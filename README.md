@@ -13,6 +13,32 @@ If you are familiar with git, you can clone the repo into your add-ins folder.
 5. **Ability to Change Settings** You can enable/disable or change the default units and the settings will persist between sessions. There is no guarantee that they will persist over updates of the add-in, until a 1.0 release is made.
 6. **Color Holes** This command will color all same sized holes in a part and tell you what nominal size they might be based on the defaults in common CAD software.
 7. **Update Tools from Library** This command in the Manufacturing workspace will replace tools in you document with identical tools form a library that they came from.
+8. **MCP Server** Hosts a local [Model Context Protocol](https://modelcontextprotocol.io) server so an AI agent (Claude, or any MCP client) can interact with your live Fusion session — read what's in your projects, open files by their data-model ID, screenshot the viewport, and optionally run Fusion API scripts. It is **off by default** and runs only on your own machine. See the [MCP Server README](commands/mcpServer/README.md) for setup, the full tool list, and the security details.
+
+## MCP Server
+
+Fusion-Essentials can expose your Fusion session to an AI agent over the Model Context
+Protocol. Enable **MCP Server** in the Fusion-Essentials settings (off by default), reload
+the add-in, and connect an MCP client to `http://127.0.0.1:27182/mcp`.
+
+The tools let an agent inspect and navigate your data and CAM programs, for example:
+`list_projects` / `list_project_files` (with openable URLs), `open_document`,
+`get_component_tree` (assembly + external references), `list_workspaces` /
+`switch_workspace`, `get_screenshot`, `set_visibility` (isolate/show/hide components
+for a focused screenshot), and a CAM set — `get_cam_setups`,
+`get_cam_operations`, `get_setup_references`, `get_tool_list` (tool sheet),
+`get_machining_time`, `get_nc_programs`, `compare_operations` (diff two operations to
+understand a strategy), `get_parameters` / `set_parameter`, `get_timeline` (how a design
+is built), `activate_setup`, and toolpath templates
+(`list_cam_templates`, `apply_template_to_setup`, `save_operations_as_template`). It can also manage data — `list_folders`, `create_project`,
+`create_folder`, and `upload_file` (which uploads local CAD and lets Fusion translate
+STEP/IGES/etc. into a Fusion design). Folder tools accept nested paths and can create
+missing folders along the way. A gated `execute_api_script` runs arbitrary Fusion
+Python; it is disabled by default and must be turned on explicitly because it lets a
+connected agent run code in your session.
+
+Full instructions, the complete tool list, client configuration, and security notes are in
+the [MCP Server README](commands/mcpServer/README.md).
 
 ## License
 
