@@ -504,11 +504,17 @@ def copy_document_handler(document_id: str = "", name: str = "",
                     "Pass create_path=true, or use list_folders to see the structure.")
 
     src_name = _safe(lambda: src.name) or "(unknown)"
+    # The copied file's intended FINAL name: the requested 'name' if given, else the source's.
+    # (DataFile.copy() cannot set a name, so a requested rename is applied after the copy below.)
+    # 'name' doubles as the source lookup when copying by name, but renaming the copy to that same
+    # name is a harmless no-op, so we treat 'name' as the rename target in both branches.
+    want_name = (name or "").strip()
+    final_name = want_name or src_name
 
-    # Duplicate guard scoped to the destination folder (same name elsewhere is fine).
-    existing = _file_in_folder_by_name(target, src_name)
+    # Duplicate guard scoped to the destination folder, against the FINAL name (what will collide).
+    existing = _file_in_folder_by_name(target, final_name)
     if existing:
-        return _error(f"A file named '{src_name}' already exists in "
+        return _error(f"A file named '{final_name}' already exists in "
                       f"'{_folder_path_string(target) or '(project root)'}' "
                       f"(id {_safe(lambda: existing.id)}). Copy into a different folder, "
                       "or remove the existing copy first.")
@@ -522,10 +528,21 @@ def copy_document_handler(document_id: str = "", name: str = "",
     if not copied:
         return _error(f"Copy returned nothing for document '{src_name}'.")
 
-    return _ok({
+    # Apply the requested rename. DataFile.copy() does not accept a name, so the copy lands with
+    # the SOURCE's name; set it here (DataFile.name has a setter). Report if the rename fails so a
+    # caller can't silently end up with a copy still named after the template.
+    rename_error = None
+    if want_name and (_safe(lambda: copied.name) or "") != want_name:
+        try:
+            copied.name = want_name
+        except Exception as e:
+            rename_error = f"copy succeeded but rename to '{want_name}' failed: {e}"
+
+    result = {
         "copied": True,
         "source_document": src_name,
         "source_id": _safe(lambda: src.id),
+        "requested_name": want_name or None,
         "copied_name": _safe(lambda: copied.name),
         "copied_id": _safe(lambda: copied.id),
         "destination_project": _safe(lambda: dproj.name),
@@ -538,7 +555,10 @@ def copy_document_handler(document_id: str = "", name: str = "",
                  "save a copy that shares "
                  "lineage for joint auto-repair, a Document.saveAs-based mode is needed "
                  "(not yet built)."),
-    })
+    }
+    if rename_error:
+        result["rename_warning"] = rename_error
+    return _ok(result)
 
 
 def _find_file_by_name(project, name):
@@ -878,6 +898,31 @@ def _safe(getter, default=None):
         return default
 
 
+def new_document_handler() -> dict:
+    """Create and open a new, empty Fusion design document; it becomes the active document.
+
+    The document exists only in the session (unsaved) until you save it — use
+    save_document_as to land it in a project/folder. Pair with create_sketch to start
+    modelling.
+    """
+    try:
+        doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    except Exception as e:
+        return _error(f"Failed to create a new design document: {e}")
+    if not doc:
+        return _error("New-document creation returned nothing.")
+
+    info = {
+        "created": True,
+        "document_name": _safe(lambda: doc.name),
+        "is_active": _safe(lambda: app.activeDocument is doc),
+        "is_saved": _safe(lambda: doc.isSaved),
+        "note": ("New blank design is now the active document (unsaved — it has no cloud id "
+                 "yet). Save it with save_document_as, or start modelling with create_sketch."),
+    }
+    return _ok(info)
+
+
 def _ok(payload: dict) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
 
@@ -1086,6 +1131,20 @@ save_document_as_item = Item.create_tool_item(
     tool=_save_document_as_tool, handler=save_document_as_handler, run_on_main_thread=True
 )
 
+_new_document_tool = Tool.create_simple(
+    name="new_document",
+    description=(
+        "Create and open a new, empty Fusion design document; it becomes the active "
+        "document. The document is unsaved (no cloud id yet) until you save it with "
+        "save_document_as. Use this to start fresh — e.g. then create_sketch and "
+        "add_sketch_geometry to model. Creates a session document (does not write to the "
+        "cloud until saved)."
+    ),
+).strict_schema()
+new_document_item = Item.create_tool_item(
+    tool=_new_document_tool, handler=new_document_handler, run_on_main_thread=True
+)
+
 
 def register_tool():
     register(create_project_item)
@@ -1096,3 +1155,4 @@ def register_tool():
     register(delete_document_item)
     register(delete_folder_item)
     register(save_document_as_item)
+    register(new_document_item)

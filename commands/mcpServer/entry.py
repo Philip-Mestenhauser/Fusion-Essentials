@@ -119,8 +119,42 @@ def _collect_items():
     # visibility: isolate/show/hide component occurrences (view state). On by default.
     tools.visibility.register_tool()
 
+    # configurations: read/switch a configured design's configurations. On by default.
+    tools.configurations.register_tool()
+
+    # sketches: get_sketches (read) + create_sketch / add_sketch_geometry (WRITE). On by default.
+    tools.sketches.register_tool()
+
+    # selection: request_user_selection + get_user_selection (user picks an entity). On by default.
+    tools.selection.register_tool()
+
+    # joint_origin: create a joint origin on the user-selected geometry (WRITE). On by default.
+    tools.joint_origin.register_tool()
+
+    # measure_bounding_box: bbox measurement (world or part-space frame). Read-only. On by default.
+    tools.measure_bounding_box.register_tool()
+
+    # insert_occurrence: insert a saved doc as a component occurrence (WRITE). On by default.
+    tools.insert_occurrence.register_tool()
+
+    # update_xref: refresh out-of-date external references (WRITE). On by default.
+    tools.update_xref.register_tool()
+
+    # joint: create a joint between two inputs (WRITE). On by default.
+    tools.joint.register_tool()
+
+    # set_sketch_text: set sketch-text strings (WRITE). On by default.
+    tools.set_sketch_text.register_tool()
+
+    # set_nc_program_comment: set NC program comment/name (WRITE CAM). On by default.
+    tools.set_nc_program_comment.register_tool()
+
     # cam_templates: navigate library (read) + apply template to setup (WRITES). On by default.
     tools.cam_templates.register_tool()
+
+    # generate_toolpaths: launch CAM toolpath generation (fire-and-return) + get_generation_status
+    # (poll). Non-blocking so long compute doesn't hold up the agent. WRITES. On by default.
+    tools.generate_toolpaths.register_tool()
 
     if _execute_api_script_allowed():
         tools.execute_api_script.register_tool()

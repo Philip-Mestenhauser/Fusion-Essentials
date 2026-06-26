@@ -29,7 +29,13 @@ for a focused screenshot), and a CAM set — `get_cam_setups`,
 `get_cam_operations`, `get_setup_references`, `get_tool_list` (tool sheet),
 `get_machining_time`, `get_nc_programs`, `compare_operations` (diff two operations to
 understand a strategy), `get_parameters` / `set_parameter`, `get_timeline` (how a design
-is built), `activate_setup`, and toolpath templates
+is built), `get_configurations` (read/switch a configured design's configurations),
+`new_document` and the sketch set (`get_sketches`, `create_sketch`, `add_sketch_geometry`)
+for starting a design and drawing on it, `request_user_selection` / `get_user_selection`
+(hand off to the user to click a face/edge/vertex/body/component and read it back),
+`create_joint_origin` (place a coordinate frame / WCS anchor programmatically),
+`measure_bounding_box` (extents in world or part-space, to drive stock),
+`activate_setup`, and toolpath templates
 (`list_cam_templates`, `apply_template_to_setup`, `save_operations_as_template`). It can also manage data — `list_folders`, `create_project`,
 `create_folder`, and `upload_file` (which uploads local CAD and lets Fusion translate
 STEP/IGES/etc. into a Fusion design). Folder tools accept nested paths and can create

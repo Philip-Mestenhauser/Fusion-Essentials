@@ -196,6 +196,9 @@ def _operations_in(setup_obj) -> list:
     return ops
 
 
+_OP_STATE_NAMES = {0: "valid", 1: "invalid", 2: "suppressed", 3: "no_toolpath"}
+
+
 def _operation_summary(op) -> dict:
     tool_desc = None
     try:
@@ -205,14 +208,35 @@ def _operation_summary(op) -> dict:
     except Exception:
         tool_desc = None
 
-    return {
+    state = _safe(lambda: op.operationState)
+    has_warn = bool(_safe(lambda: op.hasWarning, False))
+    has_err = bool(_safe(lambda: op.hasError, False))
+    summary = {
         "name": _safe(lambda: op.name),
         "tool": tool_desc,
+        "strategy": _safe(lambda: op.strategy),
+        # operationState is the authoritative roll-up; valid==generated & up to date.
+        "state": _OP_STATE_NAMES.get(state, state),
         "has_toolpath": _safe(lambda: op.hasToolpath),
         "toolpath_valid": _safe(lambda: op.isToolpathValid),
+        "is_generating": _safe(lambda: op.isGenerating),
         "is_suppressed": _safe(lambda: op.isSuppressed),
         "is_optional": _safe(lambda: op.isOptional),
+        "has_warning": has_warn,
+        "has_error": has_err,
     }
+    # Surface the actual message text — a machinist reviewing toolpaths needs the content
+    # (e.g. "Spindle speed is larger than supported", "empty toolpath"), not just a bool.
+    if has_warn:
+        summary["warning"] = (_safe(lambda: op.warning) or "").strip()
+    # 'out of date' = it has (or should have) a toolpath but that toolpath is not valid,
+    # and it isn't intentionally suppressed. This is what generate(skip_valid=true) will redo.
+    summary["is_out_of_date"] = bool(
+        state in (1, 3) and not summary["is_suppressed"]
+    )
+    if has_err:
+        summary["error"] = _safe(lambda: op.error)
+    return summary
 
 
 # ---------------------------------------------------------------------------
