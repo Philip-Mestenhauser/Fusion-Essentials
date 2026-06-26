@@ -4,7 +4,44 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 19  |  **Behaviors pinned:** 234
+**Tools with a test file:** 20  |  **Behaviors pinned:** 257
+
+## `api_doc`
+
+> Unit tests for ``api_doc.py`` — live Fusion-API documentation search.
+
+**ClassFilterFrom**
+- extracts titlecase class
+- namespace only has no class
+- empty is none
+**Trim**
+- none is empty
+- short doc unchanged
+- long doc truncated with ellipsis
+**Signature**
+- returns signature string for function
+- unsignable returns none
+**LoadModulesFilter**
+- namespace filter scopes modules
+- no filter loads all in scope
+- class filter keeps its namespace
+**Validation**
+- empty pattern errors
+- invalid regex errors
+- bad category errors
+- unknown filter namespace errors
+**ClassSearch**
+- class name match
+- namespace filter scopes classes
+**MemberSearch**
+- member name match carries signature
+- class filter scopes members
+- property vs function kind
+**DescriptionSearch**
+- matches docstring text not name
+**Caps**
+- max results clamped and truncation flagged
+- max results never exceeds hard cap
 
 ## `cam_info`
 

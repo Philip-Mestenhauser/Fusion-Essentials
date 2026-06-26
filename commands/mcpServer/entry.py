@@ -168,6 +168,9 @@ def _collect_items():
     # operation's path at a time. Manufacture-workspace display. On by default.
     tools.show_toolpath.register_tool()
 
+    # api_doc: search the live Fusion API docs (adsk.* introspection). Read-only. On by default.
+    tools.api_doc.register_tool()
+
     if _execute_api_script_allowed():
         tools.execute_api_script.register_tool()
         futil.log(f'{CMD_NAME}: execute_api_script ENABLED (user opted in)')

@@ -39,4 +39,5 @@ from . import generate_toolpaths  # noqa: F401  (entry.py registers; launch + po
 from . import inspect_view  # noqa: F401  (entry.py registers; camera/visibility/wireframe eyes + restore)
 from . import section_view  # noqa: F401  (entry.py registers; section-analysis cutaway to see inside)
 from . import show_toolpath  # noqa: F401  (entry.py registers; show/hide individual CAM toolpaths)
+from . import api_doc  # noqa: F401  (entry.py registers; search the live Fusion API docs)
 from . import execute_api_script  # noqa: F401  (gated; entry.py registers if enabled)

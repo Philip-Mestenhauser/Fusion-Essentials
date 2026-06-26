@@ -130,6 +130,7 @@ repo.)
 
 | Tool | What it does | Mutates? |
 |------|--------------|----------|
+| `get_api_doc` | Regex-search the LIVE Fusion API (classes, methods, properties, enum values) for names, signatures, and docstrings — introspected from the `adsk.*` modules in the running process, so the docs always match the installed Fusion version (nothing bundled). Scope with `apiCategory` (class/member/description/all) and `filter` (`adsk.<ns>` or `adsk.<ns>.<Class>`). Use it before writing an `execute_api_script` to confirm exact signatures | no |
 | `reload_addin` | Reload Fusion-Essentials to pick up code changes (developer tool) | restarts add-in |
 | `execute_api_script` | Run arbitrary Fusion API Python in your session | **yes — see Security** |
 
