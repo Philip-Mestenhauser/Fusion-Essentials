@@ -12,7 +12,7 @@ fixture or label, but the tool is agnostic about why.
 
 HOW (grounded live): a SketchText's content is NOT settable via its definition
 (`MultiLineTextDefinition` has no `.text`). The writable handle is `SketchText.textParameter`
-— a ModelParameter whose expression is the QUOTED string (e.g. `'Windowframe'`). Setting
+— a ModelParameter whose expression is the QUOTED string (e.g. `'Label Text'`). Setting
 `textParameter.expression = "'NewText'"` updates the engraving. No assembly-context proxy is
 needed for the write (verified live).
 

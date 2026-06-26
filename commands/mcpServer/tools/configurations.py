@@ -9,7 +9,7 @@
                         by name/id to switch the live design to it.
 
 A Configured Design (DataFile.isConfiguredDesign) holds multiple configurations as ROWS
-of a configuration table — e.g. a Workflow Template's "Jaws Normal" / "Jaws Reversed".
+of a configuration table — e.g. a design with "Variant A" / "Variant B" options.
 Open it first (open_document handles configured designs via openUsingContext), then use
 this to see the configurations and switch between them (pair with get_screenshot to view
 each). Switching is what lets you capture/compare configurations.
@@ -153,8 +153,8 @@ def handler(activate: str = "") -> dict:
     table = _top_table(design)
     if not table:
         return _error("The active design is not a Configured Design (it has no configuration "
-                      "table). Use get_configurations on a configured design — e.g. a template "
-                      "with Jaws Normal/Reversed style options.")
+                      "table). Use get_configurations on a configured design — e.g. a design "
+                      "with Variant A/Variant B style options.")
 
     target = (activate or "").strip()
     if not target:
@@ -197,7 +197,7 @@ TOOL_DESCRIPTION = (
     "Read (and optionally switch) the configurations of the active Configured Design. With "
     "no argument it returns the configuration table: each configuration (row) with its name, "
     "id, index, and whether it is the active one, plus the table's columns and name — so you "
-    "can see options like 'Jaws Normal' / 'Jaws Reversed'. Pass 'activate' = a configuration "
+    "can see options like 'Variant A' / 'Variant B'. Pass 'activate' = a configuration "
     "name or id to switch the live design to that configuration (then pair with get_screenshot "
     "to view it, or get_timeline / get_parameters to see what differs). Reading is read-only; "
     "activating changes which configuration the design shows. Requires a configured design to "

@@ -99,3 +99,190 @@ class TestSetValidation:
         assert result["isError"] is True
         assert "Provide 'expression'" not in result["message"]
         assert "active design" in result["message"]   # reached the _design() check
+
+
+# ── timeline health + guarded add/delete/favorite ──────────────────────────
+#
+# These handlers guard WRITES against breaking the parametric timeline: add
+# rolls back a parameter that introduces a NEW timeline error; delete refuses
+# when another expression references the name, and reports a health regression
+# afterwards. The fakes below model a tiny timeline (items with healthState) and
+# a userParameters collection that supports add/itemByName/deleteMe.
+
+import json
+
+
+def _payload(result):
+    assert result["isError"] is False, result
+    return json.loads(result["content"][0]["text"])
+
+
+class FakeTimelineItem:
+    def __init__(self, name, health=0):
+        self.name = name
+        self.healthState = health
+
+
+class FakeTimeline:
+    def __init__(self, items):
+        self._items = list(items)
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return self._items[i]
+
+
+class FakeParam:
+    def __init__(self, name, expression="", owner=None):
+        self.name = name
+        self.expression = expression
+        self.isFavorite = False
+        self.unit = "mm"
+        self.comment = ""
+        self.value = 1.0
+        self._owner = owner
+        self._deleted = False
+
+    def deleteMe(self):
+        self._deleted = True
+        if self._owner is not None and self in self._owner._items:
+            self._owner._items.remove(self)
+        return True
+
+
+class FakeUserParams:
+    def __init__(self, items=()):
+        self._items = list(items)
+        for it in self._items:
+            it._owner = self
+        # add() can be told to inject a downstream error into the timeline.
+        self.on_add_breaks_timeline = None   # a FakeTimeline to mutate, or None
+
+    def itemByName(self, name):
+        for p in self._items:
+            if p.name == name:
+                return p
+        return None
+
+    def add(self, name, _value_input, _unit, _comment):
+        p = FakeParam(name, owner=self)
+        self._items.append(p)
+        if self.on_add_breaks_timeline is not None:
+            self.on_add_breaks_timeline._items.append(FakeTimelineItem("BrokenFeature", health=2))
+        return p
+
+
+class FakeParamsDesign:
+    def __init__(self, user_params, timeline, all_params=None):
+        self.userParameters = user_params
+        self.timeline = timeline
+        self.allParameters = list(all_params if all_params is not None else user_params._items)
+
+
+def _stub_design(monkeypatch, design):
+    monkeypatch.setattr(params, "_design", lambda: design)
+    # add_handler uses adsk.core.ValueInput.createByString — make it benign.
+    import adsk.core
+    adsk.core.ValueInput.createByString = staticmethod(lambda s: ("VI", s))
+
+
+class TestTimelineHealth:
+    def test_rolls_up_errors_and_warnings(self):
+        tl = FakeTimeline([FakeTimelineItem("A", 0), FakeTimelineItem("B", 2),
+                           FakeTimelineItem("C", 1), FakeTimelineItem("D", 2)])
+        design = FakeParamsDesign(FakeUserParams(), tl)
+        errors, warnings, total = params._timeline_health(design)
+        assert total == 4
+        assert errors == ["B", "D"]
+        assert warnings == ["C"]
+
+    def test_health_handler_reports_healthy(self, monkeypatch):
+        design = FakeParamsDesign(FakeUserParams(), FakeTimeline([FakeTimelineItem("A", 0)]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.health_handler())
+        assert out["healthy"] is True
+        assert out["error_count"] == 0
+
+
+class TestAddHandler:
+    def test_add_rejects_duplicate(self, monkeypatch):
+        up = FakeUserParams([FakeParam("PartX", "10 mm")])
+        design = FakeParamsDesign(up, FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        res = params.add_handler(name="PartX", expression="5 mm")
+        assert res["isError"] is True and "already exists" in res["message"]
+
+    def test_add_succeeds_when_timeline_stays_healthy(self, monkeypatch):
+        up = FakeUserParams([])
+        design = FakeParamsDesign(up, FakeTimeline([FakeTimelineItem("A", 0)]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.add_handler(name="NewP", expression="3 mm"))
+        assert out["added"] is True
+        assert up.itemByName("NewP") is not None      # it stuck
+
+    def test_add_rolls_back_on_new_timeline_error(self, monkeypatch):
+        tl = FakeTimeline([FakeTimelineItem("A", 0)])
+        up = FakeUserParams([])
+        up.on_add_breaks_timeline = tl                # adding will inject an error
+        design = FakeParamsDesign(up, tl)
+        _stub_design(monkeypatch, design)
+        res = params.add_handler(name="BadP", expression="oops")
+        assert res["isError"] is True
+        assert "rolled back" in res["message"]
+        assert up.itemByName("BadP") is None          # removed again
+
+    def test_add_requires_name_and_expression(self, monkeypatch):
+        design = FakeParamsDesign(FakeUserParams(), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        assert params.add_handler(name="", expression="5")["isError"] is True
+        assert params.add_handler(name="X", expression="")["isError"] is True
+
+
+class TestDeleteHandler:
+    def test_delete_refuses_if_referenced(self, monkeypatch):
+        part = FakeParam("PartX", "10 mm")
+        user = FakeParam("Half", "PartX / 2")          # references PartX
+        up = FakeUserParams([part, user])
+        design = FakeParamsDesign(up, FakeTimeline([]), all_params=[part, user])
+        _stub_design(monkeypatch, design)
+        res = params.delete_handler(name="PartX")
+        assert res["isError"] is True
+        assert "referenced by: Half" in res["message"]
+        assert part._deleted is False                  # not deleted
+
+    def test_reference_match_is_word_boundary(self, monkeypatch):
+        # 'PartX' must NOT be considered referenced by 'PartXY' (substring, not a
+        # whole token) — the regex uses word boundaries.
+        part = FakeParam("PartX", "10 mm")
+        other = FakeParam("Calc", "PartXY + 1")        # different token
+        up = FakeUserParams([part, other])
+        design = FakeParamsDesign(up, FakeTimeline([]), all_params=[part, other])
+        _stub_design(monkeypatch, design)
+        out = _payload(params.delete_handler(name="PartX"))
+        assert out["deleted"] is True
+        assert part._deleted is True
+
+    def test_delete_unknown_param_errors(self, monkeypatch):
+        design = FakeParamsDesign(FakeUserParams([]), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        res = params.delete_handler(name="Ghost")
+        assert res["isError"] is True and "No USER parameter" in res["message"]
+
+
+class TestFavoriteHandler:
+    def test_sets_favorite_flag(self, monkeypatch):
+        p = FakeParam("PartX", "10 mm")
+        design = FakeParamsDesign(FakeUserParams([p]), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.favorite_handler(name="PartX", favorite=True))
+        assert out["favorite"] is True
+        assert p.isFavorite is True
+
+    def test_unknown_param_errors(self, monkeypatch):
+        design = FakeParamsDesign(FakeUserParams([]), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        res = params.favorite_handler(name="Ghost")
+        assert res["isError"] is True and "No USER parameter" in res["message"]

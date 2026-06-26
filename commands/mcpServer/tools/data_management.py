@@ -42,6 +42,20 @@ from ..mcp_primitives.registry import register
 
 app = adsk.core.Application.get()
 
+# Every save made through this server is authored by an AI agent, not a human at the keyboard.
+# Document.save/saveAs has no author field — the only place attribution can live is the version
+# description — so we prepend this marker. _agent_description() is the single chokepoint; reuse it
+# anywhere we write a version description so the marker can never be forgotten.
+AI_AGENT_SAVE_MARKER = "[AI agent]"
+
+
+def _agent_description(description: str = "") -> str:
+    """Prefix a version description with the AI-agent marker (idempotent)."""
+    desc = (description or "").strip()
+    if desc.startswith(AI_AGENT_SAVE_MARKER):
+        return desc
+    return f"{AI_AGENT_SAVE_MARKER} {desc}".strip()
+
 
 def _data():
     d = app.data
@@ -858,7 +872,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                     "Pass create_path=true, or use list_folders to see the structure.")
 
     try:
-        ok = doc.saveAs(name, target, description or "", "")  # adsk.core: Document.saveAs(...)
+        ok = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
         return _error(f"saveAs failed for '{name}': {e}")
     if not ok:
@@ -921,6 +935,156 @@ def new_document_handler() -> dict:
                  "yet). Save it with save_document_as, or start modelling with create_sketch."),
     }
     return _ok(info)
+
+
+# ---------------------------------------------------------------------------
+# Document lifecycle: save (in place) / close / activate / list open documents
+# ---------------------------------------------------------------------------
+
+def _find_open_document(name):
+    """Return the open Document whose name matches (exact, then case-insensitive substring), and a
+    sample of the open names. Operates on app.documents (all loaded docs — see list_open_documents'
+    note that this is a superset of the user's visible tabs)."""
+    want = (name or "").strip()
+    docs = _safe(lambda: app.documents)
+    exact = contains = None
+    names = []
+    if docs is not None:
+        for i in range(_safe(lambda: docs.count, 0)):
+            d = docs.item(i)
+            nm = _safe(lambda d=d: d.name) or ""
+            names.append(nm)
+            if nm == want:
+                exact = d
+            elif contains is None and want and want.lower() in nm.lower():
+                contains = d
+    return (exact or contains), names
+
+
+def save_document_handler(description: str = "") -> dict:
+    """Save the ACTIVE document in place (a new cloud version of the same file).
+
+    Unlike save_document_as (which needs a name + folder for a never-saved doc), this is the plain
+    'Save' of an already-saved document. The version description is automatically prefixed with the
+    AI-agent marker. The active doc must already exist in the cloud (use save_document_as first for
+    a brand-new unsaved doc). WRITES a new cloud version.
+    """
+    doc = _safe(lambda: app.activeDocument)
+    if not doc:
+        return _error("No active document to save.")
+    if not _safe(lambda: doc.isSaved, False):
+        return _error("The active document has never been saved (no cloud file yet). Use "
+                      "save_document_as to give it a name and folder first.")
+    try:
+        ok = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
+    except Exception as e:
+        return _error(f"Save failed for '{_safe(lambda: doc.name)}': {e}")
+    if not ok:
+        return _error(f"Fusion declined to save '{_safe(lambda: doc.name)}'.")
+    return _ok({
+        "saved": True,
+        "document_name": _safe(lambda: doc.name),
+        "description": _agent_description(description),
+        "note": "Active document saved as a new cloud version (description tagged as AI-agent).",
+    })
+
+
+def close_document_handler(name: str = "", save_changes: bool = False,
+                           close_all: bool = False) -> dict:
+    """Close an open document (or all), discarding or saving unsaved changes.
+
+    name: the open document to close (omit to close the ACTIVE document). close_all: close every
+    open document instead. save_changes: when true, save unsaved edits before closing; when false
+    (default) DISCARD them. NOTE: app.documents includes referenced/dependency docs that have no
+    visible tab — close_all closes those too. Fusion always keeps one document open (a blank one
+    appears if you close the last). Hard to reverse — discarded edits are gone.
+    """
+    docs = _safe(lambda: app.documents)
+    if docs is None:
+        return _error("No documents are open.")
+
+    if close_all:
+        targets = [docs.item(i) for i in range(_safe(lambda: docs.count, 0))]
+    elif name.strip():
+        d, names = _find_open_document(name)
+        if not d:
+            return _error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+        targets = [d]
+    else:
+        active = _safe(lambda: app.activeDocument)
+        if not active:
+            return _error("No active document to close.")
+        targets = [active]
+
+    closed, errors = [], []
+    for d in targets:
+        nm = _safe(lambda d=d: d.name)
+        try:
+            if d.close(bool(save_changes)):
+                closed.append(nm)
+            else:
+                errors.append({nm: "close returned false"})
+        except Exception as e:
+            errors.append({nm: str(e)[:60]})
+    return _ok({
+        "closed": closed, "closed_count": len(closed),
+        "errors": errors,
+        "save_changes": bool(save_changes),
+        "remaining_open": _safe(lambda: app.documents.count),
+        "note": ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
+                 ". Fusion keeps at least one document open."),
+    })
+
+
+def activate_document_handler(name: str = "") -> dict:
+    """Bring an open document to the foreground (make it the active document).
+
+    name: the open document to activate. Use list_open_documents to see what is open. Read-ish —
+    only changes which document is active/foregrounded.
+    """
+    if not name.strip():
+        return _error("Provide 'name' — the open document to activate.")
+    d, names = _find_open_document(name)
+    if not d:
+        return _error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+    try:
+        ok = d.activate()
+    except Exception as e:
+        return _error(f"Activate failed for '{_safe(lambda: d.name)}': {e}")
+    return _ok({"activated": bool(ok), "document_name": _safe(lambda: d.name),
+                "is_active": _safe(lambda: app.activeDocument is d)})
+
+
+def list_open_documents_handler() -> dict:
+    """List the documents currently open in the session.
+
+    IMPORTANT: app.documents is a SUPERSET of what the user sees as tabs. Opening an assembly
+    cloud-loads its referenced components as real Document objects too (e.g. 9 templates can show as
+    45 docs). Document.isVisible is TRUE for all of them — it means 'loaded/renderable', NOT 'has a
+    UI tab'. There is no fully reliable tab-vs-reference flag, so this reports isVisible/isActive/
+    isModified per doc and flags the active one; treat non-active entries cautiously before closing.
+    """
+    docs = _safe(lambda: app.documents)
+    if docs is None:
+        return _error("No documents are open.")
+    active = _safe(lambda: app.activeDocument)
+    rows = []
+    for i in range(_safe(lambda: docs.count, 0)):
+        d = docs.item(i)
+        rows.append({
+            "name": _safe(lambda d=d: d.name),
+            "is_active": _safe(lambda d=d: d is active),
+            "is_visible": _safe(lambda d=d: d.isVisible),
+            "is_saved": _safe(lambda d=d: d.isSaved),
+            "is_modified": _safe(lambda d=d: d.isModified),
+        })
+    return _ok({
+        "open_count": len(rows),
+        "documents": rows,
+        "note": ("app.documents is a SUPERSET of the user's visible tabs — referenced/dependency "
+                 "docs are loaded as real Documents (isVisible=True means loaded, not tabbed). Be "
+                 "careful with close_all."),
+    })
 
 
 def _ok(payload: dict) -> dict:
@@ -1145,6 +1309,68 @@ new_document_item = Item.create_tool_item(
     tool=_new_document_tool, handler=new_document_handler, run_on_main_thread=True
 )
 
+_save_document_tool = (
+    Tool.create_simple(
+        name="save_document",
+        description=(
+            "Save the ACTIVE document in place — a new cloud version of the same file (the plain "
+            "'Save', vs save_document_as which needs a name+folder for a never-saved doc). The "
+            "version 'description' is auto-prefixed with the AI-agent marker. The doc must already "
+            "exist in the cloud. WRITES a new cloud version."),
+    )
+    .add_input_property("description", {"type": "string",
+                                        "description": "Optional version description (the AI-agent marker is prepended automatically)."})
+    .strict_schema()
+)
+save_document_item = Item.create_tool_item(
+    tool=_save_document_tool, handler=save_document_handler, run_on_main_thread=True)
+
+_close_document_tool = (
+    Tool.create_simple(
+        name="close_document",
+        description=(
+            "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
+            "doc); 'close_all' = close every open document; 'save_changes' = save unsaved edits "
+            "first (default false = DISCARD them). NOTE: app.documents includes referenced/"
+            "dependency docs with no visible tab — close_all closes those too. Fusion always keeps "
+            "one doc open. Hard to reverse — discarded edits are gone."),
+    )
+    .add_input_property("name", {"type": "string",
+                                 "description": "Open document to close (omit = active document)."})
+    .add_input_property("save_changes", {"type": "boolean",
+                                         "description": "Save unsaved edits before closing (default false = discard)."})
+    .add_input_property("close_all", {"type": "boolean",
+                                      "description": "Close every open document (default false)."})
+    .strict_schema()
+)
+close_document_item = Item.create_tool_item(
+    tool=_close_document_tool, handler=close_document_handler, run_on_main_thread=True)
+
+_activate_document_tool = (
+    Tool.create_with_string_input(
+        name="activate_document",
+        description=(
+            "Bring an open document to the foreground (make it the active document). 'name' = the "
+            "open document to activate (see list_open_documents). Only changes which document is "
+            "active."),
+        input_param_name="name",
+        input_param_description="Open document name to activate.",
+    ).strict_schema()
+)
+activate_document_item = Item.create_tool_item(
+    tool=_activate_document_tool, handler=activate_document_handler, run_on_main_thread=True)
+
+_list_open_documents_tool = Tool.create_simple(
+    name="list_open_documents",
+    description=(
+        "List the documents open in the session: name, is_active, is_visible, is_saved, "
+        "is_modified. IMPORTANT: app.documents is a SUPERSET of the user's visible tabs — opening "
+        "an assembly loads its referenced components as real Documents too (isVisible=True means "
+        "loaded, NOT tabbed). Use before close_all to avoid closing dependency docs. Read-only."),
+).strict_schema()
+list_open_documents_item = Item.create_tool_item(
+    tool=_list_open_documents_tool, handler=list_open_documents_handler, run_on_main_thread=True)
+
 
 def register_tool():
     register(create_project_item)
@@ -1156,3 +1382,7 @@ def register_tool():
     register(delete_folder_item)
     register(save_document_as_item)
     register(new_document_item)
+    register(save_document_item)
+    register(close_document_item)
+    register(activate_document_item)
+    register(list_open_documents_item)

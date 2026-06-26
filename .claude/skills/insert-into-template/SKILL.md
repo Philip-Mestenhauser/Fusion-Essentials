@@ -66,9 +66,15 @@ phases in order, carry recorded values forward, and do not improvise.
 DEFAULT_PROJECT      = "CAM"          # project name to save into when the CAD is unsaved
 DEFAULT_FOLDER       = "{model}"      # folder path; "{model}" expands to the CAD's name
 
-# The shop's CAM template(s) to place beside the part. REPLACE with your real lineage URNs.
-# (Each is a standalone document; copy_document places it and preserves its RFA x-refs.)
-TEMPLATE_URN         = "urn:adsk.wipprod:dm.lineage:YyoW9uURTtSuWxOBbHpvbw"  # 4th Axis Windowframe Template (MCP Test Project)
+# The team's CAM TEMPLATE LIBRARY: ONE directory that holds the shop's published templates.
+# This is the example mechanism for a team to deploy THEIR template set to this skill — edit
+# these two lines to point at your team's folder, and only the documents in it are eligible.
+# The skill lists this folder and picks/uses a template ONLY from it (never from anywhere else,
+# even if a similarly-named template exists in another project/folder). DEFAULT_TEMPLATE is the
+# one used when the operator does not name a specific template.
+TEMPLATE_LIBRARY_PROJECT = "CAM"                          # project holding the template library
+TEMPLATE_LIBRARY_FOLDER  = "Workflow Templates"           # the single folder = the library
+DEFAULT_TEMPLATE         = "4th Axis Windowframe Template" # used when no template is named
 
 # Naming convention.
 TEMPLATE_NAME_SUFFIX = "_CAM"         # template copy is named "<model name>_CAM"
@@ -197,18 +203,32 @@ Assert ALL, each with its evidence value. If ANY fails, STOP and report it — d
 - [ ] A bounding box was measured (non-zero, sane units) — cite X/Y/Z.
 - [ ] The destination project + folder are known by id.
 
-## Phase 5 — Place and open the CAM template (WRITE: cloud, then open)
+## Phase 5 — Resolve, place, and open the CAM template (WRITE: cloud, then open)
+
+**5.0 — Resolve the template FROM THE LIBRARY DIRECTORY (do this first; do not skip).** The
+template MUST come from the configured `TEMPLATE_LIBRARY_PROJECT` / `TEMPLATE_LIBRARY_FOLDER` and
+nowhere else — this is the only authoritative source. Do NOT reuse a URN from memory, from a prior
+run, or a similarly-named template found in another project/folder.
+- `list_project_files(project=TEMPLATE_LIBRARY_PROJECT, folder=TEMPLATE_LIBRARY_FOLDER,
+  recursive=false)` — returns ONLY the files in the library folder. That set is the eligible
+  templates (no need to dump/scan the whole project).
+- Choose the template: if the operator named one, match it (exact, case-insensitive) within the
+  library; otherwise use `DEFAULT_TEMPLATE`. If the chosen name is not in the library, STOP and
+  report the available library template names — do NOT fall back to anything outside the folder.
+- Record `TEMPLATE_URN` = the chosen entry's `id`, and the template name. Everything below uses
+  this resolved URN.
 
 1. `copy_document(document_id=TEMPLATE_URN, project_id, folder=<destination folder>,
-   name="<model name>" + TEMPLATE_NAME_SUFFIX, create_path=true)` — copy the template into the
-   part's folder as `<model>_CAM`. A template is standalone (no lineage); `copy_document` preserves
-   its RFA external references. VERIFY the result: `copied_name` MUST equal `<model>_CAM` (the
-   document itself is renamed, not just an engraved sketch) and no `rename_warning` is present; if
-   the name still reads as the template's, STOP and report it. Confirm the RFA x-refs are listed.
+   name="<model name>" + TEMPLATE_NAME_SUFFIX, create_path=true)` — copy the resolved template into
+   the part's folder as `<model>_CAM`. A template is standalone (no lineage); `copy_document`
+   preserves its RFA external references. VERIFY the result: `copied_name` MUST equal `<model>_CAM`
+   (the document itself is renamed, not just an engraved sketch) and no `rename_warning` is present;
+   if the name still reads as the template's, STOP and report it. Confirm the RFA x-refs are listed.
    Record the `<model>_CAM` URN.
 2. `open_document(<model>_CAM URN)`, then `get_session_info` to confirm it is active before Phase 6.
 
-→ Record: the `<model>_CAM` lineage URN; that it is the active document.
+→ Record: the resolved template name + URN (from the library); the `<model>_CAM` lineage URN; that
+it is the active document.
 
 ## Phase 6 — Stand up the part in the template (WRITE)
 

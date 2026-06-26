@@ -125,6 +125,38 @@ def load_tool(module_name):
 install_mock_adsk()
 
 
+@pytest.fixture(autouse=True)
+def _restore_shared_adsk_mocks():
+    """Snapshot-and-restore the mutable ``adsk`` mock attributes around every test.
+
+    Several tool tests (inspect_view, section_view, show_toolpath, parameters)
+    install per-test behaviour by REASSIGNING shared mock callables —
+    ``adsk.fusion.Design.cast``, ``adsk.cam.CAM.cast``/``Operation.cast``,
+    ``adsk.core.Point3D.create``/``Vector3D.create``/``ValueInput.createByString``.
+    Because these live on module-level Mocks shared by the whole session, a
+    reassignment would otherwise LEAK into later tests (e.g. clobbering
+    ``Design.cast``'s pass-through so measure_bounding_box sees no design). This
+    autouse fixture records the originals before each test and puts them back
+    after, keeping tests order-independent without per-file teardown.
+    """
+    core = sys.modules["adsk.core"]
+    fusion = sys.modules["adsk.fusion"]
+    cam = sys.modules["adsk.cam"]
+    saved = [
+        (fusion.Design, "cast", fusion.Design.cast),
+        (cam.CAM, "cast", cam.CAM.cast),
+        (cam.Operation, "cast", cam.Operation.cast),
+        (core.Point3D, "create", core.Point3D.create),
+        (core.Vector3D, "create", core.Vector3D.create),
+        (core.ValueInput, "createByString", core.ValueInput.createByString),
+    ]
+    try:
+        yield
+    finally:
+        for obj, attr, original in saved:
+            setattr(obj, attr, original)
+
+
 # ── small Fusion-shaped fakes a tool's logic branches on ───────────────────
 #
 # These mimic the *interface* a tool reads, not the whole API. Names match the

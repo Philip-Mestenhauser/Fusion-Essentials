@@ -156,6 +156,18 @@ def _collect_items():
     # (poll). Non-blocking so long compute doesn't hold up the agent. WRITES. On by default.
     tools.generate_toolpaths.register_tool()
 
+    # inspect_view: the agent's "eyes" — orient camera, isolate/show/hide, wireframe, restore.
+    # VIEW state only (snapshot/restore via a saved-state stack). On by default.
+    tools.inspect_view.register_tool()
+
+    # section_view: cut the model with a Section Analysis to see inside (cavities, fits, voids).
+    # Non-destructive (clear removes it). On by default.
+    tools.section_view.register_tool()
+
+    # show_toolpath: show/hide individual CAM toolpaths (Operation.isLightBulbOn) to study one
+    # operation's path at a time. Manufacture-workspace display. On by default.
+    tools.show_toolpath.register_tool()
+
     if _execute_api_script_allowed():
         tools.execute_api_script.register_tool()
         futil.log(f'{CMD_NAME}: execute_api_script ENABLED (user opted in)')

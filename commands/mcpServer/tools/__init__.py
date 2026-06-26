@@ -36,4 +36,7 @@ from . import set_sketch_text  # noqa: F401  (entry.py registers; set sketch tex
 from . import set_nc_program_comment  # noqa: F401  (entry.py registers; set NC program comment/name)
 from . import cam_templates  # noqa: F401  (entry.py registers; navigate + apply toolpath templates)
 from . import generate_toolpaths  # noqa: F401  (entry.py registers; launch + poll CAM toolpath generation)
+from . import inspect_view  # noqa: F401  (entry.py registers; camera/visibility/wireframe eyes + restore)
+from . import section_view  # noqa: F401  (entry.py registers; section-analysis cutaway to see inside)
+from . import show_toolpath  # noqa: F401  (entry.py registers; show/hide individual CAM toolpaths)
 from . import execute_api_script  # noqa: F401  (gated; entry.py registers if enabled)

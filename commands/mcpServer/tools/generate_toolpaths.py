@@ -21,6 +21,11 @@ valid, up-to-date toolpaths are left alone (this is generateAllToolpaths(skipVal
 generateToolpath on a stale target). Read which ops are stale first with get_cam_operations
 (each op reports state / is_out_of_date / has_warning).
 
+CONTEXT GOTCHA: operation valid/out-of-date state is only re-evaluated once the MANUFACTURE
+workspace has been entered. After swapping a part into a copied template, the carried-over
+toolpaths read 'valid' from the Design workspace even though they are stale for the new geometry —
+so skip_valid=true would wrongly skip them. Enter Manufacture first, or use skip_valid=false.
+
 Grounded in adsk.cam:
   - CAM.generateAllToolpaths(skipValid: bool) -> GenerateToolpathFuture
   - CAM.generateToolpath(operations: Base) -> GenerateToolpathFuture   (Operation/Setup/Folder)
@@ -357,7 +362,12 @@ GENERATE_DESCRIPTION = (
     "alone; set false to force-regenerate everything in scope. WRITES (mutates toolpaths). After "
     "launching, do other work and poll with get_generation_status(handle) — never block waiting. "
     "Read which operations are stale first with get_cam_operations (it reports each op's state, "
-    "is_out_of_date, has_warning)."
+    "is_out_of_date, has_warning). IMPORTANT: be in the MANUFACTURE workspace before generating. "
+    "Operation valid/out-of-date state is not re-evaluated against changed geometry (e.g. a "
+    "freshly inserted/swapped part) until Manufacture is active — so from the Design workspace "
+    "skip_valid=true can WRONGLY skip operations that actually need regenerating (they read 'valid' "
+    "but are stale). After swapping a part into a template, treat the operations as out of date "
+    "and either enter Manufacture first or pass skip_valid=false to force regeneration."
 )
 
 generate_tool = (

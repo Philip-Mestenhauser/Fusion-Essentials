@@ -57,12 +57,21 @@ repo.)
 | `get_session_info` | Active document, workspace, units, component count | no |
 | `get_active_document_id` | Resolve the ACTIVE document to its data-model identity: lineage id (URN), version, web URL, and whether it is saved / has unsaved changes — act on "the active document" precisely instead of by name. An unsaved doc has no URN yet | no |
 | `list_projects` | Projects in the active hub (name + id) | no |
-| `list_project_files` | Files in a project: name, id (UID), versionId, extension, version, openable `fusionWebURL`, and `folder_path` | no |
+| `list_project_files` | Files in a project: name, id (UID), versionId, extension, version, openable `fusionWebURL`, and `folder_path`. Optional `folder` scopes the listing to one folder path (with `recursive` to descend or list immediate files only) — avoids dumping a whole large project | no |
 | `list_folders` | The project's folder tree (names, ids, full paths) to a bounded depth — discover structure before navigating | no |
 | `new_document` | Create and open a new, empty Fusion design (becomes the active doc; unsaved until you `save_document_as`). Start fresh, then `create_sketch` / model | session doc (not cloud until saved) |
 | `open_document` | Open a document from any data-model identifier — a lineage/version UID, a `source_id`, or a Fusion web URL (`fusionWebURL`/`source_url`, whose embedded id is decoded automatically). Opens Configured Designs too (via `openUsingContext`) | switches active doc |
+| `save_document` | Save the ACTIVE document in place — a new cloud version of the same file (plain Save, vs `save_document_as`). Version description auto-prefixed `[AI agent]` | **writes a new cloud version** |
+| `close_document` | Close an open document (by `name`, the active one, or `close_all`), with `save_changes` to save-or-discard. Note: closes loaded reference/dependency docs too with `close_all` | closes docs (discards edits unless saving) |
+| `activate_document` | Bring an open document to the foreground (make it the active document) | switches active doc |
+| `list_open_documents` | List open documents (name/active/visible/saved/modified). Note `app.documents` is a SUPERSET of the user's visible tabs (loaded reference docs included) | no |
 | `get_component_tree` | Walk the active design's assembly tree to a bounded depth, flagging external references and resolving each to its source document UID/URL | no |
 | `get_parameters` | The design's user (and optionally model) parameters: name, expression, value, unit, comment | no |
+| `add_parameter` | Add a user parameter (name + expression, unit, comment, favorite). Health-guarded: rolls back if it introduces a timeline error | **modifies the design** |
+| `delete_parameter` | Delete a user parameter, guarded — refuses if referenced (reports consumers) or if it would break the timeline | **modifies the design** |
+| `set_parameter_favorite` | Toggle a user parameter's favorite flag (whether it shows in the favorites list) | **modifies the design** |
+| `get_timeline_health` | Feature error/warning rollup for the parametric timeline — names of any errored/warning features. Use around risky edits | no |
+| `recompute_design` | Force a full recompute (`computeAll`) so downstream features rebuild (e.g. after editing text an emboss consumes); reports health after | **rebuilds features** |
 | `get_timeline` | The parametric design's timeline: each feature/sketch/joint/occurrence's index, name, type, suppressed/rolled-back/group state, and health — understand how a template is built and spot alternate-config branches | no |
 | `get_configurations` | A Configured Design's configurations: each one (name/id/active) plus the table's columns; optionally `activate` one by name/id to switch the live design to it (pair with `get_screenshot` to view each) | reading: no · activate: switches active config |
 | `get_sketches` | List the design's sketches: name, plane, line/circle/arc/point and profile counts, visibility | no |
@@ -92,6 +101,8 @@ repo.)
 | `switch_workspace` | Activate a workspace by id/name/alias (design/manufacture/…) | switches workspace |
 | `get_screenshot` | Capture the viewport as a PNG (optional camera view); restores your camera afterward | no |
 | `set_visibility` | Isolate / show / hide / clear-isolation on component occurrences (by name or full path) so a screenshot shows just what matters; reports before/after so you can restore. View state only — not geometry | changes what's visible |
+| `inspect_view` | The agent's "eyes": composable view verbs — `snapshot`/`restore` (in-memory push/pop of camera+style+visibility), `orient` (aim the camera by preset front/top/right/iso-… via explicit eye/target/up, and/or fit to a named occurrence), `isolate`/`show`/`hide`/`clear_isolation` (`show` lights the whole ancestor chain so a nested occurrence actually appears), `style` (shaded ↔ wireframe), and `save_view`/`apply_view`/`list_views` (persistent document Named Views — **camera-only** bookmarks). Intuit a design from many angles/states then return to how it was. View state only; pair with `get_screenshot` | changes view state (restorable) |
+| `section_view` | Cut the model with a live Section Analysis to see INSIDE — cavities, wall thickness, how a part nests in a fixture, where an internal void sits. `cut` on an origin plane (xy/xz/yz) or `through` a named occurrence's center, with `offset` (mm) and `flip`; `list`; `clear` (remove all cuts, restoring the full view). Non-destructive (a cutaway, not a geometry edit); pair with `inspect_view` + `get_screenshot` | adds/removes a section analysis (restorable) |
 | `request_user_selection` | Hand control to the user to click a face/edge/vertex/body/component in Fusion (clears the prior selection by default). Returns immediately (non-blocking, no Fusion dialog) — the agent presents its own one-click confirmation; pair with `get_user_selection` | clears selection |
 | `get_user_selection` | Read the user's current Fusion selection and describe each entity — type, owning body/component, geometry hints (face area/centroid/surface type, edge length/endpoints, vertex position, body volume), a `direction` unit vector where meaningful (planar-face normal, cyl/cone axis, linear-edge direction — for defining a machining axis or joint-origin orientation), and click point | no |
 
@@ -113,6 +124,7 @@ repo.)
 | `get_generation_status` | Poll a launched generation by handle: live op-state tally, the op currently computing + its progress %, and — once complete — each operation's warnings/errors and empty toolpaths. Each poll nudges the main-thread compute forward a bounded burst, so poll repeatedly until done (no long blocking) | no (advances the launched job) |
 | `save_operations_as_template` | Bundle a subset of a setup's operations into a new toolpath template in the library (into a folder, created if missing) | **writes to the template library** |
 | `activate_setup` | Activate a setup by name and fit the view (pair with `get_screenshot`) | changes active setup |
+| `show_toolpath` | Show/hide individual CAM toolpaths (the displayed blue paths) to study one operation's path at a time — `show`/`hide`/`isolate` an operation, `show_folder`, `hide_all`, `list`. `fit` frames the camera to the operation's toolpath extents. Manufacture-workspace display; toggles `Operation.isLightBulbOn` (no simulation commands) | changes toolpath display |
 
 **Developer / advanced**
 

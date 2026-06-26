@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 15  |  **Behaviors pinned:** 133
+**Tools with a test file:** 19  |  **Behaviors pinned:** 234
 
 ## `cam_info`
 
@@ -82,6 +82,92 @@ after changing tests._
 **FolderPathString**
 - builds slash path excluding root
 - immediate child of root
+**AgentDescription**
+- prefixes marker
+- idempotent no double prefix
+- empty is just the marker
+**SaveDocument**
+- save tags description with marker
+- refuses never saved doc
+- no active document
+**CloseDocument**
+- closes active by default discarding
+- close named
+- close all
+- unmatched name errors
+- close failure reported in errors
+**ActivateDocument**
+- activate named
+- requires name
+- unmatched errors
+**ListOpenDocuments**
+- lists with state and flags active
+**FindOpenDocument**
+- exact then substring
+- substring when no exact
+
+## `data_model`
+
+> Unit tests for ``data_model.py`` — the project/file lister and its folder filter.
+
+**ChildFolderByName**
+- exact match
+- case insensitive
+- whitespace trimmed
+- missing returns none
+- robust to broken folder
+**ProjectResolution**
+- by name case insensitive
+- by id
+- missing identifier errors
+- unknown project lists available
+**WholeProject**
+- lists all files recursively
+- nested file records its path
+**FolderScoping**
+- scopes to named folder only
+- folder is case insensitive
+- nested folder path
+- recursive true descends into subfolders
+- recursive false immediate only
+- stray slashes tolerated
+- missing folder errors with hint
+- missing nested segment names the level
+
+## `inspect_view`
+
+> Unit tests for ``inspect_view.py`` — the agent's view verbs.
+
+**Guards**
+- unknown action
+- no design
+**Visibility**
+- hide turns bulb off
+- isolate sets flag
+- isolate requires single match
+- exact name beats substring
+- show lights ancestor chain
+- clear isolation resets all
+- unmatched target errors
+- missing target errors
+**Style**
+- wireframe sets visual style
+- unknown style errors
+**Orient**
+- unknown orientation errors
+- focus unknown occurrence errors
+- front orientation sets up vector
+**NamedViews**
+- save view adds
+- save view overwrites same name
+- save view requires name
+- apply view moves camera
+- apply unknown view lists available
+- list views reports builtin flag
+**SnapshotRestore**
+- restore without snapshot errors
+- snapshot then restore puts bulbs back
+- restore counts missing occurrences
 
 ## `joint`
 
@@ -160,6 +246,21 @@ after changing tests._
 - empty name is error
 - empty expression is error
 - zero expression passes the empty guard
+**TimelineHealth**
+- rolls up errors and warnings
+- health handler reports healthy
+**AddHandler**
+- add rejects duplicate
+- add succeeds when timeline stays healthy
+- add rolls back on new timeline error
+- add requires name and expression
+**DeleteHandler**
+- delete refuses if referenced
+- reference match is word boundary
+- delete unknown param errors
+**FavoriteHandler**
+- sets favorite flag
+- unknown param errors
 
 ## `quoting`
 
@@ -178,6 +279,30 @@ after changing tests._
 - empty string
 **RoundTrip**
 - quote then unquote recovers text
+
+## `section_view`
+
+> Unit tests for ``section_view.py`` — the Section Analysis cutaway tool.
+
+**Guards**
+- unknown action
+- no design
+- cut requires plane or through
+- through unknown occurrence
+**PlaneCut**
+- xy plane uses xy construction plane at zero
+- alias front maps to xz
+- offset mm converted to cm
+- flip and hatch propagate
+**ThroughCenter**
+- xy uses z center
+- front uses y center
+- through adds explicit offset on top of center
+- through defaults to xz when no plane
+- through substring match
+**ListClear**
+- list reports sections
+- clear removes all
 
 ## `selection`
 
@@ -203,6 +328,32 @@ after changing tests._
 - require face matches a face
 - require edge flags mismatch when face selected
 - nothing selected is an error
+
+## `show_toolpath`
+
+> Unit tests for ``show_toolpath.py`` — CAM toolpath display control.
+
+**Guards**
+- unknown action errors
+- no active document
+**List**
+- reports every op and state
+**Isolate**
+- shows only target
+- substring match when no exact
+- exact beats substring
+- unmatched operation errors
+**ShowHide**
+- show turns on
+- hide turns off
+- show on pathless op warns
+- missing operation arg errors
+**HideAll**
+- hides only ops with toolpaths
+**ShowFolder**
+- shows named setup only
+- unknown folder errors
+- missing folder arg errors
 
 ## `sketches`
 

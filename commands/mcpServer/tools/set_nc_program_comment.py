@@ -11,7 +11,7 @@ part/job identifier there is a common pre-post step. General-purpose: it just ed
 
 HOW (grounded live): the comment is a CAM parameter named `nc_program_comment` on
 `NCProgram.parameters` (NOT `postParameters` — which is why get_nc_programs does not report it).
-It is an editable string parameter whose `.expression` is a QUOTED string (e.g. `'Animal'`).
+It is an editable string parameter whose `.expression` is a QUOTED string (e.g. `'Job 1234'`).
 Setting `parameters.itemByName('nc_program_comment').expression = "'text'"` updates it. The NC
 program NAME is the sibling parameter `nc_program_name` (same quoting).
 

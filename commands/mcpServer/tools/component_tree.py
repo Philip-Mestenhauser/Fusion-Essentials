@@ -7,10 +7,10 @@
                         to a bounded depth, flagging external references (X-refs) and
                         resolving each to its source document UID + name + URL.
 
-This is the general "what's inside this assembly / container?" tool. CAM setups in
-templated workflows select Component Containers as their model/fixture; this tool
-lets you see what those containers actually hold (e.g. a clamping unit + a vise),
-and which children are external references you can open with open_document.
+This is the general "what's inside this assembly / container?" tool: walk any component to
+see its child occurrences and bodies, and which children are external references you can open
+with open_document. (For example, a CAM setup that selects a container component as its
+model/fixture — this lets you see what that container actually holds.)
 
 Grounded in adsk.fusion:
   - Design.rootComponent.occurrences (top-level) / Occurrence.childOccurrences

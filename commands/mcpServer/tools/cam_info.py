@@ -656,9 +656,14 @@ _ops_tool = (
         description=(
             "Get the CAM operations in the active document, grouped by setup. Each "
             "operation reports its name, the tool used (description incl. tool number), "
-            "and state (has toolpath / valid / suppressed / optional). Also summarizes "
-            "the distinct tools used. Pass 'setup' (a setup name) to limit to one setup, "
-            "or omit it for all setups. Works without switching to Manufacture. Read-only."
+            "and state (has toolpath / valid / suppressed / optional / out-of-date). Also "
+            "summarizes the distinct tools used. Pass 'setup' (a setup name) to limit to one "
+            "setup, or omit it for all setups. Read-only. CAVEAT: the names/tools read fine "
+            "anywhere, but the VALIDITY / is_out_of_date state is only trustworthy once the "
+            "MANUFACTURE workspace has been entered — the CAM model does not re-evaluate against "
+            "changed geometry (e.g. a freshly inserted/swapped part) until Manufacture is active. "
+            "From the Design workspace these flags can be STALE (an op may read valid/up-to-date "
+            "when it is really out of date). Switch to Manufacture before trusting them."
         ),
     )
     .add_input_property("setup", {"type": "string",

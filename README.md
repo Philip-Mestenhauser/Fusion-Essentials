@@ -25,7 +25,8 @@ The tools let an agent inspect and navigate your data and CAM programs, for exam
 `list_projects` / `list_project_files` (with openable URLs), `open_document`,
 `get_component_tree` (assembly + external references), `list_workspaces` /
 `switch_workspace`, `get_screenshot`, `set_visibility` (isolate/show/hide components
-for a focused screenshot), and a CAM set — `get_cam_setups`,
+for a focused screenshot), `inspect_view` (orient/isolate/wireframe the camera and
+restore it), `section_view` (cut the model to see inside), and a CAM set — `get_cam_setups`,
 `get_cam_operations`, `get_setup_references`, `get_tool_list` (tool sheet),
 `get_machining_time`, `get_nc_programs`, `compare_operations` (diff two operations to
 understand a strategy), `get_parameters` / `set_parameter`, `get_timeline` (how a design
@@ -35,7 +36,7 @@ for starting a design and drawing on it, `request_user_selection` / `get_user_se
 (hand off to the user to click a face/edge/vertex/body/component and read it back),
 `create_joint_origin` (place a coordinate frame / WCS anchor programmatically),
 `measure_bounding_box` (extents in world or part-space, to drive stock),
-`activate_setup`, and toolpath templates
+`activate_setup`, `show_toolpath` (show/hide individual operations' toolpaths), and toolpath templates
 (`list_cam_templates`, `apply_template_to_setup`, `save_operations_as_template`). It can also manage data — `list_folders`, `create_project`,
 `create_folder`, and `upload_file` (which uploads local CAD and lets Fusion translate
 STEP/IGES/etc. into a Fusion design). Folder tools accept nested paths and can create
