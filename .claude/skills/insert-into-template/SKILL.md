@@ -1,13 +1,16 @@
 ---
-name: example-insert-into-template
+name: insert-into-template
 description: >-
-  Stand up a CAM job for a new part: save the active CAD into the data model, define a
-  "Center of Model" part-space origin oriented to a machining axis the operator picks, place
-  the shop's CAM template beside it (named <model>_CAM), insert the part into the template's
-  model container, position it, and size the stock from the measured part. A repeatable,
-  team-owned procedure built entirely from fusion-essentials building blocks — it runs without
-  asking the operator for approval; the only human step is clicking the machining face. Edit the
-  CONFIGURATION block below to adapt it to your shop. Requires the fusion-essentials MCP server.
+  Use when the user asks to insert/place/drop/load a design or part into a template (or
+  "windowframe template", "CAM template", "machining template"), to set up a CAM job for a
+  part, or to "insert this into the template". Stands up a CAM job for a new part: saves the
+  active CAD into the data model, defines a "Center of Model" part-space origin oriented to a
+  machining axis the operator picks, places the shop's CAM template beside it (named
+  <model>_CAM), inserts the part into the template's model container, positions it, and sizes
+  the stock from the measured part. A repeatable, team-owned procedure built entirely from
+  fusion-essentials building blocks — it runs without asking the operator for approval; the
+  only human step is clicking the machining face. Edit the CONFIGURATION block below to adapt
+  it to your shop. Requires the fusion-essentials MCP server.
 allowed-tools: >-
   fusion-essentials:get_session_info
   fusion-essentials:get_active_document_id
@@ -65,7 +68,7 @@ DEFAULT_FOLDER       = "{model}"      # folder path; "{model}" expands to the CA
 
 # The shop's CAM template(s) to place beside the part. REPLACE with your real lineage URNs.
 # (Each is a standalone document; copy_document places it and preserves its RFA x-refs.)
-TEMPLATE_URN         = "urn:adsk.wipprod:dm.lineage:REPLACE_ME_TEMPLATE"
+TEMPLATE_URN         = "urn:adsk.wipprod:dm.lineage:YyoW9uURTtSuWxOBbHpvbw"  # 4th Axis Windowframe Template (MCP Test Project)
 
 # Naming convention.
 TEMPLATE_NAME_SUFFIX = "_CAM"         # template copy is named "<model name>_CAM"
