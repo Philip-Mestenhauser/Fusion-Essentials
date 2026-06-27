@@ -738,19 +738,37 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 # ---------------------------------------------------------------------------
 
 def _folder_counts(folder):
-    """(file_count, subfolder_count) for a folder, best-effort."""
+    """(file_count, subfolder_count) for a folder's IMMEDIATE children, best-effort."""
     files = _safe(lambda: folder.dataFiles.count, None)
     subs = _safe(lambda: folder.dataFolders.count, None)
     return files, subs
 
 
+def _subtree_counts(folder, _depth=0):
+    """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
+    depth-capped). This is the real blast radius of a recursive delete — the immediate counts hide
+    nested files that force=true would also wipe (and whose xrefs would be orphaned)."""
+    files = _safe(lambda: folder.dataFiles.count, 0) or 0
+    subs = 0
+    if _depth < 32:
+        for sub in _safe(lambda: folder.dataFolders.asArray(), []) or []:
+            subs += 1
+            f, s = _subtree_counts(sub, _depth + 1)
+            files += f
+            subs += s
+    return files, subs
+
+
 def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
-                          force: bool = False) -> dict:
+                          force: bool = False, recursive_confirm: str = "") -> dict:
     """Delete a data-model folder by id, guarded.
 
-    SAFETY: requires 'folder_id' AND a 'confirm_name' that EXACTLY matches the folder's
-    current name — refuses on mismatch. Never deletes a project root. Refuses a folder
-    that still contains files or subfolders UNLESS force=true. Deletion is irreversible.
+    SAFETY: requires 'folder_id' AND a 'confirm_name' that EXACTLY matches the folder's current
+    name — refuses on mismatch. Never deletes a project root. An EMPTY folder deletes directly.
+    A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and bypasses the per-file
+    xref-orphan guard), so it needs BOTH force=true AND 'recursive_confirm' set to the folder's
+    name — a deliberate second acknowledgment. Without recursive_confirm, force returns a
+    full-subtree PREVIEW (the blast radius) and refuses. Deletion is irreversible.
     """
     folder_id = (folder_id or "").strip()
     confirm_name = (confirm_name or "").strip()
@@ -787,11 +805,26 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
 
     file_count, sub_count = _folder_counts(folder)
     non_empty = bool((file_count or 0) or (sub_count or 0))
-    if non_empty and not force:
-        return _error(
-            f"'{actual_name}' is not empty (files: {file_count}, subfolders: {sub_count}). "
-            "Deleting it would remove its contents. Pass force=true to delete anyway, or "
-            "remove the contents first (delete_document for files).")
+    recursive_confirm = (recursive_confirm or "").strip()
+
+    if non_empty:
+        # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too).
+        total_files, total_subs = _subtree_counts(folder)
+        if not force:
+            return _error(
+                f"'{actual_name}' is not empty (immediate files: {file_count}, subfolders: "
+                f"{sub_count}). Deleting it RECURSIVELY removes its ENTIRE subtree: "
+                f"{total_files} file(s) and {total_subs} subfolder(s) total — and bypasses the "
+                "per-file reference-orphan check. Pass force=true AND recursive_confirm="
+                f"'{actual_name}' to do this, or empty it first (delete_document for files).")
+        # force is set but require the explicit recursive acknowledgment matching the name.
+        if recursive_confirm != actual_name:
+            return _error(
+                f"RECURSIVE DELETE of '{actual_name}' would remove its ENTIRE subtree: "
+                f"{total_files} file(s) and {total_subs} subfolder(s) — and bypasses the per-file "
+                "reference-orphan check (nested referenced files would be orphaned). This is "
+                "irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
+                "(a deliberate second acknowledgment). Nothing was deleted.")
 
     try:
         ok = folder.deleteMe()  # adsk.core: DataFolder.deleteMe() -> bool
@@ -806,7 +839,7 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
         "folder_id": folder_id,
         "contained_files": file_count,
         "contained_subfolders": sub_count,
-        "forced": bool(non_empty and force),
+        "recursive": bool(non_empty),
     })
 
 
@@ -1248,10 +1281,12 @@ _delete_folder_tool = (
         description=(
             "Delete a data-model folder by its 'folder_id' (from list_folders). GUARDED and "
             "IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches the folder's "
-            "current name — refuses on mismatch. Never deletes a project ROOT. Refuses a folder "
-            "that still contains files or subfolders unless force=true (then its contents are "
-            "removed too). Useful for cleaning up orphaned/empty folders. WRITES to the cloud "
-            "data model (deletes)."
+            "current name — refuses on mismatch. Never deletes a project ROOT. An EMPTY folder "
+            "deletes directly. A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and "
+            "bypasses the per-file reference-orphan check), so it needs BOTH force=true AND "
+            "'recursive_confirm' = the folder's name (a deliberate second acknowledgment). Without "
+            "recursive_confirm, force returns a full-subtree PREVIEW (the blast radius) and refuses. "
+            "WRITES to the cloud data model (deletes)."
         ),
         input_param_name="folder_id",
         input_param_description="Id of the folder to delete (from list_folders).",
@@ -1259,7 +1294,9 @@ _delete_folder_tool = (
     .add_input_property("confirm_name", {"type": "string",
                                          "description": "Exact current name of the folder, case-sensitive (safety confirmation; must match)."})
     .add_input_property("force", {"type": "boolean",
-                                  "description": "Delete even if the folder is non-empty (default false). Use with care."})
+                                  "description": "Allow deleting a non-empty folder (default false). Still requires recursive_confirm for the recursive wipe."})
+    .add_input_property("recursive_confirm", {"type": "string",
+                                              "description": "For a non-empty folder: set to the folder's name to acknowledge the recursive subtree delete. Required (with force) to actually delete; omit to get a preview."})
 )
 delete_folder_item = Item.create_tool_item(
     tool=_delete_folder_tool, handler=delete_folder_handler, run_on_main_thread=True

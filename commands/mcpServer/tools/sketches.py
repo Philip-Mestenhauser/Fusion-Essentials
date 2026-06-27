@@ -63,6 +63,16 @@ def _safe(getter, default=None):
         return default
 
 
+def _target_component(design):
+    """The component new geometry should be created in: the ACTIVE edit target
+    (design.activeComponent), falling back to the root component when none is set
+    or the property is unavailable. So create_component(activate=true) actually
+    receives the sketch/body; behaviour is unchanged when nothing is activated
+    (activeComponent == root)."""
+    comp = _safe(lambda: design.activeComponent)
+    return comp if comp is not None else design.rootComponent
+
+
 def _scale(units: str):
     """Return the cm-per-unit factor, or None if the unit is unknown."""
     return _UNIT_TO_CM.get((units or "mm").strip().lower())
@@ -101,7 +111,7 @@ def get_sketches_handler() -> dict:
         return _error("No active design (open or create a document with design geometry).")
     sketches = []
     try:
-        coll = design.rootComponent.sketches
+        coll = _target_component(design).sketches
         for i in range(coll.count):
             sketches.append(_sketch_summary(coll.item(i)))
     except Exception as e:
@@ -112,14 +122,17 @@ def get_sketches_handler() -> dict:
 # ---------------------------------------------------------------- create_sketch
 
 def _resolve_plane(design, plane: str):
-    """Resolve a plane argument to a planar entity: an origin plane alias, or a named planar face."""
-    root = design.rootComponent
+    """Resolve a plane argument to a planar entity: an origin plane alias, or a named planar face.
+
+    Uses the ACTIVE component's origin/construction planes so a sketch created while a sub-component
+    is active lands in that component's space (not root)."""
+    comp = _target_component(design)
     key = _PLANE_ALIASES.get((plane or "").strip().lower().replace(" ", ""))
     if key:
-        return _safe(lambda: getattr(root, f"{key}ConstructionPlane")), f"{key} origin plane"
+        return _safe(lambda: getattr(comp, f"{key}ConstructionPlane")), f"{key} origin plane"
     # Otherwise try a named construction plane.
     try:
-        cp = root.constructionPlanes.itemByName(plane)
+        cp = comp.constructionPlanes.itemByName(plane)
         if cp:
             return cp, f"construction plane '{plane}'"
     except Exception:
@@ -139,7 +152,7 @@ def create_sketch_handler(plane: str = "xy", name: str = "") -> dict:
                       "planes; aliases top/front/right), or the name of a construction plane.")
 
     try:
-        sketch = design.rootComponent.sketches.add(planar)
+        sketch = _target_component(design).sketches.add(planar)
     except Exception as e:
         return _error(f"Failed to create sketch on {desc}: {e}")
     if not sketch:
@@ -163,12 +176,14 @@ def create_sketch_handler(plane: str = "xy", name: str = "") -> dict:
 
 # ------------------------------------------------------------ add_sketch_geometry
 
-_KINDS = ("line", "rectangle", "circle", "arc", "polygon")
+_KINDS = ("line", "rectangle", "circle", "arc", "polygon", "polyline", "closed_path")
 
 
 def _target_sketch(design, sketch_name: str):
-    """Resolve the target sketch by name, or default to the most recently created one."""
-    coll = design.rootComponent.sketches
+    """Resolve the target sketch by name, or default to the most recently created one.
+
+    Looks in the ACTIVE component's sketches so geometry is added to the right component."""
+    coll = _target_component(design).sketches
     name = (sketch_name or "").strip()
     if name:
         s = _safe(lambda: coll.itemByName(name))
@@ -179,9 +194,46 @@ def _target_sketch(design, sketch_name: str):
     return None, None
 
 
+def _draw_polyline(sketch, points, k, close):
+    """Draw a connected chain of lines through 'points' (a list of (x,y) in user units * k = cm).
+
+    Each segment STARTS at the previous segment's endSketchPoint (the same SketchPoint object), so
+    consecutive segments SHARE a point — the loop is continuous and parametric (drags as one shape),
+    not a set of independent segments. With close=True, a final segment connects the last point back
+    to the first and a coincident constraint welds them. Returns a label, or None if < 2 points.
+    """
+    pts = [(float(x), float(y)) for x, y in (points or [])]
+    if len(pts) < 2:
+        return None
+    lines = sketch.sketchCurves.sketchLines
+    first = None
+    prev_end = None
+    for i in range(1, len(pts)):
+        start = prev_end if prev_end is not None else _pt(pts[i - 1][0], pts[i - 1][1], k)
+        end = _pt(pts[i][0], pts[i][1], k)
+        ln = lines.addByTwoPoints(start, end)
+        if ln is None:
+            return None
+        if first is None:
+            first = ln
+        prev_end = _safe(lambda ln=ln: ln.endSketchPoint)
+    if close and first is not None and prev_end is not None:
+        # connect last point back to the first line's start point, sharing the SketchPoint so the
+        # loop is closed AND coincident.
+        start_pt = _safe(lambda: first.startSketchPoint)
+        closing = lines.addByTwoPoints(prev_end, start_pt) if start_pt is not None else None
+        if closing is not None and start_pt is not None:
+            # belt-and-suspenders: also add an explicit coincident (no-op if already shared)
+            _safe(lambda: sketch.geometricConstraints.addCoincident(closing.endSketchPoint, start_pt))
+    n = len(pts) - 1 + (1 if close else 0)
+    return f"polyline {len(pts)} pts, {n} segments{' (closed)' if close else ''}"
+
+
 def _draw(sketch, kind, p, k):
     """Dispatch a draw operation. p = params dict (raw user numbers). k = cm scale. Returns a label."""
     curves = sketch.sketchCurves
+    if kind in ("polyline", "closed_path"):
+        return _draw_polyline(sketch, p.get("points") or [], k, close=(kind == "closed_path"))
     if kind == "line":
         ln = curves.sketchLines.addByTwoPoints(_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k))
         return f"line ({p['x1']},{p['y1']})->({p['x2']},{p['y2']})" if ln else None
@@ -210,17 +262,41 @@ _REQUIRED = {
     "circle": ["cx", "cy", "radius"],
     "arc": ["cx", "cy", "x1", "y1", "sweep_deg"],
     "polygon": ["cx", "cy", "radius", "sides"],
+    # polyline / closed_path take a 'points' list instead of flat scalars (handled specially).
+    "polyline": [],
+    "closed_path": [],
 }
+
+
+def _parse_points(points):
+    """Normalize a 'points' argument into a list of (x, y) floats. Accepts a list of [x,y] pairs or
+    {x,y} dicts. Returns (list, error_or_None)."""
+    if not points or not isinstance(points, (list, tuple)):
+        return None, "Provide 'points' — a list of [x, y] pairs for the polyline/closed_path."
+    out = []
+    for i, pt in enumerate(points):
+        try:
+            if isinstance(pt, dict):
+                out.append((float(pt["x"]), float(pt["y"])))
+            else:
+                out.append((float(pt[0]), float(pt[1])))
+        except Exception:
+            return None, f"points[{i}] is not a valid [x, y] pair."
+    if len(out) < 2:
+        return None, "A polyline needs at least 2 points."
+    return out, None
 
 
 def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: str = "mm",
                                 x1: float = None, y1: float = None, x2: float = None, y2: float = None,
                                 cx: float = None, cy: float = None, radius: float = None,
-                                sweep_deg: float = None, sides: int = None) -> dict:
+                                sweep_deg: float = None, sides: int = None, points=None) -> dict:
     """Draw one geometry entity on a sketch.
 
-    kind: line | rectangle | circle | arc | polygon. The relevant coordinate/size params
-    (in 'units', default mm; angles in degrees) define it — see _REQUIRED. Targets the named
+    kind: line | rectangle | circle | arc | polygon | polyline | closed_path. Most kinds use the
+    coordinate/size params (in 'units', default mm; angles in degrees) — see _REQUIRED. polyline/
+    closed_path use 'points' (a list of [x,y]); their segments share endpoints (coincident) so the
+    shape is continuous + parametric, and closed_path also closes the loop. Targets the named
     sketch, or the most recent one if 'sketch_name' is omitted.
     """
     kind = (kind or "").strip().lower()
@@ -242,22 +318,31 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                           "or create_sketch first.")
         return _error("No sketch to draw on. Create one first with create_sketch.")
 
-    # Gather + validate the params this kind needs.
-    supplied = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": cx, "cy": cy,
-                "radius": radius, "sweep_deg": sweep_deg, "sides": sides}
-    p = {}
-    missing = []
-    for key in _REQUIRED[kind]:
-        if supplied.get(key) is None:
-            missing.append(key)
-        else:
-            p[key] = supplied[key]
-    if missing:
-        return _error(f"'{kind}' needs: {', '.join(_REQUIRED[kind])}. Missing: {', '.join(missing)}.")
-    if kind == "circle" and p["radius"] <= 0:
-        return _error("radius must be > 0.")
-    if kind == "polygon" and int(p["sides"]) < 3:
-        return _error("polygon needs sides >= 3.")
+    # polyline / closed_path: a connected, coincident chain from a 'points' list.
+    if kind in ("polyline", "closed_path"):
+        pts, perr = _parse_points(points)
+        if perr:
+            return _error(perr)
+        p = {"points": pts}
+        # fall through to the shared draw + result below
+
+    else:
+        # Gather + validate the scalar params this kind needs.
+        supplied = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": cx, "cy": cy,
+                    "radius": radius, "sweep_deg": sweep_deg, "sides": sides}
+        p = {}
+        missing = []
+        for key in _REQUIRED[kind]:
+            if supplied.get(key) is None:
+                missing.append(key)
+            else:
+                p[key] = supplied[key]
+        if missing:
+            return _error(f"'{kind}' needs: {', '.join(_REQUIRED[kind])}. Missing: {', '.join(missing)}.")
+        if kind == "circle" and p["radius"] <= 0:
+            return _error("radius must be > 0.")
+        if kind == "polygon" and int(p["sides"]) < 3:
+            return _error("polygon needs sides >= 3.")
 
     # Draw (defer compute so the single add is efficient and consistent).
     deferred_set = False
@@ -415,20 +500,26 @@ create_sketch_item = Item.create_tool_item(tool=create_sketch_tool, handler=crea
                                            run_on_main_thread=True)
 
 _ADD_DESC = (
-    "Draw one geometry entity on a sketch. 'kind' is line | rectangle | circle | arc | polygon. "
-    "Provide the params for that kind (coordinates/sizes in 'units' = mm [default], cm, or in; "
-    "angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs cx,cy,radius; arc needs "
-    "cx,cy,x1,y1,sweep_deg (start point + counter-clockwise sweep); polygon needs cx,cy,radius,"
-    "sides. Targets 'sketch_name', or the most recently created sketch if omitted. WRITES to the "
-    "design. Call repeatedly to build up geometry; pair with get_screenshot to view it."
+    "Draw one geometry entity on a sketch. 'kind' is line | rectangle | circle | arc | polygon | "
+    "polyline | closed_path. Provide the params for that kind (coordinates/sizes in 'units' = mm "
+    "[default], cm, or in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
+    "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
+    "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
+    "chain whose segments SHARE endpoints (coincident) so the shape is continuous + parametric "
+    "(drags as one shape, unlike independent 'line' calls) — use 'closed_path' for a custom closed "
+    "boundary. Targets 'sketch_name', or the most recently created sketch if omitted. WRITES to the "
+    "design. Pair with get_screenshot to view it."
 )
 add_geometry_tool = (
     Tool.create_with_string_input(
         name="add_sketch_geometry",
         description=_ADD_DESC,
         input_param_name="kind",
-        input_param_description="line | rectangle | circle | arc | polygon.",
+        input_param_description="line | rectangle | circle | arc | polygon | polyline | closed_path.",
     )
+    .add_input_property("points", {"type": "array",
+        "description": "For polyline/closed_path: list of [x,y] points (in 'units'). Segments share endpoints (coincident) for a parametric loop.",
+        "items": {"type": "array"}})
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
     .add_input_property("units", {"type": "string", "description": "mm | cm | in (default mm)."})
     .add_input_property("x1", {"type": "number", "description": "X of point 1 / start (line, rectangle, arc)."})

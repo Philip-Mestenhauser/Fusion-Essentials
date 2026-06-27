@@ -149,7 +149,9 @@ class SimpleMCPServer:
         try:
             item = self.tools[tool_name]
             if item.run_on_main_thread:
-                result = await self._execute_on_main_thread(item.handler, arguments)
+                result = await self._execute_on_main_thread(
+                    item.handler, arguments,
+                    enforce_timeout=getattr(item, "enforce_timeout", True))
             else:
                 result = item.handler(**arguments)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -157,8 +159,14 @@ class SimpleMCPServer:
             futil.handle_error(f"MCP tool '{tool_name}'")
             return self._error(request_id, -32603, f"Tool execution error: {e}")
 
-    async def _execute_on_main_thread(self, handler_func, arguments: Dict[str, Any]) -> Any:
-        """Run handler_func(**arguments) on Fusion's main thread via TaskManager."""
+    async def _execute_on_main_thread(self, handler_func, arguments: Dict[str, Any],
+                                      enforce_timeout: bool = True) -> Any:
+        """Run handler_func(**arguments) on Fusion's main thread via TaskManager.
+
+        enforce_timeout=False waits indefinitely for the callback to complete — for tools (e.g.
+        execute_api_script) whose work cannot be interrupted and would still commit, so a timeout
+        would only report a false failure for a change that actually applied.
+        """
         import time
 
         result_container = {'result': None, 'exception': None, 'completed': False}
@@ -184,7 +192,7 @@ class SimpleMCPServer:
 
         timeout = 30
         start_time = time.time()
-        while time.time() - start_time < timeout:
+        while enforce_timeout is False or (time.time() - start_time < timeout):
             with result_lock:
                 if result_container['completed']:
                     if result_container['exception'] is not None:
@@ -192,18 +200,28 @@ class SimpleMCPServer:
                     return result_container['result']
             await asyncio.sleep(0.01)
 
-        # Timed out. Cancel the still-pending task so it never runs after we've given
-        # up — otherwise a slow handler would execute its side effect (e.g. a cloud
-        # write) AFTER the client was told it failed, inviting a double-apply on retry.
-        # cancel() pops under the lock; if the handler fired in this exact window it
-        # already set 'completed', so honor that result instead of lying about a timeout.
-        TaskManager.cancel(task_id)
+        # Timed out. Try to cancel the still-pending task so it never runs after we've given up.
+        # cancel() returns True ONLY if it removed a task that had NOT yet started — in that case
+        # the operation truly never ran. If it returns False the callback was already CLAIMED by
+        # the main thread: it is running (or finished) and CANNOT be interrupted, so its side
+        # effect (e.g. a cloud write or a committed design edit) may already be applying. We must
+        # not lie that it was "cancelled before running" — that invites a blind retry → double-apply.
+        cancelled = TaskManager.cancel(task_id)
         with result_lock:
             if result_container['completed']:
+                # Finished in the cancel window — honor the real result, don't fake a timeout.
                 if result_container['exception'] is not None:
                     raise result_container['exception']
                 return result_container['result']
-        raise Exception("Handler execution timed out (30s); the operation was cancelled before running")
+        if cancelled:
+            raise Exception(
+                f"Handler execution timed out ({timeout}s); the operation was cancelled before it "
+                "started running. No change was made — safe to retry.")
+        raise Exception(
+            f"Handler is still running after {timeout}s and could NOT be cancelled (an in-flight "
+            "main-thread operation cannot be interrupted). It may still COMMIT its result. Do NOT "
+            "blindly retry — re-check the design/document state first, then retry only if the "
+            "change did not take effect. (For long operations, prefer a fire-and-poll tool.)")
 
     def _handle_resources_list(self, request_id: Any) -> Dict[str, Any]:
         resources = [

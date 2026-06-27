@@ -129,10 +129,11 @@ install_mock_adsk()
 def _restore_shared_adsk_mocks():
     """Snapshot-and-restore the mutable ``adsk`` mock attributes around every test.
 
-    Several tool tests (inspect_view, section_view, show_toolpath, parameters)
-    install per-test behaviour by REASSIGNING shared mock callables —
-    ``adsk.fusion.Design.cast``, ``adsk.cam.CAM.cast``/``Operation.cast``,
-    ``adsk.core.Point3D.create``/``Vector3D.create``/``ValueInput.createByString``.
+    Several tool tests (inspect_view, section_view, show_toolpath, parameters,
+    extrude, patterns) install per-test behaviour by REASSIGNING shared mock
+    callables — ``adsk.fusion.Design.cast``, ``adsk.cam.CAM.cast``/
+    ``Operation.cast``, ``adsk.core.Point3D.create``/``Vector3D.create``/
+    ``ValueInput.createByString``/``createByReal``/``ObjectCollection.create``.
     Because these live on module-level Mocks shared by the whole session, a
     reassignment would otherwise LEAK into later tests (e.g. clobbering
     ``Design.cast``'s pass-through so measure_bounding_box sees no design). This
@@ -149,6 +150,8 @@ def _restore_shared_adsk_mocks():
         (core.Point3D, "create", core.Point3D.create),
         (core.Vector3D, "create", core.Vector3D.create),
         (core.ValueInput, "createByString", core.ValueInput.createByString),
+        (core.ValueInput, "createByReal", core.ValueInput.createByReal),
+        (core.ObjectCollection, "create", core.ObjectCollection.create),
     ]
     try:
         yield

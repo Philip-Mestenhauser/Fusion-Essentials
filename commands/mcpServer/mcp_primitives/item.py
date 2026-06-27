@@ -19,7 +19,8 @@ class Item:
     False for handlers that are pure Python and never call adsk.*.
     """
 
-    def __init__(self, primitive: Union[Tool, Resource, Prompt], handler: callable, run_on_main_thread: bool = True):
+    def __init__(self, primitive: Union[Tool, Resource, Prompt], handler: callable, run_on_main_thread: bool = True,
+                 enforce_timeout: bool = True):
         if not isinstance(primitive, (Tool, Resource, Prompt)):
             raise ValueError("Primitive must be a Tool, Resource, or Prompt instance")
         if not callable(handler):
@@ -28,6 +29,11 @@ class Item:
         self.primitive = primitive
         self.handler = handler
         self.run_on_main_thread = run_on_main_thread
+        # enforce_timeout=False exempts a tool from the server's main-thread task timeout. Use it
+        # ONLY for tools whose work cannot be interrupted AND would still commit if we "timed out"
+        # (e.g. execute_api_script) — timing those out would report a false failure for a change
+        # that actually applied. Default True keeps the safety timeout for everything else.
+        self.enforce_timeout = enforce_timeout
 
     def get_name(self) -> str:
         return self.primitive.name
@@ -57,8 +63,10 @@ class Item:
         return f"Item(primitive={self.primitive}, handler={self.handler})"
 
     @classmethod
-    def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True) -> 'Item':
-        return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread)
+    def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True,
+                         enforce_timeout: bool = True) -> 'Item':
+        return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
+                   enforce_timeout=enforce_timeout)
 
     @classmethod
     def create_resource_item(cls, resource: Resource, handler: callable, run_on_main_thread: bool = True) -> 'Item':

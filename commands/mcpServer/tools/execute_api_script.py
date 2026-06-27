@@ -11,10 +11,19 @@ False), because it lets a connected AI run any code in the user's CAD session.
 
 Safety mechanics:
   - The script must define `def run(context):` (mirrors a Fusion script entry).
-  - Execution is wrapped in a Fusion transaction (PTransaction) so that if the
-    script raises, all changes it made are rolled back (Abort) rather than left
-    half-applied. On success the transaction is committed.
-  - The handler runs on Fusion's main thread (run_on_main_thread=True via Item).
+  - Execution is wrapped in a Fusion transaction (PTransaction) so the script's changes are
+    GROUPED as a single timeline/undo step, and committed on success.
+  - CAVEAT (do not over-trust this): the script runs via `Python.Run`, a NESTED interpreter, and
+    the appended `run(None)` executes INSIDE it. An exception raised by the script is caught within
+    Python.Run and returned to us as a result STRING — it does NOT propagate as a Python exception
+    here, so the `except` branch (PTransaction.Abort) usually does NOT fire on an in-script error.
+    In other words: a failing script is typically NOT auto-rolled-back; its partial changes are
+    committed as one undo step. Treat this as "grouped, undoable" — NOT "atomic / rolls back on
+    error". Abort only covers errors that escape Python.Run itself (rare).
+  - The handler runs on Fusion's main thread (run_on_main_thread=True via Item). It is also exempt
+    from the server's 30s task timeout (see server settings) precisely because a long script that
+    timed out could not be interrupted yet would still commit — so it is allowed to run to
+    completion rather than report a false "cancelled".
 """
 
 import os
@@ -119,8 +128,10 @@ TOOL_DESCRIPTION = (
     "- The script MUST define a function `def run(context):` which is the entry point.\n"
     "- DO NOT show any modal UI (no messageBox / no input dialogs) — modal windows "
     "pause script execution and the agent cannot dismiss them.\n"
-    "- DO NOT catch exceptions you intend to surface — let them raise so the change "
-    "is rolled back (the whole script runs in a transaction) and the error is returned.\n"
+    "- Let exceptions raise rather than swallowing them, so the error text is returned. "
+    "NOTE: the script's changes are grouped as ONE undo step but are NOT guaranteed to "
+    "auto-roll-back on error — a partial change can commit, so verify state afterward and "
+    "undo manually if needed.\n"
     "- Use print() to return values/information; printed output is included in the result.\n\n"
     "Before editing a model, consider reading its state first (e.g. get_session_info). "
     "After changes, verify the result."
@@ -133,7 +144,11 @@ tool = Tool.create_with_string_input(
     input_param_description="Fusion API Python source code to execute. Must define def run(context):",
 )
 
-item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)
+# enforce_timeout=False: a long script cannot be interrupted mid-run and would still COMMIT, so
+# the server's 30s task timeout would only report a false failure for a change that applied. Let it
+# run to completion instead. (See _execute_on_main_thread.)
+item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True,
+                             enforce_timeout=False)
 
 
 def register_tool():

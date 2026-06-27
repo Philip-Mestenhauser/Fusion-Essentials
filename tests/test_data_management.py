@@ -289,3 +289,109 @@ class TestFindOpenDocument:
         _install_app([a])
         found, _ = dm._find_open_document("CAM")
         assert found is a
+
+
+# ── delete_folder recursive-delete gate (maintainer block #1) ───────────────
+#
+# force=true on a non-empty folder recursively wipes the whole subtree (and bypasses the
+# per-file xref-orphan guard). The gate: force alone is NOT enough — require an explicit
+# 'recursive_confirm' token AND surface a full-SUBTREE preview so the caller sees the blast radius.
+
+class _Arr:
+    def __init__(self, items):
+        self._i = list(items)
+    @property
+    def count(self):
+        return len(self._i)
+    def asArray(self):
+        return list(self._i)
+    def item(self, i):
+        return self._i[i]
+
+
+class FakeDelFolder:
+    def __init__(self, fid, name, files=(), subs=(), is_root=False):
+        self.fid = fid
+        self.name = name
+        self.isRoot = is_root
+        self._files = list(files)
+        self._subs = list(subs)
+        self.deleted = False
+    @property
+    def dataFiles(self):
+        return _Arr(self._files)
+    @property
+    def dataFolders(self):
+        return _Arr(self._subs)
+    def deleteMe(self):
+        self.deleted = True
+        return True
+
+
+def _install_folder_tree(root):
+    """Install a data hub whose findFolderById walks a fake tree."""
+    index = {}
+    def walk(f):
+        index[f.fid] = f
+        for s in f._subs:
+            walk(s)
+    walk(root)
+    class FakeData:
+        def findFolderById(self, fid):
+            return index.get(fid)
+    dm.app = type("A", (), {"data": FakeData()})()
+    # dm._data() returns app.data (guarded) — make _data return it directly
+    import types
+    dm._data = lambda: FakeData()
+    return index
+
+
+def _del(folder_id, **kw):
+    return dm.delete_folder_handler(folder_id=folder_id, **kw)
+
+
+class TestDeleteFolderGate:
+    def _nested(self):
+        # root/  Outer(files: a) / Inner(files: b, c)
+        inner = FakeDelFolder("inner", "Inner", files=["b", "c"])
+        outer = FakeDelFolder("outer", "Outer", files=["a"], subs=[inner])
+        return outer, inner
+
+    def test_empty_folder_deletes_without_recursive_confirm(self):
+        empty = FakeDelFolder("e", "Empty")
+        _install_folder_tree(empty)
+        out = _del("e", confirm_name="Empty")
+        d = json.loads(out["content"][0]["text"]) if not out.get("isError") else None
+        assert out["isError"] is False and empty.deleted is True
+
+    def test_nonempty_force_without_recursive_confirm_returns_preview_and_refuses(self):
+        outer, inner = self._nested()
+        _install_folder_tree(outer)
+        res = _del("outer", confirm_name="Outer", force=True)   # force but no recursive_confirm
+        assert res["isError"] is True
+        # must NOT have deleted
+        assert outer.deleted is False
+        # must surface the FULL subtree blast radius (not just immediate children)
+        msg = res["message"]
+        assert "recursive_confirm" in msg
+        # 1 (outer 'a') + 2 (inner 'b','c') = 3 files, 1 subfolder total
+        assert "3" in msg and "recursiv" in msg.lower()
+
+    def test_nonempty_with_recursive_confirm_deletes(self):
+        outer, inner = self._nested()
+        _install_folder_tree(outer)
+        out = _del("outer", confirm_name="Outer", force=True, recursive_confirm="Outer")
+        assert out["isError"] is False
+        assert outer.deleted is True
+
+    def test_recursive_confirm_must_match_name(self):
+        outer, inner = self._nested()
+        _install_folder_tree(outer)
+        res = _del("outer", confirm_name="Outer", force=True, recursive_confirm="wrong")
+        assert res["isError"] is True
+        assert outer.deleted is False
+
+    def test_subtree_counts_walks_recursively(self):
+        outer, inner = self._nested()
+        files, subs = dm._subtree_counts(outer)
+        assert files == 3 and subs == 1   # a + b + c files; Inner subfolder

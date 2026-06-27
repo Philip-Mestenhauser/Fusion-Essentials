@@ -171,6 +171,36 @@ def _collect_items():
     # api_doc: search the live Fusion API docs (adsk.* introspection). Read-only. On by default.
     tools.api_doc.register_tool()
 
+    # create_component: new empty component occurrence (assembly part scaffold). WRITES. On by default.
+    tools.create_component.register_tool()
+
+    # capture_views: several views (front/top/right/iso) in one call. Read-only. On by default.
+    tools.capture_views.register_tool()
+
+    # extrude: turn a sketch profile into a solid (new/join/cut/intersect). WRITES. On by default.
+    tools.extrude.register_tool()
+
+    # patterns: rectangular + circular patterns of component occurrences. WRITES. On by default.
+    tools.patterns.register_tool()
+
+    # arrange: nest/pack component occurrences within a sketch-profile boundary. WRITES. On by default.
+    tools.arrange.register_tool()
+
+    # sketch_constraint: geometric constraints (perp/parallel/tangent/equal/midpoint/symmetry/...) on
+    # sketch entities by '<type>:<index>'. WRITES. On by default.
+    tools.sketch_constraint.register_tool()
+
+    # get_sketch_detail: full structure of one sketch (entities + construction + constraints +
+    # dimensions). Read-only. On by default.
+    tools.sketch_detail.register_tool()
+
+    # assembly: ground/un-ground, move an occurrence, rigid group. WRITES. On by default.
+    tools.assembly.register_tool()
+
+    # joints_advanced: capture_position (snapshots), as_built_joint, assembly_constraint
+    # (Constrain Components). WRITES. On by default.
+    tools.joints_advanced.register_tool()
+
     if _execute_api_script_allowed():
         tools.execute_api_script.register_tool()
         futil.log(f'{CMD_NAME}: execute_api_script ENABLED (user opted in)')

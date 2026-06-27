@@ -93,8 +93,16 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     program to edit (omit to edit ALL programs). set_name: optional — also set the NC program's
     Name field to this. WRITES to the CAM data; reports before/after per program.
     """
-    if comment is None and not (set_name or "").strip():
-        return _error("Provide 'comment' (and/or 'set_name') — the value(s) to write.")
+    # Guard against the silent wipe-all: comment defaults to "" (never None), so the old
+    # `comment is None` check was DEAD CODE. Refuse when there's genuinely nothing to write —
+    # an empty/whitespace comment AND no set_name. (An empty comment WITH a set_name is fine:
+    # the caller is renaming, not clearing comments; an explicit non-empty comment is fine.)
+    write_comment = bool((comment or "").strip())
+    write_name = bool((set_name or "").strip())
+    if not write_comment and not write_name:
+        return _error("Provide a non-empty 'comment' (and/or 'set_name') — the value(s) to write. "
+                      "Refusing: an empty comment with no name would blank the comment on every "
+                      "matched NC program.")
 
     cam, err = _get_cam()
     if err:
@@ -106,40 +114,61 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
         return _error("This document has no NC programs.")
 
     want = (program or "").strip()
-    results = []
-    matched = 0
+    targets = []
     for i in range(count):
         ncp = programs.item(i)
         nm = _safe(lambda ncp=ncp: ncp.name) or ""
         if want and nm != want:
             continue
-        matched += 1
-        rec = {"program": nm}
-        # comment
-        if comment is not None and (comment != "" or not (set_name or "").strip()):
-            before, after, e = _set_param(ncp, _COMMENT_PARAM, comment)
-            if e:
-                return _error(f"Failed to set comment on NC program '{nm}': {e}")
-            rec["comment_before"] = before
-            rec["comment_after"] = after
-        # optional name
-        if (set_name or "").strip():
-            before, after, e = _set_param(ncp, _NAME_PARAM, set_name)
-            if e:
-                return _error(f"Failed to set name on NC program '{nm}': {e}")
-            rec["name_before"] = before
-            rec["name_after"] = after
-        results.append(rec)
+        targets.append((ncp, nm))
 
-    if not matched:
+    if not targets:
         available = [_safe(lambda i=i: programs.item(i).name) for i in range(count)]
         return _error(f"No NC program named '{program}'. Available: "
                       f"{', '.join(str(a) for a in available)}.")
 
+    # Pre-validate every target's params BEFORE writing anything. There is no true CAM
+    # transaction here, so a mid-loop failure across multiple programs would leave earlier ones
+    # already mutated. Checking presence + editability up front makes a partial-apply far less
+    # likely (the common failure — a locked/missing param — is caught before the first write).
+    for ncp, nm in targets:
+        if write_comment:
+            p = _safe(lambda ncp=ncp: ncp.parameters.itemByName(_COMMENT_PARAM))
+            if p is None:
+                return _error(f"NC program '{nm}' has no '{_COMMENT_PARAM}' parameter; aborting "
+                              "before any change.")
+            if not _safe(lambda p=p: p.isEditable, True):
+                return _error(f"Comment on NC program '{nm}' is not editable; aborting before any "
+                              "change (nothing was modified).")
+        if write_name:
+            p = _safe(lambda ncp=ncp: ncp.parameters.itemByName(_NAME_PARAM))
+            if p is None or not _safe(lambda p=p: p.isEditable, True):
+                return _error(f"Name on NC program '{nm}' is not editable/found; aborting before "
+                              "any change (nothing was modified).")
+
+    results = []
+    for ncp, nm in targets:
+        rec = {"program": nm}
+        if write_comment:
+            before, after, e = _set_param(ncp, _COMMENT_PARAM, comment)
+            if e:
+                return _error(f"Failed to set comment on NC program '{nm}': {e}. NOTE: any "
+                              "programs processed before this one were already changed.")
+            rec["comment_before"] = before
+            rec["comment_after"] = after
+        if write_name:
+            before, after, e = _set_param(ncp, _NAME_PARAM, set_name)
+            if e:
+                return _error(f"Failed to set name on NC program '{nm}': {e}. NOTE: any programs "
+                              "processed before this one were already changed.")
+            rec["name_before"] = before
+            rec["name_after"] = after
+        results.append(rec)
+
     return _ok({
         "set": True,
-        "comment": comment if comment is not None else None,
-        "set_name": (set_name or None),
+        "comment": comment if write_comment else None,
+        "set_name": (set_name or None) if write_name else None,
         "programs_changed": len(results),
         "programs": results,
         "note": "NC program comment/name updated. Most posts emit the Comment near the top of "

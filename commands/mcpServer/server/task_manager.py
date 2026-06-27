@@ -114,18 +114,22 @@ class TaskManager:
             return None
 
     @classmethod
-    def cancel(cls, task_id: str) -> None:
-        """Drop a still-pending task so it never runs.
+    def cancel(cls, task_id: str) -> bool:
+        """Drop a still-pending task so it never runs. Returns True iff a pending task was
+        actually removed (i.e. the cancel won the race and the callback will NOT run).
 
-        Used when the poster has given up waiting (see _execute_on_main_thread's
-        timeout): if the event has not yet fired on the main thread, removing the
-        task here prevents the now-orphaned callback from running after the caller
-        already moved on. If the task already fired, this is a harmless no-op.
+        Used when the poster has given up waiting (see _execute_on_main_thread's timeout): if the
+        event has not yet fired on the main thread, removing the task here prevents the now-orphaned
+        callback from running after the caller moved on — and we return True so the caller can
+        truthfully say "cancelled before running". If the task was already CLAIMED by notify() (it
+        is running, or finished, on the main thread), there is nothing to pop: we return False,
+        because the callback's side effect may already be committing and the caller must NOT claim
+        it was cancelled. There is no way to interrupt an in-flight main-thread callback.
         """
         if not task_id:
-            return
+            return False
         with cls._tasks_lock:
-            cls._pending_tasks.pop(task_id, None)
+            return cls._pending_tasks.pop(task_id, None) is not None
 
     @classmethod
     def is_running(cls) -> bool:

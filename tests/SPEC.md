@@ -4,7 +4,19 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 20  |  **Behaviors pinned:** 257
+**Tools with a test file:** 35  |  **Behaviors pinned:** 446
+
+## `active_component`
+
+> Unit tests for the active-component targeting fix in sketches.py + extrude.py.
+
+**SketchesTargetComponent**
+- uses active component when present
+- falls back to root when no active
+- falls back to root when active is none
+**ExtrudeTargetComponent**
+- uses active component when present
+- falls back to root
 
 ## `api_doc`
 
@@ -43,6 +55,48 @@ after changing tests._
 - max results clamped and truncation flagged
 - max results never exceeds hard cap
 
+## `arrange`
+
+> Unit tests for ``arrange.py`` — pack shapes within a sketch-profile boundary (Arrange feature).
+
+**SolverType**
+- true shape default
+- rectangular
+- unknown solver errors
+**Boundary**
+- named sketch profile used as envelope
+- missing boundary errors
+- boundary with no profile errors
+**Shapes**
+- each shape added as component
+- missing shape reported
+- no shapes errors
+- feature created
+**Spacing**
+- spacing scaled to cm
+
+## `assembly`
+
+> Unit tests for ``assembly.py`` — occurrence ground/move + rigid group.
+
+**Ground**
+- ground pins in space
+- unground from parent releases lock
+- both flags independent
+- substring match
+- missing occurrence errors
+- no change requested errors
+**Move**
+- translate sets transform
+- translation scaled to cm
+- missing occurrence errors
+- zero move errors
+**RigidGroup**
+- groups named occurrences
+- include children flag
+- needs at least two
+- missing reported
+
 ## `cam_info`
 
 > Unit tests for ``cam_info.py`` pure helpers.
@@ -73,6 +127,18 @@ after changing tests._
 - descends into subfolders
 - not found returns none
 
+## `capture_views`
+
+> Unit tests for ``capture_views.py`` — capture several orthographic/iso views in one call.
+
+**ParseViews**
+- default set
+- explicit comma list
+- whitespace and case tolerant
+- dedupes preserving order
+- unknown view errors
+- all keyword expands to six orthos
+
 ## `component_tree`
 
 > Unit tests for ``component_tree.py`` occurrence search.
@@ -100,6 +166,20 @@ after changing tests._
 **CollectTruncation**
 - truncates at row cap
 - no truncation under cap
+
+## `create_component`
+
+> Unit tests for ``create_component.py`` — make a new empty component occurrence.
+
+**CreateComponent**
+- creates component
+- names the component
+- placed at position scales to cm
+- no position uses identity
+- activate makes it edit target
+- no activate by default
+- unknown units errors
+- no active design errors
 
 ## `data_management`
 
@@ -142,6 +222,12 @@ after changing tests._
 **FindOpenDocument**
 - exact then substring
 - substring when no exact
+**DeleteFolderGate**
+- empty folder deletes without recursive confirm
+- nonempty force without recursive confirm returns preview and refuses
+- nonempty with recursive confirm deletes
+- recursive confirm must match name
+- subtree counts walks recursively
 
 ## `data_model`
 
@@ -170,6 +256,63 @@ after changing tests._
 - stray slashes tolerated
 - missing folder errors with hint
 - missing nested segment names the level
+
+## `edit_joint`
+
+> Unit tests for ``edit_joint`` — edit an EXISTING joint in place (no remaking).
+
+**FindAndGuards**
+- unknown joint errors
+- no edits requested errors
+**RollTo**
+- rolls before then after
+**Flip**
+- set flip
+- unset flip
+**Motion**
+- change to slider on axis
+- change to rigid
+- unknown joint type errors
+**OffsetAngle**
+- offset sets expression with units
+- offset inch units
+- angle sets degrees expression
+- offset counts as an edit
+- unknown units errors
+**Limits**
+- rotation limits enable and set radians
+- rotation rest value
+- linear limits on slider in cm
+- linear rest value
+- rotation limit on slider errors
+- linear limit on revolute errors
+**WorldAxis**
+- world axis uses custom construction axis
+- world axis without type reuses current
+- unknown world axis errors
+**RotationDriveRefused**
+- rotation deg is refused with redirect
+**ReselectInputs**
+- reselect joint origin name inputs
+
+## `extrude`
+
+> Unit tests for ``extrude.py`` — turn a sketch profile into a solid.
+
+**Guards**
+- unknown units
+- zero distance
+- unknown operation
+- no sketch named
+- profile index out of range
+- no profile in sketch
+**Extrude**
+- basic new body scales distance to cm
+- inch scaling
+- most recent sketch when unnamed
+- operation mapping cut
+- symmetric flag passed
+- negative distance allowed
 
 ## `inspect_view`
 
@@ -219,6 +362,12 @@ after changing tests._
 - rigid
 - slider uses axis index
 - unsupported type reports error
+**ApplyLimits**
+- rotation in radians
+- linear in cm
+- rest values
+- rotation on slider errors
+- linear on revolute errors
 
 ## `joint_origin`
 
@@ -235,6 +384,73 @@ after changing tests._
 - sketch point without sketch name errors
 - sketch line missing sketch errors
 - sketch line index out of range errors
+
+## `joint_snaps`
+
+> Unit tests for the matured ``joint.py`` autonomous geometry-snap resolver.
+
+**ParseSnap**
+- plain name is joint origin
+- occurrence with snap
+- occurrence with top snap
+- cylinder snap
+- unknown suffix not treated as snap
+- occurrence colon in name without snap
+**PickFace**
+- top picks highest face
+- bottom picks lowest face
+- center picks largest planar face
+- top bottom skip nonplanar cylinder wall
+**DirectionalFaces**
+- right is max x
+- left is min x
+- back is max y
+- front is min y
+- top is max z
+- bottom is min z
+- directional snaps parse
+- empty body returns none
+
+## `joints_advanced`
+
+> Unit tests for ``joints_advanced.py`` — capture_position, as_built_joint, assembly_constraint.
+
+**CapturePosition**
+- capture when pending
+- capture with nothing pending errors
+- status reports pending and count
+- revert deletes latest snapshot
+- revert with no snapshots errors
+- unknown action
+**AsBuiltJoint**
+- rigid as built passes null geometry
+- missing occurrence errors
+- requires two distinct
+**AssemblyConstraint**
+- missing occurrence errors
+- resolves both occurrences
+**AssemblyConstraintSnaps**
+- snap specs resolve and build relationship
+- snap carries offset value
+- unresolvable snap errors
+**MultiRelationshipConstraint**
+- relationships list builds one constraint many rels
+- per relationship flip respected
+- single pair still works
+- bad relationship item errors
+
+## `main_thread_timeout`
+
+> Unit tests for the main-thread task timeout correctness (maintainer block #3).
+
+**CancelReturnsWhetherItWon**
+- cancel pending task returns true
+- cancel already claimed task returns false
+- cancel empty id returns false
+**ItemEnforceTimeoutFlag**
+- defaults to enforced
+- can opt out
+- execute api script item is timeout exempt
 
 ## `measure_bounding_box`
 
@@ -298,6 +514,38 @@ after changing tests._
 **FavoriteHandler**
 - sets favorite flag
 - unknown param errors
+
+## `patterns`
+
+> Unit tests for ``patterns.py`` — rectangular & circular component patterns.
+
+**Resolution**
+- exact name
+- substring fallback
+- missing reported
+- comma separated multiple
+**Rectangular**
+- single direction scales spacing
+- two directions
+- quantity one must be positive
+- unknown direction
+**Circular**
+- basic full ring
+- axis selection
+- symmetric flag
+- quantity must be at least two
+- unknown axis
+
+## `polyline`
+
+> Unit tests for the polyline / closed_path sketch kind in sketches.py.
+
+**PolylineChaining**
+- open polyline segment count
+- closed polyline segment count
+- consecutive segments share endpoint
+- close welds last to first
+- needs at least two points
 
 ## `quoting`
 
@@ -366,6 +614,19 @@ after changing tests._
 - require edge flags mismatch when face selected
 - nothing selected is an error
 
+## `set_nc_program_comment`
+
+> Unit tests for ``set_nc_program_comment.handler`` — the empty-input guard and multi-program behaviour.
+
+**EmptyInputGuard**
+- empty comment and no set name is refused
+- whitespace only comment no set name refused
+- real comment goes through
+- set name only is allowed
+**MultiProgramPreValidation**
+- uneditable program aborts before any write
+- all editable applies to all
+
 ## `show_toolpath`
 
 > Unit tests for ``show_toolpath.py`` — CAM toolpath display control.
@@ -391,6 +652,61 @@ after changing tests._
 - shows named setup only
 - unknown folder errors
 - missing folder arg errors
+
+## `sketch_constraint`
+
+> Unit tests for ``sketch_constraint.py`` — apply geometric constraints to sketch entities.
+
+**ResolveEntity**
+- line index
+- arc circle point
+- bad type
+- out of range
+- malformed
+**TwoCurve**
+- perpendicular
+- parallel equal tangent concentric collinear
+- two curve needs entity two
+**PointCurve**
+- midpoint
+**SingleLine**
+- horizontal
+- fix sets isfixed
+- unfix
+**Symmetry**
+- symmetry uses symmetry line
+- symmetry needs symmetry line
+**Guards**
+- unknown constraint
+- missing sketch
+- unresolvable entity
+
+## `sketch_detail`
+
+> Unit tests for ``sketch_detail.py`` — read the full structure of one sketch.
+
+**Entities**
+- lines indexed with construction flag
+- circle geometry
+- counts summary
+**Constraints**
+- perpendicular links two lines
+- horizontal links one line
+- coincident links point and entity
+- constraint total
+**Dimensions**
+- dimension name value expr
+**ConstraintState**
+- reports fully constrained flag
+- reports not fully constrained
+- dimension driving flag
+**EllipseAndPolygon**
+- ellipse enumerated
+- polygon lists all its lines
+- constraint referencing ellipse resolves
+**Guards**
+- missing sketch
+- no name lists available
 
 ## `sketches`
 

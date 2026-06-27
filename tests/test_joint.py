@@ -95,3 +95,64 @@ class TestApplyMotion:
         assert ok is False
         assert "warp_drive" in err
         assert ji.called is None
+
+
+# ── _apply_limits: shared by create + edit; rotation(rad) vs linear(cm) ──────
+
+import math as _math
+
+
+class _Lim:
+    def __init__(self):
+        self.isMinimumValueEnabled = False
+        self.isMaximumValueEnabled = False
+        self.isRestValueEnabled = False
+        self.minimumValue = None
+        self.maximumValue = None
+        self.restValue = None
+
+
+class _RevMotion:
+    def __init__(self):
+        self.rotationLimits = _Lim()
+        self.slideLimits = None   # revolute has no slide limits
+
+
+class _SlideMotion:
+    def __init__(self):
+        self.rotationLimits = None
+        self.slideLimits = _Lim()
+
+
+class TestApplyLimits:
+    def test_rotation_in_radians(self):
+        m = _RevMotion()
+        changed, err = joint._apply_limits(m, min_deg=-45, max_deg=90)
+        assert err is None
+        assert m.rotationLimits.isMinimumValueEnabled and m.rotationLimits.isMaximumValueEnabled
+        assert abs(m.rotationLimits.minimumValue - _math.radians(-45)) < 1e-9
+        assert abs(m.rotationLimits.maximumValue - _math.radians(90)) < 1e-9
+        assert changed["min_deg"] == -45 and changed["max_deg"] == 90
+
+    def test_linear_in_cm(self):
+        m = _SlideMotion()
+        changed, err = joint._apply_limits(m, min_mm=0, max_mm=300, cm_scale=0.1)
+        assert err is None
+        assert abs(m.slideLimits.maximumValue - 30.0) < 1e-9   # 300 mm -> 30 cm
+        assert changed["max_mm"] == 300
+
+    def test_rest_values(self):
+        m = _RevMotion()
+        joint._apply_limits(m, rest_deg=10)
+        assert m.rotationLimits.isRestValueEnabled
+        assert abs(m.rotationLimits.restValue - _math.radians(10)) < 1e-9
+
+    def test_rotation_on_slider_errors(self):
+        m = _SlideMotion()
+        changed, err = joint._apply_limits(m, min_deg=10)
+        assert err is not None and "rotation" in err.lower()
+
+    def test_linear_on_revolute_errors(self):
+        m = _RevMotion()
+        changed, err = joint._apply_limits(m, max_mm=100)
+        assert err is not None and ("slide" in err.lower() or "linear" in err.lower())
