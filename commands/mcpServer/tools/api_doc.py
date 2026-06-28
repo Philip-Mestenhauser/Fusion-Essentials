@@ -3,7 +3,7 @@
 
 """MCP building block: search the LIVE Fusion API documentation from inside the session.
 
-  get_api_doc -> regex-search the Fusion Python API (classes, members, enum values) and return
+  sys_get_api_doc -> regex-search the Fusion Python API (classes, members, enum values) and return
                  names, signatures, and docstrings. Read-only.
 
 Why this exists: writing Fusion automation means constantly checking exact method signatures and
@@ -22,12 +22,12 @@ rest of the server.
 
 import importlib
 import inspect
-import json
 import re
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error
 
 
 # The adsk submodules that hold the public API surface. Imported lazily/best-effort: a given Fusion
@@ -38,14 +38,6 @@ _API_MODULES = ("adsk.core", "adsk.fusion", "adsk.cam", "adsk.drawing", "adsk.si
 _MAX_RESULTS = 40
 _DOC_CHARS = 1200      # per-item docstring trim
 _MAX_CLASS_MEMBERS = 200
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _load_modules(namespace_filter):
@@ -218,7 +210,7 @@ TOOL_DESCRIPTION = (
     "Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, "
     "returning names, signatures, and docstrings. This introspects the adsk.* Python modules in the "
     "running Fusion process, so the docs ALWAYS match the installed version — nothing is bundled or "
-    "hosted. Use it BEFORE writing an execute_api_script to confirm exact signatures and behaviour "
+    "hosted. Use it BEFORE writing an sys_execute_script to confirm exact signatures and behaviour "
     "(e.g. how getOrientedBoundingBox orients its box, what generateAllToolpaths returns). "
     "'searchPattern' is a case-insensitive regex over names (and over docstrings when apiCategory is "
     "'description' or 'all'). 'apiCategory': class | member | description | all (default all). "
@@ -227,7 +219,7 @@ TOOL_DESCRIPTION = (
 )
 
 api_doc_tool = (
-    Tool.create_simple(name="get_api_doc", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="sys_get_api_doc", description=TOOL_DESCRIPTION)
     .add_input_property("searchPattern", {"type": "string",
                                           "description": "Case-insensitive regex matched against API names (and docstrings when apiCategory is description/all)."})
     .add_input_property("apiCategory", {"type": "string", "enum": ["class", "member", "description", "all"],

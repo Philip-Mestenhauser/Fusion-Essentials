@@ -3,14 +3,14 @@
 
 """MCP building block: set the comment (or name) on a document's NC programs.
 
-  set_nc_program_comment -> set the COMMENT field of one named NC program, or all of them.
+  cam_set_nc_comment -> set the COMMENT field of one named NC program, or all of them.
                             Optionally set the NC program NAME too. WRITES to the CAM data.
 
 The NC program's Comment is what most posts emit near the top of the G-code, so stamping a
 part/job identifier there is a common pre-post step. General-purpose: it just edits the field.
 
 HOW (grounded live): the comment is a CAM parameter named `nc_program_comment` on
-`NCProgram.parameters` (NOT `postParameters` — which is why get_nc_programs does not report it).
+`NCProgram.parameters` (NOT `postParameters` — which is why cam_get_nc_programs does not report it).
 It is an editable string parameter whose `.expression` is a QUOTED string (e.g. `'Job 1234'`).
 Setting `parameters.itemByName('nc_program_comment').expression = "'text'"` updates it. The NC
 program NAME is the sibling parameter `nc_program_name` (same quoting).
@@ -23,8 +23,6 @@ Grounded in adsk.cam:
 Works without switching to the Manufacture workspace. Handler runs on the main thread; WRITES.
 """
 
-import json
-
 import adsk.core
 import adsk.cam
 
@@ -33,16 +31,10 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 _COMMENT_PARAM = "nc_program_comment"
 _NAME_PARAM = "nc_program_name"
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _get_cam():
@@ -176,26 +168,18 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     })
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Set the COMMENT field of the active document's NC programs (post/output jobs) — what most "
     "posts emit near the top of the G-code. 'comment' is the text to write. 'program' limits the "
     "change to one NC program by name (omit to update ALL programs). 'set_name' optionally also "
     "sets each program's Name field. WRITES to the CAM data; reports before/after per program. "
-    "Works without switching to the Manufacture workspace. (Use get_nc_programs to list program "
+    "Works without switching to the Manufacture workspace. (Use cam_get_nc_programs to list program "
     "names — note it reports post parameters, not the comment, which this tool edits directly.)"
 )
 
 tool = (
     Tool.create_with_string_input(
-        name="set_nc_program_comment",
+        name="cam_set_nc_comment",
         description=TOOL_DESCRIPTION,
         input_param_name="comment",
         input_param_description="The text to write into the NC program Comment field.",

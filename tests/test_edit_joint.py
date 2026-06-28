@@ -1,4 +1,4 @@
-"""Unit tests for ``edit_joint`` — edit an EXISTING joint in place (no remaking).
+"""Unit tests for ``joint_edit`` — edit an EXISTING joint in place (no remaking).
 
 Tests written BEFORE the handler is wired (project rule). The behaviour pinned,
 no live Fusion:
@@ -344,7 +344,7 @@ class TestRotationDriveRefused:
         _, joint = _install(["BoomPivot"])
         res = jt.edit_handler(joint_name="BoomPivot", rotation_deg=90)
         assert res["isError"] is True
-        assert "move_occurrence" in res["message"]
+        assert "assembly_move" in res["message"]
         # and it must NOT have driven the value
         assert joint.jointMotion.rotationValue == 0.0
 

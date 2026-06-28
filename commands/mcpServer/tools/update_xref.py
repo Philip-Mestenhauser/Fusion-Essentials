@@ -3,7 +3,7 @@
 
 """MCP building block: refresh out-of-date external references in the active document.
 
-  update_xref -> bring the active document's external references (X-refs) up to their latest
+  doc_update_xref -> bring the active document's external references (X-refs) up to their latest
                  cloud version — one by name, or all that are out of date. Reports what changed.
 
 When an inserted/referenced component points at an OLDER version of its source file, the
@@ -30,13 +30,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
+from ._common import _ok, _error, _safe
 
 
 def _ref_name(ref):
@@ -102,14 +96,6 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
     })
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Refresh the active document's external references (X-refs) to their latest cloud version — "
     "the API equivalent of 'Get Latest' on a referenced component. By default it updates every "
@@ -121,7 +107,7 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_simple(name="update_xref", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="doc_update_xref", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string",
                                  "description": "Source document name of one reference to refresh (omit = all)."})
     .add_input_property("only_out_of_date", {"type": "boolean",

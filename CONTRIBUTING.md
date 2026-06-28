@@ -39,7 +39,7 @@
 - `tools/` — one file per tool ("building block"). Each has a `handler(...)` (the logic; its
   parameters are the tool inputs), a `TOOL_DESCRIPTION`, a `tool = Tool.create_...`, an
   `item = Item.create_tool_item(...)`, and a `register_tool()` (or self-`register()`).
-- `entry.py` — starts/stops the server, registers tools, gates `execute_api_script`.
+- `entry.py` — starts/stops the server, registers tools, gates `sys_execute_script`.
 - `README.md` (in that folder) — the **user-facing** doc (setup, security, platform).
 
 ### Hard rules (violating these causes crashes or hangs)
@@ -49,41 +49,41 @@
   TaskManager. Calling the Fusion API from a request/worker thread can crash Fusion.
 - **Never block the main thread.** No `time.sleep`/polling loops and no synchronous HTTP in
   `entry.start()` or in a tool handler — they run on the UI thread. (The port self-check runs
-  on a background thread for exactly this reason; `open_document` deliberately does not poll.)
+  on a background thread for exactly this reason; `doc_open` deliberately does not poll.)
 
 ### Behavior that isn't obvious from the code
 
 - The server binds **`127.0.0.1:27182`**, path **`/mcp`** — Fusion's own well-known MCP port.
   Whoever binds first wins; if Fusion's built-in MCP server holds it, the add-in detects this
   and warns the user.
-- `get_session_info` returns the live document; `list_projects` / `list_project_files` (in
+- `sys_get_session` returns the live document; `data_list_projects` / `data_list_files` (in
   `tools/data_model.py`) read the Data API (`app.data.dataProjects`, `rootFolder`);
-  `open_document` opens by UID (`app.data.findFileById`); `get_screenshot` captures the
-  viewport (and restores the camera); `execute_api_script` runs arbitrary Python (gated, off
-  by default); `reload_addin` restarts the add-in.
-- `open_document` is **async** — `documents.open()` returns before the document is active.
-- `execute_api_script` uses Fusion's `Python.Run` text command. It is **Windows-tested only**;
+  `doc_open` opens by UID (`app.data.findFileById`); `view_screenshot` captures the
+  viewport (and restores the camera); `sys_execute_script` runs arbitrary Python (gated, off
+  by default); `sys_reload_addin` restarts the add-in.
+- `doc_open` is **async** — `documents.open()` returns before the document is active.
+- `sys_execute_script` uses Fusion's `Python.Run` text command. It is **Windows-tested only**;
   the temp-path handling normalizes `\`→`/` for cross-platform use but is **unverified on
   macOS**.
 - **Never compare Fusion API objects with `is`.** The API returns fresh wrapper objects for the
   same underlying entity, so `occurrence.component is someComponent` silently fails. Match by
-  `.name` (or compare entity tokens). This bit the `joint` resolver (live-verified fix).
+  `.name` (or compare entity tokens). This bit the `joint_create` resolver (live-verified fix).
 - **A Joint Origin inside a referenced/child occurrence must be joined via its assembly-context
   proxy**, not the native JO: `jo.createForAssemblyContext(occurrence)`. Passing the native JO
-  yields "Provided input paths for joint are not valid". The `joint` tool resolves this
+  yields "Provided input paths for joint are not valid". The `joint_create` tool resolves this
   automatically (root JOs are used as-is; sub-component JOs are proxied through the occurrence
   that instances them, matched by component name).
 
 ### The development loop (iterating without manual Fusion steps)
 
-The `reload_addin` tool restarts the add-in so a connected agent can pick up code edits.
-Workflow: edit a `tools/*.py` file → call `reload_addin` (deferred: it responds, then the
+The `sys_reload_addin` tool restarts the add-in so a connected agent can pick up code edits.
+Workflow: edit a `tools/*.py` file → call `sys_reload_addin` (deferred: it responds, then the
 server restarts in ~0.5s) → poll `GET http://127.0.0.1:27182/health` until it is back →
-`tools/list` to confirm. `reload_addin` picks up **brand-new** tool modules too (verified) —
+`tools/list` to confirm. `sys_reload_addin` picks up **brand-new** tool modules too (verified) —
 as long as the module is wired into `tools/__init__.py` (import) and `entry._collect_items()`
 (register_tool call) before the reload, no manual Stop/Run is needed. A manual Stop/Run in
 Fusion's Add-Ins dialog is only required if the add-in failed to start (so no server is
-running to call `reload_addin` against). Note: an MCP **client** may cache the tool list, so
+running to call `sys_reload_addin` against). Note: an MCP **client** may cache the tool list, so
 a newly registered tool can be invisible to the client until it reconnects — reconnect the
 server in your client (`/mcp` in Claude Code) to refresh, or drive it over raw HTTP meanwhile.
 
@@ -91,7 +91,7 @@ server in your client (`/mcp` in Claude Code) to refresh, or drive it over raw H
 
 POST JSON-RPC to `http://127.0.0.1:27182/mcp` with header
 `Accept: application/json, text/event-stream`. Example tool call:
-`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}`.
+`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"data_list_projects","arguments":{}}}`.
 Diagnostics: `GET /health`, `GET /tools`.
 
 ### Adding a new tool (the pattern)
@@ -102,7 +102,7 @@ Diagnostics: `GET /health`, `GET /tools`.
 3. Ground every `adsk.*` call in the Fusion API reference rather than guessing signatures —
    the Fusion API is niche and easy to get wrong. See [docs/fusion-api-notes.md](docs/fusion-api-notes.md)
    for hard-won API facts that are not obvious from the reference alone.
-4. Verify against a stubbed `adsk` (see the testing note above), then `reload_addin` and
+4. Verify against a stubbed `adsk` (see the testing note above), then `sys_reload_addin` and
    smoke-test live.
 
 See [commands/mcpServer/README.md](commands/mcpServer/README.md) for the user-facing setup,

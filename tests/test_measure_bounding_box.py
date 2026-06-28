@@ -1,4 +1,4 @@
-"""Unit tests for the ``measure_bounding_box`` MCP tool.
+"""Unit tests for the ``model_measure_bbox`` MCP tool.
 
 Each test targets a *specific, plausible bug* in the tool's pure logic — not
 "does the function exist." The Fusion API itself is mocked (see conftest); what

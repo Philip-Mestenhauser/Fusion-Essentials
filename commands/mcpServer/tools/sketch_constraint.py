@@ -3,7 +3,7 @@
 
 """MCP building block: apply a geometric CONSTRAINT to sketch entities (the Sketch Constrain menu).
 
-  sketch_constraint -> add a geometric constraint (perpendicular / parallel / tangent / equal /
+  sketch_constrain -> add a geometric constraint (perpendicular / parallel / tangent / equal /
                        midpoint / symmetry / concentric / collinear / horizontal / vertical /
                        coincident / fix / unfix) between sketch entities, referenced by
                        '<type>:<index>' within a named sketch — no human selection. WRITES.
@@ -15,14 +15,12 @@ correctly when dimensions/points change. General-purpose — it just adds the re
 Entity references: '<type>:<index>' where type is line / arc / circle / point (e.g. 'line:0',
 'arc:1', 'point:2'), indexing the sketch's curve/point collections in creation order.
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Sketch.geometricConstraints.add<Type>(...) : addPerpendicular/Parallel/Tangent/Equal/Concentric/
     Collinear (two curves); addMidPoint/addCoincident (point + curve); addHorizontal/addVertical
     (one line); addSymmetry(entityOne, entityTwo, symmetryLine). Fix/UnFix = SketchEntity.isFixed.
 Handler runs on the main thread; WRITES.
 """
-
-import json
 
 import adsk.core
 import adsk.fusion
@@ -30,8 +28,17 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
+
+
+def _design():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        design = _safe(lambda: adsk.fusion.Design.cast(
+            app.activeDocument.products.itemByProductType('DesignProductType')))
+    return design
 
 # constraint -> ("kind", method-or-None). kinds: two_curve | point_curve | one_line | symmetry | fix
 _CONSTRAINTS = {
@@ -49,29 +56,6 @@ _CONSTRAINTS = {
     "fix": ("fix", None),
     "unfix": ("fix", None),
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
-def _design():
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        design = _safe(lambda: adsk.fusion.Design.cast(
-            app.activeDocument.products.itemByProductType('DesignProductType')))
-    return design
 
 
 def _resolve_entity(sketch, ref):
@@ -120,7 +104,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         return _error("No active design.")
     sketch = _safe(lambda: design.rootComponent.sketches.itemByName((sketch_name or "").strip()))
     if not sketch:
-        return _error(f"No sketch named '{sketch_name}'. Use get_sketches.")
+        return _error(f"No sketch named '{sketch_name}'. Use sketch_get.")
 
     e1 = _resolve_entity(sketch, entity_one)
     if not e1:
@@ -178,7 +162,7 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_simple(name="sketch_constraint", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="sketch_constrain", description=TOOL_DESCRIPTION)
     .add_input_property("constraint", {"type": "string",
         "description": "perpendicular | parallel | tangent | equal | concentric | collinear | midpoint | coincident | horizontal | vertical | symmetry | fix | unfix."})
     .add_input_property("sketch_name", {"type": "string", "description": "The sketch holding the entities."})

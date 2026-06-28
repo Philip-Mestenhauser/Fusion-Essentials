@@ -1,413 +1,49 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for creating data-model containers and uploading CAD from disk.
+"""MCP building blocks for the DOCUMENT lifecycle: copy / save-as / new / save / close / activate /
+list-open, plus delete-file.
 
-  create_project -> create a new project in the active hub
-  create_folder  -> create a folder in a project (optionally inside a parent folder)
-  upload_file    -> upload a local CAD file into a project/folder. Fusion translates
-                    neutral formats (STEP/IGES/etc.) into a Fusion design (.f3d) as
-                    part of cloud processing.
-  copy_document  -> copy an existing cloud document (by URN, or name+source-project)
-                    into a project/folder; external references are preserved as
-                    pointers to their original source files (DataFile.copy).
-  delete_document-> delete a cloud document by URN, guarded (requires a matching
-                    confirm_name; refuses open/referenced files unless forced).
-  delete_folder  -> delete a data-model folder by id, guarded (matching confirm_name;
-                    never root; refuses non-empty unless forced).
-  save_document_as-> save the ACTIVE (possibly never-saved) document into a project/
-                    folder via Document.saveAs. Captures the live session, unlike
-                    upload_file (local) or copy_document (existing saved cloud file).
+  doc_copy        -> copy an existing cloud document into a project/folder (DataFile.copy; xrefs kept)
+  data_delete_file-> delete a cloud document by URN, guarded (matching confirm_name; refuses
+                     open/referenced files unless forced)
+  doc_save_as     -> save the ACTIVE (possibly never-saved) document into a project/folder (saveAs)
+  doc_new         -> create+open a new empty design document (session-only until saved)
+  doc_save        -> save the active document in place (a new cloud version)
+  doc_close       -> close an open document (or all), saving or discarding unsaved changes
+  doc_activate    -> bring an open document to the foreground
+  doc_list_open   -> list open documents (a SUPERSET of the user's visible tabs)
 
-These WRITE to the Autodesk cloud data model (create projects/folders, upload files).
-Uploads are asynchronous: upload_file returns once the upload has STARTED; confirm
-completion later with list_project_files (the new file appears when processing finishes).
+Split out of the former data_management.py (the data-model container tools live in data_model_ops.py).
+Shared helpers (_data, _find_project, path resolution, _agent_description) live in _data_common.
+Every save is tagged with the AI-agent marker via _agent_description (the single chokepoint).
 
 Grounded in adsk.core:
-  - app.data.dataProjects.add(name, purpose, contributors) -> DataProject
-  - DataProject.rootFolder -> DataFolder; DataFolder.dataFolders.add(name) -> DataFolder
-  - DataFolder.uploadFile(fullPath) -> DataFileFuture(.uploadState, .dataFile)
-  - UploadStates: UploadProcessing=0, UploadFinished=1, UploadFailed=2
+  - DataFile.copy(targetFolder) -> DataFile; DataFile.childReferences / parentReferences
+  - data.findFileById(urn) -> DataFile; DataFile.deleteMe() -> bool
+  - Document.saveAs(name, folder, desc, tag) / Document.save(desc) / Document.close(saveChanges)
+  - app.documents.add(DocumentTypes.FusionDesignDocumentType) -> Document
 Handlers run on the main thread; none of them BLOCK (no polling loops).
 """
-
-import json
-import os
 
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
+from ._data_common import (
+    _data, _agent_description, _find_project, _split_path,
+    _resolve_folder_path, _ensure_folder_path, _folder_path_string,
+)
 
 app = adsk.core.Application.get()
 
-# Every save made through this server is authored by an AI agent, not a human at the keyboard.
-# Document.save/saveAs has no author field — the only place attribution can live is the version
-# description — so we prepend this marker. _agent_description() is the single chokepoint; reuse it
-# anywhere we write a version description so the marker can never be forgotten.
-AI_AGENT_SAVE_MARKER = "[AI agent]"
-
-
-def _agent_description(description: str = "") -> str:
-    """Prefix a version description with the AI-agent marker (idempotent)."""
-    desc = (description or "").strip()
-    if desc.startswith(AI_AGENT_SAVE_MARKER):
-        return desc
-    return f"{AI_AGENT_SAVE_MARKER} {desc}".strip()
-
-
-def _data():
-    d = app.data
-    if not d:
-        raise RuntimeError("Data not available (not signed in?).")
-    return d
-
-
-def _find_project(data, name=None, project_id=None):
-    """Find a project by id or (case-insensitive) name. Returns (project, available_names)."""
-    available = []
-    for p in data.dataProjects.asArray():
-        nm = None
-        try:
-            nm = p.name
-        except Exception:
-            pass
-        if nm:
-            available.append(nm)
-        try:
-            if project_id and p.id == project_id:
-                return p, available
-            if name and nm and nm.strip().lower() == name.strip().lower():
-                return p, available
-        except Exception:
-            continue
-    return None, available
-
-
-def _split_path(path):
-    """Split a folder path into clean segments, tolerant of / or \\ and stray slashes."""
-    if not path:
-        return []
-    norm = path.replace("\\", "/")
-    return [seg.strip() for seg in norm.split("/") if seg.strip()]
-
-
-def _child_folder_by_name(folder, name):
-    """Return the immediate child folder matching name (case-insensitive), or None."""
-    want = name.strip().lower()
-    try:
-        for f in folder.dataFolders.asArray():
-            if (_safe(lambda: f.name) or "").lower() == want:
-                return f
-    except Exception:
-        pass
-    return None
-
-
-def _resolve_folder_path(root, segments):
-    """Walk an existing folder path from `root`. Returns (folder, None) or (None, missing_segment).
-
-    Does NOT create anything. Empty `segments` resolves to `root` itself.
-    """
-    cur = root
-    for seg in segments:
-        nxt = _child_folder_by_name(cur, seg)
-        if not nxt:
-            return None, seg
-        cur = nxt
-    return cur, None
-
-
-def _ensure_folder_path(root, segments):
-    """Walk a folder path from `root`, creating any missing segments (mkdir -p).
-
-    Returns (deepest_folder, created_names_list) or raises on failure.
-    """
-    cur = root
-    created = []
-    for seg in segments:
-        nxt = _child_folder_by_name(cur, seg)
-        if not nxt:
-            nxt = cur.dataFolders.add(seg)
-            if not nxt:
-                raise RuntimeError(f"Failed to create folder segment '{seg}'.")
-            created.append(seg)
-        cur = nxt
-    return cur, created
-
-
-def _folder_path_string(folder):
-    """Build a human-readable path for a folder by walking parentFolder up to root."""
-    parts = []
-    cur = folder
-    seen = 0
-    try:
-        while cur and seen < 64:
-            seen += 1
-            if _safe(lambda: cur.isRoot, False):
-                break
-            nm = _safe(lambda: cur.name)
-            if nm:
-                parts.append(nm)
-            cur = _safe(lambda: cur.parentFolder)
-            if not cur:
-                break
-    except Exception:
-        pass
-    return "/".join(reversed(parts))
+_MAX_XREFS = 64
 
 
 # ---------------------------------------------------------------------------
-# create_project
-# ---------------------------------------------------------------------------
-
-def create_project_handler(name: str = "", purpose: str = "") -> dict:
-    name = (name or "").strip()
-    if not name:
-        return _error("Provide 'name' for the new project.")
-    try:
-        data = _data()
-    except Exception as e:
-        return _error(str(e))
-
-    # Guard against duplicate names (Fusion would otherwise create a second project).
-    existing, _ = _find_project(data, name=name)
-    if existing:
-        return _error(f"A project named '{name}' already exists "
-                      f"(id {_safe(lambda: existing.id)}). Use a different name.")
-    try:
-        proj = data.dataProjects.add(name, purpose or "", "")
-    except Exception as e:
-        return _error(f"Failed to create project '{name}': {e}")
-    if not proj:
-        return _error(f"Project creation returned nothing for '{name}'.")
-    return _ok({"created": True, "name": _safe(lambda: proj.name),
-                "id": _safe(lambda: proj.id)})
-
-
-# ---------------------------------------------------------------------------
-# create_folder
-# ---------------------------------------------------------------------------
-
-def create_folder_handler(folder_name: str = "", project: str = "", project_id: str = "",
-                          parent_folder: str = "") -> dict:
-    """Create a folder. 'parent_folder' may be a nested path (e.g. 'Fixtures/Vises').
-
-    Missing intermediate folders along the parent path are created (mkdir -p). The
-    duplicate guard is scoped to the resolved parent, not the whole tree.
-    """
-    folder_name = (folder_name or "").strip()
-    if not folder_name:
-        return _error("Provide 'folder_name'.")
-    if not (project or project_id):
-        return _error("Provide 'project' (name) or 'project_id'.")
-    try:
-        data = _data()
-    except Exception as e:
-        return _error(str(e))
-
-    proj, available = _find_project(data, name=project or None, project_id=project_id or None)
-    if not proj:
-        ident = project_id or project
-        return _error(f"Project not found: {ident}. Available: {', '.join(available) or '(none)'}")
-
-    try:
-        root = proj.rootFolder
-    except Exception as e:
-        return _error(f"Could not access project root folder: {e}")
-
-    # Resolve (creating as needed) the parent path. Empty -> project root.
-    parent_segments = _split_path(parent_folder)
-    auto_created = []
-    try:
-        container, auto_created = _ensure_folder_path(root, parent_segments)
-    except Exception as e:
-        return _error(f"Could not prepare parent path '{parent_folder}': {e}")
-
-    # Duplicate guard scoped to the resolved parent (a same-named folder elsewhere is fine).
-    existing = _child_folder_by_name(container, folder_name)
-    if existing:
-        return _error(f"A folder named '{folder_name}' already exists at "
-                      f"'{_folder_path_string(container) or '(project root)'}' "
-                      f"(id {_safe(lambda: existing.id)}).")
-
-    try:
-        folder = container.dataFolders.add(folder_name)
-    except Exception as e:
-        return _error(f"Failed to create folder '{folder_name}': {e}")
-    if not folder:
-        return _error(f"Folder creation returned nothing for '{folder_name}'.")
-    return _ok({"created": True, "name": _safe(lambda: folder.name),
-                "id": _safe(lambda: folder.id),
-                "project": _safe(lambda: proj.name),
-                "path": _folder_path_string(folder),
-                "auto_created_parents": auto_created})
-
-
-# ---------------------------------------------------------------------------
-# upload_file
-# ---------------------------------------------------------------------------
-
-_UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
-
-
-def upload_file_handler(file_path: str = "", project: str = "", project_id: str = "",
-                        folder: str = "", create_path: bool = False) -> dict:
-    """Upload a local CAD file. 'folder' may be a nested path (e.g. 'Imports/STEP').
-
-    By default the destination folder path must already exist; set create_path=true to
-    create missing folders along the way (mkdir -p).
-    """
-    file_path = (file_path or "").strip().strip('"')
-    if not file_path:
-        return _error("Provide 'file_path' — the full path to a local CAD file.")
-    if not os.path.isfile(file_path):
-        return _error(f"File not found on disk: {file_path}")
-    if not (project or project_id):
-        return _error("Provide 'project' (name) or 'project_id' for the destination.")
-
-    try:
-        data = _data()
-    except Exception as e:
-        return _error(str(e))
-
-    proj, available = _find_project(data, name=project or None, project_id=project_id or None)
-    if not proj:
-        ident = project_id or project
-        return _error(f"Project not found: {ident}. Available: {', '.join(available) or '(none)'}")
-
-    try:
-        root = proj.rootFolder
-    except Exception as e:
-        return _error(f"Could not access project root folder: {e}")
-
-    target = root
-    auto_created = []
-    segments = _split_path(folder)
-    if segments:
-        if create_path:
-            try:
-                target, auto_created = _ensure_folder_path(root, segments)
-            except Exception as e:
-                return _error(f"Could not prepare destination path '{folder}': {e}")
-        else:
-            target, missing = _resolve_folder_path(root, segments)
-            if not target:
-                # Help the agent: show what folders DO exist at the point of failure.
-                partial, _ = _resolve_folder_path(
-                    root, segments[:segments.index(missing)]) if missing in segments else (root, None)
-                here = partial or root
-                opts = [_safe(lambda: f.name) for f in _safe(lambda: here.dataFolders.asArray(), [])]
-                return _error(
-                    f"Destination folder path not found: '{folder}' (missing segment "
-                    f"'{missing}'). Folders available at "
-                    f"'{_folder_path_string(here) or '(project root)'}': "
-                    f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true to create missing folders, or use list_folders "
-                    "to see the structure.")
-
-    try:
-        # Synchronous-start upload; returns a future. We do NOT block waiting for it to
-        # finish (that would freeze the UI thread) — we report the initial state.
-        future = target.uploadFile(file_path)
-    except Exception as e:
-        return _error(f"Upload failed to start for '{file_path}': {e}")
-    if not future:
-        return _error("Upload returned no future object.")
-
-    state = _safe(lambda: future.uploadState)
-    new_name = None
-    new_id = None
-    try:
-        df = future.dataFile  # only present once finished
-        if df:
-            new_name = _safe(lambda: df.name)
-            new_id = _safe(lambda: df.id)
-    except Exception:
-        pass
-
-    return _ok({
-        "upload_started": True,
-        "source_file": os.path.basename(file_path),
-        "destination_project": _safe(lambda: proj.name),
-        "destination_folder": (_folder_path_string(target) or "(project root)"),
-        "auto_created_parents": auto_created,
-        "upload_state": _UPLOAD_STATE.get(state, str(state)),
-        "uploaded_name": new_name,
-        "uploaded_id": new_id,
-        "note": ("Upload is asynchronous and processes on the cloud (neutral formats like "
-                 "STEP are translated into a Fusion design). Use list_project_files on the "
-                 "destination project after a short wait to confirm the file appears."),
-    })
-
-
-# ---------------------------------------------------------------------------
-# list_folders
-# ---------------------------------------------------------------------------
-
-_LF_MAX_DEPTH = 12
-_LF_MAX_NODES = 2000
-
-
-def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4) -> dict:
-    """Return a project's folder tree (name, id, path) to a bounded depth."""
-    if not (project or project_id):
-        return _error("Provide 'project' (name) or 'project_id'.")
-    try:
-        data = _data()
-    except Exception as e:
-        return _error(str(e))
-
-    proj, available = _find_project(data, name=project or None, project_id=project_id or None)
-    if not proj:
-        ident = project_id or project
-        return _error(f"Project not found: {ident}. Available: {', '.join(available) or '(none)'}")
-
-    try:
-        depth = max(1, min(int(max_depth), _LF_MAX_DEPTH))
-    except Exception:
-        depth = 4
-
-    counter = {"n": 0, "truncated": False}
-    try:
-        root = proj.rootFolder
-        tree = _folder_tree(root, "", 0, depth, counter)
-    except Exception as e:
-        return _error(f"Could not read folder tree: {e}")
-
-    return _ok({"project": _safe(lambda: proj.name), "max_depth": depth,
-                "folder_count": counter["n"], "truncated": counter["truncated"],
-                "folders": tree})
-
-
-def _folder_tree(folder, parent_path, depth, max_depth, counter):
-    """Recursively summarize child folders of `folder` (bounded)."""
-    out = []
-    try:
-        children = folder.dataFolders.asArray()
-    except Exception:
-        return out
-    for f in children:
-        if counter["n"] >= _LF_MAX_NODES:
-            counter["truncated"] = True
-            break
-        counter["n"] += 1
-        name = _safe(lambda: f.name)
-        path = (parent_path + "/" + name) if parent_path else name
-        node = {"name": name, "id": _safe(lambda: f.id), "path": path}
-        if depth + 1 < max_depth:
-            kids = _folder_tree(f, path, depth + 1, max_depth, counter)
-            if kids:
-                node["folders"] = kids
-        elif _safe(lambda: f.dataFolders.count, 0):
-            node["folders_truncated"] = True
-        out.append(node)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# copy_document
+# doc_copy
 # ---------------------------------------------------------------------------
 
 def _xref_summary(data_file):
@@ -432,9 +68,6 @@ def _xref_summary(data_file):
         if len(out) >= _MAX_XREFS:
             break
     return out
-
-
-_MAX_XREFS = 64
 
 
 def copy_document_handler(document_id: str = "", name: str = "",
@@ -468,7 +101,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
             return _error(f"findFileById failed for '{document_id}': {e}")
         if not src:
             return _error(f"No file found for document_id '{document_id}'. "
-                          "Pass the file's lineage id (URN) from list_project_files.")
+                          "Pass the file's lineage id (URN) from data_list_files.")
     else:
         # Name lookup within a source project (needed because names aren't globally unique).
         if not (source_project or source_project_id):
@@ -485,7 +118,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
             return _error(f"Document '{name}' not found in source project "
                           f"'{_safe(lambda: sproj.name)}'. Files seen: "
                           f"{', '.join(candidates[:30]) or '(none)'}. "
-                          "Use list_project_files, or pass document_id (URN).")
+                          "Use data_list_files, or pass document_id (URN).")
 
     # --- resolve the destination project + folder ---
     dproj, davail = _find_project(data, name=project or None, project_id=project_id or None)
@@ -515,7 +148,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true, or use list_folders to see the structure.")
+                    "Pass create_path=true, or use data_list_folders to see the structure.")
 
     src_name = _safe(lambda: src.name) or "(unknown)"
     # The copied file's intended FINAL name: the requested 'name' if given, else the source's.
@@ -621,7 +254,7 @@ def _file_in_folder_by_name(folder, name):
 
 
 # ---------------------------------------------------------------------------
-# delete_document
+# data_delete_file
 # ---------------------------------------------------------------------------
 
 def _parent_ref_summary(data_file):
@@ -679,8 +312,8 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
         return _error("Provide 'document_id' (the lineage URN of the file to delete).")
     if not confirm_name:
         return _error("Provide 'confirm_name' — the exact current name of the file, as a "
-                      "safety confirmation. Get it from list_project_files or "
-                      "get_active_document_id.")
+                      "safety confirmation. Get it from data_list_files or "
+                      "doc_get_active_id.")
 
     try:
         data = _data()
@@ -693,7 +326,7 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
         return _error(f"findFileById failed for '{document_id}': {e}")
     if not df:
         return _error(f"No file found for document_id '{document_id}'. It may already be "
-                      "deleted. Verify with list_project_files.")
+                      "deleted. Verify with data_list_files.")
 
     actual_name = _safe(lambda: df.name) or "(unknown)"
     # Case-SENSITIVE confirmation: this is a safety gate, so require an exact match
@@ -734,117 +367,7 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 
 
 # ---------------------------------------------------------------------------
-# delete_folder
-# ---------------------------------------------------------------------------
-
-def _folder_counts(folder):
-    """(file_count, subfolder_count) for a folder's IMMEDIATE children, best-effort."""
-    files = _safe(lambda: folder.dataFiles.count, None)
-    subs = _safe(lambda: folder.dataFolders.count, None)
-    return files, subs
-
-
-def _subtree_counts(folder, _depth=0):
-    """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
-    depth-capped). This is the real blast radius of a recursive delete — the immediate counts hide
-    nested files that force=true would also wipe (and whose xrefs would be orphaned)."""
-    files = _safe(lambda: folder.dataFiles.count, 0) or 0
-    subs = 0
-    if _depth < 32:
-        for sub in _safe(lambda: folder.dataFolders.asArray(), []) or []:
-            subs += 1
-            f, s = _subtree_counts(sub, _depth + 1)
-            files += f
-            subs += s
-    return files, subs
-
-
-def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
-                          force: bool = False, recursive_confirm: str = "") -> dict:
-    """Delete a data-model folder by id, guarded.
-
-    SAFETY: requires 'folder_id' AND a 'confirm_name' that EXACTLY matches the folder's current
-    name — refuses on mismatch. Never deletes a project root. An EMPTY folder deletes directly.
-    A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and bypasses the per-file
-    xref-orphan guard), so it needs BOTH force=true AND 'recursive_confirm' set to the folder's
-    name — a deliberate second acknowledgment. Without recursive_confirm, force returns a
-    full-subtree PREVIEW (the blast radius) and refuses. Deletion is irreversible.
-    """
-    folder_id = (folder_id or "").strip()
-    confirm_name = (confirm_name or "").strip()
-    if not folder_id:
-        return _error("Provide 'folder_id' (the id of the folder to delete; from list_folders).")
-    if not confirm_name:
-        return _error("Provide 'confirm_name' — the exact current name of the folder, as a "
-                      "safety confirmation. Get it from list_folders.")
-
-    try:
-        data = _data()
-    except Exception as e:
-        return _error(str(e))
-
-    try:
-        folder = data.findFolderById(folder_id)
-    except Exception as e:
-        return _error(f"findFolderById failed for '{folder_id}': {e}")
-    if not folder:
-        return _error(f"No folder found for folder_id '{folder_id}'. It may already be "
-                      "deleted. Verify with list_folders.")
-
-    if _safe(lambda: folder.isRoot, False):
-        return _error("Refusing to delete a project ROOT folder.")
-
-    actual_name = _safe(lambda: folder.name) or "(unknown)"
-    # Case-SENSITIVE confirmation: safety gate, so require an exact match (only
-    # surrounding whitespace is forgiven).
-    if actual_name.strip() != confirm_name:
-        return _error(
-            f"Name mismatch — refusing to delete. folder_id resolves to '{actual_name}', but "
-            f"confirm_name was '{confirm_name}'. Pass confirm_name='{actual_name}' if you "
-            "really mean this folder.")
-
-    file_count, sub_count = _folder_counts(folder)
-    non_empty = bool((file_count or 0) or (sub_count or 0))
-    recursive_confirm = (recursive_confirm or "").strip()
-
-    if non_empty:
-        # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too).
-        total_files, total_subs = _subtree_counts(folder)
-        if not force:
-            return _error(
-                f"'{actual_name}' is not empty (immediate files: {file_count}, subfolders: "
-                f"{sub_count}). Deleting it RECURSIVELY removes its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) total — and bypasses the "
-                "per-file reference-orphan check. Pass force=true AND recursive_confirm="
-                f"'{actual_name}' to do this, or empty it first (delete_document for files).")
-        # force is set but require the explicit recursive acknowledgment matching the name.
-        if recursive_confirm != actual_name:
-            return _error(
-                f"RECURSIVE DELETE of '{actual_name}' would remove its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) — and bypasses the per-file "
-                "reference-orphan check (nested referenced files would be orphaned). This is "
-                "irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
-                "(a deliberate second acknowledgment). Nothing was deleted.")
-
-    try:
-        ok = folder.deleteMe()  # adsk.core: DataFolder.deleteMe() -> bool
-    except Exception as e:
-        return _error(f"Delete failed for folder '{actual_name}': {e}")
-    if not ok:
-        return _error(f"Fusion declined to delete folder '{actual_name}'. No change was made.")
-
-    return _ok({
-        "deleted": True,
-        "name": actual_name,
-        "folder_id": folder_id,
-        "contained_files": file_count,
-        "contained_subfolders": sub_count,
-        "recursive": bool(non_empty),
-    })
-
-
-# ---------------------------------------------------------------------------
-# save_document_as
+# doc_save_as
 # ---------------------------------------------------------------------------
 
 def save_document_as_handler(name: str = "", project: str = "", project_id: str = "",
@@ -852,10 +375,10 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                              description: str = "") -> dict:
     """Save the ACTIVE document into a project/folder via Document.saveAs.
 
-    This saves the live (possibly never-saved) document, unlike upload_file (local file)
-    or copy_document (an existing saved cloud file). 'folder' may be a nested path;
+    This saves the live (possibly never-saved) document, unlike data_upload_file (local file)
+    or doc_copy (an existing saved cloud file). 'folder' may be a nested path;
     create_path=true makes missing destination folders (mkdir -p). The save is async on
-    the cloud side — confirm with get_active_document_id / list_project_files afterward.
+    the cloud side — confirm with doc_get_active_id / data_list_files afterward.
     """
     name = (name or "").strip()
     if not name:
@@ -902,7 +425,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true, or use list_folders to see the structure.")
+                    "Pass create_path=true, or use data_list_folders to see the structure.")
 
     try:
         ok = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
@@ -931,25 +454,19 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
         "document_id": new_id,   # null until cloud processing assigns the lineage URN
         "note": ("Save is async on the cloud side. document_id is typically NULL right after "
                  "saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm "
-                 "with get_active_document_id after a short wait — the saved copy becomes the "
+                 "with doc_get_active_id after a short wait — the saved copy becomes the "
                  "active document and will then report its real urn: lineage id."),
     })
 
 
 # --- helpers / result shape ---
 
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
 
 def new_document_handler() -> dict:
     """Create and open a new, empty Fusion design document; it becomes the active document.
 
     The document exists only in the session (unsaved) until you save it — use
-    save_document_as to land it in a project/folder. Pair with create_sketch to start
+    doc_save_as to land it in a project/folder. Pair with sketch_create to start
     modelling.
     """
     try:
@@ -965,7 +482,7 @@ def new_document_handler() -> dict:
         "is_active": _safe(lambda: app.activeDocument is doc),
         "is_saved": _safe(lambda: doc.isSaved),
         "note": ("New blank design is now the active document (unsaved — it has no cloud id "
-                 "yet). Save it with save_document_as, or start modelling with create_sketch."),
+                 "yet). Save it with doc_save_as, or start modelling with sketch_create."),
     }
     return _ok(info)
 
@@ -976,7 +493,7 @@ def new_document_handler() -> dict:
 
 def _find_open_document(name):
     """Return the open Document whose name matches (exact, then case-insensitive substring), and a
-    sample of the open names. Operates on app.documents (all loaded docs — see list_open_documents'
+    sample of the open names. Operates on app.documents (all loaded docs — see doc_list_open'
     note that this is a superset of the user's visible tabs)."""
     want = (name or "").strip()
     docs = _safe(lambda: app.documents)
@@ -997,9 +514,9 @@ def _find_open_document(name):
 def save_document_handler(description: str = "") -> dict:
     """Save the ACTIVE document in place (a new cloud version of the same file).
 
-    Unlike save_document_as (which needs a name + folder for a never-saved doc), this is the plain
+    Unlike doc_save_as (which needs a name + folder for a never-saved doc), this is the plain
     'Save' of an already-saved document. The version description is automatically prefixed with the
-    AI-agent marker. The active doc must already exist in the cloud (use save_document_as first for
+    AI-agent marker. The active doc must already exist in the cloud (use doc_save_as first for
     a brand-new unsaved doc). WRITES a new cloud version.
     """
     doc = _safe(lambda: app.activeDocument)
@@ -1007,7 +524,7 @@ def save_document_handler(description: str = "") -> dict:
         return _error("No active document to save.")
     if not _safe(lambda: doc.isSaved, False):
         return _error("The active document has never been saved (no cloud file yet). Use "
-                      "save_document_as to give it a name and folder first.")
+                      "doc_save_as to give it a name and folder first.")
     try:
         ok = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
     except Exception as e:
@@ -1072,7 +589,7 @@ def close_document_handler(name: str = "", save_changes: bool = False,
 def activate_document_handler(name: str = "") -> dict:
     """Bring an open document to the foreground (make it the active document).
 
-    name: the open document to activate. Use list_open_documents to see what is open. Read-ish —
+    name: the open document to activate. Use doc_list_open to see what is open. Read-ish —
     only changes which document is active/foregrounded.
     """
     if not name.strip():
@@ -1120,104 +637,11 @@ def list_open_documents_handler() -> dict:
     })
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 # --- tool definitions ---
-
-_create_project_tool = (
-    Tool.create_with_string_input(
-        name="create_project",
-        description=(
-            "Create a new project in the user's active Autodesk hub. Returns the new "
-            "project's name and id. Fails if a project with the same name already exists. "
-            "WRITES to the cloud data model."
-        ),
-        input_param_name="name",
-        input_param_description="Name for the new project.",
-    )
-    .add_input_property("purpose", {"type": "string",
-                                    "description": "Optional project description/purpose."})
-)
-create_project_item = Item.create_tool_item(
-    tool=_create_project_tool, handler=create_project_handler, run_on_main_thread=True
-)
-
-_create_folder_tool = (
-    Tool.create_with_string_input(
-        name="create_folder",
-        description=(
-            "Create a folder in a project, identified by 'project' (name) or 'project_id'. "
-            "'parent_folder' may be a nested path like 'Fixtures/Vises' — any missing "
-            "folders along the path are created automatically (mkdir -p). Fails only on a "
-            "duplicate name in the same target location. Use list_folders first to see the "
-            "existing structure. WRITES to the cloud data model."
-        ),
-        input_param_name="folder_name",
-        input_param_description="Name for the new folder.",
-    )
-    .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
-    .add_input_property("parent_folder", {"type": "string",
-                                          "description": "Optional parent path (e.g. 'Fixtures/Vises'); missing folders are created."})
-)
-create_folder_item = Item.create_tool_item(
-    tool=_create_folder_tool, handler=create_folder_handler, run_on_main_thread=True
-)
-
-_upload_tool = (
-    Tool.create_with_string_input(
-        name="upload_file",
-        description=(
-            "Upload a local CAD file from the user's filesystem into a project, optionally "
-            "into a nested 'folder' path (e.g. 'Imports/STEP'). Neutral formats (STEP, IGES, "
-            "SAT, etc.) are translated into a Fusion design (.f3d) during cloud processing. "
-            "The upload is ASYNCHRONOUS: this returns once it has started; confirm completion "
-            "with list_project_files after a short wait. The destination folder path must "
-            "exist unless create_path=true (then missing folders are created). Use "
-            "list_folders to see the structure. WRITES to the cloud data model."
-        ),
-        input_param_name="file_path",
-        input_param_description="Full path to the local CAD file to upload.",
-    )
-    .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
-    .add_input_property("folder", {"type": "string",
-                                   "description": "Optional destination folder path (e.g. 'Imports/STEP')."})
-    .add_input_property("create_path", {"type": "boolean",
-                                        "description": "Create missing folders in the destination path (default false)."})
-)
-upload_file_item = Item.create_tool_item(
-    tool=_upload_tool, handler=upload_file_handler, run_on_main_thread=True
-)
-
-_list_folders_tool = (
-    Tool.create_simple(
-        name="list_folders",
-        description=(
-            "Show the folder tree of a project, identified by 'project' (name) or "
-            "'project_id', to a bounded depth. Each folder reports its name, id, and full "
-            "path. Use this to discover the structure before creating folders or uploading "
-            "into a nested path. Pass 'max_depth' (default 4). Read-only."
-        ),
-    )
-    .add_input_property("project", {"type": "string", "description": "Project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Project id (alt to name)."})
-    .add_input_property("max_depth", {"type": "integer", "description": "How deep to walk (default 4)."})
-    .strict_schema()
-)
-list_folders_item = Item.create_tool_item(
-    tool=_list_folders_tool, handler=lambda **kw: list_folders_handler(**kw), run_on_main_thread=True
-)
 
 _copy_document_tool = (
     Tool.create_with_string_input(
-        name="copy_document",
+        name="doc_copy",
         description=(
             "Copy an existing cloud document (a saved DataFile, identified by its lineage "
             "'document_id' URN — preferred — or by 'name' within a 'source_project') INTO a "
@@ -1232,7 +656,7 @@ _copy_document_tool = (
             "built yet. WRITES to the cloud data model."
         ),
         input_param_name="document_id",
-        input_param_description="Lineage id (URN) of the document to copy (preferred; from list_project_files).",
+        input_param_description="Lineage id (URN) of the document to copy (preferred; from data_list_files).",
     )
     .add_input_property("name", {"type": "string",
                                  "description": "Document name (alt to document_id); requires source_project."})
@@ -1253,14 +677,14 @@ copy_document_item = Item.create_tool_item(
 
 _delete_document_tool = (
     Tool.create_with_string_input(
-        name="delete_document",
+        name="data_delete_file",
         description=(
             "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
             "GUARDED and IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches "
             "the file's current name — the tool refuses on mismatch so you cannot delete the "
             "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
             "by other files (deleting it would orphan them) unless force=true. Get the URN and "
-            "name from list_project_files or get_active_document_id. WRITES to the cloud data "
+            "name from data_list_files or doc_get_active_id. WRITES to the cloud data "
             "model (deletes)."
         ),
         input_param_name="document_id",
@@ -1275,45 +699,18 @@ delete_document_item = Item.create_tool_item(
     tool=_delete_document_tool, handler=delete_document_handler, run_on_main_thread=True
 )
 
-_delete_folder_tool = (
-    Tool.create_with_string_input(
-        name="delete_folder",
-        description=(
-            "Delete a data-model folder by its 'folder_id' (from list_folders). GUARDED and "
-            "IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches the folder's "
-            "current name — refuses on mismatch. Never deletes a project ROOT. An EMPTY folder "
-            "deletes directly. A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and "
-            "bypasses the per-file reference-orphan check), so it needs BOTH force=true AND "
-            "'recursive_confirm' = the folder's name (a deliberate second acknowledgment). Without "
-            "recursive_confirm, force returns a full-subtree PREVIEW (the blast radius) and refuses. "
-            "WRITES to the cloud data model (deletes)."
-        ),
-        input_param_name="folder_id",
-        input_param_description="Id of the folder to delete (from list_folders).",
-    )
-    .add_input_property("confirm_name", {"type": "string",
-                                         "description": "Exact current name of the folder, case-sensitive (safety confirmation; must match)."})
-    .add_input_property("force", {"type": "boolean",
-                                  "description": "Allow deleting a non-empty folder (default false). Still requires recursive_confirm for the recursive wipe."})
-    .add_input_property("recursive_confirm", {"type": "string",
-                                              "description": "For a non-empty folder: set to the folder's name to acknowledge the recursive subtree delete. Required (with force) to actually delete; omit to get a preview."})
-)
-delete_folder_item = Item.create_tool_item(
-    tool=_delete_folder_tool, handler=delete_folder_handler, run_on_main_thread=True
-)
-
 _save_document_as_tool = (
     Tool.create_with_string_input(
-        name="save_document_as",
+        name="doc_save_as",
         description=(
             "Save the ACTIVE Fusion document into a project/folder under a given 'name', via "
             "Document.saveAs. Use this to save a design that is open in the session — including "
-            "one that has NEVER been saved (no cloud id yet). This is different from upload_file "
-            "(which uploads a LOCAL file) and copy_document (which copies an existing SAVED "
+            "one that has NEVER been saved (no cloud id yet). This is different from data_upload_file "
+            "(which uploads a LOCAL file) and doc_copy (which copies an existing SAVED "
             "cloud file): only this one captures the live session. 'folder' may be a nested "
             "path; set create_path=true to create missing destination folders. The save is "
             "ASYNCHRONOUS on the cloud side — the returned document_id may be null immediately; "
-            "confirm with get_active_document_id or list_project_files after a short wait. "
+            "confirm with doc_get_active_id or data_list_files after a short wait. "
             "WRITES to the cloud data model."
         ),
         input_param_name="name",
@@ -1333,12 +730,12 @@ save_document_as_item = Item.create_tool_item(
 )
 
 _new_document_tool = Tool.create_simple(
-    name="new_document",
+    name="doc_new",
     description=(
         "Create and open a new, empty Fusion design document; it becomes the active "
         "document. The document is unsaved (no cloud id yet) until you save it with "
-        "save_document_as. Use this to start fresh — e.g. then create_sketch and "
-        "add_sketch_geometry to model. Creates a session document (does not write to the "
+        "doc_save_as. Use this to start fresh — e.g. then sketch_create and "
+        "sketch_add_geometry to model. Creates a session document (does not write to the "
         "cloud until saved)."
     ),
 ).strict_schema()
@@ -1348,10 +745,10 @@ new_document_item = Item.create_tool_item(
 
 _save_document_tool = (
     Tool.create_simple(
-        name="save_document",
+        name="doc_save",
         description=(
             "Save the ACTIVE document in place — a new cloud version of the same file (the plain "
-            "'Save', vs save_document_as which needs a name+folder for a never-saved doc). The "
+            "'Save', vs doc_save_as which needs a name+folder for a never-saved doc). The "
             "version 'description' is auto-prefixed with the AI-agent marker. The doc must already "
             "exist in the cloud. WRITES a new cloud version."),
     )
@@ -1364,7 +761,7 @@ save_document_item = Item.create_tool_item(
 
 _close_document_tool = (
     Tool.create_simple(
-        name="close_document",
+        name="doc_close",
         description=(
             "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
             "doc); 'close_all' = close every open document; 'save_changes' = save unsaved edits "
@@ -1385,10 +782,10 @@ close_document_item = Item.create_tool_item(
 
 _activate_document_tool = (
     Tool.create_with_string_input(
-        name="activate_document",
+        name="doc_activate",
         description=(
             "Bring an open document to the foreground (make it the active document). 'name' = the "
-            "open document to activate (see list_open_documents). Only changes which document is "
+            "open document to activate (see doc_list_open). Only changes which document is "
             "active."),
         input_param_name="name",
         input_param_description="Open document name to activate.",
@@ -1398,7 +795,7 @@ activate_document_item = Item.create_tool_item(
     tool=_activate_document_tool, handler=activate_document_handler, run_on_main_thread=True)
 
 _list_open_documents_tool = Tool.create_simple(
-    name="list_open_documents",
+    name="doc_list_open",
     description=(
         "List the documents open in the session: name, is_active, is_visible, is_saved, "
         "is_modified. IMPORTANT: app.documents is a SUPERSET of the user's visible tabs — opening "
@@ -1410,13 +807,8 @@ list_open_documents_item = Item.create_tool_item(
 
 
 def register_tool():
-    register(create_project_item)
-    register(create_folder_item)
-    register(upload_file_item)
-    register(list_folders_item)
     register(copy_document_item)
     register(delete_document_item)
-    register(delete_folder_item)
     register(save_document_as_item)
     register(new_document_item)
     register(save_document_item)

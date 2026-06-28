@@ -3,9 +3,9 @@
 
 """MCP building block: control component-occurrence visibility in the active design.
 
-  set_visibility -> isolate, show, hide, or clear-isolation on one or more component
+  view_set_visibility -> isolate, show, hide, or clear-isolation on one or more component
                     occurrences (matched by name or full path). Pairs with
-                    get_screenshot: set visibility, then capture the viewport to see
+                    view_screenshot: set visibility, then capture the viewport to see
                     just the components you care about.
 
 This is a VIEW-state change (light-bulb / isolate), not a geometry edit — nothing in
@@ -21,14 +21,13 @@ Grounded in adsk.fusion:
 Handler runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -46,13 +45,6 @@ def _design():
         except Exception:
             design = None
     return design
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _occ_state(occ) -> dict:
@@ -104,7 +96,7 @@ def handler(action: str = "", target: str = "") -> dict:
     'clear_isolation' (un-isolate everything; 'target' is ignored). For isolate/show/hide,
     'target' is the occurrence name or full path (partial names match if unambiguous). The
     response includes each affected occurrence's before/after state so you can restore it.
-    Pair with get_screenshot to view the result.
+    Pair with view_screenshot to view the result.
     """
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
@@ -114,7 +106,7 @@ def handler(action: str = "", target: str = "") -> dict:
     if not design:
         return _error("No active design (open a document with design geometry). Note: a "
                       "configured design must be opened from the Data Panel first — see "
-                      "open_document.")
+                      "doc_open.")
 
     # clear_isolation: find whatever is isolated and turn it off. No target needed.
     if action == "clear_isolation":
@@ -140,7 +132,7 @@ def handler(action: str = "", target: str = "") -> dict:
     if not matches:
         sample = ", ".join(sorted(set(n for n in names if n))[:30])
         return _error(f"No occurrence matched '{target}'. Some occurrences in this design: "
-                      f"{sample}. Use get_component_tree to see the full assembly.")
+                      f"{sample}. Use design_get_tree to see the full assembly.")
     if len(matches) > _MAX_MATCHES:
         matches = matches[:_MAX_MATCHES]
 
@@ -170,18 +162,10 @@ def handler(action: str = "", target: str = "") -> dict:
         "target": target,
         "affected_count": len(results),
         "affected": results,
-        "note": ("Visibility/isolation changed. Pair with get_screenshot to view it. To "
-                 "restore: isolate -> set_visibility(action='clear_isolation'); hide/show -> "
+        "note": ("Visibility/isolation changed. Pair with view_screenshot to view it. To "
+                 "restore: isolate -> view_set_visibility(action='clear_isolation'); hide/show -> "
                  "the opposite action on the same target."),
     })
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 TOOL_DESCRIPTION = (
@@ -192,13 +176,13 @@ TOOL_DESCRIPTION = (
     "occurrence name or full path (a partial name matches if unambiguous). This changes "
     "VIEW state only (light-bulb/isolate), not geometry. The response reports each affected "
     "occurrence's before/after state so you can restore it. Typical flow: "
-    "set_visibility(isolate, 'Fixturing') -> get_screenshot -> "
-    "set_visibility(clear_isolation). Use get_component_tree to discover occurrence names."
+    "view_set_visibility(isolate, 'Fixturing') -> view_screenshot -> "
+    "view_set_visibility(clear_isolation). Use design_get_tree to discover occurrence names."
 )
 
 tool = (
     Tool.create_with_string_input(
-        name="set_visibility",
+        name="view_set_visibility",
         description=TOOL_DESCRIPTION,
         input_param_name="action",
         input_param_description="isolate | show | hide | clear_isolation.",

@@ -1,9 +1,9 @@
-"""Unit tests for assorted Tier-2 helpers: update_xref, timeline, generate_toolpaths.
+"""Unit tests for assorted Tier-2 helpers: doc_update_xref, timeline, cam_generate.
 
 Each tool has one or two pure helpers worth pinning:
-  - update_xref._ref_name      — safe name extraction with a fallback.
+  - doc_update_xref._ref_name      — safe name extraction with a fallback.
   - timeline._entity_type       — group vs entity-class-name vs None.
-  - generate_toolpaths._live_op_tally — the operation-state tally that drives the
+  - cam_generate._live_op_tally — the operation-state tally that drives the
     progress signal (valid / out_of_date / generating counts).
 """
 
@@ -16,7 +16,7 @@ timeline = load_tool("timeline")
 gtp = load_tool("generate_toolpaths")
 
 
-# ── update_xref._ref_name ──────────────────────────────────────────────────
+# ── doc_update_xref._ref_name ──────────────────────────────────────────────────
 
 class TestRefName:
     def test_reads_datafile_name(self):
@@ -50,7 +50,7 @@ class TestEntityType:
         assert timeline._entity_type(obj) is None
 
 
-# ── generate_toolpaths._live_op_tally ──────────────────────────────────────
+# ── cam_generate._live_op_tally ──────────────────────────────────────
 
 def _op(state, generating=False, progress=None, name="op"):
     return SimpleNamespace(

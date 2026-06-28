@@ -95,6 +95,10 @@ def _collect_items():
     # data_model: read-only tools (list_projects, list_project_files). On by default.
     tools.data_model.register_tool()
 
+    # data_hubs: list data hubs + switch the active hub (cross-TeamHub workflows). switch closes
+    # docs + reloads the data context. WRITES (switch changes session). On by default.
+    tools.data_hubs.register_tool()
+
     # open_document (open by UID) + get_screenshot (viewport capture). On by default.
     tools.open_document.register_tool()
     tools.get_screenshot.register_tool()
@@ -105,10 +109,12 @@ def _collect_items():
     tools.cam_info.register_tool()
     tools.component_tree.register_tool()
 
-    # data_management: create project/folder, upload CAD, save-as/copy documents, and
-    # delete documents/folders (guarded). WRITES to (and can DELETE from) the cloud
-    # data model.
-    tools.data_management.register_tool()
+    # data-model + document lifecycle (split out of the former data_management): create
+    # project/folder, upload CAD, list/delete folders (data_model_ops); save-as/copy/save/new/
+    # close/activate/list-open documents + delete-file (doc_lifecycle). WRITES to (and can
+    # DELETE from) the cloud data model.
+    tools.data_model_ops.register_tool()
+    tools.doc_lifecycle.register_tool()
 
     # parameters: read design user/model parameters. Read-only. On by default.
     tools.parameters.register_tool()
@@ -122,7 +128,8 @@ def _collect_items():
     # configurations: read/switch a configured design's configurations. On by default.
     tools.configurations.register_tool()
 
-    # sketches: get_sketches (read) + create_sketch / add_sketch_geometry (WRITE). On by default.
+    # sketches: sketch_get (read: summary list, or one sketch's full structure when named) +
+    # create_sketch / add_sketch_geometry (WRITE). On by default.
     tools.sketches.register_tool()
 
     # selection: request_user_selection + get_user_selection (user picks an entity). On by default.
@@ -152,6 +159,14 @@ def _collect_items():
     # cam_templates: navigate library (read) + apply template to setup (WRITES). On by default.
     tools.cam_templates.register_tool()
 
+    # cam_create_setup: create a milling/turning CAM setup on a part (the prerequisite for any CAM
+    # job — the other CAM tools need a setup to act on). WRITES CAM data. On by default.
+    tools.cam_create_setup.register_tool()
+
+    # cam_edit_operation: set a CAM operation's parameters (feeds/speeds/stepdown/tool/tolerance) by
+    # expression — the tune-a-toolpath half of CAM authoring. WRITES CAM data. On by default.
+    tools.cam_edit_operation.register_tool()
+
     # generate_toolpaths: launch CAM toolpath generation (fire-and-return) + get_generation_status
     # (poll). Non-blocking so long compute doesn't hold up the agent. WRITES. On by default.
     tools.generate_toolpaths.register_tool()
@@ -180,18 +195,41 @@ def _collect_items():
     # extrude: turn a sketch profile into a solid (new/join/cut/intersect). WRITES. On by default.
     tools.extrude.register_tool()
 
+    # revolve: spin a sketch profile about an axis into a solid. WRITES. On by default.
+    tools.revolve.register_tool()
+
+    # combine: boolean join/cut/intersect between solid bodies. WRITES. On by default.
+    tools.combine.register_tool()
+
+    # fillet/chamfer: round or bevel a body's edges. WRITES. On by default.
+    tools.fillet.register_tool()
+
+    # construction: add construction point/axis/plane datums by coordinate. WRITES. On by default.
+    tools.construction.register_tool()
+
+    # mirror: reflect bodies across an origin plane. WRITES. On by default.
+    tools.mirror.register_tool()
+
     # patterns: rectangular + circular patterns of component occurrences. WRITES. On by default.
     tools.patterns.register_tool()
 
     # arrange: nest/pack component occurrences within a sketch-profile boundary. WRITES. On by default.
     tools.arrange.register_tool()
 
+    # design_export: export a body/component/whole-design to a neutral CAD file (STEP/IGES/SAT/STL)
+    # on local disk. Pairs with data_upload_file for a cloud round-trip. WRITES a file. On by default.
+    tools.design_export.register_tool()
+
     # sketch_constraint: geometric constraints (perp/parallel/tangent/equal/midpoint/symmetry/...) on
     # sketch entities by '<type>:<index>'. WRITES. On by default.
     tools.sketch_constraint.register_tool()
 
-    # get_sketch_detail: full structure of one sketch (entities + construction + constraints +
-    # dimensions). Read-only. On by default.
+    # sketch_dimension: dimensional constraints (distance/radius/diameter/angle) + driven values —
+    # the sizing half of parametric sketching. WRITES. On by default.
+    tools.sketch_dimension.register_tool()
+
+    # sketch_detail: the detail ENGINE behind sketch_get (single-sketch full structure). Folded
+    # into sketch_get, so register_tool() here is a no-op; imported so the engine module is loaded.
     tools.sketch_detail.register_tool()
 
     # assembly: ground/un-ground, move an occurrence, rigid group. WRITES. On by default.
@@ -200,6 +238,16 @@ def _collect_items():
     # joints_advanced: capture_position (snapshots), as_built_joint, assembly_constraint
     # (Constrain Components). WRITES. On by default.
     tools.joints_advanced.register_tool()
+
+    # assembly_probe: per-occurrence world position / ground flags / joint wiring as JSON
+    # (reason from numbers, not cluttered screenshots). Read-only. On by default.
+    tools.assembly_probe.register_tool()
+
+    # find_geometry + joint_at_geometry: geometry-as-values — query a part's faces/edges and get
+    # stable HANDLES, then joint two parts AT that geometry (runtime keypoint rules baked in).
+    # On by default.
+    tools.find_geometry.register_tool()
+    tools.joint_at_geometry.register_tool()
 
     if _execute_api_script_allowed():
         tools.execute_api_script.register_tool()

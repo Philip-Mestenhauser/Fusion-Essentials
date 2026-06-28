@@ -1,4 +1,4 @@
-"""Unit tests for ``inspect_view.py`` — the agent's view verbs.
+"""Unit tests for ``view_inspect.py`` — the agent's view verbs.
 
 Camera math (eye/target/up per orientation) is a live-viewport side-effect best
 left to a real session, but the surrounding LOGIC is pure and worth pinning:

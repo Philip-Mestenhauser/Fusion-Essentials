@@ -7,21 +7,19 @@
                    space (the explicit Ground); 'ground_to_parent' is the default rigid-to-parent
                    lock (a fresh/patterned occurrence is ground_to_parent=true — set false to free
                    it for moving/jointing). WRITES.
-  move_occurrence -> translate (and optionally rotate about a world axis) an occurrence by editing
+  assembly_move -> translate (and optionally rotate about a world axis) an occurrence by editing
                    its transform — a free move, no joint/relationship created. WRITES.
-  rigid_group   -> lock two or more occurrences together as one rigid unit. WRITES.
+  assembly_rigid_group   -> lock two or more occurrences together as one rigid unit. WRITES.
 
 General-purpose assembly positioning. For RELATIONSHIPS (joints, as-built joints, assembly
-constraints) see joint / as_built_joint / assembly_constraint — those maintain a constraint;
-move_occurrence just repositions.
+constraints) see joint / joint_create_as_built / assembly_constrain — those maintain a constraint;
+assembly_move just repositions.
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Occurrence.isGrounded (pin in space) / isGroundToParent (parent lock) / transform (Matrix3D)
   - rootComponent.rigidGroups.add(ObjectCollection, includeChildren) -> RigidGroup
 Handlers run on the main thread; WRITE.
 """
-
-import json
 
 import adsk.core
 import adsk.fusion
@@ -29,26 +27,17 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
+from . import _inputs
+
+# rotate_axis is an AxisRef: a world axis x/y/z, OR a straight-edge handle the rotation runs along.
+_ROTATE_AXIS = _inputs.AxisRef("rotate_axis", default="z",
+                               description="Axis to rotate about (for rotate_deg).")
 
 app = adsk.core.Application.get()
 
 _UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 _AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -148,21 +137,27 @@ def ground_handler(occurrence: str = "", grounded=None, ground_to_parent=None) -
     return _ok(out)
 
 
-# -------------------------------------------------------------- move_occurrence
+# -------------------------------------------------------------- assembly_move
 
 def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 0.0,
-                 rotate_deg: float = 0.0, rotate_axis: str = "z", units: str = "mm") -> dict:
+                 rotate_deg: float = 0.0, rotate_axis: str = "z", units: str = "mm",
+                 rotate_x: float = 0.0, rotate_y: float = 0.0, rotate_z: float = 0.0) -> dict:
     """Translate (and optionally rotate) an occurrence by editing its transform — a free move.
 
     occurrence: the occurrence to move. dx/dy/dz: translation in 'units' (mm default). rotate_deg /
-    rotate_axis: optional rotation about a world axis (x/y/z) through the occurrence's current
-    position. This is a one-shot reposition (no joint/relationship). WRITES.
+    rotate_axis: a SINGLE rotation about a world axis (x/y/z) or a straight-edge handle, through the
+    occurrence's current position. rotate_x / rotate_y / rotate_z: compose a MULTI-AXIS orientation in
+    one call (applied X then Y then Z, about the occurrence's current origin) — use these OR
+    rotate_deg, not both. One-shot reposition (no joint). WRITES.
     """
     k = _scale(units)
     if k is None:
         return _error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    if dx == 0 and dy == 0 and dz == 0 and (rotate_deg or 0) == 0:
-        return _error("Provide a translation (dx/dy/dz) or rotate_deg — no movement specified.")
+    multi = (rotate_x or 0) or (rotate_y or 0) or (rotate_z or 0)
+    if dx == 0 and dy == 0 and dz == 0 and (rotate_deg or 0) == 0 and not multi:
+        return _error("Provide a translation (dx/dy/dz), rotate_deg, or rotate_x/y/z — no movement specified.")
+    if (rotate_deg or 0) and multi:
+        return _error("Use EITHER rotate_deg (single axis) OR rotate_x/y/z (multi-axis), not both.")
     design = _design()
     if not design:
         return _error("No active design with components.")
@@ -173,16 +168,42 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
 
     import math
     mat = adsk.core.Matrix3D.create()
+    axis_desc = None
     try:
         if rotate_deg:
-            axis_vec = _AXES.get((rotate_axis or "z").strip().lower())
-            if not axis_vec:
-                return _error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
-            # rotate about the axis through the occurrence's current origin
+            # rotate_axis is an AxisRef: a world axis x/y/z (rotation axis through the occurrence's
+            # current origin), OR a straight-edge handle (rotation about THAT edge's line — direction
+            # AND a point both come from the edge, so you can swing a part about a real hinge edge).
+            ax, aerr = _ROTATE_AXIS.resolve(rotate_axis)
+            if aerr:
+                return _error(aerr)
+            if ax[0] == "edge":
+                edge = ax[1]
+                line = _safe(lambda: edge.geometry)               # InfiniteLine3D / Line3D
+                axis_dir = _safe(lambda: line.direction) or _safe(lambda: edge.startVertex and None)
+                pt = _safe(lambda: line.origin) or _safe(lambda: edge.startVertex.geometry)
+                if not axis_dir or not pt:
+                    return _error("Could not read the edge's axis direction/point for rotate_axis.")
+                mat.setToRotation(math.radians(float(rotate_deg)), axis_dir, pt)
+                axis_desc = "edge"
+            else:
+                axis_vec = ax[1]
+                # rotate about the world axis through the occurrence's current origin
+                t = _safe(lambda: occ.transform)
+                origin = _safe(lambda: t.translation.asPoint()) or adsk.core.Point3D.create(0, 0, 0)
+                mat.setToRotation(math.radians(float(rotate_deg)),
+                                  adsk.core.Vector3D.create(*axis_vec), origin)
+                axis_desc = (rotate_axis or "z").strip().lower()
+        elif multi:
+            # compose X then Y then Z rotations about the occurrence's current origin
             t = _safe(lambda: occ.transform)
             origin = _safe(lambda: t.translation.asPoint()) or adsk.core.Point3D.create(0, 0, 0)
-            mat.setToRotation(math.radians(float(rotate_deg)),
-                              adsk.core.Vector3D.create(*axis_vec), origin)
+            for ang, vec in ((rotate_x, (1, 0, 0)), (rotate_y, (0, 1, 0)), (rotate_z, (0, 0, 1))):
+                if ang:
+                    r = adsk.core.Matrix3D.create()
+                    r.setToRotation(math.radians(float(ang)), adsk.core.Vector3D.create(*vec), origin)
+                    mat.transformBy(r)
+            axis_desc = "multi"
         # translation
         if dx or dy or dz:
             vec = adsk.core.Vector3D.create(float(dx) * k, float(dy) * k, float(dz) * k)
@@ -199,13 +220,14 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
         "occurrence": _safe(lambda: occ.name),
         "translation_mm": {"x": dx, "y": dy, "z": dz},
         "rotate_deg": float(rotate_deg or 0.0),
-        "rotate_axis": rotate_axis.lower() if rotate_deg else None,
+        "rotate_axis": axis_desc if (rotate_deg or multi) else None,
+        "rotate_xyz": ({"x": rotate_x, "y": rotate_y, "z": rotate_z} if multi else None),
         "units": units,
-        "note": "Occurrence repositioned (free move, no joint). Pair with get_screenshot to view.",
+        "note": "Occurrence repositioned (free move, no joint). Pair with view_screenshot to view.",
     })
 
 
-# ------------------------------------------------------------------ rigid_group
+# ------------------------------------------------------------------ assembly_rigid_group
 
 def rigid_group_handler(occurrences: str = "", include_children: bool = False) -> dict:
     """Lock two or more occurrences together as one rigid unit.
@@ -229,7 +251,7 @@ def rigid_group_handler(occurrences: str = "", include_children: bool = False) -
     if not rg:
         return _error("Rigid group creation returned nothing.")
     return _ok({
-        "rigid_group": _safe(lambda: rg.name),
+        "assembly_rigid_group": _safe(lambda: rg.name),
         "grouped": resolved,
         "include_children": bool(include_children),
         "note": "Occurrences locked together as a rigid group.",
@@ -245,7 +267,7 @@ _GROUND_DESC = (
     "least one. WRITES."
 )
 ground_tool = (
-    Tool.create_simple(name="ground", description=_GROUND_DESC)
+    Tool.create_simple(name="assembly_ground", description=_GROUND_DESC)
     .add_input_property("occurrence", {"type": "string", "description": "Occurrence name (or full path) to change."})
     .add_input_property("grounded", {"type": "boolean", "description": "Pin the occurrence in space (explicit Ground)."})
     .add_input_property("ground_to_parent", {"type": "boolean", "description": "Lock rigidly to parent (false frees it to move/joint)."})
@@ -255,19 +277,22 @@ ground_item = Item.create_tool_item(tool=ground_tool, handler=ground_handler, ru
 
 _MOVE_DESC = (
     "Move an occurrence by editing its transform — a free reposition with NO joint/relationship "
-    "created (use joint/assembly_constraint for a maintained relationship). 'dx'/'dy'/'dz' translate "
+    "created (use joint_create/assembly_constrain for a maintained relationship). 'dx'/'dy'/'dz' translate "
     "in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) optionally rotate about a world "
-    "axis through the current position. The occurrence must be free to move (see ground: "
+    "axis through the current position. The occurrence must be free to move (see assembly_ground: "
     "ground_to_parent=false). WRITES."
 )
 move_tool = (
-    Tool.create_simple(name="move_occurrence", description=_MOVE_DESC)
+    Tool.create_simple(name="assembly_move", description=_MOVE_DESC)
     .add_input_property("occurrence", {"type": "string", "description": "Occurrence name (or full path) to move."})
     .add_input_property("dx", {"type": "number", "description": "Translation X in 'units'."})
     .add_input_property("dy", {"type": "number", "description": "Translation Y in 'units'."})
     .add_input_property("dz", {"type": "number", "description": "Translation Z in 'units'."})
     .add_input_property("rotate_deg", {"type": "number", "description": "Optional rotation in degrees about 'rotate_axis'."})
-    .add_input_property("rotate_axis", {"type": "string", "description": "World axis for rotation: x | y | z (default z)."})
+    .add_input_property("rotate_axis", _ROTATE_AXIS.schema())
+    .add_input_property("rotate_x", {"type": "number", "description": "Multi-axis: degrees about world X (composed X->Y->Z). Use instead of rotate_deg."})
+    .add_input_property("rotate_y", {"type": "number", "description": "Multi-axis: degrees about world Y."})
+    .add_input_property("rotate_z", {"type": "number", "description": "Multi-axis: degrees about world Z."})
     .add_input_property("units", {"type": "string", "description": "mm | cm | in (default mm)."})
     .strict_schema()
 )
@@ -279,7 +304,7 @@ _RIGID_DESC = (
     "rigidly includes their children. WRITES."
 )
 rigid_tool = (
-    Tool.create_simple(name="rigid_group", description=_RIGID_DESC)
+    Tool.create_simple(name="assembly_rigid_group", description=_RIGID_DESC)
     .add_input_property("occurrences", {"type": "string", "description": "Occurrence name(s) to lock together (comma-separated)."})
     .add_input_property("include_children", {"type": "boolean", "description": "Also include the occurrences' children (default false)."})
     .strict_schema()

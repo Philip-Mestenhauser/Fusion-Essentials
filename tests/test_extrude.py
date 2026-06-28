@@ -59,11 +59,12 @@ class FakeExtrudeInput:
         self.operation = operation
         self.distance_extent = None     # (isSymmetric, ValueInput) captured
         self.one_side = None
+        self.participantBodies = None
 
     def setDistanceExtent(self, isSymmetric, distance):
         self.distance_extent = (isSymmetric, distance)
 
-    def setOneSideExtent(self, extent, direction, taper):
+    def setOneSideExtent(self, extent, direction, taper=None):
         self.one_side = (extent, direction, taper)
 
 
@@ -115,6 +116,9 @@ def _install(sketches):
         setattr(fo, n, n)
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
+    adsk.fusion.ToEntityExtentDefinition.create = staticmethod(lambda face, chained: ("to", face, chained))
+    ed = adsk.fusion.ExtentDirections
+    ed.PositiveExtentDirection = "pos"
     return ef
 
 
@@ -200,3 +204,89 @@ class TestExtrude:
         _, dist = ef.last_input.distance_extent
         assert dist[0] == "real" and abs(dist[1] - (-0.4)) < 1e-9
         assert out["distance"] == -4
+
+
+# ── to_object extent (extrude up to a face handle) ──────────────────────────
+
+class _FakeFaceEnt:
+    pass
+
+
+class _FakeBody:
+    def __init__(self, name):
+        self.name = name
+
+
+def _install_geom(faces=None, bodies=None):
+    """Install + wire the _inputs._common seam so to_object faces / target_bodies resolve."""
+    ef = _install([FakeSketch("S")])
+    import adsk.fusion
+    adsk.fusion.BRepFace = _FakeFaceEnt
+    adsk.fusion.BRepBody = _FakeBody
+    faces = faces or {}
+    bodies = bodies or {}
+    handle_map = dict(faces); handle_map.update(bodies)
+    comp = type("C", (), {"bRepBodies": type("BB", (), {
+        "itemByName": staticmethod(lambda n: bodies.get(n)),
+    })()})()
+    class _D:
+        rootComponent = comp
+        def findEntityByToken(self, t):
+            e = handle_map.get(t)
+            return [e] if e is not None else []
+    d = _D()
+    ex._inputs._common.design = lambda: d
+    ex._inputs._common.target_component = lambda x: comp
+    return ef
+
+
+class TestToObject:
+    def test_extrude_to_face_uses_to_entity_extent(self):
+        face = _FakeFaceEnt()
+        ef = _install_geom(faces={"F": face})
+        out = _payload(ex.handler(sketch_name="S", to_object="F"))
+        assert out["extent"] == "to_object"
+        assert out["distance"] is None
+        # a ToEntityExtentDefinition was used (one_side set, distance_extent not)
+        assert ef.last_input.one_side is not None
+        assert ef.last_input.distance_extent is None
+
+    def test_to_object_overrides_distance(self):
+        face = _FakeFaceEnt()
+        ef = _install_geom(faces={"F": face})
+        out = _payload(ex.handler(sketch_name="S", distance=999, to_object="F"))
+        assert out["extent"] == "to_object" and ef.last_input.distance_extent is None
+
+    def test_bad_to_object_handle_errors(self):
+        _install_geom(faces={})
+        res = ex.handler(sketch_name="S", to_object="missing")
+        assert res["isError"] is True
+
+
+# ── target_bodies cut scoping (prevents bleed-through) ──────────────────────
+
+class TestTargetBodies:
+    def test_cut_scoped_to_bodies(self):
+        b = _FakeBody("KeepMe")
+        ef = _install_geom(bodies={"KeepMe": b})
+        out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut", target_bodies="KeepMe"))
+        assert ef.last_input.participantBodies == [b]
+        assert out["scoped_to_bodies"] == ["KeepMe"]
+
+    def test_target_bodies_by_handle(self):
+        h = "/v" + "B" * 70
+        b = _FakeBody("FromHandle")
+        ef = _install_geom(bodies={h: b})
+        out = _payload(ex.handler(sketch_name="S", distance=5, operation="join", target_bodies=h))
+        assert ef.last_input.participantBodies == [b]
+
+    def test_target_bodies_rejected_on_new(self):
+        b = _FakeBody("X")
+        _install_geom(bodies={"X": b})
+        res = ex.handler(sketch_name="S", distance=5, operation="new", target_bodies="X")
+        assert res["isError"] is True and "cut/join/intersect" in res["message"]
+
+    def test_bad_target_body_errors(self):
+        _install_geom(bodies={"X": _FakeBody("X")})
+        res = ex.handler(sketch_name="S", distance=5, operation="cut", target_bodies="Nope")
+        assert res["isError"] is True and "Nope" in res["message"]

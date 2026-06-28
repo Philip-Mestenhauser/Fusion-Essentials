@@ -1,6 +1,6 @@
 """Unit tests for ``data_model.py`` — the project/file lister and its folder filter.
 
-The headline behaviour under test is ``list_project_files``'s optional ``folder``
+The headline behaviour under test is ``data_list_files``'s optional ``folder``
 scoping (added so the template-library skill can list ONE folder instead of
 dumping a whole large project). The branches that matter and can silently send a
 caller to the wrong place: folder navigation by case-insensitive name, a nested

@@ -3,7 +3,7 @@
 
 """MCP building block: read the active parametric design's timeline.
 
-  get_timeline -> the ordered list of timeline objects (features, sketches, joints,
+  design_get_timeline -> the ordered list of timeline objects (features, sketches, joints,
                   occurrences, construction geometry, groups) with each one's index,
                   name, entity type, suppression / rolled-back / health state, and
                   group membership; plus the marker position and a groups summary.
@@ -20,14 +20,13 @@ Grounded in adsk.fusion:
 Read-only. Handler runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -54,13 +53,6 @@ def _design():
         except Exception:
             design = None
     return design
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _entity_type(obj) -> str:
@@ -109,7 +101,7 @@ def handler(include_suppressed: bool = True, group: str = "") -> dict:
     if not design:
         return _error("No active design (open a document with design geometry). Note: a "
                       "configured design must be opened from the Data Panel first — see "
-                      "open_document.")
+                      "doc_open.")
 
     try:
         timeline = design.timeline
@@ -160,14 +152,6 @@ def handler(include_suppressed: bool = True, group: str = "") -> dict:
     return _ok(payload)
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Read the active parametric design's timeline — the ordered list of features, "
     "sketches, joints, occurrences, construction geometry, and groups that build the "
@@ -182,7 +166,7 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_simple(name="get_timeline", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="design_get_timeline", description=TOOL_DESCRIPTION)
     .add_input_property("include_suppressed", {"type": "boolean",
                                                "description": "Include suppressed objects (default true)."})
     .add_input_property("group", {"type": "string",

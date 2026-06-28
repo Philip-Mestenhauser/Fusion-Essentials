@@ -1,13 +1,13 @@
 """Unit tests for the main-thread task timeout correctness (maintainer block #3).
 
-The bug: when execute_api_script ran > 30s, the server reported "cancelled before running"
+The bug: when sys_execute_script ran > 30s, the server reported "cancelled before running"
 even though an in-flight main-thread callback cannot be interrupted and its side effect still
 COMMITS — inviting a double-apply on retry. The fixes pinned here:
 
   * TaskManager.cancel(task_id) returns True ONLY if it removed a task that had not yet started
     (a real cancel). If the task was already claimed by the main-thread handler, it returns False,
     so the caller must not claim it was cancelled.
-  * Item carries an enforce_timeout flag (default True); execute_api_script sets it False so the
+  * Item carries an enforce_timeout flag (default True); sys_execute_script sets it False so the
     server waits for completion instead of faking a timeout.
 
 The async server loop needs an event loop + Fusion custom events to exercise directly, so we test

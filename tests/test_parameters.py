@@ -241,6 +241,30 @@ class TestAddHandler:
         assert params.add_handler(name="X", expression="")["isError"] is True
 
 
+class TestSetCreateOrUpdate:
+    def test_set_existing_updates(self, monkeypatch):
+        up = FakeUserParams([FakeParam("PartX", "10 mm")])
+        design = FakeParamsDesign(up, FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.set_handler(name="PartX", expression="20 mm"))
+        assert out["set"] is True and out["created"] is False
+
+    def test_set_missing_without_create_errors(self, monkeypatch):
+        design = FakeParamsDesign(FakeUserParams([]), FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        res = params.set_handler(name="Ghost", expression="5 mm")
+        assert res["isError"] is True and "create=true" in res["message"]
+
+    def test_set_missing_with_create_makes_user_param(self, monkeypatch):
+        up = FakeUserParams([])
+        design = FakeParamsDesign(up, FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.set_handler(name="NewP", expression="3 mm", create=True))
+        assert out["set"] is True and out["created"] is True
+        assert out["before"] is None
+        assert up.itemByName("NewP") is not None        # it was created
+
+
 class TestDeleteHandler:
     def test_delete_refuses_if_referenced(self, monkeypatch):
         part = FakeParam("PartX", "10 mm")

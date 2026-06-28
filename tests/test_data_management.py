@@ -1,15 +1,46 @@
-"""Unit tests for ``data_management.py`` path helpers — pure string/tree logic.
+"""Unit tests for the former ``data_management`` tools — pure string/tree logic + handler guards.
 
 These resolve user-supplied folder paths ("Parts/Fixtures/Vises") against the
 data hierarchy. Bugs here send files to the wrong folder silently, so the
 boundaries (empty path, stray slashes, mixed separators, case-insensitive
 match, missing segment) are exactly what to pin down. No live Fusion needed —
 only small fakes mimicking ``DataFolder``.
+
+data_management.py was split into _data_common (shared helpers), data_model_ops (project/folder/
+upload + delete-folder) and doc_lifecycle (document ops). These tests predate the split and address
+everything through one ``dm`` handle, so we expose a small MERGED view over the three modules: reads
+resolve from whichever module defines the name; a write (dm.app / dm._data) is applied to EVERY module
+that already has that attribute, so a patched _data lands wherever a handler captured it by value.
 """
 
 from conftest import load_tool
 
-dm = load_tool("data_management")
+_data_common = load_tool("_data_common")
+_data_model_ops = load_tool("data_model_ops")
+_doc_lifecycle = load_tool("doc_lifecycle")
+
+
+class _MergedTools:
+    """Read across the split modules; write-through to every module exposing the attr."""
+    _MODULES = (_doc_lifecycle, _data_model_ops, _data_common)
+
+    def __getattr__(self, name):
+        for m in self._MODULES:
+            if hasattr(m, name):
+                return getattr(m, name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        applied = False
+        for m in self._MODULES:
+            if hasattr(m, name):
+                setattr(m, name, value)
+                applied = True
+        if not applied:                       # a brand-new attr -> put it on the lead module
+            setattr(self._MODULES[0], name, value)
+
+
+dm = _MergedTools()
 
 
 # ── fakes mimicking the DataFolder tree ────────────────────────────────────
@@ -291,7 +322,7 @@ class TestFindOpenDocument:
         assert found is a
 
 
-# ── delete_folder recursive-delete gate (maintainer block #1) ───────────────
+# ── data_delete_folder recursive-delete gate (maintainer block #1) ───────────────
 #
 # force=true on a non-empty folder recursively wipes the whole subtree (and bypasses the
 # per-file xref-orphan guard). The gate: force alone is NOT enough — require an explicit

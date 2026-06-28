@@ -1,20 +1,22 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: X-ray ONE sketch — entities, construction geometry, constraints, dimensions.
+"""Detail ENGINE behind sketch_get: X-ray ONE sketch — entities, construction geometry,
+constraints, dimensions.
 
-  get_sketch_detail -> the full structure of a named sketch: every entity (id '<type>:<index>',
-                      type, isConstruction flag, key geometry), every geometric constraint (type +
-                      the entity ids it links), and every dimension (name / value / expression).
-                      Read-only.
+This is not a separately-registered tool. When sketch_get is called WITH a 'sketch_name', it
+delegates to handler() here for the full structure of that sketch: every entity (id
+'<type>:<index>', type, isConstruction flag, key geometry), every geometric constraint (type + the
+entity ids it links), every dimension (name / value / expression / driving), and
+is_fully_constrained. Read-only.
 
-get_sketches gives only COUNTS; this is the detailed read that lets an agent actually understand a
-constrained sketch — slots/ellipses/rectangles and their implicit construction geometry, plus the
-relationships (perpendicular/parallel/coincident/...) that link entities. The entity ids match the
-references used by sketch_constraint / extrude / add_sketch_geometry, so you can read the structure
-then act on specific entities.
+Where sketch_get without a name gives only COUNTS, this detailed read lets an agent actually
+understand a constrained sketch — slots/ellipses/rectangles and their implicit construction
+geometry, plus the relationships (perpendicular/parallel/coincident/...) that link entities. The
+entity ids match the references used by sketch_constrain / model_extrude / sketch_add_geometry, so
+you can read the structure then act on specific entities.
 
-Grounded in adsk.fusion (confirmed via get_api_doc + live probe):
+Grounded in adsk.fusion (confirmed via sys_get_api_doc + live probe):
   - Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs}, Sketch.sketchPoints — each entity
     has .isConstruction and a stable .entityToken.
   - Sketch.geometricConstraints — each constraint exposes the entities it references (.line / .lineOne
@@ -23,14 +25,10 @@ Grounded in adsk.fusion (confirmed via get_api_doc + live probe):
 Handler runs on the main thread; read-only.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
-from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
-from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -53,21 +51,6 @@ _CONSTRAINT_REFS = {
     "CircularPatternConstraint": ("circular_pattern", ()),
     "RectangularPatternConstraint": ("rectangular_pattern", ()),
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -210,7 +193,7 @@ def handler(sketch_name: str = "") -> dict:
 
     sketch_name: the sketch to inspect. Returns every entity (id '<type>:<index>', type,
     isConstruction, geometry), every constraint (type + linked entity ids), and every dimension
-    (name/value/expression). Read-only — pair with get_sketches to find sketch names.
+    (name/value/expression). Read-only — pair with sketch_get to find sketch names.
     """
     design = _design()
     if not design:
@@ -277,14 +260,14 @@ def handler(sketch_name: str = "") -> dict:
         "constraints": constraints,
         "dimensions": dimensions,
         "note": "Full sketch structure. Entity ids ('line:0', 'arc:1', ...) match the references "
-                "used by sketch_constraint / extrude. 'construction' marks guide geometry. "
+                "used by sketch_constrain / extrude. 'construction' marks guide geometry. "
                 "is_fully_constrained=false means free DOF remain (still movable/drivable); "
                 "a dimension with driving=true locks geometry, driving=false only measures.",
     })
 
 
 TOOL_DESCRIPTION = (
-    "X-RAY one sketch: its full structure, far beyond get_sketches' counts. Returns every entity "
+    "X-RAY one sketch: its full structure, far beyond sketch_get' counts. Returns every entity "
     "(id '<type>:<index>', type, isConstruction flag, geometry), every geometric constraint (its "
     "type + the entity ids it links — e.g. perpendicular: line:1, line:0), and every dimension "
     "(name/value/expression). Use it to UNDERSTAND a constrained sketch — slots/ellipses/rectangles "
@@ -292,17 +275,16 @@ TOOL_DESCRIPTION = (
     "editing it. Also reports 'is_fully_constrained' (false = free DOF remain, the sketch can still "
     "move/be driven) and each dimension's 'driving' flag (true = locks geometry; false = just "
     "measures) — so you can tell whether a sketch is locked, driven, or free without experimenting. "
-    "Entity ids match those used by sketch_constraint / extrude. 'sketch_name' selects the sketch "
-    "(get_sketches lists names). Read-only."
+    "Entity ids match those used by sketch_constrain / extrude. 'sketch_name' selects the sketch "
+    "(sketch_get lists names). Read-only."
 )
 
-tool = (
-    Tool.create_simple(name="get_sketch_detail", description=TOOL_DESCRIPTION)
-    .add_input_property("sketch_name", {"type": "string", "description": "The sketch to inspect (see get_sketches for names)."})
-    .strict_schema()
-)
-item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)
+# This module is now the DETAIL ENGINE behind sketch_get (sketches.py): when sketch_get is given a
+# 'sketch_name' it delegates to handler() here. The single-sketch read is no longer a separate tool
+# (the old 'sketch_get' name was merged into 'sketch_get'), so nothing is registered here.
+# TOOL_DESCRIPTION is kept for reference/docs; handler() remains the importable engine.
 
 
 def register_tool():
-    register(item)
+    # Intentionally registers nothing — see note above (folded into sketch_get).
+    return

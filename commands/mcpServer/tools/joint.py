@@ -23,7 +23,6 @@ Grounded in adsk.core / adsk.fusion:
 Handler runs on the main thread; WRITES to the design.
 """
 
-import json
 import math
 
 import adsk.core
@@ -34,6 +33,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 _UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 _AXES = {"x": 0, "y": 1, "z": 2}  # JointDirections (Custom=3 not exposed here)
@@ -47,13 +47,6 @@ _JOINT_TYPES = {
     "planar": ("planar", True),
     "ball": ("ball", False),
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _fmt_num(v):
@@ -471,7 +464,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             pass
 
     # Optional limits (rotation and/or linear) — applied after the joint exists so its jointMotion
-    # is established. Same routing as edit_joint.
+    # is established. Same routing as joint_edit.
     limits_out = {}
     if any(v is not None for v in (min_deg, max_deg, rest_deg, min_mm, max_mm, rest_mm)):
         jm = _safe(lambda: joint.jointMotion)
@@ -496,7 +489,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         "angle_deg": angle if angle else None,
         "flipped": bool(flip),
         **limits_out,
-        "note": "Joint created as a timeline feature. View it with get_screenshot.",
+        "note": "Joint created as a timeline feature. View it with view_screenshot.",
     })
 
 
@@ -548,7 +541,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         return _error("No active design.")
     joint = _find_joint(design, joint_name)
     if not joint:
-        return _error(f"No joint named '{joint_name}'. Use get_timeline or check the name.")
+        return _error(f"No joint named '{joint_name}'. Use design_get_timeline or check the name.")
 
     # DRIVING the rotation value (jointMotion.rotationValue = "Drive Joints") destabilizes the
     # server connection when set from this context (reproduced: a clean revolute joint dropped the
@@ -556,8 +549,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     # motion type/axis, world_axis, flip, limits.)
     if rotation_deg is not None:
         return _error("Driving a joint to a rotation value from here is unsafe (it closes the "
-                      "server connection). To pose a jointed assembly, use move_occurrence (rotate "
-                      "the moving occurrence) + capture_position instead — that path is proven safe.")
+                      "server connection). To pose a jointed assembly, use assembly_move (rotate "
+                      "the moving occurrence) + assembly_capture_position instead — that path is proven safe.")
 
     # world_axis (re-point the motion to a TRUE WORLD axis) forces a motion re-set even if the
     # joint_type isn't changing — that's the whole point (fixing a frame-relative axis).
@@ -679,22 +672,14 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 "offset", "angle", "min_deg", "max_deg", "rest_deg", "min_mm", "max_mm", "rest_mm"):
         if key in changed:
             out[key] = changed[key]
-    out["note"] = "Joint edited in place (timeline marker rolled before/after). get_screenshot to view."
+    out["note"] = "Joint edited in place (timeline marker rolled before/after). view_screenshot to view."
     return _ok(out)
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 TOOL_DESCRIPTION = (
     "Create a Joint (timeline feature) between two inputs — the API equivalent of the Joint command. "
     "Each input ('occurrence_one'/'occurrence_two') is EITHER a Joint Origin name (create one with "
-    "create_joint_origin) OR an AUTONOMOUS geometry SNAP written '<occurrence>:<snap>' (no human "
+    "joint_create_origin) OR an AUTONOMOUS geometry SNAP written '<occurrence>:<snap>' (no human "
     "selection needed) where snap is: origin (the component's origin point) | center (largest planar "
     "face center) | top / bottom (highest / lowest face center) | cylinder (a cylindrical face's "
     "axis). E.g. 'Boom:1:origin', 'TrussMast:1:top', 'Cable:1:cylinder'. The snapped geometry is "
@@ -707,7 +692,7 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_with_string_input(
-        name="joint",
+        name="joint_create",
         description=TOOL_DESCRIPTION,
         input_param_name="occurrence_one",
         input_param_description="First input: a Joint Origin name OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder).",
@@ -746,12 +731,12 @@ EDIT_DESCRIPTION = (
     "set the joint's position parameters; 'min_deg'/'max_deg'/'rest_deg' for ROTATION limits "
     "(revolute/cylindrical) and 'min_mm'/'max_mm'/'rest_mm' for LINEAR/slide limits "
     "(slider/cylindrical). Full parity "
-    "with the create joint tool's inputs. (To DRIVE a joint to a value, use move_occurrence + "
-    "capture_position — driving from here is unsafe.) The tool rolls the timeline "
+    "with the create joint tool's inputs. (To DRIVE a joint to a value, use assembly_move + "
+    "assembly_capture_position — driving from here is unsafe.) The tool rolls the timeline "
     "marker to before the joint, applies the edits, and rolls it back (required by the API). WRITES."
 )
 edit_tool = (
-    Tool.create_simple(name="edit_joint", description=EDIT_DESCRIPTION)
+    Tool.create_simple(name="joint_edit", description=EDIT_DESCRIPTION)
     .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to edit."})
     .add_input_property("input_one", {"type": "string",
                                       "description": "New first input: Joint Origin name OR '<occurrence>:<snap>'."})
@@ -766,7 +751,7 @@ edit_tool = (
     .add_input_property("offset", {"type": "number", "description": "Set the joint offset distance (in 'units'; the offset ModelParameter)."})
     .add_input_property("angle", {"type": "number", "description": "Set the joint angle between the inputs (degrees)."})
     .add_input_property("units", {"type": "string", "description": "mm | cm | in for 'offset' (default mm)."})
-    .add_input_property("rotation_deg", {"type": "number", "description": "(Disabled — driving from here is unsafe; use move_occurrence + capture_position to pose a joint.)"})
+    .add_input_property("rotation_deg", {"type": "number", "description": "(Disabled — driving from here is unsafe; use assembly_move + assembly_capture_position to pose a joint.)"})
     .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees) — revolute/cylindrical."})
     .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees) — revolute/cylindrical."})
     .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees) — revolute/cylindrical."})

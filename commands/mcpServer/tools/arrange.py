@@ -14,7 +14,7 @@ placement. General-purpose — it just nests whatever occurrences you pass.
 NOTE: the advanced true-shape nesting can require a Fusion extension on some accounts; this catches
 the gate and reports it instead of failing opaquely (rectangular is the lighter fallback).
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Component.features.arrangeFeatures.createInput(ArrangeSolverTypes.*) -> ArrangeFeatureInput
   - input.setProfileOrFaceEnvelope([profile|planarFace,...]) -> Arrange2DProfileOrFaceEnvelopeInput
       (.objectSpacing = clearance between parts, cm)
@@ -22,14 +22,13 @@ Grounded in adsk.fusion (signatures confirmed via get_api_doc):
 Handler runs on the main thread; WRITES.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -41,21 +40,6 @@ _SOLVERS = {
     "rectangular": "Arrange2DRectangularSolverType",
     "rect": "Arrange2DRectangularSolverType",
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -122,11 +106,11 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 
     design = _design()
     if not design:
-        return _error("No active design. Create or open a document first (see new_document).")
+        return _error("No active design. Create or open a document first (see doc_new).")
 
     sketch = _find_sketch(design, boundary_sketch)
     if not sketch:
-        return _error(f"No sketch named '{boundary_sketch}' for the boundary. Use get_sketches.")
+        return _error(f"No sketch named '{boundary_sketch}' for the boundary. Use sketch_get.")
     profiles = _safe(lambda: sketch.profiles)
     if not profiles or _safe(lambda: profiles.count, 0) == 0:
         return _error(f"Boundary sketch '{boundary_sketch}' has no closed profile to use as the "
@@ -137,7 +121,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         return _error("Provide 'shapes' — the occurrence name(s) to arrange (comma-separated).")
     occs, resolved, missing = _find_occurrences(design, shapes)
     if missing:
-        return _error(f"No occurrence matched: {', '.join(missing)}. Use get_component_tree.")
+        return _error(f"No occurrence matched: {', '.join(missing)}. Use design_get_tree.")
     if not occs:
         return _error("Provide 'shapes' — at least one occurrence to arrange.")
 
@@ -177,7 +161,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         "shapes": resolved,
         "spacing": round(float(spacing), 6) if spacing else 0.0,
         "units": units,
-        "note": "Shapes arranged within the boundary. Pair with get_screenshot (top) to view the nest.",
+        "note": "Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest.",
     })
 
 
@@ -188,11 +172,11 @@ TOOL_DESCRIPTION = (
     "'true_shape' (nest the actual part outlines, tightest) or 'rectangular' (nest bounding boxes). "
     "'spacing' = minimum clearance between parts (in 'units'). WRITES an Arrange feature. Note: "
     "true-shape nesting can need a Fusion extension on some accounts (the tool reports that and you "
-    "can fall back to 'rectangular'). Pair with get_screenshot (top view) to see the layout."
+    "can fall back to 'rectangular'). Pair with view_screenshot (top view) to see the layout."
 )
 
 tool = (
-    Tool.create_simple(name="arrange", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="model_arrange", description=TOOL_DESCRIPTION)
     .add_input_property("boundary_sketch", {"type": "string",
                                             "description": "Name of the sketch whose profile is the boundary envelope."})
     .add_input_property("shapes", {"type": "string",

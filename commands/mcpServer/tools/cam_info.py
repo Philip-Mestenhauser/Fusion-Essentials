@@ -3,13 +3,13 @@
 
 """Read-only MCP building blocks for inspecting CAM (Manufacture) data in the open document.
 
-  get_cam_setups      -> setups: name, type, machine, selected models/fixtures/stock,
+  cam_get_setups      -> setups: name, type, machine, selected models/fixtures/stock,
                          and operation counts
-  get_cam_operations  -> operations per setup (or one setup): name, strategy, tool used,
+  cam_get_operations  -> operations per setup (or one setup): name, strategy, tool used,
                          and state (suppressed / has toolpath / valid)
-  get_setup_references -> per setup, the EXTERNALLY REFERENCED (X-ref) components among
+  cam_get_references -> per setup, the EXTERNALLY REFERENCED (X-ref) components among
                          its models/fixtures/stock, resolved to their source document
-                         UID + name + openable URL (feed those UIDs to open_document)
+                         UID + name + openable URL (feed those UIDs to doc_open)
 
 Grounded in adsk.cam:
   - The CAM product is reachable WITHOUT switching to the Manufacture workspace:
@@ -23,8 +23,6 @@ Grounded in adsk.cam:
 Read-only. Handlers run on the main thread (the default) because they touch adsk.*.
 """
 
-import json
-
 import adsk.core
 import adsk.cam
 import adsk.fusion
@@ -32,6 +30,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -69,13 +68,6 @@ def _get_cam():
     return cam, None
 
 
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
 def _operation_type_name(op_type) -> str:
     """Map an OperationTypes enum value to a readable name, defensively."""
     mapping = {
@@ -100,7 +92,7 @@ def _model_names(collection) -> list:
 
 
 # ---------------------------------------------------------------------------
-# get_cam_setups
+# cam_get_setups
 # ---------------------------------------------------------------------------
 
 def get_cam_setups_handler() -> dict:
@@ -132,7 +124,7 @@ def get_cam_setups_handler() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# get_cam_operations
+# cam_get_operations
 # ---------------------------------------------------------------------------
 
 def get_cam_operations_handler(setup: str = "") -> dict:
@@ -240,7 +232,7 @@ def _operation_summary(op) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# get_setup_references
+# cam_get_references
 # ---------------------------------------------------------------------------
 
 def get_setup_references_handler(setup: str = "") -> dict:
@@ -248,7 +240,7 @@ def get_setup_references_handler(setup: str = "") -> dict:
 
     For every model/fixture/stock occurrence in a setup that is an external
     reference, returns its source DataFile id (UID), name, version, and
-    fusionWebURL — so the caller can `open_document` the referenced fixture/part.
+    fusionWebURL — so the caller can `doc_open` the referenced fixture/part.
     """
     cam, err = _get_cam()
     if err:
@@ -326,7 +318,7 @@ def _references_in(collection, role: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# activate_setup
+# cam_activate_setup
 # ---------------------------------------------------------------------------
 
 def activate_setup_handler(setup: str = "") -> dict:
@@ -359,7 +351,7 @@ def activate_setup_handler(setup: str = "") -> dict:
         target.activate()
     except Exception as e:
         return _error(f"Failed to activate '{want}': {e}")
-    # Fit the view so a subsequent get_screenshot frames the setup.
+    # Fit the view so a subsequent view_screenshot frames the setup.
     try:
         vp = app.activeViewport
         if vp:
@@ -367,11 +359,11 @@ def activate_setup_handler(setup: str = "") -> dict:
     except Exception:
         pass
     return _ok({"activated": _safe(lambda: target.name),
-                "note": "Setup activated and view fit. Use get_screenshot to capture it."})
+                "note": "Setup activated and view fit. Use view_screenshot to capture it."})
 
 
 # ---------------------------------------------------------------------------
-# get_tool_list
+# sys_get_tool_list
 # ---------------------------------------------------------------------------
 
 def get_tool_list_handler() -> dict:
@@ -418,7 +410,7 @@ def get_tool_list_handler() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# get_machining_time
+# cam_get_time
 # ---------------------------------------------------------------------------
 
 def get_machining_time_handler(setup: str = "") -> dict:
@@ -541,7 +533,7 @@ def get_nc_programs_handler() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# compare_operations
+# cam_compare_operations
 # ---------------------------------------------------------------------------
 
 def compare_operations_handler(operation_a: str = "", operation_b: str = "") -> dict:
@@ -626,18 +618,11 @@ def _op_tool_desc(op):
 
 # --- result helpers (shared shape) ---
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
 
 # --- tool definitions ---
 
 _setups_tool = Tool.create_simple(
-    name="get_cam_setups",
+    name="cam_get_setups",
     description=(
         "Get the CAM (Manufacture) setups in the active document: each setup's name, "
         "operation type (milling/turning/etc.), machine, the models/fixtures/stock it "
@@ -652,7 +637,7 @@ get_cam_setups_item = Item.create_tool_item(
 
 _ops_tool = (
     Tool.create_simple(
-        name="get_cam_operations",
+        name="cam_get_operations",
         description=(
             "Get the CAM operations in the active document, grouped by setup. Each "
             "operation reports its name, the tool used (description incl. tool number), "
@@ -676,12 +661,12 @@ get_cam_operations_item = Item.create_tool_item(
 
 _refs_tool = (
     Tool.create_simple(
-        name="get_setup_references",
+        name="cam_get_references",
         description=(
             "For each CAM setup, resolve its externally referenced (X-ref) components — "
             "among its selected models, fixtures, and stock — to the SOURCE document they "
             "come from. Each reference reports the source document id (UID), name, version, "
-            "and an openable fusionWebURL. Feed a source_id to open_document to open that "
+            "and an openable fusionWebURL. Feed a source_id to doc_open to open that "
             "referenced fixture/part. Pass 'setup' to limit to one setup. Read-only; works "
             "without switching to Manufacture."
         ),
@@ -696,10 +681,10 @@ get_setup_references_item = Item.create_tool_item(
 
 
 _activate_tool = Tool.create_with_string_input(
-    name="activate_setup",
+    name="cam_activate_setup",
     description=(
         "Activate a CAM setup by name and fit the view, so you can then capture it with "
-        "get_screenshot. Use this to review each setup in turn. Changes the active setup."
+        "view_screenshot. Use this to review each setup in turn. Changes the active setup."
     ),
     input_param_name="setup",
     input_param_description="The setup name to activate.",
@@ -709,7 +694,7 @@ activate_setup_item = Item.create_tool_item(
 )
 
 _tool_list_tool = Tool.create_simple(
-    name="get_tool_list",
+    name="sys_get_tool_list",
     description=(
         "List the distinct cutting tools used across the document's CAM operations — each "
         "tool's description (includes tool number, type, and geometry), how many operations "
@@ -723,7 +708,7 @@ get_tool_list_item = Item.create_tool_item(
 
 _time_tool = (
     Tool.create_simple(
-        name="get_machining_time",
+        name="cam_get_time",
         description=(
             "Estimate machining (cycle) time for the document's CAM program: per setup and "
             "total, with feed time, rapid time, and tool-change count. Uses Fusion's default "
@@ -740,7 +725,7 @@ get_machining_time_item = Item.create_tool_item(
 )
 
 _nc_tool = Tool.create_simple(
-    name="get_nc_programs",
+    name="cam_get_nc_programs",
     description=(
         "List the document's NC programs (post/output jobs): each program's name, machine, "
         "post configuration, operation count, and the post parameters it exposes. Read-only — "
@@ -755,7 +740,7 @@ get_nc_programs_item = Item.create_tool_item(
 
 _compare_tool = (
     Tool.create_with_string_input(
-        name="compare_operations",
+        name="cam_compare_operations",
         description=(
             "Compare two CAM operations (by name) and report exactly which of their "
             "parameters differ — and the value on each side. Use this to understand what "

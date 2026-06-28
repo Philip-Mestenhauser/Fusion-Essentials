@@ -3,9 +3,9 @@
 Tests are written BEFORE the tool is wired further (project rule). The logic
 pinned here, no live Fusion: occurrence resolution (exact, then substring;
 missing reported), the TWO distinct ground flags (isGrounded = pin-in-space vs.
-isGroundToParent = release-from-parent-lock), move_occurrence building a
+isGroundToParent = release-from-parent-lock), assembly_move building a
 Matrix3D translation/rotation and applying it to occurrence.transform, and
-rigid_group collecting occurrences into RigidGroups.add. Fakes expose the real
+assembly_rigid_group collecting occurrences into RigidGroups.add. Fakes expose the real
 attributes the handlers set so we can assert on them.
 """
 
@@ -106,6 +106,7 @@ def _install(occ_names):
     # Matrix3D + Vector3D for move
     adsk.core.Matrix3D.create = staticmethod(FakeMatrix)
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
+    adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
     return design, occs, rg
 
 
@@ -156,7 +157,7 @@ class TestGround:
         assert res["isError"] is True and "Specify" in res["message"]
 
 
-# ── move_occurrence ──────────────────────────────────────────────────────────
+# ── assembly_move ──────────────────────────────────────────────────────────
 
 class TestMove:
     def test_translate_sets_transform(self):
@@ -186,8 +187,55 @@ class TestMove:
         res = asm.move_handler(occurrence="Block:1")
         assert res["isError"] is True and "no movement" in res["message"].lower()
 
+    def test_rotate_world_axis(self):
+        _, occs, _ = _install(["Block:1"])
+        out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=90, rotate_axis="y"))
+        o = _occ(occs, "Block:1")
+        assert o.transform.rotation is not None        # a rotation was set
+        assert out["rotate_axis"] == "y"
 
-# ── rigid_group ──────────────────────────────────────────────────────────────
+    def test_multi_axis_rotation(self):
+        _, occs, _ = _install(["Block:1"])
+        out = _payload(asm.move_handler(occurrence="Block:1", rotate_x=90, rotate_z=45))
+        o = _occ(occs, "Block:1")
+        assert o.transform.rotation is not None       # composed rotations landed
+        assert out["rotate_axis"] == "multi"
+        assert out["rotate_xyz"] == {"x": 90, "y": 0, "z": 45}
+
+    def test_single_and_multi_rejected_together(self):
+        _install(["Block:1"])
+        res = asm.move_handler(occurrence="Block:1", rotate_deg=30, rotate_x=10)
+        assert res["isError"] is True and "not both" in res["message"]
+
+    def test_rotate_about_edge_handle(self):
+        # AxisRef edge path: rotate about a straight EDGE's line (hinge), not the occ origin.
+        design, occs, _ = _install(["Block:1"])
+        import adsk.fusion, adsk.core
+        ct = adsk.core.Curve3DTypes
+        ct.Line3DCurveType = "LINE"
+        class _LineGeom:
+            curveType = "LINE"
+            direction = ("vec", 1, 0, 0)
+            origin = ("pt", 5, 0, 0)
+        class _Edge:
+            geometry = _LineGeom()
+        adsk.fusion.BRepEdge = _Edge
+        edge = _Edge()
+        h = "/v" + "E" * 70
+        class _D:
+            def findEntityByToken(self, t):
+                return [edge] if t == h else []
+        asm._inputs._common.design = lambda: _D()
+        out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=45, rotate_axis=h))
+        o = _occ(occs, "Block:1")
+        # rotation set about the edge's direction + a point ON the edge (5,0,0), not the occ origin
+        angle, axis, origin = o.transform.rotation
+        assert axis == ("vec", 1, 0, 0)
+        assert origin == ("pt", 5, 0, 0)
+        assert out["rotate_axis"] == "edge"
+
+
+# ── assembly_rigid_group ──────────────────────────────────────────────────────────────
 
 class TestRigidGroup:
     def test_groups_named_occurrences(self):

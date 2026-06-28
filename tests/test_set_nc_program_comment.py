@@ -1,4 +1,4 @@
-"""Unit tests for ``set_nc_program_comment.handler`` — the empty-input guard and
+"""Unit tests for ``cam_set_nc_comment.handler`` — the empty-input guard and
 multi-program behaviour.
 
 The bug this pins (maintainer block #2): ``comment`` defaults to ``""`` (never

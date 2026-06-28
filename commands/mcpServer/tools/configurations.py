@@ -3,15 +3,15 @@
 
 """MCP building block: read (and switch) the active configured design's configurations.
 
-  get_configurations -> the configuration table of the open design: each configuration
+  design_get_configurations -> the configuration table of the open design: each configuration
                         (row) with name/id/index and which is active, plus the table's
                         columns (title/type) and name. Optionally ACTIVATE a configuration
                         by name/id to switch the live design to it.
 
 A Configured Design (DataFile.isConfiguredDesign) holds multiple configurations as ROWS
 of a configuration table — e.g. a design with "Variant A" / "Variant B" options.
-Open it first (open_document handles configured designs via openUsingContext), then use
-this to see the configurations and switch between them (pair with get_screenshot to view
+Open it first (doc_open handles configured designs via openUsingContext), then use
+this to see the configurations and switch between them (pair with view_screenshot to view
 each). Switching is what lets you capture/compare configurations.
 
 Grounded in adsk.fusion:
@@ -23,14 +23,13 @@ Reading is read-only; activating MODIFIES which configuration the design shows.
 Handler runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -47,13 +46,6 @@ def _design():
         except Exception:
             design = None
     return design
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _top_table(design):
@@ -143,17 +135,17 @@ def handler(activate: str = "") -> dict:
 
     With no argument, returns the configuration table (rows = configurations, the active
     one flagged, plus columns). Pass 'activate' = a configuration name or id to switch the
-    live design to that configuration (then use get_screenshot to view it).
+    live design to that configuration (then use view_screenshot to view it).
     """
     design = _design()
     if not design:
-        return _error("No active design. Open a document first (open_document handles "
+        return _error("No active design. Open a document first (doc_open handles "
                       "configured designs too).")
 
     table = _top_table(design)
     if not table:
         return _error("The active design is not a Configured Design (it has no configuration "
-                      "table). Use get_configurations on a configured design — e.g. a design "
+                      "table). Use design_get_configurations on a configured design — e.g. a design "
                       "with Variant A/Variant B style options.")
 
     target = (activate or "").strip()
@@ -180,17 +172,9 @@ def handler(activate: str = "") -> dict:
         "now_active": after_table.get("active_configuration"),
         "table_name": after_table.get("table_name"),
         "configurations": after_table.get("configurations"),
-        "note": ("Configuration switched. Use get_screenshot to view it, or get_timeline / "
-                 "get_parameters to see what changed."),
+        "note": ("Configuration switched. Use view_screenshot to view it, or design_get_timeline / "
+                 "param_get to see what changed."),
     })
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 TOOL_DESCRIPTION = (
@@ -198,14 +182,14 @@ TOOL_DESCRIPTION = (
     "no argument it returns the configuration table: each configuration (row) with its name, "
     "id, index, and whether it is the active one, plus the table's columns and name — so you "
     "can see options like 'Variant A' / 'Variant B'. Pass 'activate' = a configuration "
-    "name or id to switch the live design to that configuration (then pair with get_screenshot "
-    "to view it, or get_timeline / get_parameters to see what differs). Reading is read-only; "
+    "name or id to switch the live design to that configuration (then pair with view_screenshot "
+    "to view it, or design_get_timeline / param_get to see what differs). Reading is read-only; "
     "activating changes which configuration the design shows. Requires a configured design to "
-    "be open (open_document opens those via openUsingContext)."
+    "be open (doc_open opens those via openUsingContext)."
 )
 
 tool = (
-    Tool.create_simple(name="get_configurations", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="design_get_configurations", description=TOOL_DESCRIPTION)
     .add_input_property("activate", {"type": "string",
                                      "description": "Optional: a configuration name or id to switch the design to."})
     .strict_schema()

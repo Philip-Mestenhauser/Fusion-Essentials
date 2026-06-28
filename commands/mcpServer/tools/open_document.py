@@ -5,8 +5,8 @@
 
 Pairs with the data-model tools — the agent gets an identifier from one of them and
 opens the document here. It accepts any of the id forms those tools emit:
-  - a lineage URN (`urn:adsk.wipprod:dm.lineage:...`)        — list_project_files 'id', source_id
-  - a versioned URN                                          — list_project_files 'versionId'
+  - a lineage URN (`urn:adsk.wipprod:dm.lineage:...`)        — data_list_files 'id', source_id
+  - a versioned URN                                          — data_list_files 'versionId'
   - a Fusion web URL (`https://…autodesk360.com/…/data/…`)   — fusionWebURL / source_url
 The web URL embeds the lineage URN as a base64url segment, which we decode and resolve.
 
@@ -21,7 +21,6 @@ Grounded in the Fusion Data API:
 """
 
 import base64
-import json
 import re
 
 import adsk.core
@@ -29,15 +28,9 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _b64url_decode(segment: str):
@@ -94,6 +87,19 @@ def _resolve_data_file(raw: str):
     return None, None, candidates
 
 
+# CRASH NOTE (verified live 2026-06, two crashes): a freshly DataFile.copy'd CAM/Manufacture
+# document with several external references (RFA model container + cloud part/machine refs) CANNOT
+# be safely touched from the API. BOTH of these crash the session (socket drops, server dies):
+#   * app.documents.openUsingContext(dataFile, ...)            — opening it
+#   * resolving/walking its reference graph to "pre-warm" it    — the earlier (wrong) "safe" path
+# The hazard is the heavy synchronous cloud reference-resolution, not one specific call — so there
+# is NO API path that safely opens or even inspects such a doc. We therefore do NOT touch the
+# reference graph here at all, and when the caller declares the doc is a multi-reference CAM
+# template (is_cam_template=true) we REFUSE the API open and instruct a UI open (the only stable
+# path). Detection cannot be automatic: inspecting the DataFile to detect CAM-ness is itself the
+# crash, so the signal must come from the caller.
+
+
 def _open_document(data_file):
     """Open a DataFile, returning (doc, method, error).
 
@@ -120,24 +126,59 @@ def _open_document(data_file):
     return None, None, "openUsingContext returned no document"
 
 
-def handler(file_id: str = "") -> dict:
+def handler(file_id: str = "", is_cam_template: bool = False,
+            force_api_open: bool = False) -> dict:
     """Open the document identified by file_id.
 
     file_id may be a lineage URN, a versioned URN, or a Fusion web URL (any of the id
     forms the data-model tools emit: 'id', 'versionId', 'fusionWebURL', 'source_id',
     'source_url'). Switches the active document. Opens configured designs too.
+
+    DECLARE-INTENT (the crash-safety contract): the caller MUST declare how to open, because a
+    multi-reference CAM template CANNOT be auto-detected (inspecting the file is itself the crash):
+      - is_cam_template=true  → it's a multi-ref CAM/Manufacture doc; the tool REFUSES the API open
+        (which crashes Fusion for these) WITHOUT touching the file, and instructs a UI open.
+      - force_api_open=true   → it's a normal doc; do the API open (resolve + openUsingContext).
+      - NEITHER               → REFUSE and ask the caller to declare. This removes the silent
+        default that previously let a bare doc_open take the crashing API path by accident.
+    If BOTH are set, is_cam_template wins (you cannot force-crash through the CAM guard).
     """
     raw = (file_id or "").strip()
     if not raw:
         return _error("Provide 'file_id' — a DataFile id or URL from the data-model tools: "
                       "a lineage 'id', a 'versionId', or a 'fusionWebURL'/'source_url'.")
 
+    # CAM template (wins over force_api_open): refuse the API open WITHOUT resolving/touching the
+    # DataFile at all — even resolving it (findFileById + reference walk) has crashed Fusion. Just
+    # return the UI-open instruction with the id the operator/agent already holds.
+    if is_cam_template:
+        return _ok({
+            "opened": False,
+            "refused_api_open": True,
+            "file_id": raw,
+            "note": "This is declared a multi-reference CAM template. Opening it (or even resolving "
+                    "its references) via the API crashes Fusion, so the API open is refused. Open "
+                    "it MANUALLY in the Fusion UI (Data Panel → the document), then confirm with "
+                    "sys_get_session before continuing. This is the only stable path for these docs.",
+        })
+
+    # DECLARE-INTENT default: with no intent declared, REFUSE rather than silently take the API path.
+    # The API path resolves the file (findFileById + openUsingContext) — and on a multi-ref CAM
+    # template that resolution/open is the crash. Since CAM-ness can't be auto-detected, a bare call
+    # is treated as unsafe-by-default: the caller must say which path they mean.
+    if not force_api_open:
+        return _error(
+            "doc_open needs you to DECLARE INTENT (a forgotten flag here previously crashed Fusion). "
+            "Pass force_api_open=true to open a NORMAL document via the API, OR is_cam_template=true "
+            "if this is a multi-reference CAM/Manufacture template (the tool then instructs a safe UI "
+            "open — the API open crashes Fusion for those). Nothing was resolved or opened.")
+
     data_file, resolved, candidates = _resolve_data_file(raw)
     if not data_file:
         tried = ", ".join(candidates) if candidates else raw
         return _error(f"Could not resolve '{raw}' to a file. Tried: {tried}. Pass a DataFile "
-                      "'id'/'versionId' or a 'fusionWebURL' from list_project_files / "
-                      "get_component_tree / get_setup_references (it may not exist or you may "
+                      "'id'/'versionId' or a 'fusionWebURL' from data_list_files / "
+                      "design_get_tree / cam_get_references (it may not exist or you may "
                       "lack access).")
 
     is_configured = bool(_safe(lambda: data_file.isConfiguredDesign, False))
@@ -172,37 +213,42 @@ def handler(file_id: str = "") -> dict:
     # stall the load AND freeze the UI. Report status honestly and tell the agent how to confirm.
     if info["is_active"] is False:
         info["note"] = (
-            "Document is still loading (open is asynchronous). Call get_session_info after a "
+            "Document is still loading (open is asynchronous). Call sys_get_session after a "
             "moment to confirm it has become the active document before operating on it."
         )
 
     return _ok(info)
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Open a Fusion document from a data-model identifier. 'file_id' accepts any id the "
     "data-model tools emit: a lineage 'id' (opens the latest version), a 'versionId' (opens "
     "that version), or a 'fusionWebURL' / 'source_url' (a Fusion web URL — the embedded id is "
-    "decoded automatically). Also resolves a 'source_id' from get_component_tree / "
-    "get_setup_references. This switches the active document in Fusion and opens Configured "
+    "decoded automatically). Also resolves a 'source_id' from design_get_tree / "
+    "cam_get_references. This switches the active document in Fusion and opens Configured "
     "Designs too (via openUsingContext). The result reports the resolved id, the open method, "
     "and whether it is a configured design. Opening a cloud document is asynchronous — call "
-    "get_session_info afterward to confirm it is active, then get_screenshot to inspect it."
+    "sys_get_session afterward to confirm it is active, then view_screenshot to inspect it. "
+    "DECLARE INTENT (required — a forgotten flag here has crashed Fusion): you MUST pass either "
+    "force_api_open=true (open a NORMAL document via the API) OR is_cam_template=true (a "
+    "multi-reference CAM/Manufacture template — the API open or even reference-inspection CRASHES "
+    "Fusion, so the tool refuses and tells you to open it in the Fusion UI / Data Panel, the only "
+    "stable path). A bare call with NEITHER flag refuses and resolves/opens nothing — because "
+    "CAM-ness cannot be auto-detected (inspecting the file is itself the crash), unsafe-by-default "
+    "is the safe behavior. If both flags are set, is_cam_template wins."
 )
 
-tool = Tool.create_with_string_input(
-    name="open_document",
-    description=TOOL_DESCRIPTION,
-    input_param_name="file_id",
-    input_param_description="A DataFile lineage/versioned URN, or a Fusion web URL (fusionWebURL/source_url).",
+tool = (
+    Tool.create_with_string_input(
+        name="doc_open",
+        description=TOOL_DESCRIPTION,
+        input_param_name="file_id",
+        input_param_description="A DataFile lineage/versioned URN, or a Fusion web URL (fusionWebURL/source_url).",
+    )
+    .add_input_property("force_api_open", {"type": "boolean",
+        "description": "Declare a NORMAL document: open it via the API (resolve + openUsingContext). REQUIRED for a normal open — without it (and without is_cam_template) the tool refuses, so a forgotten flag can't silently take the crash-prone API path. Default false."})
+    .add_input_property("is_cam_template", {"type": "boolean",
+        "description": "Declare this is a freshly-copied multi-reference CAM template. The tool then REFUSES the API open (which crashes Fusion for these docs) and instructs a manual UI open. Wins over force_api_open. Default false."})
 )
 
 item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)

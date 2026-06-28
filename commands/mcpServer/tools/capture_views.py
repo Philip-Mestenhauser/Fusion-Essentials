@@ -3,13 +3,13 @@
 
 """MCP building block: capture SEVERAL views of the model in one call (multi-view "eyes").
 
-  capture_views -> orient the camera to each requested view, capture each as a separate image, and
+  view_screenshot_multi -> orient the camera to each requested view, capture each as a separate image, and
                   return them all (interleaved with text labels) in one response. A single isometric
                   is easy to misread; seeing front/top/right/iso together lets the agent reliably
                   judge geometry, position, and proportion.
 
 Each view is captured by re-orienting + fit + saveAsImageFile (the same mechanism as
-get_screenshot, which captures only ONE viewport per call). The user's camera is saved once and
+view_screenshot, which captures only ONE viewport per call). The user's camera is saved once and
 restored at the end, so this is a non-destructive read.
 
 Grounded in the Fusion API:
@@ -27,10 +27,11 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _error
 
 app = adsk.core.Application.get()
 
-# Friendly name -> ViewOrientations enum (mirrors get_screenshot; no 'current' here — every view
+# Friendly name -> ViewOrientations enum (mirrors view_screenshot; no 'current' here — every view
 # is an explicit orientation).
 _ORIENTATIONS = {
     "top": "TopViewOrientation", "bottom": "BottomViewOrientation",
@@ -43,10 +44,6 @@ _DEFAULT_VIEWS = ["front", "top", "right", "iso-top-right"]
 _ALL_ORTHOS = ["front", "back", "left", "right", "top", "bottom"]
 _MAX_DIM = 4096
 _MAX_VIEWS = 8
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _parse_views(views: str):
@@ -148,12 +145,12 @@ TOOL_DESCRIPTION = (
     "isometric. 'views' = comma-separated view names (front, back, left, right, top, bottom, "
     "iso-top-right, iso-top-left, iso-bottom-right, iso-bottom-left), or 'all' for the six "
     "orthographic views; omit for a default front/top/right/iso set. 'width'/'height' size each "
-    "image. The camera is restored afterward (read-only). Prefer this over get_screenshot when "
+    "image. The camera is restored afterward (read-only). Prefer this over view_screenshot when "
     "judging a 3D layout."
 )
 
 tool = (
-    Tool.create_simple(name="capture_views", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="view_screenshot_multi", description=TOOL_DESCRIPTION)
     .add_input_property("views", {"type": "string",
                                   "description": "Comma-separated views, or 'all'; omit for front/top/right/iso default."})
     .add_input_property("width", {"type": "integer", "description": "Width of each image in px (default 600)."})

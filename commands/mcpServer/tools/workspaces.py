@@ -3,8 +3,8 @@
 
 """MCP building blocks for inspecting and switching Fusion workspaces.
 
-  list_workspaces  -> all selectable workspaces (id, name, productType, active)
-  switch_workspace -> activate a workspace by id or name (e.g. Design <-> Manufacture)
+  view_list_workspaces  -> all selectable workspaces (id, name, productType, active)
+  view_switch_workspace -> activate a workspace by id or name (e.g. Design <-> Manufacture)
 
 Grounded in adsk.core.UserInterface.workspaces / Workspace:
   - ui.workspaces is iterable; each Workspace has .id, .name, .isActive,
@@ -15,13 +15,12 @@ Grounded in adsk.core.UserInterface.workspaces / Workspace:
 Switching changes UI state, so handlers run on the main thread (the default).
 """
 
-import json
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error
 
 app = adsk.core.Application.get()
 
@@ -127,23 +126,16 @@ def switch_workspace_handler(workspace: str = "") -> dict:
 
 # --- result helpers (shared shape across tools) ---
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
 
 # --- tool definitions ---
 
 _list_tool = Tool.create_simple(
-    name="list_workspaces",
+    name="view_list_workspaces",
     description=(
         "List the Fusion workspaces the user can switch to (e.g. Design, "
         "Manufacture, Render), with each workspace's id, visible name, product "
         "type, and whether it is currently active. Use this to detect the current "
-        "workspace or to discover valid targets for switch_workspace. Read-only."
+        "workspace or to discover valid targets for view_switch_workspace. Read-only."
     ),
 ).strict_schema()
 list_workspaces_item = Item.create_tool_item(
@@ -151,13 +143,13 @@ list_workspaces_item = Item.create_tool_item(
 )
 
 _switch_tool = Tool.create_with_string_input(
-    name="switch_workspace",
+    name="view_switch_workspace",
     description=(
         "Switch the active Fusion workspace. Pass 'workspace' as a workspace id "
         "('FusionSolidEnvironment', 'CAMEnvironment'), a visible name ('Design', "
         "'Manufacture'), or an alias ('design', 'manufacture'/'cam'). Switching to "
         "Manufacture is required for some CAM UI actions, though CAM data can be "
-        "read without switching (see get_cam_setups). Changes the active workspace."
+        "read without switching (see cam_get_setups). Changes the active workspace."
     ),
     input_param_name="workspace",
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",

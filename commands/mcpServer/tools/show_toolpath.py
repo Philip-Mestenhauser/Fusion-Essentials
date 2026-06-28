@@ -3,8 +3,8 @@
 
 """MCP building block: control which CAM toolpaths are DISPLAYED (the blue paths).
 
-  show_toolpath(action=...) — show / hide individual generated toolpaths so an agent can look at
-  one operation's path at a time (the CAM analog of set_visibility, but for operations rather than
+  cam_show_toolpath(action=...) — show / hide individual generated toolpaths so an agent can look at
+  one operation's path at a time (the CAM analog of view_set_visibility, but for operations rather than
   component occurrences). Toolpaths only render in the Manufacture (CAM) workspace.
 
     show         -> turn ON one operation's toolpath (by name).
@@ -16,7 +16,7 @@
 
   Optional 'fit' (with show/isolate): aim+fit the camera to that operation's TOOLPATH bounding box
   (which is bigger than the part — it includes approach/retract moves; focusing on the part clips
-  it). Pair with get_screenshot to capture.
+  it). Pair with view_screenshot to capture.
 
 SAFE BY DESIGN: this toggles Operation.isLightBulbOn (a clean data-model property). It does NOT
 touch the simulation / in-process-stock UI commands (Iron*/Simulation*), which enter a modal
@@ -29,33 +29,17 @@ Grounded in adsk.cam:
 Handlers run on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload):
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text):
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _get_cam():
@@ -145,7 +129,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     action: show | hide | isolate | show_folder | hide_all | list. operation: op name (show/hide/
     isolate). folder: folder or setup name (show_folder). fit: fit the camera to the op's toolpath
     extents (show/isolate). Toolpaths render only in the Manufacture workspace. Pair with
-    get_screenshot.
+    view_screenshot.
     """
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
@@ -178,7 +162,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
             return _error("Provide 'folder' — the folder or setup name to show.")
         ops, matched = _find_folder_ops(cam, folder)
         if matched is None:
-            return _error(f"No folder/setup named '{folder}'. Use show_toolpath(list) or get_cam_operations.")
+            return _error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get_operations.")
         # hide everything, then show this folder's generated ops
         for _, o in _all_operations(cam):
             _set_bulb(o, False)
@@ -217,7 +201,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         app.activeViewport.refresh()
         return _ok({"action": action, "operation": name,
                     "warning": "This operation has no generated toolpath yet — nothing to display. "
-                               "Generate it first (generate_toolpaths).",
+                               "Generate it first (cam_generate).",
                     "has_toolpath": False})
 
     fitted = False
@@ -226,23 +210,23 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     app.activeViewport.refresh()
     return _ok({"action": action, "operation": name, "fit": fitted,
                 "note": "Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
-                        "get_screenshot."})
+                        "view_screenshot."})
 
 
 TOOL_DESCRIPTION = (
     "Show/hide individual CAM TOOLPATHS (the displayed blue paths) so you can look at one "
-    "operation's path at a time — the CAM analog of set_visibility, for operations. 'action': "
+    "operation's path at a time — the CAM analog of view_set_visibility, for operations. 'action': "
     "'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
     "+ state). 'fit' fits the camera to the operation's TOOLPATH extents (bigger than the part — "
     "includes approach/retract moves). Toolpaths render only in the MANUFACTURE workspace; pair "
-    "with get_screenshot. Toggles Operation.isLightBulbOn — does NOT touch simulation/in-process-"
+    "with view_screenshot. Toggles Operation.isLightBulbOn — does NOT touch simulation/in-process-"
     "stock commands (those are unsafe to drive from here)."
 )
 
 tool = (
     Tool.create_with_string_input(
-        name="show_toolpath",
+        name="cam_show_toolpath",
         description=TOOL_DESCRIPTION,
         input_param_name="action",
         input_param_description="show | hide | isolate | show_folder | hide_all | list.",

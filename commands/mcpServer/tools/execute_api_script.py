@@ -103,7 +103,7 @@ def handler(script: str) -> dict:
             except Exception:
                 pass  # if abort itself fails, nothing more we can do
         tb = traceback.format_exc()
-        app.log(f"Fusion-Essentials MCP execute_api_script error: {e}\n{tb}")
+        app.log(f"Fusion-Essentials MCP sys_execute_script error: {e}\n{tb}")
         return _error_result(tb)
     finally:
         if temp_file and os.path.exists(temp_file):
@@ -133,12 +133,12 @@ TOOL_DESCRIPTION = (
     "auto-roll-back on error — a partial change can commit, so verify state afterward and "
     "undo manually if needed.\n"
     "- Use print() to return values/information; printed output is included in the result.\n\n"
-    "Before editing a model, consider reading its state first (e.g. get_session_info). "
+    "Before editing a model, consider reading its state first (e.g. sys_get_session). "
     "After changes, verify the result."
 )
 
 tool = Tool.create_with_string_input(
-    name="execute_api_script",
+    name="sys_execute_script",
     description=TOOL_DESCRIPTION,
     input_param_name="script",
     input_param_description="Fusion API Python source code to execute. Must define def run(context):",

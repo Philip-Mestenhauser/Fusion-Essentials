@@ -49,7 +49,7 @@ _reload_handler = None
 def _addin_root_folder() -> str:
     """Absolute path to the add-in root folder (where the .manifest lives).
 
-    This file is at <root>/commands/mcpServer/tools/reload_addin.py, so the root
+    This file is at <root>/commands/mcpServer/tools/sys_reload_addin.py, so the root
     is four levels up.
     """
     here = os.path.dirname(os.path.abspath(__file__))
@@ -167,7 +167,7 @@ TOOL_DESCRIPTION = (
     "further calls."
 )
 
-tool = Tool.create_simple(name="reload_addin", description=TOOL_DESCRIPTION).strict_schema()
+tool = Tool.create_simple(name="sys_reload_addin", description=TOOL_DESCRIPTION).strict_schema()
 
 # Runs on the main thread, but only to start a timer; the actual reload happens
 # later via the custom event (also main thread).

@@ -1,4 +1,4 @@
-"""Unit tests for ``section_view.py`` — the Section Analysis cutaway tool.
+"""Unit tests for ``view_section.py`` — the Section Analysis cutaway tool.
 
 The branches that matter and could silently misbehave: action validation, plane
 aliasing (top/front/right -> xy/xz/yz), the ``through``-occurrence path that
@@ -120,6 +120,10 @@ def _install(occurrences=(), existing_sections=()):
     sv.app = FakeApp(design)
     import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    # the bare-plane path uses PlaneRef, which resolves via _common.design()/target_component()
+    # (the app-reference seam) — point them at the fake root so an origin alias resolves.
+    sv._inputs._common.design = lambda: design
+    sv._inputs._common.target_component = lambda d: root
     return sections
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for ``sketch_constraint.py`` — apply geometric constraints to sketch entities.
+"""Unit tests for ``sketch_constrain.py`` — apply geometric constraints to sketch entities.
 
 Adds the Sketch Constrain menu (perpendicular / parallel / tangent / equal / midpoint / symmetry /
 concentric / collinear / horizontal / vertical / coincident / fix) to sketch curves, referenced by

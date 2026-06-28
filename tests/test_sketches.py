@@ -96,3 +96,147 @@ class TestResolvePlane:
         planar, desc = sk._resolve_plane(_design(), "nonsense")
         assert planar is None
         assert desc is None
+
+
+# ── new sketch kinds (ellipse/slot/point/spline/center_rectangle) + is_construction ─────────────
+
+import json
+
+
+class _Curve:
+    def __init__(self):
+        self.isConstruction = False
+
+
+class _Coll:
+    def __init__(self):
+        self._items = []
+        self.last = None
+    def _make(self, *a):
+        c = _Curve(); self._items.append(c); self.last = a; return c
+    # the various add* methods the handler calls
+    def addByTwoPoints(self, a, b): return self._make("line", a, b)
+    def addTwoPointRectangle(self, a, b): return self._make("rect", a, b)
+    def addCenterPointRectangle(self, c, corner): return self._make("crect", c, corner)
+    def addByCenterRadius(self, c, r): return self._make("circle", c, r)
+    def addByCenterStartSweep(self, c, s, sw): return self._make("arc", c, s, sw)
+    def addScribedPolygon(self, c, n, a, r, b): return self._make("poly", c, n, r)
+    def add(self, *a): return self._make("add", *a)
+    def addCenterToCenterSlot(self, p1, p2, w): return self._make("slot", p1, p2, w)
+    @property
+    def count(self):
+        return len(self._items)
+    def item(self, i):
+        return self._items[i]
+
+
+class _AllCurves:
+    """sketch.sketchCurves: a unified count/item view over every sub-collection's curves."""
+    def __init__(self, sketch):
+        self._s = sketch
+    @property
+    def count(self):
+        return sum(c.count for c in self._s._colls)
+    def item(self, i):
+        flat = [cv for c in self._s._colls for cv in c._items]
+        return flat[i]
+    # the handler also calls sketch.sketchCurves.sketchLines etc. via _draw -> use attribute access
+    def __getattr__(self, n):
+        return getattr(self._s, n)
+
+
+class FakeSketch:
+    def __init__(self, name="S"):
+        self.name = name
+        self.isComputeDeferred = False
+        self.isVisible = True
+        self.sketchLines = _Coll()
+        self.sketchCircles = _Coll()
+        self.sketchArcs = _Coll()
+        self.sketchEllipses = _Coll()
+        self.sketchFittedSplines = _Coll()
+        self.sketchPoints = _Coll()
+        self._colls = [self.sketchLines, self.sketchCircles, self.sketchArcs,
+                       self.sketchEllipses, self.sketchFittedSplines, self.sketchPoints]
+        self.profiles = type("P", (), {"count": 1})()
+    @property
+    def sketchCurves(self):
+        return _AllCurves(self)
+
+
+class FakeSketches:
+    def __init__(self, sk_):
+        self._l = [sk_]
+    @property
+    def count(self):
+        return len(self._l)
+    def item(self, i):
+        return self._l[i]
+    def itemByName(self, n):
+        return next((s for s in self._l if s.name == n), None)
+
+
+class FakeDesignDraw:
+    def __init__(self, sketch):
+        self.rootComponent = type("R", (), {"sketches": FakeSketches(sketch)})()
+        self.activeComponent = self.rootComponent
+
+
+def _install_draw(sketch):
+    sk.app = type("A", (), {"activeProduct": FakeDesignDraw(sketch)})()
+    import adsk.fusion, adsk.core
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesignDraw) else None
+    adsk.core.Point3D.create = staticmethod(lambda x, y, z: type("P", (), {"x": x, "y": y, "z": z})())
+    class _OC:
+        def __init__(self): self._i = []
+        def add(self, x): self._i.append(x)
+        @property
+        def count(self): return len(self._i)
+    adsk.core.ObjectCollection.create = staticmethod(_OC)
+
+
+def _payload(res):
+    assert res["isError"] is False, res
+    return json.loads(res["content"][0]["text"])
+
+
+class TestNewKinds:
+    def test_ellipse(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="ellipse", cx=0, cy=0, radius=10, minor=4))
+        assert s.sketchEllipses.count == 1
+
+    def test_slot(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="slot", x1=0, y1=0, x2=20, y2=0, radius=3))
+        assert s.sketchLines.last[0] == "slot"
+
+    def test_point(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="point", cx=5, cy=5))
+        assert s.sketchPoints.count == 1
+
+    def test_spline(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="spline", points=[[0, 0], [5, 8], [10, 0]]))
+        assert s.sketchFittedSplines.count == 1
+
+    def test_center_rectangle(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="center_rectangle", cx=0, cy=0, x2=10, y2=5))
+        assert s.sketchLines.last[0] == "crect"
+
+    def test_is_construction_marks_curve(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5, is_construction=True))
+        assert s.sketchCircles.item(0).isConstruction is True
+
+    def test_non_construction_default(self):
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="circle", cx=0, cy=0, radius=5))
+        assert s.sketchCircles.item(0).isConstruction is False
+
+    def test_ellipse_needs_positive_radius(self):
+        s = FakeSketch(); _install_draw(s)
+        res = sk.add_sketch_geometry_handler(kind="ellipse", cx=0, cy=0, radius=0)
+        assert res["isError"] is True

@@ -18,13 +18,12 @@ file is read in its own try/except, and folder recursion + total files are cappe
 so a very large project can't blow the main-thread time budget.
 """
 
-import json
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error
 
 app = adsk.core.Application.get()
 
@@ -34,7 +33,7 @@ _MAX_FOLDER_DEPTH = 25
 
 
 # ---------------------------------------------------------------------------
-# list_projects
+# data_list_projects
 # ---------------------------------------------------------------------------
 
 def list_projects_handler() -> dict:
@@ -63,7 +62,7 @@ def list_projects_handler() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# list_project_files
+# data_list_files
 # ---------------------------------------------------------------------------
 
 def list_project_files_handler(project: str = "", project_id: str = "",
@@ -245,20 +244,13 @@ def _file_summary(f, folder_path: str = "") -> dict:
 # shared result helpers
 # ---------------------------------------------------------------------------
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
 
 # ---------------------------------------------------------------------------
 # tool definitions
 # ---------------------------------------------------------------------------
 
 _list_projects_tool = Tool.create_simple(
-    name="list_projects",
+    name="data_list_projects",
     description=(
         "List the Fusion data projects in the user's active hub. Returns each "
         "project's name and id. Use this to discover available projects before "
@@ -272,7 +264,7 @@ list_projects_item = Item.create_tool_item(
 
 _list_project_files_tool = (
     Tool.create_simple(
-        name="list_project_files",
+        name="data_list_files",
         description=(
             "List the files in a Fusion data project, identified by name (project) "
             "or id (project_id). Returns each file's name, id (stable lineage UID), "

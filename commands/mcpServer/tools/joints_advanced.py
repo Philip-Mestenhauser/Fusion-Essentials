@@ -1,22 +1,22 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: capture_position, as_built_joint, assembly_constraint.
+"""MCP building blocks: assembly_capture_position, joint_create_as_built, assembly_constrain.
 
-  capture_position    -> the timeline POSE mechanic for flexible/jointed assemblies. When you move a
+  assembly_capture_position    -> the timeline POSE mechanic for flexible/jointed assemblies. When you move a
                          jointed component, the move is transient until captured. 'capture' writes
                          the current pose into the timeline (valid only when a move is pending);
                          'revert' discards the latest captured position; 'status' reports whether a
                          move is pending and how many positions are captured. WRITES (capture/revert).
-  as_built_joint      -> joint two occurrences WHERE THEY ALREADY ARE (no joint origins needed). A
+  joint_create_as_built      -> joint two occurrences WHERE THEY ALREADY ARE (no joint origins needed). A
                          rigid as-built locks them in place. WRITES.
-  assembly_constraint -> the Constrain Components relationship: constrain two occurrences' geometry
+  assembly_constrain -> the Constrain Components relationship: constrain two occurrences' geometry
                          (faces/edges/etc.) flush / coincident / concentric / at an angle. The
                          relationship type is INFERRED from the selected geometry. Uses the user's
-                         current Fusion selection (two entities) — pair with request_user_selection.
+                         current Fusion selection (two entities) — pair with sys_request_selection.
                          WRITES.
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Design.snapshots: .hasPendingSnapshot, .add() [valid only when pending], Snapshot.deleteMe()
   - rootComponent.asBuiltJoints.createInput(occ1, occ2, geometry|None) -> add(input)
   - rootComponent.assemblyConstraints.createInput() -> input.geometricRelationships
@@ -24,36 +24,20 @@ Grounded in adsk.fusion (signatures confirmed via get_api_doc):
 Handlers run on the main thread; capture/revert + the joint/constraint creators WRITE.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-# Reuse the joint tool's autonomous geometry resolver so assembly_constraint can snap to geometry
+from ._common import _ok, _error, _safe
+# Reuse the joint tool's autonomous geometry resolver so assembly_constrain can snap to geometry
 # (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection — same '<occurrence>:<snap>' grammar.
 from .joint import _resolve_snap_entity, _parse_snap
 
 app = adsk.core.Application.get()
 
 _CAPTURE_ACTIONS = ("capture", "revert", "status")
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -90,7 +74,7 @@ def _find_one(design, name):
     return None, sample
 
 
-# ------------------------------------------------------------- capture_position
+# ------------------------------------------------------------- assembly_capture_position
 
 def capture_position_handler(action: str = "status") -> dict:
     """Capture / revert / report the assembly's flexible position in the timeline.
@@ -143,7 +127,7 @@ def capture_position_handler(action: str = "status") -> dict:
                 "note": "Latest captured position discarded (back to the joint-defined state)."})
 
 
-# ---------------------------------------------------------------- as_built_joint
+# ---------------------------------------------------------------- joint_create_as_built
 
 def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "") -> dict:
     """Create a rigid as-built joint between two occurrences where they already are.
@@ -179,7 +163,7 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "") -
                 "note": "Occurrences rigidly joined where they already are."})
 
 
-# ------------------------------------------------------------ assembly_constraint
+# ------------------------------------------------------------ assembly_constrain
 
 _UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 
@@ -302,7 +286,7 @@ _CAPTURE_DESC = (
 )
 capture_tool = (
     Tool.create_with_string_input(
-        name="capture_position", description=_CAPTURE_DESC,
+        name="assembly_capture_position", description=_CAPTURE_DESC,
         input_param_name="action", input_param_description="capture | revert | status.")
     .strict_schema()
 )
@@ -315,7 +299,7 @@ _ASBUILT_DESC = (
     "names to lock together in place. WRITES."
 )
 asbuilt_tool = (
-    Tool.create_simple(name="as_built_joint", description=_ASBUILT_DESC)
+    Tool.create_simple(name="joint_create_as_built", description=_ASBUILT_DESC)
     .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name."})
     .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name."})
     .strict_schema()
@@ -334,7 +318,7 @@ _CONSTRAINT_DESC = (
     "pass 'occurrence_one'/'occurrence_two', select one entity on each in Fusion first. WRITES."
 )
 constraint_tool = (
-    Tool.create_simple(name="assembly_constraint", description=_CONSTRAINT_DESC)
+    Tool.create_simple(name="assembly_constrain", description=_CONSTRAINT_DESC)
     .add_input_property("relationships", {"type": "array",
         "description": "List of {snap_one, snap_two, flip?, offset?, angle_deg?} pairs added to ONE constraint, solved together (the way to fully locate a part).",
         "items": {"type": "object"}})

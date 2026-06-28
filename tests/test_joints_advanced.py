@@ -1,16 +1,16 @@
-"""Unit tests for ``joints_advanced.py`` — capture_position, as_built_joint, assembly_constraint.
+"""Unit tests for ``joints_advanced.py`` — assembly_capture_position, joint_create_as_built, assembly_constrain.
 
 Tests written BEFORE further wiring (project rule). The nuances pinned, no live
 Fusion:
 
-  capture_position — the timeline pose mechanic. Capture is only valid when a move
+  assembly_capture_position — the timeline pose mechanic. Capture is only valid when a move
   is pending (Design.snapshots.hasPendingSnapshot); 'revert' deletes the latest
   snapshot back to the joint-defined state; 'status' reports pending + count.
 
-  as_built_joint — a joint where parts ALREADY are; createInput(occ1, occ2, None)
+  joint_create_as_built — a joint where parts ALREADY are; createInput(occ1, occ2, None)
   for a rigid as-built; occurrences resolved by name.
 
-  assembly_constraint — the new Constrain Components: build geometric relationships
+  assembly_constrain — the new Constrain Components: build geometric relationships
   between two occurrences' entities (type inferred: flush/coincident/concentric/
   angle). Here we pin the occurrence resolution + input assembly, with geometry
   entities supplied as opaque tokens (real BRep proxies need a live session).
@@ -140,7 +140,7 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-# ── capture_position ─────────────────────────────────────────────────────────
+# ── assembly_capture_position ─────────────────────────────────────────────────────────
 
 class TestCapturePosition:
     def test_capture_when_pending(self):
@@ -179,7 +179,7 @@ class TestCapturePosition:
         assert res["isError"] is True and "Unknown action" in res["message"]
 
 
-# ── as_built_joint ───────────────────────────────────────────────────────────
+# ── joint_create_as_built ───────────────────────────────────────────────────────────
 
 class TestAsBuiltJoint:
     def test_rigid_as_built_passes_null_geometry(self):
@@ -201,7 +201,7 @@ class TestAsBuiltJoint:
         assert res["isError"] is True and "two distinct" in res["message"].lower()
 
 
-# ── assembly_constraint ──────────────────────────────────────────────────────
+# ── assembly_constrain ──────────────────────────────────────────────────────
 
 class TestAssemblyConstraint:
     def test_missing_occurrence_errors(self):

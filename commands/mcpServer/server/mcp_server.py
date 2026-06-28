@@ -164,7 +164,7 @@ class SimpleMCPServer:
         """Run handler_func(**arguments) on Fusion's main thread via TaskManager.
 
         enforce_timeout=False waits indefinitely for the callback to complete — for tools (e.g.
-        execute_api_script) whose work cannot be interrupted and would still commit, so a timeout
+        sys_execute_script) whose work cannot be interrupted and would still commit, so a timeout
         would only report a false failure for a change that actually applied.
         """
         import time

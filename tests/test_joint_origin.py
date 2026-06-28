@@ -38,12 +38,13 @@ class TestKpName:
 # ── _geometry_from_args: validation gates ──────────────────────────────────
 
 def _call(anchor="coordinates", target="at", x=0, y=0, z=0,
-          sketch_name="", entity_index=0, keypoint=None, design=None, comp=None):
+          sketch_name="", entity_index=0, keypoint=None, design=None, comp=None,
+          geometry_handle=None):
     # Signature: (design, comp, anchor, target, x_cm, y_cm, z_cm,
-    #             sketch_name, entity_index, keypoint)
+    #             sketch_name, entity_index, keypoint, geometry_handle)
     return jo._geometry_from_args(
         design or SimpleNamespace(), comp or SimpleNamespace(),
-        anchor, target, x, y, z, sketch_name, entity_index, keypoint,
+        anchor, target, x, y, z, sketch_name, entity_index, keypoint, geometry_handle,
     )
 
 
@@ -76,3 +77,85 @@ class TestGeometryFromArgsValidation:
         g, desc, err = _call(anchor="sketch_line", sketch_name="S", entity_index=5)
         assert g is None
         assert "out of range" in err
+
+
+# ── anchor='geometry': BRep face/edge/vertex handle (geometry-as-values) ────────────────────────
+
+class _FakePlane:
+    pass
+
+
+class _FakeFace:
+    def __init__(self, planar):
+        self.geometry = _FakePlane() if planar else object()  # plane vs non-plane surface
+
+
+class _FakeEdge:
+    pass
+
+
+class _FakeVertex:
+    pass
+
+
+def _install_geom(handle_map):
+    """Wire adsk types + a design whose findEntityByToken resolves the geometry handles."""
+    import adsk.core, adsk.fusion
+    adsk.core.Plane = _FakePlane
+    adsk.fusion.BRepFace = _FakeFace
+    adsk.fusion.BRepEdge = _FakeEdge
+    adsk.fusion.BRepVertex = _FakeVertex
+    # JointGeometry factory records which create* was used
+    calls = {}
+    class JG:
+        @staticmethod
+        def createByPlanarFace(face, edge, kp):
+            calls["kind"] = "planar_face"; return ("g", "planar")
+        @staticmethod
+        def createByNonPlanarFace(face, kp):
+            calls["kind"] = "non_planar_face"; return ("g", "nonplanar")
+        @staticmethod
+        def createByCurve(edge, kp):
+            calls["kind"] = "curve"; return ("g", "curve")
+        @staticmethod
+        def createByPoint(v):
+            calls["kind"] = "point"; return ("g", "point")
+    adsk.fusion.JointGeometry = JG
+    kpt = adsk.fusion.JointKeyPointTypes
+    kpt.CenterKeyPoint = 3; kpt.MiddleKeyPoint = 1
+    class _D:
+        def findEntityByToken(self, t):
+            e = handle_map.get(t)
+            return [e] if e is not None else []
+    jo._inputs._common.design = lambda: _D()
+    return calls
+
+
+class TestGeometryAnchor:
+    def test_planar_face_uses_createByPlanarFace(self):
+        calls = _install_geom({"F": _FakeFace(planar=True)})
+        g, desc, err = _call(anchor="geometry", geometry_handle="F")
+        assert err is None and g is not None
+        assert calls["kind"] == "planar_face"
+        assert "normal" in desc
+
+    def test_cylinder_face_uses_nonplanar(self):
+        calls = _install_geom({"C": _FakeFace(planar=False)})
+        g, desc, err = _call(anchor="geometry", geometry_handle="C")
+        assert err is None and calls["kind"] == "non_planar_face"
+
+    def test_edge_uses_createByCurve(self):
+        calls = _install_geom({"E": _FakeEdge()})
+        g, desc, err = _call(anchor="geometry", geometry_handle="E", keypoint=1)
+        assert err is None and calls["kind"] == "curve"
+        assert "edge" in desc.lower()
+
+    def test_vertex_uses_createByPoint(self):
+        calls = _install_geom({"V": _FakeVertex()})
+        g, desc, err = _call(anchor="geometry", geometry_handle="V")
+        assert err is None and calls["kind"] == "point"
+
+    def test_bad_geometry_handle_errors(self):
+        _install_geom({})   # nothing resolves
+        g, desc, err = _call(anchor="geometry", geometry_handle="missing")
+        assert g is None and err is not None

@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 35  |  **Behaviors pinned:** 446
+**Tools with a test file:** 55  |  **Behaviors pinned:** 694
 
 ## `active_component`
 
@@ -91,11 +91,64 @@ after changing tests._
 - translation scaled to cm
 - missing occurrence errors
 - zero move errors
+- rotate world axis
+- multi axis rotation
+- single and multi rejected together
+- rotate about edge handle
 **RigidGroup**
 - groups named occurrences
 - include children flag
 - needs at least two
 - missing reported
+
+## `assembly_probe`
+
+> Unit tests for ``assembly_probe.py`` — structured kinematic state of an assembly.
+
+**Guards**
+- unknown units
+**Probe**
+- positions scaled to display units
+- ground flags and grounded list
+- joint type and dof mapping
+- rigid and cylindrical dof
+- occurrence joint cross index
+- include joints false skips
+**Health**
+- all healthy
+- broken joint surfaced
+- timeline problem surfaced
+- health message deduped
+
+## `cam_create_setup`
+
+> Unit tests for ``cam_create_setup.py`` — create a CAM (Manufacture) setup on a part.
+
+**OperationType**
+- default is milling
+- turning
+- unknown type errors
+**ModelSelection**
+- all root bodies when omitted
+- named body
+- body by handle
+- missing named model errors
+- no bodies at all errors
+**NamingAndGuards**
+- custom name
+- no cam product errors
+
+## `cam_edit_operation`
+
+> Unit tests for ``cam_edit_operation.py`` — set CAM operation parameters (feeds/speeds/stepdown/...).
+
+**EditOperation**
+- sets param dict
+- accepts name equals value strings
+- unknown param reported
+- unknown operation
+- invalid value reports and does not partially apply
+- no parameters errors
 
 ## `cam_info`
 
@@ -129,7 +182,7 @@ after changing tests._
 
 ## `capture_views`
 
-> Unit tests for ``capture_views.py`` — capture several orthographic/iso views in one call.
+> Unit tests for ``view_screenshot_multi.py`` — capture several orthographic/iso views in one call.
 
 **ParseViews**
 - default set
@@ -138,6 +191,43 @@ after changing tests._
 - dedupes preserving order
 - unknown view errors
 - all keyword expands to six orthos
+
+## `combine`
+
+> Unit tests for ``combine.py`` — boolean join/cut/intersect of solid bodies.
+
+**Guards**
+- unknown operation
+- target not found
+- no tools
+- tool not found
+- tool same as target
+**Combine**
+- join sets operation
+- cut sets operation
+- comma string tools parsed
+- keep tools flag
+- new component flag
+
+## `common`
+
+> Unit tests for the shared tool helpers (tools/_common.py).
+
+**ResponseBuilders**
+- ok wraps payload as json text
+- error sets flag and mirrors message
+- underscore aliases are the same callables
+**Safe**
+- returns value
+- swallows exception returns default
+**Scale**
+- known units
+- default is mm
+- unknown unit is none
+- case and whitespace insensitive
+**TargetComponent**
+- returns active component when set
+- falls back to root when no active
 
 ## `component_tree`
 
@@ -167,9 +257,24 @@ after changing tests._
 - truncates at row cap
 - no truncation under cap
 
+## `construction`
+
+> Unit tests for ``construction.py`` — point / axis / plane construction datums.
+
+**Guards**
+- unknown units
+- unknown kind
+- bad axis
+- bad plane
+- direct modeling env error is friendly
+**Construction**
+- point scales coords
+- axis direction and origin
+- plane offset from named plane
+
 ## `create_component`
 
-> Unit tests for ``create_component.py`` — make a new empty component occurrence.
+> Unit tests for ``model_create_component.py`` — make a new empty component occurrence.
 
 **CreateComponent**
 - creates component
@@ -179,11 +284,29 @@ after changing tests._
 - activate makes it edit target
 - no activate by default
 - unknown units errors
+- orientation rotation
+- unknown rotate axis errors
 - no active design errors
+
+## `data_hubs`
+
+> Unit tests for ``data_hubs.py`` — list Autodesk data hubs and switch the active one.
+
+**List**
+- lists all hubs with active flag
+- default action is list
+**Switch**
+- switch by name
+- switch by id
+- switch case insensitive name
+- already active is noop
+- unknown hub errors and lists available
+- switch requires hub
+- unknown action errors
 
 ## `data_management`
 
-> Unit tests for ``data_management.py`` path helpers — pure string/tree logic.
+> Unit tests for the former ``data_management`` tools — pure string/tree logic + handler guards.
 
 **SplitPath**
 - empty is no segments
@@ -257,9 +380,59 @@ after changing tests._
 - missing folder errors with hint
 - missing nested segment names the level
 
+## `design_export`
+
+> Unit tests for ``design_export.py`` — export a body/component/whole-design to a neutral CAD file.
+
+**FormatDispatch**
+- step uses step options
+- iges uses iges options
+- sat uses sat options
+- stl uses stl options
+- unknown format errors
+**TargetResolution**
+- whole design when no target
+- body by name
+- body by handle
+- missing named target errors
+**PathHandling**
+- missing path errors
+- extension auto appended
+
+## `doc_lifecycle`
+
+> Unit tests for the two CLOUD-COPY handlers in doc_lifecycle: save_document_as_handler (Document.saveAs of the active doc) and copy_document_handler (DataFile.copy of a saved file).
+
+**SaveDocumentAs**
+- requires name
+- requires destination project
+- no active document
+- unknown project lists available
+- missing folder without create path errors
+- saves to root and tags description
+- create path makes nested folders
+- document id null until urn assigned
+- document id surfaced when urn
+- saveas false return is an error
+- resolves project by id
+**CopyDocument**
+- requires a source
+- requires destination project
+- unknown document id errors
+- copy by id into root reports xrefs
+- copy applies requested rename
+- duplicate name in destination refuses
+- copy by name needs source project
+- create path makes nested destination
+- copy by name resolves source in named project
+- copy by name unknown source project errors
+- copy by name missing file lists seen
+- copy returning nothing is an error
+- rename failure surfaces warning not error
+
 ## `edit_joint`
 
-> Unit tests for ``edit_joint`` — edit an EXISTING joint in place (no remaking).
+> Unit tests for ``joint_edit`` — edit an EXISTING joint in place (no remaking).
 
 **FindAndGuards**
 - unknown joint errors
@@ -313,10 +486,123 @@ after changing tests._
 - operation mapping cut
 - symmetric flag passed
 - negative distance allowed
+**ToObject**
+- extrude to face uses to entity extent
+- to object overrides distance
+- bad to object handle errors
+**TargetBodies**
+- cut scoped to bodies
+- target bodies by handle
+- target bodies rejected on new
+- bad target body errors
+
+## `fillet`
+
+> Unit tests for ``fillet.py`` — model_fillet + model_chamfer.
+
+**Guards**
+- unknown units
+- nonpositive radius
+- body not found
+- bad edge filter
+**Fillet**
+- fillet all edges scaled
+- fillet convex filter
+- fillet concave filter
+- default most recent body
+**Chamfer**
+- chamfer scales distance
+- two distance chamfer
+- equal distance when no second
+**EdgeHandles**
+- fillet specific edges via handles
+- edges take precedence over body
+- bad edge handle errors
+
+## `find_geometry`
+
+> Unit tests for ``find_geometry.py`` — query geometry, return stable handles.
+
+**Guards**
+- unknown units
+- unresolved target
+**Find**
+- returns handles and scaled positions
+- kind filter cylinder only
+- radius filter
+- nearest to sorts
+- every match has a handle
+
+## `get_screenshot`
+
+> Unit tests for ``get_screenshot.py`` _isolate_for_fit — the fit_to visibility helper.
+
+**IsolateForFit**
+- hides others and restores
+- substring match
+- no match returns none
+- already hidden others not restored on
+
+## `inputs`
+
+> Unit tests for the typed INPUT KINDS framework (_inputs.py).
+
+**GeometryHandle**
+- resolves planar face
+- rejects wrong geometry kind
+- stale handle error
+- contract note names the required kind
+- schema includes contract note
+**GeometryHandleList**
+- resolves list of edge handles
+- accepts comma string
+- one bad handle fails with index
+- wrong kind in list rejected
+- empty optional returns empty list
+- schema is array
+**PlaneRef**
+- origin alias
+- alias front maps to xz
+- construction plane by name
+- planar face handle
+- curved face handle rejected
+- unknown string
+- contract note mentions all three sources
+**AxisRef**
+- world axis
+- edge handle axis
+- curved edge rejected
+- unknown axis string
+**DistanceUnits**
+- distance scaled by units
+- distance nonzero guard
+- unit field returns scale
+- unknown unit
+**Choice**
+- valid option
+- invalid option
+- default when empty
+**ResolveInputs**
+- resolves all with unit dependency
+- first failure short circuits
+**Generation**
+- contract block lists each input
+- apply to tool adds properties and required
+
+## `insert_occurrence`
+
+> Unit tests for ``insert_occurrence.py`` placement transform.
+
+**Placement**
+- default identity
+- position scales to cm
+- rotation built
+- bad units
+- bad rotate axis
 
 ## `inspect_view`
 
-> Unit tests for ``inspect_view.py`` — the agent's view verbs.
+> Unit tests for ``view_inspect.py`` — the agent's view verbs.
 
 **Guards**
 - unknown action
@@ -369,6 +655,26 @@ after changing tests._
 - rotation on slider errors
 - linear on revolute errors
 
+## `joint_at_geometry`
+
+> Unit tests for ``joint_at_geometry.py`` — joint two parts at geometry handles.
+
+**JointGeometryRules**
+- cylinder face uses MIDDLE not center
+- cone face also uses middle
+- planar face uses CENTER
+- circular edge uses center
+- line edge uses middle
+- vertex uses point
+**Handler**
+- unknown motion
+- unresolved handle
+- revolute forced world axis
+- revolute auto axis uses geometry axis
+- slider auto axis from geometry
+- reports health warning when joint fails to compute
+- healthy joint no warning
+
 ## `joint_origin`
 
 > Unit tests for ``joint_origin.py`` pure logic.
@@ -384,6 +690,12 @@ after changing tests._
 - sketch point without sketch name errors
 - sketch line missing sketch errors
 - sketch line index out of range errors
+**GeometryAnchor**
+- planar face uses createByPlanarFace
+- cylinder face uses nonplanar
+- edge uses createByCurve
+- vertex uses createByPoint
+- bad geometry handle errors
 
 ## `joint_snaps`
 
@@ -413,7 +725,7 @@ after changing tests._
 
 ## `joints_advanced`
 
-> Unit tests for ``joints_advanced.py`` — capture_position, as_built_joint, assembly_constraint.
+> Unit tests for ``joints_advanced.py`` — assembly_capture_position, joint_create_as_built, assembly_constrain.
 
 **CapturePosition**
 - capture when pending
@@ -454,7 +766,7 @@ after changing tests._
 
 ## `measure_bounding_box`
 
-> Unit tests for the ``measure_bounding_box`` MCP tool.
+> Unit tests for the ``model_measure_bbox`` MCP tool.
 
 **UnitConversion**
 - world extents in mm
@@ -469,9 +781,22 @@ after changing tests._
 - ok shape
 - error shape carries message
 
+## `mirror`
+
+> Unit tests for ``mirror.py`` — mirror solid bodies across an origin plane.
+
+**Guards**
+- bad plane
+- no bodies
+- body not found
+**Mirror**
+- mirror across yz
+- comma string bodies
+- join sets iscombine
+
 ## `open_document`
 
-> Unit tests for ``open_document.py`` identifier parsing.
+> Unit tests for ``doc_open.py`` identifier parsing.
 
 **B64UrlDecode**
 - decodes real urn segment
@@ -483,6 +808,11 @@ after changing tests._
 - urn with version suffix kept as is
 - candidates are deduped
 - plain garbage yields only itself
+**CamTemplateGuard**
+- refuses api open and does not resolve or open
+- normal open requires force api open
+- bare open refuses without declaring intent
+- cam flag wins over force
 
 ## `parameters`
 
@@ -507,6 +837,10 @@ after changing tests._
 - add succeeds when timeline stays healthy
 - add rolls back on new timeline error
 - add requires name and expression
+**SetCreateOrUpdate**
+- set existing updates
+- set missing without create errors
+- set missing with create makes user param
 **DeleteHandler**
 - delete refuses if referenced
 - reference match is word boundary
@@ -535,6 +869,11 @@ after changing tests._
 - symmetric flag
 - quantity must be at least two
 - unknown axis
+**BodyTargets**
+- rectangular patterns bodies by name
+- circular patterns bodies by handle
+- bodies take precedence over occurrences
+- bad body name errors
 
 ## `polyline`
 
@@ -565,9 +904,29 @@ after changing tests._
 **RoundTrip**
 - quote then unquote recovers text
 
+## `revolve`
+
+> Unit tests for ``revolve.py`` — revolve a sketch profile about an axis.
+
+**Guards**
+- unknown operation
+- zero angle
+- no sketch named
+- profile out of range
+- bad axis
+**Revolve**
+- full revolve converts deg to radians
+- partial angle
+- axis x resolves
+- axis sketch line
+- operation cut mapping
+- symmetric flag
+- two sided asymmetric
+- second angle ignored when symmetric
+
 ## `section_view`
 
-> Unit tests for ``section_view.py`` — the Section Analysis cutaway tool.
+> Unit tests for ``view_section.py`` — the Section Analysis cutaway tool.
 
 **Guards**
 - unknown action
@@ -616,7 +975,7 @@ after changing tests._
 
 ## `set_nc_program_comment`
 
-> Unit tests for ``set_nc_program_comment.handler`` — the empty-input guard and multi-program behaviour.
+> Unit tests for ``cam_set_nc_comment.handler`` — the empty-input guard and multi-program behaviour.
 
 **EmptyInputGuard**
 - empty comment and no set name is refused
@@ -629,7 +988,7 @@ after changing tests._
 
 ## `show_toolpath`
 
-> Unit tests for ``show_toolpath.py`` — CAM toolpath display control.
+> Unit tests for ``cam_show_toolpath.py`` — CAM toolpath display control.
 
 **Guards**
 - unknown action errors
@@ -655,7 +1014,7 @@ after changing tests._
 
 ## `sketch_constraint`
 
-> Unit tests for ``sketch_constraint.py`` — apply geometric constraints to sketch entities.
+> Unit tests for ``sketch_constrain.py`` — apply geometric constraints to sketch entities.
 
 **ResolveEntity**
 - line index
@@ -708,6 +1067,41 @@ after changing tests._
 - missing sketch
 - no name lists available
 
+## `sketch_dimension`
+
+> Unit tests for ``sketch_dimension.py`` — dimensional constraints + driven values.
+
+**Dispatch**
+- distance two lines
+- horizontal orientation
+- radius one circle
+- diameter
+- angle two lines
+**Guards**
+- unknown dim type
+- bad entity one
+- distance needs entity two
+- value optional
+
+## `sketch_get_merge`
+
+> Unit tests for the merged sketch_get read tool (chunk B of the refactor).
+
+**SketchGetRouting**
+- no name lists summary
+- name delegates to detail engine
+- whitespace name treated as no name
+
+## `sketch_text_create`
+
+> Unit tests for ``set_sketch_text.py`` CREATE path — make new sketch text from scratch.
+
+**CreateText**
+- creates text in named sketch
+- create requires sketch name
+- create missing sketch errors
+- create rejects nonpositive height
+
 ## `sketches`
 
 > Unit tests for ``sketches.py`` pure logic.
@@ -727,10 +1121,19 @@ after changing tests._
 - whitespace and case tolerant
 - named construction plane fallback
 - unresolvable plane returns none
+**NewKinds**
+- ellipse
+- slot
+- point
+- spline
+- center rectangle
+- is construction marks curve
+- non construction default
+- ellipse needs positive radius
 
 ## `tier2_misc`
 
-> Unit tests for assorted Tier-2 helpers: update_xref, timeline, generate_toolpaths.
+> Unit tests for assorted Tier-2 helpers: doc_update_xref, timeline, cam_generate.
 
 **RefName**
 - reads datafile name

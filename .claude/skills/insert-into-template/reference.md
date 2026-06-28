@@ -41,7 +41,7 @@ A setup's Model selection is a Container nesting three standardized typed files:
 | **Clamping Unit / Pallet Type** | Mounts the vise to the machine; defines the Machine Model Attachment point used in simulation. |
 | **WCS Type** | A **simple cube** that explicitly defines the Z and X directions for the CAM setup, so the WCS is always accurately located. |
 
-So when `get_component_tree` descends a setup's model/fixture container, expect: a Clamping
+So when `design_get_tree` descends a setup's model/fixture container, expect: a Clamping
 Unit/Pallet + a Vise + a WCS cube + the machined model.
 
 ## Two common mistakes to avoid
@@ -66,14 +66,58 @@ Unit/Pallet + a Vise + a WCS cube + the machined model.
 ## How this maps to the Fusion API (for the building blocks)
 
 - A CAM setup's `models` / `fixtures` / `stockSolids` are typically container Occurrences;
-  `get_component_tree` descends them and resolves external references.
+  `design_get_tree` descends them and resolves external references.
 - An external reference is `Occurrence.isReferencedComponent == True`; it resolves via
   `Occurrence.documentReference.dataFile` -> `.id` (lineage UID / URN), `.name`,
   `.fusionWebURL`.
 - CAM data is reachable WITHOUT switching to the Manufacture workspace -- the `get_cam_*`
   building blocks already do this.
-- `compare_operations` reports exact parameter expressions (including float jitter like
+- `cam_compare_operations` reports exact parameter expressions (including float jitter like
   `38.10000000000001`) deliberately. Do not round or filter; reason about precision.
+
+## Copying a CAM template safely: save-as, never DataFile.copy
+
+There are two ways to duplicate a cloud document, and only one is safe for a CAM template:
+
+- **`doc_copy`** wraps `DataFile.copy(targetFolder)` on a CLOSED cloud file. It triggers a cold,
+  server-side reconciliation of the document's whole external-reference graph. For a
+  multi-reference configured-design CAM template this reliably destabilises the session.
+- **`doc_save_as`** wraps `Document.saveAs(...)` on the OPEN, already-loaded document. Fusion has
+  already resolved its references in-session, so save-as just writes the loaded state to a new
+  lineage (references preserved) — no cold reconciliation.
+
+So the template-copy step is: OPEN the library template, then `doc_save_as` it as `<model>_CAM`.
+`Document.saveAs` makes the saved-as copy the ACTIVE document, so no separate re-open is needed; the
+whole copy→settle→open sequence collapses to open→save-as. The library original is never modified.
+
+## Opening a configured-design / multi-reference CAM document via the API
+
+A `doc_open` with `force_api_open=true` opens these fine WHEN the document is settled and the open is
+a single, unhurried step. Instability appears when two heavy reference-graph operations overlap on
+the main thread (e.g. opening while a fresh copy is still resolving, or a heavy geometry edit before
+the open has finished loading). Practical rule: after any open/save-as of such a doc, confirm it is
+active (`sys_get_session`) and let it settle before the next write. (`is_cam_template=true` is an
+older, more conservative refuse-to-open mode; the save-as path above avoids needing it.)
+
+## Why an inserted part must be UN-GROUNDED before a positioning joint
+
+An occurrence inserted into a container is `ground_to_parent = TRUE` by default — rigidly locked to
+its parent. A rigid joint that needs the part to MOVE to mate then can't resolve: the joint computes
+as a failed/warning state ("Can't resolve component positions — conflicts with assembly
+relationships") and `assembly_probe` reports its `occurrence_two` as null. Setting
+`ground_to_parent = false` on the inserted occurrence frees it, and the identical joint then computes
+healthy. (A healthy joint to a ROOT-level joint origin still reports `occurrence_two = null` — that is
+normal for a root-anchored JO; trust the `healthy` flag and the part's measured position, not that
+field.)
+
+## Part-space extents and orientation (the oriented bounding box)
+
+The "Center of Model" JO is built with its Z along the machining direction (`zdir`) the operator
+picked, and located at the part's bounding-box centre. To report extents IN that part frame (not
+world axes), measure with `measureManager.getOrientedBoundingBox(body, lenDir, widDir)` passing the
+JO's secondary (X) and third (Y) axis vectors: the result's `length`/`width`/`height` then correspond
+to part-space X / Y / Z, where Z is the machining axis. This makes `extents_mm` meaningful regardless
+of how the part was modelled relative to world axes — it is always reported in the machining frame.
 
 ## Determinism checklist (why the phases are ordered this way)
 
@@ -81,5 +125,5 @@ Unit/Pallet + a Vise + a WCS cube + the machined model.
   same starting state, same plan.
 - The Phase 3 gate converts the crawl into explicit pass/fail assertions; a failed assertion
   stops the run instead of improvising.
-- Post-mutation re-reads (`get_machining_time`, `compare_operations`, screenshot) verify the
+- Post-mutation re-reads (`cam_get_time`, `cam_compare_operations`, screenshot) verify the
   change did what was intended, closing the loop.

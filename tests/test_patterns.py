@@ -123,12 +123,12 @@ class TestResolution:
     def test_exact_name(self):
         rf, _ = _install(["Block:1", "Other:1"])
         out = _payload(pt.rectangular_handler(occurrences="Block:1", quantity_one=2, spacing_one=10))
-        assert out["occurrences"] == ["Block:1"]
+        assert out["entities"] == ["Block:1"]
 
     def test_substring_fallback(self):
         rf, _ = _install(["Block:1"])
         out = _payload(pt.rectangular_handler(occurrences="block", quantity_one=2, spacing_one=10))
-        assert out["occurrences"] == ["Block:1"]
+        assert out["entities"] == ["Block:1"]
 
     def test_missing_reported(self):
         _install(["Block:1"])
@@ -138,7 +138,7 @@ class TestResolution:
     def test_comma_separated_multiple(self):
         _install(["A:1", "B:1"])
         out = _payload(pt.rectangular_handler(occurrences="A:1, B:1", quantity_one=2, spacing_one=10))
-        assert set(out["occurrences"]) == {"A:1", "B:1"}
+        assert set(out["entities"]) == {"A:1", "B:1"}
 
 
 # ── rectangular ──────────────────────────────────────────────────────────────
@@ -211,3 +211,57 @@ class TestCircular:
         _install(["Spoke:1"])
         res = pt.circular_handler(occurrences="Spoke:1", quantity=4, axis="w")
         assert res["isError"] is True and "Unknown axis 'w'" in res["message"]
+
+
+# ── 'bodies' targets (BodyRefList) — pattern solid bodies, not occurrences ──────────────────────
+
+class _FakeBody:
+    def __init__(self, name):
+        self.name = name
+
+
+def _install_with_bodies(body_map):
+    """Install a design that also resolves body handles/names (the app-reference seam)."""
+    rf, cf = _install([])
+    import adsk.fusion
+    adsk.fusion.BRepBody = _FakeBody
+    comp = type("C", (), {"bRepBodies": type("BB", (), {
+        "itemByName": staticmethod(lambda n: body_map.get(n)),
+        "count": len(body_map), "item": staticmethod(lambda i: list(body_map.values())[i]),
+    })()})()
+    class _D:
+        rootComponent = comp
+        def findEntityByToken(self, t):
+            e = body_map.get(t)
+            return [e] if e is not None else []
+    d = _D()
+    pt._inputs._common.design = lambda: d
+    pt._inputs._common.target_component = lambda x: comp
+    return rf, cf
+
+
+class TestBodyTargets:
+    def test_rectangular_patterns_bodies_by_name(self):
+        rf, _ = _install_with_bodies({"Boss": _FakeBody("Boss")})
+        out = _payload(pt.rectangular_handler(bodies="Boss", quantity_one=3, spacing_one=10))
+        assert out["entity_kind"] == "bodies"
+        assert out["entities"] == ["Boss"]
+        assert out["total_instances"] == 3
+
+    def test_circular_patterns_bodies_by_handle(self):
+        h = "/v" + "B" * 70
+        rf, _ = _install_with_bodies({h: _FakeBody("FromHandle")})
+        out = _payload(pt.circular_handler(bodies=h, quantity=4))
+        assert out["entity_kind"] == "bodies"
+        assert out["entities"] == ["FromHandle"]
+
+    def test_bodies_take_precedence_over_occurrences(self):
+        rf, _ = _install_with_bodies({"Boss": _FakeBody("Boss")})
+        out = _payload(pt.rectangular_handler(occurrences="ignored", bodies="Boss",
+                                              quantity_one=2, spacing_one=5))
+        assert out["entity_kind"] == "bodies" and out["entities"] == ["Boss"]
+
+    def test_bad_body_name_errors(self):
+        _install_with_bodies({"Boss": _FakeBody("Boss")})
+        res = pt.rectangular_handler(bodies="Nope", quantity_one=2, spacing_one=5)
+        assert res["isError"] is True and "Nope" in res["message"]

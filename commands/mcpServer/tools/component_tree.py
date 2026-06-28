@@ -3,13 +3,13 @@
 
 """Read-only MCP building block: walk the component/occurrence tree of the active design.
 
-  get_component_tree -> the assembly structure under the root (or a named component),
+  design_get_tree -> the assembly structure under the root (or a named component),
                         to a bounded depth, flagging external references (X-refs) and
                         resolving each to its source document UID + name + URL.
 
 This is the general "what's inside this assembly / container?" tool: walk any component to
 see its child occurrences and bodies, and which children are external references you can open
-with open_document. (For example, a CAM setup that selects a container component as its
+with doc_open. (For example, a CAM setup that selects a container component as its
 model/fixture — this lets you see what that container actually holds.)
 
 Grounded in adsk.fusion:
@@ -19,14 +19,13 @@ Grounded in adsk.fusion:
 Read-only; runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -159,33 +158,18 @@ def _walk_occurrence(occ, depth, max_depth, counter):
     return node
 
 
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Show the assembly structure (component/occurrence tree) of the active design, to a "
     "bounded depth. For each node: its name, the component it instances, body count, and "
     "child count. Nodes that are EXTERNAL REFERENCES are flagged and resolved to their "
     "source document id (UID), name, and openable URL — so you can see what a Component "
-    "Container actually holds and open referenced parts with open_document. Pass "
+    "Container actually holds and open referenced parts with doc_open. Pass "
     "'component' to start at a named component/occurrence (else the whole root), and "
     "'max_depth' (default 3, max 8). Read-only."
 )
 
 tool = (
-    Tool.create_simple(name="get_component_tree", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="design_get_tree", description=TOOL_DESCRIPTION)
     .add_input_property("component", {"type": "string",
                                       "description": "Optional component/occurrence name to start from."})
     .add_input_property("max_depth", {"type": "integer",

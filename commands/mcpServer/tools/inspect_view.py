@@ -4,7 +4,7 @@
 """MCP building block: the agent's "eyes" — move the camera, isolate/show/hide, toggle
 wireframe, and RESTORE the prior visual state when done.
 
-  inspect_view(action=...) — a set of composable view verbs so an agent can intuit a design
+  view_inspect(action=...) — a set of composable view verbs so an agent can intuit a design
   by looking at it from different angles and in different states, WITHOUT permanently
   disturbing what the user had on screen:
 
@@ -15,17 +15,17 @@ wireframe, and RESTORE the prior visual state when done.
                          iso-top-right/...) and/or 'focus' (fit to a named occurrence). Always
                          fits the view for reliable framing unless fit=false.
     isolate|show|hide|clear_isolation
-                      -> the same visibility verbs as set_visibility (show only / bulb on/off /
+                      -> the same visibility verbs as view_set_visibility (show only / bulb on/off /
                          un-isolate). 'target' is an occurrence name or full path.
     style             -> set the visual style: 'shaded' (default look) or 'wireframe'
                          (and the hidden/visible-edge variants).
     restore           -> pop the last snapshot and put camera + style + ALL occurrence
                          visibility back exactly as they were.
 
-Pair with get_screenshot to actually capture what you've aimed at. Typical flow:
-  inspect_view(snapshot) -> inspect_view(orient, orientation='front', focus='<OccurrenceName>:1')
-  -> get_screenshot -> inspect_view(style, style='wireframe') -> get_screenshot
-  -> inspect_view(restore)
+Pair with view_screenshot to actually capture what you've aimed at. Typical flow:
+  view_inspect(snapshot) -> view_inspect(orient, orientation='front', focus='<OccurrenceName>:1')
+  -> view_screenshot -> view_inspect(style, style='wireframe') -> view_screenshot
+  -> view_inspect(restore)
 
 This is VIEW state only — no geometry changes. Generic: it's a general set of eyes (orient,
 isolate, wireframe, restore) usable for CAM evaluation, assembly review, or anything visual.
@@ -37,14 +37,13 @@ Grounded in adsk.core / adsk.fusion:
 The snapshot stack is module-level so it survives between MCP calls (one session).
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -81,21 +80,6 @@ _STYLES = {
     "wireframe-hidden-edges": "WireframeWithHiddenEdgesVisualStyle",
     "wireframe-edges": "WireframeWithVisibleEdgesOnlyVisualStyle",
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload):
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text):
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -179,7 +163,7 @@ def _do_snapshot(design):
                 "occurrences_saved": len(occ_state),
                 "visual_style": int(_safe(lambda: vp.visualStyle, 0)),
                 "note": "Current camera, visual style, and all occurrence visibility saved. "
-                        "Explore freely; call inspect_view(restore) to put it all back."})
+                        "Explore freely; call view_inspect(restore) to put it all back."})
 
 
 def _do_orient(design, orientation, focus, fit):
@@ -234,7 +218,7 @@ def _do_orient(design, orientation, focus, fit):
     vp.camera = cam                # single assignment -> single move
     vp.refresh()
     return _ok({"action": "orient", "applied": applied,
-                "note": "Camera aimed. Call get_screenshot to capture."})
+                "note": "Camera aimed. Call view_screenshot to capture."})
 
 
 def _do_visibility(design, action, target):
@@ -274,7 +258,7 @@ def _do_visibility(design, action, target):
             return _error(f"Failed to {action} '{_safe(lambda o=o: o.name)}': {e}")
         affected.append(_safe(lambda o=o: o.name))
     out = {"action": action, "target": target, "affected": affected,
-           "note": "Visibility changed. get_screenshot to view; inspect_view(restore) to undo."}
+           "note": "Visibility changed. view_screenshot to view; view_inspect(restore) to undo."}
     if ancestors_lit:
         out["ancestors_also_shown"] = sorted(set(ancestors_lit))
     return _ok(out)
@@ -295,7 +279,7 @@ def _do_restore(design):
     key = _doc_key()
     snap = _SNAPSHOTS.get(key)
     if not snap:
-        return _error(f"No snapshot saved for '{key}'. Call inspect_view(snapshot) first. "
+        return _error(f"No snapshot saved for '{key}'. Call view_inspect(snapshot) first. "
                       "(Snapshots are held in memory for this session only — reloading the add-in "
                       "clears them. To recover a clean state without a snapshot, use "
                       "clear_isolation then show the components you want.)")
@@ -344,7 +328,7 @@ def _do_save_view(design, view_name):
     SCOPE: a named view stores the CAMERA ONLY — not section state or visibility. It is a pure
     camera bookmark. It does NOT reconstitute a section cut (Fusion allows one active section and a
     NamedView can't carry that). To navigate between section perspectives, just re-issue
-    section_view(cut, plane=...): that re-cuts AND auto-aims at the cut face in one call."""
+    view_section(cut, plane=...): that re-cuts AND auto-aims at the cut face in one call."""
     name = (view_name or "").strip()
     if not name:
         return _error("Provide 'view_name' to save the current camera as a named view.")
@@ -365,7 +349,7 @@ def _do_save_view(design, view_name):
     return _ok({"action": "save_view", "view_name": _safe(lambda: nv.name),
                 "total_named_views": _safe(lambda: nvs.count),
                 "note": "Camera saved as a persistent named view. Recall it with "
-                        "apply_view, or pair with section_view for a section perspective."})
+                        "apply_view, or pair with view_section for a section perspective."})
 
 
 def _do_apply_view(design, view_name):
@@ -390,7 +374,7 @@ def _do_apply_view(design, view_name):
     return _ok({"action": "apply_view", "view_name": _safe(lambda: nv.name),
                 "note": "Camera moved to the named view (camera only — does not change any active "
                         "section cut or visibility). If a section is live and this view was a "
-                        "section perspective, re-issue section_view(cut, ...) to recut for this angle."})
+                        "section perspective, re-issue view_section(cut, ...) to recut for this angle."})
 
 
 def _do_list_views(design):
@@ -439,7 +423,7 @@ def handler(action: str = "", target: str = "", orientation: str = "", focus: st
         if action == "list_views":
             return _do_list_views(design)
     except Exception as e:
-        return _error(f"inspect_view({action}) failed: {e}")
+        return _error(f"view_inspect({action}) failed: {e}")
     return _error("unreachable")
 
 
@@ -450,7 +434,7 @@ TOOL_DESCRIPTION = (
     "restore later — call once before exploring); 'orient' (aim the camera via 'orientation' = "
     "front/back/top/bottom/left/right/iso-top-right/iso-top-left/iso-bottom-right/iso-bottom-left, "
     "and/or 'focus' = fit the view to a named occurrence; fits by default); 'isolate'/'show'/"
-    "'hide'/'clear_isolation' (same visibility verbs as set_visibility; 'target' = occurrence "
+    "'hide'/'clear_isolation' (same visibility verbs as view_set_visibility; 'target' = occurrence "
     "name/path); 'style' ('style' = shaded / wireframe / shaded-edges / wireframe-edges / ...); "
     "'restore' (put camera, visual style, and every occurrence's visibility back exactly as the "
     "last snapshot); 'save_view'/'apply_view'/'list_views' ('view_name' = save the current camera "
@@ -458,15 +442,15 @@ TOOL_DESCRIPTION = (
     "CAMERA bookmark library). VIEW state only — no geometry changes. 'show' lights the whole "
     "ancestor chain so a nested occurrence actually becomes visible. (snapshot/restore is a single "
     "in-memory push/pop cleared on add-in reload; named views persist in the document but store the "
-    "CAMERA ONLY — not section cuts or visibility.) Pair with get_screenshot. Typical: snapshot -> "
-    "orient(focus='<OccurrenceName>:1') -> get_screenshot -> style(wireframe) -> restore. To navigate "
-    "between SECTION perspectives, re-issue section_view(cut, plane=...) — it recuts AND auto-aims "
+    "CAMERA ONLY — not section cuts or visibility.) Pair with view_screenshot. Typical: snapshot -> "
+    "orient(focus='<OccurrenceName>:1') -> view_screenshot -> style(wireframe) -> restore. To navigate "
+    "between SECTION perspectives, re-issue view_section(cut, plane=...) — it recuts AND auto-aims "
     "in one call (a named camera bookmark alone won't restore the cut)."
 )
 
 tool = (
     Tool.create_with_string_input(
-        name="inspect_view",
+        name="view_inspect",
         description=TOOL_DESCRIPTION,
         input_param_name="action",
         input_param_description="snapshot | orient | isolate | show | hide | clear_isolation | style | restore | save_view | apply_view | list_views.",

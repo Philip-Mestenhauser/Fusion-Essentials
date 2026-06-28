@@ -31,7 +31,7 @@ class Item:
         self.run_on_main_thread = run_on_main_thread
         # enforce_timeout=False exempts a tool from the server's main-thread task timeout. Use it
         # ONLY for tools whose work cannot be interrupted AND would still commit if we "timed out"
-        # (e.g. execute_api_script) — timing those out would report a false failure for a change
+        # (e.g. sys_execute_script) — timing those out would report a false failure for a change
         # that actually applied. Default True keeps the safety timeout for everything else.
         self.enforce_timeout = enforce_timeout
 

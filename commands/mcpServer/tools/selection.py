@@ -3,18 +3,18 @@
 
 """MCP building blocks: hand control to the USER to pick an entity, then read it back.
 
-  request_user_selection -> clear the current selection and ask the user to click a
+  sys_request_selection -> clear the current selection and ask the user to click a
                             face/edge/vertex/body/component in Fusion. Returns IMMEDIATELY
                             (non-blocking). No Fusion dialog — the *agent* presents the
                             confirmation (e.g. a chat button) and the user clicks it to hand
                             control back, with one click and no typing.
-  get_user_selection     -> read what the user has selected in Fusion (ui.activeSelections)
+  sys_get_selection     -> read what the user has selected in Fusion (ui.activeSelections)
                             and return structured details per entity (type, owning body /
                             component, geometry hints, click point) for the agent to intuit.
 
 DESIGN — the confirmation lives in the AGENT'S UI, not Fusion. The user clicks an entity in
 Fusion, then clicks the agent's "I've selected it" control (a structured-output button in the
-chat) which returns straight to the agent; the agent then calls get_user_selection. There is
+chat) which returns straight to the agent; the agent then calls sys_get_selection. There is
 NO Fusion OK button and no "type ready" step. (A Fusion command dialog with an OK button was
 tried but rejected: it forces a second hand-off inside Fusion instead of in the chat.)
 
@@ -29,8 +29,6 @@ Grounded in adsk.core / adsk.fusion:
 Handlers run on the main thread; neither blocks.
 """
 
-import json
-
 import adsk.core
 
 app = adsk.core.Application.get()
@@ -38,6 +36,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 # 'what' hint -> human phrase for the prompt.
 _KIND_HINTS = {
@@ -48,13 +47,6 @@ _KIND_HINTS = {
     "component": "a component/occurrence (a part in the assembly)",
     "any": "a face, edge, vertex, body, or component",
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _ui():
@@ -221,7 +213,7 @@ def _classify(entity) -> dict:
     return out
 
 
-# ----------------------------------------------------------- request_user_selection
+# ----------------------------------------------------------- sys_request_selection
 
 def request_user_selection_handler(what: str = "any", clear_current: bool = True) -> dict:
     """Ask the user to click an entity in Fusion. Returns immediately (non-blocking).
@@ -229,7 +221,7 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
     By default clears the existing selection so the user starts clean. 'what' (face/edge/
     vertex/body/component/any) only shapes the prompt. The agent should then present its OWN
     one-click confirmation (e.g. a chat button); when the user clicks it, call
-    get_user_selection — there is no Fusion OK button and no need for the user to type.
+    sys_get_selection — there is no Fusion OK button and no need for the user to type.
     """
     ui = _ui()
     if not ui:
@@ -251,11 +243,11 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
             f"Click {hint} in the Fusion window (rotate/zoom as needed). You don't need to "
             "press anything in Fusion — just select it, then confirm here when ready."),
         "next_step": ("Present a one-click confirmation to the user (a structured-output "
-                      "button). When they click it, call get_user_selection to read the pick."),
+                      "button). When they click it, call sys_get_selection to read the pick."),
     })
 
 
-# --------------------------------------------------------------- get_user_selection
+# --------------------------------------------------------------- sys_get_selection
 
 def get_user_selection_handler(require: str = "") -> dict:
     """Read the user's current Fusion selection and describe each selected entity.
@@ -273,7 +265,7 @@ def get_user_selection_handler(require: str = "") -> dict:
     count = _safe(lambda: sels.count, 0) if sels is not None else 0
     if not count:
         return _error("Nothing is selected in Fusion. Ask the user to click an entity, then "
-                      "call get_user_selection again (or re-run request_user_selection).")
+                      "call sys_get_selection again (or re-run sys_request_selection).")
 
     selections = []
     try:
@@ -300,18 +292,11 @@ def get_user_selection_handler(require: str = "") -> dict:
         if want not in kinds:
             payload["note"] = (f"Selection does not include a '{want}'. It contains: "
                                f"{', '.join(k for k in kinds if k)}. Re-prompt with "
-                               "request_user_selection if you need a different kind.")
+                               "sys_request_selection if you need a different kind.")
     return _ok(payload)
 
 
 # ----------------------------------------------------------------------- helpers
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 # ------------------------------------------------------------------------- tools
@@ -323,10 +308,10 @@ _REQUEST_DESC = (
     "dialog and does NOT block. The user simply clicks the entity in the model; YOU provide the "
     "one-click confirmation in the chat (a structured-output button). 'what' = face | edge | "
     "vertex | body | component | any (default any) only shapes the prompt. After the user "
-    "confirms, call get_user_selection to read what they picked."
+    "confirms, call sys_get_selection to read what they picked."
 )
 request_tool = (
-    Tool.create_simple(name="request_user_selection", description=_REQUEST_DESC)
+    Tool.create_simple(name="sys_request_selection", description=_REQUEST_DESC)
     .add_input_property("what", {"type": "string",
                                  "description": "Kind hint: face | edge | vertex | body | component | any (default any)."})
     .add_input_property("clear_current", {"type": "boolean",
@@ -349,7 +334,7 @@ _GET_DESC = (
     "mismatch. Read-only. If nothing is selected, returns an error telling you to re-prompt."
 )
 get_tool = (
-    Tool.create_simple(name="get_user_selection", description=_GET_DESC)
+    Tool.create_simple(name="sys_get_selection", description=_GET_DESC)
     .add_input_property("require", {"type": "string",
                                     "description": "Optional expected kind to validate: face | edge | vertex | body | component."})
     .strict_schema()

@@ -3,13 +3,13 @@
 
 """MCP building blocks for the active design's parameters + timeline health.
 
-  get_parameters         -> read user (and optionally all model) parameters.
-  set_parameter          -> set a parameter's expression. WRITES.
-  add_parameter          -> add a user parameter (health-guarded). WRITES.
-  delete_parameter       -> delete a user parameter (refuses if referenced; health-guarded). WRITES.
-  set_parameter_favorite -> toggle a user parameter's favorite flag. WRITES.
-  get_timeline_health    -> feature error/warning rollup. Read-only.
-  recompute_design       -> computeAll() so downstream features rebuild. WRITES.
+  param_get         -> read user (and optionally all model) parameters.
+  param_set          -> set a parameter's expression. WRITES.
+  param_add          -> add a user parameter (health-guarded). WRITES.
+  param_delete       -> delete a user parameter (refuses if referenced; health-guarded). WRITES.
+  param_set_favorite -> toggle a user parameter's favorite flag. WRITES.
+  design_get_timeline_health    -> feature error/warning rollup. Read-only.
+  design_recompute       -> computeAll() so downstream features rebuild. WRITES.
 
 The read/write foundation for parameter-driven templates (driving stock size, positioning, etc.).
 add/delete are guarded by a timeline-health check so an edit that breaks a downstream feature is
@@ -24,14 +24,13 @@ Grounded in adsk.fusion:
 Handlers run on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
 
@@ -48,13 +47,6 @@ def _design():
         except Exception:
             design = None
     return design
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _param_summary(p) -> dict:
@@ -152,14 +144,16 @@ def _find_parameter(design, name):
     return None
 
 
-def set_handler(name: str = "", expression: str = "") -> dict:
-    """Set a design parameter's expression. WRITES to the design.
+def set_handler(name: str = "", expression: str = "", create: bool = False,
+                unit: str = "mm") -> dict:
+    """Set a design parameter's expression — or CREATE it if missing (create-or-update). WRITES.
 
     'expression' is interpreted like the Parameters dialog: a numeric expression
     ('2 in', 'StockX/2', '6.25'), a reference to other parameters, or a quoted text
-    value for text parameters ('Hello'). Returns the before/after so the effect is
-    visible. Works for user and model parameters (model/feature params may reject the
-    edit, which is reported).
+    value for text parameters ('Hello'). create=true: if no parameter named 'name' exists,
+    create it as a USER parameter with 'unit' (mm default; '' for unitless) — so a caller can
+    set-or-make in one call. Returns before/after (before is null for a created param). Works for
+    user and model parameters (model/feature params may reject the edit, which is reported).
     """
     name = (name or "").strip()
     if not name:
@@ -173,7 +167,20 @@ def set_handler(name: str = "", expression: str = "") -> dict:
 
     param = _find_parameter(design, name)
     if not param:
-        return _error(f"Parameter not found: '{name}'. Use get_parameters to list them.")
+        if not create:
+            return _error(f"Parameter not found: '{name}'. Use param_get to list them, or pass "
+                          "create=true to make it a new user parameter.")
+        # create-or-update: make a new user parameter with the given expression + unit.
+        try:
+            vi = adsk.core.ValueInput.createByString(expression)
+            param = design.userParameters.add(name, vi, unit or "", "")
+        except Exception as e:
+            return _error(f"Could not create user parameter '{name}' = '{expression}' "
+                          f"(unit '{unit}'): {e}.")
+        if not param:
+            return _error(f"Creating user parameter '{name}' returned nothing.")
+        return _ok({"set": True, "created": True, "name": name,
+                    "before": None, "after": _param_summary(param)})
 
     before = _param_summary(param)
     try:
@@ -184,7 +191,7 @@ def set_handler(name: str = "", expression: str = "") -> dict:
                       "expression; text parameters need quotes, e.g. \"'text'\".)")
 
     after = _param_summary(param)
-    return _ok({"set": True, "name": name, "before": before, "after": after})
+    return _ok({"set": True, "created": False, "name": name, "before": before, "after": after})
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +268,7 @@ def add_handler(name: str = "", expression: str = "", unit: str = "mm",
     if not design:
         return _error("No active design.")
     if _find_parameter(design, name):
-        return _error(f"A parameter named '{name}' already exists. Use set_parameter to change it.")
+        return _error(f"A parameter named '{name}' already exists. Use param_set to change it.")
 
     err_before, _, _ = _timeline_health(design)
     try:
@@ -347,23 +354,15 @@ def favorite_handler(name: str = "", favorite: bool = True) -> dict:
     return _ok({"name": name, "favorite": _safe(lambda: p.isFavorite)})
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Read the active design's parameters: each parameter's name, expression, value, "
     "unit, and comment. Returns user parameters by default; pass "
     "include_model_parameters=true to also include feature/model parameters, or 'name' "
-    "to fetch a single parameter. Read-only. (Use set_parameter to change one.)"
+    "to fetch a single parameter. Read-only. (Use param_set to change one.)"
 )
 
 tool = (
-    Tool.create_simple(name="get_parameters", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="param_get", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string",
                                  "description": "Optional single parameter name to fetch."})
     .add_input_property("include_model_parameters", {"type": "boolean",
@@ -380,30 +379,34 @@ _SET_DESCRIPTION = (
     "other parameters), or a quoted text value for text parameters (\"'Roughing'\"). "
     "Returns the before/after so you can confirm the change. Works for user and model "
     "parameters; model/feature parameters may reject the edit (reported as an error). Use "
-    "get_parameters to discover names first."
+    "param_get to discover names first."
 )
 
 set_tool = (
     Tool.create_with_string_input(
-        name="set_parameter",
+        name="param_set",
         description=_SET_DESCRIPTION,
         input_param_name="name",
         input_param_description="The parameter name to set.",
     )
     .add_input_property("expression", {"type": "string",
                                        "description": "New value/expression (e.g. '2 in', 'StockX/2', \"'text'\")."})
+    .add_input_property("create", {"type": "boolean",
+                                   "description": "If the parameter doesn't exist, create it as a USER parameter (create-or-update). Default false."})
+    .add_input_property("unit", {"type": "string",
+                                 "description": "Unit for a created parameter (mm default; '' for unitless). Only used with create=true."})
 )
 
 set_item = Item.create_tool_item(tool=set_tool, handler=set_handler, run_on_main_thread=True)
 
 _add_tool = (
     Tool.create_with_string_input(
-        name="add_parameter",
+        name="param_add",
         description=(
             "Add a USER parameter (name + expression). WRITES. 'unit' = mm/cm/in/deg or '' for "
             "unitless (default mm); 'comment' optional; 'favorite' shows it in the favorites list. "
             "GUARDED: if the add introduces a NEW timeline error it is rolled back and reported. "
-            "Use set_parameter to change an existing one."),
+            "Use param_set to change an existing one."),
         input_param_name="name",
         input_param_description="New parameter name (unique).",
     )
@@ -420,7 +423,7 @@ add_item = Item.create_tool_item(tool=_add_tool, handler=add_handler, run_on_mai
 
 _delete_tool = (
     Tool.create_with_string_input(
-        name="delete_parameter",
+        name="param_delete",
         description=(
             "Delete a USER parameter, GUARDED. WRITES. Refuses if another parameter/feature "
             "references it (reports the consumers), and reports if the delete introduces a timeline "
@@ -433,7 +436,7 @@ delete_item = Item.create_tool_item(tool=_delete_tool, handler=delete_handler, r
 
 _favorite_tool = (
     Tool.create_with_string_input(
-        name="set_parameter_favorite",
+        name="param_set_favorite",
         description=("Toggle a user parameter's 'favorite' flag (whether it appears in the favorites "
                      "list). WRITES."),
         input_param_name="name",
@@ -446,7 +449,7 @@ _favorite_tool = (
 favorite_item = Item.create_tool_item(tool=_favorite_tool, handler=favorite_handler, run_on_main_thread=True)
 
 _health_tool = Tool.create_simple(
-    name="get_timeline_health",
+    name="design_get_timeline_health",
     description=("Report the active design's parametric timeline health — feature error/warning "
                 "rollup (names of any errored/warning features). Read-only. Use before/after a "
                 "risky edit to confirm nothing broke."),
@@ -454,7 +457,7 @@ _health_tool = Tool.create_simple(
 health_item = Item.create_tool_item(tool=_health_tool, handler=health_handler, run_on_main_thread=True)
 
 _recompute_tool = Tool.create_simple(
-    name="recompute_design",
+    name="design_recompute",
     description=("Force a full recompute (computeAll) of the active design so downstream features "
                 "rebuild against current values (e.g. after changing text an emboss consumes). "
                 "Reports timeline health afterwards. WRITES (rebuilds features)."),

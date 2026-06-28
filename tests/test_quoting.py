@@ -1,6 +1,6 @@
 """Unit tests for the text-parameter quoting helpers.
 
-Both ``set_sketch_text.py`` and ``set_nc_program_comment.py`` carry a
+Both ``sketch_set_text.py`` and ``cam_set_nc_comment.py`` carry a
 ``_quote`` / ``_unquote`` pair for Fusion's quoted text-parameter expressions
 ('foo'). Quoting bugs corrupt user text silently (a stray quote breaks the
 expression, or escaping is lost on round-trip), so these get round-trip and
@@ -15,8 +15,8 @@ from conftest import load_tool
 sketch_text = load_tool("set_sketch_text")
 nc_comment = load_tool("set_nc_program_comment")
 
-MODULES = [pytest.param(sketch_text, id="set_sketch_text"),
-           pytest.param(nc_comment, id="set_nc_program_comment")]
+MODULES = [pytest.param(sketch_text, id="sketch_set_text"),
+           pytest.param(nc_comment, id="cam_set_nc_comment")]
 
 
 @pytest.mark.parametrize("mod", MODULES)

@@ -3,13 +3,13 @@
 
 """MCP building block: measure a target's bounding box (world-aligned or in a part-space frame).
 
-  measure_bounding_box -> the bounding-box extents (x/y/z), center, and frame axes of a body /
+  model_measure_bbox -> the bounding-box extents (x/y/z), center, and frame axes of a body /
                           component / the whole design. Optionally measured in the coordinate
                           frame of a named Joint Origin (part space), not just world-aligned.
 
 General-purpose measurement: report a body/component's size, world-aligned or in an arbitrary
 frame. One common use is to measure a part in a part-space frame (define it with
-create_joint_origin) and feed the extents into set_parameter (e.g. to size stock) — but the tool
+joint_create_origin) and feed the extents into param_set (e.g. to size stock) — but the tool
 is agnostic about why you measure; it just returns the box.
 
 Two modes:
@@ -26,8 +26,6 @@ Grounded in adsk.core / adsk.fusion:
 Read-only. Handler runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
@@ -36,15 +34,9 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 _CM_TO_UNIT = {"mm": 10.0, "cm": 1.0, "in": 1.0 / 2.54, "inch": 1.0 / 2.54}
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def _design():
@@ -83,6 +75,14 @@ def _resolve_target(design, target):
     name = (target or "").strip()
     if not name:
         return root, "root component (whole design)"
+
+    # Handle short-circuit: a find_geometry handle resolves a SPECIFIC body (bodies are auto-named,
+    # so a handle is the precise path). Occurrences / the whole design stay by-name (named by design).
+    if name.startswith("/v") or len(name) > 60:
+        found = _safe(lambda: design.findEntityByToken(name))
+        if found and len(found) and isinstance(found[0], adsk.fusion.BRepBody):
+            return found[0], f"body (handle {name[:10]}…)"
+        return None, None
 
     # Occurrence by name / full path.
     occ = _safe(lambda: root.occurrences.itemByName(name))
@@ -186,7 +186,7 @@ def handler(target: str = "", frame: str = "", units: str = "mm") -> dict:
     entity, desc = _resolve_target(design, target)
     if not entity:
         return _error(f"Target not found: '{target}'. Provide a body or component/occurrence "
-                      "name (use get_component_tree to list them), or omit to measure the whole design.")
+                      "name (use design_get_tree to list them), or omit to measure the whole design.")
 
     want_frame = (frame or "").strip()
 
@@ -194,7 +194,7 @@ def handler(target: str = "", frame: str = "", units: str = "mm") -> dict:
     if want_frame:
         x_vec, y_vec, z_vec, jo_name = _joint_origin_axes(design, want_frame)
         if x_vec is None:
-            return _error(f"No Joint Origin named '{frame}'. Create one with create_joint_origin, "
+            return _error(f"No Joint Origin named '{frame}'. Create one with joint_create_origin, "
                           "or omit 'frame' for a world-aligned box.")
         mgr = _safe(lambda: app.measureManager)
         if not mgr:
@@ -204,7 +204,7 @@ def handler(target: str = "", frame: str = "", units: str = "mm") -> dict:
         geom, geom_note = _measurable_geometry(entity)
         if geom is None:
             return _error(f"{desc} has no B-Rep body to measure in a frame. Target a specific "
-                          "body/occurrence (get_component_tree lists them).")
+                          "body/occurrence (design_get_tree lists them).")
         try:
             obb = mgr.getOrientedBoundingBox(geom, x_vec, y_vec)
         except Exception as e:
@@ -224,7 +224,7 @@ def handler(target: str = "", frame: str = "", units: str = "mm") -> dict:
             "center": _ptxyz(_safe(lambda: obb.centerPoint), f),
             "frame_axes": {"x_axis": _vecxyz(x_vec), "y_axis": _vecxyz(y_vec), "z_axis": _vecxyz(z_vec)},
             "note": "Measured in the joint-origin frame; x/y/z are the part-space extents. Feed "
-                    "these to set_parameter to drive stock size.",
+                    "these to param_set to drive stock size.",
         }
         return _ok(payload)
 
@@ -251,16 +251,8 @@ def handler(target: str = "", frame: str = "", units: str = "mm") -> dict:
                    "y": round((_safe(lambda: mx.y, 0.0) + _safe(lambda: mn.y, 0.0)) / 2 * f, 6),
                    "z": round((_safe(lambda: mx.z, 0.0) + _safe(lambda: mn.z, 0.0)) / 2 * f, 6)},
         "note": "World-axis-aligned box. For a part-space measurement, pass frame=<joint origin "
-                "name> (see create_joint_origin). Feed x/y/z to set_parameter to drive stock size.",
+                "name> (see joint_create_origin). Feed x/y/z to param_set to drive stock size.",
     })
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 TOOL_DESCRIPTION = (
@@ -268,14 +260,14 @@ TOOL_DESCRIPTION = (
     "design (omit 'target'). Returns the X/Y/Z extents, center, and the frame axes, in 'units' "
     "(mm default / cm / in). By default the box is WORLD-axis-aligned. Pass 'frame' = the name of "
     "a Joint Origin to measure IN THAT PART-SPACE FRAME instead (x/y/z map to the frame's X/Y/Z) "
-    "— the standard way to size stock for a setup: define the origin with create_joint_origin, "
-    "measure here, then feed x/y/z into set_parameter. Read-only."
+    "— the standard way to size stock for a setup: define the origin with joint_create_origin, "
+    "measure here, then feed x/y/z into param_set. Read-only."
 )
 
 tool = (
-    Tool.create_simple(name="measure_bounding_box", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="model_measure_bbox", description=TOOL_DESCRIPTION)
     .add_input_property("target", {"type": "string",
-                                   "description": "Body or component/occurrence name (default: whole design)."})
+                                   "description": "What to measure: a body HANDLE from find_geometry (precise — bodies are auto-named), a body/occurrence name, or omit for the whole design."})
     .add_input_property("frame", {"type": "string",
                                   "description": "Optional Joint Origin name to measure in part space (oriented box)."})
     .add_input_property("units", {"type": "string", "description": "mm | cm | in (default mm)."})

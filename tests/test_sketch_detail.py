@@ -1,6 +1,6 @@
 """Unit tests for ``sketch_detail.py`` — read the full structure of one sketch.
 
-get_sketches gives only COUNTS; get_sketch_detail X-rays one sketch: every entity (id, type,
+sketch_get gives only COUNTS; sketch_get X-rays one sketch: every entity (id, type,
 isConstruction, geometry), every constraint (type + the entity IDs it links, mapped via
 entityToken), and every dimension (name/value/expression). This is the read companion that lets the
 agent reason about a constrained sketch (slots/ellipses/rectangles + their construction geometry +
@@ -241,7 +241,7 @@ class TestDimensions:
 
 # ── constraint state: is_fully_constrained + per-dim isDriving ──────────────
 #
-# The intuition gap this closes: get_sketch_detail's flat list couldn't tell an agent whether a
+# The intuition gap this closes: sketch_get's flat list couldn't tell an agent whether a
 # sketch is LOCKED, fully constrained, or has free DOF — nor which dimension drives vs. references.
 # Surfacing is_fully_constrained + each dimension's driving flag gives that at a glance.
 

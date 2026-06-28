@@ -1,4 +1,4 @@
-"""Unit tests for ``show_toolpath.py`` — CAM toolpath display control.
+"""Unit tests for ``cam_show_toolpath.py`` — CAM toolpath display control.
 
 The handler toggles ``Operation.isLightBulbOn`` to show/hide individual
 toolpaths. The logic worth pinning: action validation, operation lookup (exact

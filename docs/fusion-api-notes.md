@@ -32,7 +32,7 @@ predictable from any other.
   both a human name and the precise id, and on no match return an error listing what IS
   available — forgiving for an agent that only has a name.
 - **Make structure visible, then address by path.** Folder/data tools accept nested paths
-  (`Fixtures/Vises`, split on `/` or `\`); `list_folders` reveals the tree; `list_project_files`
+  (`Fixtures/Vises`, split on `/` or `\`); `data_list_folders` reveals the tree; `data_list_files`
   stamps each file with its `folder_path`. Creation tools do `mkdir -p` (auto-create missing
   parents); when a required path is missing, the error lists the folders that DO exist at the
   failure point. Duplicate guards are scoped to the resolved path, not the whole tree.
@@ -49,14 +49,14 @@ workholding (clamping unit + vise, the machined part, a WCS cube) lives *inside*
 as **external references**. Therefore:
 
 - To see what a setup actually holds, descend into the selected occurrence's
-  `childOccurrences` — a top-level read shows only the container. `get_component_tree` does this
-  (depth-bounded, resolving each X-ref to its source UID). `get_setup_references` only resolves
+  `childOccurrences` — a top-level read shows only the container. `design_get_tree` does this
+  (depth-bounded, resolving each X-ref to its source UID). `cam_get_references` only resolves
   top-level refs.
 - A lone cube referenced by a setup is very likely a **WCS-defining component**, not a
   placeholder — descend and report rather than assuming.
-- The tools that cover the common machinist flow without `execute_api_script`:
-  `get_component_tree`, `activate_setup` (+ `get_screenshot` to review), `get_tool_list`,
-  `get_machining_time`, `get_cam_setups` / `get_cam_operations`. Reach for `execute_api_script`
+- The tools that cover the common machinist flow without `sys_execute_script`:
+  `design_get_tree`, `cam_activate_setup` (+ `view_screenshot` to review), `sys_get_tool_list`,
+  `cam_get_time`, `cam_get_setups` / `cam_get_operations`. Reach for `sys_execute_script`
   only for genuine one-offs — if you run the same kind of script twice, it probably wants to be
   a tool.
 
@@ -82,7 +82,7 @@ as **external references**. Therefore:
 - **Operation parameters:** every `Operation` has `.parameters` (CAMParameters, iterable,
   `.itemByName`). Each `CAMParameter` has `.name` (internal), `.title` (UI label), and
   `.expression` (the reliable human-readable value — prefer it over the typed `.value`
-  subclasses). `compare_operations` diffs two ops' parameters and reports EXACT expressions
+  subclasses). `cam_compare_operations` diffs two ops' parameters and reports EXACT expressions
   (including float jitter like `38.10000000000001`) on purpose — do not round/filter; let the
   agent reason about precision.
 - **NC programs:** `CAM.ncPrograms` → `NCProgram(.name, .operations, .machine,
@@ -118,11 +118,11 @@ The library manager is on the **CAMManager singleton**, not the CAM product:
 
 `Design.userParameters` (user) / `Design.allParameters` (all). `Parameter(.name,
 .expression [settable], .value [numeric, db units], .unit, .comment, .textValue)`. `.expression`
-is the human-facing field. `get_parameters` reads; `set_parameter` writes `.expression`
+is the human-facing field. `param_get` reads; `param_set` writes `.expression`
 (changing a driver cascades to dependents, e.g. `StockY = StockX`). Setting model/feature
 params can raise — surface the error rather than crashing.
 
-**Fusion expression-language syntax** (matters when authoring `set_parameter` expressions):
+**Fusion expression-language syntax** (matters when authoring `param_set` expressions):
 function ARGS are separated by **`;`**, not `,` — e.g. `if(cond; then; else)`, `max(a; b)`,
 `min(a; b)`. Conditionals nest: `if(StockX>=2 in; if(StockY/2>=13 mm; 10 mm; 5 mm); 5 mm)`.
 Units mix freely in one expression (`StockX + Wall_Taper_Width_Min*2`, in + mm) and the result
@@ -148,7 +148,7 @@ can legitimately fail (returns False) — e.g. with no document open — so hand
 - **Accepting pasted identifiers:** `fusionWebURL` / `source_url` are browser URLs, not URNs —
   `findFileById` rejects them. The lineage URN is embedded in the URL as a base64url path
   segment (`…/data/<folderURN_b64>/<fileURN_b64>`); decode each long segment and keep the one
-  that decodes to `urn:adsk…`. `open_document` does this, so it accepts a lineage/version URN, a
+  that decodes to `urn:adsk…`. `doc_open` does this, so it accepts a lineage/version URN, a
   `source_id`, OR a web URL interchangeably (`_urn_candidates` / `_b64url_decode`).
 
 ## Configured designs
@@ -159,7 +159,7 @@ Open them with `openUsingContext`, NOT `open`.
   is True. `documents.openUsingContext(df, FileOpenContext.create(), True)` opens it cleanly. A
   default (empty-timestamp) context is enough — you do not need to select a configuration row;
   it opens at the active config. `openUsingContext` also works for normal designs, so
-  `open_document` uses it as the primary path and only falls back to `open()` if
+  `doc_open` uses it as the primary path and only falls back to `open()` if
   `openUsingContext` is unavailable.
 - Once open, read configurations from the open design's **`Design.configurationTopTable`** (NOT
   `Design.configurationTable`, which does not exist). It exposes `.name`, `.rows` (each
@@ -172,7 +172,7 @@ Open them with `openUsingContext`, NOT `open`.
   `DataFile.fusionWebURL` and the table `.id`.
 - `Document.close(saveChanges=False)` cleanly closes a configured design and discards changes —
   useful for round-trip testing without persisting anything.
-- `execute_api_script` wraps the script in a transaction that ABORTS on any raised exception
+- `sys_execute_script` wraps the script in a transaction that ABORTS on any raised exception
   (rolling back file writes too); write diagnostics before the risky call.
 
 ## Active document, save, copy, delete
@@ -180,13 +180,13 @@ Open them with `openUsingContext`, NOT `open`.
 - **Active document → identity:** `app.activeDocument` → `Document(.name, .isSaved, .isModified,
   .version [the Fusion APP version it was saved with, NOT a file version], .dataFile)`.
   `Document.dataFile` is the A360 `DataFile`; for a never-saved doc it is null / raises — guard
-  it (`get_active_document_id` does, and reports `has_data_file=false`).
+  it (`doc_get_active_id` does, and reports `has_data_file=false`).
 - **Saving the active doc:** `Document.saveAs(name, DataFolder, description, tag) -> bool` saves
-  the LIVE session — including a never-saved doc — distinct from `upload_file` (local file) and
-  `copy_document` (existing saved cloud file). Right after `saveAs`, `doc.dataFile.id` is a
+  the LIVE session — including a never-saved doc — distinct from `data_upload_file` (local file) and
+  `doc_copy` (existing saved cloud file). Right after `saveAs`, `doc.dataFile.id` is a
   LOCAL pre-upload handle (a temp `.f3d` path), NOT the lineage URN — cloud processing assigns
-  the `urn:` id a moment later. So `save_document_as` returns `document_id=null` unless `.id`
-  already `startswith("urn:")`, and tells the caller to confirm via `get_active_document_id`
+  the `urn:` id a moment later. So `doc_save_as` returns `document_id=null` unless `.id`
+  already `startswith("urn:")`, and tells the caller to confirm via `doc_get_active_id`
   after a short wait. Don't block waiting for it.
 - **Copying a saved cloud file:** `Data.findFileById(urn).copy(targetFolder) -> DataFile`.
   External references are PRESERVED as pointers to their originals (not re-copied) — read them
@@ -196,7 +196,7 @@ Open them with `openUsingContext`, NOT `open`.
 - **Deleting, guarded:** `DataFile.deleteMe()` / `DataFolder.deleteMe()`. `DataFile.deleteMe`
   fails on an OPEN or REFERENCED file (Fusion's own guard); the tools add a `confirm_name`
   exact-match check and, for files, a `parentReferences` refusal (force to override).
-  `DataFolder.deleteMe` has NO built-in empty/root guard — `delete_folder` refuses a project
+  `DataFolder.deleteMe` has NO built-in empty/root guard — `data_delete_folder` refuses a project
   root (`folder.isRoot`) and a non-empty folder unless forced. Resolve a folder by id with
   `Data.findFolderById(id)`. Deletion is irreversible.
 
@@ -205,5 +205,5 @@ Open them with `openUsingContext`, NOT `open`.
 1. **Static:** stub `adsk.*` plus the repo packages in `sys.modules` (faithful temp-package
    tree), import the module, register it, and exercise the handler against stub objects —
    including the error paths. Run with Fusion's bundled Python (path in CONTRIBUTING.md).
-2. **Live:** `reload_addin` to load it, then drive it via a POST to `127.0.0.1:27182/mcp`
+2. **Live:** `sys_reload_addin` to load it, then drive it via a POST to `127.0.0.1:27182/mcp`
    (`tools/call`). Confirm against a real document.

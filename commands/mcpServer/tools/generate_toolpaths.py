@@ -3,22 +3,22 @@
 
 """MCP building blocks: generate CAM toolpaths without blocking the agent, then poll.
 
-  generate_toolpaths   -> launch (re)generation of toolpaths for the whole document, a setup,
+  cam_generate   -> launch (re)generation of toolpaths for the whole document, a setup,
                           a folder, or one operation. Returns IMMEDIATELY with a handle — it does
                           NOT wait for the (potentially very long) compute to finish.
-  get_generation_status -> poll a launched generation by handle (or "latest"): how many of its
+  cam_get_status -> poll a launched generation by handle (or "latest"): how many of its
                           operations have completed, whether it is done, and — once done — each
                           operation's state and any warnings/errors.
 
 Why two tools (fire-and-poll): toolpath generation can take minutes. Blocking an MCP call that
-long wastes the agent's time and risks timeouts. So generate_toolpaths starts the work and returns
-a handle; the agent goes off and does other work, then calls get_generation_status whenever it
+long wastes the agent's time and risks timeouts. So cam_generate starts the work and returns
+a handle; the agent goes off and does other work, then calls cam_get_status whenever it
 likes. The live GenerateToolpathFuture is held in a module-level registry that survives between
 calls (module globals persist for the add-in session).
 
 Selective regeneration: pass skip_valid=true (default) so only OUT-OF-DATE operations regenerate —
 valid, up-to-date toolpaths are left alone (this is generateAllToolpaths(skipValid) /
-generateToolpath on a stale target). Read which ops are stale first with get_cam_operations
+generateToolpath on a stale target). Read which ops are stale first with cam_get_operations
 (each op reports state / is_out_of_date / has_warning).
 
 CONTEXT GOTCHA: operation valid/out-of-date state is only re-evaluated once the MANUFACTURE
@@ -31,11 +31,10 @@ Grounded in adsk.cam:
   - CAM.generateToolpath(operations: Base) -> GenerateToolpathFuture   (Operation/Setup/Folder)
   - GenerateToolpathFuture: .numberOfOperations, .numberOfCompleted, .isGenerationCompleted
   - Operation/OperationBase: .operationState, .hasWarning, .hasError, .error, .name, .strategy
-Handlers run on the main thread. generate_toolpaths WRITES (it mutates toolpaths); the status read
+Handlers run on the main thread. cam_generate WRITES (it mutates toolpaths); the status read
 does not mutate.
 """
 
-import json
 import time
 
 import adsk.core
@@ -46,6 +45,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 
 # Live generations, keyed by a short handle. Each entry holds the Future plus launch metadata.
@@ -59,21 +59,6 @@ _GENERATIONS = {}
 _HANDLE_SEQ = [0]
 
 _OP_STATE_NAMES = {0: "valid", 1: "invalid", 2: "suppressed", 3: "no_toolpath"}
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _get_cam():
@@ -185,7 +170,7 @@ def _collect_op_health():
 
 
 # ---------------------------------------------------------------------------
-# generate_toolpaths  (launch; returns immediately)
+# cam_generate  (launch; returns immediately)
 # ---------------------------------------------------------------------------
 
 def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
@@ -194,7 +179,7 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
     target: omit (or 'all'/'document') to generate across the whole document; otherwise the exact
     NAME of a setup, folder, or operation. skip_valid: when true (default) only regenerate
     out-of-date operations; when false, regenerate everything in scope. WRITES (mutates toolpaths).
-    Does NOT wait — poll with get_generation_status(handle).
+    Does NOT wait — poll with cam_get_status(handle).
     """
     cam, err = _get_cam()
     if err:
@@ -211,7 +196,7 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
             tgt, kind = _find_target(cam, want)
             if not tgt:
                 return _error(
-                    f"No setup/folder/operation named '{target}'. Use get_cam_operations to list "
+                    f"No setup/folder/operation named '{target}'. Use cam_get_operations to list "
                     "names. Omit 'target' to generate the whole document.")
             # generateToolpath has no skip_valid flag; it regenerates the given target. When the
             # caller asked to skip valid and this single target is already valid+current, short out.
@@ -250,25 +235,25 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
         "skip_valid": bool(skip_valid),
         "operations_to_generate": (total if total is not None else "pending (read on first poll)"),
         "note": ("Generation is launched. Fusion advances it on the main-thread loop, which the "
-                 "POLL pumps — so call get_generation_status(handle) repeatedly until "
+                 "POLL pumps — so call cam_get_status(handle) repeatedly until "
                  "completed=true (each poll nudges it forward a bounded burst and returns; it never "
                  "blocks for the full compute). The op count/progress populate on the first poll."),
     })
 
 
 # ---------------------------------------------------------------------------
-# get_generation_status  (poll)
+# cam_get_status  (poll)
 # ---------------------------------------------------------------------------
 
 def status_handler(handle: str = "", include_operations: bool = True,
                    pump_seconds: float = 1.5) -> dict:
-    """Poll a launched generation. handle: the id from generate_toolpaths (or 'latest' for the most
+    """Poll a launched generation. handle: the id from cam_generate (or 'latest' for the most
     recent). include_operations: when true and generation is complete, also report each in-scope
     operation's final state + warnings/errors. pump_seconds: how long to nudge the generation
     forward on THIS poll (default 1.5s, capped at 10s) — see note below. Read-only (does not
     mutate the design; it only advances the already-launched generation)."""
     if not _GENERATIONS:
-        return _error("No generations have been launched in this session. Call generate_toolpaths "
+        return _error("No generations have been launched in this session. Call cam_generate "
                       "first.")
 
     key = (handle or "").strip()
@@ -327,7 +312,7 @@ def status_handler(handle: str = "", include_operations: bool = True,
         if live and live.get("generating", 0) == 0 and live.get("out_of_date", 0) > 0:
             note += ("WARNING: no operation is actively generating yet out-of-date ops remain — "
                      "the ops may be failing to generate (e.g. broken input geometry / a mis-posed "
-                     "fixture or stock). Check get_cam_operations for per-op errors.")
+                     "fixture or stock). Check cam_get_operations for per-op errors.")
         payload["note"] = note
         return _ok(payload)
 
@@ -360,8 +345,8 @@ GENERATE_DESCRIPTION = (
     "whole document, or pass the exact NAME of a setup, folder, or operation. 'skip_valid' "
     "(default true) regenerates only OUT-OF-DATE operations, leaving valid up-to-date toolpaths "
     "alone; set false to force-regenerate everything in scope. WRITES (mutates toolpaths). After "
-    "launching, do other work and poll with get_generation_status(handle) — never block waiting. "
-    "Read which operations are stale first with get_cam_operations (it reports each op's state, "
+    "launching, do other work and poll with cam_get_status(handle) — never block waiting. "
+    "Read which operations are stale first with cam_get_operations (it reports each op's state, "
     "is_out_of_date, has_warning). IMPORTANT: be in the MANUFACTURE workspace before generating. "
     "Operation valid/out-of-date state is not re-evaluated against changed geometry (e.g. a "
     "freshly inserted/swapped part) until Manufacture is active — so from the Design workspace "
@@ -371,7 +356,7 @@ GENERATE_DESCRIPTION = (
 )
 
 generate_tool = (
-    Tool.create_simple(name="generate_toolpaths", description=GENERATE_DESCRIPTION)
+    Tool.create_simple(name="cam_generate", description=GENERATE_DESCRIPTION)
     .add_input_property("target", {"type": "string",
                                    "description": "Setup/folder/operation NAME to generate; omit (or 'document') for the whole document."})
     .add_input_property("skip_valid", {"type": "boolean",
@@ -382,8 +367,8 @@ generate_item = Item.create_tool_item(tool=generate_tool, handler=generate_handl
                                        run_on_main_thread=True)
 
 STATUS_DESCRIPTION = (
-    "Poll a toolpath generation launched by generate_toolpaths and NUDGE it forward. 'handle' is "
-    "the id returned by generate_toolpaths (or 'latest'). IMPORTANT: Fusion advances generation on "
+    "Poll a toolpath generation launched by cam_generate and NUDGE it forward. 'handle' is "
+    "the id returned by cam_generate (or 'latest'). IMPORTANT: Fusion advances generation on "
     "the main-thread event loop, so each poll pumps that loop for a short bounded burst "
     "('pump_seconds', default 1.5s, max 10s) to make real progress, then returns — generation only "
     "advances while a poll is pumping, so poll repeatedly until completed=true. Reports "
@@ -394,9 +379,9 @@ STATUS_DESCRIPTION = (
 )
 
 status_tool = (
-    Tool.create_simple(name="get_generation_status", description=STATUS_DESCRIPTION)
+    Tool.create_simple(name="cam_get_status", description=STATUS_DESCRIPTION)
     .add_input_property("handle", {"type": "string",
-                                   "description": "Generation handle from generate_toolpaths, or 'latest'."})
+                                   "description": "Generation handle from cam_generate, or 'latest'."})
     .add_input_property("include_operations", {"type": "boolean",
                                                "description": "When complete, include per-operation state + warnings (default true)."})
     .add_input_property("pump_seconds", {"type": "number",

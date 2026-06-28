@@ -1,7 +1,7 @@
-"""Unit tests for ``capture_views.py`` — capture several orthographic/iso views in one call.
+"""Unit tests for ``view_screenshot_multi.py`` — capture several orthographic/iso views in one call.
 
-get_screenshot captures ONE viewport per call, so reading a model from a single iso
-is error-prone. capture_views orients to each requested view, captures each as a
+view_screenshot captures ONE viewport per call, so reading a model from a single iso
+is error-prone. view_screenshot_multi orients to each requested view, captures each as a
 separate image, and returns them interleaved with text labels — so an inference
 model sees front/top/right/iso together.
 

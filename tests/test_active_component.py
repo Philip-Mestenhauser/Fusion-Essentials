@@ -1,7 +1,7 @@
 """Unit tests for the active-component targeting fix in sketches.py + extrude.py.
 
 The bug the crane build exposed: both tools hardcoded design.rootComponent, so a
-component made active via create_component(activate=true) never received the new
+component made active via model_create_component(activate=true) never received the new
 sketch/body — geometry leaked into root, leaving empty components. The fix routes
 through a _target_component(design) helper that returns design.activeComponent
 (the current edit target) and falls back to rootComponent when none/unsupported,

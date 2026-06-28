@@ -111,7 +111,7 @@ class TestClassify:
 # ── handler 'require' mismatch flagging ────────────────────────────────────
 
 class TestRequireFlag:
-    """get_user_selection should flag when the selection doesn't match 'require'.
+    """sys_get_selection should flag when the selection doesn't match 'require'.
 
     We bypass the live UI by stubbing _ui()/_classify the minimum needed: build a
     fake Selections collection holding one BRepFace and check the require logic.

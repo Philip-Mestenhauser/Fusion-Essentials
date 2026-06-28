@@ -3,9 +3,9 @@
 
 """MCP building blocks: rectangular & circular PATTERNS of component occurrences.
 
-  rectangular_pattern -> duplicate one or more component occurrences in a grid: a count + spacing
+  model_pattern_rectangular -> duplicate one or more component occurrences in a grid: a count + spacing
                          along a primary axis, and optionally a second axis. WRITES.
-  circular_pattern    -> duplicate occurrences evenly around an axis: a count over a total angle
+  model_pattern_circular    -> duplicate occurrences evenly around an axis: a count over a total angle
                          (360 = full ring). WRITES.
 
 These pattern OCCURRENCES (placed components), resolved by name — the common "lay out N copies of
@@ -13,7 +13,7 @@ this part/fixture" case. Direction/axis defaults to a world construction axis (x
 entity pick is needed; pass 'axis'/'direction' to choose. General-purpose: they just replicate the
 named occurrences; they say nothing about why.
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - features.rectangularPatternFeatures.createInput(inputEntities, directionOneEntity, quantityOne,
       distanceOne, PatternDistanceType) ; .setDirectionTwo(entity, qtyTwo, distTwo) ; .add(input)
   - features.circularPatternFeatures.createInput(inputEntities, axis) ; .quantity / .totalAngle /
@@ -22,34 +22,24 @@ Grounded in adsk.fusion (signatures confirmed via get_api_doc):
 Handlers run on the main thread; WRITE.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
+from . import _inputs
 
 app = adsk.core.Application.get()
 
 _UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 _AXES = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstructionAxis"}
 
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
+# 'bodies' lets a pattern replicate solid BODIES (by handle/name) instead of occurrences —
+# the "pattern these holes/bosses" case. Empty -> fall back to 'occurrences'.
+_BODIES = _inputs.BodyRefList("bodies", required=False,
+                              description="Bodies to pattern (alternative to 'occurrences').")
 
 
 def _design():
@@ -107,6 +97,30 @@ def _resolve_occurrences(design, names):
     return coll, resolved, missing, sample
 
 
+def _resolve_input_entities(design, occurrences, bodies):
+    """Build the ObjectCollection to pattern: 'bodies' (BodyRefList) takes precedence, else
+    'occurrences' (by name). Returns (collection, resolved_names, error)."""
+    if bodies not in (None, "", []):
+        ents, berr = _BODIES.resolve(bodies)
+        if berr:
+            return None, None, berr
+        coll = adsk.core.ObjectCollection.create()
+        for b in ents:
+            coll.add(b)
+        if coll.count == 0:
+            return None, None, "No valid bodies resolved to pattern."
+        return coll, [_safe(lambda b=b: b.name) for b in ents], None
+
+    coll, resolved, missing, sample = _resolve_occurrences(design, occurrences)
+    if missing:
+        return None, None, (f"No occurrence matched: {', '.join(missing)}. Some present: "
+                            f"{', '.join(n for n in sample if n)[:300]}.")
+    if coll.count == 0:
+        return None, None, ("Provide 'occurrences' (occurrence name(s)) or 'bodies' (body "
+                            "handles/names) to pattern.")
+    return coll, resolved, None
+
+
 def _axis_entity(design, axis_key):
     root = design.rootComponent
     attr = _AXES.get((axis_key or "z").strip().lower())
@@ -117,15 +131,16 @@ def _axis_entity(design, axis_key):
 
 # --------------------------------------------------------------- rectangular
 
-def rectangular_handler(occurrences: str = "", quantity_one: int = 2, spacing_one: float = 10.0,
+def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 2, spacing_one: float = 10.0,
                         direction_one: str = "x", quantity_two: int = 1, spacing_two: float = 10.0,
                         direction_two: str = "y", units: str = "mm") -> dict:
-    """Pattern component occurrences in a rectangular grid.
+    """Pattern component occurrences OR bodies in a rectangular grid.
 
-    occurrences: occurrence name(s) to pattern (comma-separated, or one name). quantity_one /
-    spacing_one / direction_one: count, spacing (in 'units'), and world axis (x/y/z) for the first
-    direction. quantity_two / spacing_two / direction_two: optional second direction (set
-    quantity_two=1 for a single row). 'spacing' is the distance BETWEEN instances. WRITES.
+    occurrences: occurrence name(s) to pattern (comma-separated, or one name). bodies: solid body
+    handles/names to pattern instead (takes precedence over occurrences) — the "pattern these
+    bosses/holes" case. quantity_one / spacing_one / direction_one: count, spacing (in 'units'), and
+    world axis (x/y/z) for the first direction. quantity_two / spacing_two / direction_two: optional
+    second direction (set quantity_two=1 for a single row). 'spacing' is BETWEEN instances. WRITES.
     """
     k = _scale(units)
     if k is None:
@@ -136,12 +151,9 @@ def rectangular_handler(occurrences: str = "", quantity_one: int = 2, spacing_on
     if not design:
         return _error("No active design. Open or create a document with components first.")
 
-    coll, resolved, missing, sample = _resolve_occurrences(design, occurrences)
-    if missing:
-        return _error(f"No occurrence matched: {', '.join(missing)}. Some present: "
-                      f"{', '.join(n for n in sample if n)[:300]}.")
-    if coll.count == 0:
-        return _error("Provide 'occurrences' — the component occurrence name(s) to pattern.")
+    coll, resolved, rerr = _resolve_input_entities(design, occurrences, bodies)
+    if rerr:
+        return _error(rerr)
 
     d1 = _axis_entity(design, direction_one)
     if not d1:
@@ -173,27 +185,28 @@ def rectangular_handler(occurrences: str = "", quantity_one: int = 2, spacing_on
         "patterned": True,
         "type": "rectangular",
         "feature": _safe(lambda: feature.name),
-        "occurrences": resolved,
+        "entities": resolved,
+        "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
         "direction_one": direction_one.lower(), "quantity_one": int(quantity_one),
         "spacing_one": round(float(spacing_one), 6),
         "direction_two": direction_two.lower() if int(quantity_two) > 1 else None,
         "quantity_two": int(quantity_two), "spacing_two": round(float(spacing_two), 6),
         "units": units,
         "total_instances": total,
-        "note": "Occurrences patterned in a grid. Pair with get_screenshot to view.",
+        "note": "Occurrences patterned in a grid. Pair with view_screenshot to view.",
     })
 
 
 # ------------------------------------------------------------------- circular
 
-def circular_handler(occurrences: str = "", quantity: int = 4, total_angle_deg: float = 360.0,
+def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, total_angle_deg: float = 360.0,
                      axis: str = "z", symmetric: bool = False) -> dict:
-    """Pattern component occurrences evenly around an axis.
+    """Pattern component occurrences OR bodies evenly around an axis.
 
-    occurrences: occurrence name(s) (comma-separated, or one). quantity: number of instances
-    (including the original). total_angle_deg: angle to spread them over (360 = full ring). axis:
-    world axis x/y/z to rotate about (default z). symmetric: spread symmetrically about the
-    original instead of one direction. WRITES.
+    occurrences: occurrence name(s) (comma-separated, or one). bodies: solid body handles/names to
+    pattern instead (takes precedence). quantity: number of instances (including the original).
+    total_angle_deg: angle to spread them over (360 = full ring). axis: world axis x/y/z to rotate
+    about (default z). symmetric: spread symmetrically about the original. WRITES.
     """
     if int(quantity) < 2:
         return _error("quantity must be >= 2 for a circular pattern.")
@@ -201,12 +214,9 @@ def circular_handler(occurrences: str = "", quantity: int = 4, total_angle_deg: 
     if not design:
         return _error("No active design. Open or create a document with components first.")
 
-    coll, resolved, missing, sample = _resolve_occurrences(design, occurrences)
-    if missing:
-        return _error(f"No occurrence matched: {', '.join(missing)}. Some present: "
-                      f"{', '.join(n for n in sample if n)[:300]}.")
-    if coll.count == 0:
-        return _error("Provide 'occurrences' — the component occurrence name(s) to pattern.")
+    coll, resolved, rerr = _resolve_input_entities(design, occurrences, bodies)
+    if rerr:
+        return _error(rerr)
 
     ax = _axis_entity(design, axis)
     if not ax:
@@ -228,12 +238,13 @@ def circular_handler(occurrences: str = "", quantity: int = 4, total_angle_deg: 
         "patterned": True,
         "type": "circular",
         "feature": _safe(lambda: feature.name),
-        "occurrences": resolved,
+        "entities": resolved,
+        "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
         "axis": axis.lower(),
         "quantity": int(quantity),
         "total_angle_deg": float(total_angle_deg),
         "symmetric": bool(symmetric),
-        "note": "Occurrences patterned around the axis. Pair with get_screenshot to view.",
+        "note": "Occurrences patterned around the axis. Pair with view_screenshot to view.",
     })
 
 
@@ -244,12 +255,13 @@ _RECT_DESC = (
     "copy (comma-separated, or one). 'quantity_one'/'spacing_one'/'direction_one' set the count, "
     "spacing (in 'units', the distance BETWEEN instances), and world axis (x/y/z) of the first "
     "direction; 'quantity_two'/'spacing_two'/'direction_two' add an optional second direction "
-    "(leave quantity_two=1 for a single row). WRITES. Pair with get_screenshot to view."
+    "(leave quantity_two=1 for a single row). WRITES. Pair with view_screenshot to view."
 )
 rectangular_tool = (
-    Tool.create_simple(name="rectangular_pattern", description=_RECT_DESC)
+    Tool.create_simple(name="model_pattern_rectangular", description=_RECT_DESC)
     .add_input_property("occurrences", {"type": "string",
                                         "description": "Occurrence name(s) to pattern (comma-separated, or one name)."})
+    .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity_one", {"type": "integer", "description": "Instance count in direction one (>=1)."})
     .add_input_property("spacing_one", {"type": "number", "description": "Spacing between instances in direction one (in 'units')."})
     .add_input_property("direction_one", {"type": "string", "description": "World axis for direction one: x | y | z (default x)."})
@@ -267,12 +279,13 @@ _CIRC_DESC = (
     "copy (comma-separated, or one). 'quantity' = number of instances (including the original); "
     "'total_angle_deg' = the angle to spread them over (360 = full ring); 'axis' = world axis x/y/z "
     "to rotate about (default z); 'symmetric' spreads symmetrically about the original. WRITES. "
-    "Pair with get_screenshot to view."
+    "Pair with view_screenshot to view."
 )
 circular_tool = (
-    Tool.create_simple(name="circular_pattern", description=_CIRC_DESC)
+    Tool.create_simple(name="model_pattern_circular", description=_CIRC_DESC)
     .add_input_property("occurrences", {"type": "string",
                                         "description": "Occurrence name(s) to pattern (comma-separated, or one name)."})
+    .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity", {"type": "integer", "description": "Number of instances including the original (>=2)."})
     .add_input_property("total_angle_deg", {"type": "number", "description": "Total angle to spread over in degrees (360 = full ring)."})
     .add_input_property("axis", {"type": "string", "description": "World axis to rotate about: x | y | z (default z)."})

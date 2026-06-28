@@ -7,12 +7,12 @@
              feature operation (new body / join / cut / intersect), the distance, and optionally a
              symmetric (both-sides) extrude or a taper angle. WRITES to the design.
 
-This is the companion to create_sketch / add_sketch_geometry: those draw a profile, this gives it
+This is the companion to sketch_create / sketch_add_geometry: those draw a profile, this gives it
 depth. General-purpose — it just extrudes a profile; it says nothing about WHY (a boss, a pocket, a
 plate). Targets a profile by sketch name + profile index, so an agent can pick which closed region
 of a sketch to extrude.
 
-Grounded in adsk.fusion (signatures confirmed via get_api_doc):
+Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Component.features.extrudeFeatures.createInput(profile, FeatureOperations) -> ExtrudeFeatureInput
   - ExtrudeFeatureInput.setDistanceExtent(isSymmetric: bool, distance: ValueInput)
   - ExtrudeFeatureInput.setOneSideExtent(DistanceExtentDefinition, direction, taperAngle)  [taper]
@@ -20,16 +20,23 @@ Grounded in adsk.fusion (signatures confirmed via get_api_doc):
 Handler runs on the main thread; WRITES.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
+from . import _inputs
 
 app = adsk.core.Application.get()
+
+# to_object: extrude UP TO a face (handle) instead of a blind distance.
+_TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
+    description="Extrude up to THIS face (a find_geometry face handle) instead of by 'distance'.")
+# target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
+    description="Bodies a cut/join/intersect may affect (prevents cut bleed-through into other bodies).")
 
 _UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 
@@ -41,21 +48,6 @@ _OPERATIONS = {
     "cut": "CutFeatureOperation",
     "intersect": "IntersectFeatureOperation",
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -73,7 +65,7 @@ def _scale(units: str):
 def _target_component(design):
     """The component to build into: the ACTIVE edit target (design.activeComponent), falling back
     to root when none is set — so extrude lands in the component made active by
-    create_component(activate=true); unchanged when nothing is activated."""
+    model_create_component(activate=true); unchanged when nothing is activated."""
     comp = _safe(lambda: design.activeComponent)
     return comp if comp is not None else design.rootComponent
 
@@ -93,32 +85,34 @@ def _target_sketch(design, sketch_name):
 
 def handler(sketch_name: str = "", profile_index: int = 0, distance: float = 0.0,
             units: str = "mm", operation: str = "new", symmetric: bool = False,
-            taper_deg: float = 0.0) -> dict:
+            taper_deg: float = 0.0, to_object: str = "", target_bodies=None) -> dict:
     """Extrude a sketch profile into a solid.
 
     sketch_name: the sketch holding the profile (omit = most recent sketch). profile_index: which
     closed profile of that sketch to extrude (0-based; default 0). distance: extrude depth in
-    'units' (mm/cm/in; negative reverses direction). operation: new | join | cut | intersect.
-    symmetric: extrude both sides of the plane by 'distance' each (default one-sided). taper_deg:
-    optional draft angle in degrees. WRITES to the design.
+    'units' (mm/cm/in; negative reverses direction). to_object: extrude UP TO a face (a find_geometry
+    handle) instead of 'distance'. operation: new | join | cut | intersect. target_bodies: scope a
+    cut/join/intersect to these bodies (prevents bleed-through into other bodies). symmetric: extrude
+    both sides of the plane (default one-sided). taper_deg: optional draft angle. WRITES.
     """
     k = _scale(units)
     if k is None:
         return _error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    if distance == 0:
-        return _error("Provide a non-zero 'distance' to extrude.")
+    use_to_object = bool((to_object or "").strip())
+    if distance == 0 and not use_to_object:
+        return _error("Provide a non-zero 'distance' to extrude, or 'to_object' to extrude up to a face.")
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
         return _error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
 
     design = _design()
     if not design:
-        return _error("No active design. Create or open a document first (see new_document).")
+        return _error("No active design. Create or open a document first (see doc_new).")
 
     sketch, requested = _target_sketch(design, sketch_name)
     if not sketch:
         if requested:
-            return _error(f"No sketch named '{requested}'. Use get_sketches or create_sketch.")
+            return _error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
         return _error("No sketch to extrude. Create one and draw a closed profile first.")
 
     profiles = _safe(lambda: sketch.profiles)
@@ -141,19 +135,42 @@ def handler(sketch_name: str = "", profile_index: int = 0, distance: float = 0.0
     except Exception as e:
         return _error(f"Could not start extrude: {e}")
 
-    dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
+    # extent: 'to_object' (extrude up to a face handle) wins over a blind distance.
     try:
-        taper = float(taper_deg or 0.0)
-        if taper and not symmetric:
-            # one-sided with taper: build a DistanceExtentDefinition + taper ValueInput
-            extent = adsk.fusion.DistanceExtentDefinition.create(dist_val)
-            taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
-            ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection,
-                                       taper_val)
+        if use_to_object:
+            face, ferr = _TO_OBJECT.resolve(to_object)
+            if ferr:
+                return _error(ferr)
+            to_extent = adsk.fusion.ToEntityExtentDefinition.create(face, False)  # chained=False
+            ext_input.setOneSideExtent(to_extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
         else:
-            ext_input.setDistanceExtent(bool(symmetric), dist_val)
+            dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
+            taper = float(taper_deg or 0.0)
+            if taper and not symmetric:
+                # one-sided with taper: build a DistanceExtentDefinition + taper ValueInput
+                extent = adsk.fusion.DistanceExtentDefinition.create(dist_val)
+                taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
+                ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection,
+                                           taper_val)
+            else:
+                ext_input.setDistanceExtent(bool(symmetric), dist_val)
     except Exception as e:
         return _error(f"Could not set extrude extent: {e}")
+
+    # target_bodies: scope a cut/join/intersect to specific bodies so it can't bleed through others.
+    scoped_to = None
+    if target_bodies not in (None, "", []):
+        if op_key == "new":
+            return _error("'target_bodies' only applies to cut/join/intersect (a 'new' body has no "
+                          "participants). Remove it, or change the operation.")
+        bodies_ents, berr = _TARGET_BODIES.resolve(target_bodies)
+        if berr:
+            return _error(berr)
+        try:
+            ext_input.participantBodies = list(bodies_ents)
+            scoped_to = [_safe(lambda b=b: b.name) for b in bodies_ents]
+        except Exception as e:
+            return _error(f"Could not scope to target_bodies: {e}")
 
     try:
         feature = root.features.extrudeFeatures.add(ext_input)
@@ -173,27 +190,29 @@ def handler(sketch_name: str = "", profile_index: int = 0, distance: float = 0.0
         "operation": op_key,
         "sketch": _safe(lambda: sketch.name),
         "profile_index": idx,
-        "distance": round(float(distance), 6),
+        "distance": (None if use_to_object else round(float(distance), 6)),
+        "extent": ("to_object" if use_to_object else "distance"),
         "units": units,
         "symmetric": bool(symmetric),
         "taper_deg": float(taper_deg or 0.0),
+        "scoped_to_bodies": scoped_to,
         "result_bodies": body_names,
-        "note": "Profile extruded into a solid. Pair with get_screenshot (iso) to view it.",
+        "note": "Profile extruded into a solid. Pair with view_screenshot (iso) to view it.",
     })
 
 
 TOOL_DESCRIPTION = (
     "Extrude a closed sketch profile into a 3D solid — the back half of modelling, paired with "
-    "create_sketch / add_sketch_geometry. 'sketch_name' selects the sketch (omit = most recent); "
+    "sketch_create / sketch_add_geometry. 'sketch_name' selects the sketch (omit = most recent); "
     "'profile_index' picks which closed region of it to extrude (0-based). 'distance' is the depth "
     "in 'units' (mm default; negative reverses). 'operation': new (new body) | join | cut | "
     "intersect — cut/intersect act on existing bodies. 'symmetric' extrudes both sides of the "
     "plane; 'taper_deg' applies a draft angle. WRITES to the design. Returns the resulting "
-    "body names; pair with get_screenshot to view."
+    "body names; pair with view_screenshot to view."
 )
 
 extrude_tool = (
-    Tool.create_simple(name="extrude", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="model_extrude", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
                                         "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": "integer",
@@ -207,6 +226,8 @@ extrude_tool = (
                                       "description": "Extrude both sides of the plane by 'distance' each (default false)."})
     .add_input_property("taper_deg", {"type": "number",
                                       "description": "Optional draft/taper angle in degrees (one-sided only)."})
+    .add_input_property("to_object", _TO_OBJECT.schema())
+    .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .strict_schema()
 )
 extrude_item = Item.create_tool_item(tool=extrude_tool, handler=handler, run_on_main_thread=True)

@@ -24,21 +24,21 @@ logic breaks **silently** — a wrong unit factor or a dropped error path return
 subtly wrong JSON to the agent, with no exception. That's what we pin down.
 
 We deliberately **do not** unit-test tools whose only job is to forward data
-to/from the Fusion API (`get_session_info`, `get_screenshot`, `reload_addin`,
-`execute_api_script`, `workspaces`, …). Mocking `adsk` just to assert "it copied
+to/from the Fusion API (`sys_get_session`, `view_screenshot`, `sys_reload_addin`,
+`sys_execute_script`, `workspaces`, …). Mocking `adsk` just to assert "it copied
 `app.version` into a field" tests the mock, not the code. Those belong to the
 in-Fusion integration layer (driven via the Fusion MCP server), not here.
 
 ### Triage when deciding whether a tool needs tests
 
 - **Tier 1 — test thoroughly.** Real logic: unit math, parsing, classification,
-  path/name resolution, state tallies. (measure_bounding_box, selection,
+  path/name resolution, state tallies. (model_measure_bbox, selection,
   cam_info, data_management, parameters, configurations, joint, joint_origin,
   cam_templates, sketches.)
 - **Tier 2 — test the one or two real helpers.** Mostly Fusion orchestration
-  with a pure helper or two worth pinning. (open_document URN parsing, quoting
-  helpers, component_tree/visibility lookups, timeline/update_xref/
-  generate_toolpaths helpers.)
+  with a pure helper or two worth pinning. (doc_open URN parsing, quoting
+  helpers, component_tree/visibility lookups, timeline/doc_update_xref/
+  cam_generate helpers.)
 - **Tier 3 — skip.** Fusion pass-throughs with no pure logic. Skipping is
   correct, not lazy.
 

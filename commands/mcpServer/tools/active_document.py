@@ -3,11 +3,11 @@
 
 """Safe, read-only MCP tool: resolve the ACTIVE document to its data-model identity.
 
-`get_session_info` returns the active document's NAME but not its data-model id (URN).
-Names are not unique, so resolving "the active doc" by name (via list_project_files) is
+`sys_get_session` returns the active document's NAME but not its data-model id (URN).
+Names are not unique, so resolving "the active doc" by name (via data_list_files) is
 fragile. This tool returns the active document's lineage URN, version, openability, and
 whether it has unsaved changes — so an agent can act on the live document deterministically
-(e.g. copy_document by URN, or know that a save is needed first).
+(e.g. doc_copy by URN, or know that a save is needed first).
 
 Grounded in adsk.core:
   - app.activeDocument -> Document
@@ -18,22 +18,14 @@ Grounded in adsk.core:
 Read-only; runs on the main thread (touches adsk.*).
 """
 
-import json
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
 
 app = adsk.core.Application.get()
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
 
 
 def handler() -> dict:
@@ -48,7 +40,7 @@ def handler() -> dict:
         "is_modified": _safe(lambda: doc.isModified),
         "fusion_version_saved_with": _safe(lambda: doc.version),
         # data-model identity (only meaningful once the doc has been saved to the cloud)
-        "document_id": None,      # lineage URN — the id copy_document / open_document use
+        "document_id": None,      # lineage URN — the id doc_copy / doc_open use
         "version_id": None,
         "version_number": None,
         "latest_version_number": None,
@@ -83,17 +75,9 @@ def handler() -> dict:
     return _ok(info)
 
 
-def _ok(payload: dict) -> dict:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
-
-
 TOOL_DESCRIPTION = (
     "Resolve the ACTIVE Fusion document to its data-model identity: its lineage id (URN) — "
-    "the 'document_id' used by copy_document and open_document — plus version number, "
+    "the 'document_id' used by doc_copy and doc_open — plus version number, "
     "openable web URL, and whether it is saved / has unsaved changes. Use this to act on "
     "'the active document' precisely, instead of guessing it by name. IMPORTANT: an UNSAVED "
     "document has no document_id yet (has_data_file=false) — save it first. If the document "
@@ -102,7 +86,7 @@ TOOL_DESCRIPTION = (
 )
 
 tool = Tool.create_simple(
-    name="get_active_document_id",
+    name="doc_get_active_id",
     description=TOOL_DESCRIPTION,
 ).strict_schema()
 

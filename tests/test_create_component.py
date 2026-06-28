@@ -1,4 +1,4 @@
-"""Unit tests for ``create_component.py`` — make a new empty component occurrence.
+"""Unit tests for ``model_create_component.py`` — make a new empty component occurrence.
 
 Tests written BEFORE the tool is wired (project rule). The logic pinned, no live
 Fusion: an empty component+occurrence is created (Occurrences.addNewComponent),
@@ -35,6 +35,9 @@ class FakeOcc:
 class FakeMatrix:
     def __init__(self):
         self.translation = None
+        self.rotation = None
+    def setToRotation(self, angle, axis, origin):
+        self.rotation = (angle, axis, origin)
 
 
 class FakeOccurrences:
@@ -65,6 +68,7 @@ def _install():
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.Matrix3D.create = staticmethod(FakeMatrix)
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
+    adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
     return design
 
 
@@ -115,6 +119,17 @@ class TestCreateComponent:
         _install()
         res = cc.handler(x=5, units="furlongs")
         assert res["isError"] is True and "Unknown units" in res["message"]
+
+    def test_orientation_rotation(self):
+        design = _install()
+        out = _payload(cc.handler(rotate_deg=90, rotate_axis="x"))
+        assert design.rootComponent.occurrences.last_transform.rotation is not None
+        assert out["rotate_axis"] == "x" and out["rotate_deg"] == 90
+
+    def test_unknown_rotate_axis_errors(self):
+        _install()
+        res = cc.handler(rotate_deg=45, rotate_axis="w")
+        assert res["isError"] is True and "rotate_axis" in res["message"]
 
     def test_no_active_design_errors(self):
         cc.app = type("A", (), {"activeProduct": None})()

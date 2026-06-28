@@ -3,7 +3,7 @@
 
 """MCP building block: cut the model with a section plane so the agent can see INSIDE.
 
-  section_view(action=...) — create / adjust / remove a Section Analysis (the live cutaway in
+  view_section(action=...) — create / adjust / remove a Section Analysis (the live cutaway in
   Fusion's Inspect > Section Analysis), so an agent can see internal geometry — cavities, wall
   thickness, how a part nests in a fixture, where an internal void sits — that a solid view
   hides.
@@ -15,7 +15,7 @@
     clear     -> remove all section analyses (restores the un-cut view).
 
 This is a VIEW/analysis aid — Section Analysis does not modify geometry (it's a non-destructive
-cutaway you can delete). Pair with inspect_view (orient/isolate) + get_screenshot to study the cut.
+cutaway you can delete). Pair with view_inspect (orient/isolate) + view_screenshot to study the cut.
 
 Grounded in adsk.fusion:
   - Design.analyses.sectionAnalyses.createInput(cutPlaneEntity, distance_cm) -> SectionAnalysisInput
@@ -24,16 +24,19 @@ Grounded in adsk.fusion:
 Handler runs on the main thread.
 """
 
-import json
-
 import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from ._common import _ok, _error, _safe
+from . import _inputs
 
 app = adsk.core.Application.get()
+
+# PlaneRef for a bare-plane cut (origin alias | construction name | planar-face handle).
+_PLANE = _inputs.PlaneRef("plane", description="The plane to cut on (when not using 'through').")
 
 _ACTIONS = ("cut", "list", "clear")
 _PLANES = {
@@ -41,21 +44,6 @@ _PLANES = {
     "xz": "xZConstructionPlane", "front": "xZConstructionPlane",
     "yz": "yZConstructionPlane", "right": "yZConstructionPlane",
 }
-
-
-def _safe(getter, default=None):
-    try:
-        return getter()
-    except Exception:
-        return default
-
-
-def _ok(payload):
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
-
-
-def _error(text):
-    return {"content": [{"type": "text", "text": text}], "isError": True, "message": text}
 
 
 def _design():
@@ -184,12 +172,15 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
             base_offset_cm += normal_coord
         desc = f"through '{_safe(lambda: occ.name)}' on {pkey} plane"
     else:
-        pkey = (plane or "").strip().lower()
-        if pkey not in _PLANES:
-            return _error("Provide 'plane' (xy/xz/yz or top/front/right) or 'through' "
-                          "(an occurrence to cut through its center).")
-        cut_entity = getattr(root, _PLANES[pkey])
-        desc = f"{pkey} plane"
+        if not (plane or "").strip():
+            return _error("Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or "
+                          "a planar-face handle from find_geometry) or 'through' (an occurrence).")
+        # plane is a PlaneRef: resolves origin alias OR construction-plane name OR a planar-face/plane
+        # handle — gains section-on-an-arbitrary-plane (face/construction) over the old origin-only path.
+        cut_entity, perr = _PLANE.resolve(plane)
+        if perr:
+            return _error(perr)
+        desc = f"plane '{(plane or '')[:16]}'"
 
     try:
         inp = sections.createInput(cut_entity, base_offset_cm)
@@ -222,8 +213,8 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         "auto_viewed": aimed,
         "note": ("Model is now cut" + (" and the camera is aimed at the cut face." if aimed else
                  "; the camera was left where it was (auto_view=false).") +
-                 " Use get_screenshot to study the interior; flip=true cuts the other half; "
-                 "section_view(clear) removes the cut."),
+                 " Use view_screenshot to study the interior; flip=true cuts the other half; "
+                 "view_section(clear) removes the cut."),
     })
 
 
@@ -236,21 +227,21 @@ TOOL_DESCRIPTION = (
     "(remove ALL sections — restores the un-cut view). By default the camera is auto-aimed at the "
     "exposed cut face (auto_view=false keeps your camera) — otherwise the camera may sit on the "
     "solid side where the model looks uncut. NON-DESTRUCTIVE: a section analysis is a "
-    "cutaway view, not a geometry edit, and 'clear' fully undoes it. Pair with inspect_view "
-    "(orient/isolate) and get_screenshot. Typical: section_view(cut, through='<OccurrenceName>:1', "
-    "plane='front') -> inspect_view(orient, orientation='front') -> get_screenshot -> "
-    "section_view(clear)."
+    "cutaway view, not a geometry edit, and 'clear' fully undoes it. Pair with view_inspect "
+    "(orient/isolate) and view_screenshot. Typical: view_section(cut, through='<OccurrenceName>:1', "
+    "plane='front') -> view_inspect(orient, orientation='front') -> view_screenshot -> "
+    "view_section(clear)."
 )
 
 tool = (
     Tool.create_with_string_input(
-        name="section_view",
+        name="view_section",
         description=TOOL_DESCRIPTION,
         input_param_name="action",
         input_param_description="cut | list | clear.",
     )
     .add_input_property("plane", {"type": "string",
-                                  "description": "Cut plane for 'cut': xy/xz/yz or top/front/right (default xz/front when using 'through')."})
+                                  "description": "Cut plane: an origin alias (xy/xz/yz or top/front/right), a construction-plane NAME, or a planar-face handle from find_geometry (cut on an arbitrary/angled plane). With 'through', an origin alias is used (default xz/front)."})
     .add_input_property("through", {"type": "string",
                                     "description": "Occurrence name to cut through its center (alternative to a bare plane)."})
     .add_input_property("offset", {"type": "number",

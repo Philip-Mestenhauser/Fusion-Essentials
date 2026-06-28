@@ -82,7 +82,7 @@ TOOL_DESCRIPTION = (
 )
 
 tool = Tool.create_simple(
-    name="get_session_info",
+    name="sys_get_session",
     description=TOOL_DESCRIPTION,
 ).strict_schema()
 
