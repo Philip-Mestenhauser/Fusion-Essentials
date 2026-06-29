@@ -72,6 +72,7 @@ class FakeDesign:
 def _install():
     sketch = FakeSketch()
     sd.app = type("A", (), {"activeProduct": FakeDesign(sketch)})()
+    sd._common.app = sd.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
@@ -115,6 +116,66 @@ class TestDispatch:
         assert s.sketchDimensions.calls[-1][0] == "angle"
 
 
+    def test_vertical_orientation(self):
+        s = _install()
+        _payload(sd.handler(dim_type="vertical_distance", entity_one="line:0", entity_two="line:1"))
+        assert s.sketchDimensions.calls[-1] == ("distance", "vert")
+
+
+# ── _radial_text_point: the offset-from-center math (the module's key bug-fix) ──
+
+class _FakeCenter:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _FakeCurveGeo:
+    def __init__(self, center, radius):
+        self.center = center
+        self.radius = radius
+
+
+class _FakeCurve:
+    def __init__(self, center, radius):
+        self.geometry = _FakeCurveGeo(center, radius)
+
+
+class TestRadialTextPoint:
+    def setup_method(self):
+        import adsk.core
+        adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
+
+    def test_offset_one_radius_along_x_from_center(self):
+        # center (3,4), radius 2 -> text point at (3+2, 4) = (5, 4); NOT the center (degenerate)
+        c = _FakeCurve(_FakeCenter(3, 4), 2)
+        assert sd._radial_text_point(c) == ("pt", 5.0, 4.0, 0.0)
+
+    def test_zero_radius_uses_unit_offset(self):
+        # a degenerate/zero radius must still produce a NON-zero offset (1.0), never center+0
+        c = _FakeCurve(_FakeCenter(0, 0), 0.0)
+        assert sd._radial_text_point(c) == ("pt", 1.0, 0.0, 0.0)
+
+    def test_missing_center_falls_back_to_unit_point(self):
+        class _NoCenter:
+            geometry = type("G", (), {"center": None, "radius": 0.0})()
+        assert sd._radial_text_point(_NoCenter()) == ("pt", 1, 0, 0)
+
+
+# ── _point_of: line start point vs a bare point ─────────────────────────────
+
+class TestPointOf:
+    def test_line_uses_start_sketch_point(self):
+        line = type("L", (), {"startSketchPoint": "SP"})()
+        assert sd._point_of(line) == "SP"
+
+    def test_point_returns_itself(self):
+        # a sketch point has no startSketchPoint -> returns the entity itself
+        class _Pt:
+            startSketchPoint = None
+        p = _Pt()
+        assert sd._point_of(p) is p
+
+
 class TestGuards:
     def test_unknown_dim_type(self):
         _install()
@@ -135,3 +196,30 @@ class TestGuards:
         _install()
         out = _payload(sd.handler(dim_type="radius", entity_one="circle:0"))
         assert out["driven"] is False
+        # not driven -> value echoes the dimension's auto-measured expression
+        assert out["value"] == "10 mm"
+
+    def test_value_set_failure_is_reported(self):
+        s = _install()
+
+        # the parameter rejects the expression -> the handler must surface an error, not false success
+        class _BadParam:
+            name = "d1"
+            @property
+            def expression(self):
+                return "10 mm"
+            @expression.setter
+            def expression(self, v):
+                raise RuntimeError("bad expression")
+
+        class _BadDim:
+            parameter = _BadParam()
+        s.sketchDimensions.addRadialDimension = lambda c, tp: _BadDim()
+        res = sd.handler(dim_type="radius", entity_one="circle:0", value="oops")
+        assert res["isError"] is True and "could not set value" in res["message"]
+
+    def test_dimension_returning_nothing_is_error(self):
+        s = _install()
+        s.sketchDimensions.addRadialDimension = lambda c, tp: None
+        res = sd.handler(dim_type="radius", entity_one="circle:0")
+        assert res["isError"] is True and "returned nothing" in res["message"]

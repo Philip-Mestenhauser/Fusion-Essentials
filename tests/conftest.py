@@ -11,7 +11,7 @@ through ``adsk.fusion``. To unit-test their pure logic outside Fusion we:
      ``commands/__init__.py`` (which builds Fusion UI panels) or
      ``tools/__init__.py`` (which imports all ~30 tools, most needing adsk).
 
-``load_tool("measure_bounding_box")`` does both and returns the module so a
+``load_tool("model_measure_bbox")`` does both and returns the module so a
 test can call its ``handler(...)`` and private helpers directly.
 
 The mocks here are deliberately small: they implement only what a tool actually
@@ -21,6 +21,7 @@ this project's package layout (no ``<prefix>_`` packages, no webapp).
 """
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -112,6 +113,16 @@ def load_tool(module_name):
         sys.modules["mcpServer.tools"] = tools_pkg
 
     full_name = f"mcpServer.tools.{module_name}"
+    # Reuse an already-loaded module instead of re-execing it into a NEW object. This is essential for
+    # the shared substrate (_common/_inputs): tools do `from . import _common`, binding whatever
+    # _common object is in sys.modules at load time. If load_tool re-execs _common later, that creates
+    # a SECOND _common — and a tool loaded earlier keeps pointing at the first, while the conftest
+    # snapshot/restore (and a later test's patch) act on the second. The two diverge and the handler
+    # reads a stale _common.app -> _common.design() returns None mid-suite ("No active design"). One
+    # canonical module per name keeps the seam single-identity. Tests re-patch app/Design.cast in their
+    # own _install, so reusing the module object is safe.
+    if full_name in sys.modules:
+        return sys.modules[full_name]
     spec = importlib.util.spec_from_file_location(
         full_name, os.path.join(TOOLS_DIR, f"{module_name}.py")
     )
@@ -121,8 +132,75 @@ def load_tool(module_name):
     return module
 
 
+# Pristine seam per tool module, captured ONCE the first time the module is seen — before any test
+# patches it — so the autouse fixture can restore to it.
+#
+# A tool module reads the active design through one of a few module-level "seam" names: `app`
+# (read by _common.design()), the imported-by-value `design`/`target_component`/`_design` helpers it
+# calls bare, or `_data` (data tools). A test patches these on its OWN module object (e.g.
+# `fl.target_component = lambda x: comp`, `mo.app = ...`). Because load_tool returns ONE canonical
+# module object per tool for the whole session, such a patch LEAKS into the next test that uses the
+# same module unless restored — producing order-dependent failures (the handler builds onto a stale
+# fake). So the fixture restores these seam attrs on EVERY loaded tool module after each test, not
+# just the substrate few. (`_design` added because a handful of tools bind a local `_design`.)
+_PRISTINE_SEAMS = {}
+_SEAM_ATTRS = ("design", "target_component", "_design", "app", "_data")
+
+
+def _loaded_tool_modules():
+    """Every currently-loaded `mcpServer.tools.*` module object (substrate + tools)."""
+    return {name: mod for name, mod in sys.modules.items()
+            if name.startswith("mcpServer.tools.") and mod is not None}
+
+
+def _pristine_seam(key, mod):
+    if key not in _PRISTINE_SEAMS:
+        _PRISTINE_SEAMS[key] = {a: getattr(mod, a) for a in _SEAM_ATTRS if hasattr(mod, a)}
+    return _PRISTINE_SEAMS[key]
+
+
 # Install mocks at collection time, before any test module imports a tool.
 install_mock_adsk()
+
+
+# Pristine snapshot of each adsk mock module's attribute namespace, captured ONCE right after install
+# (before any test patches it). Tests routinely assign fake TYPE CLASSES and enum values onto these
+# shared mocks — e.g. `adsk.fusion.BRepBody = SomeClass`, `adsk.fusion.MeshBody = ...`,
+# `adsk.fusion.DesignTypes.ParametricDesignType = 1`, `adsk.core.Point3D.create = ...`. Because the
+# mock modules are shared for the whole session, those assignments LEAK into later tests unless undone
+# (a later test then isinstance-checks against the wrong class, or reads a stale enum, and fails only
+# in certain orderings). Restoring each module's __dict__ to this snapshot after every test removes
+# test-added attributes and reverts changed ones, making the suite order-independent.
+def _snapshot_adsk_dicts():
+    snap = {}
+    for name in ("adsk.core", "adsk.fusion", "adsk.cam"):
+        mod = sys.modules[name]
+        # Shallow copy of the module-mock's own attribute dict, plus a shallow copy of each child
+        # Mock's __dict__ one level down (that's where Type.cast / Type.create / Enum.MEMBER live).
+        children = {}
+        for attr, child in list(vars(mod).items()):
+            cd = getattr(child, "__dict__", None)
+            if isinstance(cd, dict):
+                children[attr] = dict(cd)
+        snap[name] = (dict(vars(mod)), children)
+    return snap
+
+
+def _restore_adsk_dicts(snap):
+    for name, (top, children) in snap.items():
+        mod = sys.modules[name]
+        md = vars(mod)
+        md.clear()
+        md.update(top)
+        for attr, cd in children.items():
+            child = md.get(attr)
+            chd = getattr(child, "__dict__", None)
+            if isinstance(chd, dict):
+                chd.clear()
+                chd.update(cd)
+
+
+_PRISTINE_ADSK = _snapshot_adsk_dicts()
 
 
 @pytest.fixture(autouse=True)
@@ -140,24 +218,42 @@ def _restore_shared_adsk_mocks():
     autouse fixture records the originals before each test and puts them back
     after, keeping tests order-independent without per-file teardown.
     """
-    core = sys.modules["adsk.core"]
-    fusion = sys.modules["adsk.fusion"]
-    cam = sys.modules["adsk.cam"]
-    saved = [
-        (fusion.Design, "cast", fusion.Design.cast),
-        (cam.CAM, "cast", cam.CAM.cast),
-        (cam.Operation, "cast", cam.Operation.cast),
-        (core.Point3D, "create", core.Point3D.create),
-        (core.Vector3D, "create", core.Vector3D.create),
-        (core.ValueInput, "createByString", core.ValueInput.createByString),
-        (core.ValueInput, "createByReal", core.ValueInput.createByReal),
-        (core.ObjectCollection, "create", core.ObjectCollection.create),
-    ]
+    # The whole adsk.core/fusion/cam mock namespace is snapshot/restored from _PRISTINE_ADSK (captured
+    # once at install). That covers BOTH the reassigned callables (Design.cast, Point3D.create,
+    # ValueInput.create*, ObjectCollection.create, …) AND the fake TYPE CLASSES / enum members tests
+    # assign onto the shared mocks (adsk.fusion.BRepBody/MeshBody/BaseFeature, DesignTypes.*, …) —
+    # the latter were the source of order-dependent isinstance/enum failures.
+    # Tools that share _common.design()/target_component()/app (instead of a local _design()) are
+    # tested by patching those on the _common module (the seam _inputs.py uses). Snapshot them at SETUP
+    # and restore after, so a test's patch can't leak into a later test. _common is loaded lazily by
+    # load_tool, so it may not exist yet on the very first tests — guard for that.
+    # Capture pristine substrate seams at SETUP (before the test body patches them). _pristine_seam
+    # only records the first time it sees each module — so the very first test to load a substrate
+    # captures it clean, and later (patched) setups don't overwrite the cache.
+    for _name, _mod in _loaded_tool_modules().items():
+        _pristine_seam(_name, _mod)
+    # A few tests stub a tool's filesystem check by assigning `mod.os.path.isfile = lambda …`. Because
+    # `mod.os` is the REAL os module, that mutates process-wide os.path and would leak into a later test
+    # (e.g. a left-behind `isfile -> False` makes an unrelated upload report "file not found"). Snapshot
+    # the real os.path predicates and restore them after the test.
+    import os.path as _ospath
+    _os_saved = [(_ospath, a, getattr(_ospath, a)) for a in ("isfile", "isdir", "exists")
+                 if hasattr(_ospath, a)]
     try:
         yield
     finally:
-        for obj, attr, original in saved:
-            setattr(obj, attr, original)
+        for _obj, _attr, _orig in _os_saved:
+            setattr(_obj, _attr, _orig)
+        _restore_adsk_dicts(_PRISTINE_ADSK)
+        # load_tool returns ONE canonical object per tool module for the whole session, so a test that
+        # patches a module-level seam (app/design/target_component/_design/_data) leaks into the next
+        # test using that same module. Restore every loaded tool module's seam attrs to PRISTINE
+        # (captured the first time the module is seen, before any patch — a per-test snapshot would
+        # chain a prior test's patch forward and lose the original). This keeps the suite
+        # order-independent without per-file teardown.
+        for _name, _mod in _loaded_tool_modules().items():
+            for attr, val in _pristine_seam(_name, _mod).items():
+                setattr(_mod, attr, val)
 
 
 # ── small Fusion-shaped fakes a tool's logic branches on ───────────────────
@@ -310,3 +406,151 @@ class BRepEdge:
         self.geometry = curve
         self.startVertex = _Vertex(start) if start else None
         self.endVertex = _Vertex(end) if end else None
+
+
+# ── shared fake-design builder + dual-seam install (the test-plumbing convention) ───────────────────
+#
+# Why this exists: nearly every test_<tool>.py re-implemented the SAME wiring — build a FakeComp/
+# FakeDesign, then patch the design onto BOTH seams a tool reads it through:
+#   • the tool's own  `mod._common.design()` / `target_component()`  (and `mod.app`), and
+#   • the input-kinds' `mod._inputs._common.design()` / `target_component()`  (BodyRef/PlaneRef/… use
+#     _inputs, which has its OWN bound _common reference).
+# Forgetting the _inputs seam is a silent trap: the handler resolves but the INPUT kind resolves
+# against the wrong (or stale) design, so the test passes while testing the wrong thing. Centralising
+# it here makes "patch both seams" structural instead of a remembered rule, and removes the per-file
+# `adsk.fusion.<Type> = LocalClass` / `ObjectCollection.create` reassignments that leaked across files.
+
+class MakeComp:
+    """A component with the standard Fusion collection protocol (count/item/itemByName).
+
+    Pass bodies as names (str) or objects with a `.name`. Extra collections a specific tool needs
+    (e.g. a fake `features`) can be attached by the caller after construction, or pass a ready-made
+    component to `make_design(comp=...)` instead.
+    """
+    def __init__(self, name="Root", bodies=(), occurrences=()):
+        self.name = name
+        norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
+        self.bRepBodies = _NamedCollection(norm)
+        self.occurrences = _NamedCollection(list(occurrences))
+        self.allOccurrences = list(occurrences)
+        self.boundingBox = None
+
+
+class MakeDesign:
+    """A design exposing the attributes tools/inputs read: rootComponent, activeComponent (defaults to
+    root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map."""
+    def __init__(self, comp=None, tokens=None, all_components=None):
+        self.rootComponent = comp if comp is not None else MakeComp()
+        self.activeComponent = self.rootComponent
+        self._tokens = dict(tokens or {})
+        self._all_components = list(all_components) if all_components is not None else [self.rootComponent]
+
+    @property
+    def allOccurrences(self):
+        return list(self.rootComponent.allOccurrences)
+
+    @property
+    def allComponents(self):
+        return list(self._all_components)
+
+    def findEntityByToken(self, token):
+        e = self._tokens.get(token)
+        return [e] if e is not None else []
+
+
+def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None):
+    """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
+    fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences)."""
+    if comp is None:
+        comp = MakeComp(bodies=bodies, occurrences=occurrences)
+    return MakeDesign(comp=comp, tokens=tokens, all_components=all_components)
+
+
+def install(mod, design, *, cast_design=True, object_collection=True):
+    """Wire `design` into a tool module under both seams, the way every _install() did by hand.
+
+    Patches: mod.app (+ mod._common.app), and — when present — mod._inputs._common.design /
+    target_component, plus adsk.fusion.Design.cast (pass-through for our design) and
+    adsk.core.ObjectCollection.create (a minimal counted collection). All of these are reverted to
+    pristine after each test by the autouse fixture, so the patch can't leak.
+
+    Returns `design` for convenience (e.g. `design = install(mod, make_design(...))`).
+    """
+    import adsk.fusion
+    import adsk.core
+
+    comp = getattr(design, "rootComponent", None)
+    target = lambda _d=None: getattr(design, "activeComponent", None) or comp
+
+    mod.app = types.SimpleNamespace(activeProduct=design)
+    # The tool's own seam (it imported _common; some import `target_component` bare too).
+    if hasattr(mod, "_common"):
+        mod._common.app = mod.app
+        mod._common.design = lambda: design
+        mod._common.target_component = target
+    # The input-kinds seam (BodyRef/PlaneRef/AxisRef/GeometryHandle resolve through _inputs._common).
+    if hasattr(mod, "_inputs") and hasattr(mod._inputs, "_common"):
+        mod._inputs._common.design = lambda: design
+        mod._inputs._common.target_component = target
+    # A tool that imported `target_component`/`design` bare as module globals (e.g. model_fillet_chamfer).
+    if hasattr(mod, "target_component"):
+        mod.target_component = target
+    if hasattr(mod, "design"):
+        mod.design = lambda: design
+
+    if cast_design:
+        adsk.fusion.Design.cast = lambda x: x if x is design or isinstance(x, MakeDesign) else None
+    if object_collection:
+        adsk.core.ObjectCollection.create = staticmethod(_make_object_collection)
+    return design
+
+
+class _FakeObjectCollection:
+    def __init__(self):
+        self._items = []
+    def add(self, x):
+        self._items.append(x)
+    @property
+    def count(self):
+        return len(self._items)
+    def __iter__(self):
+        return iter(self._items)
+    def item(self, i):
+        return self._items[i]
+
+
+def _make_object_collection():
+    return _FakeObjectCollection()
+
+
+def payload(result):
+    """The success JSON body of a tool result; asserts it is NOT an error first."""
+    assert result["isError"] is False, result
+    return json.loads(result["content"][0]["text"])
+
+
+def error_message(result):
+    """Assert a tool result IS an error and return its message (for guard assertions)."""
+    assert result["isError"] is True, result
+    return result["message"]
+
+
+def assert_no_active_design(mod, handler, **valid_kwargs):
+    """A write/read tool that needs a design must return a clean 'no active design' error (not crash)
+    when there is none. Point both seams at None, call the handler with otherwise-valid args, and
+    assert the error mentions the design. Surfaces tools that skip the guard and NPE instead."""
+    if hasattr(mod, "_common"):
+        mod._common.design = lambda: None
+    if hasattr(mod, "_inputs") and hasattr(mod._inputs, "_common"):
+        mod._inputs._common.design = lambda: None
+    res = handler(**valid_kwargs)
+    msg = error_message(res).lower()
+    assert "design" in msg or "document" in msg, res
+
+
+def assert_unknown_units(handler, units_param="units", **valid_kwargs):
+    """A tool taking a unit must reject an unknown one with a clear error (naming the unit), not
+    silently scale by a bogus factor. Pass the other valid args; this sets units='furlong'."""
+    res = handler(**{**valid_kwargs, units_param: "furlong"})
+    msg = error_message(res).lower()
+    assert "unit" in msg, res

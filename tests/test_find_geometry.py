@@ -47,8 +47,10 @@ class FakeBody:
 
 
 class FakeOcc:
-    def __init__(self, name, comp, bodies):
+    def __init__(self, name, comp, bodies, full_path=None):
         self.name = name
+        # fullPathName is the unambiguous key; defaults to name for flat (single-level) assemblies.
+        self.fullPathName = full_path or name
         self.component = type("C", (), {"name": comp})()
         self.bRepBodies = list(bodies)
 
@@ -63,20 +65,38 @@ class _OccColl:
         return self._o[i]
 
 
+class _RootBodies:
+    """Root-level bodies: iterable (for the whole-design scan) AND itemByName (for the body-name path)."""
+    def __init__(self, bodies=()):
+        self._b = list(bodies)
+    def __iter__(self):
+        return iter(self._b)
+    def itemByName(self, n):
+        for b in self._b:
+            if getattr(b, "name", None) == n:
+                return b
+        return None
+
+
 class FakeRoot:
-    def __init__(self, occs):
+    def __init__(self, occs, root_bodies=(), all_occs=None):
+        # `occurrences` is the TOP-LEVEL collection; `allOccurrences` is the FLATTENED, recursive list.
+        # For a flat assembly they're equal; nested tests pass all_occs ⊋ occs so a top-level-only scan
+        # genuinely can't reach the nested occurrence (that's what makes the recursion test bite).
         self.occurrences = _OccColl(occs)
-        self.bRepBodies = type("B", (), {"itemByName": staticmethod(lambda n: None)})()
+        self.allOccurrences = list(all_occs) if all_occs is not None else list(occs)
+        self.bRepBodies = _RootBodies(root_bodies)
 
 
 class FakeDesign:
-    def __init__(self, occs):
-        self.rootComponent = FakeRoot(occs)
+    def __init__(self, occs, root_bodies=(), all_occs=None):
+        self.rootComponent = FakeRoot(occs, root_bodies, all_occs)
 
 
-def _install(occs):
-    design = FakeDesign(occs)
+def _install(occs, root_bodies=(), all_occs=None):
+    design = FakeDesign(occs, root_bodies, all_occs)
     fg.app = type("A", (), {"activeProduct": design})()
+    fg._common.app = fg.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     # surfaceType enum: map our string sentinels onto the SurfaceTypes attrs the code reads
@@ -120,10 +140,15 @@ class TestFind:
         _install([FakeOcc("Crank:1", "Crank", [FakeBody(faces=[f])])])
         out = _payload(fg.handler(target="Crank:1", units="mm"))
         m = out["matches"][0]
-        assert m["handle"] == "TOK_PIN"
+        # The handle is the SELF-HEALING composite '<token>|@<kind>:<x>,<y>,<z>' (locator in cm, the
+        # API unit) — the token is the fast path, the '@' locator the stale-token fallback.
+        assert m["handle"].startswith("TOK_PIN|@")
+        assert m["handle"] == "TOK_PIN|@cylinder_face:2.450000,2.000000,0.000000"
         assert m["kind"] == "cylinder_face"
         assert m["position"] == [24.5, 20.0, 0.0]      # cm -> mm
         assert m["radius"] == 8.0                        # 0.8cm -> 8mm
+        # The declared output contract holds: the handler actually mints the 'handle' RETURNS declares.
+        assert fg.RETURNS[0].assert_present(out) == ""
 
     def test_kind_filter_cylinder_only(self):
         body = FakeBody(faces=[_cyl("C", 0.8, (0, 0, 0)), _plane("P", (1, 0, 0))])
@@ -136,7 +161,8 @@ class TestFind:
         body = FakeBody(faces=[_cyl("PIN", 0.8, (0, 0, 0)), _cyl("JRN", 1.0, (1, 0, 0))])
         _install([FakeOcc("X:1", "X", [body])])
         out = _payload(fg.handler(target="X:1", kind="cylinder_face", radius=8, units="mm"))
-        assert out["returned"] == 1 and out["matches"][0]["handle"] == "PIN"   # only the r8mm pin
+        # only the r8mm pin; handle is the composite '<token>|@...'
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("PIN|@")
 
     def test_nearest_to_sorts(self):
         # faces at world 10cm (FAR) and 1cm (NEAR); nearest_to is in mm.
@@ -144,13 +170,57 @@ class TestFind:
         _install([FakeOcc("X:1", "X", [body])])
         # nearest_to=[10,0,0]mm = 1cm -> NEAR (at 1cm) is closest
         out = _payload(fg.handler(target="X:1", nearest_to=[10, 0, 0], units="mm"))
-        assert out["matches"][0]["handle"] == "NEAR"
+        assert out["matches"][0]["handle"].startswith("NEAR|@")
         # nearest_to=[100,0,0]mm = 10cm -> FAR (at 10cm) is closest
         out2 = _payload(fg.handler(target="X:1", nearest_to=[100, 0, 0], units="mm"))
-        assert out2["matches"][0]["handle"] == "FAR"
+        assert out2["matches"][0]["handle"].startswith("FAR|@")
 
     def test_every_match_has_a_handle(self):
         body = FakeBody(faces=[_cyl("A", 0.8, (0, 0, 0)), _plane("B", (1, 0, 0))])
         _install([FakeOcc("X:1", "X", [body])])
         out = _payload(fg.handler(target="X:1"))
         assert all(m.get("handle") for m in out["matches"])
+
+
+# ── #4: NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────
+# find_geometry used to scan only root.occurrences (top-level), so a nested occurrence that
+# design_get_tree/assembly_probe report by fullPathName returned "could not resolve" — disagreeing with
+# the self-heal path (_refind_by_locator scans allOccurrences). Now it scans allOccurrences too.
+
+class TestNestedAssembly:
+    def test_nested_occurrence_resolved_by_full_path(self):
+        # A bracket nested under a sub-assembly: it is NOT in the TOP-LEVEL occurrences, only in the
+        # flattened allOccurrences. Targetable by fullPathName. (A top-level-only scan can't see it —
+        # that's what this pins.)
+        f = _cyl("NESTED_PIN", 0.8, (1.0, 0.0, 0.0))
+        parent = FakeOcc("Frame:1", "Frame", [], full_path="Frame:1")
+        nested = FakeOcc("Bracket:1", "Bracket", [FakeBody(faces=[f])],
+                         full_path="Frame:1/Bracket:1")
+        # top-level = [parent] only; allOccurrences = [parent, nested]
+        _install([parent], all_occs=[parent, nested])
+        out = _payload(fg.handler(target="Frame:1/Bracket:1", units="mm"))
+        assert out["returned"] == 1
+        assert out["matches"][0]["handle"].startswith("NESTED_PIN|@")
+
+    def test_nested_also_reachable_by_local_name(self):
+        f = _cyl("PIN", 0.8, (0, 0, 0))
+        parent = FakeOcc("Frame:1", "Frame", [], full_path="Frame:1")
+        nested = FakeOcc("Bracket:1", "Bracket", [FakeBody(faces=[f])],
+                         full_path="Frame:1/Bracket:1")
+        _install([parent], all_occs=[parent, nested])
+        out = _payload(fg.handler(target="Bracket:1"))
+        assert out["returned"] == 1
+
+    def test_whole_design_includes_nested_and_root_bodies(self):
+        # whole-design scan reaches BOTH a root-level body (occurrence None) AND a NESTED occurrence's
+        # body — the self-heal path scans both, so the initial query must too.
+        root_face = _plane("ROOT_FACE", (0, 0, 0))
+        nested_face = _cyl("NESTED", 0.8, (5, 0, 0))
+        parent = FakeOcc("Frame:1", "Frame", [], full_path="Frame:1")
+        nested = FakeOcc("Bracket:1", "Bracket", [FakeBody(faces=[nested_face])],
+                         full_path="Frame:1/Bracket:1")
+        _install([parent], all_occs=[parent, nested],
+                 root_bodies=[FakeBody(faces=[root_face])])
+        out = _payload(fg.handler())
+        handles = {m["handle"].split("|@")[0] for m in out["matches"]}
+        assert "ROOT_FACE" in handles and "NESTED" in handles

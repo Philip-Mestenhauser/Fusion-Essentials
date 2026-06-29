@@ -152,6 +152,7 @@ class FakeDesign:
 def _install(sketch):
     design = FakeDesign([sketch])
     sd.app = type("A", (), {"activeProduct": design})()
+    sd._common.app = sd.app
     import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     return design
@@ -160,6 +161,43 @@ def _install(sketch):
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
+
+
+class _SubComponentDesign:
+    """A design whose sketch lives in an ACTIVATED SUB-COMPONENT, with the root component EMPTY — the
+    normal assembly workflow (model_create_component(activate=true) + sketch_create). This is the shape
+    the old rootComponent.sketches lookup could not resolve (bug #3); resolve_sketch must find it."""
+    def __init__(self, sub_sketch):
+        self.rootComponent = type("Root", (), {"sketches": FakeSketches([])})()
+        self._sub = type("Sub", (), {"sketches": FakeSketches([sub_sketch])})()
+        self.activeComponent = self._sub                       # the activated sub-component
+        self.rootComponent.allComponents = _Coll([self.rootComponent, self._sub])
+
+
+def _install_subcomponent(sketch):
+    design = _SubComponentDesign(sketch)
+    sd.app = type("A", (), {"activeProduct": design})()
+    sd._common.app = sd.app
+    import adsk.fusion
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _SubComponentDesign) else None
+    return design
+
+
+class TestSubComponentResolution:
+    """Regression for bug #3: a by-name sketch lookup must find a sketch in an ACTIVE sub-component,
+    not only one in the root component (the old rootComponent.sketches.itemByName returned None)."""
+
+    def test_finds_sketch_in_active_sub_component(self):
+        _install_subcomponent(_rich_sketch())
+        out = _payload(sd.handler(sketch_name="S4"))     # S4 lives ONLY in the sub-component
+        assert out["sketch"] == "S4"
+        assert any(e["id"] == "circle:0" for e in out["entities"])
+
+    def test_unknown_name_lists_sub_component_sketches(self):
+        res = _install_subcomponent(_rich_sketch()) and sd.handler(sketch_name="Ghost")
+        assert res["isError"] is True
+        # the 'Available' list reflects sketches wherever they live (here, the sub-component)
+        assert "S4" in res["message"]
 
 
 def _rich_sketch():
@@ -301,6 +339,105 @@ class TestEllipseAndPolygon:
         out = _payload(sd.handler(sketch_name="E"))
         tan = next(c for c in out["constraints"] if c["type"] == "tangent")
         assert "ellipse:0" in tan["entities"]
+
+
+# ── arc + point geometry records ────────────────────────────────────────────
+
+class FakeArc:
+    def __init__(self, tok, cx, cy, r, construction=False):
+        self.entityToken = tok
+        self.isConstruction = construction
+        self.centerSketchPoint = type("P", (), {"geometry": _Pt(cx, cy)})()
+        self.radius = r
+
+
+class TestArcAndPoint:
+    def test_arc_center_and_radius(self):
+        a = FakeArc("ta", 2, 3, 7)
+        s = FakeSketch("A", arcs=[a])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="A"))
+        arc = next(e for e in out["entities"] if e["id"] == "arc:0")
+        assert arc["type"] == "arc"
+        assert arc["center"] == {"x": 2, "y": 3} and arc["radius"] == 7
+        assert out["counts"]["arcs"] == 1
+
+    def test_point_position(self):
+        p = FakeSketchPoint("tp", 4, 5)
+        s = FakeSketch("P", points=[p])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="P"))
+        pt = next(e for e in out["entities"] if e["id"] == "point:0")
+        assert pt["position"] == {"x": 4, "y": 5}
+        assert pt["construction"] is False
+
+
+# ── driving-dimension tally + missing parameter ─────────────────────────────
+
+class TestDimensionTally:
+    def test_driving_dimension_count(self):
+        s = FakeSketch("D", dimensions=[
+            FakeDim("d1", 1.0, "1 mm", driving=True),
+            FakeDim("d2", 2.0, "2 mm", driving=True),
+            FakeDim("d3", 3.0, "3 mm", driving=False)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D"))
+        # 2 driving, 1 reference -> tally counts only the driving ones
+        assert out["driving_dimension_count"] == 2
+
+    def test_dimension_with_no_parameter_is_safe(self):
+        class _NoParamDim:
+            parameter = None
+            isDriving = True
+        s = FakeSketch("D", dimensions=[_NoParamDim()])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D"))
+        d = out["dimensions"][0]
+        assert d["name"] is None and d["value"] is None and d["expression"] is None
+
+
+# ── _vector_items: both collection idioms + single-entity rejection ─────────
+
+class _CountItemVec:
+    """A collection exposing the .count/.item idiom (NOT len/[i])."""
+    def __init__(self, items):
+        self._i = list(items)
+    @property
+    def count(self):
+        return len(self._i)
+    def item(self, i):
+        return self._i[i]
+
+
+class TestVectorItems:
+    def test_count_item_collection_expanded(self):
+        a, b = object(), object()
+        got = sd._vector_items(_CountItemVec([a, b]))
+        assert got == [a, b]
+
+    def test_len_getitem_vector_expanded(self):
+        a, b, c = object(), object(), object()
+        got = sd._vector_items(_Vec([a, b, c]))
+        assert got == [a, b, c]
+
+    def test_single_entity_is_not_a_vector(self):
+        # a thing with an entityToken is a single sketch entity, never a vector
+        line = FakeLine("solo", 0, 0, 1, 1)
+        assert sd._vector_items(line) is None
+
+
+# ── unknown constraint class -> derived friendly name ───────────────────────
+
+class TestUnknownConstraint:
+    def test_unknown_class_name_derived(self):
+        # a class not in _CONSTRAINT_REFS: friendly = name minus 'Constraint', lowercased; no refs
+        class FilletConstraint:
+            pass
+        s = FakeSketch("U", constraints=[FilletConstraint()])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="U"))
+        c = out["constraints"][0]
+        assert c["type"] == "fillet" and c["entities"] == []
 
 
 # ── guards ───────────────────────────────────────────────────────────────────

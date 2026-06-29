@@ -15,6 +15,9 @@ Fusion's preferred default port; whichever server binds first wins, and if ours
 loses we detect it and guide the user (see _start_ownership_check / start()).
 """
 
+import importlib
+import pkgutil
+
 import adsk.core
 
 from ...lib import fusion360utils as futil
@@ -45,6 +48,10 @@ PORT = 27182
 SETTINGS_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_MCP'
 _ALLOW_EXECUTE_KEY = 'allow_execute_api_script'
 
+# Tool modules that are NOT auto-registered by the pkgutil sweep in _collect_items(): the gated
+# arbitrary-script tool (registered only when the user opts in) is handled explicitly afterward.
+_GATED_TOOL_MODULES = frozenset({'sys_execute_script'})
+
 DEFAULT_SETTINGS = {
     _ALLOW_EXECUTE_KEY: {
         "type": "checkbox",
@@ -74,185 +81,60 @@ _mcp = None
 
 
 def _collect_items():
-    """Reset the registry and import tool modules so they self-register freshly.
+    """Reset the registry and AUTO-DISCOVER every tool, registering each freshly.
 
-    Safe tools self-register on import. The high-risk execute_api_script tool is
-    only registered when the user has explicitly enabled it.
+    Tools live one-per-module under ``tools/`` and expose a ``register_tool()`` (a few self-register on
+    import; ``register_tool()`` is then a harmless no-op). Rather than hand-maintain a parallel list of
+    ~64 ``tools.X.register_tool()`` calls here AND a parallel import list in ``tools/__init__.py`` — two
+    registries that drift whenever a tool is added — we sweep the package with ``pkgutil`` and call each
+    module's ``register_tool()``. The registry's name-collision guard makes a double-register loud, and
+    a module without ``register_tool()`` (a ``_``-prefixed helper) is skipped.
+
+    Two cases stay explicit: the GATED arbitrary-script tool registers only when the user opts in, and
+    ``sys_reload_addin`` also installs its dedicated reload custom event (a side-effect beyond
+    registration).
     """
     registry.reset_registry()
-    # Importing the tools package triggers each safe tool's register() call.
-    from . import tools  # noqa: F401
+    from . import tools  # the package whose modules we sweep
 
-    # reload_addin: developer tool, on by default. Register it and install its
-    # dedicated deferred-reload custom event (separate from TaskManager's).
-    tools.reload_addin.register_tool()
-    tools.reload_addin.install_reload_event()
+    registered = []
+    for mod_info in pkgutil.iter_modules(tools.__path__):
+        name = mod_info.name
+        if name.startswith('_') or name in _GATED_TOOL_MODULES:
+            continue
+        try:
+            mod = importlib.import_module(f'{tools.__name__}.{name}')
+        except Exception as e:
+            futil.log(f'{CMD_NAME}: tool module {name!r} failed to import: {e}')
+            continue
+        reg = getattr(mod, 'register_tool', None)
+        if callable(reg):
+            try:
+                reg()
+                registered.append(name)
+            except Exception as e:
+                futil.log(f'{CMD_NAME}: {name}.register_tool() failed: {e}')
 
-    # active_document: resolve the live document -> its data-model id (URN) + save state.
-    # Read-only. On by default.
-    tools.active_document.register_tool()
+    # reload_addin is registered by the sweep above; it ALSO needs its dedicated deferred-reload custom
+    # event installed (a side-effect beyond registration). Import it explicitly (don't rely on it being
+    # a bound attribute of the tools package) and install the event.
+    try:
+        from .tools import sys_reload_addin
+        sys_reload_addin.install_reload_event()
+    except Exception as e:
+        futil.log(f'{CMD_NAME}: sys_reload_addin.install_reload_event() failed: {e}')
 
-    # data_model: read-only tools (list_projects, list_project_files). On by default.
-    tools.data_model.register_tool()
-
-    # data_hubs: list data hubs + switch the active hub (cross-TeamHub workflows). switch closes
-    # docs + reloads the data context. WRITES (switch changes session). On by default.
-    tools.data_hubs.register_tool()
-
-    # open_document (open by UID) + get_screenshot (viewport capture). On by default.
-    tools.open_document.register_tool()
-    tools.get_screenshot.register_tool()
-
-    # workspaces (list/switch) + cam_info (setups/operations/tools/time/activate)
-    # + component_tree (assembly crawl). On by default.
-    tools.workspaces.register_tool()
-    tools.cam_info.register_tool()
-    tools.component_tree.register_tool()
-
-    # data-model + document lifecycle (split out of the former data_management): create
-    # project/folder, upload CAD, list/delete folders (data_model_ops); save-as/copy/save/new/
-    # close/activate/list-open documents + delete-file (doc_lifecycle). WRITES to (and can
-    # DELETE from) the cloud data model.
-    tools.data_model_ops.register_tool()
-    tools.doc_lifecycle.register_tool()
-
-    # parameters: read design user/model parameters. Read-only. On by default.
-    tools.parameters.register_tool()
-
-    # timeline: read the design timeline (features/order/suppression/groups). Read-only. On by default.
-    tools.timeline.register_tool()
-
-    # visibility: isolate/show/hide component occurrences (view state). On by default.
-    tools.visibility.register_tool()
-
-    # configurations: read/switch a configured design's configurations. On by default.
-    tools.configurations.register_tool()
-
-    # sketches: sketch_get (read: summary list, or one sketch's full structure when named) +
-    # create_sketch / add_sketch_geometry (WRITE). On by default.
-    tools.sketches.register_tool()
-
-    # selection: request_user_selection + get_user_selection (user picks an entity). On by default.
-    tools.selection.register_tool()
-
-    # joint_origin: create a joint origin on the user-selected geometry (WRITE). On by default.
-    tools.joint_origin.register_tool()
-
-    # measure_bounding_box: bbox measurement (world or part-space frame). Read-only. On by default.
-    tools.measure_bounding_box.register_tool()
-
-    # insert_occurrence: insert a saved doc as a component occurrence (WRITE). On by default.
-    tools.insert_occurrence.register_tool()
-
-    # update_xref: refresh out-of-date external references (WRITE). On by default.
-    tools.update_xref.register_tool()
-
-    # joint: create a joint between two inputs (WRITE). On by default.
-    tools.joint.register_tool()
-
-    # set_sketch_text: set sketch-text strings (WRITE). On by default.
-    tools.set_sketch_text.register_tool()
-
-    # set_nc_program_comment: set NC program comment/name (WRITE CAM). On by default.
-    tools.set_nc_program_comment.register_tool()
-
-    # cam_templates: navigate library (read) + apply template to setup (WRITES). On by default.
-    tools.cam_templates.register_tool()
-
-    # cam_create_setup: create a milling/turning CAM setup on a part (the prerequisite for any CAM
-    # job — the other CAM tools need a setup to act on). WRITES CAM data. On by default.
-    tools.cam_create_setup.register_tool()
-
-    # cam_edit_operation: set a CAM operation's parameters (feeds/speeds/stepdown/tool/tolerance) by
-    # expression — the tune-a-toolpath half of CAM authoring. WRITES CAM data. On by default.
-    tools.cam_edit_operation.register_tool()
-
-    # generate_toolpaths: launch CAM toolpath generation (fire-and-return) + get_generation_status
-    # (poll). Non-blocking so long compute doesn't hold up the agent. WRITES. On by default.
-    tools.generate_toolpaths.register_tool()
-
-    # inspect_view: the agent's "eyes" — orient camera, isolate/show/hide, wireframe, restore.
-    # VIEW state only (snapshot/restore via a saved-state stack). On by default.
-    tools.inspect_view.register_tool()
-
-    # section_view: cut the model with a Section Analysis to see inside (cavities, fits, voids).
-    # Non-destructive (clear removes it). On by default.
-    tools.section_view.register_tool()
-
-    # show_toolpath: show/hide individual CAM toolpaths (Operation.isLightBulbOn) to study one
-    # operation's path at a time. Manufacture-workspace display. On by default.
-    tools.show_toolpath.register_tool()
-
-    # api_doc: search the live Fusion API docs (adsk.* introspection). Read-only. On by default.
-    tools.api_doc.register_tool()
-
-    # create_component: new empty component occurrence (assembly part scaffold). WRITES. On by default.
-    tools.create_component.register_tool()
-
-    # capture_views: several views (front/top/right/iso) in one call. Read-only. On by default.
-    tools.capture_views.register_tool()
-
-    # extrude: turn a sketch profile into a solid (new/join/cut/intersect). WRITES. On by default.
-    tools.extrude.register_tool()
-
-    # revolve: spin a sketch profile about an axis into a solid. WRITES. On by default.
-    tools.revolve.register_tool()
-
-    # combine: boolean join/cut/intersect between solid bodies. WRITES. On by default.
-    tools.combine.register_tool()
-
-    # fillet/chamfer: round or bevel a body's edges. WRITES. On by default.
-    tools.fillet.register_tool()
-
-    # construction: add construction point/axis/plane datums by coordinate. WRITES. On by default.
-    tools.construction.register_tool()
-
-    # mirror: reflect bodies across an origin plane. WRITES. On by default.
-    tools.mirror.register_tool()
-
-    # patterns: rectangular + circular patterns of component occurrences. WRITES. On by default.
-    tools.patterns.register_tool()
-
-    # arrange: nest/pack component occurrences within a sketch-profile boundary. WRITES. On by default.
-    tools.arrange.register_tool()
-
-    # design_export: export a body/component/whole-design to a neutral CAD file (STEP/IGES/SAT/STL)
-    # on local disk. Pairs with data_upload_file for a cloud round-trip. WRITES a file. On by default.
-    tools.design_export.register_tool()
-
-    # sketch_constraint: geometric constraints (perp/parallel/tangent/equal/midpoint/symmetry/...) on
-    # sketch entities by '<type>:<index>'. WRITES. On by default.
-    tools.sketch_constraint.register_tool()
-
-    # sketch_dimension: dimensional constraints (distance/radius/diameter/angle) + driven values —
-    # the sizing half of parametric sketching. WRITES. On by default.
-    tools.sketch_dimension.register_tool()
-
-    # sketch_detail: the detail ENGINE behind sketch_get (single-sketch full structure). Folded
-    # into sketch_get, so register_tool() here is a no-op; imported so the engine module is loaded.
-    tools.sketch_detail.register_tool()
-
-    # assembly: ground/un-ground, move an occurrence, rigid group. WRITES. On by default.
-    tools.assembly.register_tool()
-
-    # joints_advanced: capture_position (snapshots), as_built_joint, assembly_constraint
-    # (Constrain Components). WRITES. On by default.
-    tools.joints_advanced.register_tool()
-
-    # assembly_probe: per-occurrence world position / ground flags / joint wiring as JSON
-    # (reason from numbers, not cluttered screenshots). Read-only. On by default.
-    tools.assembly_probe.register_tool()
-
-    # find_geometry + joint_at_geometry: geometry-as-values — query a part's faces/edges and get
-    # stable HANDLES, then joint two parts AT that geometry (runtime keypoint rules baked in).
-    # On by default.
-    tools.find_geometry.register_tool()
-    tools.joint_at_geometry.register_tool()
-
+    # The high-risk arbitrary-script tool is gated and SKIPPED by the sweep — import it explicitly and
+    # register it ONLY when the user has opted in.
     if _execute_api_script_allowed():
-        tools.execute_api_script.register_tool()
-        futil.log(f'{CMD_NAME}: execute_api_script ENABLED (user opted in)')
+        try:
+            from .tools import sys_execute_script
+            sys_execute_script.register_tool()
+            futil.log(f'{CMD_NAME}: execute_api_script ENABLED (user opted in)')
+        except Exception as e:
+            futil.log(f'{CMD_NAME}: sys_execute_script.register_tool() failed: {e}')
 
+    futil.log(f'{CMD_NAME}: registered {len(registered)} tool modules (auto-discovered)')
     return registry.get_tools() + registry.get_resources()
 
 

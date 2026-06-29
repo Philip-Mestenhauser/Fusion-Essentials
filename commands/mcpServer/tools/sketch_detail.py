@@ -28,7 +28,8 @@ Handler runs on the main thread; read-only.
 import adsk.core
 import adsk.fusion
 
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe, resolve_sketch, all_sketch_names
+from . import _common
 
 app = adsk.core.Application.get()
 
@@ -53,14 +54,6 @@ _CONSTRAINT_REFS = {
 }
 
 
-def _design():
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        design = _safe(lambda: adsk.fusion.Design.cast(
-            app.activeDocument.products.itemByProductType('DesignProductType')))
-    return design
-
-
 def _round(v):
     return round(float(v), 4) if v is not None else None
 
@@ -68,88 +61,88 @@ def _round(v):
 def _build_token_map(sketch):
     """Map entityToken -> '<type>:<index>' for every line/arc/circle/point in the sketch."""
     tok2id = {}
-    curves = _safe(lambda: sketch.sketchCurves)
+    curves = safe(lambda: sketch.sketchCurves)
     for kind, coll_get in (("line", lambda: curves.sketchLines),
                            ("arc", lambda: curves.sketchArcs),
                            ("circle", lambda: curves.sketchCircles),
                            ("ellipse", lambda: curves.sketchEllipses)):
-        coll = _safe(coll_get)
-        for i in range(_safe(lambda coll=coll: coll.count, 0) if coll else 0):
-            tok = _safe(lambda coll=coll, i=i: coll.item(i).entityToken)
+        coll = safe(coll_get)
+        for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
+            tok = safe(lambda coll=coll, i=i: coll.item(i).entityToken)
             if tok:
                 tok2id[tok] = f"{kind}:{i}"
-    pts = _safe(lambda: sketch.sketchPoints)
-    for i in range(_safe(lambda: pts.count, 0) if pts else 0):
-        tok = _safe(lambda i=i: pts.item(i).entityToken)
+    pts = safe(lambda: sketch.sketchPoints)
+    for i in range(safe(lambda: pts.count, 0) if pts else 0):
+        tok = safe(lambda i=i: pts.item(i).entityToken)
         if tok:
             tok2id[tok] = f"point:{i}"
     return tok2id
 
 
 def _line_geo(ln):
-    s = _safe(lambda: ln.startSketchPoint.geometry)
-    e = _safe(lambda: ln.endSketchPoint.geometry)
+    s = safe(lambda: ln.startSketchPoint.geometry)
+    e = safe(lambda: ln.endSketchPoint.geometry)
     return {"start": {"x": _round(s.x), "y": _round(s.y)} if s else None,
-            "end": {"x": _round(e.x), "y": _round(e.y)} if e else None}
+    "end": {"x": _round(e.x), "y": _round(e.y)} if e else None}
 
 
 def _entities(sketch):
     """List every entity with id, type, isConstruction, and key geometry."""
     out = []
-    curves = _safe(lambda: sketch.sketchCurves)
+    curves = safe(lambda: sketch.sketchCurves)
     construction = 0
 
-    lines = _safe(lambda: curves.sketchLines)
-    for i in range(_safe(lambda: lines.count, 0) if lines else 0):
+    lines = safe(lambda: curves.sketchLines)
+    for i in range(safe(lambda: lines.count, 0) if lines else 0):
         ln = lines.item(i)
-        con = bool(_safe(lambda ln=ln: ln.isConstruction, False))
+        con = bool(safe(lambda ln=ln: ln.isConstruction, False))
         construction += 1 if con else 0
         rec = {"id": f"line:{i}", "type": "line", "construction": con}
         rec.update(_line_geo(ln))
         out.append(rec)
 
-    arcs = _safe(lambda: curves.sketchArcs)
-    for i in range(_safe(lambda: arcs.count, 0) if arcs else 0):
+    arcs = safe(lambda: curves.sketchArcs)
+    for i in range(safe(lambda: arcs.count, 0) if arcs else 0):
         a = arcs.item(i)
-        con = bool(_safe(lambda a=a: a.isConstruction, False))
+        con = bool(safe(lambda a=a: a.isConstruction, False))
         construction += 1 if con else 0
-        c = _safe(lambda: a.centerSketchPoint.geometry)
+        c = safe(lambda: a.centerSketchPoint.geometry)
         out.append({"id": f"arc:{i}", "type": "arc", "construction": con,
-                    "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-                    "radius": _round(_safe(lambda: a.radius))})
+        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
+        "radius": _round(safe(lambda: a.radius))})
 
-    circles = _safe(lambda: curves.sketchCircles)
-    for i in range(_safe(lambda: circles.count, 0) if circles else 0):
+    circles = safe(lambda: curves.sketchCircles)
+    for i in range(safe(lambda: circles.count, 0) if circles else 0):
         cc = circles.item(i)
-        con = bool(_safe(lambda cc=cc: cc.isConstruction, False))
+        con = bool(safe(lambda cc=cc: cc.isConstruction, False))
         construction += 1 if con else 0
-        c = _safe(lambda: cc.centerSketchPoint.geometry)
+        c = safe(lambda: cc.centerSketchPoint.geometry)
         out.append({"id": f"circle:{i}", "type": "circle", "construction": con,
-                    "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-                    "radius": _round(_safe(lambda: cc.radius))})
+        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
+        "radius": _round(safe(lambda: cc.radius))})
 
-    ellipses = _safe(lambda: curves.sketchEllipses)
-    for i in range(_safe(lambda: ellipses.count, 0) if ellipses else 0):
+    ellipses = safe(lambda: curves.sketchEllipses)
+    for i in range(safe(lambda: ellipses.count, 0) if ellipses else 0):
         el = ellipses.item(i)
-        con = bool(_safe(lambda el=el: el.isConstruction, False))
+        con = bool(safe(lambda el=el: el.isConstruction, False))
         construction += 1 if con else 0
-        c = _safe(lambda: el.centerSketchPoint.geometry)
+        c = safe(lambda: el.centerSketchPoint.geometry)
         out.append({"id": f"ellipse:{i}", "type": "ellipse", "construction": con,
-                    "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-                    "major_radius": _round(_safe(lambda: el.majorAxisRadius)),
-                    "minor_radius": _round(_safe(lambda: el.minorAxisRadius))})
+        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
+        "major_radius": _round(safe(lambda: el.majorAxisRadius)),
+        "minor_radius": _round(safe(lambda: el.minorAxisRadius))})
 
-    pts = _safe(lambda: sketch.sketchPoints)
-    for i in range(_safe(lambda: pts.count, 0) if pts else 0):
-        g = _safe(lambda i=i: pts.item(i).geometry)
+    pts = safe(lambda: sketch.sketchPoints)
+    for i in range(safe(lambda: pts.count, 0) if pts else 0):
+        g = safe(lambda i=i: pts.item(i).geometry)
         out.append({"id": f"point:{i}", "type": "point", "construction": False,
-                    "position": {"x": _round(g.x), "y": _round(g.y)} if g else None})
+        "position": {"x": _round(g.x), "y": _round(g.y)} if g else None})
 
     return out, construction
 
 
 def _ent_id(ent, tok2id):
-    tok = _safe(lambda: ent.entityToken)
+    tok = safe(lambda: ent.entityToken)
     return tok2id.get(tok, "?") if tok else "?"
 
 
@@ -160,7 +153,7 @@ def _describe_constraint(c, tok2id):
     friendly, attrs = _CONSTRAINT_REFS.get(cls, (cls.replace("Constraint", "").lower(), ()))
     ids = []
     for attr in attrs:
-        ent = _safe(lambda attr=attr: getattr(c, attr))
+        ent = safe(lambda attr=attr: getattr(c, attr))
         if ent is None:
             continue
         items = _vector_items(ent)
@@ -177,12 +170,12 @@ def _vector_items(ent):
     .count/.item collection idiom AND the SketchLineVector len()/[i] idiom (used by PolygonConstraint
     .lines). A single BRep/sketch entity is NOT a vector — so a plain SketchLine returns None."""
     # A single sketch entity exposes entityToken; treat that as NOT a vector even if it has len.
-    if _safe(lambda: ent.entityToken) is not None:
+    if safe(lambda: ent.entityToken) is not None:
         return None
-    n = _safe(lambda: ent.count, None)
-    if n is not None and _safe(lambda: ent.item) is not None:
+    n = safe(lambda: ent.count, None)
+    if n is not None and safe(lambda: ent.item) is not None:
         return [ent.item(i) for i in range(n)]
-    n = _safe(lambda: len(ent), None)
+    n = safe(lambda: len(ent), None)
     if n is not None:
         return [ent[i] for i in range(n)]
     return None
@@ -195,57 +188,58 @@ def handler(sketch_name: str = "") -> dict:
     isConstruction, geometry), every constraint (type + linked entity ids), and every dimension
     (name/value/expression). Read-only — pair with sketch_get to find sketch names.
     """
-    design = _design()
+    design = _common.design()
     if not design:
-        return _error("No active design.")
-    coll = _safe(lambda: design.rootComponent.sketches)
-    names = []
-    for i in range(_safe(lambda: coll.count, 0) if coll else 0):
-        names.append(_safe(lambda i=i: coll.item(i).name))
+        return error("No active design.")
 
     name = (sketch_name or "").strip()
     if not name:
-        return _error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
-    sketch = _safe(lambda: coll.itemByName(name))
+        names = all_sketch_names(design)
+        return error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
+    # Resolve across the WHOLE design (active component first, then root, then all sub-components) — a
+    # sketch in an activated sub-component (the normal assembly flow) must be findable, not only one in
+    # the root component.
+    sketch = resolve_sketch(design, name)
     if not sketch:
-        return _error(f"No sketch named '{name}'. Available: " + (", ".join(n for n in names if n) or "(none)"))
+        names = all_sketch_names(design)
+        return error(f"No sketch named '{name}'. Available: " + (", ".join(n for n in names if n) or "(none)"))
 
     tok2id = _build_token_map(sketch)
     entities, construction_count = _entities(sketch)
 
     constraints = []
-    gc = _safe(lambda: sketch.geometricConstraints)
-    for i in range(_safe(lambda: gc.count, 0) if gc else 0):
+    gc = safe(lambda: sketch.geometricConstraints)
+    for i in range(safe(lambda: gc.count, 0) if gc else 0):
         constraints.append(_describe_constraint(gc.item(i), tok2id))
 
     dimensions = []
-    sd = _safe(lambda: sketch.sketchDimensions)
-    for i in range(_safe(lambda: sd.count, 0) if sd else 0):
+    sd = safe(lambda: sketch.sketchDimensions)
+    for i in range(safe(lambda: sd.count, 0) if sd else 0):
         d = sd.item(i)
-        par = _safe(lambda d=d: d.parameter)
+        par = safe(lambda d=d: d.parameter)
         dimensions.append({
-            "name": _safe(lambda: par.name) if par else None,
-            "value": _round(_safe(lambda: par.value)) if par else None,
-            "expression": _safe(lambda: par.expression) if par else None,
+            "name": safe(lambda: par.name) if par else None,
+            "value": _round(safe(lambda: par.value)) if par else None,
+            "expression": safe(lambda: par.expression) if par else None,
             # driving = constrains geometry; a driven/reference dim just MEASURES (doesn't lock).
-            "driving": bool(_safe(lambda d=d: d.isDriving, True)),
+            "driving": bool(safe(lambda d=d: d.isDriving, True)),
             "type": type(d).__name__.replace("SketchDimension", "").replace("Dimension", "").lower(),
         })
 
     counts = {
-        "lines": _safe(lambda: sketch.sketchCurves.sketchLines.count, 0),
-        "arcs": _safe(lambda: sketch.sketchCurves.sketchArcs.count, 0),
-        "circles": _safe(lambda: sketch.sketchCurves.sketchCircles.count, 0),
-        "ellipses": _safe(lambda: sketch.sketchCurves.sketchEllipses.count, 0),
-        "points": _safe(lambda: sketch.sketchPoints.count, 0),
+    "lines": safe(lambda: sketch.sketchCurves.sketchLines.count, 0),
+    "arcs": safe(lambda: sketch.sketchCurves.sketchArcs.count, 0),
+    "circles": safe(lambda: sketch.sketchCurves.sketchCircles.count, 0),
+    "ellipses": safe(lambda: sketch.sketchCurves.sketchEllipses.count, 0),
+    "points": safe(lambda: sketch.sketchPoints.count, 0),
     }
 
-    fully = _safe(lambda: sketch.isFullyConstrained)
+    fully = safe(lambda: sketch.isFullyConstrained)
     driving_dims = sum(1 for d in dimensions if d.get("driving"))
 
-    return _ok({
-        "sketch": _safe(lambda: sketch.name),
-        "plane": _safe(lambda: sketch.referencePlane.name),
+    return ok({
+        "sketch": safe(lambda: sketch.name),
+        "plane": safe(lambda: sketch.referencePlane.name),
         # is_fully_constrained = no remaining degrees of freedom (geometry can't be dragged). False =
         # there are free DOF (the sketch can still move / be driven). The only DOF signal the API
         # exposes — there is no DOF COUNT or over-constrained flag (use the in-product sketch view
@@ -255,14 +249,14 @@ def handler(sketch_name: str = "") -> dict:
         "driving_dimension_count": driving_dims,
         "counts": counts,
         "construction_count": construction_count,
-        "profile_count": _safe(lambda: sketch.profiles.count, 0),
+        "profile_count": safe(lambda: sketch.profiles.count, 0),
         "entities": entities,
         "constraints": constraints,
-        "dimensions": dimensions,
-        "note": "Full sketch structure. Entity ids ('line:0', 'arc:1', ...) match the references "
-                "used by sketch_constrain / extrude. 'construction' marks guide geometry. "
-                "is_fully_constrained=false means free DOF remain (still movable/drivable); "
-                "a dimension with driving=true locks geometry, driving=false only measures.",
+    "dimensions": dimensions,
+    "note": "Full sketch structure. Entity ids ('line:0', 'arc:1', ...) match the references "
+    "used by sketch_constrain / extrude. 'construction' marks guide geometry. "
+    "is_fully_constrained=false means free DOF remain (still movable/drivable); "
+    "a dimension with driving=true locks geometry, driving=false only measures.",
     })
 
 
@@ -276,7 +270,7 @@ TOOL_DESCRIPTION = (
     "move/be driven) and each dimension's 'driving' flag (true = locks geometry; false = just "
     "measures) — so you can tell whether a sketch is locked, driven, or free without experimenting. "
     "Entity ids match those used by sketch_constrain / extrude. 'sketch_name' selects the sketch "
-    "(sketch_get lists names). Read-only."
+    "(sketch_get lists names)."
 )
 
 # This module is now the DETAIL ENGINE behind sketch_get (sketches.py): when sketch_get is given a

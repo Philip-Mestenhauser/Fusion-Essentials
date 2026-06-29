@@ -17,11 +17,26 @@ class Annotations:
         self,
         audience: Optional[List[str]] = None,
         priority: Optional[float] = None,
-        last_modified: Optional[Union[str, datetime]] = None
+        last_modified: Optional[Union[str, datetime]] = None,
+        read_only: Optional[bool] = None,
+        destructive: Optional[bool] = None
     ):
         self.audience = audience or []
         self.priority = priority
         self.last_modified = last_modified
+        # MCP tool behaviour hints. read_only: the tool does not modify state. destructive: a write
+        # whose effect is hard to reverse (deletes, history-discarding conversions, closing docs).
+        # Serialized as readOnlyHint / destructiveHint (the MCP spec names).
+        self.read_only = read_only
+        self.destructive = destructive
+
+    def set_read_only(self, read_only: bool = True) -> 'Annotations':
+        self.read_only = read_only
+        return self
+
+    def set_destructive(self, destructive: bool = True) -> 'Annotations':
+        self.destructive = destructive
+        return self
 
     def set_audience(self, *audiences: str) -> 'Annotations':
         self.audience = list(audiences)
@@ -53,6 +68,10 @@ class Annotations:
             result['priority'] = self.priority
         if self.last_modified:
             result['lastModified'] = self.last_modified
+        if self.read_only is not None:
+            result['readOnlyHint'] = self.read_only
+        if self.destructive is not None:
+            result['destructiveHint'] = self.destructive
         return result
 
     def to_json(self) -> str:

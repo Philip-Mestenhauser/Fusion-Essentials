@@ -8,7 +8,7 @@ No live Fusion — fakes mimic Sketch.sketchTexts.createInput2 / add.
 import json
 from conftest import load_tool
 
-st = load_tool("set_sketch_text")
+st = load_tool("sketch_set_text")
 
 
 class FakeTextInput:
@@ -51,6 +51,7 @@ class FakeDesign:
 def _install(sketches):
     design = FakeDesign(sketches)
     st.app = type("A", (), {"activeProduct": design})()
+    st._common.app = st.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))

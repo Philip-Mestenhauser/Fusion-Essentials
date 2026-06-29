@@ -16,7 +16,7 @@ that already has that attribute, so a patched _data lands wherever a handler cap
 from conftest import load_tool
 
 _data_common = load_tool("_data_common")
-_data_model_ops = load_tool("data_model_ops")
+_data_model_ops = load_tool("data_ops")
 _doc_lifecycle = load_tool("doc_lifecycle")
 
 
@@ -322,7 +322,7 @@ class TestFindOpenDocument:
         assert found is a
 
 
-# ── data_delete_folder recursive-delete gate (maintainer block #1) ───────────────
+# ── data_delete_folder recursive-delete gate ─────────────────────────────────────
 #
 # force=true on a non-empty folder recursively wipes the whole subtree (and bypasses the
 # per-file xref-orphan guard). The gate: force alone is NOT enough — require an explicit
@@ -426,3 +426,280 @@ class TestDeleteFolderGate:
         outer, inner = self._nested()
         files, subs = dm._subtree_counts(outer)
         assert files == 3 and subs == 1   # a + b + c files; Inner subfolder
+
+
+# ── data_ops handlers: create project / create folder / upload / list folders ────
+#
+# These resolve a project + (possibly nested) folder path and WRITE. The pure logic
+# worth pinning: duplicate guards, mkdir -p auto-create reporting, the upload-state
+# enum mapping (0/1/2/unknown), the file-not-found / missing-path gates, and the
+# depth-clamped folder tree.
+
+class FakeProjFolder:
+    """A DataFolder that supports add() (folders) and uploadFile()."""
+    def __init__(self, name, parent=None, is_root=False):
+        self.name = name
+        self.parentFolder = parent
+        self.isRoot = is_root
+        self._children = []
+        self._files = []
+        self.uploaded = []
+
+    def _add_child(self, name):
+        child = FakeProjFolder(name, parent=self)
+        self._children.append(child)
+        return child
+
+    @property
+    def id(self):
+        return "fid:" + self.name
+
+    @property
+    def dataFolders(self):
+        outer = self
+        class _DF:
+            @property
+            def count(self_inner):
+                return len(outer._children)
+            def asArray(self_inner):
+                return list(outer._children)
+            def add(self_inner, name):           # Fusion: DataFolder.dataFolders.add(name)
+                return outer._add_child(name)
+        return _DF()
+
+    @property
+    def dataFiles(self):
+        outer = self
+        class _Df:
+            @property
+            def count(self_inner):
+                return len(outer._files)
+            def asArray(self_inner):
+                return list(outer._files)
+        return _Df()
+
+    def uploadFile(self, path):
+        self.uploaded.append(path)
+        return _next_future
+
+
+class FakeProj:
+    def __init__(self, name, pid, root):
+        self.name = name
+        self.id = pid
+        self.rootFolder = root
+
+
+class FakeProjects:
+    def __init__(self, projects):
+        self._p = list(projects)
+        self.added = []
+    def asArray(self):
+        return list(self._p)
+    def add(self, name, purpose, contributors):
+        p = FakeProj(name, "newid:" + name, FakeProjFolder("Root", is_root=True))
+        self._p.append(p)
+        self.added.append((name, purpose, contributors))
+        return p
+
+
+class FakeProjData:
+    def __init__(self, projects):
+        self.dataProjects = FakeProjects(projects)
+
+
+_next_future = None
+
+
+def _install_proj_data(projects):
+    data = FakeProjData(projects)
+    dm._data = lambda: data
+    return data
+
+
+class TestCreateProject:
+    def test_creates_and_reports_id(self):
+        data = _install_proj_data([])
+        out = _payload(dm.create_project_handler(name="Alpha", purpose="testing"))
+        assert out["created"] is True
+        assert out["name"] == "Alpha"
+        assert out["id"] == "newid:Alpha"
+        assert data.dataProjects.added == [("Alpha", "testing", "")]
+
+    def test_blank_name_errors(self):
+        _install_proj_data([])
+        res = dm.create_project_handler(name="   ")
+        assert res["isError"] is True and "name" in res["message"]
+
+    def test_duplicate_name_refused(self):
+        existing = FakeProj("Alpha", "p1", FakeProjFolder("Root", is_root=True))
+        data = _install_proj_data([existing])
+        res = dm.create_project_handler(name="alpha")   # case-insensitive duplicate
+        assert res["isError"] is True
+        assert "already exists" in res["message"]
+        assert data.dataProjects.added == []            # nothing created
+
+
+class TestCreateFolder:
+    def _proj(self):
+        root = FakeProjFolder("Root", is_root=True)
+        return FakeProj("Proj", "pid", root), root
+
+    def test_creates_at_root(self):
+        proj, root = self._proj()
+        _install_proj_data([proj])
+        out = _payload(dm.create_folder_handler(folder_name="Parts", project="Proj"))
+        assert out["created"] is True and out["name"] == "Parts"
+        assert out["auto_created_parents"] == []
+        assert [c.name for c in root._children] == ["Parts"]
+
+    def test_mkdir_p_reports_auto_created_parents(self):
+        proj, root = self._proj()
+        _install_proj_data([proj])
+        out = _payload(dm.create_folder_handler(
+            folder_name="Vises", project="Proj", parent_folder="Fixtures/Mills"))
+        # both intermediate parents were created
+        assert out["auto_created_parents"] == ["Fixtures", "Mills"]
+        assert out["path"] == "Fixtures/Mills/Vises"
+
+    def test_duplicate_in_same_parent_refused(self):
+        proj, root = self._proj()
+        root._add_child("Parts")
+        _install_proj_data([proj])
+        res = dm.create_folder_handler(folder_name="parts", project="Proj")  # case-insensitive dup
+        assert res["isError"] is True and "already exists" in res["message"]
+
+    def test_missing_project_lists_available(self):
+        proj, _ = self._proj()
+        _install_proj_data([proj])
+        res = dm.create_folder_handler(folder_name="X", project="Ghost")
+        assert res["isError"] is True
+        assert "Ghost" in res["message"] and "Proj" in res["message"]
+
+    def test_requires_project_identifier(self):
+        _install_proj_data([])
+        res = dm.create_folder_handler(folder_name="X")
+        assert res["isError"] is True and "project" in res["message"]
+
+
+class TestUploadFile:
+    def _proj_with_path(self):
+        root = FakeProjFolder("Root", is_root=True)
+        imports = root._add_child("Imports")
+        imports._add_child("STEP")
+        return FakeProj("Proj", "pid", root), root
+
+    def _set_future(self, state, df_name=None, df_id=None):
+        global _next_future
+        class _DF:
+            name = df_name
+            id = df_id
+        class _Future:
+            uploadState = state
+            dataFile = _DF() if df_name is not None else None
+        _next_future = _Future()
+
+    def test_file_not_found_errors(self, tmp_path):
+        _install_proj_data([])
+        res = dm.upload_file_handler(file_path=str(tmp_path / "nope.step"), project="Proj")
+        assert res["isError"] is True and "not found" in res["message"].lower()
+
+    def test_requires_project(self, tmp_path):
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        _install_proj_data([])
+        res = dm.upload_file_handler(file_path=str(f))
+        assert res["isError"] is True and "project" in res["message"]
+
+    def test_upload_state_finished_maps_to_word(self, tmp_path):
+        proj, root = self._proj_with_path()
+        _install_proj_data([proj])
+        self._set_future(1, df_name="p.step", df_id="urn:1")
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        out = _payload(dm.upload_file_handler(file_path=str(f), project="Proj"))
+        assert out["upload_state"] == "finished"     # 1 -> finished
+        assert out["uploaded_name"] == "p.step"
+        assert out["uploaded_id"] == "urn:1"
+        assert out["destination_folder"] == "(project root)"
+
+    def test_upload_state_processing_and_unknown(self, tmp_path):
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(0)
+        out = _payload(dm.upload_file_handler(file_path=str(f), project="Proj"))
+        assert out["upload_state"] == "processing"   # 0 -> processing
+        # an unmapped state value falls back to str(state)
+        self._set_future(99)
+        out2 = _payload(dm.upload_file_handler(file_path=str(f), project="Proj"))
+        assert out2["upload_state"] == "99"
+
+    def test_existing_nested_folder_target(self, tmp_path):
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(1, df_name="p.step", df_id="urn:1")
+        out = _payload(dm.upload_file_handler(
+            file_path=str(f), project="Proj", folder="Imports/STEP"))
+        assert out["destination_folder"] == "Imports/STEP"
+        assert out["auto_created_parents"] == []
+
+    def test_missing_folder_without_create_path_errors(self, tmp_path):
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        res = dm.upload_file_handler(
+            file_path=str(f), project="Proj", folder="Imports/Ghost")
+        assert res["isError"] is True
+        assert "not found" in res["message"] and "Ghost" in res["message"]
+        # hint names the folders that DO exist at that level
+        assert "STEP" in res["message"]
+
+    def test_create_path_makes_missing_folders(self, tmp_path):
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(1, df_name="p.step", df_id="urn:1")
+        out = _payload(dm.upload_file_handler(
+            file_path=str(f), project="Proj", folder="New/Deep", create_path=True))
+        assert out["auto_created_parents"] == ["New", "Deep"]
+        assert out["destination_folder"] == "New/Deep"
+
+
+class TestListFolders:
+    def _tree(self):
+        root = FakeProjFolder("Root", is_root=True)
+        parts = root._add_child("Parts")
+        parts._add_child("Fixtures")
+        root._add_child("Templates")
+        return FakeProj("Proj", "pid", root)
+
+    def test_lists_tree_with_paths(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Parts", "Templates"}
+        assert top["Parts"]["path"] == "Parts"
+        # nested folder appears under Parts with full path
+        nested = top["Parts"]["folders"][0]
+        assert nested["name"] == "Fixtures" and nested["path"] == "Parts/Fixtures"
+        assert out["folder_count"] == 3
+
+    def test_max_depth_clamped_to_at_least_one(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=0))
+        # clamped to 1 -> top-level folders only, nested 'Fixtures' becomes a truncation flag
+        assert out["max_depth"] == 1
+        top = {n["name"]: n for n in out["folders"]}
+        assert top["Parts"].get("folders_truncated") is True
+        assert "folders" not in top["Parts"]
+
+    def test_invalid_max_depth_defaults(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth="oops"))
+        assert out["max_depth"] == 4

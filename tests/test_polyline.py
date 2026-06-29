@@ -1,4 +1,4 @@
-"""Unit tests for the polyline / closed_path sketch kind in sketches.py.
+"""Unit tests for the polyline / closed_path sketch kind in sketch_core.py.
 
 The gap: drawing a custom boundary from independent 'line' calls leaves each segment's endpoints
 DISCONNECTED — dragging a vertex tears the shape apart (no coincident constraints). A polyline draws
@@ -13,7 +13,7 @@ record which point object each segment started from, so we can assert the chaini
 
 from conftest import load_tool
 
-sk = load_tool("sketches")
+sk = load_tool("sketch_core")
 
 
 # ── fakes mimicking SketchLines / SketchLine / SketchPoint ──────────────────

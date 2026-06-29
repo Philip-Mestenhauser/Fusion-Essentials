@@ -13,16 +13,23 @@ WHY THIS EXISTS (the design point): joints, datums, and many features need a SPE
 geometry — a crank-pin's cylindrical face, a bore, a hole edge. Selecting it by a magic snap-string
 ('<occ>:cylinder') is ambiguous when a part has many such faces, and a raw script must re-derive it
 every time. Instead, this returns each candidate as a HANDLE you can pass to other tools
-(joint_at_geometry, ...). The handle is the entity's `entityToken`, which round-trips reliably via
-Design.findEntityByToken — so geometry becomes a first-class VALUE that flows between tool calls,
-rather than tribal knowledge an agent must rediscover by trial and error.
+(joint_at_geometry, ...) — geometry as a first-class VALUE that flows between tool calls.
+
+HANDLE LIFETIME (important — do not overstate stability): the handle is the entity's `entityToken`.
+Fusion does NOT guarantee a stable token per entity: querying the SAME edge/face twice can return
+DIFFERENT tokens, and an older token can fail `findEntityByToken` even with NO model edit in between.
+Treat a handle as SHORT-LIVED: use it promptly, in the calls right after the find_geometry that minted
+it. If a handle fails to resolve ("stale"), re-run find_geometry (same target/kind/nearest_to) for a
+fresh one — don't assume the geometry changed. Prefer to find + consume in adjacent calls rather than
+hoarding a batch of handles to use later.
 
 Grounded in adsk.fusion:
   - Occurrence.bRepBodies / body.faces / body.edges / body.vertices (proxied into assembly context)
   - BRepFace.geometry.surfaceType (Cylinder/Plane/Cone/Sphere/...), .area, .centroid; cylinder
     .geometry.radius + .origin + .axis
   - BRepEdge.geometry.curveType (Circle3D/Line3D/Arc3D/...), .length, edge circle .center+.radius
-  - entity.entityToken  (the stable HANDLE) ; Design.findEntityByToken(token) resolves it back
+  - entity.entityToken (the HANDLE) ; Design.findEntityByToken(token) resolves it back WHEN the token
+    is still live (see HANDLE LIFETIME above — not guaranteed stable across separate queries)
 Handler runs on the main thread; read-only.
 """
 
@@ -32,53 +39,60 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import UNIT_TO_CM, error, ok, safe, scale
+from . import _common
+from . import _inputs
+from . import _outputs
+
+# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
+# The 'handle' lands inside each item of the 'matches' list. ~18 GeometryHandle/BodyRef inputs consume it.
+RETURNS = [
+    _outputs.ReturnsHandle("handle", require="any", in_list=True, consumers=[
+        "joint_at_geometry", "sketch_create", "model_extrude", "model_fillet", "model_chamfer",
+        "model_construction", "model_mirror", "model_combine", "model_measure_bbox", "view_section"]),
+]
 
 app = adsk.core.Application.get()
 
-_UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
-
 # friendly 'kind' -> what it matches. Faces by surfaceType, edges by curveType, plus vertex.
 _FACE_KINDS = {"cylinder_face": "Cylinder", "planar_face": "Plane",
-               "cone_face": "Cone", "sphere_face": "Sphere", "torus_face": "Torus"}
+    "cone_face": "Cone", "sphere_face": "Sphere", "torus_face": "Torus"}
 _EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "Arc3D"}
 
 
-def _design():
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        design = _safe(lambda: adsk.fusion.Design.cast(
-            app.activeDocument.products.itemByProductType('DesignProductType')))
-    return design
-
-
-def _scale(units):
-    return _UNIT_TO_CM.get((units or "mm").strip().lower())
-
 
 def _resolve_target(design, target):
-    """Resolve 'target' (occurrence name, or component name, or body name, or '' = whole design)
-    to a list of (occurrence_or_None, body) to scan."""
+    """Resolve 'target' (occurrence name/fullPathName, or component name, or body name, or
+    '' = whole design) to a list of (occurrence_or_None, body) to scan.
+
+    Scans root.allOccurrences (the flattened, RECURSIVE list — so a NESTED occurrence is reachable by
+    its fullPathName, the same key design_get_tree/assembly_probe emit) plus root-level bodies. This
+    keeps find_geometry's reach consistent with the self-heal path (_inputs._refind_by_locator), which
+    also scans allOccurrences — otherwise a deep occurrence resolves on re-find but not on the initial
+    query."""
     root = design.rootComponent
     name = (target or "").strip()
+    all_occs = safe(lambda: list(root.allOccurrences)) or []
+    root_bodies = safe(lambda: list(root.bRepBodies)) or []
     pairs = []
-    occs = _safe(lambda: root.occurrences)
     if not name:
-        for i in range(_safe(lambda: occs.count, 0) if occs else 0):
-            o = occs.item(i)
-            for b in (_safe(lambda o=o: list(o.bRepBodies)) or []):
+        # whole design: root-level bodies (occurrence None) + every occurrence's bodies, recursively.
+        for b in root_bodies:
+            pairs.append((None, b))
+        for o in all_occs:
+            for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
         return pairs, "whole design"
-    # by occurrence name
-    for i in range(_safe(lambda: occs.count, 0) if occs else 0):
-        o = occs.item(i)
-        if _safe(lambda o=o: o.name) == name or _safe(lambda o=o: o.component.name) == name:
-            for b in (_safe(lambda o=o: list(o.bRepBodies)) or []):
+    # by occurrence fullPathName (unambiguous), name, or component name — recursively.
+    for o in all_occs:
+        if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
+                or safe(lambda o=o: o.component.name) == name):
+            for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
     if pairs:
         return pairs, f"occurrence/component '{name}'"
     # by body name on root
-    b = _safe(lambda: root.bRepBodies.itemByName(name))
+    b = safe(lambda: root.bRepBodies.itemByName(name))
     if b:
         return [(None, b)], f"body '{name}'"
     return [], None
@@ -89,38 +103,44 @@ def _dist(a, b):
 
 
 def _face_record(face, inv_k):
-    g = _safe(lambda: face.geometry)
-    st = _safe(lambda: g.surfaceType)
+    g = safe(lambda: face.geometry)
+    st = safe(lambda: g.surfaceType)
     kind = {adsk.core.SurfaceTypes.CylinderSurfaceType: "cylinder_face",
             adsk.core.SurfaceTypes.PlaneSurfaceType: "planar_face",
             adsk.core.SurfaceTypes.ConeSurfaceType: "cone_face",
             adsk.core.SurfaceTypes.SphereSurfaceType: "sphere_face",
             adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face"}.get(st, "face")
-    c = _safe(lambda: face.centroid)
-    rec = {"handle": _safe(lambda: face.entityToken), "kind": kind,
-           "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
-           "area": round(_safe(lambda: face.area, 0) * inv_k * inv_k, 3)}
+    c = safe(lambda: face.centroid)
+    # Composite, self-healing handle: token + a kind+position locator (cm) so a stale token re-resolves
+    # to the same face by geometry instead of erroring (see _inputs.make_handle).
+    handle = _inputs.make_handle(face, kind, (c.x, c.y, c.z)) if c else safe(lambda: face.entityToken)
+    rec = {"handle": handle, "kind": kind,
+            "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
+            "area": round(safe(lambda: face.area, 0) * inv_k * inv_k, 3)}
     if kind == "cylinder_face":
-        rec["radius"] = round(_safe(lambda: g.radius, 0) * inv_k, 3)
-        ax = _safe(lambda: g.axis)
+        rec["radius"] = round(safe(lambda: g.radius, 0) * inv_k, 3)
+        ax = safe(lambda: g.axis)
         if ax:
             rec["axis"] = [round(ax.x, 3), round(ax.y, 3), round(ax.z, 3)]
     return rec
 
 
 def _edge_record(edge, inv_k):
-    g = _safe(lambda: edge.geometry)
-    ct = _safe(lambda: g.curveType)
+    g = safe(lambda: edge.geometry)
+    ct = safe(lambda: g.curveType)
     kind = {adsk.core.Curve3DTypes.Circle3DCurveType: "circular_edge",
             adsk.core.Curve3DTypes.Line3DCurveType: "line_edge",
             adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge"}.get(ct, "edge")
-    pt = _safe(lambda: edge.pointOnEdge)
-    rec = {"handle": _safe(lambda: edge.entityToken), "kind": kind,
-           "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
-           "length": round(_safe(lambda: edge.length, 0) * inv_k, 3)}
+    pt = safe(lambda: edge.pointOnEdge)
+    # Self-healing handle keyed to pointOnEdge (the same point _refind_by_locator compares against for
+    # an edge — NOT the circle center the display 'position' may show below).
+    handle = _inputs.make_handle(edge, kind, (pt.x, pt.y, pt.z)) if pt else safe(lambda: edge.entityToken)
+    rec = {"handle": handle, "kind": kind,
+            "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
+            "length": round(safe(lambda: edge.length, 0) * inv_k, 3)}
     if kind in ("circular_edge", "arc_edge"):
-        rec["radius"] = round(_safe(lambda: g.radius, 0) * inv_k, 3)
-        ctr = _safe(lambda: g.center)
+        rec["radius"] = round(safe(lambda: g.radius, 0) * inv_k, 3)
+        ctr = safe(lambda: g.center)
         if ctr:
             rec["position"] = [round(ctr.x * inv_k, 3), round(ctr.y * inv_k, 3), round(ctr.z * inv_k, 3)]
     return rec
@@ -137,19 +157,19 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     matches by distance to. max_results caps the list. Read-only — returns handles to pass to
     joint_at_geometry etc.
     """
-    k = _scale(units)
+    k = scale(units)
     if k is None:
-        return _error(f"Unknown units '{units}'. Use mm, cm, or in.")
+        return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     inv_k = 1.0 / k
 
-    design = _design()
+    design = _common.design()
     if not design:
-        return _error("No active design (open or create a document first).")
+        return error("No active design (open or create a document first).")
 
     pairs, target_label = _resolve_target(design, target)
     if not pairs:
-        return _error(f"Could not resolve target '{target}'. Use an occurrence/component name, a "
-                      "body name, or '' for the whole design (see assembly_probe / design_get_tree).")
+        return error(f"Could not resolve target '{target}'. Use an occurrence/component name, a "
+    "body name, or '' for the whole design (see assembly_probe / design_get_tree).")
 
     knd = (kind or "").strip().lower()
     want_faces = (not knd) or knd in _FACE_KINDS
@@ -159,22 +179,23 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     matches = []
     for occ, body in pairs:
         if want_faces:
-            for f in (_safe(lambda body=body: list(body.faces)) or []):
+            for f in (safe(lambda body=body: list(body.faces)) or []):
                 rec = _face_record(f, inv_k)
                 if knd in _FACE_KINDS and rec["kind"] != knd:
                     continue
                 matches.append(rec)
         if want_edges:
-            for e in (_safe(lambda body=body: list(body.edges)) or []):
+            for e in (safe(lambda body=body: list(body.edges)) or []):
                 rec = _edge_record(e, inv_k)
                 if knd in _EDGE_KINDS and rec["kind"] != knd:
                     continue
                 matches.append(rec)
         if want_verts:
-            for v in (_safe(lambda body=body: list(body.vertices)) or []):
-                p = _safe(lambda v=v: v.geometry)
-                matches.append({"handle": _safe(lambda v=v: v.entityToken), "kind": "vertex",
-                                "position": [round(p.x * inv_k, 3), round(p.y * inv_k, 3),
+            for v in (safe(lambda body=body: list(body.vertices)) or []):
+                p = safe(lambda v=v: v.geometry)
+                vh = _inputs.make_handle(v, "vertex", (p.x, p.y, p.z)) if p else safe(lambda v=v: v.entityToken)
+                matches.append({"handle": vh, "kind": "vertex",
+        "position": [round(p.x * inv_k, 3), round(p.y * inv_k, 3),
                                              round(p.z * inv_k, 3)] if p else None})
 
     # radius filter (cylinder faces / circular edges)
@@ -191,41 +212,43 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     total = len(matches)
     matches = matches[:max(1, int(max_results))]
 
-    return _ok({
+    return ok({
         "target": target_label,
         "kind_filter": knd or "faces+edges",
         "match_count": total,
         "returned": len(matches),
         "units": units,
         "matches": matches,
-        "note": "Each 'handle' is a stable entity token. Pass a handle to joint_at_geometry (or other "
-                "geometry-consuming tools) — geometry flows as a VALUE, no snap-string guessing. "
-                "Narrow with kind / radius / nearest_to when a part has many similar faces.",
+        # Producer prose generated from the RETURNS declaration (the chain is declared once, not
+        # hand-typed here and paraphrased in every consumer). Plus the one tool-specific tip.
+        "note": _outputs.produces_block(RETURNS) + "\nNarrow with kind / radius / nearest_to "
+        "when a part has many similar faces.",
     })
 
 
 TOOL_DESCRIPTION = (
-    "Find geometry on a part and return stable HANDLES to it — the query half of geometry-as-values. "
-    "Scan an occurrence/component/body's faces, edges, and vertices and get back a list of matches, "
-    "each with a 'handle' (a stable entity token), its kind, world position, and shape data (a "
-    "cylinder face's radius+axis, a circular edge's radius, a face's area). 'target' = "
-    "occurrence/component/body name (or '' = whole design). 'kind' filters to cylinder_face / "
-    "planar_face / cone_face / sphere_face / torus_face / circular_edge / line_edge / arc_edge / "
-    "vertex. 'radius' keeps only matching round geometry; 'nearest_to' = [x,y,z] sorts by distance. "
-    "Pass a returned handle to joint_at_geometry (etc.) instead of guessing a snap-string. Read-only."
+    "Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, "
+    "world position, and shape data (cylinder radius+axis, edge radius, face area). 'target' = "
+    "occurrence/component/body name ('' = whole design). 'kind' filters by geometry type; 'radius' keeps "
+    "matching round geometry; 'nearest_to'=[x,y,z] sorts by distance. Handles are SHORT-LIVED — use them "
+    "in the next call(s); if one is rejected as stale, re-run find_geometry for a fresh one.\n"
+    + _outputs.produces_block(RETURNS)
 )
 
 find_tool = (
     Tool.create_simple(name="find_geometry", description=TOOL_DESCRIPTION)
     .add_input_property("target", {"type": "string", "description": "Occurrence/component/body name, or '' for the whole design."})
-    .add_input_property("kind", {"type": "string", "description": "cylinder_face | planar_face | cone_face | sphere_face | torus_face | circular_edge | line_edge | arc_edge | vertex (omit = faces+edges)."})
+    .add_input_property(*_inputs.Choice("kind",
+        ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face",
+         "circular_edge", "line_edge", "arc_edge", "vertex"],
+        description="Geometry kind to find (omit = faces+edges).").as_property())
     .add_input_property("radius", {"type": "number", "description": "Keep only cylinder faces / circular edges with this radius (in 'units', 5% tol)."})
     .add_input_property("nearest_to", {"type": "array", "items": {"type": "number"}, "description": "[x,y,z] world point (in 'units') to sort matches by distance to."})
-    .add_input_property("units", {"type": "string", "description": "mm | cm | in (default mm)."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("max_results", {"type": "integer", "description": "Cap on matches returned (default 20)."})
     .strict_schema()
 )
-find_item = Item.create_tool_item(tool=find_tool, handler=handler, run_on_main_thread=True)
+find_item = Item.create_tool_item(tool=find_tool, write="read", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

@@ -141,3 +141,60 @@ class TestEditOperation:
         _install()
         res = ce.handler(operation="Adaptive1", parameters={})
         assert res["isError"] is True and "parameters" in res["message"]
+
+    def test_no_operation_name_errors(self):
+        _install()
+        res = ce.handler(operation="   ", parameters={"tool_stepover": "1"})
+        assert res["isError"] is True and "operation" in res["message"]
+
+    def test_changed_records_evaluated_value(self):
+        # changed[].value is the EVALUATED number (FakeParam.value parses the expr),
+        # distinct from the .after expression string.
+        _install()
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters={"tool_feedCutting": "3000"}))
+        c = out["changed"][0]
+        assert c["after"] == "3000"          # the expression text
+        assert c["value"] == 3000.0          # the evaluated value
+
+
+class TestParseParameters:
+    def test_string_without_equals_errors(self):
+        _install()
+        res = ce.handler(operation="Adaptive1", parameters="tool_stepover 1.5")
+        assert res["isError"] is True
+        assert "name=value" in res["message"]
+
+    def test_string_skips_blank_chunks(self):
+        # trailing/double commas produce empty chunks that must be ignored, not errored.
+        op = _install()
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters="tool_stepover=1.5, , tool_feedCutting=900,"))
+        assert out["updated_count"] == 2
+        assert op.parameters.itemByName("tool_stepover").expression == "1.5"
+
+    def test_non_dict_non_string_errors(self):
+        _install()
+        res = ce.handler(operation="Adaptive1", parameters=42)
+        assert res["isError"] is True
+        assert "object" in res["message"] or "name=value" in res["message"]
+
+
+class TestFindOperation:
+    def test_falls_back_to_allOperations_when_operations_missing(self):
+        # A setup that exposes only allOperations (operations is None) must still resolve.
+        op = FakeOp("OnlyAll", {"tool_stepover": "2."})
+        setup = FakeSetup([op])
+        setup.operations = None                 # force the `or allOperations` fallback
+        cam = FakeCAM([])
+        cam.setups = FakeSetups([setup])
+        ce._get_cam = lambda: (cam, None)
+        out = _payload(ce.handler(operation="OnlyAll", parameters={"tool_stepover": "1"}))
+        assert out["operation"] == "OnlyAll"
+        assert op.parameters.itemByName("tool_stepover").expression == "1"
+
+    def test_unknown_operation_lists_available_names(self):
+        _install(op_name="RealOp")
+        res = ce.handler(operation="Ghost", parameters={"tool_stepover": "1"})
+        assert res["isError"] is True
+        assert "RealOp" in res["message"]      # available names surfaced

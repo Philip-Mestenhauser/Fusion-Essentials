@@ -16,6 +16,7 @@ request thread can crash Fusion.
 
 import json
 import threading
+import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
@@ -28,6 +29,14 @@ app = adsk.core.Application.get()
 # Custom event id, namespaced to this add-in so it can't collide with Autodesk's
 # own MCP server or another add-in.
 CUSTOM_EVENT_ID = 'GTF_Fusion-Essentials.MCP.TaskManagerEvent'
+
+# A pending task should be claimed by notify() within seconds of being posted. If Fusion DROPS the
+# custom event under load (it never fires on the main thread) AND the poster doesn't cancel it (e.g. a
+# non-enforce_timeout poll loop, or the request thread died), the entry would linger in _pending_tasks
+# until stop(). Anything older than this TTL is therefore an orphan and is reaped on the next post().
+# Generous vs. MAIN_THREAD_TASK_TIMEOUT_S (~25s) so a legitimately slow-to-be-claimed task is never
+# reaped out from under a live poster.
+_PENDING_TASK_TTL_S = 300.0
 
 
 class TaskManager:
@@ -103,15 +112,38 @@ class TaskManager:
             futil.log('TaskManager: callback must be callable')
             return None
         try:
+            cls._reap_stale()          # drop any orphaned (dropped-event) tasks before adding one
             task_id = str(uuid.uuid4())
             with cls._tasks_lock:
-                cls._pending_tasks[task_id] = {'command': command, 'callback': callback, 'data': data}
+                cls._pending_tasks[task_id] = {'command': command, 'callback': callback,
+                                               'data': data, 'created': time.monotonic()}
             event_data = {'task_id': task_id, 'command': command, 'data': data}
             app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
             return task_id
         except Exception:
             futil.handle_error('TaskManager.post')
             return None
+
+    @classmethod
+    def _reap_stale(cls, ttl: float = _PENDING_TASK_TTL_S) -> int:
+        """Drop pending tasks older than `ttl` seconds — orphans left when Fusion dropped their custom
+        event and no cancel() removed them. Called opportunistically from post() (no background thread,
+        so it stays off the main-thread-safety critical path). Returns the number reaped.
+
+        A reaped task's callback will NEVER run. That is the correct outcome for a dropped event: the
+        poster has long since timed out (TTL >> the request timeout), so the result was already reported
+        as a timeout — running the callback minutes later would apply a side effect nobody is waiting
+        for. notify() pops under the same lock, so a task claimed in the same instant is not double-freed.
+        """
+        now = time.monotonic()
+        with cls._tasks_lock:
+            stale = [tid for tid, t in cls._pending_tasks.items()
+                     if now - t.get('created', now) > ttl]
+            for tid in stale:
+                cls._pending_tasks.pop(tid, None)
+        if stale:
+            futil.log(f'TaskManager: reaped {len(stale)} orphaned pending task(s) (dropped events)')
+        return len(stale)
 
     @classmethod
     def cancel(cls, task_id: str) -> bool:

@@ -376,7 +376,7 @@ def run(context):
 
    **2a. PRIMARY (root JO present):** pick the root JO (if several, the one that reads as the model/
    workpiece attach — e.g. matches /Attach|Center.*Model|Workpiece/; record it). Then
-   `joint(occurrence_one="Center of Model", occurrence_two="<that root JO>", joint_type="rigid")` —
+   `joint_create(occurrence_one="Center of Model", occurrence_two="<that root JO>", joint_type="rigid")` —
    the join tool proxies the part's "Center of Model" JO by name inside the inserted occurrence and
    rigidly mates it to the template JO (whose offsets position the part). No measuring/moving needed.
    (A healthy root-JO join reports `occurrence_two = null` in assembly_probe — that's normal for a
@@ -386,7 +386,7 @@ def run(context):
    - `find_geometry(target="<stock occurrence>", kind="planar_face")` and pick the TOP face (max Z
      center) — the stock occurrence is the setup's stock body (e.g. `Main Stock:1`). Record its handle.
    - `joint_at_geometry` is for two handles; here the part side is a JO — so instead use
-     `joint(occurrence_one="Center of Model", occurrence_two="<stock occ>:top", joint_type="rigid",
+     `joint_create(occurrence_one="Center of Model", occurrence_two="<stock occ>:top", joint_type="rigid",
      offset = -(0.5*partZ + 1 mm), units="mm")` where `partZ` is the part-space Z extent from Phase 2.
      The negative offset drops the part center below the stock-top face by (½partZ + 1 mm) so the part
      top is 1 mm under the stock top. (`:top` is the highest-face-center snap.)

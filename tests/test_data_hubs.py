@@ -1,10 +1,12 @@
 """Unit tests for ``data_hubs.py`` — list Autodesk data hubs and switch the active one.
 
-Switching hubs is a real need (templates/parts live on different TeamHubs) and was previously a
-manual Fusion-UI action. The Fusion API exposes app.data.dataHubs + a settable app.data.activeHub —
-this tool wraps both. Covers: list (with is_active flag), switch by name + by id, the unknown-hub
-guard, the already-active no-op, and that switch reports the disruptive close-docs warning.
-No live Fusion — fakes mimic app.data.dataHubs / activeHub.
+Switching hubs is a real need (templates/parts live on different TeamHubs). The Fusion API exposes
+app.data.dataHubs (reliable) but Data.activeHub is GETTER-ONLY, so 'switch' is best-effort: it
+attempts the assignment, verifies the active hub actually changed, and returns an honest error if
+not. Covers: list (with is_active flag), switch by name + by id when the setter works, the
+unknown-hub guard, the already-active no-op, the close-docs warning, AND the getter-only reality
+(silent-noop + raising setters must yield an honest error, never a false switched:True).
+No live Fusion — fakes mimic app.data.dataHubs / activeHub in each shape.
 """
 
 import json
@@ -72,6 +74,21 @@ class TestList:
         out = _payload(dh.handler())
         assert "hubs" in out and out["active_hub"]["name"] == "Acme Robotics"
 
+    def test_unnamed_hub_gets_placeholder(self):
+        # a hub whose .name is None/empty is reported as "(unnamed)", not null.
+        hubs = [FakeHub(None, "a.x"), FakeHub("Named", "a.y")]
+        _install(hubs=hubs, active_idx=1)
+        out = _payload(dh.handler(action="list"))
+        names = [h["name"] for h in out["hubs"]]
+        assert names == ["(unnamed)", "Named"]
+        assert out["hub_count"] == 2
+
+    def test_single_hub_is_active(self):
+        _install(hubs=[FakeHub("Solo", "a.solo")], active_idx=0)
+        out = _payload(dh.handler(action="list"))
+        assert out["hub_count"] == 1
+        assert out["hubs"][0]["is_active"] is True
+
 
 # ── switch ────────────────────────────────────────────────────────────────────
 
@@ -118,3 +135,56 @@ class TestSwitch:
         _install()
         res = dh.handler(action="teleport")
         assert res["isError"] is True and "action" in res["message"]
+
+
+# ── the getter-only reality (the audit's confirmed bug) ─────────────────────────────────────────
+#
+# Data.activeHub is documented GETTER-ONLY. On a real Fusion the assignment either raises or silently
+# no-ops, so the active hub never actually changes. The tool must NOT report switched:True in that
+# case — it must verify the change and, if it didn't take, return an honest, actionable error. These
+# simulate both getter-only shapes.
+
+class _NoopSetterData:
+    """activeHub assignment is silently ignored (the no-op getter-only shape)."""
+    def __init__(self, hubs, active):
+        self.dataHubs = FakeHubs(hubs)
+        self._active = active
+    @property
+    def activeHub(self):
+        return self._active
+    @activeHub.setter
+    def activeHub(self, h):
+        pass   # silently ignored — the active hub does not change
+
+
+class _RaisingSetterData:
+    """activeHub assignment raises (the read-only-property shape)."""
+    def __init__(self, hubs, active):
+        self.dataHubs = FakeHubs(hubs)
+        self._active = active
+    @property
+    def activeHub(self):
+        return self._active
+    @activeHub.setter
+    def activeHub(self, h):
+        raise RuntimeError("property 'activeHub' of 'Data' object has no setter")
+
+
+class TestSwitchGetterOnly:
+    def _install_data(self, data_cls):
+        hubs = [FakeHub("Acme Robotics", "a.acme"), FakeHub("Contoso Machining", "a.contoso")]
+        data = data_cls(hubs, hubs[0])
+        dh.app = type("A", (), {"data": data})()
+        return data
+
+    def test_silent_noop_setter_reports_honest_error_not_false_success(self):
+        self._install_data(_NoopSetterData)
+        res = dh.handler(action="switch", hub="Contoso Machining")
+        assert res["isError"] is True, "must NOT claim switched:True when the hub never changed"
+        assert "read-only" in res["message"] and "data panel" in res["message"]
+
+    def test_raising_setter_reports_honest_error(self):
+        self._install_data(_RaisingSetterData)
+        res = dh.handler(action="switch", hub="Contoso Machining")
+        assert res["isError"] is True
+        assert "read-only" in res["message"]

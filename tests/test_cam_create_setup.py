@@ -167,7 +167,42 @@ class TestNamingAndGuards:
         assert cam.setups.added[-1].name == "Op10 Mill"
         assert out["setup_name"] == "Op10 Mill"
 
+    def test_blank_name_not_assigned(self):
+        # whitespace-only name -> inp.name left at the FakeSetupInput default (None),
+        # so the setup keeps its auto-name ("Setup1"), it is NOT set to "   ".
+        _, cam, _ = _install()
+        out = _payload(cs.handler(name="   "))
+        assert cam.setups.added[-1].name == "Setup1"
+        assert out["setup_name"] == "Setup1"
+
     def test_no_cam_product_errors(self):
         _install(has_cam=False)
         res = cs.handler()
         assert res["isError"] is True and "CAM" in res["message"]
+
+
+# ── output fields ────────────────────────────────────────────────────────────
+
+class TestOutputFields:
+    def test_model_count_and_names_reported(self):
+        _install(bodies=[FakeBody("A"), FakeBody("B"), FakeBody("C")])
+        out = _payload(cs.handler())
+        assert out["model_count"] == 3
+        assert set(out["models"]) == {"A", "B", "C"}
+        assert out["operation_count"] == 0          # fresh setup has no operations
+        assert out["operation_type"] == "milling"
+
+    def test_single_body_model_count_one(self):
+        _install(bodies=[FakeBody("Solo")])
+        out = _payload(cs.handler())
+        assert out["model_count"] == 1
+        assert out["models"] == ["Solo"]
+
+    def test_setup_creation_failure_reported(self):
+        _, cam, _ = _install()
+        def boom(_inp):
+            raise RuntimeError("kaboom")
+        cam.setups.add = boom
+        res = cs.handler()
+        assert res["isError"] is True
+        assert "kaboom" in res["message"] and "milling" in res["message"]

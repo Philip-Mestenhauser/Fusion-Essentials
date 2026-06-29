@@ -29,20 +29,20 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
 
 app = adsk.core.Application.get()
 
 
 def _get_cam():
     """Return (cam, None) for the active document, or (None, reason)."""
-    doc = _safe(lambda: app.activeDocument)
+    doc = safe(lambda: app.activeDocument)
     if not doc:
         return None, "No active document."
-    products = _safe(lambda: doc.products)
+    products = safe(lambda: doc.products)
     if not products:
         return None, "Could not access document products."
-    cam = _safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
+    cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
     if not cam:
         return None, "This document has no CAM (Manufacture) data."
     return cam, None
@@ -52,12 +52,12 @@ def _find_operation(cam, name):
     """Find an operation by name across all setups. Returns (op, available_names)."""
     want = (name or "").strip()
     available = []
-    for si in range(_safe(lambda: cam.setups.count, 0) or 0):
+    for si in range(safe(lambda: cam.setups.count, 0) or 0):
         setup = cam.setups.item(si)
-        ops = _safe(lambda: setup.operations) or _safe(lambda: setup.allOperations)
-        for oi in range(_safe(lambda: ops.count, 0) or 0):
+        ops = safe(lambda: setup.operations) or safe(lambda: setup.allOperations)
+        for oi in range(safe(lambda: ops.count, 0) or 0):
             op = ops.item(oi)
-            nm = _safe(lambda op=op: op.name) or ""
+            nm = safe(lambda op=op: op.name) or ""
             available.append(nm)
             if nm == want:
                 return op, available
@@ -88,22 +88,22 @@ def _parse_parameters(parameters):
 def handler(operation: str = "", parameters=None) -> dict:
     """Set named parameters on a CAM operation. parameters = {name: expression} or 'name=value,...'."""
     if not (operation or "").strip():
-        return _error("Provide 'operation' — the CAM operation name to edit (see cam_get_operations).")
+        return error("Provide 'operation' — the CAM operation name to edit (see cam_get_operations).")
 
     wanted, perr = _parse_parameters(parameters)
     if perr:
-        return _error(perr)
+        return error(perr)
     if not wanted:
-        return _error("Provide 'parameters' — at least one name=value to set (e.g. "
-                      "{'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).")
+        return error("Provide 'parameters' — at least one name=value to set (e.g. "
+    "{'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).")
 
     cam, cam_err = _get_cam()
     if cam_err:
-        return _error(cam_err)
+        return error(cam_err)
 
     op, available = _find_operation(cam, operation)
     if not op:
-        return _error(f"Operation '{operation}' not found. Available: "
+        return error(f"Operation '{operation}' not found. Available: "
                       f"{', '.join(n for n in available if n)[:300] or '(none)'}.")
 
     params = op.parameters
@@ -111,36 +111,36 @@ def handler(operation: str = "", parameters=None) -> dict:
     resolved = {}
     missing = []
     for name in wanted:
-        p = _safe(lambda name=name: params.itemByName(name))
+        p = safe(lambda name=name: params.itemByName(name))
         if p is None:
             missing.append(name)
         else:
             resolved[name] = p
     if missing:
-        return _error(f"Operation '{operation}' has no parameter(s): {', '.join(missing)}. "
-                      "Read the operation's parameter names first (the tool only sets existing ones).")
+        return error(f"Operation '{operation}' has no parameter(s): {', '.join(missing)}. "
+    "Read the operation's parameter names first (the tool only sets existing ones).")
 
     changed = []
     for name, expr in wanted.items():
         p = resolved[name]
-        before = _safe(lambda p=p: p.expression)
+        before = safe(lambda p=p: p.expression)
         try:
             p.expression = expr
         except Exception as e:
-            return _error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
+            return error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
                           f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)")
-        after = _safe(lambda p=p: p.expression)
+        after = safe(lambda p=p: p.expression)
         changed.append({"name": name, "before": before, "after": after,
-                        "value": _safe(lambda p=p: p.value.value)})
+        "value": safe(lambda p=p: p.value.value)})
 
-    return _ok({
+    return ok({
         "edited": True,
-        "operation": _safe(lambda: op.name),
-        "strategy": _safe(lambda: op.strategy),
-        "updated_count": len(changed),
-        "changed": changed,
-        "note": ("Parameters set. The toolpath is now OUT OF DATE — regenerate it with cam_generate "
-                 "(be in the Manufacture workspace)."),
+        "operation": safe(lambda: op.name),
+    "strategy": safe(lambda: op.strategy),
+    "updated_count": len(changed),
+    "changed": changed,
+    "note": ("Parameters set. The toolpath is now OUT OF DATE — regenerate it with cam_generate "
+            "(be in the Manufacture workspace)."),
     })
 
 
@@ -162,10 +162,10 @@ tool = (
         input_param_description="The CAM operation name to edit.",
     )
     .add_input_property("parameters", {"type": "object",
-        "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string). e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}."})
+            "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string). e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}."})
 )
 
-item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

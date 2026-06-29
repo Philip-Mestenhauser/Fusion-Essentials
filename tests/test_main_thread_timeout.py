@@ -1,17 +1,19 @@
-"""Unit tests for the main-thread task timeout correctness (maintainer block #3).
+"""Unit tests for main-thread task timeout correctness.
 
-The bug: when sys_execute_script ran > 30s, the server reported "cancelled before running"
-even though an in-flight main-thread callback cannot be interrupted and its side effect still
-COMMITS — inviting a double-apply on retry. The fixes pinned here:
+A main-thread callback that is already running cannot be interrupted, and its side effect (a cloud
+write, a committed design edit) still COMMITS — so a timed-out request must never claim "cancelled
+before running" (that invites a blind retry → double-apply). The invariants pinned here:
 
   * TaskManager.cancel(task_id) returns True ONLY if it removed a task that had not yet started
     (a real cancel). If the task was already claimed by the main-thread handler, it returns False,
     so the caller must not claim it was cancelled.
-  * Item carries an enforce_timeout flag (default True); sys_execute_script sets it False so the
-    server waits for completion instead of faking a timeout.
+  * Item carries an enforce_timeout flag (default True); a tool that sets it False makes the server
+    wait for completion instead of reporting a timeout.
+  * _reap_stale() drops tasks orphaned by a dropped custom event (TTL-based), so _pending_tasks
+    can't grow unbounded.
 
 The async server loop needs an event loop + Fusion custom events to exercise directly, so we test
-the two pure/structural pieces the fix turns on.
+the pure/structural pieces these invariants turn on.
 """
 
 import importlib.util
@@ -113,6 +115,40 @@ class TestCancelReturnsWhetherItWon:
         assert tm.TaskManager.cancel("") is False
 
 
+class TestReapStale:
+    """Orphaned tasks (Fusion dropped their custom event, no cancel removed them) must not linger in
+    _pending_tasks until stop(). _reap_stale() drops anything older than the TTL; post() calls it."""
+
+    def test_reaps_tasks_older_than_ttl(self, tm):
+        import time
+        TM = tm.TaskManager
+        TM._pending_tasks.clear()
+        now = time.monotonic()
+        TM._pending_tasks["old"] = {"callback": lambda d: None, "data": {}, "created": now - 9999}
+        TM._pending_tasks["fresh"] = {"callback": lambda d: None, "data": {}, "created": now}
+        reaped = TM._reap_stale(ttl=300.0)
+        assert reaped == 1
+        assert "old" not in TM._pending_tasks      # orphan dropped
+        assert "fresh" in TM._pending_tasks         # live task untouched
+
+    def test_reap_is_a_noop_when_all_fresh(self, tm):
+        import time
+        TM = tm.TaskManager
+        TM._pending_tasks.clear()
+        TM._pending_tasks["a"] = {"callback": lambda d: None, "data": {}, "created": time.monotonic()}
+        assert TM._reap_stale(ttl=300.0) == 0
+        assert "a" in TM._pending_tasks
+
+    def test_missing_created_stamp_is_not_reaped(self, tm):
+        # A task without a 'created' stamp (shouldn't happen post-fix, but be defensive) is treated as
+        # age 0 — never reaped — so a missing field can't silently drop a live task.
+        TM = tm.TaskManager
+        TM._pending_tasks.clear()
+        TM._pending_tasks["nostamp"] = {"callback": lambda d: None, "data": {}}
+        assert TM._reap_stale(ttl=0.0) == 0
+        assert "nostamp" in TM._pending_tasks
+
+
 # ── Item.enforce_timeout flag (no deep imports needed) ──────────────────────
 
 class TestItemEnforceTimeoutFlag:
@@ -145,5 +181,5 @@ class TestItemEnforceTimeoutFlag:
 def test_execute_api_script_item_is_timeout_exempt():
     """The gated script tool must opt out of the timeout (its work commits even on 'timeout')."""
     from conftest import load_tool
-    eas = load_tool("execute_api_script")
+    eas = load_tool("sys_execute_script")
     assert eas.item.enforce_timeout is False

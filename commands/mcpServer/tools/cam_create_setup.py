@@ -28,7 +28,8 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
+from . import _common
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -44,33 +45,25 @@ _MODELS = _inputs.BodyRefList("models", required=False,
 
 def _get_cam():
     """Return (cam, None) for the active document, or (None, reason)."""
-    doc = _safe(lambda: app.activeDocument)
+    doc = safe(lambda: app.activeDocument)
     if not doc:
         return None, "No active document."
-    products = _safe(lambda: doc.products)
+    products = safe(lambda: doc.products)
     if not products:
         return None, "Could not access document products."
-    cam = _safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
+    cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
     if not cam:
         return None, ("This document has no CAM (Manufacture) data yet. Switch to the Manufacture "
-                      "workspace once (view_switch_workspace 'manufacture') so the CAM product is "
-                      "created, then retry.")
+    "workspace once (view_switch_workspace 'manufacture') so the CAM product is "
+    "created, then retry.")
     return cam, None
-
-
-def _design():
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        design = _safe(lambda: adsk.fusion.Design.cast(
-            app.activeDocument.products.itemByProductType('DesignProductType')))
-    return design
 
 
 def _all_root_bodies(design):
     """Every solid body in the root component (the default machining set)."""
-    root = _safe(lambda: design.rootComponent)
-    bodies = _safe(lambda: root.bRepBodies) if root else None
-    n = _safe(lambda: bodies.count, 0) if bodies else 0
+    root = safe(lambda: design.rootComponent)
+    bodies = safe(lambda: root.bRepBodies) if root else None
+    n = safe(lambda: bodies.count, 0) if bodies else 0
     return [bodies.item(i) for i in range(n)]
 
 
@@ -78,26 +71,26 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
     """Create a CAM setup of 'operation_type' over 'models' (or all root bodies)."""
     op_key, oerr = _OP_TYPE.resolve(operation_type)
     if oerr:
-        return _error(oerr)
+        return error(oerr)
 
     cam, cam_err = _get_cam()
     if cam_err:
-        return _error(cam_err)
+        return error(cam_err)
 
-    design = _design()
+    design = _common.design()
     if not design:
-        return _error("No active design. Open or create a document first (see doc_new).")
+        return error("No active design. Open or create a document first (see doc_new).")
 
     # Resolve the models: explicit BodyRefList (handles/names), else all root bodies.
     if models not in (None, "", []):
         body_list, merr = _MODELS.resolve(models)
         if merr:
-            return _error(merr)
+            return error(merr)
     else:
         body_list = _all_root_bodies(design)
     if not body_list:
-        return _error("No bodies to machine. The design has no solid bodies in the root component "
-                      "— add geometry first, or pass 'models' = body handles/names.")
+        return error("No bodies to machine. The design has no solid bodies in the root component "
+    "— add geometry first, or pass 'models' = body handles/names.")
 
     try:
         op_enum = getattr(adsk.cam.OperationTypes, _OP_TYPES[op_key])
@@ -108,20 +101,20 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
             inp.name = nm
         setup = cam.setups.add(inp)
     except Exception as e:
-        return _error(f"Failed to create the {op_key} setup: {e}")
+        return error(f"Failed to create the {op_key} setup: {e}")
     if not setup:
-        return _error("Setup creation returned nothing.")
+        return error("Setup creation returned nothing.")
 
-    return _ok({
+    return ok({
         "created": True,
-        "setup_name": _safe(lambda: setup.name),
+        "setup_name": safe(lambda: setup.name),
         "operation_type": op_key,
         "model_count": len(body_list),
-        "models": [_safe(lambda b=b: b.name) for b in body_list],
-        "operation_count": _safe(lambda: setup.operations.count, 0),
-        "note": ("Setup created (no operations yet). Add toolpaths with cam_apply_template (a "
-                 "COMPATIBLE template — a milling setup needs a milling template), then "
-                 "cam_generate. Be in the Manufacture workspace before generating."),
+    "models": [safe(lambda b=b: b.name) for b in body_list],
+    "operation_count": safe(lambda: setup.operations.count, 0),
+    "note": ("Setup created (no operations yet). Add toolpaths with cam_apply_template (a "
+            "COMPATIBLE template — a milling setup needs a milling template), then "
+            "cam_generate. Be in the Manufacture workspace before generating."),
     })
 
 
@@ -144,7 +137,7 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

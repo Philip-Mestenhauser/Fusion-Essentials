@@ -13,7 +13,7 @@ Grounded in adsk.core: app.data (DataHub) -> dataProjects / DataProject.rootFold
 
 import adsk.core
 
-from ._common import _safe
+from ._common import safe
 
 app = adsk.core.Application.get()
 
@@ -72,7 +72,7 @@ def _child_folder_by_name(folder, name):
     want = name.strip().lower()
     try:
         for f in folder.dataFolders.asArray():
-            if (_safe(lambda: f.name) or "").lower() == want:
+            if (safe(lambda: f.name) or "").lower() == want:
                 return f
     except Exception:
         pass
@@ -115,12 +115,12 @@ def _folder_path_string(folder):
     try:
         while cur and seen < 64:
             seen += 1
-            if _safe(lambda: cur.isRoot, False):
+            if safe(lambda: cur.isRoot, False):
                 break
-            nm = _safe(lambda: cur.name)
+            nm = safe(lambda: cur.name)
             if nm:
                 parts.append(nm)
-            cur = _safe(lambda: cur.parentFolder)
+            cur = safe(lambda: cur.parentFolder)
             if not cur:
                 break
     except Exception:

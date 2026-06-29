@@ -29,7 +29,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
 
 app = adsk.core.Application.get()
 
@@ -94,22 +94,22 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
     """Navigate the template library. Start at a location root (or a folder 'url')."""
     lib, err = _template_library()
     if err:
-        return _error(err)
+        return error(err)
 
     # Resolve the starting URL: explicit url wins, else the named location's root.
     start_url = None
     if url.strip():
-        start_url = _safe(lambda: adsk.core.URL.create(url.strip()))
+        start_url = safe(lambda: adsk.core.URL.create(url.strip()))
         if not start_url:
-            return _error(f"Invalid library URL: '{url}'.")
+            return error(f"Invalid library URL: '{url}'.")
     else:
         loc = _LOCATIONS.get(location.strip().lower())
         if loc is None:
-            return _error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
-        start_url = _safe(lambda: lib.urlByLocation(loc))
+            return error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
+        start_url = safe(lambda: lib.urlByLocation(loc))
         if not start_url:
-            return _error(f"Could not resolve the '{location}' library root "
-                          "(it may not be configured/available).")
+            return error(f"Could not resolve the '{location}' library root "
+    "(it may not be configured/available).")
 
     try:
         depth = max(1, min(int(max_depth), 8))
@@ -120,24 +120,24 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
     try:
         tree = _walk_library(lib, start_url, 0, depth, counter)
     except Exception as e:
-        return _error(f"Could not read the template library: {e}")
+        return error(f"Could not read the template library: {e}")
 
-    return _ok({
-        "location": location if not url.strip() else None,
-        "root_url": _safe(lambda: start_url.toString()),
-        "node_count": counter["n"],
-        "truncated": counter["truncated"],
-        "tree": tree,
+    return ok({
+    "location": location if not url.strip() else None,
+    "root_url": safe(lambda: start_url.toString()),
+    "node_count": counter["n"],
+    "truncated": counter["truncated"],
+    "tree": tree,
     })
 
 
 def _walk_library(lib, folder_url, depth, max_depth, counter):
     """Recursively summarize a library folder: its templates + subfolders."""
     node = {
-        "folder": _safe(lambda: lib.displayName(folder_url)),
-        "url": _safe(lambda: folder_url.toString()),
-        "templates": [],
-        "folders": [],
+    "folder": safe(lambda: lib.displayName(folder_url)),
+    "url": safe(lambda: folder_url.toString()),
+    "templates": [],
+    "folders": [],
     }
 
     # Templates directly in this folder. Pair each with its asset URL (from
@@ -165,13 +165,13 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
                 counter["truncated"] = True
                 break
             counter["n"] += 1
-            tname = _safe(lambda: t.name)
+            tname = safe(lambda: t.name)
             node["templates"].append({
-                "name": tname,
-                "description": _safe(lambda: t.description),
-                "is_valid": _safe(lambda: t.isValidTemplate),
-                "is_hole_template": _safe(lambda: t.isHoleTemplate),
-                "url": _asset_url_for(tname),
+            "name": tname,
+            "description": safe(lambda: t.description),
+            "is_valid": safe(lambda: t.isValidTemplate),
+            "is_hole_template": safe(lambda: t.isHoleTemplate),
+            "url": _asset_url_for(tname),
             })
     except Exception:
         pass
@@ -203,10 +203,10 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
 
 # AutomaticGenerationModes: ForceGeneration=0, SkipGeneration=1, UserPreference=2.
 _GEN_MODES = {
-    "skip": "SkipGeneration",            # default: create ops, don't generate toolpaths
-    "generate": "ForceGeneration",       # create AND generate toolpaths
-    "force": "ForceGeneration",
-    "user_preference": "UserPreference",
+"skip": "SkipGeneration",            # default: create ops, don't generate toolpaths
+"generate": "ForceGeneration",       # create AND generate toolpaths
+"force": "ForceGeneration",
+"user_preference": "UserPreference",
 }
 
 
@@ -220,16 +220,16 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     generate_new); default 'skip' just creates the operations.
     """
     if not (setup or "").strip():
-        return _error("Provide 'setup' — the name of the setup to apply the template to.")
+        return error("Provide 'setup' — the name of the setup to apply the template to.")
     if not (template_url.strip() or template_name.strip()):
-        return _error("Provide 'template_url' or 'template_name'.")
+        return error("Provide 'template_url' or 'template_name'.")
 
     cam, err = _get_cam()
     if err:
-        return _error(err)
+        return error(err)
     lib, err = _template_library()
     if err:
-        return _error(err)
+        return error(err)
 
     # Find the target setup.
     target_setup = None
@@ -237,64 +237,64 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     try:
         for i in range(cam.setups.count):
             s = cam.setups.item(i)
-            nm = _safe(lambda: s.name)
+            nm = safe(lambda: s.name)
             available_setups.append(nm)
             if (nm or "").lower() == setup.strip().lower():
                 target_setup = s
                 break
     except Exception as e:
-        return _error(f"Could not read setups: {e}")
+        return error(f"Could not read setups: {e}")
     if not target_setup:
-        return _error(f"Setup not found: '{setup}'. "
+        return error(f"Setup not found: '{setup}'. "
                       f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
 
     # Resolve the template.
     template = None
     if template_url.strip():
-        u = _safe(lambda: adsk.core.URL.create(template_url.strip()))
+        u = safe(lambda: adsk.core.URL.create(template_url.strip()))
         if not u:
-            return _error(f"Invalid template URL: '{template_url}'.")
-        template = _safe(lambda: lib.templateAtURL(u))
+            return error(f"Invalid template URL: '{template_url}'.")
+        template = safe(lambda: lib.templateAtURL(u))
         if not template:
-            return _error(f"No template found at URL: {template_url}")
+            return error(f"No template found at URL: {template_url}")
     else:
         template, where = _find_template_by_name(lib, location, template_name.strip())
         if not template:
-            return _error(f"Template named '{template_name}' not found under '{location}'. "
+            return error(f"Template named '{template_name}' not found under '{location}'. "
                           + (where or ""))
 
-    if not _safe(lambda: template.isValidTemplate, True):
-        return _error(f"Template '{_safe(lambda: template.name)}' is not in a valid state to apply.")
+    if not safe(lambda: template.isValidTemplate, True):
+        return error(f"Template '{safe(lambda: template.name)}' is not in a valid state to apply.")
 
     # Build the input + apply.
     try:
         ti = adsk.cam.CreateFromCAMTemplateInput.create()
         ti.camTemplate = template
         mode_name = _GEN_MODES.get((generate or "skip").lower(), "SkipGeneration")
-        mode_val = _safe(lambda: getattr(adsk.cam.AutomaticGenerationModes, mode_name))
+        mode_val = safe(lambda: getattr(adsk.cam.AutomaticGenerationModes, mode_name))
         if mode_val is not None:
             ti.mode = mode_val
         created = target_setup.createFromCAMTemplate2(ti)
     except Exception as e:
-        return _error(f"Failed to apply template: {e}")
+        return error(f"Failed to apply template: {e}")
 
     created_names = []
     try:
         for ob in (created or []):
-            created_names.append(_safe(lambda: ob.name))
+            created_names.append(safe(lambda: ob.name))
     except Exception:
         pass
 
-    return _ok({
+    return ok({
         "applied": True,
-        "template": _safe(lambda: template.name),
-        "setup": _safe(lambda: target_setup.name),
+        "template": safe(lambda: template.name),
+        "setup": safe(lambda: target_setup.name),
         "generation_mode": (generate or "skip"),
         "created_count": len(created_names),
         "created_operations": created_names,
         "note": ("Operations were added to the setup. If generation_mode was 'skip', "
-                 "the toolpaths are not yet generated. Use cam_get_operations or "
-                 "view_screenshot to verify, and cam_compare_operations to check settings."),
+            "the toolpaths are not yet generated. Use cam_get_operations or "
+            "view_screenshot to verify, and cam_compare_operations to check settings."),
     })
 
 
@@ -303,7 +303,7 @@ def _find_template_by_name(lib, location, name):
     loc = _LOCATIONS.get((location or "cloud").lower())
     if loc is None:
         return None, f"Unknown location '{location}'."
-    root = _safe(lambda: lib.urlByLocation(loc))
+    root = safe(lambda: lib.urlByLocation(loc))
     if not root:
         return None, f"Could not resolve the '{location}' library root."
 
@@ -316,7 +316,7 @@ def _find_template_by_name(lib, location, name):
         visited += 1
         try:
             for t in (lib.childTemplates(folder_url) or []):
-                tn = _safe(lambda: t.name)
+                tn = safe(lambda: t.name)
                 if tn:
                     seen_names.append(tn)
                 if tn and tn.lower() == want:
@@ -336,6 +336,33 @@ def _find_template_by_name(lib, location, name):
 # cam_save_template
 # ---------------------------------------------------------------------------
 
+def _as_cam_template(result):
+    """Normalise createFromOperations' result to a CAMTemplate (or None).
+
+    The live API annotation is list[Operation] but the docstring claims a CAMTemplate — so be robust:
+      - already a CAMTemplate (or casts to one) -> use it directly;
+      - a list/collection -> try its single element, else CAMTemplate.cast on the container;
+      - anything else -> None (caller reports it honestly rather than crashing on .name later).
+      """
+    cast = safe(lambda: adsk.cam.CAMTemplate.cast(result))
+    if cast:
+        return cast
+    # list-like? (createFromOperations' annotated return). Try to recover a CAMTemplate from it.
+    items = None
+    if isinstance(result, (list, tuple)):
+        items = list(result)
+    else:
+        cnt = safe(lambda: result.count)
+        if cnt is not None:
+            items = [safe(lambda i=i: result.item(i)) for i in range(cnt)]
+    if items:
+        for it in items:
+            t = safe(lambda it=it: adsk.cam.CAMTemplate.cast(it))
+            if t:
+                return t
+    return None
+
+
 def save_operations_as_template_handler(template_name: str = "", operations: str = "",
                                         setup: str = "", location: str = "cloud",
                                         folder: str = "", description: str = "") -> dict:
@@ -348,19 +375,19 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     """
     template_name = (template_name or "").strip()
     if not template_name:
-        return _error("Provide 'template_name' for the new template.")
+        return error("Provide 'template_name' for the new template.")
     if not (setup or "").strip():
-        return _error("Provide 'setup' — the setup containing the operations.")
+        return error("Provide 'setup' — the setup containing the operations.")
     op_names = [o.strip() for o in (operations or "").split(",") if o.strip()]
     if not op_names:
-        return _error("Provide 'operations' — a comma-separated list of operation names to bundle.")
+        return error("Provide 'operations' — a comma-separated list of operation names to bundle.")
 
     cam, err = _get_cam()
     if err:
-        return _error(err)
+        return error(err)
     lib, err = _template_library()
     if err:
-        return _error(err)
+        return error(err)
 
     # Find the setup.
     target_setup = None
@@ -368,30 +395,30 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     try:
         for i in range(cam.setups.count):
             s = cam.setups.item(i)
-            nm = _safe(lambda: s.name)
+            nm = safe(lambda: s.name)
             available_setups.append(nm)
             if (nm or "").lower() == setup.strip().lower():
                 target_setup = s
                 break
     except Exception as e:
-        return _error(f"Could not read setups: {e}")
+        return error(f"Could not read setups: {e}")
     if not target_setup:
-        return _error(f"Setup not found: '{setup}'. "
+        return error(f"Setup not found: '{setup}'. "
                       f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
 
     # Collect the requested operations (Operation objects only).
     by_name = {}
     available_ops = []
     try:
-        for op in _safe(lambda: target_setup.allOperations, []):
+        for op in safe(lambda: target_setup.allOperations, []):
             operation = adsk.cam.Operation.cast(op)
             if operation:
-                nm = _safe(lambda: operation.name)
+                nm = safe(lambda: operation.name)
                 if nm:
                     by_name[nm.lower()] = operation
                     available_ops.append(nm)
     except Exception as e:
-        return _error(f"Could not read operations in '{setup}': {e}")
+        return error(f"Could not read operations in '{setup}': {e}")
 
     selected = []
     missing = []
@@ -402,33 +429,42 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         else:
             missing.append(n)
     if missing:
-        return _error(f"Operations not found in '{setup}': {', '.join(missing)}. "
+        return error(f"Operations not found in '{setup}': {', '.join(missing)}. "
                       f"Available: {', '.join(available_ops[:25]) or '(none)'}")
 
-    # Build the template from the operations.
+    # Build the template from the operations. NOTE the live API is self-contradictory here:
+    # CAMTemplate.createFromOperations' docstring says "Returns the newly created template" but its
+    # type annotation says -> list[Operation]. So the result may be EITHER a CAMTemplate OR a list.
+    # The old code assumed a single CAMTemplate (set .name, passed straight to importTemplate); if the
+    # binding returns a list that silently broke the save. Normalise to a real CAMTemplate first.
     try:
-        template = adsk.cam.CAMTemplate.createFromOperations(selected)
+        result = adsk.cam.CAMTemplate.createFromOperations(selected)
     except Exception as e:
-        return _error(f"Could not build template from operations: {e}")
-    if not template:
-        return _error("createFromOperations returned nothing.")
+        return error(f"Could not build template from operations: {e}")
+    if not result:
+        return error("createFromOperations returned nothing.")
+    template = _as_cam_template(result)
+    if template is None:
+        return error("createFromOperations did not yield a usable CAMTemplate (got "
+                     f"{type(result).__name__}). The operation set may not be templatable together, "
+                     "or this Fusion build's API returns an unexpected shape — please report.")
     try:
         template.name = template_name
         if description.strip():
             template.description = description.strip()
     except Exception:
         pass
-    if not _safe(lambda: template.isValidTemplate, True):
-        return _error("The created template is not in a valid state (the operation set may "
-                      "not be templatable together).")
+    if not safe(lambda: template.isValidTemplate, True):
+        return error("The created template is not in a valid state (the operation set may "
+    "not be templatable together).")
 
     # Resolve the destination FOLDER url (importTemplate wants a folder url).
     loc = _LOCATIONS.get(location.strip().lower())
     if loc is None:
-        return _error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
-    root = _safe(lambda: lib.urlByLocation(loc))
+        return error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
+    root = safe(lambda: lib.urlByLocation(loc))
     if not root:
-        return _error(f"Could not resolve the '{location}' library root.")
+        return error(f"Could not resolve the '{location}' library root.")
 
     dest_url = root
     created_folder = None
@@ -437,7 +473,7 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         existing = None
         try:
             for furl in (lib.childFolderURLs(root) or []):
-                if (_safe(lambda: lib.displayName(furl)) or "").lower() == folder.strip().lower():
+                if (safe(lambda: lib.displayName(furl)) or "").lower() == folder.strip().lower():
                     existing = furl
                     break
         except Exception:
@@ -449,28 +485,28 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
                 dest_url = lib.createFolder(root, folder.strip())
                 created_folder = folder.strip()
             except Exception as e:
-                return _error(f"Could not create destination folder '{folder}': {e}")
+                return error(f"Could not create destination folder '{folder}': {e}")
 
     # Import (save) the template into the folder.
     try:
         new_url = lib.importTemplate(template, dest_url)
     except Exception as e:
-        return _error(f"Failed to save the template: {e}")
+        return error(f"Failed to save the template: {e}")
     if not new_url:
-        return _error("importTemplate returned no URL (save may have failed).")
+        return error("importTemplate returned no URL (save may have failed).")
 
-    return _ok({
+    return ok({
         "saved": True,
-        "template": _safe(lambda: template.name),
+        "template": safe(lambda: template.name),
         "operation_count": len(selected),
-        "operations": [_safe(lambda: o.name) for o in selected],
+        "operations": [safe(lambda: o.name) for o in selected],
         "location": location,
         "folder": (folder or "(library root)"),
         "created_folder": created_folder,
-        "template_url": _safe(lambda: new_url.toString()),
+        "template_url": safe(lambda: new_url.toString()),
         "note": ("New template saved. Verify with cam_list_templates (which reports each "
-                 "template's asset URL). This tool always creates a NEW template; "
-                 "overwriting an existing one is a separate capability."),
+            "template's asset URL). This tool always creates a NEW template; "
+            "overwriting an existing one is a separate capability."),
     })
 
 
@@ -483,22 +519,22 @@ _list_tool = (
     Tool.create_simple(
         name="cam_list_templates",
         description=(
-            "Navigate the CAM toolpath template library. Lists folders and the templates "
-            "they contain (name, description, validity) for a library 'location' "
-            "(cloud, local, fusion, samples, hub, ...) or a specific folder 'url'. Each "
-            "template/folder reports its URL so you can apply it with cam_apply_template. "
-            "Read-only. Pass 'max_depth' (default 4)."
+        "Navigate the CAM toolpath template library. Lists folders and the templates "
+        "they contain (name, description, validity) for a library 'location' "
+        "(cloud, local, fusion, samples, hub, ...) or a specific folder 'url'. Each "
+        "template/folder reports its URL so you can apply it with cam_apply_template. "
+        " Pass 'max_depth' (default 4)."
         ),
     )
     .add_input_property("location", {"type": "string",
-                                     "description": "Library location: cloud (default), local, fusion, samples, hub."})
+        "description": "Library location: cloud (default), local, fusion, samples, hub."})
     .add_input_property("url", {"type": "string",
-                                "description": "Optional specific folder URL to start at (overrides location)."})
+        "description": "Optional specific folder URL to start at (overrides location)."})
     .add_input_property("max_depth", {"type": "integer", "description": "Folder depth to walk (default 4)."})
     .strict_schema()
 )
 list_cam_templates_item = Item.create_tool_item(
-    tool=_list_tool, handler=list_cam_templates_handler, run_on_main_thread=True
+    tool=_list_tool, write="read", handler=list_cam_templates_handler, run_on_main_thread=True
 )
 
 _apply_tool = (
@@ -523,19 +559,19 @@ _apply_tool = (
     .add_input_property("generate", {"type": "string", "description": "skip (default) | generate."})
 )
 apply_template_to_setup_item = Item.create_tool_item(
-    tool=_apply_tool, handler=apply_template_to_setup_handler, run_on_main_thread=True
+    tool=_apply_tool, write="write", handler=apply_template_to_setup_handler, run_on_main_thread=True
 )
 
 _save_tool = (
     Tool.create_with_string_input(
         name="cam_save_template",
         description=(
-            "Bundle a subset of a setup's operations into a NEW toolpath template in the "
-            "library. 'operations' is a comma-separated list of operation names within "
-            "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
-            "if missing). Optional 'description'. WRITES to the template library. (Overwriting "
-            "an existing template is not yet supported — always creates a new template.) "
-            "Verify with cam_list_templates."
+        "Bundle a subset of a setup's operations into a NEW toolpath template in the "
+        "library. 'operations' is a comma-separated list of operation names within "
+        "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
+        "if missing). Optional 'description'. WRITES to the template library. (Overwriting "
+        "an existing template is not yet supported — always creates a new template.) "
+        "Verify with cam_list_templates."
         ),
         input_param_name="template_name",
         input_param_description="Name for the new template.",
@@ -547,7 +583,7 @@ _save_tool = (
     .add_input_property("description", {"type": "string", "description": "Optional template description."})
 )
 save_operations_as_template_item = Item.create_tool_item(
-    tool=_save_tool, handler=save_operations_as_template_handler, run_on_main_thread=True
+    tool=_save_tool, write="write", handler=save_operations_as_template_handler, run_on_main_thread=True
 )
 
 

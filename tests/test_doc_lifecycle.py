@@ -9,12 +9,12 @@ version marker. The boundaries worth pinning — missing args, project/folder re
 create_path, the rename-after-copy, the duplicate guard, the xref report, and the
 async/null-document_id contract — are pure logic and need no live Fusion.
 
-These complement test_data_management.py (save/close/activate/list) and test_data_model.py
-(the folder-path helpers), which do not exercise saveAs or copy.
+These complement test_data_management.py (save/close/activate/list + the folder-path helpers),
+which does not exercise saveAs or copy.
 
 SCOPE: every DECISION branch with behaviour in copy_document_handler and save_document_as_handler
 is covered (verified with `coverage --branch`) and mutation-checked. The only lines left uncovered
-in these two handlers are the `except Exception: return _error(str(e))` wrappers around raw SDK
+in these two handlers are the `except Exception: return error(str(e))` wrappers around raw SDK
 calls (findFileById / saveAs / dataFolders.add throwing) — they hold no logic, only stringify the
 error, so they are intentionally not unit-tested. The tree-walk helper `_find_file_by_name`
 (doc_lifecycle.py) is exercised here only through the copy-by-name handler (one match + two miss
@@ -382,3 +382,200 @@ class TestCopyDocument:
         assert "rename to 'PartA_CAM' failed" in out["rename_warning"]
         # the copy still carries the SOURCE name (caller is warned, not silently misled)
         assert out["copied_name"] == "Template"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# delete_document_handler  (DataFile.deleteMe — guarded, irreversible)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FakeDeleteFile:
+    def __init__(self, name, fid="urn:adsk.file:del", parent_refs=None,
+                 delete_returns=True):
+        self.name = name
+        self.id = fid
+        self._parent_refs = list(parent_refs or [])
+        self._delete_returns = delete_returns
+        self.deleted = False
+
+    @property
+    def hasParentReferences(self):
+        return bool(self._parent_refs)
+
+    @property
+    def parentReferences(self):
+        outer = self
+
+        class _C:
+            def asArray(self_inner):
+                return list(outer._parent_refs)
+        return _C()
+
+    def deleteMe(self):
+        self.deleted = True
+        return self._delete_returns
+
+
+class _OpenDoc:
+    def __init__(self, fid):
+        self.dataFile = type("DF", (), {"id": fid})()
+
+
+class _OpenDocs:
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    @property
+    def count(self):
+        return len(self._docs)
+
+    def item(self, i):
+        return self._docs[i]
+
+
+def _install_delete(by_id, open_docs=()):
+    data = FakeData([])
+    data._by_id = dict(by_id)
+    app = FakeApp(data)
+    app.documents = _OpenDocs(open_docs)
+    _data_common.app = app
+    _doc_lifecycle.app = app
+    return app, data
+
+
+class TestDeleteDocument:
+    def test_requires_document_id(self):
+        _install_delete({})
+        res = _doc_lifecycle.delete_document_handler(confirm_name="X")
+        assert res["isError"] is True and "document_id" in res["message"]
+
+    def test_requires_confirm_name(self):
+        _install_delete({})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:x")
+        assert res["isError"] is True and "confirm_name" in res["message"]
+
+    def test_unknown_file_errors(self):
+        _install_delete({})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:missing", confirm_name="X")
+        assert res["isError"] is True and "No file found" in res["message"]
+
+    def test_name_mismatch_refuses(self):
+        f = FakeDeleteFile("RealName", fid="urn:f")
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="WrongName")
+        assert res["isError"] is True
+        assert "Name mismatch" in res["message"]
+        assert "RealName" in res["message"]
+        assert f.deleted is False
+
+    def test_open_file_refused(self):
+        f = FakeDeleteFile("PartA", fid="urn:f")
+        _install_delete({"urn:f": f}, open_docs=[_OpenDoc("urn:f")])
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="PartA")
+        assert res["isError"] is True and "OPEN" in res["message"]
+        assert f.deleted is False
+
+    def test_referenced_file_refused_without_force(self):
+        f = FakeDeleteFile("PartA", fid="urn:f",
+                           parent_refs=[type("R", (), {"name": "Asm1", "id": "urn:a"})()])
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="PartA")
+        assert res["isError"] is True
+        assert "referenced by" in res["message"] and "Asm1" in res["message"]
+        assert f.deleted is False
+
+    def test_referenced_file_deleted_with_force(self):
+        f = FakeDeleteFile("PartA", fid="urn:f",
+                           parent_refs=[type("R", (), {"name": "Asm1", "id": "urn:a"})()])
+        _install_delete({"urn:f": f})
+        out = _payload(_doc_lifecycle.delete_document_handler(
+            document_id="urn:f", confirm_name="PartA", force=True))
+        assert out["deleted"] is True
+        assert out["forced"] is True
+        assert f.deleted is True
+        assert [p["name"] for p in out["was_referenced_by"]] == ["Asm1"]
+
+    def test_unreferenced_file_deleted(self):
+        f = FakeDeleteFile("PartA", fid="urn:f")
+        _install_delete({"urn:f": f})
+        out = _payload(_doc_lifecycle.delete_document_handler(
+            document_id="urn:f", confirm_name="PartA"))
+        assert out["deleted"] is True and out["forced"] is False
+        assert f.deleted is True
+
+    def test_confirm_name_whitespace_forgiven(self):
+        f = FakeDeleteFile("PartA", fid="urn:f")
+        _install_delete({"urn:f": f})
+        out = _payload(_doc_lifecycle.delete_document_handler(
+            document_id="urn:f", confirm_name="  PartA  "))
+        assert out["deleted"] is True
+
+    def test_delete_me_false_reported(self):
+        f = FakeDeleteFile("PartA", fid="urn:f", delete_returns=False)
+        _install_delete({"urn:f": f})
+        res = _doc_lifecycle.delete_document_handler(document_id="urn:f", confirm_name="PartA")
+        assert res["isError"] is True and "declined to delete" in res["message"]
+
+
+class TestDeleteHelpers:
+    def test_is_document_open_true_when_matching(self):
+        _install_delete({}, open_docs=[_OpenDoc("urn:f")])
+        assert _doc_lifecycle._is_document_open("urn:f") is True
+
+    def test_is_document_open_false_when_absent(self):
+        _install_delete({}, open_docs=[_OpenDoc("urn:other")])
+        assert _doc_lifecycle._is_document_open("urn:f") is False
+
+    def test_is_document_open_empty_id_false(self):
+        _install_delete({})
+        assert _doc_lifecycle._is_document_open("") is False
+
+    def test_parent_ref_summary_empty_when_no_refs(self):
+        assert _doc_lifecycle._parent_ref_summary(FakeDeleteFile("X")) == []
+
+    def test_parent_ref_summary_lists_refs(self):
+        f = FakeDeleteFile("X", parent_refs=[
+            type("R", (), {"name": "A", "id": "1"})(),
+            type("R", (), {"name": "B", "id": "2"})()])
+        out = _doc_lifecycle._parent_ref_summary(f)
+        assert [r["name"] for r in out] == ["A", "B"]
+
+    def test_xref_summary_empty_when_no_children(self):
+        assert _doc_lifecycle._xref_summary(FakeFile("X")) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# new_document_handler  (app.documents.add)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNewDocument:
+    def test_creates_and_reports_active(self):
+        class _NewDoc:
+            name = "Untitled"
+            isSaved = False
+
+        class _Docs:
+            def add(self, doc_type):
+                return _NewDoc()
+
+        class _App:
+            documents = _Docs()
+            activeDocument = _NewDoc()
+
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.new_document_handler())
+        assert out["created"] is True
+        assert out["document_name"] == "Untitled"
+        assert out["is_active"] is True
+        assert out["is_saved"] is False
+
+    def test_add_returning_nothing_is_an_error(self):
+        class _Docs:
+            def add(self, doc_type):
+                return None
+
+        class _App:
+            documents = _Docs()
+
+        _doc_lifecycle.app = _App()
+        res = _doc_lifecycle.new_document_handler()
+        assert res["isError"] is True and "returned nothing" in res["message"]

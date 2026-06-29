@@ -1,10 +1,7 @@
 # Fusion API notes for MCP tool authors
 
-The Fusion API is large and niche, and some of the behavior the MCP tools depend on is not
-obvious from the official reference. This document collects the facts that were established by
-testing against a live Fusion session while building `commands/mcpServer/tools/`. Ground every
-`adsk.*` call in the official Fusion API reference first; use these notes for the gotchas the
-reference does not spell out.
+Behavior the MCP tools depend on that the official Fusion API reference does not spell out. Ground
+every `adsk.*` call in the official reference first; use these notes for the gotchas it omits.
 
 See [../CONTRIBUTING.md](../CONTRIBUTING.md) for the add-in/tool conventions and the
 main-thread rules, and `commands/mcpServer/README.md` for the user-facing docs.
@@ -22,12 +19,12 @@ predictable from any other.
   status honestly and tell the agent to confirm with another tool rather than waiting.
 - **Result shape is always** `{"content": [...], "isError": bool}`. Text payloads go in a
   `{"type":"text","text": json.dumps(...)}` block; images in
-  `{"type":"image","data": b64,"mimeType":"image/png"}`. Use the local `_ok` / `_error`
-  helpers (copied per file so each module is self-contained).
-- **Guard every individual `adsk.*` access.** Cloud/CAM/data calls fail in surprising ways.
-  Wrap per-field reads in try/except (see the `_safe(getter, default)` / `_file_summary` /
-  `_operation_summary` patterns) so one bad field does not fail the whole call. Cap
-  enumeration of large collections (`_MAX_FILES`, `_MAX_ITEMS`) and flag truncation.
+  `{"type":"image","data": b64,"mimeType":"image/png"}`. Use the `ok` / `error` helpers from
+  `_common`.
+- **Guard every individual `adsk.*` access.** Cloud/CAM/data calls fail in surprising ways. Wrap
+  per-field reads in `safe(getter, default)` (from `_common`) so one bad field does not fail the whole
+  call — but only for PROBING; let an actual mutation raise (a swallowed mutation is a false success).
+  Cap enumeration of large collections and flag truncation.
 - **Accept name OR id.** Read tools that target a thing (project, setup, workspace) should take
   both a human name and the precise id, and on no match return an error listing what IS
   available — forgiving for an agent that only has a name.
@@ -131,6 +128,58 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
 (`-d242`). A common template idiom is a user param aliasing a computed one
 (`StockX = Calc_StockX`) so the value auto-computes but can be overtyped to break the link.
 
+## Assembly positioning (move vs. parametric features)
+
+- **A free `Occurrence.transform` move is silently clobbered by a parametric pattern/mirror on the
+  next recompute.** `assembly_move` writes the occurrence transform directly (a free move, no
+  relationship). A `RectangularPatternFeature` / `MirrorFeature` / `CircularPatternFeature` is a
+  *timeline feature* that re-derives its instances' placement from the base body/occurrence every time
+  the timeline recomputes — and ANY later edit (a fillet, a parameter change, `design_recompute`)
+  triggers that recompute. When it does, the feature overwrites the free move and the patterned parts
+  snap back to where the feature thinks they belong. Symptom: parts that looked correct in an early
+  screenshot are scattered after an unrelated later edit; `model_measure_bbox` shows the occurrence
+  centre at the pre-move location. This cost a full assembly rebuild during the tractor build.
+- **The robust pattern: bake position into geometry, don't move-then-pattern.** Build each part's
+  geometry at its FINAL position inside an origin-placed component (offset `model_construction` plane for
+  an off-plane axis, e.g. a wheel centred away from the sketch plane), then `model_mirror` the *bodies*
+  across an origin plane for left/right symmetry. Body mirror/pattern features are stable under recompute
+  because the geometry itself carries the position; only *occurrence* placement fights the timeline.
+- **Occurrence placement double-offsets world-coord sketch geometry.** If you place a component with
+  `model_create_component(x=…, y=…, z=…)` AND then sketch geometry at world coordinates inside it, the
+  occurrence transform applies on top of the world coords — the part lands at (placement + world). Pick
+  one: place the component at the origin and draw at world coords, OR place the occurrence and draw at
+  local (component-relative) coords. `model_measure_bbox` on the occurrence confirms the true location.
+
+## Occurrence delete
+
+- **`Occurrence.deleteMe() -> bool`** removes one instance; if it was the last instance referencing its
+  component, the component is deleted too (per the API docstring, confirmed live). It returns **False
+  without raising** for an instance Fusion won't remove on its own — most often a pattern/mirror CHILD,
+  which can only be removed by deleting (or reducing the count of) its owning timeline feature. There is
+  **no Occurrence-level "is a pattern child" property** (`isClonedComponent` does NOT exist on
+  Occurrence; only `sourceComponent` / `isReferencedComponent` / `isValid` do), so detect the
+  feature-owned case from the `deleteMe() == False` result rather than a pre-check. `design_delete_occurrence`
+  does this and reports it with a pointer to the owning feature.
+- Deleting an occurrence silently drops the joints it participated in (`Occurrence.joints`). Read and
+  report those names BEFORE the delete so the loss is visible, and re-check timeline health after (a
+  downstream feature may have referenced the removed geometry).
+
+## Mesh bodies
+
+- **A parametric mesh write must run inside a base-feature scope.** `MeshBodies.add` /
+  `addByTriangleMeshData` fail in a parametric design unless wrapped in
+  `BaseFeature.startEdit()`/`finishEdit()`. While that scope is OPEN the design reports
+  `designType == DirectDesignType`, the base feature is HIDDEN from its collection
+  (`baseFeatures.count` drops, `itemByName` returns None), and `Design.timeline` raises — so the only
+  handle to an open scope is the `BaseFeature` object `add()` returned. Capture it and finish through
+  it; do not try to re-find an open scope by name. (Direct designs need no scope.)
+- **Tessellation emits unwelded vertices.** `body.meshManager.createMeshCalculator().calculate()`
+  returns one node per triangle corner — a box yields 24 nodes for 8 real vertices — so feeding its
+  `nodeCoordinatesAsDouble`/`nodeIndices` straight to `addByTriangleMeshData` produces a topologically
+  OPEN mesh: `MeshBody.isClosed` is False even for a watertight solid, and `mesh_to_brep` then refuses
+  it. Merge coincident vertices (dedupe coordinates at a tight tolerance, remap the indices) before the
+  add; the normals stay per-corner and geometry is unchanged. (`save_as_mesh` does this; see `_weld`.)
+
 ## Workspaces
 
 `app.userInterface.workspaces` (iterable) → `Workspace(.id, .name, .isActive, .productType,
@@ -199,6 +248,22 @@ Open them with `openUsingContext`, NOT `open`.
   `DataFolder.deleteMe` has NO built-in empty/root guard — `data_delete_folder` refuses a project
   root (`folder.isRoot`) and a non-empty folder unless forced. Resolve a folder by id with
   `Data.findFolderById(id)`. Deletion is irreversible.
+
+## Matrix3D: rotation pivot lives in the translation column
+
+`Matrix3D.setToRotation(angle, axis, origin)` rotates about `origin` by baking a pivot-correcting
+term (`origin - R·origin`) into the matrix's **translation column**. So `mat.translation = vec` AFTER a
+non-origin `setToRotation` **overwrites** that correction — the part then rotates about the WORLD origin
+instead of `origin`. To rotate AND translate in one transform, compose the translation as its own
+matrix (`t = Matrix3D.create(); t.translation = vec; mat.transformBy(t)`), never assign `mat.translation`
+on the rotation matrix. (`assembly_move` does this; fixed 2026-06-29.)
+
+> ⚠️ **PENDING LIVE CHECK (before merge):** the above is confirmed by API-doc + code reading and pinned
+> by a unit test against a fake Matrix3D, but NOT yet verified against real Matrix3D semantics. Run
+> `assembly_move(rotate_deg=…, rotate_axis=<edge handle>, dx=…)` on a live occurrence and confirm it
+> swings about the edge, not the world origin. NB: a transient move also needs
+> `assembly_capture_position` to persist past the next timeline feature — don't mistake an uncaptured
+> move for a pivot bug.
 
 ## Verifying a new tool
 

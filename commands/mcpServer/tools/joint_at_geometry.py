@@ -39,35 +39,38 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
+from . import _common
+from . import _inputs
+from . import _outputs
 
 app = adsk.core.Application.get()
 
+# What this tool RETURNS: the joint name (a consumer key) + the AUTHORITATIVE health verdict (read from
+# the joint's own state — no separate assembly_probe needed to know if it computed).
+RETURNS = [
+    _outputs.ReturnsName("joint_name", of="joint", consumers=["joint_edit", "joint_motion_link"]),
+    _outputs.ReturnsValue("healthy", "whether the joint actually COMPUTES (added != working)"),
+]
+
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
 _AXIS_DIR = {
-    "x": "XAxisJointDirection",
-    "y": "YAxisJointDirection",
-    "z": "ZAxisJointDirection",
+"x": "XAxisJointDirection",
+"y": "YAxisJointDirection",
+"z": "ZAxisJointDirection",
 }
 
 
-def _design():
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    if not design:
-        design = _safe(lambda: adsk.fusion.Design.cast(
-            app.activeDocument.products.itemByProductType('DesignProductType')))
-    return design
-
-
-def _resolve_handle(design, handle):
-    """entityToken handle -> the entity (or None). Returns the first match."""
-    h = (handle or "").strip()
-    if not h:
-        return None
-    found = _safe(lambda: design.findEntityByToken(h))
-    if found and len(found):
-        return found[0]
-    return None
+# The two handle inputs are typed GeometryHandle kinds (require='any' — a joint can land on a face,
+# edge, vertex, or construction/sketch point; _joint_geometry_for does the per-kind validation). Using
+# the kind means resolution + the stale-handle error + the contract note are the shared, single-source
+# path, not hand-rolled here.
+_HANDLE_ONE = _inputs.GeometryHandle(
+    "handle_one", require="any", required=True,
+    description="The FIRST (moving) part's geometry to joint at.")
+_HANDLE_TWO = _inputs.GeometryHandle(
+    "handle_two", require="any", required=True,
+    description="The SECOND (fixed) part's geometry to joint at.")
 
 
 def _joint_geometry_for(entity):
@@ -77,30 +80,30 @@ def _joint_geometry_for(entity):
     JG = adsk.fusion.JointGeometry
     # BRepFace
     if isinstance(entity, adsk.fusion.BRepFace):
-        st = _safe(lambda: entity.geometry.surfaceType)
+        st = safe(lambda: entity.geometry.surfaceType)
         if st == adsk.core.SurfaceTypes.PlaneSurfaceType:
-            g = _safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
+            g = safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
             return g, "planar_face@center", None if g else "createByPlanarFace failed"
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
             # RULE: CenterKeyPoint is INVALID on a cylinder/cone — use MiddleKeyPoint (axis midpoint).
-            g = _safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
+            g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
             return g, "cylinder_face@middle", None if g else "createByNonPlanarFace failed"
         # other non-planar (sphere/torus): try non-planar with middle keypoint
-        g = _safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
+        g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
         return g, "nonplanar_face@middle", None if g else "unsupported face geometry for a joint"
     # BRepEdge (circular -> center; linear -> midpoint)
     if isinstance(entity, adsk.fusion.BRepEdge):
-        ct = _safe(lambda: entity.geometry.curveType)
+        ct = safe(lambda: entity.geometry.curveType)
         kp = KP.CenterKeyPoint if ct == adsk.core.Curve3DTypes.Circle3DCurveType else KP.MiddleKeyPoint
-        g = _safe(lambda: JG.createByCurve(entity, kp))
+        g = safe(lambda: JG.createByCurve(entity, kp))
         return g, "edge", None if g else "createByCurve failed for this edge"
     # BRepVertex / construction point
     if isinstance(entity, (adsk.fusion.BRepVertex, adsk.fusion.ConstructionPoint)):
-        g = _safe(lambda: JG.createByPoint(entity))
+        g = safe(lambda: JG.createByPoint(entity))
         return g, "point", None if g else "createByPoint failed"
     # SketchPoint
     if isinstance(entity, adsk.fusion.SketchPoint):
-        g = _safe(lambda: JG.createByPoint(entity))
+        g = safe(lambda: JG.createByPoint(entity))
         return g, "sketch_point", None if g else "createByPoint failed"
     return None, None, f"entity kind {type(entity).__name__} is not a supported joint geometry"
 
@@ -111,18 +114,18 @@ def _axis_entity(entity):
     joint must move about the PIN'S axis, not a world axis the caller guessed — passing a world axis
     that doesn't match the geometry over-constrains the assembly ('Compute Failed')."""
     if isinstance(entity, adsk.fusion.BRepFace):
-        st = _safe(lambda: entity.geometry.surfaceType)
+        st = safe(lambda: entity.geometry.surfaceType)
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
             return entity
     if isinstance(entity, adsk.fusion.BRepEdge):
-        if _safe(lambda: entity.geometry.curveType) == adsk.core.Curve3DTypes.Circle3DCurveType:
+        if safe(lambda: entity.geometry.curveType) == adsk.core.Curve3DTypes.Circle3DCurveType:
             return entity
     return None
 
 
 def _apply_motion(ji, motion, axis, axis_ent):
     """Set the motion on the JointInput. If axis_ent is given (a cylinder face/circular edge) and
-    axis is 'auto', use CustomJointDirection from that entity's own axis. Returns (ok, error)."""
+    axis is 'auto', use CustomJointDirection from that entity's own axis. Returns (did, error)."""
     JD = adsk.fusion.JointDirections
     a = (axis or "auto").strip().lower()
     use_custom = (a == "auto") and (axis_ent is not None)
@@ -163,123 +166,108 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     """
     mot = (motion or "revolute").strip().lower()
     if mot not in _MOTIONS:
-        return _error(f"Unknown motion '{motion}'. Use: {', '.join(sorted(_MOTIONS))}.")
+        return error(f"Unknown motion '{motion}'. Use: {', '.join(sorted(_MOTIONS))}.")
 
-    design = _design()
+    design = _common.design()
     if not design:
-        return _error("No active design.")
+        return error("No active design.")
 
-    e1 = _resolve_handle(design, handle_one)
-    if not e1:
-        return _error(f"handle_one did not resolve to an entity. Pass a 'handle' from find_geometry "
-                      "(an entity token). It may be stale if the geometry was rebuilt.")
-    e2 = _resolve_handle(design, handle_two)
-    if not e2:
-        return _error("handle_two did not resolve to an entity. Pass a 'handle' from find_geometry.")
+    # Resolve each handle via the shared GeometryHandle kind (require='any' — joints accept faces, edges,
+    # vertices, construction/sketch points; the per-kind validation happens in _joint_geometry_for). This
+    # is the same typed path every other handle input uses (staleness note + 'live entity' error baked in).
+    e1, err1 = _HANDLE_ONE.resolve(handle_one)   # the kind's error already names 'handle_one'
+    if err1:
+        return error(err1)
+    e2, err2 = _HANDLE_TWO.resolve(handle_two)
+    if err2:
+        return error(err2)
 
     g1, l1, err1 = _joint_geometry_for(e1)
     if err1:
-        return _error(f"handle_one: {err1}")
+        return error(f"handle_one: {err1}")
     g2, l2, err2 = _joint_geometry_for(e2)
     if err2:
-        return _error(f"handle_two: {err2}")
+        return error(f"handle_two: {err2}")
 
     root = design.rootComponent
     try:
         ji = root.joints.createInput(g1, g2)
     except Exception as e:
-        return _error(f"Could not create joint input from the two geometries: {e}")
+        return error(f"Could not create joint input from the two geometries: {e}")
 
     # axis='auto' (default): derive the motion axis from the geometry itself (a cylinder face / round
     # edge), so a pin rotates about the PIN's axis — not a guessed world axis that would over-constrain
     # the assembly. Prefer whichever input carries a usable axis.
     axis_ent = _axis_entity(e1) or _axis_entity(e2)
-    ok, merr = _apply_motion(ji, mot, axis, axis_ent)
-    if merr or not ok:
-        return _error(f"Could not set {mot} motion: {merr or 'rejected'}. "
-                      "(For a world axis pass axis=x/y/z; 'auto' needs a cylinder face / round edge "
-                      "to derive the axis from.)")
+    did, merr = _apply_motion(ji, mot, axis, axis_ent)
+    if merr or not did:
+        return error(f"Could not set {mot} motion: {merr or 'rejected'}. "
+    "(For a world axis pass axis=x/y/z; 'auto' needs a cylinder face / round edge "
+    "to derive the axis from.)")
 
     try:
         joint = root.joints.add(ji)
     except Exception as e:
-        return _error(f"Joint creation failed: {e}. (The two geometries may be incompatible, or one "
-                      "part may be over-constrained.)")
+        return error(f"Joint creation failed: {e}. (The two geometries may be incompatible, or one "
+    "part may be over-constrained.)")
     if not joint:
-        return _error("Joint creation returned nothing.")
+        return error("Joint creation returned nothing.")
 
     nm = (name or "").strip()
     if nm:
-        _safe(lambda: setattr(joint, "name", nm))
+        safe(lambda: setattr(joint, "name", nm))
 
     # report the joint's resulting occurrences so the caller can verify the wiring
-    o1 = _safe(lambda: joint.occurrenceOne.name)
-    o2 = _safe(lambda: joint.occurrenceTwo.name)
+    o1 = safe(lambda: joint.occurrenceOne.name)
+    o2 = safe(lambda: joint.occurrenceTwo.name)
     # CHECK HEALTH at the source: a joint can be ADDED yet fail to COMPUTE (over-constrained) — the
     # 'Compute Failed' the user sees first. Surface it here so the caller doesn't trust a broken joint.
-    hs = _safe(lambda: joint.healthState)
+    hs = safe(lambda: joint.healthState)
     healthy = (hs is None) or (hs == 0)
     out = {
-        "jointed": True,
-        "joint_name": _safe(lambda: joint.name),
-        "motion": mot,
-        "axis": ("auto(geometry)" if (axis or "auto").strip().lower() == "auto" and axis_ent
+    "jointed": True,
+    "joint_name": safe(lambda: joint.name),
+    "motion": mot,
+    "axis": ("auto(geometry)" if (axis or "auto").strip().lower() == "auto" and axis_ent
                  else (axis or "auto").strip().lower()) if mot != "rigid" else None,
-        "healthy": healthy,
-        "geometry_one": l1,
-        "geometry_two": l2,
-        "occurrence_one": o1,
-        "occurrence_two": o2,
-        "note": "Joint created AT the geometry. axis='auto' derived the motion axis from the "
-                "geometry itself. Verify with assembly_probe (is_healthy + positions).",
+    "healthy": healthy,
+    "geometry_one": l1,
+    "geometry_two": l2,
+    "occurrence_one": o1,
+    "occurrence_two": o2,
+    "note": "Joint created AT the geometry. axis='auto' derived the motion axis from the "
+    "geometry itself. Verify with assembly_probe (is_healthy + positions).",
     }
     if not healthy:
-        msg = (_safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
+        msg = (safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
                                  + (msg[:200] or "conflicts with assembly relationships"))
-    return _ok(out)
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (
-    "Joint two parts AT specific geometry (the offset pin / bore center), NOT collapsed to the part "
-    "origins the way an ':origin' snap does. The consume half of geometry-as-values: it takes two "
-    "'handle's and bakes in the runtime rules (proxy-into-occurrence, valid keypoint per face type, "
-    "axis-from-geometry, post-create health check) so you don't rediscover them by trial and error.\n"
-    "\n"
-    "CONTRACT (resolve these BEFORE calling, so you pre-provide correct inputs):\n"
-    "• HANDLE ORDER MATTERS (the #1 live failure): the tool MOVES handle_one's occurrence to mate "
-    "with handle_two. So handle_one MUST be the part that is FREE to move and handle_two the part "
-    "that stays put — typically handle_one = the moving part's geometry, handle_two = the geometry "
-    "on the grounded/fixed part. Passing a GROUNDED part as handle_one fails: 'First component to "
-    "move is grounded, it can not move'. Check ground flags with assembly_probe first.\n"
-    "• CONSUMES: handle_one + handle_two = entity-token 'handle's from find_geometry (NOT names, NOT "
-    "snap-strings). Query the exact mating geometry (e.g. find_geometry the pin's cylinder_face by "
-    "radius+nearest_to, and the rod's bore face). Handles go STALE if geometry is rebuilt — re-find "
-    "after any model edit (grounding/recompute does NOT rebuild geometry, so handles survive that).\n"
-    "• OPEN QUESTIONS to settle first: (1) which part is the MOVER (→ handle_one) vs the fixed one "
-    "(→ handle_two)? (2) which two faces/edges are the real mating pair? (3) motion type — revolute "
-    "(pin) / slider (piston-in-bore) / cylindrical / ball / rigid?\n"
-    "• FAILS / DEGRADES IF: handle_one is a grounded part (see above); a handle is stale or names a "
-    "non-jointable entity; the two geometries are incompatible; OR the joint can't solve in the "
-    "current part poses → it is ADDED but returns healthy=false + health_warning. A joint that "
-    "'created' is NOT necessarily working — ALWAYS verify is_healthy via assembly_probe afterward.\n"
-    "• axis: leave 'auto' (derives from the geometry's own axis — correct default). For two coaxial "
-    "cylinder faces the axis is fixed by the geometry regardless, so this rarely matters; pass x/y/z "
-    "only to force a world axis on geometry that doesn't define one.\n"
-    "• PRODUCES: the joint name, the two occurrences wired, the resolved geometry/keypoint, and a "
-    "'healthy' flag. WRITES."
+                                 "Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part "
+                                 "origins like an ':origin' snap. handle_one/handle_two are find_geometry handles (not "
+                                 "names/snap-strings; re-find if stale after a model edit). ORDER MATTERS: the tool moves "
+                                 "handle_one's occurrence to handle_two, so handle_one must be the FREE part and handle_two the "
+                                 "fixed one (a grounded handle_one fails). motion: revolute/slider/cylindrical/ball/rigid. axis: "
+                                 "'auto' (from the geometry) unless forcing a world x/y/z. If it can't solve in the current pose "
+                                 "the joint is still added with healthy=false — the returned 'healthy' flag is authoritative.\n"
+                                 + _outputs.produces_block(RETURNS)
 )
 
 joint_at_tool = (
     Tool.create_simple(name="joint_at_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property("handle_one", {"type": "string", "description": "Entity-token handle (from find_geometry) for the first geometry."})
-    .add_input_property("handle_two", {"type": "string", "description": "Entity-token handle (from find_geometry) for the second geometry."})
-    .add_input_property("motion", {"type": "string", "description": "rigid | revolute | slider | cylindrical | ball (default revolute)."})
+    .add_input_property(*_HANDLE_ONE.as_property())
+    .add_input_property(*_HANDLE_TWO.as_property())
+    .add_input_property(*_inputs.joint_motion(
+        "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
+        default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
     .add_input_property("axis", {"type": "string", "description": "auto (default — derive axis from the geometry, e.g. a cylinder face's axis) | x | y | z (force a world axis)."})
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()
 )
-joint_at_item = Item.create_tool_item(tool=joint_at_tool, handler=handler, run_on_main_thread=True)
+joint_at_item = Item.create_tool_item(tool=joint_at_tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

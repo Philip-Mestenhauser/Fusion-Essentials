@@ -35,7 +35,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
 
 app = adsk.core.Application.get()
 
@@ -43,10 +43,10 @@ _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
 
 
 def _get_cam():
-    doc = _safe(lambda: app.activeDocument)
+    doc = safe(lambda: app.activeDocument)
     if not doc:
         return None, "No active document."
-    cam = _safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
+    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
     if not cam:
         return None, "Active document has no CAM data (open a document with Manufacture setups)."
     return cam, None
@@ -55,10 +55,10 @@ def _get_cam():
 def _all_operations(cam):
     """Yield (setup_name, folder_name, Operation) for every operation across all setups."""
     out = []
-    for i in range(_safe(lambda: cam.setups.count, 0)):
+    for i in range(safe(lambda: cam.setups.count, 0)):
         s = cam.setups.item(i)
-        sname = _safe(lambda s=s: s.name)
-        for op in _safe(lambda s=s: s.allOperations, []) or []:
+        sname = safe(lambda s=s: s.name)
+        for op in safe(lambda s=s: s.allOperations, []) or []:
             o = adsk.cam.Operation.cast(op)
             if o:
                 out.append((sname, o))
@@ -70,7 +70,7 @@ def _find_op(cam, name):
     exact = contains = None
     names = []
     for sname, o in _all_operations(cam):
-        nm = _safe(lambda o=o: o.name) or ""
+        nm = safe(lambda o=o: o.name) or ""
         if len(names) < 80:
             names.append(nm)
         if nm == want:
@@ -85,19 +85,19 @@ def _find_folder_ops(cam, folder_name):
     want = (folder_name or "").strip().lower()
     ops = []
     matched = None
-    for i in range(_safe(lambda: cam.setups.count, 0)):
+    for i in range(safe(lambda: cam.setups.count, 0)):
         s = cam.setups.item(i)
-        if (_safe(lambda s=s: s.name) or "").lower() == want:
-            matched = _safe(lambda s=s: s.name)
-            for op in _safe(lambda s=s: s.allOperations, []) or []:
+        if (safe(lambda s=s: s.name) or "").lower() == want:
+            matched = safe(lambda s=s: s.name)
+            for op in safe(lambda s=s: s.allOperations, []) or []:
                 o = adsk.cam.Operation.cast(op)
                 if o:
                     ops.append(o)
             return ops, matched
-        for child in _safe(lambda s=s: s.children, []) or []:
-            if type(child).__name__ == "CAMFolder" and (_safe(lambda c=child: c.name) or "").lower() == want:
-                matched = _safe(lambda c=child: c.name)
-                for op in _safe(lambda c=child: c.allOperations, []) or []:
+        for child in safe(lambda s=s: s.children, []) or []:
+            if type(child).__name__ == "CAMFolder" and (safe(lambda c=child: c.name) or "").lower() == want:
+                matched = safe(lambda c=child: c.name)
+                for op in safe(lambda c=child: c.allOperations, []) or []:
                     o = adsk.cam.Operation.cast(op)
                     if o:
                         ops.append(o)
@@ -106,14 +106,14 @@ def _find_folder_ops(cam, folder_name):
 
 
 def _set_bulb(o, on):
-    return _safe(lambda: setattr(o, "isLightBulbOn", bool(on)))
+    return safe(lambda: setattr(o, "isLightBulbOn", bool(on)))
 
 
 def _fit_operation(o):
     """Fit the camera to an operation's TOOLPATH bounding box (bigger than the part). Best-effort:
     if the toolpath bbox is unavailable, fall back to a plain fit."""
     vp = app.activeViewport
-    bb = _safe(lambda: app.measureManager.getOrientedBoundingBox(
+    bb = safe(lambda: app.measureManager.getOrientedBoundingBox(
         o, adsk.core.Vector3D.create(1, 0, 0), adsk.core.Vector3D.create(0, 1, 0))) \
         if hasattr(app, "measureManager") else None
     cam = vp.camera
@@ -133,62 +133,62 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     """
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
-        return _error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
+        return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
     cam, err = _get_cam()
     if err:
-        return _error(err)
+        return error(err)
 
     if action == "list":
         rows = []
         for sname, o in _all_operations(cam):
-            rows.append({"setup": sname, "op": _safe(lambda o=o: o.name),
-                         "has_toolpath": _safe(lambda o=o: o.hasToolpath),
-                         "valid": _safe(lambda o=o: o.isToolpathValid),
-                         "suppressed": _safe(lambda o=o: o.isSuppressed),
-                         "shown": _safe(lambda o=o: o.isLightBulbOn)})
-        return _ok({"action": "list", "operation_count": len(rows), "operations": rows})
+            rows.append({"setup": sname, "op": safe(lambda o=o: o.name),
+        "has_toolpath": safe(lambda o=o: o.hasToolpath),
+        "valid": safe(lambda o=o: o.isToolpathValid),
+        "suppressed": safe(lambda o=o: o.isSuppressed),
+        "shown": safe(lambda o=o: o.isLightBulbOn)})
+        return ok({"action": "list", "operation_count": len(rows), "operations": rows})
 
     if action == "hide_all":
         n = 0
         for _, o in _all_operations(cam):
-            if _safe(lambda o=o: o.hasToolpath):
+            if safe(lambda o=o: o.hasToolpath):
                 _set_bulb(o, False)
                 n += 1
         app.activeViewport.refresh()
-        return _ok({"action": "hide_all", "hidden_count": n})
+        return ok({"action": "hide_all", "hidden_count": n})
 
     if action == "show_folder":
         if not folder.strip():
-            return _error("Provide 'folder' — the folder or setup name to show.")
+            return error("Provide 'folder' — the folder or setup name to show.")
         ops, matched = _find_folder_ops(cam, folder)
         if matched is None:
-            return _error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get_operations.")
+            return error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get_operations.")
         # hide everything, then show this folder's generated ops
         for _, o in _all_operations(cam):
             _set_bulb(o, False)
         shown = []
         for o in ops:
-            if _safe(lambda o=o: o.hasToolpath):
+            if safe(lambda o=o: o.hasToolpath):
                 _set_bulb(o, True)
-                shown.append(_safe(lambda o=o: o.name))
+                shown.append(safe(lambda o=o: o.name))
         app.activeViewport.refresh()
-        return _ok({"action": "show_folder", "folder": matched, "shown": shown,
-                    "shown_count": len(shown),
-                    "note": "Only this folder's generated toolpaths are shown."})
+        return ok({"action": "show_folder", "folder": matched, "shown": shown,
+        "shown_count": len(shown),
+        "note": "Only this folder's generated toolpaths are shown."})
 
     # show / hide / isolate a single operation
     if not operation.strip():
-        return _error(f"Provide 'operation' — the operation name to {action}.")
+        return error(f"Provide 'operation' — the operation name to {action}.")
     o, names = _find_op(cam, operation)
     if not o:
-        return _error(f"No operation matched '{operation}'. Some: "
+        return error(f"No operation matched '{operation}'. Some: "
                       f"{', '.join(n for n in names if n)[:300]}.")
-    name = _safe(lambda: o.name)
+    name = safe(lambda: o.name)
 
     if action == "hide":
         _set_bulb(o, False)
         app.activeViewport.refresh()
-        return _ok({"action": "hide", "operation": name})
+        return ok({"action": "hide", "operation": name})
 
     if action == "isolate":
         for _, other in _all_operations(cam):
@@ -197,20 +197,20 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     else:  # show
         _set_bulb(o, True)
 
-    if not _safe(lambda: o.hasToolpath):
+    if not safe(lambda: o.hasToolpath):
         app.activeViewport.refresh()
-        return _ok({"action": action, "operation": name,
-                    "warning": "This operation has no generated toolpath yet — nothing to display. "
-                               "Generate it first (cam_generate).",
-                    "has_toolpath": False})
+        return ok({"action": action, "operation": name,
+        "warning": "This operation has no generated toolpath yet — nothing to display. "
+        "Generate it first (cam_generate).",
+        "has_toolpath": False})
 
     fitted = False
     if fit:
         fitted = bool(_fit_operation(o))
     app.activeViewport.refresh()
-    return _ok({"action": action, "operation": name, "fit": fitted,
-                "note": "Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
-                        "view_screenshot."})
+    return ok({"action": action, "operation": name, "fit": fitted,
+        "note": "Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
+        "view_screenshot."})
 
 
 TOOL_DESCRIPTION = (
@@ -232,15 +232,15 @@ tool = (
         input_param_description="show | hide | isolate | show_folder | hide_all | list.",
     )
     .add_input_property("operation", {"type": "string",
-                                      "description": "Operation name (show/hide/isolate)."})
+            "description": "Operation name (show/hide/isolate)."})
     .add_input_property("folder", {"type": "string",
-                                   "description": "Folder or setup name (show_folder)."})
+            "description": "Folder or setup name (show_folder)."})
     .add_input_property("fit", {"type": "boolean",
-                                "description": "Fit the camera to the operation's toolpath extents (show/isolate)."})
+            "description": "Fit the camera to the operation's toolpath extents (show/isolate)."})
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

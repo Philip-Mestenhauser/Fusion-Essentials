@@ -14,7 +14,7 @@ exercised against the running session separately.
 
 from conftest import load_tool
 
-jt = load_tool("joint")
+jt = load_tool("joint_create_edit")
 
 
 # ── _parse_snap: split '<occurrence>:<snap>' ───────────────────────────────

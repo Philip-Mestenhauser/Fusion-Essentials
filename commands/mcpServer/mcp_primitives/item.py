@@ -64,7 +64,21 @@ class Item:
 
     @classmethod
     def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True,
-                         enforce_timeout: bool = True) -> 'Item':
+                         enforce_timeout: bool = True, write: str = None) -> 'Item':
+        """Build a tool Item. ``write`` declares the tool's write-status, applied to the tool's
+        annotations (readOnlyHint / destructiveHint) so the server reports it as structured data:
+          'read'        -> read-only (does not modify state)
+          'write'       -> modifies state
+          'destructive' -> a hard-to-reverse write (delete, history-discarding conversion, close doc)
+        Every tool must pass one (enforced by tests/test_write_status_annotations.py)."""
+        if write == "read":
+            tool.reads()
+        elif write == "write":
+            tool.writes()
+        elif write == "destructive":
+            tool.writes(destructive=True)
+        elif write is not None:
+            raise ValueError(f"write must be 'read'/'write'/'destructive', got {write!r}")
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
                    enforce_timeout=enforce_timeout)
 

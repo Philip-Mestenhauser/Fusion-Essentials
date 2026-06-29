@@ -23,11 +23,11 @@ class TestResponseBuilders:
         assert res["message"] == "boom"
         assert res["content"][0]["text"] == "boom"
 
-    def test_underscore_aliases_are_the_same_callables(self):
-        # modules migrate by changing only the import line; the _ names must still work
-        assert common._ok is common.ok
-        assert common._error is common.error
-        assert common._safe is common.safe
+    def test_underscore_aliases_are_gone(self):
+        # the migration-era _ok/_error/_safe aliases were removed (single public spelling now).
+        # Pin their ABSENCE so they can't silently creep back in.
+        for legacy in ("_ok", "_error", "_safe", "_scale", "_target_component", "_UNIT_TO_CM"):
+            assert not hasattr(common, legacy), f"_common should no longer export {legacy}"
 
 
 class TestSafe:

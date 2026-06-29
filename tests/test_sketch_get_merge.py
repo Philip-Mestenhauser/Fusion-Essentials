@@ -9,7 +9,7 @@ needing a full fake design for both paths.
 
 from conftest import load_tool
 
-sketches = load_tool("sketches")
+sketches = load_tool("sketch_core")
 
 
 class TestSketchGetRouting:

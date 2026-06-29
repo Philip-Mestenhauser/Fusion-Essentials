@@ -6,7 +6,7 @@ suite) and need no live Fusion session.
 
 ```bash
 py -3 -m pytest            # run everything
-py -3 -m pytest tests/test_selection.py -v   # one tool, verbose
+py -3 -m pytest tests/test_sys_selection.py -v   # one tool, verbose
 py -3 tests/gen_spec.py    # regenerate SPEC.md (the behavior spec)
 ```
 
@@ -32,13 +32,13 @@ in-Fusion integration layer (driven via the Fusion MCP server), not here.
 ### Triage when deciding whether a tool needs tests
 
 - **Tier 1 — test thoroughly.** Real logic: unit math, parsing, classification,
-  path/name resolution, state tallies. (model_measure_bbox, selection,
-  cam_info, data_management, parameters, configurations, joint, joint_origin,
-  cam_templates, sketches.)
+  path/name resolution, state tallies. (model_measure_bbox, sys_selection,
+  cam_read, data_ops/doc_lifecycle, param_ops, design_get_configurations,
+  joint_create_edit, joint_create_origin, cam_templates, sketch_core.)
 - **Tier 2 — test the one or two real helpers.** Mostly Fusion orchestration
   with a pure helper or two worth pinning. (doc_open URN parsing, quoting
-  helpers, component_tree/visibility lookups, timeline/doc_update_xref/
-  cam_generate helpers.)
+  helpers, design_get_tree/view_set_visibility lookups, design_get_timeline/
+  doc_update_xref/cam_generate helpers.)
 - **Tier 3 — skip.** Fusion pass-throughs with no pure logic. Skipping is
   correct, not lazy.
 
@@ -51,16 +51,16 @@ Two problems make these tools awkward to import in a test, both solved in
    adsk.core.Application.get()` at import time. So `install_mock_adsk()` injects
    mock `adsk` / `adsk.core` / `adsk.fusion` / `adsk.cam` into `sys.modules`
    **before** any tool is imported (it's called at collection time).
-2. **Importing one tool pulls in all ~30.** `tools/__init__.py` imports every
-   tool (most need Fusion) and `commands/__init__.py` builds UI panels.
-   `load_tool("measure_bounding_box")` sidesteps both: it puts `commands/` on the
-   path, imports only the cheap adsk-free packages, stubs `mcpServer.tools`, then
-   spec-loads the single requested module so its `from ..mcp_primitives ...`
-   relative imports still resolve.
+2. **Importing the package pulls in Fusion-dependent code.** `entry.py`
+   auto-discovers and imports every tool (most need Fusion) and
+   `commands/__init__.py` builds UI panels. `load_tool("model_measure_bbox")`
+   sidesteps both: it puts `commands/` on the path, imports only the cheap
+   adsk-free packages, stubs `mcpServer.tools`, then spec-loads the single
+   requested module so its `from ..mcp_primitives ...` relative imports resolve.
 
 ```python
 from conftest import load_tool
-mbb = load_tool("measure_bounding_box")   # at module level
+mbb = load_tool("model_measure_bbox")   # at module level
 ```
 
 ### The one rule the mocks impose: assert on concrete values

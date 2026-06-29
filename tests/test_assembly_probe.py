@@ -82,6 +82,7 @@ class FakeDesign:
 def _install(occs, joints, timeline=None):
     design = FakeDesign(occs, joints, timeline)
     ap.app = type("A", (), {"activeProduct": design})()
+    ap._common.app = ap.app
     import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
 
@@ -134,6 +135,32 @@ class TestProbe:
         assert by["R"]["type"] == "rigid" and by["R"]["dof"] == 0
         assert by["C"]["type"] == "cylindrical" and by["C"]["dof"] == 2
 
+    def test_all_motion_types_and_dof(self):
+        # pin_slot(4)=2dof, planar(5)=3dof, ball(6)=3dof, slider(2)=1dof — the remaining _MOTION rows.
+        _install([], [FakeJoint("Slide", 2, "A:1", "B:1"),
+                      FakeJoint("PinSlot", 4, "A:1", "B:1"),
+                      FakeJoint("Planar", 5, "A:1", "B:1"),
+                      FakeJoint("Ball", 6, "A:1", "B:1")])
+        by = {x["name"]: x for x in _payload(ap.handler())["joints"]}
+        assert by["Slide"]["type"] == "slider" and by["Slide"]["dof"] == 1
+        assert by["PinSlot"]["type"] == "pin_slot" and by["PinSlot"]["dof"] == 2
+        assert by["Planar"]["type"] == "planar" and by["Planar"]["dof"] == 3
+        assert by["Ball"]["type"] == "ball" and by["Ball"]["dof"] == 3
+
+    def test_unknown_motion_type_is_question_mark_with_null_dof(self):
+        _install([], [FakeJoint("Mystery", 99, "A:1", "B:1")])
+        j = _payload(ap.handler())["joints"][0]
+        assert j["type"] == "?" and j["dof"] is None
+
+    def test_positions_scaled_to_cm_and_inch(self):
+        # same 2cm origin reported in cm (unchanged) and in inches (2cm / 2.54).
+        occ = FakeOcc("Block:1", "Block", origin=(2.54, 0.0, 0.0))
+        _install([occ], [])
+        cm = _payload(ap.handler(units="cm"))["occurrences"][0]
+        assert cm["origin"] == [2.54, 0.0, 0.0]
+        inch = _payload(ap.handler(units="in"))["occurrences"][0]
+        assert inch["origin"] == [1.0, 0.0, 0.0]    # 2.54 cm -> 1 inch
+
     def test_occurrence_joint_cross_index(self):
         _install([FakeOcc("Crank:1", "Crank"), FakeOcc("Block:1", "Block")],
                  [FakeJoint("CrankMain", 1, "Crank:1", "Block:1")])
@@ -178,6 +205,23 @@ class TestHealth:
         assert by["PistonSlide1"]["healthy"] is False
         assert "conflicts" in by["PistonSlide1"]["error"]
         assert by["Good"]["healthy"] is True
+
+    def test_stale_joint_health_flagged_when_timeline_is_clean(self):
+        # per-joint healthState LAGS the timeline after an in-place edit. When a joint reads broken but
+        # the timeline shows NO errored feature, flag potential staleness + point to design_recompute.
+        _install([], [FakeJoint("Wheel_Spin", 1, "W:1", "A:1", health_state=2)],
+                 timeline=[FakeTimelineObj("Joint1", 0)])   # timeline CLEAN
+        out = _payload(ap.handler())
+        assert out["broken_joints"] == ["Wheel_Spin"]
+        assert out.get("health_may_be_stale") is True
+        assert "design_recompute" in out["note"]
+
+    def test_no_stale_flag_when_timeline_also_shows_the_error(self):
+        # genuine breakage (joint AND timeline agree) -> NOT flagged as stale
+        _install([], [FakeJoint("J", 1, "A:1", "B:1", health_state=2)],
+                 timeline=[FakeTimelineObj("J", 1, message="broke")])
+        out = _payload(ap.handler())
+        assert out.get("health_may_be_stale") is None
 
     def test_timeline_problem_surfaced(self):
         _install([], [],

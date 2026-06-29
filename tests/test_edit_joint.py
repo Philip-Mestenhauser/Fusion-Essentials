@@ -22,7 +22,7 @@ import math
 
 from conftest import load_tool
 
-jt = load_tool("joint")
+jt = load_tool("joint_create_edit")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -132,18 +132,44 @@ class FakeRoot:
         self.zConstructionAxis = "WAXIS_Z"
 
 
+class _FakeTLItem:
+    def __init__(self, name, health=0):
+        self.name = name
+        self.healthState = health
+
+
+class _FakeTimeline:
+    def __init__(self, items):
+        self._i = list(items)
+    @property
+    def count(self):
+        return len(self._i)
+    def item(self, i):
+        return self._i[i]
+
+
 class FakeDesign:
-    def __init__(self, joints):
+    def __init__(self, joints, timeline_items=None):
         self.rootComponent = FakeRoot(joints)
+        self.computeAll_called = False
+        self._timeline_items = timeline_items or [_FakeTLItem("Joint1", 0)]
+
+    def computeAll(self):
+        self.computeAll_called = True
+
+    @property
+    def timeline(self):
+        return _FakeTimeline(self._timeline_items)
 
 
-def _install(joint_names=("BoomPivot",), motion="revolute"):
+def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
     joints = [FakeJoint(n) for n in joint_names]
     if motion == "slider":
         for j in joints:
             j.jointMotion = SliderJointMotion()
-    design = FakeDesign(joints)
+    design = FakeDesign(joints, timeline_items=timeline_items)
     jt.app = type("A", (), {"activeProduct": design})()
+    jt._common.app = jt.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     # JointDirections axis enum
@@ -373,3 +399,26 @@ class TestReselectInputs:
         assert joint.geometryOrOriginOne.name == "A"
         assert joint.geometryOrOriginTwo.name == "B"
         assert out["input_one"] == "A" and out["input_two"] == "B"
+
+
+# ── auto-recompute after the edit (downstream features settle) ──
+# Editing a joint rolls the timeline marker, which can leave downstream features compute-failed until
+# a full recompute. joint_edit runs computeAll itself + reports health, so the caller does not have to
+# remember design_recompute.
+
+class TestAutoRecompute:
+    def test_edit_runs_computeAll(self):
+        design, _ = _install(["BoomPivot"])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", flip=True))
+        assert design.computeAll_called is True
+        assert out["recomputed"] is True
+        assert "timeline_errors_after" not in out      # healthy timeline -> no error list
+
+    def test_reports_downstream_errors_after_recompute(self):
+        # a downstream feature ends up errored (healthState 2) -> surfaced, not silently hidden
+        design, _ = _install(["BoomPivot"],
+                             timeline_items=[_FakeTLItem("Joint1", 0), _FakeTLItem("Pattern1", 2)])
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", offset=5, units="mm"))
+        assert out["recomputed"] is True
+        assert out["timeline_errors_after"] == ["Pattern1"]
+        assert "over-constrain" in out["note"]

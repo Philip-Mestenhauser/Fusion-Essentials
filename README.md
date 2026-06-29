@@ -21,31 +21,18 @@ Fusion-Essentials can expose your Fusion session to an AI agent over the Model C
 Protocol. Enable **MCP Server** in the Fusion-Essentials settings (off by default), reload
 the add-in, and connect an MCP client to `http://127.0.0.1:27182/mcp`.
 
-The tools let an agent inspect and navigate your data and CAM programs, for example:
-`data_list_projects` / `data_list_files` (with openable URLs), `doc_open`,
-`design_get_tree` (assembly + external references), `view_list_workspaces` /
-`view_switch_workspace`, `view_screenshot`, `view_set_visibility` (isolate/show/hide components
-for a focused screenshot), `view_inspect` (orient/isolate/wireframe the camera and
-restore it), `view_section` (cut the model to see inside), and a CAM set — `cam_get_setups`,
-`cam_get_operations`, `cam_get_references`, `sys_get_tool_list` (tool sheet),
-`cam_get_time`, `cam_get_nc_programs`, `cam_compare_operations` (diff two operations to
-understand a strategy), `param_get` / `param_set`, `design_get_timeline` (how a design
-is built), `design_get_configurations` (read/switch a configured design's configurations),
-`doc_new` and the sketch set (`sketch_get`, `sketch_create`, `sketch_add_geometry`)
-for starting a design and drawing on it, `sys_request_selection` / `sys_get_selection`
-(hand off to the user to click a face/edge/vertex/body/component and read it back),
-`joint_create_origin` (place a coordinate frame / WCS anchor programmatically),
-`model_measure_bbox` (extents in world or part-space, to drive stock),
-`cam_activate_setup`, `cam_show_toolpath` (show/hide individual operations' toolpaths), and toolpath templates
-(`cam_list_templates`, `cam_apply_template`, `cam_save_template`). It can also manage data — `data_list_folders`, `data_create_project`,
-`data_create_folder`, and `data_upload_file` (which uploads local CAD and lets Fusion translate
-STEP/IGES/etc. into a Fusion design). Folder tools accept nested paths and can create
-missing folders along the way. A gated `sys_execute_script` runs arbitrary Fusion
-Python; it is disabled by default and must be turned on explicitly because it lets a
-connected agent run code in your session.
+The tools let an agent inspect and act across your Fusion session — the data model (browse
+projects/files, open by ID, upload CAD), the design (read the assembly tree and timeline, sketch,
+model, joint, measure), the viewport (screenshot, isolate, section to see inside), and CAM (read
+setups/operations/tools, time, templates). A connected agent typically starts with
+`workspace_orient` — one read that reports what's open, its health, and where to look next — then
+drills in with scoped reads. A gated `sys_execute_script` runs arbitrary Fusion Python; it is
+disabled by default and must be turned on explicitly, because it lets a connected agent run code in
+your session.
 
-Full instructions, the complete tool list, client configuration, and security notes are in
-the [MCP Server README](commands/mcpServer/README.md).
+The **authoritative tool list is the [`commands/mcpServer/tools/`](commands/mcpServer/tools/)
+directory** (one file per tool) — or ask a connected client for its tool list. Full setup, client
+configuration, and security notes are in the [MCP Server README](commands/mcpServer/README.md).
 
 ## License
 

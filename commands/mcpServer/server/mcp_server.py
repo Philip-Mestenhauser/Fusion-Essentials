@@ -47,6 +47,11 @@ PROTOCOL_VERSION_HEADER = 'MCP-Protocol-Version'
 # (vs. Autodesk's built-in server, which reports "MCP HTTP Server").
 SERVER_NAME = "Fusion-Essentials MCP Server"
 
+# Seconds a main-thread tool task may run before _execute_on_main_thread reports "still running".
+# Tools that legitimately run long (e.g. STEP export, cloud upload) opt out via enforce_timeout=False
+# on their Item. This is a fixed budget, not per-request configurable.
+MAIN_THREAD_TASK_TIMEOUT_S = 30
+
 # Result codes returned by start_server() so entry.py can react appropriately.
 START_OK = 'ok'
 START_PORT_IN_USE = 'port_in_use'
@@ -151,7 +156,7 @@ class SimpleMCPServer:
             if item.run_on_main_thread:
                 result = await self._execute_on_main_thread(
                     item.handler, arguments,
-                    enforce_timeout=getattr(item, "enforce_timeout", True))
+                    enforce_timeout=item.enforce_timeout)
             else:
                 result = item.handler(**arguments)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -190,7 +195,7 @@ class SimpleMCPServer:
         if not task_id:
             raise Exception("Failed to post task to TaskManager")
 
-        timeout = 30
+        timeout = MAIN_THREAD_TASK_TIMEOUT_S
         start_time = time.time()
         while enforce_timeout is False or (time.time() - start_time < timeout):
             with result_lock:
@@ -257,7 +262,7 @@ class SimpleMCPServer:
             futil.handle_error(f"MCP resource '{uri}'")
             return self._error(request_id, -32603, f"Resource read error: {e}")
 
-    def _error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
+    def error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 

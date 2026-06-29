@@ -12,8 +12,8 @@ import pytest
 
 from conftest import load_tool
 
-sketch_text = load_tool("set_sketch_text")
-nc_comment = load_tool("set_nc_program_comment")
+sketch_text = load_tool("sketch_set_text")
+nc_comment = load_tool("cam_set_nc_comment")
 
 MODULES = [pytest.param(sketch_text, id="sketch_set_text"),
            pytest.param(nc_comment, id="cam_set_nc_comment")]

@@ -2,10 +2,10 @@
 
 The VALUE of this tool is the baked-in runtime rules, so that's what's pinned: `_joint_geometry_for`
 must pick a VALID keypoint by entity kind — a cylinder/cone face uses MiddleKeyPoint (CenterKeyPoint
-is invalid there, the rule that cost a live crash), a planar face uses CenterKeyPoint, a circular
-edge uses center, a vertex uses createByPoint. Plus the motion mapping and the handle-resolution
-guards. The geometry construction is captured on fakes so we assert which JointGeometry factory +
-keypoint were used, without a live design.
+is invalid on a cylinder/cone face), a planar face uses CenterKeyPoint, a circular edge uses center,
+a vertex uses createByPoint. Plus the motion mapping and the handle-resolution guards. The geometry
+construction is captured on fakes so we assert which JointGeometry factory + keypoint were used,
+without a live design.
 """
 
 import json
@@ -76,7 +76,7 @@ def _install():
 
 class TestJointGeometryRules:
     def test_cylinder_face_uses_MIDDLE_not_center(self):
-        # THE rule that cost a live crash: CenterKeyPoint is invalid on a cylinder face.
+        # The key rule: CenterKeyPoint is invalid on a cylinder face — use MiddleKeyPoint.
         _install()
         g, label, err = jg._joint_geometry_for(FakeBRepFace("CYL"))
         assert err is None
@@ -153,6 +153,7 @@ def _install_design(token_map, joint_health=0, joint_msg=""):
             return [e] if e is not None else []
     d = FakeDesign()
     jg.app = type("A", (), {"activeProduct": d})()
+    jg._common.app = jg.app
     import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     return joints
@@ -172,7 +173,9 @@ class TestHandler:
     def test_unresolved_handle(self):
         _install_design({"a": FakeBRepFace("CYL")})   # 'b' not in map
         res = jg.handler(handle_one="a", handle_two="b")
-        assert res["isError"] is True and "handle_two did not resolve" in res["message"]
+        # The typed GeometryHandle kind names the offending input and flags possible staleness.
+        assert res["isError"] is True
+        assert "handle_two" in res["message"] and "did not resolve" in res["message"]
 
     def test_revolute_forced_world_axis(self):
         joints = _install_design({"rod": FakeBRepFace("CYL"), "pin": FakeBRepFace("CYL")})
@@ -212,3 +215,66 @@ class TestHandler:
         _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is True and "health_warning" not in out
+
+    def test_rigid_motion_has_null_axis(self):
+        joints = _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert joints.last_input.motion == ("rigid",)
+        assert out["axis"] is None                       # rigid has no motion axis to report
+
+    def test_ball_motion_uses_two_world_directions(self):
+        joints = _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball"))
+        assert joints.last_input.motion == ("ball",)     # setAsBallJointMotion(Z, X)
+        assert out["jointed"] is True
+
+    def test_slider_forced_world_axis(self):
+        # axis='z' on cylinder faces still FORCES the world Z direction (no CustomJointDirection).
+        joints = _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
+        _payload(jg.handler(handle_one="a", handle_two="b", motion="slider", axis="z"))
+        assert joints.last_input.motion == ("slider", "ZD")
+
+    def test_cylindrical_forced_world_axis(self):
+        joints = _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
+        _payload(jg.handler(handle_one="a", handle_two="b", motion="cylindrical", axis="y"))
+        assert joints.last_input.motion == ("cyl", "YD")
+
+    def test_auto_axis_with_no_geometry_axis_falls_back_to_world_z(self):
+        # PLANAR faces give _axis_entity nothing -> 'auto' can't derive an axis; the motion uses the
+        # default world Z direction and the reported axis is plain 'auto', NOT 'auto(geometry)'.
+        joints = _install_design({"a": FakeBRepFace("PLANE"), "b": FakeBRepFace("PLANE")})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert joints.last_input.motion == ("revolute", "ZD")   # world Z, not CUSTOM
+        assert out["axis"] == "auto"
+
+    def test_unknown_axis_keyword_defaults_to_world_z(self):
+        # an unrecognized axis string (not x/y/z, not auto) maps to the Z world direction.
+        joints = _install_design({"a": FakeBRepFace("PLANE"), "b": FakeBRepFace("PLANE")})
+        _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="diagonal"))
+        assert joints.last_input.motion == ("revolute", "ZD")
+
+    def test_circular_edge_is_an_axis_entity_for_auto(self):
+        # a circular edge can define the motion axis (auto -> CustomJointDirection + the edge).
+        joints = _install_design({"a": FakeBRepEdge("CIRCLE"), "b": FakeBRepEdge("CIRCLE")})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        m = joints.last_input.motion
+        assert m[0] == "revolute" and m[1] == "CUSTOM" and m[2] is not None
+        assert out["axis"] == "auto(geometry)"
+
+    def test_motion_setter_failure_reports_error(self):
+        # if the motion setter raises (e.g. incompatible geometry), the handler returns an error
+        # naming the motion + the axis hint, NOT a false success.
+        joints = _install_design({"a": FakeBRepFace("CYL"), "b": FakeBRepFace("CYL")})
+
+        def boom(*a, **k):
+            raise RuntimeError("geometry rejected")
+        # patch createInput to return a JointInput whose revolute setter raises
+        orig = joints.createInput
+        def make(g1, g2):
+            ji = orig(g1, g2)
+            ji.setAsRevoluteJointMotion = boom
+            return ji
+        joints.createInput = make
+        res = jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="x")
+        assert res["isError"] is True
+        assert "Could not set revolute motion" in res["message"]

@@ -31,36 +31,25 @@ class Tool:
         self.annotations = annotations
         self.additional_properties = additional_properties
 
-    def set_title(self, title: str) -> 'Tool':
-        self.title = title
+    def reads(self) -> 'Tool':
+        """Declare this tool READ-ONLY (does not modify the document/state). Sets readOnlyHint=true."""
+        if self.annotations is None:
+            self.annotations = Annotations()
+        self.annotations.set_read_only(True)
         return self
 
-    def set_description(self, description: str) -> 'Tool':
-        self.description = description
-        return self
-
-    def set_input_schema(self, schema: dict) -> 'Tool':
-        self.input_schema = schema
-        return self
-
-    def set_output_schema(self, schema: dict) -> 'Tool':
-        self.output_schema = schema
-        return self
-
-    def set_annotations(self, annotations: Annotations) -> 'Tool':
-        self.annotations = annotations
-        return self
-
-    def set_additional_properties(self, additional_properties: bool) -> 'Tool':
-        self.additional_properties = additional_properties
+    def writes(self, destructive: bool = False) -> 'Tool':
+        """Declare this tool a WRITE. Sets readOnlyHint=false; destructive=true for a hard-to-reverse
+        write (deletes, history-discarding conversions, closing docs) → destructiveHint=true."""
+        if self.annotations is None:
+            self.annotations = Annotations()
+        self.annotations.set_read_only(False)
+        if destructive:
+            self.annotations.set_destructive(True)
         return self
 
     def strict_schema(self) -> 'Tool':
         self.additional_properties = False
-        return self
-
-    def flexible_schema(self) -> 'Tool':
-        self.additional_properties = True
         return self
 
     def add_input_property(self, name: str, property_schema: dict) -> 'Tool':
@@ -120,21 +109,5 @@ class Tool:
         tool.add_input_property(
             input_param_name,
             {"type": "string", "description": input_param_description}
-        ).add_required_input(input_param_name)
-        return tool
-
-    @classmethod
-    def create_with_number_input(
-        cls,
-        name: str,
-        description: str,
-        input_param_name: str = "value",
-        input_param_description: str = "Numeric input parameter",
-        **kwargs
-    ) -> 'Tool':
-        tool = cls.create_simple(name, description, **kwargs)
-        tool.add_input_property(
-            input_param_name,
-            {"type": "number", "description": input_param_description}
         ).add_required_input(input_param_name)
         return tool

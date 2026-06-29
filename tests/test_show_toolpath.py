@@ -51,6 +51,17 @@ class FakeSetup:
         return list(self._ops)
 
 
+class CAMFolder:
+    """Named to match type(child).__name__ == 'CAMFolder' in _find_folder_ops."""
+    def __init__(self, name, ops):
+        self.name = name
+        self._ops = list(ops)
+
+    @property
+    def allOperations(self):
+        return list(self._ops)
+
+
 class FakeCAM:
     def __init__(self, setups):
         self.setups = _Counted(setups)
@@ -81,10 +92,17 @@ class FakeDoc:
         self.products = FakeProducts(cam)
 
 
+class FakeMeasureManager:
+    def getOrientedBoundingBox(self, entity, vx, vy):
+        # A non-None bbox -> _fit_operation reports fit succeeded.
+        return object()
+
+
 class FakeApp:
     def __init__(self, cam):
         self.activeDocument = FakeDoc(cam)
         self.activeViewport = FakeViewport()
+        self.measureManager = FakeMeasureManager()
 
 
 def _install(setups):
@@ -236,3 +254,43 @@ class TestShowFolder:
         res = st.handler(action="show_folder")
         assert res["isError"] is True
         assert "Provide 'folder'" in res["message"]
+
+    def test_show_folder_skips_pathless_ops(self):
+        # only ops with a generated toolpath are turned on / reported in `shown`.
+        a1 = FakeOp("A1", has_toolpath=True)
+        a2 = FakeOp("A2", has_toolpath=False)      # not generated -> excluded
+        _install([FakeSetup("SetupA", [a1, a2])])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert out["shown"] == ["A1"]
+        assert out["shown_count"] == 1
+        assert a1.isLightBulbOn is True
+        assert a2.isLightBulbOn is False           # path-less op stays off
+
+    def test_show_folder_matches_camfolder_child(self):
+        # show_folder resolves a CAMFolder NESTED in a setup (not just a setup name).
+        # The tool branches on type(child).__name__ == "CAMFolder", so name the fake that.
+        f_op = FakeOp("FOp1")
+        folder = CAMFolder("Drilling", [f_op])
+        setup_op = FakeOp("S1")
+        setup = FakeSetup("Setup1", [setup_op], children=[folder])
+        _install([setup])
+        out = _payload(st.handler(action="show_folder", folder="drilling"))   # case-insensitive
+        assert out["folder"] == "Drilling"
+        assert out["shown"] == ["FOp1"]
+        assert f_op.isLightBulbOn is True
+        assert setup_op.isLightBulbOn is False     # the non-folder op is hidden
+
+
+# ── fit camera path ──────────────────────────────────────────────────────────
+
+class TestFit:
+    def test_show_with_fit_reports_fitted(self):
+        op1, _, _ = _simple_world()
+        out = _payload(st.handler(action="show", operation="Rough Top", fit=True))
+        assert out["fit"] is True                  # _fit_operation succeeded (measureManager present)
+        assert op1.isLightBulbOn is True
+
+    def test_show_without_fit_does_not_fit(self):
+        _simple_world()
+        out = _payload(st.handler(action="show", operation="Rough Top"))
+        assert out["fit"] is False

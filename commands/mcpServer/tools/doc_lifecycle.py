@@ -31,7 +31,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import _ok, _error, _safe
+from ._common import ok, error, safe
 from ._data_common import (
     _data, _agent_description, _find_project, _split_path,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
@@ -57,14 +57,14 @@ def _xref_summary(data_file):
     DataFile.childReferences (DataFiles collection).
     """
     out = []
-    if not _safe(lambda: data_file.hasChildReferences, False):
+    if not safe(lambda: data_file.hasChildReferences, False):
         return out
     try:
         refs = data_file.childReferences.asArray()
     except Exception:
         return out
     for r in (refs or []):
-        out.append({"name": _safe(lambda: r.name), "id": _safe(lambda: r.id)})
+        out.append({"name": safe(lambda: r.name), "id": safe(lambda: r.id)})
         if len(out) >= _MAX_XREFS:
             break
     return out
@@ -83,14 +83,14 @@ def copy_document_handler(document_id: str = "", name: str = "",
     (mkdir -p).
     """
     if not (document_id or name):
-        return _error("Provide 'document_id' (lineage URN, preferred) or 'name'.")
+        return error("Provide 'document_id' (lineage URN, preferred) or 'name'.")
     if not (project or project_id):
-        return _error("Provide 'project' (name) or 'project_id' for the destination.")
+        return error("Provide 'project' (name) or 'project_id' for the destination.")
 
     try:
         data = _data()
     except Exception as e:
-        return _error(str(e))
+        return error(str(e))
 
     # --- resolve the source DataFile ---
     src = None
@@ -98,25 +98,25 @@ def copy_document_handler(document_id: str = "", name: str = "",
         try:
             src = data.findFileById(document_id)
         except Exception as e:
-            return _error(f"findFileById failed for '{document_id}': {e}")
+            return error(f"findFileById failed for '{document_id}': {e}")
         if not src:
-            return _error(f"No file found for document_id '{document_id}'. "
-                          "Pass the file's lineage id (URN) from data_list_files.")
+            return error(f"No file found for document_id '{document_id}'. "
+                                      "Pass the file's lineage id (URN) from data_list_files.")
     else:
         # Name lookup within a source project (needed because names aren't globally unique).
         if not (source_project or source_project_id):
-            return _error("When using 'name', also provide 'source_project' "
-                          "(name) or 'source_project_id' so the lookup is unambiguous.")
+            return error("When using 'name', also provide 'source_project' "
+                                      "(name) or 'source_project_id' so the lookup is unambiguous.")
         sproj, savail = _find_project(data, name=source_project or None,
                                       project_id=source_project_id or None)
         if not sproj:
             ident = source_project_id or source_project
-            return _error(f"Source project not found: {ident}. Available: "
+            return error(f"Source project not found: {ident}. Available: "
                           f"{', '.join(savail) or '(none)'}")
         src, candidates = _find_file_by_name(sproj, name)
         if not src:
-            return _error(f"Document '{name}' not found in source project "
-                          f"'{_safe(lambda: sproj.name)}'. Files seen: "
+            return error(f"Document '{name}' not found in source project "
+                          f"'{safe(lambda: sproj.name)}'. Files seen: "
                           f"{', '.join(candidates[:30]) or '(none)'}. "
                           "Use data_list_files, or pass document_id (URN).")
 
@@ -124,12 +124,12 @@ def copy_document_handler(document_id: str = "", name: str = "",
     dproj, davail = _find_project(data, name=project or None, project_id=project_id or None)
     if not dproj:
         ident = project_id or project
-        return _error(f"Destination project not found: {ident}. Available: "
+        return error(f"Destination project not found: {ident}. Available: "
                       f"{', '.join(davail) or '(none)'}")
     try:
         root = dproj.rootFolder
     except Exception as e:
-        return _error(f"Could not access destination project root: {e}")
+        return error(f"Could not access destination project root: {e}")
 
     target = root
     auto_created = []
@@ -139,18 +139,18 @@ def copy_document_handler(document_id: str = "", name: str = "",
             try:
                 target, auto_created = _ensure_folder_path(root, segments)
             except Exception as e:
-                return _error(f"Could not prepare destination path '{folder}': {e}")
+                return error(f"Could not prepare destination path '{folder}': {e}")
         else:
             target, missing = _resolve_folder_path(root, segments)
             if not target:
-                opts = [_safe(lambda: f.name) for f in _safe(lambda: root.dataFolders.asArray(), [])]
-                return _error(
+                opts = [safe(lambda: f.name) for f in safe(lambda: root.dataFolders.asArray(), [])]
+                return error(
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
                     "Pass create_path=true, or use data_list_folders to see the structure.")
 
-    src_name = _safe(lambda: src.name) or "(unknown)"
+    src_name = safe(lambda: src.name) or "(unknown)"
     # The copied file's intended FINAL name: the requested 'name' if given, else the source's.
     # (DataFile.copy() cannot set a name, so a requested rename is applied after the copy below.)
     # 'name' doubles as the source lookup when copying by name, but renaming the copy to that same
@@ -161,9 +161,9 @@ def copy_document_handler(document_id: str = "", name: str = "",
     # Duplicate guard scoped to the destination folder, against the FINAL name (what will collide).
     existing = _file_in_folder_by_name(target, final_name)
     if existing:
-        return _error(f"A file named '{final_name}' already exists in "
+        return error(f"A file named '{final_name}' already exists in "
                       f"'{_folder_path_string(target) or '(project root)'}' "
-                      f"(id {_safe(lambda: existing.id)}). Copy into a different folder, "
+                      f"(id {safe(lambda: existing.id)}). Copy into a different folder, "
                       "or remove the existing copy first.")
 
     xrefs = _xref_summary(src)
@@ -171,41 +171,41 @@ def copy_document_handler(document_id: str = "", name: str = "",
     try:
         copied = src.copy(target)  # adsk.core: DataFile.copy(targetFolder) -> DataFile
     except Exception as e:
-        return _error(f"Copy failed for document '{src_name}': {e}")
+        return error(f"Copy failed for document '{src_name}': {e}")
     if not copied:
-        return _error(f"Copy returned nothing for document '{src_name}'.")
+        return error(f"Copy returned nothing for document '{src_name}'.")
 
     # Apply the requested rename. DataFile.copy() does not accept a name, so the copy lands with
     # the SOURCE's name; set it here (DataFile.name has a setter). Report if the rename fails so a
     # caller can't silently end up with a copy still named after the template.
     rename_error = None
-    if want_name and (_safe(lambda: copied.name) or "") != want_name:
+    if want_name and (safe(lambda: copied.name) or "") != want_name:
         try:
             copied.name = want_name
         except Exception as e:
             rename_error = f"copy succeeded but rename to '{want_name}' failed: {e}"
 
     result = {
-        "copied": True,
-        "source_document": src_name,
-        "source_id": _safe(lambda: src.id),
-        "requested_name": want_name or None,
-        "copied_name": _safe(lambda: copied.name),
-        "copied_id": _safe(lambda: copied.id),
-        "destination_project": _safe(lambda: dproj.name),
-        "destination_folder": (_folder_path_string(target) or "(project root)"),
-        "auto_created_parents": auto_created,
-        "external_references": xrefs,
-        "external_reference_count": len(xrefs),
-        "note": ("The copy preserves external references: each referenced component still "
-                 "points at its ORIGINAL source file — the references are not re-copied. To "
-                 "save a copy that shares "
-                 "lineage for joint auto-repair, a Document.saveAs-based mode is needed "
-                 "(not yet built)."),
+    "copied": True,
+    "source_document": src_name,
+    "source_id": safe(lambda: src.id),
+    "requested_name": want_name or None,
+    "copied_name": safe(lambda: copied.name),
+    "copied_id": safe(lambda: copied.id),
+    "destination_project": safe(lambda: dproj.name),
+    "destination_folder": (_folder_path_string(target) or "(project root)"),
+    "auto_created_parents": auto_created,
+    "external_references": xrefs,
+    "external_reference_count": len(xrefs),
+    "note": ("The copy preserves external references: each referenced component still "
+        "points at its ORIGINAL source file — the references are not re-copied. To "
+        "save a copy that shares "
+        "lineage for joint auto-repair, a Document.saveAs-based mode is needed "
+        "(not yet built)."),
     }
     if rename_error:
         result["rename_warning"] = rename_error
-    return _ok(result)
+    return ok(result)
 
 
 def _find_file_by_name(project, name):
@@ -226,7 +226,7 @@ def _find_file_by_name(project, name):
         visited += 1
         try:
             for f in folder.dataFiles.asArray():
-                nm = _safe(lambda: f.name)
+                nm = safe(lambda: f.name)
                 if nm:
                     seen.append(nm)
                     if nm.strip().lower() == want:
@@ -246,7 +246,7 @@ def _file_in_folder_by_name(folder, name):
     want = (name or "").strip().lower()
     try:
         for f in folder.dataFiles.asArray():
-            if (_safe(lambda: f.name) or "").strip().lower() == want:
+            if (safe(lambda: f.name) or "").strip().lower() == want:
                 return f
     except Exception:
         pass
@@ -265,14 +265,14 @@ def _parent_ref_summary(data_file):
     DataFile.parentReferences (DataFiles collection).
     """
     out = []
-    if not _safe(lambda: data_file.hasParentReferences, False):
+    if not safe(lambda: data_file.hasParentReferences, False):
         return out
     try:
         refs = data_file.parentReferences.asArray()
     except Exception:
         return out
     for r in (refs or []):
-        out.append({"name": _safe(lambda: r.name), "id": _safe(lambda: r.id)})
+        out.append({"name": safe(lambda: r.name), "id": safe(lambda: r.id)})
         if len(out) >= _MAX_XREFS:
             break
     return out
@@ -287,10 +287,10 @@ def _is_document_open(file_id):
         return False
     try:
         docs = app.documents
-        for i in range(_safe(lambda: docs.count, 0) or 0):
-            d = _safe(lambda: docs.item(i))
-            df = _safe(lambda: d.dataFile) if d else None
-            if df and _safe(lambda: df.id) == file_id:
+        for i in range(safe(lambda: docs.count, 0) or 0):
+            d = safe(lambda: docs.item(i))
+            df = safe(lambda: d.dataFile) if d else None
+            if df and safe(lambda: df.id) == file_id:
                 return True
     except Exception:
         pass
@@ -309,60 +309,60 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
     document_id = (document_id or "").strip()
     confirm_name = (confirm_name or "").strip()
     if not document_id:
-        return _error("Provide 'document_id' (the lineage URN of the file to delete).")
+        return error("Provide 'document_id' (the lineage URN of the file to delete).")
     if not confirm_name:
-        return _error("Provide 'confirm_name' — the exact current name of the file, as a "
-                      "safety confirmation. Get it from data_list_files or "
-                      "doc_get_active_id.")
+        return error("Provide 'confirm_name' — the exact current name of the file, as a "
+    "safety confirmation. Get it from data_list_files or "
+    "doc_get_active_id.")
 
     try:
         data = _data()
     except Exception as e:
-        return _error(str(e))
+        return error(str(e))
 
     try:
         df = data.findFileById(document_id)
     except Exception as e:
-        return _error(f"findFileById failed for '{document_id}': {e}")
+        return error(f"findFileById failed for '{document_id}': {e}")
     if not df:
-        return _error(f"No file found for document_id '{document_id}'. It may already be "
-                      "deleted. Verify with data_list_files.")
+        return error(f"No file found for document_id '{document_id}'. It may already be "
+            "deleted. Verify with data_list_files.")
 
-    actual_name = _safe(lambda: df.name) or "(unknown)"
+    actual_name = safe(lambda: df.name) or "(unknown)"
     # Case-SENSITIVE confirmation: this is a safety gate, so require an exact match
     # (only surrounding whitespace is forgiven).
     if actual_name.strip() != confirm_name:
-        return _error(
+        return error(
             f"Name mismatch — refusing to delete. document_id resolves to '{actual_name}', "
             f"but confirm_name was '{confirm_name}'. Pass confirm_name='{actual_name}' if you "
             "really mean this file.")
 
     if _is_document_open(document_id):
-        return _error(f"'{actual_name}' is currently OPEN — close it before deleting "
-                      "(Fusion will not delete an open document).")
+        return error(f"'{actual_name}' is currently OPEN — close it before deleting "
+            "(Fusion will not delete an open document).")
 
     parents = _parent_ref_summary(df)
     if parents and not force:
         names = ", ".join(p.get("name") or "?" for p in parents)
-        return _error(
+        return error(
             f"'{actual_name}' is referenced by {len(parents)} other file(s): {names}. "
             "Deleting it would orphan those references. Pass force=true to delete anyway "
             "(Fusion may still reject it).")
 
     try:
-        ok = df.deleteMe()  # adsk.core: DataFile.deleteMe() -> bool
+        did = df.deleteMe()  # adsk.core: DataFile.deleteMe() -> bool
     except Exception as e:
-        return _error(f"Delete failed for '{actual_name}': {e}")
-    if not ok:
-        return _error(f"Fusion declined to delete '{actual_name}' (it may be referenced or "
-                      "open). No change was made.")
+        return error(f"Delete failed for '{actual_name}': {e}")
+    if not did:
+        return error(f"Fusion declined to delete '{actual_name}' (it may be referenced or "
+    "open). No change was made.")
 
-    return _ok({
-        "deleted": True,
-        "name": actual_name,
-        "document_id": document_id,
-        "was_referenced_by": parents,
-        "forced": bool(parents and force),
+    return ok({
+    "deleted": True,
+    "name": actual_name,
+    "document_id": document_id,
+    "was_referenced_by": parents,
+    "forced": bool(parents and force),
     })
 
 
@@ -382,31 +382,31 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
     """
     name = (name or "").strip()
     if not name:
-        return _error("Provide 'name' for the saved document.")
+        return error("Provide 'name' for the saved document.")
     if not (project or project_id):
-        return _error("Provide 'project' (name) or 'project_id' for the destination.")
+        return error("Provide 'project' (name) or 'project_id' for the destination.")
 
-    doc = _safe(lambda: app.activeDocument)
+    doc = safe(lambda: app.activeDocument)
     if not doc:
-        return _error("No active document to save. Open a document first.")
+        return error("No active document to save. Open a document first.")
 
     # Report whether this was an unsaved doc (the expected Phase-3 case) for the caller.
-    was_saved = _safe(lambda: doc.isSaved, None)
+    was_saved = safe(lambda: doc.isSaved, None)
 
     try:
         data = _data()
     except Exception as e:
-        return _error(str(e))
+        return error(str(e))
 
     proj, available = _find_project(data, name=project or None, project_id=project_id or None)
     if not proj:
         ident = project_id or project
-        return _error(f"Destination project not found: {ident}. Available: "
+        return error(f"Destination project not found: {ident}. Available: "
                       f"{', '.join(available) or '(none)'}")
     try:
         root = proj.rootFolder
     except Exception as e:
-        return _error(f"Could not access destination project root: {e}")
+        return error(f"Could not access destination project root: {e}")
 
     target = root
     auto_created = []
@@ -416,46 +416,46 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
             try:
                 target, auto_created = _ensure_folder_path(root, segments)
             except Exception as e:
-                return _error(f"Could not prepare destination path '{folder}': {e}")
+                return error(f"Could not prepare destination path '{folder}': {e}")
         else:
             target, missing = _resolve_folder_path(root, segments)
             if not target:
-                opts = [_safe(lambda: f.name) for f in _safe(lambda: root.dataFolders.asArray(), [])]
-                return _error(
+                opts = [safe(lambda: f.name) for f in safe(lambda: root.dataFolders.asArray(), [])]
+                return error(
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
                     "Pass create_path=true, or use data_list_folders to see the structure.")
 
     try:
-        ok = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
+        did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
-        return _error(f"saveAs failed for '{name}': {e}")
-    if not ok:
-        return _error(f"Fusion declined to save '{name}' to the destination. No change made.")
+        return error(f"saveAs failed for '{name}': {e}")
+    if not did:
+        return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
     # After saveAs the DataFile id is NOT yet the cloud lineage URN — immediately post-save it
     # is a local pre-upload path/handle. Only surface it if it actually looks like a URN;
     # otherwise report null so the caller doesn't mistake the temp handle for the document id.
     new_id = None
-    df = _safe(lambda: doc.dataFile)
+    df = safe(lambda: doc.dataFile)
     if df:
-        raw = _safe(lambda: df.id)
+        raw = safe(lambda: df.id)
         if isinstance(raw, str) and raw.startswith("urn:"):
             new_id = raw
 
-    return _ok({
+    return ok({
         "saved": True,
         "name": name,
         "was_previously_saved": was_saved,
-        "destination_project": _safe(lambda: proj.name),
+        "destination_project": safe(lambda: proj.name),
         "destination_folder": (_folder_path_string(target) or "(project root)"),
         "auto_created_parents": auto_created,
         "document_id": new_id,   # null until cloud processing assigns the lineage URN
         "note": ("Save is async on the cloud side. document_id is typically NULL right after "
-                 "saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm "
-                 "with doc_get_active_id after a short wait — the saved copy becomes the "
-                 "active document and will then report its real urn: lineage id."),
+            "saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm "
+            "with doc_get_active_id after a short wait — the saved copy becomes the "
+            "active document and will then report its real urn: lineage id."),
     })
 
 
@@ -472,19 +472,24 @@ def new_document_handler() -> dict:
     try:
         doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     except Exception as e:
-        return _error(f"Failed to create a new design document: {e}")
+        return error(f"Failed to create a new design document: {e}")
     if not doc:
-        return _error("New-document creation returned nothing.")
+        return error("New-document creation returned nothing.")
 
+    # `documents.add` makes the new doc active, but `app.activeDocument is doc` can read False right
+    # after creation (the active reference resolves separately). Compare by NAME, which is reliable,
+    # and don't report a misleading False that would make a caller hesitate to model into it.
+    new_name = safe(lambda: doc.name)
+    is_active = safe(lambda: app.activeDocument.name == new_name, True)
     info = {
-        "created": True,
-        "document_name": _safe(lambda: doc.name),
-        "is_active": _safe(lambda: app.activeDocument is doc),
-        "is_saved": _safe(lambda: doc.isSaved),
-        "note": ("New blank design is now the active document (unsaved — it has no cloud id "
-                 "yet). Save it with doc_save_as, or start modelling with sketch_create."),
+    "created": True,
+    "document_name": new_name,
+    "is_active": is_active,
+    "is_saved": safe(lambda: doc.isSaved),
+    "note": ("New blank design is now the active document (unsaved — it has no cloud id "
+        "yet). Save it with doc_save_as, or start modelling with sketch_create."),
     }
-    return _ok(info)
+    return ok(info)
 
 
 # ---------------------------------------------------------------------------
@@ -496,13 +501,13 @@ def _find_open_document(name):
     sample of the open names. Operates on app.documents (all loaded docs — see doc_list_open'
     note that this is a superset of the user's visible tabs)."""
     want = (name or "").strip()
-    docs = _safe(lambda: app.documents)
+    docs = safe(lambda: app.documents)
     exact = contains = None
     names = []
     if docs is not None:
-        for i in range(_safe(lambda: docs.count, 0)):
+        for i in range(safe(lambda: docs.count, 0)):
             d = docs.item(i)
-            nm = _safe(lambda d=d: d.name) or ""
+            nm = safe(lambda d=d: d.name) or ""
             names.append(nm)
             if nm == want:
                 exact = d
@@ -519,23 +524,23 @@ def save_document_handler(description: str = "") -> dict:
     AI-agent marker. The active doc must already exist in the cloud (use doc_save_as first for
     a brand-new unsaved doc). WRITES a new cloud version.
     """
-    doc = _safe(lambda: app.activeDocument)
+    doc = safe(lambda: app.activeDocument)
     if not doc:
-        return _error("No active document to save.")
-    if not _safe(lambda: doc.isSaved, False):
-        return _error("The active document has never been saved (no cloud file yet). Use "
-                      "doc_save_as to give it a name and folder first.")
+        return error("No active document to save.")
+    if not safe(lambda: doc.isSaved, False):
+        return error("The active document has never been saved (no cloud file yet). Use "
+    "doc_save_as to give it a name and folder first.")
     try:
-        ok = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
+        did = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
     except Exception as e:
-        return _error(f"Save failed for '{_safe(lambda: doc.name)}': {e}")
-    if not ok:
-        return _error(f"Fusion declined to save '{_safe(lambda: doc.name)}'.")
-    return _ok({
-        "saved": True,
-        "document_name": _safe(lambda: doc.name),
-        "description": _agent_description(description),
-        "note": "Active document saved as a new cloud version (description tagged as AI-agent).",
+        return error(f"Save failed for '{safe(lambda: doc.name)}': {e}")
+    if not did:
+        return error(f"Fusion declined to save '{safe(lambda: doc.name)}'.")
+    return ok({
+    "saved": True,
+    "document_name": safe(lambda: doc.name),
+    "description": _agent_description(description),
+    "note": "Active document saved as a new cloud version (description tagged as AI-agent).",
     })
 
 
@@ -549,26 +554,26 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     visible tab — close_all closes those too. Fusion always keeps one document open (a blank one
     appears if you close the last). Hard to reverse — discarded edits are gone.
     """
-    docs = _safe(lambda: app.documents)
+    docs = safe(lambda: app.documents)
     if docs is None:
-        return _error("No documents are open.")
+        return error("No documents are open.")
 
     if close_all:
-        targets = [docs.item(i) for i in range(_safe(lambda: docs.count, 0))]
+        targets = [docs.item(i) for i in range(safe(lambda: docs.count, 0))]
     elif name.strip():
         d, names = _find_open_document(name)
         if not d:
-            return _error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+            return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
         targets = [d]
     else:
-        active = _safe(lambda: app.activeDocument)
+        active = safe(lambda: app.activeDocument)
         if not active:
-            return _error("No active document to close.")
+            return error("No active document to close.")
         targets = [active]
 
     closed, errors = [], []
     for d in targets:
-        nm = _safe(lambda d=d: d.name)
+        nm = safe(lambda d=d: d.name)
         try:
             if d.close(bool(save_changes)):
                 closed.append(nm)
@@ -576,13 +581,13 @@ def close_document_handler(name: str = "", save_changes: bool = False,
                 errors.append({nm: "close returned false"})
         except Exception as e:
             errors.append({nm: str(e)[:60]})
-    return _ok({
-        "closed": closed, "closed_count": len(closed),
-        "errors": errors,
-        "save_changes": bool(save_changes),
-        "remaining_open": _safe(lambda: app.documents.count),
-        "note": ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
-                 ". Fusion keeps at least one document open."),
+    return ok({
+    "closed": closed, "closed_count": len(closed),
+    "errors": errors,
+    "save_changes": bool(save_changes),
+    "remaining_open": safe(lambda: app.documents.count),
+    "note": ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
+            ". Fusion keeps at least one document open."),
     })
 
 
@@ -593,16 +598,16 @@ def activate_document_handler(name: str = "") -> dict:
     only changes which document is active/foregrounded.
     """
     if not name.strip():
-        return _error("Provide 'name' — the open document to activate.")
+        return error("Provide 'name' — the open document to activate.")
     d, names = _find_open_document(name)
     if not d:
-        return _error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+        return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
     try:
-        ok = d.activate()
+        did = d.activate()
     except Exception as e:
-        return _error(f"Activate failed for '{_safe(lambda: d.name)}': {e}")
-    return _ok({"activated": bool(ok), "document_name": _safe(lambda: d.name),
-                "is_active": _safe(lambda: app.activeDocument is d)})
+        return error(f"Activate failed for '{safe(lambda: d.name)}': {e}")
+    return ok({"activated": bool(did), "document_name": safe(lambda: d.name),
+        "is_active": safe(lambda: app.activeDocument is d)})
 
 
 def list_open_documents_handler() -> dict:
@@ -614,26 +619,26 @@ def list_open_documents_handler() -> dict:
     UI tab'. There is no fully reliable tab-vs-reference flag, so this reports isVisible/isActive/
     isModified per doc and flags the active one; treat non-active entries cautiously before closing.
     """
-    docs = _safe(lambda: app.documents)
+    docs = safe(lambda: app.documents)
     if docs is None:
-        return _error("No documents are open.")
-    active = _safe(lambda: app.activeDocument)
+        return error("No documents are open.")
+    active = safe(lambda: app.activeDocument)
     rows = []
-    for i in range(_safe(lambda: docs.count, 0)):
+    for i in range(safe(lambda: docs.count, 0)):
         d = docs.item(i)
         rows.append({
-            "name": _safe(lambda d=d: d.name),
-            "is_active": _safe(lambda d=d: d is active),
-            "is_visible": _safe(lambda d=d: d.isVisible),
-            "is_saved": _safe(lambda d=d: d.isSaved),
-            "is_modified": _safe(lambda d=d: d.isModified),
+        "name": safe(lambda d=d: d.name),
+        "is_active": safe(lambda d=d: d is active),
+        "is_visible": safe(lambda d=d: d.isVisible),
+        "is_saved": safe(lambda d=d: d.isSaved),
+        "is_modified": safe(lambda d=d: d.isModified),
         })
-    return _ok({
+    return ok({
         "open_count": len(rows),
         "documents": rows,
         "note": ("app.documents is a SUPERSET of the user's visible tabs — referenced/dependency "
-                 "docs are loaded as real Documents (isVisible=True means loaded, not tabbed). Be "
-                 "careful with close_all."),
+            "docs are loaded as real Documents (isVisible=True means loaded, not tabbed). Be "
+            "careful with close_all."),
     })
 
 
@@ -659,44 +664,44 @@ _copy_document_tool = (
         input_param_description="Lineage id (URN) of the document to copy (preferred; from data_list_files).",
     )
     .add_input_property("name", {"type": "string",
-                                 "description": "Document name (alt to document_id); requires source_project."})
+        "description": "Document name (alt to document_id); requires source_project."})
     .add_input_property("source_project", {"type": "string",
-                                           "description": "Source project name (for a 'name' lookup)."})
+        "description": "Source project name (for a 'name' lookup)."})
     .add_input_property("source_project_id", {"type": "string",
-                                              "description": "Source project id (alt to source_project)."})
+        "description": "Source project id (alt to source_project)."})
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("folder", {"type": "string",
-                                   "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
+        "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
     .add_input_property("create_path", {"type": "boolean",
-                                        "description": "Create missing destination folders (default false)."})
+        "description": "Create missing destination folders (default false)."})
 )
 copy_document_item = Item.create_tool_item(
-    tool=_copy_document_tool, handler=copy_document_handler, run_on_main_thread=True
+    tool=_copy_document_tool, write="write", handler=copy_document_handler, run_on_main_thread=True
 )
 
 _delete_document_tool = (
     Tool.create_with_string_input(
         name="data_delete_file",
         description=(
-            "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
-            "GUARDED and IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches "
-            "the file's current name — the tool refuses on mismatch so you cannot delete the "
-            "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
-            "by other files (deleting it would orphan them) unless force=true. Get the URN and "
-            "name from data_list_files or doc_get_active_id. WRITES to the cloud data "
-            "model (deletes)."
+        "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
+        "GUARDED and IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches "
+        "the file's current name — the tool refuses on mismatch so you cannot delete the "
+        "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
+        "by other files (deleting it would orphan them) unless force=true. Get the URN and "
+        "name from data_list_files or doc_get_active_id. WRITES to the cloud data "
+        "model (deletes)."
         ),
         input_param_name="document_id",
         input_param_description="Lineage id (URN) of the document to delete.",
     )
     .add_input_property("confirm_name", {"type": "string",
-                                         "description": "Exact current name of the file, case-sensitive (safety confirmation; must match)."})
+        "description": "Exact current name of the file, case-sensitive (safety confirmation; must match)."})
     .add_input_property("force", {"type": "boolean",
-                                  "description": "Delete even if referenced by other files (default false). Use with care."})
+        "description": "Delete even if referenced by other files (default false). Use with care."})
 )
 delete_document_item = Item.create_tool_item(
-    tool=_delete_document_tool, handler=delete_document_handler, run_on_main_thread=True
+    tool=_delete_document_tool, write="destructive", handler=delete_document_handler, run_on_main_thread=True
 )
 
 _save_document_as_tool = (
@@ -719,28 +724,28 @@ _save_document_as_tool = (
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("folder", {"type": "string",
-                                   "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
+        "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
     .add_input_property("create_path", {"type": "boolean",
-                                        "description": "Create missing destination folders (default false)."})
+        "description": "Create missing destination folders (default false)."})
     .add_input_property("description", {"type": "string",
-                                        "description": "Optional version description for the save."})
+        "description": "Optional version description for the save."})
 )
 save_document_as_item = Item.create_tool_item(
-    tool=_save_document_as_tool, handler=save_document_as_handler, run_on_main_thread=True
+    tool=_save_document_as_tool, write="write", handler=save_document_as_handler, run_on_main_thread=True
 )
 
 _new_document_tool = Tool.create_simple(
     name="doc_new",
     description=(
-        "Create and open a new, empty Fusion design document; it becomes the active "
-        "document. The document is unsaved (no cloud id yet) until you save it with "
-        "doc_save_as. Use this to start fresh — e.g. then sketch_create and "
-        "sketch_add_geometry to model. Creates a session document (does not write to the "
-        "cloud until saved)."
+    "Create and open a new, empty Fusion design document; it becomes the active "
+    "document. The document is unsaved (no cloud id yet) until you save it with "
+    "doc_save_as. Use this to start fresh — e.g. then sketch_create and "
+    "sketch_add_geometry to model. Creates a session document (does not write to the "
+    "cloud until saved)."
     ),
 ).strict_schema()
 new_document_item = Item.create_tool_item(
-    tool=_new_document_tool, handler=new_document_handler, run_on_main_thread=True
+    tool=_new_document_tool, write="write", handler=new_document_handler, run_on_main_thread=True
 )
 
 _save_document_tool = (
@@ -753,11 +758,11 @@ _save_document_tool = (
             "exist in the cloud. WRITES a new cloud version."),
     )
     .add_input_property("description", {"type": "string",
-                                        "description": "Optional version description (the AI-agent marker is prepended automatically)."})
+            "description": "Optional version description (the AI-agent marker is prepended automatically)."})
     .strict_schema()
 )
 save_document_item = Item.create_tool_item(
-    tool=_save_document_tool, handler=save_document_handler, run_on_main_thread=True)
+    tool=_save_document_tool, write="write", handler=save_document_handler, run_on_main_thread=True)
 
 _close_document_tool = (
     Tool.create_simple(
@@ -770,15 +775,15 @@ _close_document_tool = (
             "one doc open. Hard to reverse — discarded edits are gone."),
     )
     .add_input_property("name", {"type": "string",
-                                 "description": "Open document to close (omit = active document)."})
+            "description": "Open document to close (omit = active document)."})
     .add_input_property("save_changes", {"type": "boolean",
-                                         "description": "Save unsaved edits before closing (default false = discard)."})
+            "description": "Save unsaved edits before closing (default false = discard)."})
     .add_input_property("close_all", {"type": "boolean",
-                                      "description": "Close every open document (default false)."})
+            "description": "Close every open document (default false)."})
     .strict_schema()
 )
 close_document_item = Item.create_tool_item(
-    tool=_close_document_tool, handler=close_document_handler, run_on_main_thread=True)
+    tool=_close_document_tool, write="destructive", handler=close_document_handler, run_on_main_thread=True)
 
 _activate_document_tool = (
     Tool.create_with_string_input(
@@ -792,7 +797,7 @@ _activate_document_tool = (
     ).strict_schema()
 )
 activate_document_item = Item.create_tool_item(
-    tool=_activate_document_tool, handler=activate_document_handler, run_on_main_thread=True)
+    tool=_activate_document_tool, write="write", handler=activate_document_handler, run_on_main_thread=True)
 
 _list_open_documents_tool = Tool.create_simple(
     name="doc_list_open",
@@ -800,10 +805,10 @@ _list_open_documents_tool = Tool.create_simple(
         "List the documents open in the session: name, is_active, is_visible, is_saved, "
         "is_modified. IMPORTANT: app.documents is a SUPERSET of the user's visible tabs — opening "
         "an assembly loads its referenced components as real Documents too (isVisible=True means "
-        "loaded, NOT tabbed). Use before close_all to avoid closing dependency docs. Read-only."),
+        "loaded, NOT tabbed). Use before close_all to avoid closing dependency docs."),
 ).strict_schema()
 list_open_documents_item = Item.create_tool_item(
-    tool=_list_open_documents_tool, handler=list_open_documents_handler, run_on_main_thread=True)
+    tool=_list_open_documents_tool, write="read", handler=list_open_documents_handler, run_on_main_thread=True)
 
 
 def register_tool():

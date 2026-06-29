@@ -1,19 +1,18 @@
 # Reading Fusion state — the essential reads and their blind spots
 
-Fusion is many environments glued together (CAD modelling, assemblies, parametric timeline, CAM,
-the cloud data model, sim, electrical). Reading an *entire* document is unreasonable at scale, so a
-good pair-programmer agent works by **progressive disclosure**: run a cheap state read first, and
-only zoom in (isolate/screenshot/deep-read) on the part that read flags as ambiguous.
+Fusion is many environments glued together (CAD modelling, assemblies, parametric timeline, CAM, the
+cloud data model, sim, electrical). Reading an entire document does not scale, so work by progressive
+disclosure: run a cheap state read first, and only zoom in (isolate / screenshot / deep-read) on the
+part that read flags as ambiguous.
 
-This doc is the map for that: for each environment, **the one read tool to start with, what it
-reliably tells you, and the BLIND SPOTS** — the places where a read returns something that looks
-authoritative but isn't, so you draw a silent wrong conclusion. The blind spots are the whole point:
-they are where agents go wrong without any error to warn them.
+For each environment below: the one read tool to start with, what it reliably reports, and the **blind
+spots** — where a read looks authoritative but isn't, so a wrong conclusion follows with no error to
+warn you.
 
-> Rule of thumb: **read state before you reason; reason before you act; verify with numbers, not a
-> screenshot.** A screenshot of an assembly is the LEAST reliable input (parts overlap at the
-> origin, the active component greys the rest out, depth is ambiguous) — reach for it last, and only
-> on a single isolated, oriented component.
+> Rule of thumb: read state before you reason; reason before you act; verify with numbers, not a
+> screenshot. A screenshot of an assembly is the least reliable input (parts overlap at the origin,
+> the active component greys the rest out, depth is ambiguous) — reach for it last, and only on a
+> single isolated, oriented component.
 
 ---
 
@@ -21,10 +20,14 @@ they are where agents go wrong without any error to warn them.
 
 | Read | Tells you | Then branch to |
 |---|---|---|
-| `sys_get_session` | active document, **workspace**, **product type**, units, root name, occurrence count | the environment-specific read below |
+| `workspace_orient` | active document + where it lives, health (timeline/joints/refs), units, mode, the major pieces, whether CAM data exists, and **pointers** to the right narrow tool | the area its pointers flag |
+| `sys_get_session` | the thinner read: active document, **workspace**, **product type**, units, root name, occurrence count | the environment-specific read below |
 
-The active **workspace/product** decides which environment you're in and therefore which deep read
-is meaningful. Don't assume — a doc can hold Design + CAM + sim products at once.
+`workspace_orient` is the cold-boot read — one call that situates you and points at the right deep
+read, so you don't fish across tool families. Use `sys_get_session` when you only need the active
+document/workspace/units. Either way the active **workspace/product** decides which environment
+you're in and therefore which deep read is meaningful — don't assume; a doc can hold Design + CAM +
+sim products at once.
 
 ---
 
@@ -42,16 +45,15 @@ right two parts?", "where is each piston?".
   rigid-to-parent lock) are DIFFERENT. A common failure: the intended fixed frame (e.g. an engine
   block) has `grounded=false` while another part has `ground_to_parent=true` — so when you drive a
   joint, the WRONG part moves. Verify `grounded_occurrences` lists your fixed frame, and that moving
-  parts have `ground_to_parent=false`. (Observed live: a whole engine with `grounded:[]`.)
-- **The INVISIBLE first-component trap (no tool call causes it).** A Fusion USER PREFERENCE
-  ("ground to parent", on by default for many users) implicitly sets `ground_to_parent=true` on the
-  FIRST component created in a document — and only the first. So if you build the crankshaft first
-  and the block second, the *crankshaft* is silently locked-to-parent and the block is free → drive
-  a joint and the block moves while the crank stays put. NOTHING in your tool calls reveals this;
-  only `assembly_probe` does. **After creating components, ALWAYS probe ground flags and explicitly
-  set them** — free everything (`ground_to_parent=false`) then `grounded=true` on your one intended
-  fixed frame — rather than trusting the implicit default. (Hit twice live: both the V4 and the
-  inline-4 had the first-created part auto-grounded.)
+  parts have `ground_to_parent=false`.
+- **The invisible first-component trap (no tool call causes it).** The "ground to parent" Fusion user
+  preference (on by default for many users) implicitly sets `ground_to_parent=true` on the FIRST
+  component created in a document — and only the first. Build the crankshaft first and the block
+  second, and the crankshaft is silently locked-to-parent while the block is free, so driving a joint
+  moves the block and leaves the crank put. Nothing in the tool calls reveals this; only
+  `assembly_probe` does. After creating components, probe ground flags and set them explicitly — free
+  everything (`ground_to_parent=false`), then `grounded=true` on the one intended fixed frame — rather
+  than trusting the implicit default.
 - **Occurrence origin ≠ part geometry center.** `origin` is the occurrence transform; `bbox_center`
   is where the geometry actually sits. They differ whenever a part was modelled off its own origin.
 - `assembly_probe` reports joints but not their *current driven value* — to see motion, drive with
@@ -149,41 +151,39 @@ session.
 
 ---
 
-## Building multi-part assemblies — two traps that NUMBERS won't catch
+## Building multi-part assemblies — two traps that numbers won't catch
 
-These bit a live engine build hard; both are invisible to `assembly_probe` (a malformed body has the
-same bounding box as a clean one) and only an isolated multi-angle LOOK reveals them.
+Both are invisible to `assembly_probe` (a malformed body has the same bounding box as a clean one) and
+only an isolated multi-angle look reveals them.
 
-- **Cut operations bleed through OVERLAPPING bodies.** An extrude-`cut` (and combine-`cut`) acts on
-  whatever solid geometry occupies the cut volume — not just "the part you think you're editing." If
-  you build several components STACKED at the origin (the default — every new component starts there),
-  a bore cut in one part can carve a gouge through another part sitting at the same coordinates. (Live
-  result: cutting rod/block bores gouged the crankshaft sitting overlapped at the origin.)
-  **PREVENTION:** build each part **isolated and ACTIVE** — `model_create_component(activate=true)`,
-  and `view_inspect(isolate)` it — so the cut is scoped to that component AND you get a clean view.
-  Alternatively build parts spaced FAR apart (hundreds of mm) and only bring them together by joint.
-- **Raw-transform placement does NOT survive the joint solve.** Positioning free occurrences with
-  `assembly_move` / a transform, then creating a joint, makes the joint solver **snap the still-free
-  parts back to their component origin** (they collapse to (0,0,0)). Pre-positioning is throwaway.
-  **PREVENTION:** let JOINTS define position — constrain each part by its joints (revolute to a real
-  datum/pin, slider in a bore), don't pre-place it. Build construction-point datums at the real
-  connection points (`model_construction`, parametric designs only) and joint to those.
+- **Cut operations bleed through overlapping bodies.** An extrude-`cut` (and combine-`cut`) acts on
+  whatever solid geometry occupies the cut volume — not just the part you think you're editing. If
+  several components are stacked at the origin (the default — every new component starts there), a bore
+  cut in one part can carve a gouge through another part at the same coordinates. **Prevention:** build
+  each part isolated and active — `model_create_component(activate=true)` + `view_inspect(isolate)` —
+  so the cut is scoped to that component and you get a clean view. Alternatively build parts spaced far
+  apart and bring them together only by joint.
+- **Raw-transform placement does not survive the joint solve.** Positioning free occurrences with
+  `assembly_move` / a transform and then creating a joint makes the solver snap the still-free parts
+  back to their component origin (collapsing to (0,0,0)). Pre-positioning is throwaway. **Prevention:**
+  let joints define position — constrain each part by its joints (revolute to a datum/pin, slider in a
+  bore). Build construction-point datums at the real connection points (`model_construction`,
+  parametric designs only) and joint to those.
 
-> **Numbers verify POSITION / grounding / joint-wiring. Isolated multi-angle images verify SHAPE.**
-> After shaping a part (extrude/revolve/cut/fillet), `view_inspect(isolate)` it and image 3–4
-> quadrants to confirm the silhouette is right — a gouge, a merged bore, or a failed cut is invisible
-> in the bbox but obvious in the picture. Do BOTH; neither alone is enough.
+> Numbers verify position / grounding / joint-wiring. Isolated multi-angle images verify shape. After
+> shaping a part (extrude / revolve / cut / fillet), `view_inspect(isolate)` it and image 3–4 quadrants
+> to confirm the silhouette — a gouge, a merged bore, or a failed cut is invisible in the bbox but
+> obvious in the picture. Do both; neither alone is enough.
 
-## Verify HEALTH before structure (the user's first signal)
+## Verify health before structure (the user's first signal)
 
-A feature or joint can be created and WIRED correctly yet **fail to compute** — the yellow "Compute
-Failed" a user sees in the timeline. That is the FIRST thing a real user notices something is wrong,
-*before* any functional test. An agent that only checks structure (joint count, types, positions,
-wiring) will happily report a BROKEN assembly as fine. (Lived it: a slider joint with a mis-aligned
-axis over-constrained the assembly — `healthState=1`, "conflicts with assembly relationships" — while
-the structural probe said everything was great.)
+A feature or joint can be created and wired correctly yet **fail to compute** — the yellow "Compute
+Failed" in the timeline. That is the first thing a user notices is wrong, before any functional test.
+A check that only looks at structure (joint count, types, positions, wiring) will report a broken
+assembly as fine: a slider joint with a mis-aligned axis over-constrains the assembly
+(`healthState=1`, "conflicts with assembly relationships") while the structural probe looks clean.
 
-So **check health FIRST**:
+So **check health first**:
 - `assembly_probe` reports `is_healthy`, `broken_joints`, `timeline_problems`, and a per-joint
   `healthy` flag — read those before reasoning about positions. `is_healthy=false` means stop and
   fix the named feature/joint; don't proceed to drive/test it.
