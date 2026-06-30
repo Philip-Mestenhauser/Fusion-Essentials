@@ -3,7 +3,7 @@
 
 """Safe, read-only MCP tool: resolve the ACTIVE document to its data-model identity.
 
-`sys_get_session` returns the active document's NAME but not its data-model id (URN).
+`workspace_orient` reports the active document's NAME but not its data-model id (URN).
 Names are not unique, so resolving "the active doc" by name (via data_list_files) is
 fragile. This tool returns the active document's lineage URN, version, openability, and
 whether it has unsaved changes — so an agent can act on the live document deterministically

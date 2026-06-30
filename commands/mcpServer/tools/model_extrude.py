@@ -39,6 +39,11 @@ _TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
     description="Bodies a cut/join/intersect may affect (prevents cut bleed-through into other bodies).")
 
+# profile_index may carry a profile HANDLE (entityToken from sketch_get) — resolved via ProfileRef.
+# _inputs.is_handle distinguishes a handle from an int/list/'all' selector.
+_PROFILE = _inputs.ProfileRef("profile_index")
+_looks_like_handle = _inputs.is_handle
+
 # Operation name -> adsk.fusion.FeatureOperations attribute.
 _OPERATIONS = {
     "new": "NewBodyFeatureOperation",
@@ -62,11 +67,14 @@ def _target_sketch(design, sketch_name):
     return (coll.item(n - 1) if n else None), name
 
 
-def _resolve_profile_indices(profile_index, pcount):
-    """Normalise the profile selector to a sorted list of in-range indices, or (None, error).
+def _resolve_profile_indices(profile_index, pcount, profiles=None):
+    """Normalise the profile_index selector to a sorted list of in-range indices, or (None, error).
 
-    Accepts: an int (single), a list of ints (several), a comma-string '0,2,3', or 'all' (every
-    closed profile of the sketch — so N regions extrude in ONE call). Bounds-checked against pcount."""
+    Accepts an int (single), a list of ints, a comma-string '0,2,3', or 'all' (every closed profile —
+    N regions in ONE call). To pick a SPECIFIC region on a multi-profile sketch (e.g. one drawn on a
+    face, which yields the region + the surrounding ring), prefer a profile HANDLE: read the regions
+    with sketch_get and pass that profile's 'handle' (resolved via ProfileRef) — area/centroid let you
+    pick the right one, which a blind index can't. profiles/pcount bound-check the index path."""
     sel = profile_index
     if isinstance(sel, str):
         s = sel.strip().lower()
@@ -75,7 +83,8 @@ def _resolve_profile_indices(profile_index, pcount):
         try:
             sel = [int(x) for x in s.split(",") if x.strip() != ""]
         except Exception:
-            return None, f"profile_index '{profile_index}' is not an int, list, 'all', or '0,1,2'."
+            return None, (f"profile_index '{profile_index}' is not an int, list, 'all', or '0,1,2'. "
+                          "To target a specific region, pass a profile handle from sketch_get instead.")
     if isinstance(sel, (list, tuple)):
         idxs = []
         for x in sel:
@@ -177,22 +186,31 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             open_surface = True
 
     if not want_surface:
-        if pcount == 0:
-            return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to extrude. "
+        # HANDLE path: a profile entityToken from sketch_get (a real ProfileRef) targets the exact
+        # region — the robust way to pick one of several profiles (face ring vs the region you drew).
+        # _looks_like_handle distinguishes it from an int/list/'all' selector.
+        if _looks_like_handle(profile_index):
+            prof, perr = _PROFILE.resolve(profile_index)
+            if perr:
+                return error(perr)
+            profile_arg, indices = prof, [None]
+        else:
+            if pcount == 0:
+                return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to extrude. "
     "Draw a closed region (e.g. a rectangle or circle) first, or pass "
     "as_surface=true to extrude an open path into a surface.")
-        indices, ierr = _resolve_profile_indices(profile_index, pcount)
-        if ierr:
-            return error(ierr)
-        # One profile -> pass it directly; several -> an ObjectCollection (extrudeFeatures.createInput
-        # accepts either, so N profiles of one sketch extrude in ONE feature/call).
-        if len(indices) == 1:
-            profile_arg = profiles.item(indices[0])
-        else:
-            coll = adsk.core.ObjectCollection.create()
-            for i in indices:
-                coll.add(profiles.item(i))
-            profile_arg = coll
+            indices, ierr = _resolve_profile_indices(profile_index, pcount, profiles)
+            if ierr:
+                return error(ierr)
+            # One profile -> pass it directly; several -> an ObjectCollection (extrudeFeatures.createInput
+            # accepts either, so N profiles of one sketch extrude in ONE feature/call).
+            if len(indices) == 1:
+                profile_arg = profiles.item(indices[0])
+            else:
+                coll = adsk.core.ObjectCollection.create()
+                for i in indices:
+                    coll.add(profiles.item(i))
+                profile_arg = coll
 
     op = getattr(adsk.fusion.FeatureOperations, _OPERATIONS[op_key])
     try:
@@ -264,7 +282,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "sketch": safe(lambda: sketch.name),
-        "profile_index": (indices[0] if len(indices) == 1 else indices),
+        "profile_index": ("handle" if indices == [None]
+                          else (indices[0] if len(indices) == 1 else indices)),
         "profiles_extruded": len(indices),
         "as_surface": bool(open_surface),
         "is_solid": is_solid,
@@ -282,10 +301,11 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 TOOL_DESCRIPTION = (
 "Extrude a closed sketch profile into a 3D solid — the back half of modelling, paired with "
 "sketch_create / sketch_add_geometry. 'sketch_name' selects the sketch (omit = most recent); "
-"'profile_index' picks which closed region of it to extrude (0-based). 'distance' is the depth "
-"in 'units' (mm default; negative reverses). 'operation': new (new body) | join | cut | "
-"intersect — cut/intersect act on existing bodies. 'symmetric' extrudes both sides of the "
-"plane; 'taper_deg' applies a draft angle. WRITES to the design. Returns the resulting "
+"'profile_index' picks the region: an index / list / 'all', OR a profile HANDLE from sketch_get "
+"(the robust way to pick one region of a multi-profile sketch, e.g. a region drawn on a face). "
+"'distance' is the depth in 'units' (mm default; negative reverses). 'operation': new (new body) | "
+"join | cut | intersect — cut/intersect act on existing bodies. 'symmetric' extrudes both sides of "
+"the plane; 'taper_deg' applies a draft angle. WRITES to the design. Returns the resulting "
 "body names; pair with view_screenshot to view."
 )
 
@@ -294,7 +314,7 @@ extrude_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Which closed profile(s) to extrude in ONE call: an index (0-based, default 0), a list [0,2,3], a string '0,2,3', or 'all' for every profile of the sketch. Use this instead of N separate cuts/extrudes."})
+            "description": "Which region(s) to extrude: an index (0-based, default 0), a list [0,2,3], '0,2,3', or 'all' (every profile in ONE call) — OR a profile 'handle' from sketch_get to target one exact region (the robust pick for a multi-profile / on-face sketch)."})
     .add_input_property("distance", {"type": "number",
             "description": "Extrude depth in 'units' (negative reverses direction)."})
     .add_input_property(*_inputs.UNITS.as_property())

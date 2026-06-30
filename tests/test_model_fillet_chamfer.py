@@ -30,6 +30,7 @@ class FakeBody:
     def __init__(self, name, convex_flags):
         self.name = name
         self.edges = FakeEdges(convex_flags)
+        self.isSolid = True          # BodyRef(kind='solid') checks this
 
 
 class FakeBodies:
@@ -112,8 +113,15 @@ def _install(bodies):
     # the handler builds onto the wrong fake -> cf.last stays None).
     fl.target_component = fl._common.target_component
     fl._design = fl._common.design
+    # BodyRef (the 'body_name' kind) resolves through the _inputs._common seam — patch it to the SAME
+    # design, else the body resolves against a stale/empty design (the documented dual-seam trap).
+    fl._inputs._common.design = lambda: design
+    fl._inputs._common.target_component = lambda _d=None: comp
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    # BodyRef(kind='solid') does isinstance(body, adsk.fusion.BRepBody) + checks isSolid — make the
+    # fake body pass the BRep type check.
+    adsk.fusion.BRepBody = FakeBody
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
 
     class FakeColl:
@@ -145,9 +153,10 @@ class TestGuards:
         assert res["isError"] is True and "positive" in res["message"]
 
     def test_body_not_found(self):
+        # BodyRef resolves the named body; an unknown name errors, naming the value + the handle path.
         _install([FakeBody("B", [True])])
         res = fl._fillet_handler(body_name="X", radius=1)
-        assert res["isError"] is True and "not found" in res["message"]
+        assert res["isError"] is True and "no body named 'X'" in res["message"]
 
     def test_bad_edge_filter(self):
         _install([FakeBody("B", [True])])

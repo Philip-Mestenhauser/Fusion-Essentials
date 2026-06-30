@@ -292,8 +292,7 @@ mesh_generate_face_groups_tool = (
                          "'MESH_FAILED_BREP — Use Generate Face Groups'. Run this first, then "
                          "mesh_to_brep(method='prismatic'). method='accurate' (default) is slower but "
                          "cleaner; 'fast' is quicker. In a PARAMETRIC design the feature runs inside a "
-                         "BaseFeature edit scope (handled for you); in DIRECT no scope is needed.\n\n"
-                         + _inputs.contract_block(_FG_SPEC))),
+                         "BaseFeature edit scope (handled for you); in DIRECT no scope is needed.")),
         _FG_SPEC)
     .strict_schema()
 )
@@ -310,8 +309,7 @@ mesh_plane_cut_tool = (
                 "(default) keeps one side; 'split_body' makes two separate mesh bodies; "
                 "'split_faces' cuts the triangulation in place. fill: none | minimal (default) | "
                 "uniform. flip keeps/cuts the OTHER side. In PARAMETRIC the cut runs inside a "
-                "BaseFeature scope (handled for you); DIRECT needs none.\n\n"
-                         + _inputs.contract_block(_CUT_SPEC))),
+                "BaseFeature scope (handled for you); DIRECT needs none.")),
         _CUT_SPEC)
     .add_input_property("flip", {"type": "boolean",
             "description": "Keep/cut the OTHER side of the plane (default false)."})

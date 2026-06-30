@@ -21,11 +21,9 @@ warn you.
 | Read | Tells you | Then branch to |
 |---|---|---|
 | `workspace_orient` | active document + where it lives, health (timeline/joints/refs), units, mode, the major pieces, whether CAM data exists, and **pointers** to the right narrow tool | the area its pointers flag |
-| `sys_get_session` | the thinner read: active document, **workspace**, **product type**, units, root name, occurrence count | the environment-specific read below |
 
 `workspace_orient` is the cold-boot read — one call that situates you and points at the right deep
-read, so you don't fish across tool families. Use `sys_get_session` when you only need the active
-document/workspace/units. Either way the active **workspace/product** decides which environment
+read, so you don't fish across tool families. The active **workspace/product** decides which environment
 you're in and therefore which deep read is meaningful — don't assume; a doc can hold Design + CAM +
 sim products at once.
 

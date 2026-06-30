@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 81  |  **Behaviors pinned:** 1648
+**Tools with a test file:** 92  |  **Behaviors pinned:** 1853
 
 ## `active_component`
 
@@ -143,8 +143,7 @@ after changing tests._
 **Ground**
 - lock to parent
 - unground from parent releases lock
-- does not touch the pin
-- isgrounded reported read only
+- only sets ground to parent
 - no grounded param is rejected by strict schema
 - substring match
 - missing occurrence errors
@@ -174,6 +173,27 @@ after changing tests._
 **MoveNote**
 - jointed move note differs from free move
 
+## `cam_create_operation`
+
+> Unit tests for ``cam_create_operation`` — apply a CAM milling operation.
+
+**Guards**
+- no cam
+- setup not found
+- bad strategy
+- tool ref out of range
+- missing tool ref
+**Create**
+- creates operation with tool
+- create then generate
+- default generates
+**DocumentToolScope**
+- creates op from document library
+- document index out of range
+- empty document library
+- document scope ignores url
+- no ref at all errors
+
 ## `cam_create_setup`
 
 > Unit tests for ``cam_create_setup.py`` — create a CAM (Manufacture) setup on a part.
@@ -197,6 +217,23 @@ after changing tests._
 - single body model count one
 - setup creation failure reported
 
+## `cam_delete`
+
+> Unit tests for ``cam_delete`` — delete any CAM entity (setup / operation / folder / pattern).
+
+**Guards**
+- no cam
+- requires entity
+- not found
+- ambiguous name
+**Delete**
+- delete operation
+- delete folder
+- delete nested pattern
+- delete op nested in folder
+- delete setup
+- deleteme false is error
+
 ## `cam_edit_operation`
 
 > Unit tests for ``cam_edit_operation.py`` — set CAM operation parameters (feeds/speeds/stepdown/...).
@@ -217,6 +254,45 @@ after changing tests._
 **FindOperation**
 - falls back to allOperations when operations missing
 - unknown operation lists available names
+
+## `cam_edit_setup`
+
+> Unit tests for ``cam_edit_setup`` — generalized editing of a CAM setup.
+
+**Guards**
+- no cam
+- setup not found
+- nothing to do
+- unknown parameter fails before applying
+- bad body ref
+**Parameters**
+- sets wcs and stock params
+- parameters accept string form
+**Bodies**
+- sets models
+- sets fixtures and stock
+- params and bodies together
+
+## `cam_folder`
+
+> Unit tests for ``cam_folder`` — interrogate / create / rename CAM folders + move operations in.
+
+**Guards**
+- no cam
+- unknown action
+- setup not found
+**List**
+- lists folders with contents
+**Create**
+- create folder
+- create requires name
+**Rename**
+- rename folder
+- rename unknown folder
+**Move**
+- move ops into folder
+- move unknown operation
+- move requires ops and folder
 
 ## `cam_generate`
 
@@ -286,6 +362,52 @@ after changing tests._
 - same ref in two roles deduped
 - non referenced occurrence skipped
 
+## `cam_reorder`
+
+> Unit tests for ``cam_reorder`` — reorder a CAM operation/folder/pattern before or after another.
+
+**Guards**
+- no cam
+- bad position
+- entity not found
+- reference not found
+- entity equals reference
+**Reorder**
+- move after
+- move before
+- reorder nested entity
+- move declined is error
+
+## `cam_select_geometry`
+
+> Unit tests for ``cam_select_geometry`` — set the machining geometry (and optional heights) on a CAM operation, then optionally regenerate.
+
+**Guards**
+- bad selection
+- no cam
+- op not found
+- handle resolve error propagates
+**CurveSelection**
+- chain applies and sets knobs
+- pocket uses pocket builder and ignores chain knobs
+- zero selections is error
+**Holes**
+- holes sets holefaces directly
+- diameter filter keeps in range
+- diameter filter empty is error
+- holes on nonhole op errors
+- holes on bore uses circularFaces
+- holes prefers holeFaces when both absent irrelevant
+**Heights**
+- sets mode and offset
+- heights set before selection
+- missing height param errors
+**Generate**
+- generate waits on future and reports valid
+- empty no warning gives zero depth hint
+- warning is surfaced
+- generate false skips
+
 ## `cam_set_nc_comment`
 
 > Unit tests for ``cam_set_nc_comment.handler`` — the empty-input guard and multi-program behaviour.
@@ -338,6 +460,45 @@ after changing tests._
 - missing operations list
 - setup not found lists available
 - missing operations named in error
+
+## `cam_tool_library`
+
+> Unit tests for ``cam_tool_library`` — read & manage CAM tool libraries + their tools.
+
+**Guards**
+- unknown action
+- unknown scope
+- target not found
+- where used requires document
+**List**
+- lists tools
+- list filters by tool type
+- list libraries when no library given
+**Add**
+- add multiple
+- add validates all refs before adding
+- add requires refs
+**AddRich**
+- create from type
+- create with description override and holder
+- create with presets
+- unknown from type errors before adding
+- entry needs type or ref
+**Remove**
+- remove multiple high to low
+- remove out of range
+**Edit**
+- edit parameters and persist document
+- edit unknown parameter before applying
+**WhereUsed**
+- where used lists operations
+**CreateLibrary**
+- create empty local
+- create with seeds
+- hub descends to team folder
+- refuses document scope
+- requires name
+- bad seed before import
 
 ## `common`
 
@@ -484,6 +645,43 @@ after changing tests._
 **Truncation**
 - whole project truncates at max files
 - recursive field always true for whole project
+
+## `design_configure`
+
+> Unit tests for ``design_configure`` — the WRITE counterpart to design_get_configurations.
+
+**Guards**
+- unknown action
+- no active design
+- column action requires configured design
+**Create**
+- create converts design
+- create is idempotent when already configured
+- create refuses unsaved document
+- create proceeds when saved
+**AddConfiguration**
+- add row
+- add row requires name
+**RenameConfiguration**
+- rename changes row name
+- rename unknown row errors
+- rename requires both names
+- rename to existing name errors
+**AddParameter**
+- param column and expressions by row name
+- missing parameter errors
+- value for unknown row is reported
+**SuppressVisibility**
+- suppress sets is suppressed
+- visibility sets is visible
+**AppearanceTheme**
+- appearance adds column before rows then links
+**AddInsert**
+- insert and map each config by name
+- unknown part errors
+- map to unknown part config errors
+- map to unknown assembly config errors
+- insert config defaults to first part row
 
 ## `design_delete_feature`
 
@@ -904,6 +1102,10 @@ after changing tests._
 - stale handle error
 - contract note names the required kind
 - schema includes contract note
+**IsHandle**
+- composite handle
+- long bare token
+- int and index selectors are not handles
 **SelfHealingHandle**
 - live token resolves via fast path
 - stale token recovers via locator
@@ -1094,6 +1296,7 @@ after changing tests._
 - revolute dispatches axis and echoes axis field
 - rigid has null axis field
 - ball has null axis field
+- ball uses valid pitch and yaw directions
 - offset scaled to cm on value input
 - offset inch scaling
 - angle converted to radians
@@ -1121,6 +1324,30 @@ after changing tests._
 - edge uses createByCurve
 - vertex uses createByPoint
 - bad geometry handle errors
+
+## `joint_drive`
+
+> Unit tests for ``joint_drive`` — the Drive Joints command (set a joint's value).
+
+**Guards**
+- no value given errors
+- unknown units
+- joint not found
+- rigid is refused
+- slider rejects angle
+- revolute rejects distance
+**RevoluteDrive**
+- angle set in radians
+- value read back in degrees
+- over limit warns
+**SliderDrive**
+- distance set in cm
+- distance read back in mm
+- inch distance
+- below min warns
+**CylindricalDrive**
+- drives both values
+- cylindrical angle only
 
 ## `joint_motion_link`
 
@@ -1467,6 +1694,25 @@ after changing tests._
 - unknown rotate axis errors
 - no active design errors
 
+## `model_create_holder`
+
+> Unit tests for ``model_create_holder.py`` + the pure half of ``_holder.py``.
+
+**BuildHolderData**
+- segment units cm to mm
+- multiple segments in order
+- metadata passthrough
+- guid and reference guid match
+- empty profile gives no segments
+**Handler**
+- happy path returns segments and json no library
+- name defaults to active document
+- no active design errors
+- axis not an axis errors
+- invalid end datum errors
+- empty profile errors
+- bad body handle errors
+
 ## `model_extrude`
 
 > Unit tests for ``extrude.py`` — turn a sketch profile into a solid.
@@ -1486,6 +1732,10 @@ after changing tests._
 - comma string
 - out of range in list reports
 - garbage string
+**ProfileHandle**
+- composite handle is a handle
+- long bare token is a handle
+- index selectors are not handles
 **MultiProfileExtrude**
 - all profiles extruded in one call
 - list of profiles
@@ -1542,6 +1792,35 @@ after changing tests._
 - fillet specific edges via handles
 - edges take precedence over body
 - bad edge handle errors
+
+## `model_hole`
+
+> Unit tests for ``model_hole`` — the real HoleFeatures building block (not a sketch+extrude-cut).
+
+**Guards**
+- unknown type
+- missing diameter
+- no points
+- counterbore requires its dims
+- through and depth conflict or missing
+**Simple**
+- simple blind
+- simple through uses positive direction
+- multiple points one feature
+**CounterboreCountersink**
+- counterbore passes three dims
+- countersink passes angle
+**Tapped**
+- tapped builds thread info and taps
+- unknown tap designation errors
+**ClearanceFastener**
+- clearance tags hole and sizes from table
+- fit changes diameter
+- fastener overrides explicit diameter
+- unknown fastener size errors
+- unknown fastener type errors
+- bad fit errors
+- counterbore with fastener keeps counterbore
 
 ## `model_measure_bbox`
 
@@ -1632,6 +1911,37 @@ after changing tests._
 **BodyOwningComponent**
 - circular builds on bodys parent component
 - rectangular builds on bodys parent component
+
+## `model_physical_properties`
+
+> Unit tests for ``model_physical_properties`` — mass/CoM/inertia/principal/gyration.
+
+**Guards**
+- unknown units
+- unknown accuracy
+- no active design
+- unresolvable target
+- no measurable solid
+**Scalars**
+- mass is kg regardless of units
+- volume scales by cube of length
+- area scales by square of length
+- center of mass scales by length
+- inches volume and com
+- density reported in kg per cm3
+**Inertia**
+- world inertia scaled by length squared
+- principal moments present and scaled
+- principal axes are unit vectors not scaled
+- radius of gyration scaled by length
+- rotation to principal is radians not scaled
+- failed inertia ok flag is skipped
+**Accuracy**
+- accuracy passed through and reported
+- accuracy used maps enum back to name
+**PerBody**
+- per occurrence breakdown
+- per body false omits breakdown
 
 ## `model_revolve`
 
@@ -1942,6 +2252,16 @@ after changing tests._
 **Guards**
 - missing sketch
 - no name lists available
+**Profiles**
+- emits per profile records with handles
+- sorted largest area first
+- handle is a composite self healing token
+- loop count distinguishes ring from region
+- empty when no profiles
+**ProgressiveDisclosure**
+- default omits the heavy entity xray
+- default points at the deeper level
+- include entities adds the xray
 
 ## `sketch_dimension`
 
@@ -2160,16 +2480,23 @@ after changing tests._
 - max results clamped and truncation flagged
 - max results never exceeds hard cap
 
-## `sys_get_session`
+## `sys_find_tool`
 
-> Unit tests for the ``sys_get_session.py`` MCP tool.
+> Unit tests for ``sys_find_tool`` — search the server's own tools + input-kinds by keyword.
 
-**Envelope**
-- result uses the common ok contract
-**ReadOnlyProbe**
-- reports active document and workspace
-- missing fields are none not errors
-- a raising property is swallowed
+**Guards**
+- empty query errors
+**ToolSearch**
+- matches name
+- matches description and inputs
+- name match outranks description only
+- summary is first sentence
+- no match reports
+**KindSearch**
+- profile query surfaces ProfileRef
+- body query surfaces BodyRef
+- include kinds false omits them
+- kinds note points to convention
 
 ## `sys_selection`
 
@@ -2348,18 +2675,6 @@ after changing tests._
 **ListClear**
 - list reports sections
 - clear removes all
-
-## `view_set_visibility`
-
-> Unit tests for ``visibility.py`` occurrence resolution + state read.
-
-**FindOccurrences**
-- exact match preferred over substring
-- substring fallback when no exact
-- matches on full path
-- no match returns empty
-**OccState**
-- snapshots all visibility flags
 
 ## `view_workspaces`
 

@@ -216,6 +216,23 @@ class TestProfileIndexResolution:
         assert idxs is None and "not an int" in err
 
 
+class TestProfileHandle:
+    """profile_index may carry a profile HANDLE (entityToken from sketch_get) — _looks_like_handle
+    routes it to ProfileRef instead of the index path. (The on-face disambiguation, done right.)"""
+
+    def test_composite_handle_is_a_handle(self):
+        assert ex._looks_like_handle("sometoken|@profile:0.4,0.2,0.0") is True
+
+    def test_long_bare_token_is_a_handle(self):
+        assert ex._looks_like_handle("/v4BAAAARlJLZXkAH4sIAAAA" + "x" * 40) is True
+
+    def test_index_selectors_are_not_handles(self):
+        assert ex._looks_like_handle(0) is False
+        assert ex._looks_like_handle("0,2,3") is False
+        assert ex._looks_like_handle("all") is False
+        assert ex._looks_like_handle([0, 1]) is False
+
+
 class TestMultiProfileExtrude:
     def test_all_profiles_extruded_in_one_call(self):
         _install([FakeSketch("S", profile_count=4)])

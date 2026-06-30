@@ -15,7 +15,7 @@ wireframe, and RESTORE the prior visual state when done.
                          iso-top-right/...) and/or 'focus' (fit to a named occurrence). Always
                          fits the view for reliable framing unless fit=false.
     isolate|show|hide|clear_isolation
-                      -> the same visibility verbs as view_set_visibility (show only / bulb on/off /
+                      -> visibility verbs (show only / bulb on/off /
                          un-isolate). 'target' is an occurrence name or full path.
     style             -> set the visual style: 'shaded' (default look) or 'wireframe'
                          (and the hidden/visible-edge variants).

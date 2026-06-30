@@ -492,8 +492,7 @@ mesh_export_tool = (
                 "'refinement' (high|medium|low) sets mesh density where the format supports it. Set "
                 "split_by_component=true to export EACH top-level occurrence to its own file (one per "
                 "part — what 3D printing wants) into the DIRECTORY 'file_path' ('target' ignored). "
-                "WRITES a file to disk (does NOT modify the design).\n\n"
-                + _inputs.contract_block(_EXPORT_SPEC))),
+                "WRITES a file to disk (does NOT modify the design).")),
         _EXPORT_SPEC)
     .add_input_property("file_path", {"type": "string",
             "description": "Local output path (a file; or a DIRECTORY when split_by_component=true). Extension appended if missing; directory created if needed."})
@@ -517,8 +516,7 @@ save_as_mesh_tool = (
                 "(default normal) — the tessellation level of detail. WRITES a MeshBody. In a "
                 "PARAMETRIC design the mesh write is wrapped in a BaseFeature edit scope automatically "
                 "(the API requires it); in DIRECT no scope is needed. The new mesh lands beside the "
-                "source body. Inspect/edit it with the mesh_* tools.\n\n"
-                + _inputs.contract_block(_SAVE_SPEC))),
+                "source body. Inspect/edit it with the mesh_* tools.")),
         _SAVE_SPEC)
     .add_input_property("name", {"type": "string",
             "description": "Optional name for the new mesh body."})

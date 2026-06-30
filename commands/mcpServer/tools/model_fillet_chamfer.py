@@ -33,30 +33,26 @@ from . import _inputs
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
                                     description="Specific edges to fillet/chamfer (overrides edge_filter).")
+# Body input: a find_geometry handle (precise) OR a name; resolved/kind-checked by BodyRef.
+_BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
+                        description="Body to fillet/chamfer ALL edges of (omit = most recent).")
 
 app = adsk.core.Application.get()
 
 
-def _resolve_body(comp, name):
-    name = (name or "").strip()
-    if not name:
-        # default: the only/most-recent body in the active component
+def _resolve_body(comp, body_name):
+    """Resolve the body to fillet/chamfer ALL edges of. A given value (a find_geometry handle OR a
+    name) resolves through BodyRef (kind-checked solid, with a precise error). Empty = the most-recent
+    body in the active component (the default). Returns (body, error)."""
+    if body_name in (None, "", []):
         bodies = safe(lambda: comp.bRepBodies)
         n = safe(lambda: bodies.count, 0) if bodies else 0
-        return bodies.item(n - 1) if n else None
-    b = safe(lambda: comp.bRepBodies.itemByName(name))
-    if b:
-        return b
-    root = safe(lambda: _common.design().rootComponent)
-    if root:
-        b = safe(lambda: root.bRepBodies.itemByName(name))
-        if b:
-            return b
-        for o in (safe(lambda: root.allOccurrences) or []):
-            b = safe(lambda o=o: o.bRepBodies.itemByName(name))
-            if b:
-                return b
-    return None
+        body = bodies.item(n - 1) if n else None
+        if not body:
+            return None, ("No body in the active component to fillet/chamfer. Model one first, or "
+                          "pass 'edges' = edge handles from find_geometry.")
+        return body, None
+    return _BODY.resolve(body_name)
 
 
 def _collect_edges(body, edge_filter):
@@ -121,11 +117,9 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         edge_src = f"{edges.count} handle(s)"
         body_label = safe(lambda: ents[0].body.name)
     else:
-        body = _resolve_body(comp, body_name)
-        if not body:
-            return error(f"Body '{body_name}' not found. Name a solid body in the active component "
-                          "(or omit to use the most recent), OR pass 'edges' = edge handles from "
-                          "find_geometry to fillet specific edges.")
+        body, berr = _resolve_body(comp, body_name)
+        if berr:
+            return error(berr)
         if (edge_filter or "all").strip().lower() not in ("all", "convex", "concave"):
             return error("edge_filter must be: all | convex | concave.")
         edges, total = _collect_edges(body, edge_filter)
@@ -175,21 +169,21 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 _FILLET_DESC = (
     "Round (fillet) edges with a constant radius — the deburr/edge-break every real part needs. "
     "TARGET the edges one of two ways: (a) 'edges' = a list of edge handles from find_geometry to "
-    "fillet SPECIFIC edges (the precise way); or (b) omit 'edges' and give 'body_name' (omit = most "
-    "recent body) to fillet ALL its edges, optionally narrowed by 'edge_filter' (convex/concave). "
-    "'radius' is in 'units' (mm default). 'edges' takes precedence."
+    "fillet SPECIFIC edges (the precise way); or (b) omit 'edges' and give 'body_name' (a body handle "
+    "or name; omit = most recent body) to fillet ALL its edges, optionally narrowed by 'edge_filter' "
+    "(convex/concave). 'radius' is in 'units' (mm default). 'edges' takes precedence."
 )
 _CHAMFER_DESC = (
 "Bevel (chamfer) edges with a constant distance — an angled edge break. TARGET via 'edges' = "
-"edge handles from find_geometry (specific edges), OR 'body_name' + optional 'edge_filter' "
-"(convex/concave) for all/filtered edges of a body. 'distance' is in 'units' (mm default). "
-"'edges' takes precedence."
+"edge handles from find_geometry (specific edges), OR 'body_name' (a body handle or name) + optional "
+"'edge_filter' (convex/concave) for all/filtered edges of a body. 'distance' is in 'units' (mm "
+"default). 'edges' takes precedence."
 )
 
 fillet_tool = (
     Tool.create_simple(name="model_fillet", description=_FILLET_DESC)
     .add_input_property("edges", _EDGES.schema())
-    .add_input_property("body_name", {"type": "string", "description": "Body to fillet ALL edges of (omit = most recent body). Ignored if 'edges' given."})
+    .add_input_property("body_name", _BODY.schema())
     .add_input_property("radius", {"type": "number", "description": "Fillet radius in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.Choice("edge_filter", ["all", "convex", "concave"], default="all",
@@ -201,7 +195,7 @@ fillet_item = Item.create_tool_item(tool=fillet_tool, write="write", handler=_fi
 chamfer_tool = (
     Tool.create_simple(name="model_chamfer", description=_CHAMFER_DESC)
     .add_input_property("edges", _EDGES.schema())
-    .add_input_property("body_name", {"type": "string", "description": "Body to chamfer ALL edges of (omit = most recent). Ignored if 'edges' given."})
+    .add_input_property("body_name", _BODY.schema())
     .add_input_property("distance", {"type": "number", "description": "Chamfer distance in 'units' (the first/only distance)."})
     .add_input_property("distance_two", {"type": "number", "description": "Second distance for an ASYMMETRIC two-distance chamfer (in 'units'); omit/0 = equal-distance."})
     .add_input_property(*_inputs.UNITS.as_property())

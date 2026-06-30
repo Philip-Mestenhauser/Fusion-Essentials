@@ -763,8 +763,7 @@ mesh_measure_tool = _inputs.apply_to_tool(
         name="mesh_measure",
         description=("Bounding box + triangle/vertex counts + watertight (is_closed) for ONE mesh "
                      "body — the mesh analogue of model_measure_bbox, which can't see meshes. reads. "
-                     "is_closed=false is the single most useful 3D-print/convert-readiness signal.\n\n"
-                     + _inputs.contract_block(_MEASURE_SPEC))),
+                     "is_closed=false is the single most useful 3D-print/convert-readiness signal.")),
     _MEASURE_SPEC).strict_schema()
 mesh_measure_item = Item.create_tool_item(tool=mesh_measure_tool, write="read", handler=mesh_measure_handler, run_on_main_thread=True)
 
@@ -795,8 +794,7 @@ mesh_reduce_tool = (
             description=("Decimate (reduce the triangle count of) a MESH body to a target proportion "
                          "(percent), face_count, or max_deviation. WRITES a MeshReduceFeature. Big "
                          "scans (millions of triangles) can exceed the 30s handler cap — the result "
-                         "notes when a fire-and-poll wrapper is advisable.\n\n"
-                         + _inputs.contract_block([_REDUCE_MESH, _REDUCE_TARGET, _REDUCE_METHOD, _REDUCE_UNITS]))),
+                         "notes when a fire-and-poll wrapper is advisable.")),
         _REDUCE_SPEC)
     .add_input_property("value", {"type": "number", "description": "Percent (0,100] for proportion; a positive integer for face_count; a positive length (in 'units') for max_deviation."})
     .add_required_input("value")
@@ -809,8 +807,7 @@ mesh_remesh_tool = (
         name="mesh_remesh",
         description=("Regenerate a cleaner, more uniform triangulation of a MESH body (repair / even "
                      "density). WRITES a MeshRemeshFeature. Big meshes can exceed the 30s cap — the "
-                     "result notes when fire-and-poll is advisable.\n\n"
-                     + _inputs.contract_block([_REMESH_MESH])))
+                     "result notes when fire-and-poll is advisable."))
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
     .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Field names vary by build; set best-effort."})
@@ -830,8 +827,7 @@ mesh_to_brep_tool = (
                          "heavy); 'organic' rebuilds smooth surfaces but REQUIRES the Product Design "
                          "Extension (refused with a clear message if absent — no silent fallback). "
                          "Pre-checks is_closed and REFUSES a non-watertight mesh (conversion almost "
-                         "always fails on open meshes).\n\n"
-                         + _inputs.contract_block(_CONVERT_SPEC))),
+                         "always fails on open meshes).")),
         _CONVERT_SPEC)
     .add_input_property("face_count", {"type": "integer", "description": "Organic + resolution=by_facet_number: target BRep face count."})
     .strict_schema()

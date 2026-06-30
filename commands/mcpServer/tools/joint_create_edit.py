@@ -398,8 +398,9 @@ def _apply_motion(ji, jtype, axis_idx, world_axis_entity=None):
                 return bool(ji.setAsPlanarJointMotion(ax, world_axis_entity)), None
             return bool(ji.setAsPlanarJointMotion(ax)), None
         if jtype == "ball":
-            # Ball needs a pitch + yaw direction; use the two axes other than nothing — default X pitch, Y yaw.
-            return bool(ji.setAsBallJointMotion(JD.XAxisJointDirection, JD.YAxisJointDirection)), None
+            # pitch MUST be Z, yaw MUST be X (not the intuitive X/Y) — the API rejects any other pair
+            # with "Invalid parameter pitchDirection". Enforced by test_ball_uses_valid_pitch_and_yaw_directions.
+            return bool(ji.setAsBallJointMotion(JD.ZAxisJointDirection, JD.XAxisJointDirection)), None
     except Exception as e:
         return False, str(e)
     return False, f"unsupported joint_type '{jtype}'"

@@ -24,6 +24,10 @@ tool author literally cannot take a bare coordinate where a face belongs — so 
 
 Resolution returns (value, error): on success error is None; on failure value is None and error is a
 ready-to-return message. Tools call `resolve_inputs(...)` to resolve all declared inputs at once.
+
+Typing an input is also what keeps a tool's exposed prose honest: if a description is explaining what
+an input's values MEAN or how it BEHAVES, that is a missing kind — convert the input so the schema
+carries the contract, rather than asserting it in prose nothing checks.
 """
 
 import adsk.core
@@ -31,6 +35,9 @@ import adsk.fusion
 
 from . import _common
 from ._common import UNIT_TO_CM
+
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = "the typed reference kinds — see the kinds table above; resolve_inputs/apply_to_tool"
 
 app = adsk.core.Application.get()
 
@@ -41,6 +48,12 @@ class InputKind:
     """One declared tool input: name + schema + how to resolve/validate it + its contract line."""
 
     json_type = "string"
+
+    # MAP_HINT: a single terse phrase — "what this kind references + the gotcha it avoids" — read by
+    # tests/gen_manifest.py to build the CLAUDE.md anti-drift map a tool-AUTHOR sees at session start.
+    # Lives ON the kind so it can't drift from it; a new kind with MAP_HINT="" shows up blank in the
+    # generated map, which is the signal to fill it in. NOT loaded into a runtime agent's context.
+    MAP_HINT = ""
 
     def __init__(self, name, description="", required=False, default=None):
         self.name = name
@@ -95,13 +108,15 @@ class GeometryHandle(InputKind):
     enforced at resolve time. Resolves the handle to the live BRep entity. Tokens are not guaranteed
     stable across separate find_geometry queries — use a handle promptly; re-find if it fails."""
 
+    MAP_HINT = "one face/edge/vertex by find_geometry handle (require=face/edge/…), not a coordinate"
+
     def __init__(self, name, require="any", **kw):
         super().__init__(name, **kw)
         self.require = require if require in _GEOMETRY_REQUIREMENTS else "any"
 
     def contract_note(self) -> str:
         label, _ = _GEOMETRY_REQUIREMENTS[self.require]
-        return f"A fresh find_geometry 'handle' at {label} (not a name/coordinate; re-find if stale)."
+        return f"A find_geometry 'handle' at {label}."
 
     def resolve(self, raw):
         h = (raw or "").strip() if isinstance(raw, str) else raw
@@ -134,14 +149,14 @@ class GeometryHandleList(GeometryHandle):
     GeometryHandle logic and returns the list of live entities. The 'fillet THESE edges' shape."""
 
     json_type = "array"
+    MAP_HINT = "several faces/edges by handles (fillet/drill THESE)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
         label, _ = _GEOMETRY_REQUIREMENTS[self.require]
-        return (f"A list of find_geometry 'handle's at {label} (JSON list or comma-separated; "
-                "not names/coordinates).")
+        return f"find_geometry 'handle's at {label} (JSON list or comma-separated)."
 
     def resolve(self, raw):
         if raw is None or raw == "" or raw == []:
@@ -180,6 +195,8 @@ class EdgeLoopRef(GeometryHandleList):
     Resolves to (ObjectCollection, meta) where meta carries {entities, body_count}. A single edge is
     allowed (Fusion auto-finds the connected loop). For closed=False every edge must come from the SAME
     body (a multi-body chain is rejected before any mutation runs)."""
+
+    MAP_HINT = "a closed/open edge-loop boundary from edge handles"
 
     def __init__(self, name, closed=True, **kw):
         super().__init__(name, require="edge", **kw)
@@ -263,6 +280,21 @@ def make_handle(entity, kind, position_cm):
         return token
     x, y, z = position_cm
     return f"{token}{_HANDLE_SEP}{kind}:{x:.6f},{y:.6f},{z:.6f}"
+
+
+def is_handle(v) -> bool:
+    """True if v looks like a find_geometry/sketch_get HANDLE (entityToken), not an int/index/name.
+    For an input that accepts EITHER a handle OR an index/keyword (e.g. profile_index): a composite
+    handle carries the '|@<kind>:' locator; a bare entityToken is a long non-numeric base64 string.
+    An int, a list, '0,2,3', 'all', or a short name are NOT handles."""
+    if not isinstance(v, str):
+        return False
+    s = v.strip()
+    if _HANDLE_SEP in s:
+        return True
+    if not s or s.lower() in ("all", "*"):
+        return False
+    return len(s) > 40 and not all(c.isdigit() or c in ", " for c in s)
 
 
 def _split_handle(s):
@@ -485,6 +517,8 @@ class BodyRef(InputKind):
     Shared by model_combine / model_mirror / model_measure_bbox so they each stop hand-rolling
     body-by-name and all gain handle + mesh support."""
 
+    MAP_HINT = "a body by handle (precise) or name; kind=solid/surface/mesh"
+
     def __init__(self, name, kind="any", **kw):
         super().__init__(name, **kw)
         self.kind = kind if kind in _BODY_KINDS else "any"
@@ -525,6 +559,7 @@ class BodyRefList(BodyRef):
     EVERY element BEFORE returning, so a wrong-kind body fails the call before any mutation runs."""
 
     json_type = "array"
+    MAP_HINT = "several bodies (handles or names)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
@@ -679,6 +714,8 @@ class PlaneRef(InputKind):
     view_section, ...) stop each hand-rolling 'origin-plane-or-name' and gain face/handle support for
     free. Resolves against the ACTIVE component's planes (so sub-component edits land correctly)."""
 
+    MAP_HINT = "a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle"
+
     def contract_note(self) -> str:
         return ("A plane: an origin alias (xy/xz/yz or top/front/right), a construction-plane NAME, "
                 "or a planar-face/plane 'handle' from find_geometry (for an arbitrary/angled plane).")
@@ -729,6 +766,8 @@ class AxisRef(InputKind):
     ('world', (vx,vy,vz)) for a world axis, or ('edge', BRepEdge) for an edge. Lets construction
     axes / patterns / joints define their axis from real geometry, not just world directions."""
 
+    MAP_HINT = "a direction: world x/y/z OR a straight-edge handle"
+
     def contract_note(self) -> str:
         return ("A world axis x/y/z, OR a 'handle' from find_geometry pointing at a straight edge "
                 "(the axis runs along the edge).")
@@ -773,6 +812,7 @@ class Distance(InputKind):
     input is declared separately (UnitField); resolve() is given the already-chosen scale factor."""
 
     json_type = "number"
+    MAP_HINT = "a length in display units (pair with one UnitField)"
 
     def __init__(self, name, allow_zero=False, allow_negative=True, **kw):
         super().__init__(name, **kw)
@@ -812,6 +852,7 @@ class UnitField(InputKind):
     their own `_common.scale()` call on the raw string."""
 
     _UNITS = ["mm", "cm", "in"]
+    MAP_HINT = "the 'units' selector (mm/cm/in enum) for a Distance"
 
     def __init__(self, name="units", **kw):
         super().__init__(name, default="mm", **kw)
@@ -837,6 +878,8 @@ class Choice(InputKind):
     """One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are
     machine-validated and carried by the SCHEMA — the description does NOT re-list them (that prose
     duplicated the enum and drifted out of sync with the options, the bug this kind closes)."""
+
+    MAP_HINT = "one of a fixed set → JSON enum"
 
     def __init__(self, name, options, **kw):
         super().__init__(name, **kw)
@@ -864,6 +907,8 @@ class Choice(InputKind):
 class NameRef(InputKind):
     """A by-name reference (occurrence/component/body/sketch). Resolution is left to the tool (it
     knows which collection), but the kind documents that a name is expected + how to discover it."""
+
+    MAP_HINT = "a plain by-name ref; prefer a handle/fullPathName kind if one exists"
 
     def __init__(self, name, of="entity", discover_with="", **kw):
         super().__init__(name, **kw)
@@ -932,6 +977,8 @@ class OccurrenceRef(InputKind):
     matches several instances rather than silently grabbing the first). Resolves to the live
     adsk.fusion.Occurrence."""
 
+    MAP_HINT = "an assembly occurrence by fullPathName (refuses ambiguous names)"
+
     def contract_note(self) -> str:
         return ("An occurrence's fullPathName (unambiguous, from design_get_tree) or its name "
                 "(a name that matches several instances is rejected, not guessed).")
@@ -950,6 +997,7 @@ class OccurrenceRefList(InputKind):
     fails the whole list, with its value named, so a tool never half-applies)."""
 
     json_type = "array"
+    MAP_HINT = "several occurrences (fullPathNames/names)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
@@ -1050,6 +1098,8 @@ class ProfileRef(InputKind):
     kept for back-compat). Resolves handle-first to the live adsk.fusion.Profile. Replaces the fragile
     sketch_name+profile_index pattern for loft/extrude."""
 
+    MAP_HINT = "a sketch profile by stable handle, not sketch_name+profile_index"
+
     def contract_note(self) -> str:
         return ("A profile — a stable 'handle' (entityToken; prefer this, it survives rebuilds) OR a "
                 "legacy {sketch, profile_index} selector (a blind, order-unstable index).")
@@ -1068,6 +1118,7 @@ class ProfileRefList(ProfileRef):
     a handle or a {sketch, profile_index} selector, resolved via the single ProfileRef logic."""
 
     json_type = "array"
+    MAP_HINT = "an ORDERED list of profiles (loft — order is load-bearing)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}

@@ -159,7 +159,7 @@ def handler(file_id: str = "", is_cam_template: bool = False,
         "note": "This is declared a multi-reference CAM template. Opening it (or even resolving "
         "its references) via the API crashes Fusion, so the API open is refused. Open "
         "it MANUALLY in the Fusion UI (Data Panel → the document), then confirm with "
-        "sys_get_session before continuing. This is the only stable path for these docs.",
+        "workspace_orient before continuing. This is the only stable path for these docs.",
         })
 
     # DECLARE-INTENT default: with no intent declared, REFUSE rather than silently take the API path.
@@ -213,7 +213,7 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     # stall the load AND freeze the UI. Report status honestly and tell the agent how to confirm.
     if info["is_active"] is False:
         info["note"] = (
-        "Document is still loading (open is asynchronous). Call sys_get_session after a "
+        "Document is still loading (open is asynchronous). Call workspace_orient after a "
         "moment to confirm it has become the active document before operating on it."
         )
 
@@ -224,7 +224,7 @@ TOOL_DESCRIPTION = (
     "Open a Fusion document by data-model id. 'file_id' = a lineage id (latest version), a versionId "
     "(that version), a fusionWebURL/source_url (decoded automatically), or a source_id from "
     "design_get_tree / cam_get_references. Switches the active document; handles configured designs. "
-    "Async — call sys_get_session afterward to confirm it's active. REQUIRED declare-intent flag (a "
+    "Async — call workspace_orient afterward to confirm it's active. REQUIRED declare-intent flag (a "
     "missing one has crashed Fusion): pass force_api_open=true for a NORMAL document, OR "
     "is_cam_template=true for a multi-reference CAM/Manufacture template (which the tool then REFUSES "
     "to API-open — open those in the Fusion UI, the only stable path). With neither flag it refuses "

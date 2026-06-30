@@ -25,6 +25,9 @@ import json
 import adsk.core
 import adsk.fusion
 
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch, scale — the response+resolve substrate"
+
 app = adsk.core.Application.get()
 
 

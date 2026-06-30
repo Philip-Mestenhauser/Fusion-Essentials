@@ -44,6 +44,9 @@ _OPERATIONS = {
 "intersect": "IntersectFeatureOperation",
 }
 
+# profile_index may carry a profile HANDLE (entityToken from sketch_get) — resolved via ProfileRef.
+_PROFILE = _inputs.ProfileRef("profile_index")
+
 # Axis keyword -> the active component's origin construction axis attribute.
 _AXES = {
 "x": "xConstructionAxis",
@@ -80,7 +83,7 @@ def _resolve_axis(comp, sketch, axis):
     return None, None
 
 
-def handler(sketch_name: str = "", profile_index: int = 0, axis: str = "z",
+def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             angle_deg: float = 360.0, operation: str = "new", symmetric: bool = False,
             second_angle_deg: float = 0.0) -> dict:
     """Revolve a sketch profile about an axis into a solid.
@@ -115,15 +118,23 @@ def handler(sketch_name: str = "", profile_index: int = 0, axis: str = "z",
 
     profiles = safe(lambda: sketch.profiles)
     pcount = safe(lambda: profiles.count, 0) if profiles else 0
-    if pcount == 0:
-        return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to revolve.")
-    try:
-        idx = int(profile_index)
-    except Exception:
-        idx = 0
-    if idx < 0 or idx >= pcount:
-        return error(f"profile_index {idx} out of range — sketch has {pcount} profile(s).")
-    profile = profiles.item(idx)
+    # HANDLE path: a profile entityToken from sketch_get (a ProfileRef) targets the exact region —
+    # the robust pick on a multi-profile / on-face sketch, where a blind index is ambiguous.
+    if _inputs.is_handle(profile_index):
+        profile, perr = _PROFILE.resolve(profile_index)
+        if perr:
+            return error(perr)
+        idx = "handle"
+    else:
+        if pcount == 0:
+            return error(f"Sketch '{safe(lambda: sketch.name)}' has no closed profile to revolve.")
+        try:
+            idx = int(profile_index)
+        except Exception:
+            idx = 0
+        if idx < 0 or idx >= pcount:
+            return error(f"profile_index {idx} out of range — sketch has {pcount} profile(s).")
+        profile = profiles.item(idx)
 
     axis_entity, axis_label = _resolve_axis(comp, sketch, axis)
     if not axis_entity:
@@ -182,7 +193,8 @@ def handler(sketch_name: str = "", profile_index: int = 0, axis: str = "z",
 TOOL_DESCRIPTION = (
 "Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part: shaft, "
 "piston, pulley, bottle). The companion to model_extrude. 'sketch_name' selects the sketch "
-"(omit = most recent); 'profile_index' picks the closed region (0-based). 'axis' is x | y | z "
+"(omit = most recent); 'profile_index' picks the region (0-based index, OR a profile 'handle' from "
+"sketch_get to target one region of a multi-profile sketch). 'axis' is x | y | z "
 "(the component origin axis) OR 'line:<index>' to revolve about a straight line you drew in the "
 "sketch. 'angle_deg' is the sweep (360 = full revolve). 'operation': new | join | cut | "
 "intersect. 'symmetric' splits the angle both ways about the profile plane. WRITES; returns the "
@@ -193,8 +205,8 @@ revolve_tool = (
     Tool.create_simple(name="model_revolve", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
-    .add_input_property("profile_index", {"type": "integer",
-            "description": "Which closed profile to revolve (0-based, default 0)."})
+    .add_input_property("profile_index", {"type": ["integer", "string"],
+            "description": "Which region to revolve: a 0-based index (default 0), OR a profile 'handle' from sketch_get (targets one region of a multi-profile sketch)."})
     .add_input_property("axis", {"type": "string",
             "description": "x | y | z (component origin axis) or 'line:<index>' (a straight sketch line). Default z."})
     .add_input_property("angle_deg", {"type": "number",

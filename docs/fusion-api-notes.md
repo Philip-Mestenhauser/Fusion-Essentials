@@ -82,11 +82,121 @@ as **external references**. Therefore:
   subclasses). `cam_compare_operations` diffs two ops' parameters and reports EXACT expressions
   (including float jitter like `38.10000000000001`) on purpose — do not round/filter; let the
   agent reason about precision.
+- **Operation geometry selections** (how an op gets its faces/edges/contours to machine — verified
+  live on the block AND by dissecting two pro sample docs, "Pier 9 Logo" + "Probing Strategies").
+  There are **two distinct selection mechanisms** plus a geometry-driven height pattern:
+  - **(A) Curve selections — the CHAIN family**, for milling boundaries: 2D contour `contours`,
+    2D pocket `pockets`/`stockContours`, 3D adaptive/parallel **`machiningBoundarySel`** — all are
+    `CadContours2dParameterValue`. Flow: `param.value.getCurveSelections()` (→ `CurveSelections`) →
+    `cs.clear()` → `cs.createNew*Selection()` → set `sel.inputGeometry = [edges/curves]` →
+    `param.value.applyCurveSelections(cs)`. Builders: `createNewChainSelection` (the workhorse —
+    seed one or more **BRepEdge OR SketchLine**, Fusion walks the connected chain → `outputGeometry`
+    = ONE `Curve3DPath`), `createNewPocketSelection` (seed the pocket-FLOOR BRepFace),
+    `createNewFaceContourSelection`, `createNewSilhouetteSelection`, `createNewSketchSelection`,
+    `createNewPocketRecognitionSelection`. `ChainSelection` knobs the pros actually use:
+    **`isOpen`** (True for open finish profiles that follow a face edge, False for closed
+    boundaries), `isReverted` (flip the tool side / climb-vs-conventional), `startExtensionLength`/
+    `endExtensionLength`/`extensionType`. Pros feed BRepEdges (dozens at once is fine — they coalesce
+    to 1 path) and SketchLines interchangeably.
+  - **(B) Direct OBJECT-LIST**, for drill `holeFaces`, probe `probe_selection`, and height
+    references — a `CadObjectParameterValue`. Set `param.value.value = [BRepFace / BRepEdge /
+    BRepVertex / SketchPoint, ...]` directly (it's a `BaseVector`). Drill selects cylinder faces this
+    way; **diameter-range selection = just FILTER the cylinder faces by `face.geometry.radius`
+    (cm; *20 for mm-Ø) before assigning** — no extension needed. (`RecognizedHole.recognizeHoles`
+    auto-recognition exists but **requires the paid Manufacturing Extension** and wants a *list* of
+    bodies, `recognizeHoles([body])`; the face+radius filter is the license-free equivalent.)
+  - **HEIGHTS are a 4-part group** per height (`clearance`/`retract`/`feed`/`top`/`bottom`):
+    `<name>_mode` (the *from* reference: `'from stock top'`/`'from hole top'`/`'from hole bottom'`/
+    `'from contour'`/`'from point'`/…), `<name>_offset` (delta — SET THIS), `<name>_value`
+    (resolved result — READ-ONLY, never set), `<name>_ref` (a `CadObjectParameterValue` for
+    reference geometry). **Set heights via `_mode` + `_offset` (+ `_ref` for `'from point'`); never
+    `_value`.** DRILL needs no manual depth — it defaults `topHeight_mode='from hole top'` /
+    `bottomHeight_mode='from hole bottom'`, reading each hole's depth from geometry. A 2D CONTOUR
+    defaults BOTH top & bottom to the same Z → **zero depth, valid-but-empty toolpath with NO
+    warning/error**; fix by setting `bottomHeight_mode` + `_offset` (the pros set
+    `_mode='from point'`, `_ref=[a BRepVertex / SketchPoint]`, `_offset=<depth>` — height driven by
+    selected geometry, e.g. contour bottom = `from point`, ref=SketchPoint, offset=`-0.1in`).
+    Set a `_mode` via `param.expression = '<unquoted choice expr>'` (NOT `param.value.value =
+    '<display name>'`, which throws). The valid choices come from `ChoiceParameterValue.getChoices()`
+    → `(True, (display names…), (expr strings…))`; pass the EXPR string without its surrounding quotes
+    (`'from stock top'` → set `from stock top`). **A `_mode`'s valid set is CONTEXT-DEPENDENT and
+    ORDER-SENSITIVE** — applying a geometry selection can transiently invalidate a mode that was legal
+    in the op's settled state (live: setting `bottomHeight_mode` AFTER re-applying the chain threw
+    "Invalid enumeration value", but BEFORE it succeeded). So set heights BEFORE the selection.
+    `_offset` is robust and order-independent; prefer offset-only when the default mode is acceptable.
+  - **Generation is ASYNC — gate on the FUTURE, not the op flag.** `cam.generateToolpath(op)` →
+    `GenerateToolpathFuture`. Poll **`future.isGenerationCompleted`** (pumping `adsk.doEvents()`),
+    NOT `op.isGenerating` — the latter clears before the toolpath is actually done, so reading
+    `op.hasToolpath`/`isToolpathValid` too early gives a FALSE empty/invalid. (`cam_generate` +
+    `cam_get_status` already pump correctly; this only bites direct `generateToolpath` callers.)
 - **NC programs:** `CAM.ncPrograms` → `NCProgram(.name, .operations, .machine,
   .postConfiguration.description, .postParameters)`. The UI's Name/Number/Comment/Output-folder
   fields are NOT exposed as readable post parameters — `postParameters` only holds post
   *options* (e.g. `metric`, probing/format settings). Report the actual post parameters rather
   than fabricating those fields.
+- **Tool libraries (shared, no open CAM job needed):** `adsk.cam.CAMManager.get().libraryManager
+  .toolLibraries` → `ToolLibraries`. `urlByLocation(LibraryLocations.Fusion360LibraryLocation /
+  LocalLibraryLocation / CloudLibraryLocation / HubLibraryLocation)` → root URL;
+  `childAssetURLs(url)` → libraries directly UNDER url; **`childFolderURLs(url)` → sub-folders**.
+  Fusion360/Local have libraries right at the root, but **Cloud/Hub libraries are NESTED in folders**
+  (Hub root has no direct assets — its libraries sit under a hub-name folder, e.g.
+  `hub://Mechio/Haas Vf2.hub`), so you must RECURSE (list assets + descend folders) or Hub/Cloud come
+  back empty. `urlByLocation` resolves all locations (`cloud://`, `hub://Mechio`); `toolLibraryAtURL(url)`
+  → `ToolLibrary(.count, .item(i) -> Tool)`. A `Tool` has
+  `.parameters.itemByName('tool_type' / 'tool_diameter' / 'tool_numberOfFlutes' / 'tool_description'
+  / 'tool_unit' / ...).value.value` (182 params) plus `.presets`, `.toJson()`. Diameters come back in
+  the cm scale → *10 for mm (a 12mm endmill reads 1.2). The stable tool REFERENCE for downstream use is
+  `(library_url, index)` — what `cam_tool_library` (list action) returns and `cam_create_operation` consumes.
+- **Creating a tool library** (cam_tool_library, action=create_library): `ToolLibrary.createEmpty()` (or
+  `createFromJson(json)`) → `.add(tool)` to seed → `ToolLibraries.importToolLibrary(lib, destinationUrl,
+  name)` → URL of the new persisted library (numeric suffix if the name exists; throws on a read-only
+  destination). **Verified live: Local + Cloud work** (write `…/Name.json`). **Hub does NOT** — import at
+  `hub://` fails ("Neither the folder nor its parent exists"); even into the team folder `hub://Mechio`
+  (which holds `Holders.hub` / `Haas Vf2.hub`) it raises "Tool library import failed" — Hub team libraries
+  use a `.hub` format / different write path the API won't satisfy here (create those in the UI). The
+  import raises a HARD error that propagates past a try/except in a spike script — wrap it in the tool.
+  Fusion360 samples are read-only (refuse). To create at Hub you must target its child folder, not
+  `hub://`. (A Hub library MADE IN THE UI can then be populated via updateToolLibrary — only the *create*
+  is UI-only.)
+- **Build a tool / preset / holder** (the cam_tool_library demo): a `Tool` round-trips as JSON —
+  `tool.toJson()` / `Tool.createFromJson(json)`. Top-level keys: `type`, `description`, `geometry`,
+  `holder`, `start-values`, `presets`, `guid`, vendor info. To MAKE a tool of a given geometry type,
+  clone a sample tool's JSON of that type and change `description` (don't hand-author the schema). The
+  21 distinct sample geometry types: flat/ball/bull-nose/face/form/radius/slot/lollipop/dovetail/tapered/
+  chamfer mills, drill, spot drill, counter bore, counter sink, reamer, tap, thread mill, laser/plasma/
+  waterjet. PRESETS: `tool.presets.add()` clones the tool's values into a new `ToolPreset`; set its
+  `.parameters.itemByName('tool_spindleSpeed'/...).expression`. HOLDER: it's the `holder` sub-dict in the
+  JSON (a Holders-library item IS a holder doc: `{type:'holder', segments:[...], gaugeLength, ...}`) —
+  ASSIGN one by setting `toolJson['holder'] = holderJson` before createFromJson.
+- **Persisting library writes** (`ToolLibrary.add`/`remove` then `ToolLibraries.updateToolLibrary(url,
+  lib)`): works on Local/Cloud/Hub; `updateToolLibrary` returning True is NOT proof — re-read fresh from
+  the url to confirm. GOTCHA: writing to a library that is OPEN in the Manufacture UI contends with the
+  UI lock and STALLS the script (looks like a timeout) though the write still lands — close the library
+  tab before bulk writes. Hub reads/writes are network-backed and slow; read one Hub library at a time
+  (reading all at once can time out).
+- **Create an operation (proven live end-to-end):** `Setup.operations.compatibleStrategies` → list of
+  `OperationStrategy`; each `.name` is the strategy STRING (`face`, `adaptive`, `pocket2d`, `drill`,
+  `bore`, `contour2d`, ... 53 for a milling setup). Then `Setup.operations.createInput(strategyName)`
+  → `OperationInput`; set `opin.tool = <Tool from a ToolLibrary>` (writes the tool params);
+  `Setup.operations.add(opin)` → `Operation`; `CAM.generateToolpath(op)` → `GenerateToolpathFuture`
+  (async) and the op then reports `.hasToolpath` / `.isToolpathValid`. The CAM product only exists once
+  the doc has CAM data — switch to Manufacture once (or use cam_create_setup) to materialise it.
+- **Setup is broadly editable** (cam_edit_setup): `Setup.parameters` (~287 CAMParameters) is the lever
+  for almost everything — the WCS is steered via `wcs_orientation_mode` / `wcs_origin_mode` /
+  `wcs_origin_boxPoint` / `wcs_orientation_axisZ/X/Y` + `flipZ/X/Y` (the `Setup.workCoordinateSystem`
+  Matrix3D itself is READ-ONLY), and stock via `stockXLow/High` / `stockZHigh` / ... `Setup.models` /
+  `.fixtures` / `.stockSolids` are get/SET ObjectCollections of Occurrence/BRepBody/MeshBody (empty
+  collection clears). All verified live.
+- **Folders & patterns** (cam_folder): `Setup.folders` (CAMFolders) `.addFolder(name)` → `CAMFolder`
+  (`.name` get/set, `.operations`/`.patterns`/`.folders`, `.deleteMe()`). Move any item with
+  `OperationBase.moveInto(container)` (works into setups/folders/patterns) / `moveAfter` / `moveBefore`.
+  **PATTERNS (mirror/linear/rotary) CANNOT be created via the API** — `createInput('pattern')` returns
+  an input but `operations.add()` raises "Strategy is not exposed to the API" (and there's no
+  mirror/linear/rotary strategy, no `CAMPatterns.add`). They CAN be read + their `.parameters` edited
+  (a `CAMPattern` has `.parameters` like an operation). Create patterns in the Manufacture UI.
+- **CAM delete** (cam_delete): `design_delete_feature`/`_occurrence` only touch the DESIGN timeline —
+  CAM entities live in `cam.setups`, not the timeline. Setup/Operation/CAMFolder/CAMPattern each have
+  `.deleteMe()` (verified live on an operation + folder). Honour the false-return (Fusion can decline).
 
 ## Toolpath templates
 
@@ -164,6 +274,92 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
   report those names BEFORE the delete so the loss is visible, and re-check timeline health after (a
   downstream feature may have referenced the removed geometry).
 
+## Holes (`model_hole` / HoleFeatures)
+
+Use the real `HoleFeatures`, not a sketch circle + extrude-cut — the hole then reads as a Hole in the
+timeline and carries hole/thread metadata (what fastener/CAM tooling recognises).
+
+- **Three input builders** on `component.features.holeFeatures`: `createSimpleInput(dia)`,
+  `createCounterboreInput(dia, cbDia, cbDepth)`, `createCountersinkInput(dia, csDia, csAngle)`.
+- **Placement** (on the returned `HoleFeatureInput`): `setPositionBySketchPoint(sketchPoint)` or
+  `setPositionBySketchPoints(ObjectCollection of co-planar points)`. The reliable path is to add a
+  sketch on the target face and create the points there. `setPositionByPoint(face, Point3D)` is
+  finicky — a bare Point3D often fails the hole's `logicalSelection`; prefer sketch points.
+- **Extent**: `setDistanceExtent(value)` for blind; `setAllExtent(direction)` for through. **Through
+  MUST use `ExtentDirections.PositiveExtentDirection`** — `NegativeExtentDirection` fails with
+  `InternalValidationError : logicalSelection` (the hole's natural direction is already INTO the body,
+  so positive is the through direction). This one cost real debugging.
+- **Tapped holes**: `tf = component.features.threadFeatures` (it's on `Features`, NOT `Design`);
+  `ti = tf.createThreadInfo(isInternal, threadType, threadDesignation, threadClass)` then
+  `holeInput.setToTappedHole(ti)`. The SIZE is embedded in the designation ("M5x0.8") — it is NOT a
+  separate argument to `createThreadInfo`. Query the library via `tf.threadDataQuery`
+  (`allThreadTypes` -> `allSizes(type)` -> `allDesignations(type, size)` -> `allClasses(internal,
+  type, designation)`). `holeInput.isModeled=False` keeps the thread cosmetic.
+- **`holeFeatures.add(input)` RAISES on an inconsistent input, and a raised exception ABORTS the whole
+  `sys_execute_script` transaction** (rolling back everything in that run). Validate inputs and resolve
+  the ThreadInfo BEFORE calling `add`. Also: a partial/aborted run can leave the doc bodyless — start
+  spikes from a clean `doc_new`.
+- **Fastener-library bridge (future):** a tapped hole's thread is configurable via
+  `ConfigurationColumns.addThreadTypeColumns(holeFeature, ConfigurationThreadColumns....)` /
+  `addFeatureAspectColumn(holeFeature, ThreadDesignationFeatureAspectType, ...)` — i.e. thread
+  type/size/designation/class can each become a configuration column. This is the hook for
+  encoded-hole / fastener-driven configurations.
+
+### Fasteners & clearance holes (live-verified findings)
+
+- **Fastener-BODY insertion is SEMI-automatable (not headless).** The Fastener command is a real,
+  triggerable command definition: `ui.commandDefinitions.itemById('FusionFastenersCommand')` (name
+  "Insert Fastener"; also `FastenersInsertSimilar`, `InsertMcMasterCarrComponentCommand`).
+  `cmd.execute()` returns immediately and OPENS THE MODAL DIALOG — it does NOT block, expose
+  commandInputs, or let you set the screw/click OK (the Autodesk Standard Components add-in is closed).
+  So you CANNOT complete it headless. BUT you CAN pre-stage it: select the **counterbore CYLINDER
+  FACES** (the hole signature — bore axis/dia/depth; a raw rim EDGE gives ambiguous input and the
+  command may not recognise it) via `ui.activeSelections`, then `execute()` → the dialog opens
+  pre-populated and the user only picks the fastener + OK. The command snaps the screw onto each
+  axis/face and adds a fastener feature. (Confirmed live: placed a 'Cheese Head Screw ISO 7048 - M6 x
+  20' — one per accepted face.) Building block = a "select-holes-and-launch" helper, not a full inserter.
+- **A Fastener OBJECT ≠ a screw-shaped component.** The dynamic, resizable Fastener (in the Fasteners
+  browser folder, `FastenerOccurrenceDefinition` + `updateSize` + its locating joint) is created ONLY
+  by the Fasteners command — its "fastener-ness" lives in a fastener FEATURE the command authors, not
+  in the geometry. So `occurrences.addByInsert(libraryDataFile, t, isReferenced=False)` /
+  `addExistingComponent` only ever clone a DUMB STATIC model of the screw (generic OccurrenceDefinition,
+  no updateSize, no joint) — NOT a real fastener. There is no API to construct a FastenerOccurrenceDefinition.
+- **Headless library hack (PARTIAL — initialize + lookup proven, commit blocked).** The fastener
+  library is the `MSFWmdComponentLibraryVM`, normally only live inside the modal command. You CAN bring
+  it up headless: `app.executeTextCommand('Commands.Start MSFWmdComponentLibraryCmd')` makes it the
+  active command, and then `MSFWmdComponentSources.AddSource <library-fastener-urn>` STAGES the source
+  and returns OK (the exact call that fails "test object cannot be found: MSFWmdComponentLibraryVM" when
+  the command isn't live). The library DataFiles are browsable via `app.data.findFolderById('urn:...
+  fs.folder:<id>')` → Fasteners → Bolts and Screws → <standard> → DataFile (only types ALREADY
+  materialised by the dialog appear). BLOCKED at COMMIT: instancing a staged source needs
+  `MSFWmdCompManagerCmd.AddCompInstances <component path> <qty>` or `MSFWmdComponentSources.SetSelection
+  <onk1>@<onk2>` — but the VM exposes NO read command to enumerate the staged sources' onk/path keys,
+  raw URNs break the text-cmd parser (':' is a command separator), the text-cmd "pipe to file" doesn't
+  write via executeTextCommand, and GUESSING AddCompInstances paths / starting the heavier
+  `MSFWmdCompManagerCmd` CRASHED Fusion (twice). Next: get the onk format from Autodesk-internal docs on
+  the WMD/Standard-Content commands, then AddSource+SetSelection+commit could be fully headless. Do any
+  WMD probing on a THROWAWAY doc_new (crash-prone).
+  `FastenerOccurrenceDefinition` (vs the generic `OccurrenceDefinition` for normal occs) with
+  `isSizeUpToDate` + `updateSize()` (auto-resizes a placed fastener to its hole — check isSizeUpToDate
+  first; updateSize isn't a no-op) + `parentOccurrence`. `Component.isLibraryItem` flags library comps.
+  A `fastener_sync` building block (find FastenerOccurrenceDefinitions, updateSize the stale ones) IS buildable.
+- **Stray add-in note:** the bundled `colorHoles` command's `active_selection_changed` handler throws
+  `NoneType has no attribute 'parent'` on programmatic `activeSelections` changes — harmless noise in
+  script output (the selection still takes), but a real bug in that command worth fixing separately.
+- **Clearance holes are HALF-wired.** `HoleFeatureInput.setToClearanceHole(ClearanceHoleInfo)` exists
+  (parallel to setToTappedHole) and TAGS the hole with a fastener spec — `ClearanceHoleInfo.create(
+  standard, fastenerType, size, fit)`, validated against the live catalog via
+  `ClearanceHoleDataQuery.create()` → `allStandards` / `allFastenerTypes(std)` / `allSizes(std,type)`.
+  BUT on this version it returns True WITHOUT resizing the geometry, and NEITHER ClearanceHoleInfo NOR
+  the data query exposes the resolved DIAMETER. So `model_hole`'s `fastener=` does BOTH: tags via
+  setToClearanceHole AND sets the bore from a built-in ISO-273 clearance table (`_CLEARANCE_MM`,
+  close/normal/loose). `ConfigurationColumns.addClearanceTypeColumns` config-drives the clearance.
+- **Stale face after each hole:** drilling a hole recomputes the body, invalidating a cached BRepFace
+  reference — re-find the placement face for EACH hole when drilling several in a loop.
+- **Spike in a throwaway doc_new, never the saved working doc** — a partial spike leaves scratch
+  bodies/features in the timeline (learned the hard way: had to excise a ClearScratch block from the
+  saved part).
+
 ## Mesh bodies
 
 - **A parametric mesh write must run inside a base-feature scope.** `MeshBodies.add` /
@@ -223,6 +419,55 @@ Open them with `openUsingContext`, NOT `open`.
   useful for round-trip testing without persisting anything.
 - `sys_execute_script` wraps the script in a transaction that ABORTS on any raised exception
   (rolling back file writes too); write diagnostics before the risky call.
+
+### Building a configured design (`design_configure`)
+
+The write side. All live-verified on a parametric bracket.
+
+- **`Design.createConfiguredDesign()`** converts the active design and returns a
+  `ConfigurationTopTable` with ONE row and NO columns. It works on an unsaved design (the in-memory
+  `Design.isConfiguredDesign` flips True), but see the save+reopen rule below — that alone does not
+  give the user a configured design.
+- **Save + reopen is the real instantiation.** The conversion materializes for the user in three
+  steps: (1) `createConfiguredDesign()` builds the table in memory; (2) **saving** commits it —
+  `DataFile.isConfiguredDesign` flips True only AFTER the save; (3) **reopening** the document makes
+  the UI rebuild and show the Configurations dropdown. An already-open document will NOT retrofit the
+  dropdown — Fusion builds that toolbar at open time. So `design_configure(create)` requires a saved
+  doc and its note tells the caller to save+reopen. (Right after `saveAs`, the cloud lineage lags:
+  `doc.dataFile` may raise `can't fetch table from PIM` and `doc_get_active_id` returns a local cache
+  path instead of a `urn:` — retry the DataFile read after the async save lands.)
+- **Columns live on `table.columns` (`ConfigurationColumns`)**: `addParameterColumn(Parameter)`,
+  `addSuppressColumn(feature)`, `addVisibilityColumn(entity)`, `addInsertColumn(occurrence)`. The
+  parameter/suppress variants are valid only on the top table or a theme table (they fail elsewhere).
+  The `Parameter` must come from THIS design's `allParameters`.
+- **Address cells by ROW NAME, not index.** Every column kind exposes `getCell(index)`,
+  `getCellByRowId(id)`, and `getCellByRowName(name)`. Prefer `getCellByRowName` — robust against row
+  reordering. Cell setters: parameter cell `.expression = "50 mm"`; suppress cell
+  `.isSuppressed = True`; visibility cell `.isVisible = False`; appearance cell `.appearance = appObj`.
+- **A parameter column only changes geometry if the parameter drives a dimension.** A user parameter
+  that nothing consumes will switch value but the model won't resize. After `ConfigurationRow.activate()`
+  call `Design.computeAll()` so the geometry rebuilds to the active config.
+- **Appearance theme table has an ORDERING trap and a LINKAGE trap.** Get it via
+  `table.appearanceTable`. (1) Ordering: call `appearanceTable.columns.add(body)` FIRST — adding the
+  body column auto-creates the first theme row; add extra theme rows AFTER (adding theme rows before
+  the body column throws `InternalValidationError`). (2) Linkage: each config row is tied to a theme
+  row through `appearanceTable.parentTableColumn` (a `ConfigurationThemeColumn`),
+  `cell.referencedTableRow = themeRow`. The theme column's **`getCell(index)` does NOT share
+  `top.rows` ordering** — addressing it positionally links the wrong configuration (live-caught: the
+  colors came out swapped). Use `themeColumn.getCellByRowName(configName)`.
+- **Nested configurations (insert column).** To make an assembly config select a configured PART's
+  config: insert the part with `root.occurrences.addFromConfiguration(partRow, transform)` (the part
+  and assembly must be in the SAME project; `partRow` comes from the part DataFile's
+  `configurationTable`), then `assemblyTable.columns.addInsertColumn(occurrence)` ->
+  `ConfigurationInsertColumn`, and per assembly config set `cell.row = partRow` — again addressing the
+  cell by `getCellByRowName(assemblyConfigName)`. The set row must belong to the inserted part's table.
+  Verified live end-to-end: switching one assembly config drove the base geometry, a config-driven
+  circular-pattern quantity, AND the inserted part's configuration together.
+- **Circular pattern instances can silently drop when config-driven.** A `CircularPatternFeature`
+  whose `quantity` is a configured parameter updates the quantity value, but if the pattern geometry
+  (e.g. a bolt circle whose diameter is ALSO config-driven) pushes instances off the body or overlaps
+  them, fewer instances materialize than `quantity` says. Not a configurations bug — keep patterned
+  features within the body across all configs, or the instance count won't match the parameter.
 
 ## Active document, save, copy, delete
 

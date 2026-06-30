@@ -569,9 +569,8 @@ _save_tool = (
         "Bundle a subset of a setup's operations into a NEW toolpath template in the "
         "library. 'operations' is a comma-separated list of operation names within "
         "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
-        "if missing). Optional 'description'. WRITES to the template library. (Overwriting "
-        "an existing template is not yet supported — always creates a new template.) "
-        "Verify with cam_list_templates."
+        "if missing). Optional 'description'. Always creates a new template. WRITES to the "
+        "template library. Verify with cam_list_templates."
         ),
         input_param_name="template_name",
         input_param_description="Name for the new template.",

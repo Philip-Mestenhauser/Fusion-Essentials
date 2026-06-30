@@ -15,6 +15,9 @@ import adsk.core
 
 from ._common import safe
 
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = "cloud data-model helpers shared by data_model_ops + doc_lifecycle (hub/project/folder/URN)"
+
 app = adsk.core.Application.get()
 
 # Every save made through this server is authored by an AI agent, not a human. Document.save/saveAs

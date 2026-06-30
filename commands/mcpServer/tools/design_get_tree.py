@@ -106,7 +106,7 @@ def _walk_occurrence(occ, depth, max_depth, counter):
     node = {
     "name": safe(lambda: occ.name),
     # fullPathName is the UNAMBIGUOUS instance key (name is only locally unique — the same "Bolt:1"
-    # recurs under every sub-assembly). Name-consuming tools (view_set_visibility, model_arrange,
+    # recurs under every sub-assembly). Name-consuming tools (view_inspect, model_arrange,
     # measure_bbox, assembly_*, joint_*, ...) resolve by it via the OccurrenceRef kind; emit it so the
     # agent can author the key instead of a name that silently grabs the wrong instance.
     "full_path": safe(lambda: occ.fullPathName),

@@ -54,8 +54,7 @@ Work by **progressive disclosure**, not by dumping whole documents:
 
 1. **Orient** — `workspace_orient` first: one cheap read that reports the active document and
    where it lives, its health, units/mode, the major pieces, whether CAM data exists, and
-   *pointers* to the right narrow tool for each area. (`sys_get_session` is the thinner
-   active-document/workspace/units read if that is all you need.) The workspace/product decides
+   *pointers* to the right narrow tool for each area. The workspace/product decides
    which environment you're in and which deep read is meaningful.
 2. **Read state with the right tool** before reasoning — `assembly_probe` (kinematics: positions,
    ground flags, joint wiring), `design_get_timeline` (build intent), `cam_get_setups`/
@@ -83,7 +82,7 @@ prefix tells you the area —
 
 | Prefix | Area | Examples |
 |--------|------|----------|
-| `sys_` | session / introspection / the script escape hatch | `sys_get_session`, `sys_get_api_doc`, `sys_execute_script` |
+| `sys_` | session / introspection / the script escape hatch | `sys_find_tool`, `sys_get_api_doc`, `sys_execute_script` |
 | `data_` | the cloud data model (projects, folders, files) | `data_list_files`, `data_upload_file`, `data_delete_file` |
 | `doc_` | document lifecycle (open / save / copy / insert) | `doc_open`, `doc_save_as`, `doc_insert_occurrence` |
 | `design_` | the active design as a whole (tree, timeline, mode) | `design_get_tree`, `design_get_timeline`, `design_recompute` |
@@ -124,7 +123,7 @@ here when learning the surface:
 - The CAM tools read CAM data **without requiring you to switch to the Manufacture
   workspace**.
 - `doc_open` / `doc_save_as` are **asynchronous**: the call returns before the document is
-  fully active/saved — confirm with `sys_get_session` / `doc_get_active_id` afterward.
+  fully active/saved — confirm with `workspace_orient` / `doc_get_active_id` afterward.
 - `cam_get_time` needs generated toolpaths to be meaningful.
 - `cam_generate` is fire-and-poll: it returns immediately with a handle; poll `cam_get_status`
   until done (it never blocks for the multi-minute compute).

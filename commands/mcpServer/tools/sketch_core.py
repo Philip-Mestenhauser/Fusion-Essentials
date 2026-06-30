@@ -117,19 +117,19 @@ def get_sketches_handler() -> dict:
     return ok({"sketch_count": len(sketches), "sketches": sketches})
 
 
-def sketch_get_handler(sketch_name: str = "") -> dict:
-    """Read sketches at the right depth, switched by specificity.
+def sketch_get_handler(sketch_name: str = "", include_entities: bool = False) -> dict:
+    """Read sketches at the right ZOOM LEVEL (progressive disclosure — see CLAUDE.md).
 
     No 'sketch_name' → a SUMMARY list of every sketch (name/plane/counts/visibility) to find what
-    exists. A 'sketch_name' → the FULL structure of that one sketch (entities, geometric
-    constraints, dimensions, is_fully_constrained) for understanding it before editing. The return
-    is always about sketches; only the depth changes — shallow list vs deep single. This replaces
-    the old sketch_get + sketch_get split.
+    exists. A 'sketch_name' → that sketch's OVERVIEW: counts, is_fully_constrained, and the 'profiles'
+    list (each region's area/centroid/loop_count + a HANDLE for ProfileRef) — the actionable layer,
+    without the flood. Add include_entities=true for the heavy X-ray (every entity/constraint/
+    dimension) when you actually need to edit the sketch geometry.
     """
     if (sketch_name or "").strip():
         # delegate to the detail engine (imported lazily; no circular dependency)
         from . import sketch_detail
-        return sketch_detail.handler(sketch_name=sketch_name)
+        return sketch_detail.handler(sketch_name=sketch_name, include_entities=include_entities)
     return get_sketches_handler()
 
 
@@ -559,19 +559,20 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
 # ------------------------------------------------------------------------- tools
 
 _GET_DESC = (
-    "Read sketches at the right depth. WITHOUT 'sketch_name': a summary list of every sketch "
-    "(name, plane, line/circle/arc/point + profile counts, visibility) — use it to find sketch "
-    "names to draw on (sketch_add_geometry) or confirm what was drawn. WITH 'sketch_name': the "
-    "FULL structure of that one sketch — every entity (id '<type>:<index>', type, isConstruction, "
-    "geometry), every geometric constraint (type + the entity ids it links), every dimension "
-    "(name/value/expression/driving), and is_fully_constrained — to understand a constrained "
-    "sketch before editing it. Entity ids match those used by sketch_constrain / model_extrude. "
-    ""
+    "Read sketches by zoom level. WITHOUT 'sketch_name': a summary list of every sketch (name, plane, "
+    "entity + profile counts, visibility) to find names. WITH 'sketch_name': that sketch's OVERVIEW — "
+    "entity counts, is_fully_constrained, and a 'profiles' list (each closed region's area, centroid, "
+    "loop_count, and a 'handle' to pass as a ProfileRef to model_extrude / model_revolve / "
+    "model_loft — so you pick a region by area/position, not a guessed index). Add include_entities="
+    "true for the full per-entity/constraint/dimension X-ray (heavier — only when editing the sketch). "
+    "Entity ids match those used by sketch_constrain."
 )
 sketch_get_tool = (
     Tool.create_simple(name="sketch_get", description=_GET_DESC)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Omit for a summary list of all sketches; give a name for that sketch's full structure."})
+            "description": "Omit for a summary list of all sketches; give a name for that sketch's overview (counts + profiles)."})
+    .add_input_property("include_entities", {"type": "boolean",
+            "description": "Also return the full per-entity/constraint/dimension X-ray (default false — heavier; for editing geometry)."})
     .strict_schema()
 )
 sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", handler=sketch_get_handler,

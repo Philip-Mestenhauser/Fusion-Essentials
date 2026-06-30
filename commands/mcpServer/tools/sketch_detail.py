@@ -30,6 +30,7 @@ import adsk.fusion
 
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names
 from . import _common
+from . import _inputs
 
 app = adsk.core.Application.get()
 
@@ -181,29 +182,44 @@ def _vector_items(ent):
     return None
 
 
-def handler(sketch_name: str = "") -> dict:
-    """Return the full structure of one sketch: entities, constraints, dimensions.
+def _profiles(sketch):
+    """Per-profile records so an agent can SEE the closed regions and grab a specific one's HANDLE.
 
-    sketch_name: the sketch to inspect. Returns every entity (id '<type>:<index>', type,
-    isConstruction, geometry), every constraint (type + linked entity ids), and every dimension
-    (name/value/expression). Read-only — pair with sketch_get to find sketch names.
-    """
-    design = _common.design()
-    if not design:
-        return error("No active design.")
+    A sketch yields one Profile per closed region; a sketch drawn ON A FACE yields the drawn region
+    PLUS the surrounding face-minus-region ring (and any sub-regions), so a blind index is ambiguous —
+    these records (area / centroid / loop_count / handle) are how you disambiguate. The handle is a
+    composite entityToken (the same self-healing form find_geometry mints), validated durable across
+    recompute / sketch-edit / boolean-cut / timeline-rollback (live probe), so it's a real ProfileRef
+    you can pass to model_extrude / model_revolve / model_loft. Sorted largest-area first (the outer
+    boundary is usually [0]); 'index' is the position in sketch.profiles for the legacy selector."""
+    profs = safe(lambda: sketch.profiles)
+    n = safe(lambda: profs.count, 0) if profs else 0
+    out = []
+    for i in range(n):
+        p = profs.item(i)
+        ap = safe(lambda p=p: p.areaProperties())
+        area = safe(lambda: ap.area) if ap else None
+        c = safe(lambda: ap.centroid) if ap else None
+        # world centroid (cm, the API unit) doubles as the locator for the composite handle.
+        pos = (c.x, c.y, c.z) if c else None
+        loops = safe(lambda p=p: p.profileLoops.count)
+        out.append({
+            "index": i,
+            "area": _round(area),
+            "centroid": [_round(c.x), _round(c.y), _round(c.z)] if c else None,
+            "loop_count": loops,
+            "handle": _inputs.make_handle(p, "profile", pos) if pos else safe(lambda: p.entityToken),
+        })
+    # largest first — the outer/main region is the common target; index preserves API order.
+    out.sort(key=lambda r: (r["area"] is None, -(r["area"] or 0)))
+    return out
 
-    name = (sketch_name or "").strip()
-    if not name:
-        names = all_sketch_names(design)
-        return error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
-    # Resolve across the WHOLE design (active component first, then root, then all sub-components) — a
-    # sketch in an activated sub-component (the normal assembly flow) must be findable, not only one in
-    # the root component.
-    sketch = resolve_sketch(design, name)
-    if not sketch:
-        names = all_sketch_names(design)
-        return error(f"No sketch named '{name}'. Available: " + (", ".join(n for n in names if n) or "(none)"))
 
+def _entity_xray(sketch):
+    """The HEAVY layer: every entity / constraint / dimension as its own record. Built ONLY when the
+    caller asks (include_entities=true) — on a dense sketch this is dozens of records and would flood
+    the agent's window if returned by default. Returns (entities, constraints, dimensions,
+    construction_count, driving_dim_count)."""
     tok2id = _build_token_map(sketch)
     entities, construction_count = _entities(sketch)
 
@@ -225,6 +241,36 @@ def handler(sketch_name: str = "") -> dict:
             "driving": bool(safe(lambda d=d: d.isDriving, True)),
             "type": type(d).__name__.replace("SketchDimension", "").replace("Dimension", "").lower(),
         })
+    driving_dims = sum(1 for d in dimensions if d.get("driving"))
+    return entities, constraints, dimensions, construction_count, driving_dims
+
+
+def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
+    """Read ONE sketch at the right zoom level (progressive disclosure — see CLAUDE.md).
+
+    Default (light): the actionable OVERVIEW — entity counts, is_fully_constrained, and the
+    'profiles' list (each closed region's area/centroid/loop_count + a HANDLE to pass as a ProfileRef
+    to extrude/revolve/loft). This is what you need to pick a region to model on, without the flood.
+
+    include_entities=true (heavy): also the full X-ray — every entity ('<type>:<index>' + geometry),
+    every geometric constraint, every dimension — for understanding/editing a constrained sketch. On a
+    dense sketch this is dozens of records, so it is OPT-IN. Read-only.
+    """
+    design = _common.design()
+    if not design:
+        return error("No active design.")
+
+    name = (sketch_name or "").strip()
+    if not name:
+        names = all_sketch_names(design)
+        return error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
+    # Resolve across the WHOLE design (active component first, then root, then all sub-components) — a
+    # sketch in an activated sub-component (the normal assembly flow) must be findable, not only one in
+    # the root component.
+    sketch = resolve_sketch(design, name)
+    if not sketch:
+        names = all_sketch_names(design)
+        return error(f"No sketch named '{name}'. Available: " + (", ".join(n for n in names if n) or "(none)"))
 
     counts = {
     "lines": safe(lambda: sketch.sketchCurves.sketchLines.count, 0),
@@ -233,31 +279,43 @@ def handler(sketch_name: str = "") -> dict:
     "ellipses": safe(lambda: sketch.sketchCurves.sketchEllipses.count, 0),
     "points": safe(lambda: sketch.sketchPoints.count, 0),
     }
-
     fully = safe(lambda: sketch.isFullyConstrained)
-    driving_dims = sum(1 for d in dimensions if d.get("driving"))
+    constraint_count = safe(lambda: sketch.geometricConstraints.count, 0)
+    dim_count = safe(lambda: sketch.sketchDimensions.count, 0)
 
-    return ok({
+    out = {
         "sketch": safe(lambda: sketch.name),
         "plane": safe(lambda: sketch.referencePlane.name),
-        # is_fully_constrained = no remaining degrees of freedom (geometry can't be dragged). False =
-        # there are free DOF (the sketch can still move / be driven). The only DOF signal the API
-        # exposes — there is no DOF COUNT or over-constrained flag (use the in-product sketch view
-        # for those). Each dimension's 'driving' flag says whether it LOCKS geometry (true) or just
-        # MEASURES it (false / reference dim).
+        # is_fully_constrained = no remaining degrees of freedom (geometry can't be dragged). The only
+        # DOF signal the API exposes — no DOF count / over-constrained flag (use the in-product view).
         "is_fully_constrained": bool(fully) if fully is not None else None,
-        "driving_dimension_count": driving_dims,
         "counts": counts,
-        "construction_count": construction_count,
+        "constraint_count": constraint_count,
+        "dimension_count": dim_count,
         "profile_count": safe(lambda: sketch.profiles.count, 0),
+        # The actionable layer: pass a profile's 'handle' as a ProfileRef to extrude/revolve/loft
+        # instead of guessing a profile_index.
+        "profiles": _profiles(sketch),
+    }
+
+    if not include_entities:
+        out["note"] = ("Overview only. 'profiles[].handle' → ProfileRef for extrude/revolve/loft. For "
+                       "the full entity/constraint/dimension X-ray (to edit the sketch), call again "
+                       "with include_entities=true.")
+        return ok(out)
+
+    entities, constraints, dimensions, construction_count, driving_dims = _entity_xray(sketch)
+    out.update({
+        "driving_dimension_count": driving_dims,
+        "construction_count": construction_count,
         "entities": entities,
         "constraints": constraints,
-    "dimensions": dimensions,
-    "note": "Full sketch structure. Entity ids ('line:0', 'arc:1', ...) match the references "
-    "used by sketch_constrain / extrude. 'construction' marks guide geometry. "
-    "is_fully_constrained=false means free DOF remain (still movable/drivable); "
-    "a dimension with driving=true locks geometry, driving=false only measures.",
+        "dimensions": dimensions,
+        "note": ("Full X-ray. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain / extrude "
+                 "refs. is_fully_constrained=false means free DOF remain; a dimension driving=true "
+                 "locks geometry, driving=false only measures."),
     })
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (

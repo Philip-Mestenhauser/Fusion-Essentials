@@ -205,8 +205,7 @@ TOOL_DESCRIPTION = (
     "shared volume) | merge (combine without altering faces). 'algorithm': enhanced (default, fewer "
     "triangles) | legacy. Every input is validated to be a MESH body (a BRep handle is redirected to "
     "the BRep tools). In a PARAMETRIC design the combine is wrapped in a BaseFeature edit scope "
-    "(API-required for mesh writes).\n\n"
-    + _inputs.contract_block(_SPEC)
+    "(API-required for mesh writes)."
 )
 
 mesh_combine_tool = _inputs.apply_to_tool(

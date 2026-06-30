@@ -480,6 +480,20 @@ class TestCreateHandler:
         assert coll.last_input.called[0] == "ball"
         assert out["axis"] is None
 
+    def test_ball_uses_valid_pitch_and_yaw_directions(self):
+        # LIVE bug this pins: setAsBallJointMotion(pitchDirection, yawDirection) REJECTS XAxis as the
+        # pitch direction ("Invalid parameter pitchDirection"). The API requires pitch=ZAxisJointDirection
+        # and yaw=XAxisJointDirection. The old code passed (XAxis, YAxis) and failed only on a live
+        # document (the mock accepted any args). Pin the correct enums so a regression is caught here.
+        import adsk.fusion
+        JD = adsk.fusion.JointDirections
+        _, coll = _install_create()
+        joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", joint_type="ball")
+        kind, pitch, yaw = coll.last_input.called
+        assert kind == "ball"
+        assert pitch == JD.ZAxisJointDirection, "pitchDirection must be ZAxisJointDirection (not X)"
+        assert yaw == JD.XAxisJointDirection, "yawDirection must be XAxisJointDirection"
+
     def test_offset_scaled_to_cm_on_value_input(self):
         _, coll = _install_create()
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",

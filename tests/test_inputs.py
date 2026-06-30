@@ -81,9 +81,8 @@ class TestGeometryHandle:
     def test_contract_note_names_the_required_kind(self):
         k = inp.GeometryHandle("on_face", require="planar_face")
         note = k.contract_note()
+        # The note must name the required kind and point at find_geometry (the handle source).
         assert "planar" in note.lower() and "find_geometry" in note
-        # The note must steer AWAY from names/coordinates (exact wording may vary).
-        assert "name" in note.lower() and "coordinate" in note.lower()
 
     def test_schema_includes_contract_note(self):
         k = inp.GeometryHandle("on_face", require="cylinder_face", description="The pin face.")
@@ -133,6 +132,22 @@ def _install_with_bodies(faces, token_map):
             e = token_map.get(h)
             return [e] if e is not None else []
     inp._common.design = lambda: FakeDesign()
+
+
+class TestIsHandle:
+    """is_handle distinguishes a handle (entityToken) from an int/index/'all' for dual-accept inputs."""
+    def test_composite_handle(self):
+        assert inp.is_handle(f"tok{inp._HANDLE_SEP}profile:0.4,0.2,0.0") is True
+
+    def test_long_bare_token(self):
+        assert inp.is_handle("/v4BAAAARlJLZXk" + "Z" * 40) is True
+
+    def test_int_and_index_selectors_are_not_handles(self):
+        assert inp.is_handle(0) is False
+        assert inp.is_handle("0,2,3") is False
+        assert inp.is_handle("all") is False
+        assert inp.is_handle([0, 1]) is False
+        assert inp.is_handle("") is False
 
 
 class TestSelfHealingHandle:

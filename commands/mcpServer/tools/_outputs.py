@@ -22,6 +22,9 @@ tools that consume it, and whether the value is a stable/round-trippable id. Fro
 Tools declare ``RETURNS = [ _outputs.ReturnsHandle(...), ... ]`` the way they declare an inputs spec.
 """
 
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = "RETURNS kinds (ReturnsHandle/Urn/Name/Value) — declare a tool's stable outputs once"
+
 
 class OutputKind:
     """One declared tool output. ``key`` = the payload field a consumer reads; ``label`` = the human

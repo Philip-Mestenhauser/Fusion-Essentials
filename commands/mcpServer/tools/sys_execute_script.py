@@ -139,7 +139,7 @@ TOOL_DESCRIPTION = (
     "auto-roll-back on error — a partial change can commit, so verify state afterward and "
     "undo manually if needed.\n"
     "- Use print() to return values/information; printed output is included in the result.\n\n"
-    "Before editing a model, consider reading its state first (e.g. sys_get_session). "
+    "Before editing a model, consider reading its state first (e.g. workspace_orient). "
     "After changes, verify the result."
 )
 

@@ -4,9 +4,8 @@
 """MCP building blocks: occurrence ground/move + rigid group (assembly positioning basics).
 
   ground        -> set an occurrence's STATELESS 'ground_to_parent' lock (true = rigid-to-parent;
-                   false frees a fresh/patterned occurrence for moving/jointing). Does NOT set the
-                   stateful Ground/Pin (isGrounded) — that timeline Pin is error-prone and almost
-                   never needed; fix a part in space with ground_to_parent + assembly_move. WRITES.
+                   false frees a fresh/patterned occurrence for moving/jointing). Fix a part in
+                   space with ground_to_parent + assembly_move. WRITES.
   assembly_move -> translate (and optionally rotate about a world axis) an occurrence by editing
                    its transform — a free move, no joint/relationship created. WRITES.
   assembly_rigid_group   -> lock two or more occurrences together as one rigid unit. WRITES.
@@ -16,8 +15,7 @@ constraints) see joint / joint_create_as_built / assembly_constrain — those ma
 assembly_move just repositions.
 
 Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Occurrence.isGroundToParent (parent lock — what ground sets) / isGrounded (the Pin; read-only
-    here) / transform (Matrix3D)
+  - Occurrence.isGroundToParent (parent lock — what ground sets) / transform (Matrix3D)
   - rootComponent.rigidGroups.add(ObjectCollection, includeChildren) -> RigidGroup
 Handlers run on the main thread; WRITE.
 """
@@ -74,18 +72,12 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
 
     occurrence: the occurrence to change. 'ground_to_parent' (true/false): the default rigid-to-parent
     lock — true holds the part fixed relative to its parent/assembly; set false to FREE a
-    fresh/patterned occurrence so it can be moved (assembly_move) or jointed. WRITES.
-
-    NOTE: this tool deliberately does NOT set the explicit Ground/Pin (Occurrence.isGrounded). The Pin
-    is a STATEFUL timeline feature (a Pin/Unpin pair) that recomputes with the model and is a frequent
-    source of failed-compute features and surprising cascades — it is almost never necessary. To fix a
-    part in space, ground_to_parent=true and position it with assembly_move. (isGrounded is still
-    reported below as a READ-BACK so you can see the current pin state set elsewhere.)
+    fresh/patterned occurrence so it can be moved (assembly_move) or jointed. To fix a part in space,
+    ground_to_parent=true and position it with assembly_move. WRITES.
     """
     if ground_to_parent is None:
         return error("Specify 'ground_to_parent' (true/false). true locks the occurrence rigidly to "
-                     "its parent; false frees it to move/joint. (Pinning in space is intentionally "
-                     "not offered — use ground_to_parent + assembly_move; see the tool description.)")
+                     "its parent; false frees it to move/joint.")
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -99,7 +91,6 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     return ok({
         "occurrence": safe(lambda: occ.name),
         "isGroundToParent": bool(ground_to_parent),
-        "isGrounded": safe(lambda: occ.isGrounded),   # read-back only; this tool never sets the Pin
         "note": "ground_to_parent set (the stateless parent lock). true = locked rigidly to parent; "
                 "false = freed to move/joint. To fix a part in space, keep it ground_to_parent=true "
                 "and position it with assembly_move.",
@@ -276,11 +267,7 @@ _GROUND_DESC = (
 "Set an occurrence's 'ground_to_parent' lock — the STATELESS rigid-to-parent flag. true holds the "
 "part fixed relative to its parent/assembly; false FREES a fresh/patterned occurrence so it can be "
 "moved (assembly_move) or jointed. To fix a part IN SPACE, ground_to_parent=true and position it "
-"with assembly_move. "
-"This tool does NOT set the explicit Ground/Pin (isGrounded): the Pin is a stateful timeline "
-"feature (a Pin/Unpin pair) that recomputes with the model and frequently causes failed-compute "
-"features and surprising cascades — it is almost never necessary, so it is intentionally not "
-"offered here. (The current isGrounded state is still reported back, read-only.)"
+"with assembly_move."
 )
 ground_tool = (
     Tool.create_simple(name="assembly_ground", description=_GROUND_DESC)

@@ -24,7 +24,7 @@ logic breaks **silently** — a wrong unit factor or a dropped error path return
 subtly wrong JSON to the agent, with no exception. That's what we pin down.
 
 We deliberately **do not** unit-test tools whose only job is to forward data
-to/from the Fusion API (`sys_get_session`, `view_screenshot`, `sys_reload_addin`,
+to/from the Fusion API (`view_screenshot`, `sys_reload_addin`,
 `sys_execute_script`, `workspaces`, …). Mocking `adsk` just to assert "it copied
 `app.version` into a field" tests the mock, not the code. Those belong to the
 in-Fusion integration layer (driven via the Fusion MCP server), not here.

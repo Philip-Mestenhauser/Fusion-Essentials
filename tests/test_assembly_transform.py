@@ -2,9 +2,8 @@
 
 Tests are written BEFORE the tool is wired further (project rule). The logic
 pinned here, no live Fusion: occurrence resolution (exact, then substring;
-missing reported), the TWO distinct ground flags (isGrounded = pin-in-space vs.
-isGroundToParent = release-from-parent-lock), assembly_move building a
-Matrix3D translation/rotation and applying it to occurrence.transform, and
+missing reported), the ground_to_parent lock (isGroundToParent), assembly_move
+building a Matrix3D translation/rotation and applying it to occurrence.transform, and
 assembly_rigid_group collecting occurrences into RigidGroups.add. Fakes expose the real
 attributes the handlers set so we can assert on them.
 """
@@ -159,9 +158,7 @@ def _occ(occs, name):
 # â”€â”€ ground â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestGround:
-    # assembly_ground sets ONLY the stateless ground_to_parent lock. The stateful Ground/Pin
-    # (isGrounded) is intentionally NOT settable here â€” it's an error-prone timeline feature. isGrounded
-    # is still reported back read-only.
+    # assembly_ground sets ONLY the stateless ground_to_parent lock; it never writes isGrounded.
     def test_lock_to_parent(self):
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
@@ -174,21 +171,13 @@ class TestGround:
         assert _occ(occs, "Block:1").isGroundToParent is False
         assert out["isGroundToParent"] is False
 
-    def test_does_not_touch_the_pin(self):
-        # The tool must NEVER set isGrounded (the stateful Pin) â€” it only locks to parent.
+    def test_only_sets_ground_to_parent(self):
+        # The tool sets ONLY isGroundToParent; it must never write isGrounded.
         _, occs, _ = _install(["Block:1"])
         o = _occ(occs, "Block:1")
         o.isGrounded = False
         asm.ground_handler(occurrence="Block:1", ground_to_parent=True)
         assert o.isGrounded is False              # untouched
-
-    def test_isgrounded_reported_read_only(self):
-        # isGrounded set elsewhere is still surfaced in the payload (read-back parity with probe).
-        _, occs, _ = _install(["Block:1"])
-        o = _occ(occs, "Block:1")
-        o.isGrounded = True                       # as if pinned elsewhere
-        out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
-        assert out["isGrounded"] is True          # reported, not changed by this call
 
     def test_no_grounded_param_is_rejected_by_strict_schema(self):
         # The 'grounded' input was removed; the handler signature no longer accepts it. (At the MCP

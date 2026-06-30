@@ -656,9 +656,8 @@ _copy_document_tool = (
             "ORIGINAL source file (the references are not re-copied). The result lists those "
             "external references so you can confirm they came along. 'folder' may be a nested "
             "path; set create_path=true to create missing destination folders (mkdir -p). "
-            "NOTE: this uses DataFile.copy and does NOT share lineage (so Fusion will not "
-            "auto-repair joints from the copy) — a Document.saveAs-based lineage mode is not "
-            "built yet. WRITES to the cloud data model."
+            "NOTE: this does NOT share lineage, so Fusion will not auto-repair joints from "
+            "the copy. WRITES to the cloud data model."
         ),
         input_param_name="document_id",
         input_param_description="Lineage id (URN) of the document to copy (preferred; from data_list_files).",

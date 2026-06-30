@@ -4,7 +4,7 @@
 """MCP building block: control which CAM toolpaths are DISPLAYED (the blue paths).
 
   cam_show_toolpath(action=...) — show / hide individual generated toolpaths so an agent can look at
-  one operation's path at a time (the CAM analog of view_set_visibility, but for operations rather than
+  one operation's path at a time (the CAM analog of view_inspect's visibility verbs, but for operations rather than
   component occurrences). Toolpaths only render in the Manufacture (CAM) workspace.
 
     show         -> turn ON one operation's toolpath (by name).
@@ -215,7 +215,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
 TOOL_DESCRIPTION = (
     "Show/hide individual CAM TOOLPATHS (the displayed blue paths) so you can look at one "
-    "operation's path at a time — the CAM analog of view_set_visibility, for operations. 'action': "
+    "operation's path at a time. 'action': "
     "'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
     "+ state). 'fit' fits the camera to the operation's TOOLPATH extents (bigger than the part — "

@@ -12,7 +12,7 @@ This lint locks that in two ways:
      ambiguous bare name errors). A behavioural anchor so the helper can't be gutted.
 
 Deliberately NOT flagged (justified substring matches, different shape/domain):
-  - view_inspect / view_set_visibility: MULTI-match isolate/show/hide ("hide all bolts") — returns a
+  - view_inspect: MULTI-match isolate/show/hide ("hide all bolts") — returns a
     LIST of every match, not one guessed instance.
   - show_toolpath: matches CAM operations (not occurrences).
   - doc_lifecycle: matches documents by name (not occurrences).
