@@ -78,7 +78,7 @@ def switch_workspace_handler(workspace: str = "") -> dict:
     """Activate a workspace by id, visible name, or alias (design/manufacture/cam)."""
     want = (workspace or "").strip()
     if not want:
-        return error("Provide 'workspace' — an id, visible name, or alias "
+        return error("Provide 'workspace' - an id, visible name, or alias "
     "(e.g. 'design', 'manufacture').")
 
     target_id = _ALIASES.get(want.lower())  # alias -> id, else None
@@ -149,13 +149,13 @@ _switch_tool = Tool.create_with_string_input(
     "('FusionSolidEnvironment', 'CAMEnvironment'), a visible name ('Design', "
     "'Manufacture'), or an alias ('design', 'manufacture'/'cam'). Switching to "
     "Manufacture is required for some CAM UI actions, though CAM data can be "
-    "read without switching (see cam_get_setups). Changes the active workspace."
+    "read without switching (see cam_get). Changes the active workspace."
     ),
     input_param_name="workspace",
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",
 )
 switch_workspace_item = Item.create_tool_item(
-    tool=_switch_tool, write="read", handler=switch_workspace_handler, run_on_main_thread=True
+    tool=_switch_tool, write="write", handler=switch_workspace_handler, run_on_main_thread=True
 )
 
 

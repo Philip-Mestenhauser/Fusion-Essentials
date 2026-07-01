@@ -70,6 +70,31 @@ class TestIsolateForFit:
         assert b.isLightBulbOn is False      # we never turned it on
 
 
+# ── active-component note: a non-root activation dims everything else to ghosts ──
+# When a sub-component is activated, the screenshot looks washed-out/translucent. The note names the
+# active component so the agent reads that as activation scope, not a lighting/appearance bug.
+
+class TestActiveComponentNote:
+    def _design(self, active_is_root=True, active_name="Gimbal:1"):
+        from types import SimpleNamespace
+        root = SimpleNamespace(name="Root")
+        active = root if active_is_root else SimpleNamespace(name=active_name)
+        return SimpleNamespace(rootComponent=root, activeComponent=active)
+
+    def test_root_active_no_note(self):
+        assert gs._active_component_note(self._design(active_is_root=True)) is None
+
+    def test_sub_component_active_warns_and_names_it(self):
+        note = gs._active_component_note(self._design(active_is_root=False, active_name="Rotor:1"))
+        assert note is not None
+        assert "Rotor:1" in note
+        assert "dimmed" in note or "translucent" in note
+        assert "lighting" in note            # explicitly rules out the misdiagnosis
+
+    def test_none_design_is_safe(self):
+        assert gs._active_component_note(None) is None
+
+
 # ── true-orthographic camera vectors (square 'right'/'top' views) ──
 # The camera is set to EXACT world-axis vectors per named view, so an orthographic read is guaranteed
 # square ([±1,0,0] etc.) — not a rotate-toward that leaves a tilt and silently distorts the screenshot.

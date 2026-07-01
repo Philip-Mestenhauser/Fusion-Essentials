@@ -4,7 +4,94 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 92  |  **Behaviors pinned:** 1853
+**Tools with a test file:** 96  |  **Behaviors pinned:** 1863
+
+## `_data_read`
+
+> Unit tests for ``data_read.py`` — the project/file read cores behind data_get.
+
+**ChildFolderByName**
+- exact match
+- case insensitive
+- whitespace trimmed
+- missing returns none
+- robust to broken folder
+**ProjectResolution**
+- by name case insensitive
+- by id
+- missing identifier errors
+- unknown project lists available
+**WholeProject**
+- lists all files recursively
+- nested file records its path
+**FolderScoping**
+- scopes to named folder only
+- folder is case insensitive
+- nested folder path
+- recursive true descends into subfolders
+- recursive false immediate only
+- stray slashes tolerated
+- missing folder errors with hint
+- missing nested segment names the level
+**FileSummary**
+- all fields populated
+- empty folder path becomes project root
+- broken getter yields none not crash
+**Truncation**
+- whole project truncates at max files
+- recursive field always true for whole project
+
+## `_sketch_detail`
+
+> Unit tests for ``sketch_detail.py`` — read the full structure of one sketch.
+
+**SubComponentResolution**
+- finds sketch in active sub component
+- unknown name lists sub component sketches
+**Entities**
+- lines indexed with construction flag
+- circle geometry
+- counts summary
+**Constraints**
+- perpendicular links two lines
+- horizontal links one line
+- coincident links point and entity
+- constraint total
+**Dimensions**
+- dimension name value expr
+**ConstraintState**
+- reports fully constrained flag
+- reports not fully constrained
+- dimension driving flag
+**EllipseAndPolygon**
+- ellipse enumerated
+- polygon lists all its lines
+- constraint referencing ellipse resolves
+**ArcAndPoint**
+- arc center and radius
+- point position
+**DimensionTally**
+- driving dimension count
+- dimension with no parameter is safe
+**VectorItems**
+- count item collection expanded
+- len getitem vector expanded
+- single entity is not a vector
+**UnknownConstraint**
+- unknown class name derived
+**Guards**
+- missing sketch
+- no name lists available
+**Profiles**
+- emits per profile records with handles
+- sorted largest area first
+- handle is a composite self healing token
+- loop count distinguishes ring from region
+- empty when no profiles
+**ProgressiveDisclosure**
+- default omits the heavy entity xray
+- default points at the deeper level
+- include entities adds the xray
 
 ## `active_component`
 
@@ -49,11 +136,10 @@ after changing tests._
 - missing target errors
 - no base appearance errors
 - component with no bodies errors
-- handle resolving to neither face nor body errors
 - no editable color property errors
 **ResolveExtra**
-- root component by name resolves to root
-- empty target is whole design root
+- component target applies to its bodies
+- empty target is whole design
 **BaseAppearanceFallback**
 - falls back to material library when design has none
 
@@ -119,6 +205,8 @@ after changing tests._
 **Guards**
 - unknown units
 **Probe**
+- reports root bodies not just occurrences
+- no root bodies is empty and no note
 - positions scaled to display units
 - ground flags and grounded list
 - joint type and dof mapping
@@ -128,9 +216,12 @@ after changing tests._
 - positions scaled to cm and inch
 - occurrence joint cross index
 - include joints false skips
+- as built joints are visible
+- broken as built joint breaks health
 **Health**
 - all healthy
 - broken joint surfaced
+- suppressed joint is not broken
 - stale joint health flagged when timeline is clean
 - no stale flag when timeline also shows the error
 - timeline problem surfaced
@@ -234,6 +325,27 @@ after changing tests._
 - delete setup
 - deleteme false is error
 
+## `cam_edit_folders`
+
+> Unit tests for ``cam_edit_folders`` — interrogate / create / rename CAM folders + move operations in.
+
+**Guards**
+- no cam
+- unknown action
+- setup not found
+**List**
+- lists folders with contents
+**Create**
+- create folder
+- create requires name
+**Rename**
+- rename folder
+- rename unknown folder
+**Move**
+- move ops into folder
+- move unknown operation
+- move requires ops and folder
+
 ## `cam_edit_operation`
 
 > Unit tests for ``cam_edit_operation.py`` — set CAM operation parameters (feeds/speeds/stepdown/...).
@@ -273,26 +385,44 @@ after changing tests._
 - sets fixtures and stock
 - params and bodies together
 
-## `cam_folder`
+## `cam_edit_tools`
 
-> Unit tests for ``cam_folder`` — interrogate / create / rename CAM folders + move operations in.
+> Unit tests for ``cam_edit_tools`` — read & manage CAM tool libraries + their tools.
 
 **Guards**
-- no cam
 - unknown action
-- setup not found
+- unknown scope
+- target not found
+- where used requires document
 **List**
-- lists folders with contents
-**Create**
-- create folder
-- create requires name
-**Rename**
-- rename folder
-- rename unknown folder
-**Move**
-- move ops into folder
-- move unknown operation
-- move requires ops and folder
+- lists tools
+- list filters by tool type
+- list libraries when no library given
+**Add**
+- add multiple
+- add validates all refs before adding
+- add requires refs
+**AddRich**
+- create from type
+- create with description override and holder
+- create with presets
+- unknown from type errors before adding
+- entry needs type or ref
+**Remove**
+- remove multiple high to low
+- remove out of range
+**Edit**
+- edit parameters and persist document
+- edit unknown parameter before applying
+**WhereUsed**
+- where used lists operations
+**CreateLibrary**
+- create empty local
+- create with seeds
+- hub descends to team folder
+- refuses document scope
+- requires name
+- bad seed before import
 
 ## `cam_generate`
 
@@ -318,49 +448,53 @@ after changing tests._
 - unknown handle lists active
 - latest resolves to last handle
 - stall warning when nothing generating but ood remains
+- errored op surfaced while still generating
+- setup error blocks via readiness
 - pump budget is clamped
 
-## `cam_read`
+## `cam_get`
 
-> Unit tests for ``cam_read.py`` pure helpers.
+> Tests for `cam_get` — the CAM rich read (setups default + include= deeper slices).
 
-**Hms**
-- zero
-- under a minute pads seconds
-- minutes and seconds padded
-- hours not padded minutes seconds are
-- rounds fractional seconds
-- garbage input is safe
-**OperationSummary**
-- valid state name
-- invalid state is out of date
-- no toolpath state is out of date
-- suppressed invalid is not out of date
-- warning text surfaced
-- unknown state falls back to raw value
-**MachiningTimeUnits**
-- feed scale is percent not fraction
-- rapid feed is cm per second
-- assumptions reported in payload
-**GetOperations**
-- filters to named setup case insensitive
-- not found lists available
-- tools used tally counts each tool
-**GetToolList**
-- groups by tool and sorts by use desc
-- ops without a tool are skipped
-**ActivateSetup**
-- empty setup errors
-- not found lists available
-- activates matching setup
-**CompareOperations**
-- requires both names
-- operation not found
-- diff reports same and differing params
-- param present in only one marked not present
-**ReferencesDedupe**
-- same ref in two roles deduped
-- non referenced occurrence skipped
+**DefaultSlice**
+- default returns setups only
+- default note advertises remaining
+**IncludeSlices**
+- include adds the slice
+- setup filter passes through
+- multiple includes
+**CamPointers**
+- stale ops point at cam generate
+- out of date machine points at edit setup
+- clean setup gets no pointers
+- sums across setups
+- router emits pointers on stale default
+**OrientationDedup**
+- default keeps setup invalidation reasons
+- operations drops setup reasons keeps context
+- unrelated include keeps setup reasons
+**Guards**
+- unknown include errors
+- no cam data guard
+**OperationRazor**
+- healthy op collapses
+- abnormal op keeps its flags
+**Bounding**
+- operations capped and flagged
+- nc programs summarizes post parameters
+**LibrarySlice**
+- router includes library and passes scope
+- slice delegates to read library
+- templates slice delegates with location
+- templates slice defaults location and depth
+**DeepZoom**
+- parameters requires operation
+- tool requires operation
+- grouped visible params sections and filters
+**NormalizeInclude**
+- comma string
+- list lowercased
+- none empty
 
 ## `cam_reorder`
 
@@ -404,7 +538,7 @@ after changing tests._
 - missing height param errors
 **Generate**
 - generate waits on future and reports valid
-- empty no warning gives zero depth hint
+- empty no warning reports observed state and causes
 - warning is surfaced
 - generate false skips
 
@@ -461,44 +595,17 @@ after changing tests._
 - setup not found lists available
 - missing operations named in error
 
-## `cam_tool_library`
+## `cold_start_onboarding`
 
-> Unit tests for ``cam_tool_library`` — read & manage CAM tool libraries + their tools.
+> The cold-start front door: a contextless agent must be routed to the orientation tools.
 
-**Guards**
-- unknown action
-- unknown scope
-- target not found
-- where used requires document
-**List**
-- lists tools
-- list filters by tool type
-- list libraries when no library given
-**Add**
-- add multiple
-- add validates all refs before adding
-- add requires refs
-**AddRich**
-- create from type
-- create with description override and holder
-- create with presets
-- unknown from type errors before adding
-- entry needs type or ref
-**Remove**
-- remove multiple high to low
-- remove out of range
-**Edit**
-- edit parameters and persist document
-- edit unknown parameter before applying
-**WhereUsed**
-- where used lists operations
-**CreateLibrary**
-- create empty local
-- create with seeds
-- hub descends to team folder
-- refuses document scope
-- requires name
-- bad seed before import
+**ServerInstructions**
+- instructions returned on initialize
+- instructions route to both orientation tools
+**NaiveOnboardingSearchHitsFrontDoor**
+- getting started surfaces orientation
+- help surfaces capability map
+- overview and start here surface front door
 
 ## `common`
 
@@ -520,26 +627,19 @@ after changing tests._
 - returns active component when set
 - falls back to root when no active
 
-## `data_hubs`
+## `data_get`
 
-> Unit tests for ``data_hubs.py`` — list Autodesk data hubs and switch the active one.
+> Tests for `data_get` — the cloud rich read (hub/projects/folders/files), scope-driven.
 
-**List**
-- lists all hubs with active flag
-- default action is list
-- unnamed hub gets placeholder
-- single hub is active
-**Switch**
-- switch by name
-- switch by id
-- switch case insensitive name
-- already active is noop
-- unknown hub errors and lists available
-- switch requires hub
-- unknown action errors
-**SwitchGetterOnly**
-- silent noop setter reports honest error not false success
-- raising setter reports honest error
+**ScopeDispatch**
+- default lists projects
+- project lists files
+- project with folders shows tree
+- include hubs lists hubs
+- folder path passed to files
+**Guards**
+- unknown include errors
+- cloud error propagates
 
 ## `data_management`
 
@@ -574,11 +674,10 @@ after changing tests._
 - unmatched name errors
 - close failure reported in errors
 **ActivateDocument**
-- activate named
+- activate taken reports true
+- activate async pending reports pending not true
 - requires name
 - unmatched errors
-**ListOpenDocuments**
-- lists with state and flags active
 **FindOpenDocument**
 - exact then substring
 - substring when no exact
@@ -611,44 +710,30 @@ after changing tests._
 - max depth clamped to at least one
 - invalid max depth defaults
 
-## `data_read`
+## `data_switch_hub`
 
-> Unit tests for ``data_read.py`` — the project/file lister and its folder filter.
+> Unit tests for ``data_switch_hub.py`` — list Autodesk data hubs and switch the active one.
 
-**ChildFolderByName**
-- exact match
-- case insensitive
-- whitespace trimmed
-- missing returns none
-- robust to broken folder
-**ProjectResolution**
-- by name case insensitive
-- by id
-- missing identifier errors
-- unknown project lists available
-**WholeProject**
-- lists all files recursively
-- nested file records its path
-**FolderScoping**
-- scopes to named folder only
-- folder is case insensitive
-- nested folder path
-- recursive true descends into subfolders
-- recursive false immediate only
-- stray slashes tolerated
-- missing folder errors with hint
-- missing nested segment names the level
-**FileSummary**
-- all fields populated
-- empty folder path becomes project root
-- broken getter yields none not crash
-**Truncation**
-- whole project truncates at max files
-- recursive field always true for whole project
+**List**
+- lists all hubs with active flag
+- default action is list
+- unnamed hub gets placeholder
+- single hub is active
+**Switch**
+- switch by name
+- switch by id
+- switch case insensitive name
+- already active is noop
+- unknown hub errors and lists available
+- switch requires hub
+- unknown action errors
+**SwitchGetterOnly**
+- silent noop setter reports honest error not false success
+- raising setter reports honest error
 
 ## `design_configure`
 
-> Unit tests for ``design_configure`` — the WRITE counterpart to design_get_configurations.
+> Unit tests for ``design_configure`` — the configured-design build+switch tool.
 
 **Guards**
 - unknown action
@@ -773,66 +858,65 @@ after changing tests._
 - handle resolving to non body is not found
 - no active design errors
 
-## `design_get_configurations`
+## `design_get`
 
-> Unit tests for ``configurations.py`` pure logic.
+> Tests for `design_get` - the first RICH READ (one tool, default slice + include= deeper slices).
 
-**RowSummary**
-- marks active row
-- non active row
-- none id is never active
-**FindRow**
-- match by name
-- match by id when no name matches
-- name wins over id collision
-- no match returns none
-**CollectTruncation**
-- truncates at row cap
-- no truncation under cap
-**ColumnSummary**
-- reads title and type
-**CollectActiveAndColumns**
-- marks the active row and names it
-- no active row leaves active null
-**Handler**
-- no active design
-- not a configured design
-- read returns table
-- activate switches and reports
-- activate unknown lists available
-- activate returns false is an error
-
-## `design_get_tree`
-
-> Unit tests for ``design_get_tree.py`` occurrence search.
-
-**FindOccurrenceByName**
-- substring match on occurrence name
-- exact match on component name
-- descends into children
-- no match returns none
-- empty tree returns none
-**NodeShape**
-- node emits full path
-**WalkOccurrence**
-- counts bodies and children
-- xref resolves source fields
-- non reference has no source fields
-- descends within depth
-- stops at depth limit flags children truncated
-- node cap sets truncated
-**TreeHandler**
-- no active design
-- max depth clamped to ceiling
-- max depth floored to one
-- invalid max depth uses default
-- root walk returns children and node count
-- named start not found errors
-- named start returns subtree
+**DefaultSlice**
+- default is the dense orientation
+- default omits noise when healthy
+- default emits pointers for hidden content
+- default no pointers when only obvious content
+- default points at cam when cam present
+- default surfaces health detail when unhealthy
+- default note advertises remaining slices
+**IncludeSlices**
+- include adds the slice
+- include mode adds full capability map
+- multiple includes
+**Fingerprint**
+- counts both joint collections
+- as built only still counts
+- counts user parameters
+- zero counts omitted
+**ContentPointers**
+- parameters present points at param tools
+- obvious classes get no pointer
+- only present classes pointed
+- empty contents no pointers
+**HasCam**
+- cam present
+- no cam
+- no parent document is safe
+**TimelineSlice**
+- entity type group
+- entity type class name
+- object summary maps health label
+- object summary message only when present
+- slice returns all with marker count
+- slice include suppressed false
+- slice group filter
+- slice summary states and exceptions
+- slice no timeline errors
+**TimelineRazor**
+- healthy row drops noise
+- abnormal row keeps its flags
+- tree scope params pass through
+- configurations degrades for non configured design
+**Guards**
+- unknown include errors
+- no active design guard
+**NormalizeInclude**
+- none empty
+- comma string
+- list lowercased
+**RootBodies**
+- root body names lists direct bodies
+- no root bodies returns empty
 
 ## `design_mode`
 
-> Unit tests for design_mode.py — design_get_mode / design_set_mode / model_base_feature.
+> Unit tests for design_mode.py — get_mode_handler (design_get's mode slice) / design_set_mode / model_base_feature.
 
 **GetMode**
 - no active design
@@ -897,19 +981,20 @@ after changing tests._
 - compute failure is an error
 - no active design errors
 
-## `doc_get_active_id`
+## `doc_get`
 
-> Unit tests for ``doc_get_active_id.py`` — resolve the active doc to its data-model identity.
+> Tests for `doc_get` — the session rich read (active doc identity + open-doc list).
 
+**ActiveIdentity**
+- saved doc surfaces urn and state
+- unsaved doc has no urn
+- modified doc flags stale urn
+**OpenList**
+- terse healthy doc collapses
+- summary leads with unsaved exceptions
+- modified dependency doc keeps its flag
 **Guards**
 - no active document errors
-**Unsaved**
-- unsaved doc has no urn
-- no datafile fields leak as mock
-**Saved**
-- saved modified reports urn and warns stale
-- saved unmodified clean note
-- all datafile fields mapped
 
 ## `doc_insert_occurrence`
 
@@ -1216,6 +1301,16 @@ after changing tests._
 - resolves each by path in order
 - comma string accepted
 - one ambiguous element fails whole list
+**TargetRef**
+- empty is whole design
+- handle to body
+- handle to face
+- handle to mesh
+- occurrence by fullpath
+- component by name
+- body by name
+- allow restricts kind
+- unresolvable errors
 
 ## `joint_at_geometry`
 
@@ -1333,6 +1428,7 @@ after changing tests._
 - no value given errors
 - unknown units
 - joint not found
+- as built joint is drivable by name
 - rigid is refused
 - slider rejects angle
 - revolute rejects distance
@@ -1550,10 +1646,8 @@ after changing tests._
 - unknown component name errors
 - dedup same mesh listed once
 **MeshMeasure**
-- measures via handle
+- measures a mesh body
 - non watertight carries warning
-**MeshBodyRefRedirect**
-- brep handle rejected with redirect
 **MeshInsert**
 - gates on base feature scope in parametric when scope cannot open
 - parametric succeeds even when scope is invisible to a guard
@@ -1647,6 +1741,25 @@ after changing tests._
 - keep tools flag
 - new component flag
 
+## `model_compute_holder`
+
+> Unit tests for ``model_compute_holder.py`` + the pure half of ``_holder.py``.
+
+**BuildHolderData**
+- segment units cm to mm
+- multiple segments in order
+- metadata passthrough
+- guid and reference guid match
+- empty profile gives no segments
+**Handler**
+- happy path returns segments and json no library
+- name defaults to active document
+- no active design errors
+- axis not an axis errors
+- invalid end datum errors
+- empty profile errors
+- bad body handle errors
+
 ## `model_construction`
 
 > Unit tests for ``construction.py`` — point / axis / plane construction datums.
@@ -1693,25 +1806,6 @@ after changing tests._
 - position scaled inches
 - unknown rotate axis errors
 - no active design errors
-
-## `model_create_holder`
-
-> Unit tests for ``model_create_holder.py`` + the pure half of ``_holder.py``.
-
-**BuildHolderData**
-- segment units cm to mm
-- multiple segments in order
-- metadata passthrough
-- guid and reference guid match
-- empty profile gives no segments
-**Handler**
-- happy path returns segments and json no library
-- name defaults to active document
-- no active design errors
-- axis not an axis errors
-- invalid end datum errors
-- empty profile errors
-- bad body handle errors
 
 ## `model_extrude`
 
@@ -1822,43 +1916,37 @@ after changing tests._
 - bad fit errors
 - counterbore with fastener keeps counterbore
 
-## `model_measure_bbox`
+## `model_inspect`
 
-> Unit tests for the ``model_measure_bbox`` MCP tool.
+> Tests for `model_inspect` — the measurement rich read (bbox default + include=['mass']; mesh routing).
 
-**UnitConversion**
-- world extents in mm
-- world extents in inches
-- unknown units is an error not a crash
-**WorldBoxMath**
-- center is midpoint of offset box
-- min max points scaled
-- oriented false for world
-- no bounding box errors
-- bbox with none points errors
-**MeasurableGeometry**
-- zero bodies returns none
-- single body is used directly
-- picks largest body by volume
-- brep body passed through unchanged
-- body without bbox skipped in volume scan
-- all bodies without bbox falls back to first
-- note warns when picking one of many
-**ResolveTarget**
-- empty target is root component
-- occurrence by name
-- body by name in root
-- body by name inside occurrence
-- not found returns none
-- not found target is an error
-**OrientedMeasurement**
-- xyz map length width height in frame
-- frame axes reported
-- obb built from jo x and y axes
-- missing frame is an error
-**ResultContract**
-- ok shape
-- error shape carries message
+**DefaultAndDispatch**
+- solid default is bbox
+- design default is bbox
+- include mass adds properties
+- mesh target routes to mesh stats
+- mesh is not a valid include
+**Guards**
+- unresolvable target errors
+- unknown include errors
+**NormalizeInclude**
+- comma string
+- none empty
+
+## `model_measure_between`
+
+> Tests for `model_measure_between` — distance / angle between two targets.
+
+**Distance**
+- distance default mode scales to mm
+- distance in cm
+**Angle**
+- angle returns degrees
+**Guards**
+- unknown mode errors
+- bad units errors
+- unresolvable a errors
+- measure failure surfaced
 
 ## `model_mirror`
 
@@ -1911,37 +1999,6 @@ after changing tests._
 **BodyOwningComponent**
 - circular builds on bodys parent component
 - rectangular builds on bodys parent component
-
-## `model_physical_properties`
-
-> Unit tests for ``model_physical_properties`` — mass/CoM/inertia/principal/gyration.
-
-**Guards**
-- unknown units
-- unknown accuracy
-- no active design
-- unresolvable target
-- no measurable solid
-**Scalars**
-- mass is kg regardless of units
-- volume scales by cube of length
-- area scales by square of length
-- center of mass scales by length
-- inches volume and com
-- density reported in kg per cm3
-**Inertia**
-- world inertia scaled by length squared
-- principal moments present and scaled
-- principal axes are unit vectors not scaled
-- radius of gyration scaled by length
-- rotation to principal is radians not scaled
-- failed inertia ok flag is skipped
-**Accuracy**
-- accuracy passed through and reported
-- accuracy used maps enum back to name
-**PerBody**
-- per occurrence breakdown
-- per body false omits breakdown
 
 ## `model_revolve`
 
@@ -2211,58 +2268,6 @@ after changing tests._
 - unreadable frame is none
 - partial frame is none
 
-## `sketch_detail`
-
-> Unit tests for ``sketch_detail.py`` — read the full structure of one sketch.
-
-**SubComponentResolution**
-- finds sketch in active sub component
-- unknown name lists sub component sketches
-**Entities**
-- lines indexed with construction flag
-- circle geometry
-- counts summary
-**Constraints**
-- perpendicular links two lines
-- horizontal links one line
-- coincident links point and entity
-- constraint total
-**Dimensions**
-- dimension name value expr
-**ConstraintState**
-- reports fully constrained flag
-- reports not fully constrained
-- dimension driving flag
-**EllipseAndPolygon**
-- ellipse enumerated
-- polygon lists all its lines
-- constraint referencing ellipse resolves
-**ArcAndPoint**
-- arc center and radius
-- point position
-**DimensionTally**
-- driving dimension count
-- dimension with no parameter is safe
-**VectorItems**
-- count item collection expanded
-- len getitem vector expanded
-- single entity is not a vector
-**UnknownConstraint**
-- unknown class name derived
-**Guards**
-- missing sketch
-- no name lists available
-**Profiles**
-- emits per profile records with handles
-- sorted largest area first
-- handle is a composite self healing token
-- loop count distinguishes ring from region
-- empty when no profiles
-**ProgressiveDisclosure**
-- default omits the heavy entity xray
-- default points at the deeper level
-- include entities adds the xray
-
 ## `sketch_dimension`
 
 > Unit tests for ``sketch_dimension.py`` — dimensional constraints + driven values.
@@ -2351,7 +2356,7 @@ after changing tests._
 
 **SurfaceExtrude**
 - sets isSolid false and reports it
-- rejects a solid result
+- reports result is solid read back
 - zero distance guard
 - unknown operation rejected
 - from edge curves uses edge profile
@@ -2361,7 +2366,7 @@ after changing tests._
 - sketch with no curves errors
 **SurfaceRevolve**
 - sets isSolid false
-- rejects solid result
+- reports result is solid read back
 - zero angle guard
 - non numeric angle rejected
 - unknown axis rejected
@@ -2480,6 +2485,18 @@ after changing tests._
 - max results clamped and truncation flagged
 - max results never exceeds hard cap
 
+## `sys_capability_map`
+
+> Unit tests for ``sys_capability_map`` - the LIVE family index (breadth map).
+
+**FamilyMap**
+- groups by prefix with summary entry and count
+- counts sum to tool total
+- unmapped family falls back honestly
+- note cross links to find tool
+**FamilyOf**
+- prefix split
+
 ## `sys_find_tool`
 
 > Unit tests for ``sys_find_tool`` — search the server's own tools + input-kinds by keyword.
@@ -2525,7 +2542,7 @@ after changing tests._
 
 ## `tier2_misc`
 
-> Unit tests for assorted Tier-2 helpers: doc_update_xref, timeline, cam_generate.
+> Unit tests for assorted Tier-2 helpers: doc_update_xref, cam_generate.
 
 **RefName**
 - reads datafile name
@@ -2539,42 +2556,36 @@ after changing tests._
 - name filter targets one ref
 - unknown name lists available
 - get latest false is an error
-**EntityType**
-- group returns timelinegroup
-- entity class name
-- none entity returns none
-**ObjectSummary**
-- maps known health label
-- unknown health stays numeric
-- group type and flag
-- parent group name surfaced
-- no parent group is none
-- message only when present
-- suppressed and rolled back flags
-**TimelineHandler**
-- no active design
-- returns all with marker and count
-- include suppressed false omits suppressed
-- group filter returns only that group
-- groups roster maps name to member count
-- truncation at cap
-**LiveOpTally**
+**LiveReadiness**
 - counts states
 - active op captured with real progress
-- cam unavailable returns none
+- errored op bucketed separately not as ood
+- setup level error tallied
+- nc program level error tallied
+- clean job is ready
+- cam unavailable returns error
 
 ## `tool_autodiscovery`
 
 > Lint/contract for the AUTO-DISCOVERED tool registration (entry.py::_collect_items).
 
 **AutoDiscovery**
-- sweep registers exactly the register tool modules
+- every swept module registers a tool
 - sweep registers a full nonempty set
 - tool names are unique
 - gated tool not in swept set
 - helper modules have no register tool
 - explicitly referenced modules are importable with their entry points
 - entry does not attribute access swept or gated modules
+
+## `tool_naming`
+
+> Lint/contract for the TOOL NAMING SCHEMA (CLAUDE.md "Read vs Edit").
+
+**ToolNaming**
+- every name is domain verb
+- verb is in the closed set
+- verb kind matches write status
 
 ## `view_inspect`
 
@@ -2624,6 +2635,10 @@ after changing tests._
 - substring match
 - no match returns none
 - already hidden others not restored on
+**ActiveComponentNote**
+- root active no note
+- sub component active warns and names it
+- none design is safe
 **OrthoCameraVectors**
 - front looks along plus y z up
 - right looks along minus x
@@ -2704,9 +2719,12 @@ after changing tests._
 - document without a design
 **Orientation**
 - reports document and design identity
+- reports parameters count and pointer
+- no param pointer when zero
 - healthy rollup
 - timeline errors make it unhealthy
 - broken joint surfaced by name
+- suppressed joint is not broken
 - healthy note says so
 - direct mode has no timeline
 - browser digest is depth one
@@ -2717,7 +2735,7 @@ after changing tests._
 **ExternalReferences**
 - no references is clean
 - references all current is healthy
-- out of date reference makes design unhealthy
+- out of date reference is flagged for attention
 - ood reported even without an active design
 **Pointers**
 - small design points to whole tree
@@ -2739,6 +2757,22 @@ after changing tests._
 - no selection is empty
 - selected body echoed with pointer
 - selected face reports body and occurrence
+
+## `write_guard`
+
+> Tests for the write-document binding guard (_write_guard) - the concurrency targeting fix.
+
+**ActedOnStamp**
+- successful write is stamped
+- error result is not stamped
+- handler does not see expect document
+**ExpectDocumentGuard**
+- match by name proceeds
+- match by urn proceeds
+- mismatch refuses without calling handler
+- omitted expect document proceeds
+**IntegrationThroughItem**
+- write tool gains expect document read does not
 
 ## `write_status_annotations`
 

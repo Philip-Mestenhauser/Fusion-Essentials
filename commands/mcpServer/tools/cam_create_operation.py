@@ -5,17 +5,17 @@
 
   cam_create_operation -> add a toolpath operation to a CAM setup: pick a STRATEGY (face / adaptive /
                           pocket2d / drill / bore / contour2d / ...), a TOOL by reference
-                          (tool_library_url + tool_index — the handle cam_read_tool_library hands back),
+                          (tool_library_url + tool_index - the handle cam_edit_tools / cam_get(include=['library']) hands back),
                           add it to the setup, and (by default) generate the toolpath.
 
-The "apply an operation" half of CAM, paired with cam_read_tool_library (the catalog half): read a
+The "apply an operation" half of CAM, paired with cam_edit_tools / cam_get(include=['library']) (the catalog half): read a
 library to get a tool reference, then create an operation with it. cam_create_setup makes the setup;
 this fills it with toolpaths.
 
 Grounded in adsk.cam (the full path confirmed live):
   - Setup.operations.compatibleStrategies -> [OperationStrategy] (each .name is the strategy string)
   - Setup.operations.createInput(strategyName) -> OperationInput
-  - OperationInput.tool = <Tool>  (a Tool from ToolLibrary.item(i) — setting it writes the tool params)
+  - OperationInput.tool = <Tool>  (a Tool from ToolLibrary.item(i) - setting it writes the tool params)
   - Setup.operations.add(input) -> Operation
   - CAM.generateToolpath(operation) -> GenerateToolpathFuture (async); operation then has
     .hasToolpath / .isToolpathValid
@@ -50,7 +50,7 @@ def _get_cam():
 
 def _doc_tool_at(cam, index):
     """Fetch a Tool from THIS document's tool library by index (cam.documentToolLibrary). This is the
-    library cam_tool_library writes to at scope='document' — so an agent can create an op against a
+    library cam_edit_tools writes to at scope='document' - so an agent can create an op against a
     tool it just made in the doc, with no URL plumbing. Returns (tool, None) or (None, error)."""
     dtl = safe(lambda: cam.documentToolLibrary)
     if dtl is None:
@@ -58,7 +58,7 @@ def _doc_tool_at(cam, index):
     n = safe(lambda: dtl.count, 0) or 0
     if n == 0:
         return None, ("The document tool library is empty. Add a tool first "
-                      "(cam_tool_library scope='document' action='add').")
+                      "(cam_edit_tools scope='document' action='add').")
     if not (0 <= index < n):
         return None, f"tool_index {index} out of range (document library has {n} tools)."
     t = safe(lambda: dtl.item(index))
@@ -66,7 +66,7 @@ def _doc_tool_at(cam, index):
 
 
 def _tool_at(library_url, index):
-    """Fetch a Tool by (library_url, index) — the reference handle cam_tool_library (list) returns for a
+    """Fetch a Tool by (library_url, index) - the reference handle cam_edit_tools (list) returns for a
     SHARED library (local/cloud/hub/Fusion samples). Returns (tool, None) or (None, error)."""
     libs = safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
     if not libs:
@@ -113,9 +113,9 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             tool_index: int = -1, tool_scope: str = "", generate: bool = True) -> dict:
     """Create a CAM milling operation in a setup.
 
-    setup: the setup name (from cam_get_setups). strategy: e.g. face / adaptive / pocket2d / drill /
+    setup: the setup name (from cam_get). strategy: e.g. face / adaptive / pocket2d / drill /
     bore / contour2d (validated against the setup's compatible strategies). The TOOL is either
-    tool_scope='document' + tool_index (this doc's library — what cam_tool_library scope='document'
+    tool_scope='document' + tool_index (this doc's library - what cam_edit_tools scope='document'
     writes; no URL needed), OR tool_library_url + tool_index (a shared library). generate: generate the
     toolpath after creating (default True). WRITES.
     """
@@ -137,14 +137,14 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     tool_scope = (tool_scope or "").strip().lower()
     if tool_index is None or tool_index < 0:
         return error("Provide 'tool_index' (with 'tool_scope=document' for this doc's library, or "
-                     "'tool_library_url' for a shared one) — both from cam_tool_library.")
+                     "'tool_library_url' for a shared one) - both from cam_edit_tools.")
     if tool_scope == "document":
         tool, terr = _doc_tool_at(cam, tool_index)
     elif tool_library_url:
         tool, terr = _tool_at(tool_library_url, tool_index)
     else:
         return error("Provide a tool reference: 'tool_scope=document' + 'tool_index', OR "
-                     "'tool_library_url' + 'tool_index' (from cam_tool_library).")
+                     "'tool_library_url' + 'tool_index' (from cam_edit_tools).")
     if terr:
         return error(terr)
 
@@ -187,7 +187,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             result["note"] = f"Operation created but toolpath generation errored: {gerr}"
         else:
             result["note"] = ("Operation created and toolpath generation started (async). Confirm with "
-                              "cam_get_operations (hasToolpath / isToolpathValid).")
+                              "cam_get(include=['operations']) (hasToolpath / isToolpathValid).")
     return ok(result)
 
 
@@ -195,22 +195,22 @@ TOOL_DESCRIPTION = (
     "CREATE a CAM milling operation in a setup (the 'apply an operation' half of CAM). 'setup' = the "
     "setup name; 'strategy' = face / adaptive / pocket2d / drill / bore / contour2d / ... (validated "
     "against the setup's compatible strategies). TOOL ref: 'tool_scope=document' + 'tool_index' (this "
-    "doc's library — what cam_tool_library scope='document' adds; no URL needed) OR 'tool_library_url' "
+    "doc's library - what cam_edit_tools scope='document' adds; no URL needed) OR 'tool_library_url' "
     "+ 'tool_index' (a shared library). 'generate' (default true) computes the toolpath. WRITES. Then "
     "cam_select_geometry targets the geometry. cam_create_setup makes the setup first."
 )
 
 tool = (
     Tool.create_simple(name="cam_create_operation", description=TOOL_DESCRIPTION)
-    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get_setups)."})
+    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("strategy", {"type": "string",
             "description": "Strategy name, e.g. face / adaptive / pocket2d / drill / bore / contour2d."})
     .add_input_property("tool_scope", {"type": "string", "enum": ["document"],
             "description": "Set 'document' to take the tool from this doc's library by tool_index (no url)."})
     .add_input_property("tool_library_url", {"type": "string",
-            "description": "Shared tool library url (from cam_tool_library) — omit if tool_scope=document."})
+            "description": "Shared tool library url (from cam_edit_tools) - omit if tool_scope=document."})
     .add_input_property("tool_index", {"type": "integer",
-            "description": "Tool index within the chosen library (from cam_tool_library)."})
+            "description": "Tool index within the chosen library (from cam_edit_tools)."})
     .add_input_property("generate", {"type": "boolean",
             "description": "Generate the toolpath after creating (default true)."})
     .strict_schema()

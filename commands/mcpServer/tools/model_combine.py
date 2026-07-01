@@ -10,7 +10,7 @@
 This is the body-on-body boolean that model_extrude/model_revolve's cut/join can't do (those act on
 a profile vs. existing geometry). Use it to assemble a part from primitive bodies (a boss + a base),
 to bore a hole (cut a cylinder body from the part), or to find an overlap (intersect). Bodies are
-referenced BY NAME within the active component. General-purpose — it just combines bodies.
+referenced BY NAME within the active component. General-purpose - it just combines bodies.
 
 Grounded in adsk.fusion (signatures confirmed live):
   - Component.features.combineFeatures.createInput(targetBody, ObjectCollection(toolBodies)) -> input
@@ -43,33 +43,6 @@ _OPERATIONS = {
 }
 
 
-def _resolve_body(comp, name):
-    """Find a solid body by name in the component (then any occurrence's bodies)."""
-    name = (name or "").strip()
-    if not name:
-        return None
-    b = safe(lambda: comp.bRepBodies.itemByName(name))
-    if b:
-        return b
-    root = safe(lambda: _common.design().rootComponent)
-    if root:
-        b = safe(lambda: root.bRepBodies.itemByName(name))
-        if b:
-            return b
-        for o in (safe(lambda: root.allOccurrences) or []):
-            b = safe(lambda o=o: o.bRepBodies.itemByName(name))
-            if b:
-                return b
-    return None
-
-
-def _split_names(tools):
-    """Accept a list of names, or a comma-separated string, of tool bodies."""
-    if isinstance(tools, (list, tuple)):
-        return [str(t).strip() for t in tools if str(t).strip()]
-    return [t.strip() for t in (tools or "").split(",") if t.strip()]
-
-
 def handler(target: str = "", tools=None, operation: str = "join",
             keep_tools: bool = False, new_component: bool = False) -> dict:
     """Boolean-combine tool bodies into a target body.
@@ -88,7 +61,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # target + tools are BodyRef / BodyRefList inputs: resolve each by HANDLE (precise — bodies are
+    # target + tools are BodyRef / BodyRefList inputs: resolve each by HANDLE (precise - bodies are
     # auto-named) or by name, with validation. The handler drops its bespoke body-by-name resolver.
     tgt, terr = _TARGET.resolve(target)
     if terr:
@@ -100,7 +73,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     coll = adsk.core.ObjectCollection.create()
     for b in tool_bodies:
         if b is tgt:
-            return error("A tool body is the same as the target — pick distinct bodies.")
+            return error("A tool body is the same as the target - pick distinct bodies.")
         coll.add(b)
     if coll.count == 0:
         return error("No valid tool bodies resolved.")
@@ -131,9 +104,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
 
 TOOL_DESCRIPTION = (
-"Boolean-combine solid BODIES — the Combine feature. 'target' is the body to keep/modify; "
+"Boolean-combine solid BODIES - the Combine feature. 'target' is the body to keep/modify; "
 "'tools' is the body name(s) to combine into it (a list, or comma-separated). 'operation': "
-"join (fuse into one) | cut (subtract the tools from the target — e.g. bore a hole with a "
+"join (fuse into one) | cut (subtract the tools from the target - e.g. bore a hole with a "
 "cylinder body) | intersect (keep only the shared volume). 'keep_tools' leaves the tool bodies "
 "(default false = consume them). This is the body-on-body boolean that model_extrude/"
 "model_revolve's cut/join can't do (those act on a profile). Bodies are named within the active "

@@ -237,14 +237,15 @@ class TestSurfaceExtrude:
         assert dist == ("real", 0.5)                 # 5 mm -> 0.5 cm
         assert ef.last_input.operation == "NewBodyFeatureOperation"
 
-    def test_rejects_a_solid_result(self):
-        # if add() returned a SOLID body, the profile was closed -> error, point at model_extrude
-        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Body1", is_solid=True)])
+    def test_reports_result_is_solid_read_back(self):
+        # is_solid is READ BACK from the result body, not assumed. With createOpenProfile + isSolid=False
+        # a closed boundary makes an open sheet/tube (is_solid False, verified live), so the tool
+        # SUCCEEDS — it doesn't reject; it reports what the body actually is.
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Body1", is_solid=False)])
         comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
         _install(comp)
-        res = sc.extrude_handler(sketch_name="S", distance=5)
-        assert res["isError"] is True
-        assert "SOLID" in res["message"] and "model_extrude" in res["message"]
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5))
+        assert out["created"] is True and out["is_solid"] is False
 
     def test_zero_distance_guard(self):
         comp = FakeComp(FakeFeatures(ef=FakeExtrudeFeatures()), sketches=[FakeSketch("S")])
@@ -316,12 +317,14 @@ class TestSurfaceRevolve:
         assert out["axis"] == "y-axis"
         assert rf.last_input.isSolid is False
 
-    def test_rejects_solid_result(self):
-        rf = FakeRevolveFeatures(result_bodies=[FakeBody("Body1", is_solid=True)])
+    def test_reports_result_is_solid_read_back(self):
+        # is_solid is read back from the body, not assumed; a sheet revolve makes an open shell
+        # (is_solid False, verified live) and SUCCEEDS rather than rejecting.
+        rf = FakeRevolveFeatures(result_bodies=[FakeBody("Body1", is_solid=False)])
         comp = FakeComp(FakeFeatures(rf=rf), sketches=[FakeSketch("S")])
         _install(comp)
-        res = sc.revolve_handler(sketch_name="S", angle_deg=360)
-        assert res["isError"] is True and "model_revolve" in res["message"]
+        out = _payload(sc.revolve_handler(sketch_name="S", angle_deg=360))
+        assert out["created"] is True and out["is_solid"] is False
 
     def test_zero_angle_guard(self):
         comp = FakeComp(FakeFeatures(rf=FakeRevolveFeatures()), sketches=[FakeSketch("S")])

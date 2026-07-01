@@ -127,6 +127,11 @@ class _Sketches:
         self._byname = {}
         self.created_on = []
     def add(self, plane):
+        # The live Sketches.add rejects a wrong-typed argument with a TypeError (it expects a face/plane
+        # entity, NOT a tuple). Model that so an unpacking bug — passing _resolve_face's (entity, error)
+        # tuple instead of the entity — fails here as it does live, rather than silently passing.
+        if isinstance(plane, tuple):
+            raise TypeError("Wrong number or type of arguments for overloaded function 'Sketches_add'.")
         s = _Sketch("HolePts%d" % len(self.created_on)); self.created_on.append(plane)
         self._byname[s.name] = s; return s
     def itemByName(self, n):
@@ -170,8 +175,9 @@ def _install():
     design = _Design()
     mh._common.design = lambda: design
     mh._target_component = lambda d: d.rootComponent
-    # face resolver returns a stand-in planar face; the tool builds a sketch on it
-    mh._resolve_face = lambda d, h: ("FACE", h)
+    # face resolver returns (entity, error) — the GeometryHandle.resolve contract. The handler MUST
+    # unpack it; passing the whole tuple to sketches.add raises TypeError (see _Sketches.add).
+    mh._resolve_face = lambda d, h: ("FACE", None)
     # ObjectCollection + ValueInput + ExtentDirections seams
     mh._object_collection = _ObjColl.create
     mh._value = lambda s: ("V", s)

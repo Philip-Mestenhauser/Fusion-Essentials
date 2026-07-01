@@ -13,7 +13,7 @@
   assembly_constrain -> the Constrain Components relationship: constrain two occurrences' geometry
                          (faces/edges/etc.) flush / coincident / concentric / at an angle. The
                          relationship type is INFERRED from the selected geometry. Uses the user's
-                         current Fusion selection (two entities) — pair with sys_request_selection.
+                         current Fusion selection (two entities) - pair with sys_request_selection.
                          WRITES.
 
 Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
@@ -34,7 +34,7 @@ from ._common import UNIT_TO_CM, error, ok, safe
 from . import _common
 from . import _inputs
 # Reuse the joint tool's autonomous geometry resolver so assembly_constrain can snap to geometry
-# (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection — same '<occurrence>:<snap>' grammar.
+# (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection - same '<occurrence>:<snap>' grammar.
 from .joint_create_edit import _resolve_snap_entity, _parse_snap
 
 app = adsk.core.Application.get()
@@ -44,7 +44,7 @@ _CAPTURE_ACTIONS = ("capture", "revert", "status")
 
 def _find_one(design, name):
     """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
-    logic — refuses an ambiguous substring instead of grabbing the first instance (the wrong-instance
+    logic - refuses an ambiguous substring instead of grabbing the first instance (the wrong-instance
     bug). Returns (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence(name, name)
 
@@ -54,7 +54,7 @@ def _find_one(design, name):
 def capture_position_handler(action: str = "status") -> dict:
     """Capture / revert / report the assembly's flexible position in the timeline.
 
-    action: 'capture' (write the current pose into the timeline — only valid when a move is
+    action: 'capture' (write the current pose into the timeline - only valid when a move is
     pending), 'revert' (discard the latest captured position), or 'status' (report whether a move
     is pending and how many positions are captured).
     """
@@ -78,7 +78,7 @@ def capture_position_handler(action: str = "status") -> dict:
 
     if act == "capture":
         if not pending:
-            return error("Nothing to capture — there is no pending position change. Move a jointed "
+            return error("Nothing to capture - there is no pending position change. Move a jointed "
     "component first (its pose is transient until captured).")
         try:
             snap = snaps.add()
@@ -90,7 +90,7 @@ def capture_position_handler(action: str = "status") -> dict:
 
     # revert
     if count < 1:
-        return error("Nothing to revert — there are no captured positions.")
+        return error("Nothing to revert - there are no captured positions.")
     try:
         latest = snaps.item(count - 1)
         did = latest.deleteMe()
@@ -150,10 +150,10 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
                                 flipped: bool = False, units: str = "mm") -> dict:
     """Constrain two occurrences' geometry (the Constrain Components relationship).
 
-    Fusion locates a part by a SET of relationships solved TOGETHER in one constraint — one face
+    Fusion locates a part by a SET of relationships solved TOGETHER in one constraint - one face
     pair rarely fully locates a part, so prefer 'relationships':
 
-      relationships=[ {snap_one, snap_two, flip?, offset?, angle_deg?}, ... ]  — each item is a
+      relationships=[ {snap_one, snap_two, flip?, offset?, angle_deg?}, ... ]  - each item is a
       geometry pair ('<occurrence>:<snap>'); all are added to ONE constraint and solved together
       (e.g. a part's bottom flush onto another's top + two side faces flush to fully fix it). Mating
       faces 'rest on' each other when flip=true (their normals oppose).
@@ -191,7 +191,7 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         names = set()
 
         if specs:
-            # Autonomous snap path — resolve every pair and add it to the SAME constraint input.
+            # Autonomous snap path - resolve every pair and add it to the SAME constraint input.
             for i, sp in enumerate(specs):
                 occ1, sn1 = _parse_snap(sp["snap_one"])
                 occ2, sn2 = _parse_snap(sp["snap_two"])
@@ -268,7 +268,7 @@ capture_item = Item.create_tool_item(tool=capture_tool, write="write", handler=c
                                      run_on_main_thread=True)
 
 _ASBUILT_DESC = (
-                                     "Create a rigid AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE — no joint "
+                                     "Create a rigid AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint "
                                      "origins needed (unlike the joint tool). 'occurrence_one'/'occurrence_two' are the occurrence "
                                      "names to lock together in place."
 )
@@ -282,11 +282,11 @@ asbuilt_item = Item.create_tool_item(tool=asbuilt_tool, write="write", handler=a
                                      run_on_main_thread=True)
 
 _CONSTRAINT_DESC = (
-                                     "Constrain component occurrences' geometry — Constrain Components (flush / coincident / "
+                                     "Constrain component occurrences' geometry - Constrain Components (flush / coincident / "
                                      "concentric / at an angle, INFERRED from the geometry). Fusion locates a part with a SET of "
                                      "relationships solved TOGETHER, so prefer 'relationships' = a list of {snap_one, snap_two, "
                                      "flip?, offset?} pairs (each '<occurrence>:<snap>', snap = center/top/bottom/left/right/front/"
-                                     "back/cylinder/origin) all added to ONE constraint — e.g. a part's bottom flush onto another's "
+                                     "back/cylinder/origin) all added to ONE constraint - e.g. a part's bottom flush onto another's "
                                      "top + two side faces flush to fully fix it. Mating faces 'rest on' each other with flip=true. "
                                      "Shorthand: pass 'snap_one'/'snap_two' for a single relationship. Or selection mode: omit snaps, "
                                      "pass 'occurrence_one'/'occurrence_two', select one entity on each in Fusion first."

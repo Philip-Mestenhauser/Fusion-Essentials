@@ -3,9 +3,9 @@
 
 """MCP building block: cut the model with a section plane so the agent can see INSIDE.
 
-  view_section(action=...) — create / adjust / remove a Section Analysis (the live cutaway in
-  Fusion's Inspect > Section Analysis), so an agent can see internal geometry — cavities, wall
-  thickness, how a part nests in a fixture, where an internal void sits — that a solid view
+  view_section(action=...) - create / adjust / remove a Section Analysis (the live cutaway in
+  Fusion's Inspect > Section Analysis), so an agent can see internal geometry - cavities, wall
+  thickness, how a part nests in a fixture, where an internal void sits - that a solid view
   hides.
 
     cut       -> add a section on an origin plane ('plane' = xy / xz / yz, aliases top/front/right)
@@ -14,7 +14,7 @@
     list      -> list the active section analyses.
     clear     -> remove all section analyses (restores the un-cut view).
 
-This is a VIEW/analysis aid — Section Analysis does not modify geometry (it's a non-destructive
+This is a VIEW/analysis aid - Section Analysis does not modify geometry (it's a non-destructive
 cutaway you can delete). Pair with view_inspect (orient/isolate) + view_screenshot to study the cut.
 
 Grounded in adsk.fusion:
@@ -52,7 +52,7 @@ _PLANES = {
 
 def _find_occurrence(design, name):
     """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
-    logic — refuses an ambiguous substring instead of cutting through the wrong instance. Returns
+    logic - refuses an ambiguous substring instead of cutting through the wrong instance. Returns
     (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence("through", name)
 
@@ -70,7 +70,7 @@ def _aim_at_cut(normal, flipped):
     Verified rule: a section keeps the +normal half and the cut interior faces toward +normal, so
     the REVEALING camera sits on the +normal side with view_dir (eye - target) == +normal. 'flip'
     keeps the other half, so the revealing side reverses. Without this, cut() leaves the camera
-    wherever it was — often on the solid (wrong) side, where the model looks uncut.
+    wherever it was - often on the solid (wrong) side, where the model looks uncut.
     """
     nx, ny, nz = normal
     if flipped:
@@ -99,7 +99,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
     action: 'cut' (add a section), 'list', or 'clear' (remove all). For 'cut': 'plane' = xy/xz/yz
     (top/front/right) OR 'through' = a named occurrence to cut through its center; 'offset' (mm,
     +/- along the plane normal) shifts the cut; 'flip' cuts the opposite side; 'show_hatch' shows
-    the section hatch (default true). Non-destructive — 'clear' fully restores the un-cut view.
+    the section hatch (default true). Non-destructive - 'clear' fully restores the un-cut view.
     """
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
@@ -127,7 +127,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
                 removed.append(nm)
         app.activeViewport.refresh()
         return ok({"action": "clear", "removed_count": len(removed), "removed": removed,
-        "note": "All section analyses removed — the model is no longer cut."})
+        "note": "All section analyses removed - the model is no longer cut."})
 
     # --- cut ---
     root = design.rootComponent
@@ -159,14 +159,14 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         if not (plane or "").strip():
             return error("Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or "
     "a planar-face handle from find_geometry) or 'through' (an occurrence).")
-        # plane is a PlaneRef: resolves origin alias OR construction-plane name OR a planar-face/plane
-        # handle — gains section-on-an-arbitrary-plane (face/construction) over the old origin-only path.
+        # plane is a PlaneRef: resolves an origin alias OR construction-plane name OR a planar-face/plane
+        # handle, so a section can be taken on an arbitrary plane (face/construction), not just an origin one.
         cut_entity, perr = _PLANE.resolve(plane)
         if perr:
             return error(perr)
         # If the plane is an origin alias, remember its key so auto_view can aim at the cut. For a
         # construction-plane name or a planar-face handle there's no fixed WORLD normal, so pkey stays
-        # None and auto-aim is skipped (rather than raising) — the section is still created.
+        # None and auto-aim is skipped (rather than raising) - the section is still created.
         alias = (plane or "").strip().lower()
         if alias in _PLANE_NORMALS:
             pkey = alias
@@ -185,7 +185,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
     app.activeViewport.refresh()
 
     # By default, aim the camera at the exposed cut face. Without this, the camera stays where it
-    # was — frequently on the SOLID side, where the model looks uncut and you'd wrongly think the
+    # was - frequently on the SOLID side, where the model looks uncut and you'd wrongly think the
     # section failed. Pass auto_view=false to keep your current camera.
     aimed = False
     if auto_view:
@@ -209,15 +209,13 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
 
 
 TOOL_DESCRIPTION = (
-    "Cut the active model with a live Section Analysis so you can SEE INSIDE — cavities, wall "
-    "thickness, how a part nests in a fixture, where a void sits — that a solid view hides. "
-    "'action': 'cut' (add a section: 'plane' = xy/xz/yz or top/front/right, OR 'through' = a named "
-    "occurrence to cut through its center; 'offset' in mm shifts the cut along the plane normal; "
-    "'flip' cuts the other side; 'show_hatch' default true); 'list' (active sections); 'clear' "
-    "(remove ALL sections — restores the un-cut view). By default the camera is auto-aimed at the "
-    "exposed cut face (auto_view=false keeps your camera) — otherwise the camera may sit on the "
-    "solid side where the model looks uncut. NON-DESTRUCTIVE: a section analysis is a "
-    "cutaway view, not a geometry edit, and 'clear' fully undoes it. Pair with view_inspect "
+    "Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall "
+    "thickness, how a part nests in a fixture, where a void sits - that a solid view hides. "
+    "'action': cut | list | clear (clear removes ALL sections, restoring the un-cut view). Cut by "
+    "'plane' OR by 'through' (an occurrence, cut through its center). NON-DESTRUCTIVE: a cutaway view, "
+    "not a geometry edit; 'clear' fully undoes it. Camera is auto-aimed at the exposed cut face by "
+    "default (auto_view=false keeps your camera) - otherwise it may sit on the solid side where the "
+    "model looks uncut. Pair with view_inspect "
     "(orient/isolate) and view_screenshot. Typical: view_section(cut, through='<OccurrenceName>:1', "
     "plane='front') -> view_inspect(orient, orientation='front') -> view_screenshot -> "
     "view_section(clear)."

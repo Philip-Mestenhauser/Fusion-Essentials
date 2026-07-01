@@ -1,8 +1,8 @@
-"""Unit tests for ``data_read.py`` — the project/file lister and its folder filter.
+"""Unit tests for ``data_read.py`` — the project/file read cores behind data_get.
 
-The headline behaviour under test is ``data_list_files``'s optional ``folder``
-scoping (added so the template-library skill can list ONE folder instead of
-dumping a whole large project). The branches that matter and can silently send a
+The headline behaviour under test is the file lister's optional ``folder``
+scoping (so a caller can list ONE folder instead of dumping a whole large
+project — data_get(project=..., folder=...) delegates here). The branches that matter and can silently send a
 caller to the wrong place: folder navigation by case-insensitive name, a nested
 path, ``recursive`` immediate-files-only vs. descend, the folder-not-found error
 (with its "available subfolders" hint), project resolution by name/id, and the
@@ -15,7 +15,7 @@ import json
 
 from conftest import load_tool
 
-dm = load_tool("data_read")
+dm = load_tool("_data_read")
 
 
 # ── fakes mimicking the data-model tree ────────────────────────────────────

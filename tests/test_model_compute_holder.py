@@ -1,4 +1,4 @@
-"""Unit tests for ``model_create_holder.py`` + the pure half of ``_holder.py``.
+"""Unit tests for ``model_compute_holder.py`` + the pure half of ``_holder.py``.
 
 The geometry reduction (get_tool_profile and its cylindrical-coordinate helpers) needs a full
 body-of-revolution BRep and is covered by live validation, not mocks — reconstructing a faithful
@@ -8,7 +8,7 @@ worth pinning here:
   1. _holder.build_holder_data — the cm→mm segment conversion (height ×10, diameter = radius ×10×2),
      the holder JSON shape (type='holder', millimeters), and metadata pass-through. A wrong unit
      factor here ships a holder the wrong size with no exception — exactly the silent bug to catch.
-  2. model_create_holder.handler — the resolve/guard branches: no design, an axis handle that doesn't
+  2. model_compute_holder.handler — the resolve/guard branches: no design, an axis handle that doesn't
      define an axis (get_axis -> None), an end datum not normal to the axis (is_valid_axial_datum ->
      None), an empty profile, and the happy path (returns segments_mm + holder_json, writes NO library).
 
@@ -20,7 +20,7 @@ import json
 
 from conftest import load_tool
 
-mch = load_tool("model_create_holder")
+mch = load_tool("model_compute_holder")
 holder = load_tool("_holder")
 
 

@@ -42,24 +42,17 @@ def _sweep_register():
     return registry.get_tools()
 
 
-# Non-helper modules that are intentionally NOT tools (engines imported by a real tool). They expose no
-# register_tool() and the sweep correctly skips them — listed here so the discovery contract is explicit.
-_ENGINE_MODULES = {"sketch_detail"}
-
-
 class TestAutoDiscovery:
-    def test_sweep_registers_exactly_the_register_tool_modules(self):
-        # The discovery invariant: the sweep registers EVERY non-gated module that exposes
-        # register_tool(), and only those. A non-gated module without register_tool() must be a known
-        # engine (else it's a tool that would be silently left unregistered).
+    def test_every_swept_module_registers_a_tool(self):
+        # The discovery invariant: every non-gated, non-underscore module the sweep sees exposes
+        # register_tool() - else it's a tool silently left unregistered. (Shared engines/helpers are
+        # _-prefixed and so are skipped by both _tool_module_names() and the real sweep - that is how a
+        # read CORE behind a Get, like _sketch_detail / _data_read, declares "I am not a tool".)
         names = [n for n in _tool_module_names() if n not in _GATED]
         without = [n for n in names if not callable(getattr(load_tool(n), "register_tool", None))]
-        assert set(without) <= _ENGINE_MODULES, (
-            f"non-gated modules missing register_tool() that aren't known engines (would be silently "
-            f"UNREGISTERED): {set(without) - _ENGINE_MODULES}")
-        # And the sweep's registered count equals the register_tool-bearing module count.
-        with_reg = [n for n in names if n not in without]
-        assert len(_sweep_register()) >= len(with_reg)
+        assert not without, (f"non-gated, non-underscore modules missing register_tool() (would be "
+                             f"silently UNREGISTERED - _-prefix them if they are shared engines): {without}")
+        assert len(_sweep_register()) >= len(names)
 
     def test_sweep_registers_a_full_nonempty_set(self):
         items = _sweep_register()

@@ -8,7 +8,7 @@
   model_pattern_circular    -> duplicate occurrences evenly around an axis: a count over a total angle
                          (360 = full ring). WRITES.
 
-These pattern OCCURRENCES (placed components), resolved by name — the common "lay out N copies of
+These pattern OCCURRENCES (placed components), resolved by name - the common "lay out N copies of
 this part/fixture" case. Direction/axis defaults to a world construction axis (x/y/z) so no manual
 entity pick is needed; pass 'axis'/'direction' to choose. General-purpose: they just replicate the
 named occurrences; they say nothing about why.
@@ -36,7 +36,7 @@ app = adsk.core.Application.get()
 
 _AXES = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstructionAxis"}
 
-# 'bodies' lets a pattern replicate solid BODIES (by handle/name) instead of occurrences —
+# 'bodies' lets a pattern replicate solid BODIES (by handle/name) instead of occurrences -
 # the "pattern these holes/bosses" case. Empty -> fall back to 'occurrences'.
 _BODIES = _inputs.BodyRefList("bodies", required=False,
                               description="Bodies to pattern (alternative to 'occurrences').")
@@ -44,7 +44,7 @@ _BODIES = _inputs.BodyRefList("bodies", required=False,
 
 def _resolve_occurrences(design, names):
     """Resolve a list (or comma string) of occurrence names/fullPathNames via the shared OccurrenceRef
-    logic (fullPathName-preferring, ambiguity-refusing — no silent wrong-instance grab).
+    logic (fullPathName-preferring, ambiguity-refusing - no silent wrong-instance grab).
     Returns (object_collection, resolved_names, errors)."""
     if isinstance(names, str):
         wanted = [n.strip() for n in names.split(",") if n.strip()]
@@ -98,7 +98,7 @@ def _axis_entity(comp, axis_key):
 
 def _owning_component(design, coll, bodies):
     """The component the pattern feature must be built in: for a BODIES pattern, the parent component
-    of the (first) resolved body — its construction axes and features collection are the ones that
+    of the (first) resolved body - its construction axes and features collection are the ones that
     share an object path with the bodies. For an OCCURRENCES pattern the entities are root children, so
     the root component is correct. Falls back to root if a parent can't be read."""
     root = safe(lambda: design.rootComponent)
@@ -118,7 +118,7 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
     """Pattern component occurrences OR bodies in a rectangular grid.
 
     occurrences: occurrence name(s) to pattern (comma-separated, or one name). bodies: solid body
-    handles/names to pattern instead (takes precedence over occurrences) — the "pattern these
+    handles/names to pattern instead (takes precedence over occurrences) - the "pattern these
     bosses/holes" case. quantity_one / spacing_one / direction_one: count, spacing (in 'units'), and
     world axis (x/y/z) for the first direction. quantity_two / spacing_two / direction_two: optional
     second direction (set quantity_two=1 for a single row). 'spacing' is BETWEEN instances. WRITES.
@@ -137,7 +137,7 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         return error(rerr)
 
     # Build the axis AND the feature in the component that OWNS the inputs (the bodies' parent for a
-    # body pattern, else root) — they must share a component or Fusion raises getObjectPath.
+    # body pattern, else root) - they must share a component or Fusion raises getObjectPath.
     owner = _owning_component(design, coll, bodies)
     d1 = _axis_entity(owner, direction_one)
     if not d1:
@@ -202,7 +202,7 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
         return error(rerr)
 
     # Axis + feature in the component that OWNS the inputs (bodies' parent for a body pattern, else
-    # root) — sharing a component is what lets Fusion build the object path (the sub-component body
+    # root) - sharing a component is what lets Fusion build the object path (the sub-component body
     # pattern failed with getObjectPath when the axis came from root).
     owner = _owning_component(design, coll, bodies)
     ax = _axis_entity(owner, axis)

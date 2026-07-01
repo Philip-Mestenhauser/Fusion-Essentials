@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: surface<->solid body operations — LOFT, STITCH, UNSTITCH.
+"""MCP building blocks: surface<->solid body operations - LOFT, STITCH, UNSTITCH.
 
 These are the surface-aware companions to model_extrude/model_combine. They bridge the surface and
 solid worlds:
@@ -9,26 +9,26 @@ solid worlds:
   model_loft     -> loft a body through an ORDERED list of profiles (optionally shaped by rails OR a
                     single centerline). isSolid toggles a surface vs. a solid loft. WRITES.
   model_stitch   -> join surface bodies into a SOLID iff they form a watertight boundary within
-                    'tolerance'. If gaps exceed tolerance the result STAYS a surface — and the tool
+                    'tolerance'. If gaps exceed tolerance the result STAYS a surface - and the tool
                     says so honestly (became_solid=False), never faking the solid. WRITES.
-  model_unstitch -> explode a solid/surface body (or specific faces) into per-face SURFACE bodies —
+  model_unstitch -> explode a solid/surface body (or specific faces) into per-face SURFACE bodies -
                     the inverse of stitch, so one face can be patched/trimmed then re-stitched. WRITES.
 
 Grounded in adsk.fusion (signatures confirmed live via sys_get_api_doc):
   - Component.features.loftFeatures.createInput(FeatureOperations) -> LoftFeatureInput
-      .loftSections.add(section)  (sections added IN ORDER — order is the whole game)
+      .loftSections.add(section)  (sections added IN ORDER - order is the whole game)
       .centerLineOrRails.addCenterLine(curve) / .addRail(curve)  (centerline XOR rails)
       .isSolid = bool
     LoftFeatures.add(input) -> LoftFeature (.bodies, .isSolid)
   - Component.features.stitchFeatures.createInput(ObjectCollection, ValueInput, FeatureOperations)
       -> StitchFeatureInput;  StitchFeatures.add(input) -> StitchFeature (.bodies)
-    BRepBody.isSolid — the KEY signal: a stitch that didn't close stays a surface.
+    BRepBody.isSolid - the KEY signal: a stitch that didn't close stays a surface.
   - Component.features.unstitchFeatures.add(ObjectCollection, isChainSelection) -> UnstitchFeature
-      (NOTE: no createInput — add() takes the faces/bodies collection directly).
+      (NOTE: no createInput - add() takes the faces/bodies collection directly).
 
-Handlers run on the main thread; WRITES. (loft/stitch can be slow — the 30s main-thread cap applies.)
+Handlers run on the main thread; WRITES. (loft/stitch can be slow - the 30s main-thread cap applies.)
 
-CAVEAT (safe): _common.safe() swallows exceptions, so it must NEVER wrap the mutating add(...) call —
+CAVEAT (safe): _common.safe() swallows exceptions, so it must NEVER wrap the mutating add(...) call -
 a swallowed failure there would report false success. Mutations use explicit try/except -> error(...),
 exactly as model_extrude/model_combine do; the RESULT body's isSolid is read back, never assumed.
 """
@@ -87,7 +87,7 @@ _STITCH_BODIES = _inputs.SurfaceBodyRefList("bodies", required=True,
 _STITCH_TOLERANCE = _inputs.Distance("tolerance", allow_zero=False, allow_negative=False, required=False,
     description="Gap-closing tolerance in 'units' (default ~0.01 mm).")
 
-# UNSTITCH — a whole body (BodyRef any) OR specific faces (GeometryHandleList).
+# UNSTITCH - a whole body (BodyRef any) OR specific faces (GeometryHandleList).
 _UNSTITCH_BODY = _inputs.BodyRef("target", kind="any", required=False,
     description="A whole body to fully explode into per-face surfaces.")
 _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
@@ -100,7 +100,7 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                  as_surface=None) -> dict:
     """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline.
 
-    profiles: >=2 ordered profile references (handles or {sketch, profile_index} selectors) — the loft
+    profiles: >=2 ordered profile references (handles or {sketch, profile_index} selectors) - the loft
     runs through them IN ORDER. rails: optional guide curves (mutually exclusive with centerline).
     centerline: optional single centerline curve (mutually exclusive with rails). operation: new |
     join | cut | intersect. as_surface: force a surface loft (isSolid=False); default None = leave the
@@ -143,7 +143,7 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
     except Exception as e:
         return error(f"Could not start loft: {e}")
 
-    # Add sections IN ORDER — this ordering is the whole game (do NOT sort/reorder).
+    # Add sections IN ORDER - this ordering is the whole game (do NOT sort/reorder).
     try:
         for sec in secs:
             loft_input.loftSections.add(sec)
@@ -188,7 +188,7 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         "result_bodies": body_names,
         "note": ("Lofted through %d profiles in order. " % len(secs)) + (
             "Result is a SOLID." if is_solid else
-            "Result is a SURFACE — pair with model_stitch/model_thicken to close it."),
+            "Result is a SURFACE - pair with model_stitch/model_thicken to close it."),
     })
 
 
@@ -197,10 +197,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
 def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> dict:
     """Join surface bodies into a SOLID iff they form a watertight boundary within 'tolerance'.
 
-    bodies: >=2 SURFACE bodies (handles or names) — each validated to be an open surface (not a solid).
+    bodies: >=2 SURFACE bodies (handles or names) - each validated to be an open surface (not a solid).
     tolerance: gap-closing tolerance in 'units' (default ~0.01 mm). operation: only meaningful if the
     result closes into a solid (mirrors the API; ignored otherwise). If gaps exceed tolerance the
-    result STAYS a surface and became_solid is reported FALSE — never faked. WRITES.
+    result STAYS a surface and became_solid is reported FALSE - never faked. WRITES.
     """
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
@@ -251,7 +251,7 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
         return error("Stitch returned no feature.")
 
     # HONEST result: read each RESULT body's isSolid back. became_solid is true ONLY if every result
-    # body is a closed solid; gaps>tolerance leave an open surface and we say so — never fake success.
+    # body is a closed solid; gaps>tolerance leave an open surface and we say so - never fake success.
     body_names, flags = _result_body_report(feature)
     became_solid = all(flags) if flags else False
     payload = {
@@ -270,18 +270,18 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     else:
         payload["note"] = (
             f"Surfaces did NOT close into a solid within tolerance ({payload['tolerance']} {units}). "
-            "The result is still a surface — increase tolerance or check for gaps/overlaps.")
+            "The result is still a surface - increase tolerance or check for gaps/overlaps.")
     return ok(payload)
 
 
 # ── UNSTITCH ──────────────────────────────────────────────────────────────────
 
 def unstitch_handler(target="", faces=None, chain=True) -> dict:
-    """Explode a body (or specific faces) into per-face SURFACE bodies — the inverse of stitch.
+    """Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of stitch.
 
     target: a whole body to fully explode (handle or name). faces: OR specific faces to peel off
     (find_geometry face handles). chain: include connected/adjacent faces (isChainSelection; default
-    true). WRITES. (UnstitchFeatures.add takes the faces ObjectCollection directly — no createInput.)
+    true). WRITES. (UnstitchFeatures.add takes the faces ObjectCollection directly - no createInput.)
     """
     design = _common.design()
     if not design:
@@ -328,7 +328,7 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
         "chain": bool(chain),
         "result_bodies": body_names,
         "surface_body_count": len(body_names),
-        "note": ("Exploded into %d surface body(ies) — each is now an open surface. Edit a face, then "
+        "note": ("Exploded into %d surface body(ies) - each is now an open surface. Edit a face, then "
             "model_stitch to re-close." % len(body_names)),
     })
 
@@ -337,7 +337,7 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
 
 LOFT_DESCRIPTION = (
 "Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order "
-"given — order is load-bearing), optionally shaped by 'rails' (guide curves) OR a single "
+"given - order is load-bearing), optionally shaped by 'rails' (guide curves) OR a single "
 "'centerline' (mutually exclusive). 'operation': new | join | cut | intersect. 'as_surface' forces "
 "a surface loft (isSolid=False). Reports 'is_solid' read back off the feature. "
 "Pair with model_stitch to close surfaces, or view_screenshot to view."
@@ -358,11 +358,11 @@ loft_item = Item.create_tool_item(tool=loft_tool, write="write", handler=loft_ha
 
 
 STITCH_DESCRIPTION = (
-"Join SURFACE bodies into a SOLID — iff they form a closed, watertight boundary within 'tolerance'. "
-"'bodies' is >=2 surface bodies (each must be an open surface, not a solid — run model_unstitch on "
+"Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance'. "
+"'bodies' is >=2 surface bodies (each must be an open surface, not a solid - run model_unstitch on "
 "a solid first). 'tolerance' is the gap-closing distance in 'units' (default ~0.01 mm). HONEST "
 "RESULT: if gaps exceed tolerance the result STAYS a surface and 'became_solid' is reported FALSE "
-"(never faked) — read 'became_solid' to know whether you got the solid you asked for. 'operation' "
+"(never faked) - read 'became_solid' to know whether you got the solid you asked for. 'operation' "
 "only matters when the result closes into a solid."
 )
 
@@ -380,7 +380,7 @@ stitch_item = Item.create_tool_item(tool=stitch_tool, write="write", handler=sti
 
 
 UNSTITCH_DESCRIPTION = (
-"Explode a body (or specific faces) into per-face SURFACE bodies — the inverse of model_stitch, so "
+"Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of model_stitch, so "
 "one face can be patched/trimmed/offset then re-stitched. Pass EITHER 'target' (a whole body, by "
 "handle or name, to fully explode) OR 'faces' (find_geometry face handles to peel off). 'chain' "
 "includes connected/adjacent faces (default true). Each result body is now an OPEN surface."

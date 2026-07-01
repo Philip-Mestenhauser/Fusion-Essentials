@@ -1,4 +1,4 @@
-"""Unit tests for ``cam_tool_library`` — read & manage CAM tool libraries + their tools.
+"""Unit tests for ``cam_edit_tools`` — read & manage CAM tool libraries + their tools.
 
 The adsk.cam API is mocked; what we pin is the tool's OWN logic: the action dispatch (list / add /
 remove / edit / where_used), resolving the target library by scope, and the per-action behaviour —
@@ -16,7 +16,7 @@ import json
 
 from conftest import load_tool
 
-ct = load_tool("cam_tool_library")
+ct = load_tool("cam_edit_tools")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────

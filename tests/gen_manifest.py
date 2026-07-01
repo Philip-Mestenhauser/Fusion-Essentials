@@ -40,7 +40,7 @@ if COMMANDS_DIR not in sys.path:
 MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MANIFEST.md")
 
 # Tool name prefix -> family label. The order here is the manifest's section order; a tool falls into
-# the FIRST prefix it matches (so 'design_get_tree' -> design, 'sys_find_tool' -> sys). A tool matching
+# the FIRST prefix it matches (so 'design_get' -> design, 'sys_find_tool' -> sys). A tool matching
 # none lands in "other" — which the family test asserts stays empty-or-accounted-for by total count.
 _FAMILY_PREFIXES = [
     ("model_", "model"), ("surface_", "surface"), ("mesh_", "mesh"), ("sketch_", "sketch"),

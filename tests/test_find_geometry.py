@@ -184,7 +184,7 @@ class TestFind:
 
 # ── #4: NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────
 # find_geometry used to scan only root.occurrences (top-level), so a nested occurrence that
-# design_get_tree/assembly_probe report by fullPathName returned "could not resolve" — disagreeing with
+# design_get(tree)/assembly_probe report by fullPathName returned "could not resolve" — disagreeing with
 # the self-heal path (_refind_by_locator scans allOccurrences). Now it scans allOccurrences too.
 
 class TestNestedAssembly:

@@ -10,12 +10,12 @@
                   default; legacy). WRITES.
 
 This is the MESH analogue of model_combine (the BRep boolean). A MeshBody is a SEPARATE type living
-in comp.meshBodies (not comp.bRepBodies), so the BRep Combine feature can't touch it — this is the
-mesh-on-mesh boolean. Bodies are referenced by HANDLE (from find_geometry / mesh_get — precise) or by
+in comp.meshBodies (not comp.bRepBodies), so the BRep Combine feature can't touch it - this is the
+mesh-on-mesh boolean. Bodies are referenced by HANDLE (from find_geometry / mesh_get - precise) or by
 name, and EVERY input is validated to be a MESH body BEFORE any mutation (a BRep handle is redirected
 to the BRep tools, never silently mis-combined).
 
-CRITICAL — base-feature scope: meshCombineFeatures.add CREATES/edits mesh bodies, so in a PARAMETRIC
+CRITICAL - base-feature scope: meshCombineFeatures.add CREATES/edits mesh bodies, so in a PARAMETRIC
 design it must run inside an open BaseFeature edit scope (the same constraint MeshBodies.add carries).
 The createInput->set->add is routed through run_in_base_feature(design, comp, inner_op) (from
 design_mode.py): in DIRECT mode it runs inner_op(None) directly; in PARAMETRIC mode it opens the
@@ -46,7 +46,7 @@ from .design_mode import run_in_base_feature
 app = adsk.core.Application.get()
 
 # target = ONE mesh body (kept/modified); tools = a LIST of mesh bodies combined into it. There is no
-# MeshBodyRefList helper in _inputs (only MeshBodyRef), so the list uses BodyRefList(kind="mesh") —
+# MeshBodyRefList helper in _inputs (only MeshBodyRef), so the list uses BodyRefList(kind="mesh") -
 # which kind-checks EVERY element as a MESH body BEFORE returning (so a BRep handle in the list fails
 # the call before any mutation), exactly the enforcement we want for the createInput(list[MeshBody]).
 _TARGET = _inputs.MeshBodyRef("target", required=True,
@@ -56,7 +56,7 @@ _TOOLS = _inputs.BodyRefList("tools", kind="mesh", required=True,
 _OPERATION = _inputs.Choice("operation", ["join", "cut", "intersect", "merge"], default="join",
                             description="join | cut | intersect | merge.")
 _ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanced",
-                            description="legacy | enhanced (default — fewer triangles).")
+                            description="legacy | enhanced (default - fewer triangles).")
 
 _SPEC = [_TARGET, _TOOLS, _OPERATION, _ALGORITHM]
 
@@ -90,7 +90,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error("No active design. Create or open a document first (see doc_new).")
 
     # target = MeshBodyRef, tools = BodyRefList(kind="mesh"): resolve + KIND-VALIDATE every input up
-    # front — a BRep handle is redirected (the whole point), and the list is fully checked BEFORE any
+    # front - a BRep handle is redirected (the whole point), and the list is fully checked BEFORE any
     # mutation. createInput wants list[MeshBody], so the kind gate must pass first.
     tgt, terr = _TARGET.resolve(target)
     if terr:
@@ -109,7 +109,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # same-body guard (mirrors model_combine): the target must NOT also be a tool body.
     for b in tool_bodies:
         if b is tgt:
-            return error("A tool body is the same as the target — pick distinct mesh bodies "
+            return error("A tool body is the same as the target - pick distinct mesh bodies "
     "(the target is combined INTO, the tools are combined FROM).")
 
     # The MeshCombine feature lives on the component that owns the target mesh.
@@ -122,7 +122,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # createInput(target, list[MeshBody]) -> set operation + algorithm -> add(). This whole sequence
     # CREATES/edits mesh bodies, so it runs INSIDE run_in_base_feature: direct mode calls inner_op(None)
     # directly; parametric mode wraps it in an atomic base-feature scope that always finishEdit()s in a
-    # finally. The add() mutation is NOT wrapped in safe() — a real failure must surface.
+    # finally. The add() mutation is NOT wrapped in safe() - a real failure must surface.
     def inner_op(_base_feature):
         try:
             inp = feats.createInput(tgt, list(tool_bodies))
@@ -158,7 +158,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
         return scope_err
-    # inner_op may itself return a ready _common.error() dict (a configure/add failure) — surface it.
+    # inner_op may itself return a ready _common.error() dict (a configure/add failure) - surface it.
     if isinstance(result, dict) and result.get("isError") is True:
         return result
 
@@ -176,7 +176,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
                 if b is not None:
                     result_bodies.append({"name": safe(lambda: b.name),
         "handle": safe(lambda: b.entityToken)})
-    # Non-parametric (feature None): the combine landed in the TARGET mesh in place — report it.
+    # Non-parametric (feature None): the combine landed in the TARGET mesh in place - report it.
     if not result_bodies:
         result_bodies.append({"name": safe(lambda: tgt.name),
         "handle": safe(lambda: tgt.entityToken)})
@@ -192,13 +192,13 @@ def handler(target: str = "", tools=None, operation: str = "join",
         "result_bodies": result_bodies,
         "mesh_body_count": after_mesh_count,
         "note": ("Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect "
-            "the result with mesh_measure, or convert with mesh_to_brep. Pair with "
+            "the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with "
             "view_screenshot to view it."),
     })
 
 
 TOOL_DESCRIPTION = (
-    "Boolean-combine MESH bodies — the MeshCombine feature (the mesh analogue of model_combine, which "
+    "Boolean-combine MESH bodies - the MeshCombine feature (the mesh analogue of model_combine, which "
     "only sees BRep solids). 'target' is the mesh body kept/modified; 'tools' is the mesh body "
     "handle(s)/name(s) to combine into it (a list, or comma-separated). 'operation': join (combine by "
     "enclosing volumes) | cut (remove the tools' overlap from the target) | intersect (keep only the "

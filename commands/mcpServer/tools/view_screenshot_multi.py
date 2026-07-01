@@ -31,7 +31,7 @@ from ._common import error
 
 app = adsk.core.Application.get()
 
-# Friendly name -> ViewOrientations enum (mirrors view_screenshot; no 'current' here — every view
+# Friendly name -> ViewOrientations enum (mirrors view_screenshot; no 'current' here - every view
 # is an explicit orientation).
 _ORIENTATIONS = {
     "top": "TopViewOrientation", "bottom": "BottomViewOrientation",
@@ -155,8 +155,8 @@ def handler(views: str = "", width: int = 600, height: int = 500) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Capture SEVERAL views of the model in ONE call — front/top/right/iso etc. as separate labelled "
-    "images — so you can read geometry/position reliably instead of guessing from a single "
+    "Capture SEVERAL views of the model in ONE call - front/top/right/iso etc. as separate labelled "
+    "images - so you can read geometry/position reliably instead of guessing from a single "
     "isometric. 'views' = comma-separated view names (front, back, left, right, top, bottom, "
     "iso-top-right, iso-top-left, iso-bottom-right, iso-bottom-left), or 'all' for the six "
     "orthographic views; omit for a default front/top/right/iso set. 'width'/'height' size each "

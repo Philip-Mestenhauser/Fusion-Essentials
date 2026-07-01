@@ -367,14 +367,17 @@ class TestGenerate:
         assert cam.generated == [op]
         assert out["generated"] is True and out["toolpath_valid"] is True
 
-    def test_empty_no_warning_gives_zero_depth_hint(self):
-        # generation completes, but no toolpath + no warning -> the zero-depth diagnostic
+    def test_empty_no_warning_reports_observed_state_and_causes(self):
+        # has_toolpath False + silent warning channel -> report the OBSERVED empty + candidate causes
+        # (verified live: a zero-depth contour generates with no warning), not a single asserted cause.
         op = _curve_op(has_tp=False, valid=False, warning="")
         cam = _CAM([_Setup([op])], future=_Future(True))
         _install(cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
         assert out["toolpath_valid"] is False
-        assert "ZERO DEPTH" in out["note"]
+        assert out["has_toolpath"] is False
+        note = out["note"].lower()
+        assert "has_toolpath" in note and "zero" in note and "selection" in note  # observed + causes
 
     def test_warning_is_surfaced(self):
         op = _curve_op(has_tp=False, valid=False, warning="missing selection")

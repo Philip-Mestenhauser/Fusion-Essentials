@@ -1,19 +1,21 @@
-"""Unit tests for assorted Tier-2 helpers: doc_update_xref, timeline, cam_generate.
+"""Unit tests for assorted Tier-2 helpers: doc_update_xref, cam_generate.
 
 Each tool has one or two pure helpers worth pinning:
   - doc_update_xref._ref_name      — safe name extraction with a fallback.
-  - timeline._entity_type       — group vs entity-class-name vs None.
   - cam_generate._live_op_tally — the operation-state tally that drives the
     progress signal (valid / out_of_date / generating counts).
 """
 
+import json as _json
 from types import SimpleNamespace
 
 from conftest import load_tool
 
 uxref = load_tool("doc_update_xref")
-timeline = load_tool("design_get_timeline")
 gtp = load_tool("cam_generate")
+# NB: _cam_common is loaded LAZILY inside each TestLiveReadiness test (not at module top). test_cam_get
+# swaps the cam modules for a stub via monkeypatch.setitem; pre-caching the real module here
+# would change that swap's timing and leak the real handler into test_cam_get. Lazy load avoids it.
 
 
 # ── doc_update_xref._ref_name ──────────────────────────────────────────────────
@@ -124,196 +126,114 @@ class TestUpdateXrefHandler:
         assert "failed to update" in res["message"]
 
 
-# ── timeline._entity_type ──────────────────────────────────────────────────
-
-class TestEntityType:
-    def test_group_returns_timelinegroup(self):
-        obj = SimpleNamespace(isGroup=True)
-        assert timeline._entity_type(obj) == "TimelineGroup"
-
-    def test_entity_class_name(self):
-        class ExtrudeFeature:
-            pass
-        obj = SimpleNamespace(isGroup=False, entity=ExtrudeFeature())
-        assert timeline._entity_type(obj) == "ExtrudeFeature"
-
-    def test_none_entity_returns_none(self):
-        obj = SimpleNamespace(isGroup=False, entity=None)
-        assert timeline._entity_type(obj) is None
-
-
-# ── timeline._object_summary ───────────────────────────────────────────────
-
-import json as _json
-
-
-def _tlobj(index=0, name="Extrude1", is_group=False, suppressed=False, rolled_back=False,
-           parent_group=None, health=0, message=None, entity_name="ExtrudeFeature"):
-    class _Ent:
-        pass
-    _Ent.__name__ = entity_name
-    pg = SimpleNamespace(name=parent_group) if parent_group is not None else None
-    return SimpleNamespace(
-        index=index, name=name, isGroup=is_group, isSuppressed=suppressed,
-        isRolledBack=rolled_back, parentGroup=pg, healthState=health,
-        errorOrWarningMessage=message,
-        entity=(None if is_group else _Ent()),
-    )
-
-
-class TestObjectSummary:
-    def test_maps_known_health_label(self):
-        out = timeline._object_summary(_tlobj(health=2))
-        assert out["health"] == "error"
-
-    def test_unknown_health_stays_numeric(self):
-        out = timeline._object_summary(_tlobj(health=99))
-        assert out["health"] == 99
-
-    def test_group_type_and_flag(self):
-        out = timeline._object_summary(_tlobj(is_group=True, name="Grp"))
-        assert out["is_group"] is True
-        assert out["type"] == "TimelineGroup"
-
-    def test_parent_group_name_surfaced(self):
-        out = timeline._object_summary(_tlobj(parent_group="Wheels"))
-        assert out["parent_group"] == "Wheels"
-
-    def test_no_parent_group_is_none(self):
-        out = timeline._object_summary(_tlobj(parent_group=None))
-        assert out["parent_group"] is None
-
-    def test_message_only_when_present(self):
-        with_msg = timeline._object_summary(_tlobj(message="needs rebuild"))
-        without = timeline._object_summary(_tlobj(message=None))
-        assert with_msg["message"] == "needs rebuild"
-        assert "message" not in without
-
-    def test_suppressed_and_rolled_back_flags(self):
-        out = timeline._object_summary(_tlobj(suppressed=True, rolled_back=True))
-        assert out["is_suppressed"] is True and out["is_rolled_back"] is True
-
-
-# ── timeline.handler: filters + groups roster + truncation ─────────────────
-
-class _Timeline:
-    def __init__(self, items, marker=0, groups=()):
-        self._items = list(items)
-        self.markerPosition = marker
-        self.timelineGroups = list(groups)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-
-def _install_tl(monkeypatch, timeline_obj):
-    design = SimpleNamespace(timeline=timeline_obj)
-    monkeypatch.setattr(timeline._common, "design", lambda: design)
-    return design
-
-
-def _tl_payload(res):
-    assert res["isError"] is False, res
-    return _json.loads(res["content"][0]["text"])
-
-
-class TestTimelineHandler:
-    def test_no_active_design(self, monkeypatch):
-        monkeypatch.setattr(timeline._common, "design", lambda: None)
-        res = timeline.handler()
-        assert res["isError"] is True and "No active design" in res["message"]
-
-    def test_returns_all_with_marker_and_count(self, monkeypatch):
-        tl = _Timeline([_tlobj(0, "A"), _tlobj(1, "B")], marker=2)
-        _install_tl(monkeypatch, tl)
-        out = _tl_payload(timeline.handler())
-        assert out["count"] == 2
-        assert out["returned"] == 2
-        assert out["marker_position"] == 2
-        assert [o["name"] for o in out["timeline"]] == ["A", "B"]
-
-    def test_include_suppressed_false_omits_suppressed(self, monkeypatch):
-        tl = _Timeline([_tlobj(0, "Live"), _tlobj(1, "Hidden", suppressed=True)])
-        _install_tl(monkeypatch, tl)
-        out = _tl_payload(timeline.handler(include_suppressed=False))
-        assert out["returned"] == 1
-        assert [o["name"] for o in out["timeline"]] == ["Live"]
-        # but count still reflects the full timeline
-        assert out["count"] == 2
-
-    def test_group_filter_returns_only_that_group(self, monkeypatch):
-        tl = _Timeline([
-            _tlobj(0, "A", parent_group="Wheels"),
-            _tlobj(1, "B", parent_group="Frame"),
-            _tlobj(2, "C", parent_group="Wheels"),
-        ])
-        _install_tl(monkeypatch, tl)
-        out = _tl_payload(timeline.handler(group="Wheels"))
-        assert [o["name"] for o in out["timeline"]] == ["A", "C"]
-
-    def test_groups_roster_maps_name_to_member_count(self, monkeypatch):
-        groups = [SimpleNamespace(name="Wheels", count=3), SimpleNamespace(name="Frame", count=1)]
-        tl = _Timeline([_tlobj(0, "A")], groups=groups)
-        _install_tl(monkeypatch, tl)
-        out = _tl_payload(timeline.handler())
-        assert out["groups"] == {"Wheels": 3, "Frame": 1}
-
-    def test_truncation_at_cap(self, monkeypatch):
-        monkeypatch.setattr(timeline, "_MAX_ITEMS", 2)
-        tl = _Timeline([_tlobj(i, f"F{i}") for i in range(5)])
-        _install_tl(monkeypatch, tl)
-        out = _tl_payload(timeline.handler())
-        assert out["returned"] == 2
-        assert out["truncated"] is True
-        assert "truncated" in out["note"].lower()
-
-
 # ── cam_generate._live_op_tally ──────────────────────────────────────
 
-def _op(state, generating=False, progress=None, name="op"):
+def _op(state, generating=False, progress=None, name="op", error=None):
     return SimpleNamespace(
         operationState=state, isGenerating=generating,
         generatingProgress=progress, name=name,
+        hasError=error is not None, error=error or "",
     )
 
 
-def _cam_with(ops):
-    """Fake CAM with a single setup holding the given operations."""
-    setup = SimpleNamespace(allOperations=list(ops))
-
-    class _Setups:
-        count = 1
+def _coll(items):
+    class _C:
+        count = len(items)
 
         def item(self, i):
-            return setup
-    return SimpleNamespace(setups=_Setups())
+            return items[i]
+    return _C()
 
 
-class TestLiveOpTally:
+def _cam_with(ops, setup_error=None, programs=()):
+    """Fake CAM with a single setup holding the given operations. setup_error makes the SETUP itself
+    hasError; programs is a list of NC programs (each a SimpleNamespace with hasError/error/name)."""
+    setup = SimpleNamespace(allOperations=list(ops), name="Setup1",
+                            hasError=setup_error is not None, error=setup_error or "")
+    return SimpleNamespace(setups=_coll([setup]), ncPrograms=_coll(list(programs)))
+
+
+def _ncp(name, error=None):
+    return SimpleNamespace(name=name, hasError=error is not None, error=error or "")
+
+
+class TestLiveReadiness:
+    """_cam_common.live_readiness - the SINGLE CAM health/readiness signal (was cam_generate._live_op_tally,
+    folded into _cam_common so cam_get and cam_get_status share ONE source instead of re-deriving it)."""
+
     def test_counts_states(self, monkeypatch):
+        ccom = load_tool("_cam_common")
         # states: 0=valid, 1/3=out_of_date, 2=suppressed
         ops = [_op(0), _op(0), _op(1), _op(3), _op(2)]
-        monkeypatch.setattr(gtp, "_get_cam", lambda: (_cam_with(ops), None))
-        tally = gtp._live_op_tally()
-        assert tally["valid"] == 2
-        assert tally["out_of_date"] == 2     # one invalid + one no_toolpath
-        assert tally["suppressed"] == 1
-        assert tally["total"] == 5
+        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        sig, err = ccom.live_readiness()
+        assert err is None
+        assert sig["valid"] == 2
+        assert sig["out_of_date"] == 2     # one invalid + one no_toolpath
+        assert sig["suppressed"] == 1
+        assert sig["total"] == 5
 
     def test_active_op_captured_with_real_progress(self, monkeypatch):
+        ccom = load_tool("_cam_common")
         ops = [_op(1, generating=True, progress="Pending", name="queued"),
                _op(1, generating=True, progress="42.0%", name="running")]
-        monkeypatch.setattr(gtp, "_get_cam", lambda: (_cam_with(ops), None))
-        tally = gtp._live_op_tally()
-        assert tally["generating"] == 2
+        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        sig, _ = ccom.live_readiness()
+        assert sig["generating"] == 2
         # The op with real progress wins over the "Pending" one.
-        assert tally["active"]["op"] == "running"
-        assert tally["active"]["progress"] == "42.0%"
+        assert sig["active"]["op"] == "running"
+        assert sig["active"]["progress"] == "42.0%"
 
-    def test_cam_unavailable_returns_none(self, monkeypatch):
-        monkeypatch.setattr(gtp, "_get_cam", lambda: (None, "no CAM"))
-        assert gtp._live_op_tally() is None
+    def test_errored_op_bucketed_separately_not_as_ood(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        # an errored op (hasError) is its OWN bucket - NOT counted as out_of_date/generating (it will
+        # never finish); samples.op carries name + first error line, and readiness is a BLOCKER.
+        ops = [_op(0), _op(1, error="Top height must not be below the bottom height\nOn the Heights tab...",
+                       name="Rough to Model Top"), _op(1)]
+        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        sig, _ = ccom.live_readiness()
+        assert sig["errored"] == 1
+        assert sig["out_of_date"] == 1          # only the non-errored state-1 op
+        assert sig["valid"] == 1
+        assert sig["samples"]["op"]["name"] == "Rough to Model Top"
+        # only the FIRST line of the error is carried (the signal; full text is the per-op record)
+        assert sig["samples"]["op"]["error"] == "Top height must not be below the bottom height"
+        assert sig["readiness"].startswith("BLOCKER:")
+
+    def test_setup_level_error_tallied(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        # a faulted SETUP blocks the job even with clean ops - surfaced as setups_errored + a sample.
+        ops = [_op(0)]
+        monkeypatch.setattr(ccom, "get_cam",
+                            lambda: (_cam_with(ops, setup_error="WCS orientation is invalid"), None))
+        sig, _ = ccom.live_readiness()
+        assert sig["setups_errored"] == 1
+        assert sig["programs_errored"] == 0
+        assert sig["samples"]["setup"]["error"] == "WCS orientation is invalid"
+        assert "setup" in sig["readiness"].lower() and sig["readiness"].startswith("BLOCKER:")
+
+    def test_nc_program_level_error_tallied(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        # a faulted NC PROGRAM (no post config / no ops) blocks posting - surfaced as programs_errored.
+        ops = [_op(0)]
+        progs = [_ncp("Main", error="No post configuration selected")]
+        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops, programs=progs), None))
+        sig, _ = ccom.live_readiness()
+        assert sig["programs_errored"] == 1
+        assert sig["samples"]["program"]["name"] == "Main"
+        assert "NC program" in sig["readiness"]
+
+    def test_clean_job_is_ready(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        monkeypatch.setattr(ccom, "get_cam",
+                            lambda: (_cam_with([_op(0), _op(0)], programs=[_ncp("Main")]), None))
+        sig, _ = ccom.live_readiness()
+        assert sig["setups_errored"] == 0 and sig["programs_errored"] == 0
+        assert sig["samples"]["op"] is None
+        assert "ready to post" in sig["readiness"]
+
+    def test_cam_unavailable_returns_error(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        monkeypatch.setattr(ccom, "get_cam", lambda: (None, "no CAM"))
+        sig, err = ccom.live_readiness()
+        assert sig is None and err == "no CAM"

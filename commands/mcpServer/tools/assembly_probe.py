@@ -8,7 +8,7 @@
                     design-level joint list (type + the two occurrences + whether the design is fully
                     constrained). Read-only.
 
-Why this exists: a screenshot of an assembly is often unreliable to reason from — parts overlap at
+Why this exists: a screenshot of an assembly is often unreliable to reason from - parts overlap at
 the origin, the active component greys everything else out, and depth is ambiguous. This returns the
 STRUCTURED STATE instead, so an agent can verify "is the block grounded and the crank free?", "did
 the joint connect the right two parts?", "where is each piston?" from NUMBERS, not pixels. Pair it
@@ -70,12 +70,12 @@ def _occ_world(occ, inv_k):
 
 
 def _health(obj):
-    """(healthy: bool, message) for an entity with a healthState. healthState 0 = healthy; non-zero
-    = error/warning (the "Compute Failed" the user sees in the timeline FIRST, before any test)."""
+    """(healthy: bool, message) for an entity with a healthState. healthState enum: 0=healthy,
+    1=warning, 2=error, 3=SUPPRESSED. Only a warning/error is a compute FAILURE ('Compute Failed').
+    Suppression is intentional (the author parked it, e.g. an alternate joint in a fixture template) -
+    NOT broken, so it reports healthy=True. Only 1/2 count as broken."""
     hs = safe(lambda: obj.healthState)
-    if hs is None:
-        return True, None
-    if hs == 0:
+    if hs is None or hs == 0 or hs == 3:            # healthy, or intentionally suppressed
         return True, None
     msg = safe(lambda: obj.errorOrWarningMessage) or ""
     # Fusion sometimes repeats the message; keep just the first sentence-ish chunk.
@@ -117,19 +117,21 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
         return error("No active design. Open or create a document first (see doc_new).")
     root = design.rootComponent
 
-    # joints first, so we can index them per occurrence
+    # joints first, so we can index them per occurrence. asBuiltJoints is a SEPARATE collection from
+    # joints (as-built joints mate parts where they already are); read both or they're invisible here.
     joints = []
     occ_joints = {}
     if include_joints:
-        jc = safe(lambda: root.joints)
-        for i in range(safe(lambda: jc.count, 0) if jc else 0):
-            j = jc.item(i)
-            rec = _joint_record(j)
-            joints.append(rec)
-            for key in ("occurrence_one", "occurrence_two"):
-                nm = rec.get(key)
-                if nm:
-                    occ_joints.setdefault(nm, []).append(rec["name"])
+        for coll_name in ("joints", "asBuiltJoints"):
+            jc = safe(lambda cn=coll_name: getattr(root, cn))
+            for i in range(safe(lambda: jc.count, 0) if jc else 0):
+                j = jc.item(i)
+                rec = _joint_record(j)
+                joints.append(rec)
+                for key in ("occurrence_one", "occurrence_two"):
+                    nm = rec.get(key)
+                    if nm:
+                        occ_joints.setdefault(nm, []).append(rec["name"])
 
     occurrences = []
     grounded_names = []
@@ -152,7 +154,17 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
             rec["joints"] = occ_joints.get(name, [])
         occurrences.append(rec)
 
-    # HEALTH ROLLUP — the thing a user sees FIRST (a yellow "Compute Failed" in the timeline)
+    # Bodies directly in the ROOT component are NOT occurrences, so the loop above misses them - yet a
+    # root body can't be jointed/grounded (it isn't an occurrence). Report it so the kinematic picture
+    # isn't silently missing root-level geometry the user built.
+    root_bodies = []
+    rbodies = safe(lambda: root.bRepBodies)
+    for i in range(safe(lambda: rbodies.count, 0) if rbodies else 0):
+        b = safe(lambda i=i: rbodies.item(i))
+        if b is not None:
+            root_bodies.append(safe(lambda b=b: b.name) or f"Body{i+1}")
+
+    # HEALTH ROLLUP - the thing a user sees FIRST (a yellow "Compute Failed" in the timeline)
     # before any functional test. A joint can be created + wired correctly yet FAIL TO COMPUTE
     # (e.g. its axis doesn't match the geometry, over-constraining the assembly). Surface that
     # here so the probe doesn't report a broken assembly as fine. Also walk the timeline for any
@@ -171,7 +183,7 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
     is_healthy = not broken_joints and not timeline_problems
 
     # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place edit
-    # (joint_edit/param change) that hasn't been recomputed — so broken_joints can disagree with the
+    # (joint_edit/param change) that hasn't been recomputed - so broken_joints can disagree with the
     # timeline feature health. When they disagree, the timeline is authoritative; flag it and point to
     # design_recompute, instead of silently reporting unhealthy joints over a clean timeline.
     tl_problem_names = {p["name"] for p in timeline_problems}
@@ -185,8 +197,9 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
     "grounded_occurrences": grounded_names,
     "joint_count": len(joints),
     "occurrences": occurrences,
+    "root_bodies": root_bodies,   # bodies directly in root (NOT jointable; promote to a component to joint)
     "joints": joints if include_joints else None,
-    "note": "Structured kinematic state. CHECK is_healthy FIRST — false means a joint/feature "
+    "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint/feature "
     "FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
     "test; a wired-but-mis-axised joint over-constrains the assembly). broken_joints / "
     "timeline_problems name them. Then reason about grounding/positions/joint-wiring from "
@@ -194,14 +207,18 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
     }
     if joints_broke_but_timeline_clean:
         out["health_may_be_stale"] = True
-        out["note"] += (" ⚠ broken_joints is non-empty but the TIMELINE shows no errored feature — "
+        out["note"] += (" WARNING: broken_joints is non-empty but the TIMELINE shows no errored feature - "
     "the joint health likely LAGS an uncommitted edit. Run design_recompute, then "
-    "re-probe; the timeline (design_get_timeline_health) is authoritative.")
+    "re-probe; the timeline (design_get) is authoritative.")
+    if root_bodies:
+        out["note"] += (" NOTE: root_bodies lists geometry directly in the root component - these are "
+                        "NOT occurrences and can't be jointed/grounded; promote one to a component "
+                        "(model_create_component) to make it part of the kinematics.")
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
-    "Probe the active assembly's KINEMATIC STATE as clean JSON — the reliable alternative to "
+    "Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
     "interpreting a cluttered screenshot. For every occurrence: its world position (origin + bbox "
     "center/size in 'units'), ground flags (grounded / ground_to_parent), and the joints it "
     "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "

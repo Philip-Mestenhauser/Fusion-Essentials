@@ -6,11 +6,11 @@
   joint_create_origin -> place a Joint Origin in the active design at a location/orientation the
                          AGENT specifies. WRITES to the design. Reports the resulting frame axes.
 
-This is for an AI agent to place a joint origin ITSELF — a person would use Fusion's in-product
+This is for an AI agent to place a joint origin ITSELF - a person would use Fusion's in-product
 Joint Origin command. A Joint Origin is the reusable coordinate frame used as a WCS anchor.
 
 ORIENTATION (the important part): a joint origin's frame is NOT freely orientable from a bare
-point — anchoring on a point yields a world-aligned frame (Z = world Z). The frame's Z axis is
+point - anchoring on a point yields a world-aligned frame (Z = world Z). The frame's Z axis is
 driven by the GEOMETRY it is built from:
   - createByPoint(point)        -> position only; Z = world Z (or the point's sketch-plane normal)
   - createByCurve(curve, kp)    -> Z runs ALONG the curve  (VERIFIED: a sketch line pointing
@@ -49,7 +49,7 @@ _TARGETS = ("at", "origin")
 _ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry")
 _KEYPOINTS = {"start": 0, "middle": 1, "end": 2, "center": 3}
 
-# anchor='geometry': a BRep face/edge/vertex HANDLE from find_geometry — the frame's orientation
+# anchor='geometry': a BRep face/edge/vertex HANDLE from find_geometry - the frame's orientation
 # comes from that real geometry (a planar face's normal, a cylinder/edge's axis, a hole edge).
 _GEOM = _inputs.GeometryHandle("geometry", require="any",
                                description="A find_geometry handle to anchor the joint origin on (face/edge/vertex).")
@@ -74,7 +74,7 @@ def _anchor_sketch_point(comp, x_cm, y_cm, z_cm):
 
 def _find_sketch(design, name):
     # Whole-design resolve (active component first), so a JO can anchor on a sketch line/point drawn in
-    # an activated sub-component — not only one in the root component.
+    # an activated sub-component - not only one in the root component.
     return resolve_sketch(design, name) if name else None
 
 
@@ -99,10 +99,10 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
                     (None if g else "createByPlanarFace returned nothing.")
             g = safe(lambda: JG.createByNonPlanarFace(ent, adsk.fusion.JointKeyPointTypes.MiddleKeyPoint))
             return g, "non-planar face (axis from the face)", \
-                (None if g else "createByNonPlanarFace returned nothing (CenterKeyPoint is invalid on a cylinder — Middle is used).")
+                (None if g else "createByNonPlanarFace returned nothing (CenterKeyPoint is invalid on a cylinder - Middle is used).")
         if isinstance(ent, adsk.fusion.BRepEdge):
             g = safe(lambda: JG.createByCurve(ent, kp_val))
-            return g, f"edge ({_kp_name(kp_val)}) — Z runs along the edge", \
+            return g, f"edge ({_kp_name(kp_val)}) - Z runs along the edge", \
                 (None if g else "createByCurve returned nothing (try a different keypoint).")
         if isinstance(ent, adsk.fusion.BRepVertex):
             g = safe(lambda: JG.createByPoint(ent))
@@ -137,7 +137,7 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
         line = lines.item(idx)
         kp = _KEYPOINTS.get(keypoint, 0)  # default start (frame located at the line start)
         g = safe(lambda: JG.createByCurve(line, kp))
-        return g, f"sketch '{sketch_name}' line[{idx}] ({_kp_name(kp)}) — Z runs along the line", \
+        return g, f"sketch '{sketch_name}' line[{idx}] ({_kp_name(kp)}) - Z runs along the line", \
             (None if g else "createByCurve returned nothing (check the keypoint for this curve).")
 
     if anchor == "sketch_point":
@@ -165,9 +165,9 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             geometry: str = "", name: str = "") -> dict:
     """Create a joint origin, position-only or oriented.
 
-    anchor='coordinates' (default): at x,y,z (target='at') or the model origin (target='origin') —
+    anchor='coordinates' (default): at x,y,z (target='at') or the model origin (target='origin') -
     world-aligned frame. anchor='sketch_line': anchor on a sketch line (sketch_name + entity_index,
-    'keypoint' = start/middle/end/center) so Z runs ALONG the line — use sketch_add_3d_line first to set
+    'keypoint' = start/middle/end/center) so Z runs ALONG the line - use sketch_add_3d_line first to set
     the direction. anchor='sketch_point': anchor on an existing sketch point. 'name' names the origin.
     """
     design = _common.design()
@@ -211,7 +211,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     if not jo_input:
         return error("createInput returned nothing for this geometry.")
 
-    # Resulting frame axes (Z primary, X secondary, Y third) — confirms orientation took.
+    # Resulting frame axes (Z primary, X secondary, Y third) - confirms orientation took.
     axes = {
     "primary_axis_Z": _vec(safe(lambda: jo_input.primaryAxisVector)),
     "secondary_axis_X": _vec(safe(lambda: jo_input.secondaryAxisVector)),
@@ -240,7 +240,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "frame_axes": axes,
     "component": safe(lambda: comp.name),
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
-    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions — for an "
+    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions - for an "
         "oriented frame, anchor on a sketch line (draw it with sketch_add_3d_line first); a "
         "point-anchored origin is world-aligned. View with view_screenshot."),
     }
@@ -252,14 +252,14 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent — no user "
+    "Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user "
     "click. Orientation follows the anchor:\n"
     "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
     "World-aligned (Z = world Z).\n"
     "- anchor='sketch_line': on a sketch line (sketch_name + entity_index, 'keypoint'=start/middle/end/"
-    "center) — frame Z runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
+    "center) - frame Z runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
     "- anchor='sketch_point': on a sketch point (position only).\n"
-    "- anchor='geometry': on a find_geometry handle — planar FACE (Z=normal), cyl/cone face or EDGE "
+    "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
     "Optional 'name'. WRITES. The result's 'frame_axes' reports the Z/X/Y vectors to confirm orientation."
 )

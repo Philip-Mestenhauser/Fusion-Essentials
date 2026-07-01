@@ -100,8 +100,8 @@ class TestTrim:
 
     def test_long_doc_truncated_with_ellipsis(self):
         out = ad._trim("x" * (ad._DOC_CHARS + 50))
-        assert out.endswith("…")
-        assert len(out) <= ad._DOC_CHARS + 2
+        assert out.endswith(" ...")                  # ASCII ellipsis
+        assert len(out) <= ad._DOC_CHARS + 4
 
 
 class TestSignature:

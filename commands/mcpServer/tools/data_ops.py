@@ -7,9 +7,11 @@
   data_create_folder  -> create a folder in a project (optionally inside a parent path; mkdir -p)
   data_upload_file    -> upload a local CAD file into a project/folder (async; neutral formats are
                          translated into a Fusion design during cloud processing)
-  data_list_folders   -> show a project's folder tree (name/id/path) to a bounded depth (read-only)
   data_delete_folder  -> delete a data-model folder by id, guarded (matching confirm_name; never
                          root; non-empty needs force + recursive_confirm)
+
+(Reading a project's folder tree is data_get(project=..., include=['folders']); list_folders_handler
+below is the core it delegates to.)
 
 Split out of the former data_management.py (the document-lifecycle tools live in doc_lifecycle.py).
 Shared helpers (_data, _find_project, path resolution) live in _data_common.
@@ -137,7 +139,7 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
     """
     file_path = (file_path or "").strip().strip('"')
     if not file_path:
-        return error("Provide 'file_path' — the full path to a local CAD file.")
+        return error("Provide 'file_path' - the full path to a local CAD file.")
     if not os.path.isfile(file_path):
         return error(f"File not found on disk: {file_path}")
     if not (project or project_id):
@@ -180,12 +182,12 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
                     f"'{missing}'). Folders available at "
                     f"'{_folder_path_string(here) or '(project root)'}': "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true to create missing folders, or use data_list_folders "
+                    "Pass create_path=true to create missing folders, or use data_get(include=['folders']) "
                     "to see the structure.")
 
     try:
         # Synchronous-start upload; returns a future. We do NOT block waiting for it to
-        # finish (that would freeze the UI thread) — we report the initial state.
+        # finish (that would freeze the UI thread) - we report the initial state.
         future = target.uploadFile(file_path)
     except Exception as e:
         return error(f"Upload failed to start for '{file_path}': {e}")
@@ -213,13 +215,13 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
         "uploaded_name": new_name,
         "uploaded_id": new_id,
         "note": ("Upload is asynchronous and processes on the cloud (neutral formats like "
-            "STEP are translated into a Fusion design). Use data_list_files on the "
+            "STEP are translated into a Fusion design). Use data_get on the "
             "destination project after a short wait to confirm the file appears."),
     })
 
 
 # ---------------------------------------------------------------------------
-# data_list_folders
+# data_get(project=..., include=['folders']) core: the project's folder tree
 # ---------------------------------------------------------------------------
 
 _LF_MAX_DEPTH = 12
@@ -295,7 +297,7 @@ def _folder_counts(folder):
 
 def _subtree_counts(folder, _depth=0):
     """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
-    depth-capped). This is the real blast radius of a recursive delete — the immediate counts hide
+    depth-capped). This is the real blast radius of a recursive delete - the immediate counts hide
     nested files that force=true would also wipe (and whose xrefs would be orphaned)."""
     files = safe(lambda: folder.dataFiles.count, 0) or 0
     subs = 0
@@ -313,19 +315,19 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
     """Delete a data-model folder by id, guarded.
 
     SAFETY: requires 'folder_id' AND a 'confirm_name' that EXACTLY matches the folder's current
-    name — refuses on mismatch. Never deletes a project root. An EMPTY folder deletes directly.
+    name - refuses on mismatch. Never deletes a project root. An EMPTY folder deletes directly.
     A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and bypasses the per-file
     xref-orphan guard), so it needs BOTH force=true AND 'recursive_confirm' set to the folder's
-    name — a deliberate second acknowledgment. Without recursive_confirm, force returns a
+    name - a deliberate second acknowledgment. Without recursive_confirm, force returns a
     full-subtree PREVIEW (the blast radius) and refuses. Deletion is irreversible.
     """
     folder_id = (folder_id or "").strip()
     confirm_name = (confirm_name or "").strip()
     if not folder_id:
-        return error("Provide 'folder_id' (the id of the folder to delete; from data_list_folders).")
+        return error("Provide 'folder_id' (the id of the folder to delete; from data_get(include=['folders'])).")
     if not confirm_name:
-        return error("Provide 'confirm_name' — the exact current name of the folder, as a "
-    "safety confirmation. Get it from data_list_folders.")
+        return error("Provide 'confirm_name' - the exact current name of the folder, as a "
+    "safety confirmation. Get it from data_get(include=['folders']).")
 
     try:
         data = _data()
@@ -338,7 +340,7 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
         return error(f"findFolderById failed for '{folder_id}': {e}")
     if not folder:
         return error(f"No folder found for folder_id '{folder_id}'. It may already be "
-    "deleted. Verify with data_list_folders.")
+    "deleted. Verify with data_get(include=['folders']).")
 
     if safe(lambda: folder.isRoot, False):
         return error("Refusing to delete a project ROOT folder.")
@@ -348,7 +350,7 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
     # surrounding whitespace is forgiven).
     if actual_name.strip() != confirm_name:
         return error(
-            f"Name mismatch — refusing to delete. folder_id resolves to '{actual_name}', but "
+            f"Name mismatch - refusing to delete. folder_id resolves to '{actual_name}', but "
             f"confirm_name was '{confirm_name}'. Pass confirm_name='{actual_name}' if you "
             "really mean this folder.")
 
@@ -363,14 +365,14 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
             return error(
                 f"'{actual_name}' is not empty (immediate files: {file_count}, subfolders: "
                 f"{sub_count}). Deleting it RECURSIVELY removes its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) total — and bypasses the "
+                f"{total_files} file(s) and {total_subs} subfolder(s) total - and bypasses the "
                 "per-file reference-orphan check. Pass force=true AND recursive_confirm="
                 f"'{actual_name}' to do this, or empty it first (data_delete_file for files).")
         # force is set but require the explicit recursive acknowledgment matching the name.
         if recursive_confirm != actual_name:
             return error(
                 f"RECURSIVE DELETE of '{actual_name}' would remove its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) — and bypasses the per-file "
+                f"{total_files} file(s) and {total_subs} subfolder(s) - and bypasses the per-file "
                 "reference-orphan check (nested referenced files would be orphaned). This is "
                 "irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
                 "(a deliberate second acknowledgment). Nothing was deleted.")
@@ -417,9 +419,9 @@ _create_folder_tool = (
         name="data_create_folder",
         description=(
         "Create a folder in a project, identified by 'project' (name) or 'project_id'. "
-        "'parent_folder' may be a nested path like 'Fixtures/Vises' — any missing "
+        "'parent_folder' may be a nested path like 'Fixtures/Vises' - any missing "
         "folders along the path are created automatically (mkdir -p). Fails only on a "
-        "duplicate name in the same target location. Use data_list_folders first to see the "
+        "duplicate name in the same target location. Use data_get(include=['folders']) first to see the "
         "existing structure. WRITES to the cloud data model."
         ),
         input_param_name="folder_name",
@@ -442,9 +444,9 @@ _upload_tool = (
         "into a nested 'folder' path (e.g. 'Imports/STEP'). Neutral formats (STEP, IGES, "
         "SAT, etc.) are translated into a Fusion design (.f3d) during cloud processing. "
         "The upload is ASYNCHRONOUS: this returns once it has started; confirm completion "
-        "with data_list_files after a short wait. The destination folder path must "
+        "with data_get after a short wait. The destination folder path must "
         "exist unless create_path=true (then missing folders are created). Use "
-        "data_list_folders to see the structure. WRITES to the cloud data model."
+        "data_get(include=['folders']) to see the structure. WRITES to the cloud data model."
         ),
         input_param_name="file_path",
         input_param_description="Full path to the local CAD file to upload.",
@@ -460,32 +462,16 @@ upload_file_item = Item.create_tool_item(
     tool=_upload_tool, write="write", handler=upload_file_handler, run_on_main_thread=True
 )
 
-_list_folders_tool = (
-    Tool.create_simple(
-        name="data_list_folders",
-        description=(
-        "Show the folder tree of a project, identified by 'project' (name) or "
-        "'project_id', to a bounded depth. Each folder reports its name, id, and full "
-        "path. Use this to discover the structure before creating folders or uploading "
-        "into a nested path. Pass 'max_depth' (default 4)."
-        ),
-    )
-    .add_input_property("project", {"type": "string", "description": "Project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Project id (alt to name)."})
-    .add_input_property("max_depth", {"type": "integer", "description": "How deep to walk (default 4)."})
-    .strict_schema()
-)
-list_folders_item = Item.create_tool_item(
-    tool=_list_folders_tool, write="read", handler=lambda **kw: list_folders_handler(**kw), run_on_main_thread=True
-)
+# list_folders_handler is the folder-tree read core that data_get delegates to (data_get(project=...,
+# include=['folders']) is the registered rich read; the folder-tree walk + caps live here).
 
 _delete_folder_tool = (
     Tool.create_with_string_input(
         name="data_delete_folder",
         description=(
-            "Delete a data-model folder by its 'folder_id' (from data_list_folders). GUARDED and "
+            "Delete a data-model folder by its 'folder_id' (from data_get(include=['folders'])). GUARDED and "
             "IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches the folder's "
-            "current name — refuses on mismatch. Never deletes a project ROOT. An EMPTY folder "
+            "current name - refuses on mismatch. Never deletes a project ROOT. An EMPTY folder "
             "deletes directly. A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and "
             "bypasses the per-file reference-orphan check), so it needs BOTH force=true AND "
             "'recursive_confirm' = the folder's name (a deliberate second acknowledgment). Without "
@@ -493,7 +479,7 @@ _delete_folder_tool = (
             "WRITES to the cloud data model (deletes)."
         ),
         input_param_name="folder_id",
-        input_param_description="Id of the folder to delete (from data_list_folders).",
+        input_param_description="Id of the folder to delete (from data_get(include=['folders'])).",
     )
     .add_input_property("confirm_name", {"type": "string",
         "description": "Exact current name of the folder, case-sensitive (safety confirmation; must match)."})
@@ -511,5 +497,4 @@ def register_tool():
     register(create_project_item)
     register(create_folder_item)
     register(upload_file_item)
-    register(list_folders_item)
     register(delete_folder_item)

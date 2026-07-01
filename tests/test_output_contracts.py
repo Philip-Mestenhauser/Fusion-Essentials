@@ -38,7 +38,7 @@ class TestDeclaredOutputs:
     def test_at_least_the_known_producers_declare_returns(self):
         # A floor so this lint can't pass vacuously if discovery breaks.
         names = {n for n, _ in _tools_with_returns()}
-        assert {"find_geometry", "doc_get_active_id", "cam_generate"} <= names
+        assert {"find_geometry", "doc_get", "cam_generate"} <= names
 
     def test_returns_entries_are_output_kinds(self):
         for name, mod in _tools_with_returns():

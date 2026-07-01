@@ -46,14 +46,14 @@ _MAX_DIM = 4096
 
 
 # Exact world-axis camera vectors per named view, so an orthographic view is GUARANTEED square to
-# world (a true [±1,0,0]/[0,±1,0]/[0,0,±1] look direction) — NOT "rotate toward the axis from
+# world (a true [+/-1,0,0]/[0,+/-1,0]/[0,0,+/-1] look direction) - NOT "rotate toward the axis from
 # whatever arbitrary pose the camera is in", which leaves a few-degree tilt and silently distorts
 # every orthographic read. Convention (Fusion default, Z up): FRONT looks along +Y, TOP looks along
 # -Z, RIGHT looks along -X. Each entry = (look_dir, up) as unit world vectors; eye = target - look_dir*d.
 # Orthographic views also force cameraType=orthographic so there is zero perspective parallax.
 _SQRT3 = 3 ** -0.5
 _VIEW_VECTORS = {
-    # name: (look_direction, up_vector)  — both world unit vectors
+    # name: (look_direction, up_vector)  - both world unit vectors
     "front":  ((0, 1, 0),  (0, 0, 1)),
     "back":   ((0, -1, 0), (0, 0, 1)),
     "top":    ((0, 0, -1), (0, 1, 0)),
@@ -111,6 +111,19 @@ def _isolate_for_fit(name):
     return restore
 
 
+def _active_component_note(design):
+    """If a NON-root component is activated, Fusion renders everything outside it as dimmed/translucent
+    'ghosts'. Return a one-line warning naming the active component so the agent reads the washed-out
+    image as activation scope, not a lighting/appearance problem. Returns None when root is active."""
+    root = safe(lambda: design.rootComponent) if design else None
+    active = safe(lambda: design.activeComponent) if design else None
+    if root is None or active is None or active is root:
+        return None
+    nm = safe(lambda: active.name) or "a sub-component"
+    return (f"Active component is '{nm}' - everything outside it renders dimmed/translucent in this "
+            "image (activation scope, not a lighting issue). Activate the root to see all parts solid.")
+
+
 def handler(view: str = "current", width: int = 800, height: int = 600,
             zoom: float = 1.0, fit_to: str = "") -> dict:
     """Capture the active viewport and return it as a base64 PNG image block."""
@@ -137,7 +150,7 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     if want_fit:
         restore_fit_to = _isolate_for_fit(want_fit)
         if restore_fit_to is None:
-            return error(f"fit_to: no occurrence matched '{want_fit}'. Use design_get_tree to list.")
+            return error(f"fit_to: no occurrence matched '{want_fit}'. Use design_get(include=['tree']) to list.")
 
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change
@@ -187,10 +200,12 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
             return error("Viewport capture failed (saveAsImageFile returned false).")
         with open(temp_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
-        return {
-        "content": [{"type": "image", "data": b64, "mimeType": "image/png"}],
-        "isError": False,
-        }
+        content = []
+        note = _active_component_note(adsk.fusion.Design.cast(app.activeProduct))
+        if note:
+            content.append({"type": "text", "text": note})
+        content.append({"type": "image", "data": b64, "mimeType": "image/png"})
+        return {"content": content, "isError": False}
     except Exception as e:
         return error(f"Screenshot error: {e}")
     finally:

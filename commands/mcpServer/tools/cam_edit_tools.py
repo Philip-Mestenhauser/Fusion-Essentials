@@ -3,19 +3,19 @@
 
 """MCP building block: manage CAM TOOLS across document / local / cloud / hub libraries.
 
-  cam_tool(action=list|add|remove|edit|where_used, scope=document|local|cloud|hub, library=..., ...)
+  cam_edit_tools(action=list|add|remove|edit|where_used, scope=document|local|cloud|hub, library=..., ...)
 
 The cohesive tool-management surface. One action-dispatched verb covers the real interaction tasks an
 agent needs:
   - list        -> the tools in the target library (index + key specs)
-  - add         -> copy one or more tools IN by (library_url, index) reference (the cam_read_tool_library
+  - add         -> copy one or more tools IN by (library_url, index) reference (the cam_edit_tools
                    handle); validates ALL refs before adding any
   - remove      -> remove one or more tools by index (removed high-to-low so indices stay valid)
   - edit        -> set named tool parameters by expression on one tool, then persist
   - where_used  -> which operations use a tool (DOCUMENT scope only)
 
 Scope picks the library: 'document' = CAM.documentToolLibrary (this doc's tools, with where_used);
-'local'/'cloud'/'hub' = the shared ToolLibrary at 'library' (name or url). Writes PERSIST — document via
+'local'/'cloud'/'hub' = the shared ToolLibrary at 'library' (name or url). Writes PERSIST - document via
 DocumentToolLibrary.updateTool; shared via ToolLibraries.updateToolLibrary(url, lib). Hub is shared
 TEAM data (writes affect others) and network-slow.
 
@@ -100,7 +100,7 @@ def _get_cam():
 
 
 def _tool_libraries():
-    """The shared ToolLibraries — on CAMManager.get().libraryManager (NOT the document's CAM product,
+    """The shared ToolLibraries - on CAMManager.get().libraryManager (NOT the document's CAM product,
     which has no libraryManager). Works without an open CAM job."""
     return safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
 
@@ -139,7 +139,7 @@ def _resolve_target(scope, library):
         return _Target(dtl, is_document=True,
                        update_tool_fn=lambda t: dtl.updateTool(t),
                        ops_fn=lambda t: safe(lambda: dtl.operationsByTool(t))), None
-    # shared library — no open document needed
+    # shared library - no open document needed
     libs = _tool_libraries()
     if not libs:
         return None, "Tool libraries unavailable."
@@ -385,7 +385,7 @@ def _build_entry(ref):
 
 def _do_add(target, add_tools):
     if not add_tools:
-        return error("Provide 'add_tools' — entries to add. Each: {from_type:'drill'} (create from a "
+        return error("Provide 'add_tools' - entries to add. Each: {from_type:'drill'} (create from a "
                      "sample of that type) or {library_url, index} (copy an existing tool); optional "
                      "'description'/'diameter' overrides, 'holder':{library_url,index}, 'presets':[...].")
     # build ALL entries before adding any (no partial write on an error)
@@ -406,7 +406,7 @@ def _do_add(target, add_tools):
 
 def _do_remove(target, indices):
     if not indices:
-        return error("Provide 'remove_indices' — the tool indices to remove.")
+        return error("Provide 'remove_indices' - the tool indices to remove.")
     n = len(target.tools)
     bad = [i for i in indices if not (0 <= i < n)]
     if bad:
@@ -456,7 +456,7 @@ def _do_edit(target, tool_index, parameters):
 
 def _do_where_used(target, tool_index):
     if not target.is_document:
-        return error("'where_used' is only available for the document library (scope='document') — a "
+        return error("'where_used' is only available for the document library (scope='document') - a "
                      "shared library has no operations.")
     tools = target.tools
     if tool_index is None or not (0 <= tool_index < len(tools)):
@@ -493,7 +493,7 @@ def _do_create_library(scope, name, seed_tools):
     root = safe(lambda: libs.urlByLocation(getattr(adsk.cam.LibraryLocations, _CREATE_LOCATIONS[scope])))
     if not root:
         return error(f"Could not resolve the '{scope}' library root.")
-    # Hub can't import at the bare hub:// root — descend to its team folder.
+    # Hub can't import at the bare hub:// root - descend to its team folder.
     if scope == "hub":
         child = safe(lambda: list(libs.childFolderURLs(root)), []) or []
         if not child:
@@ -516,7 +516,7 @@ def _do_create_library(scope, name, seed_tools):
     try:
         new_url = libs.importToolLibrary(lib, root, name)
     except Exception as e:
-        hint = (" Hub team libraries use a different write path importToolLibrary doesn't satisfy — "
+        hint = (" Hub team libraries use a different write path importToolLibrary doesn't satisfy - "
                 "create Hub libraries in the UI." if scope == "hub" else "")
         return error(f"Creating library '{name}' at {scope} failed: {e}.{hint}")
     if not new_url:
@@ -527,11 +527,26 @@ def _do_create_library(scope, name, seed_tools):
                        "Cloud/Hub=your Autodesk account; a duplicate name gets a numeric suffix.)"})
 
 
+def read_library(scope: str = "document", library: str = "", tool_type: str = "") -> dict:
+    """The READ-ONLY library listing, shared with cam_get(include=['library']). Lists the tools in the
+    target library (or, for a shared scope with no 'library', the libraries at that location). The write
+    actions (add/remove/edit) stay on the cam_edit_tools tool - this is just the read half."""
+    scope = (scope or "document").strip().lower()
+    if scope not in _SCOPES:
+        return error(f"Unknown scope '{scope}'. Use one of: {', '.join(_SCOPES)}.")
+    if scope != "document" and not (library or "").strip():
+        return _do_list_libraries(scope)
+    target, terr = _resolve_target(scope, library)
+    if terr:
+        return error(terr)
+    return _do_list(target, tool_type)
+
+
 def handler(action: str = "list", scope: str = "document", library: str = "",
             add_tools=None, remove_indices=None, tool=None, parameters=None,
             tool_type: str = "") -> dict:
     """Manage CAM tools + libraries. action: list/add/remove/edit/where_used. scope: document/local/
-    cloud/hub. library: shared-library name/url — OMIT with action='list' (shared scope) to LIST the
+    cloud/hub. library: shared-library name/url - OMIT with action='list' (shared scope) to LIST the
     libraries. add_tools: [{library_url,index}]. remove_indices: [int]. tool: a tool index
     (edit/where_used). parameters: {name: expression} (edit). tool_type: list filter. WRITES (except
     list/where_used)."""
@@ -542,21 +557,18 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
     if scope not in _SCOPES:
         return error(f"Unknown scope '{scope}'. Use one of: {', '.join(_SCOPES)}.")
 
-    # create_library: the target doesn't exist yet — 'library' is the NEW name. Dispatch before resolve.
+    # create_library: the target doesn't exist yet - 'library' is the NEW name. Dispatch before resolve.
     if action == "create_library":
         return _do_create_library(scope, library, add_tools)
 
-    # list with a shared scope and NO library -> list the libraries at that location (subsumes the old
-    # cam_read_tool_library library-listing). document scope always has exactly one library.
-    if action == "list" and scope != "document" and not (library or "").strip():
-        return _do_list_libraries(scope)
+    # list is the READ half - one implementation, also surfaced as cam_get(include=['library']).
+    if action == "list":
+        return read_library(scope, library, tool_type)
 
     target, terr = _resolve_target(scope, library)
     if terr:
         return error(terr)
 
-    if action == "list":
-        return _do_list(target, tool_type)
     if action == "add":
         return _do_add(target, add_tools or [])
     if action == "remove":
@@ -569,20 +581,16 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Read & manage CAM TOOL LIBRARIES + their tools. 'scope': document (this doc's tools) / local / cloud "
-    "/ hub. 'action': 'list' — with a shared scope and NO 'library', lists the libraries there; otherwise "
-    "lists that library's tools (each with a (library_url,index) reference; optional 'tool_type' filter). "
-    "'add' (each 'add_tools' entry CREATES a tool: {from_type:'drill'} clones a sample of that geometry "
-    "type, or {library_url,index} copies an existing one; + optional 'description'/'diameter', "
-    "'holder':{library_url,index}, 'presets':[{spindle_speed,feed}]) / 'remove' ('remove_indices'=[int]) / "
-    "'edit' (set 'parameters'={name:expression} on the 'tool' index) / 'where_used' (operations using the "
-    "'tool' index — document scope only) / 'create_library' (new library named 'library' at scope "
-    "local/cloud/hub, optionally seeded with 'add_tools'). For shared scopes give 'library' (name or url). "
-    "WRITES persist (Hub is shared TEAM data; Hub reads/writes are network-slow). 'list'/'where_used' read-only."
+    "Read & manage CAM TOOL LIBRARIES + their tools (each action's inputs are documented on the "
+    "properties below). 'scope': document / local / cloud / hub. 'action': list | add | remove | edit | "
+    "where_used | create_library. 'list' with a shared scope and NO 'library' lists the libraries there, "
+    "else that library's tools (each carries a (library_url,index) reference). For shared scopes give "
+    "'library' (name or url); document scope needs none. WRITES persist; Hub is shared TEAM data and Hub "
+    "reads/writes are network-slow. 'where_used' is document-scope only. 'list'/'where_used' read-only."
 )
 
 tool = (
-    Tool.create_simple(name="cam_tool_library", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="cam_edit_tools", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
             "description": "list / add / remove / edit / where_used."})
     .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),

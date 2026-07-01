@@ -12,7 +12,7 @@
 The read/write foundation for parameter-driven templates (driving stock size, positioning, etc.).
 add/delete are guarded by a timeline-health check (a LOCAL _timeline_health helper) so an edit that
 breaks a downstream feature is rolled back/reported rather than silently corrupting the model. The
-whole-design timeline tools (design_get_timeline_health / design_recompute) live in design_ops.py.
+whole-design recompute tool (design_recompute) lives in design_ops.py (timeline health is design_get's default).
 
 Grounded in adsk.fusion:
   - Design.userParameters (UserParameters: .add(name, ValueInput, unit, comment), .itemByName) /
@@ -45,7 +45,7 @@ def _param_summary(p) -> dict:
     "comment": safe(lambda: p.comment),
     "value": None,
     }
-    # value is numeric in db units; text params raise — fall back to textValue.
+    # value is numeric in db units; text params raise - fall back to textValue.
     v = safe(lambda: p.value)
     if v is not None:
         out["value"] = v
@@ -134,20 +134,20 @@ def _find_parameter(design, name):
 
 def set_handler(name: str = "", expression: str = "", create: bool = False,
                 unit: str = "mm") -> dict:
-    """Set a design parameter's expression — or CREATE it if missing (create-or-update). WRITES.
+    """Set a design parameter's expression - or CREATE it if missing (create-or-update). WRITES.
 
     'expression' is interpreted like the Parameters dialog: a numeric expression
     ('2 in', 'StockX/2', '6.25'), a reference to other parameters, or a quoted text
     value for text parameters ('Hello'). create=true: if no parameter named 'name' exists,
-    create it as a USER parameter with 'unit' (mm default; '' for unitless) — so a caller can
+    create it as a USER parameter with 'unit' (mm default; '' for unitless) - so a caller can
     set-or-make in one call. Returns before/after (before is null for a created param). Works for
     user and model parameters (model/feature params may reject the edit, which is reported).
     """
     name = (name or "").strip()
     if not name:
-        return error("Provide 'name' — the parameter to set.")
+        return error("Provide 'name' - the parameter to set.")
     if (expression or "").strip() == "" and expression != "0":
-        return error("Provide 'expression' — the new value/expression for the parameter.")
+        return error("Provide 'expression' - the new value/expression for the parameter.")
 
     design = _common.design()
     if not design:
@@ -190,8 +190,8 @@ _HEALTH_NAMES = {0: "healthy", 1: "warning", 2: "error", 3: "suppressed", 4: "ro
 
 
 def _timeline_health(design):
-    """Return (errors, warnings, total) for the parametric timeline — used by the add/delete health
-    guard below. (The design_get_timeline_health / design_recompute TOOLS live in design_ops.py.)"""
+    """Return (errors, warnings, total) for the parametric timeline - used by the add/delete health
+    guard below. (design_recompute lives in design_ops.py; timeline health is in design_get's default slice.)"""
     errors, warnings, total = [], [], 0
     tl = safe(lambda: design.timeline)
     if tl is None:
@@ -235,7 +235,7 @@ def _add_one(design, name, expression, unit, comment, favorite):
         safe(lambda: p.deleteMe())
         return None, (f"adding '{name}' introduced a timeline error ({err_after}); rolled back. "
                 "Check the expression/unit.")
-    # Report the ACTUAL favorite state read back from the parameter, not the request — so a silently
+    # Report the ACTUAL favorite state read back from the parameter, not the request - so a silently
     # failed isFavorite set doesn't surface as a false success.
     return {"parameter": _param_summary(p), "favorite": bool(safe(lambda: p.isFavorite, False)),
                 "timeline_warnings": warn_after}, None
@@ -246,7 +246,7 @@ def add_handler(name: str = "", expression: str = "", unit: str = "mm",
     """Add ONE or MANY user parameters in a single call. WRITES.
 
     Single: name + expression (+ unit/comment/favorite). Batch: 'params' = a list of dicts, each
-    {name, expression, unit?, comment?, favorite?}, applied in order — far fewer calls than one per
+    {name, expression, unit?, comment?, favorite?}, applied in order - far fewer calls than one per
     parameter. unit defaults to mm (or '' for unitless). Each add is health-guarded: if it leaves the
     timeline with a NEW error it is rolled back. In a batch, the first failing entry STOPS the run
     (earlier successes are kept) and the error names its index, so you can fix and re-run the rest.
@@ -288,7 +288,7 @@ def delete_handler(name: str = "") -> dict:
     """
     name = (name or "").strip()
     if not name:
-        return error("Provide 'name' — the parameter to delete.")
+        return error("Provide 'name' - the parameter to delete.")
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -319,7 +319,7 @@ def delete_handler(name: str = "") -> dict:
     err_after, _, _ = _timeline_health(design)
     if len(err_after) > len(err_before):
         return error(f"Deleting '{name}' introduced a timeline error ({err_after}). "
-    "The deletion stands — undo in Fusion if needed.")
+    "The deletion stands - undo in Fusion if needed.")
     return ok({"deleted": True, "name": name,
         "note": "User parameter deleted; timeline verified (no new errors)."})
 
@@ -361,7 +361,7 @@ tool = (
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
 
 _SET_DESCRIPTION = (
-"Set a design parameter's expression (value). WRITES to the design — parameters drive "
+"Set a design parameter's expression (value). WRITES to the design - parameters drive "
 "geometry, stock, and suppression downstream. 'expression' is interpreted like the "
 "Parameters dialog: a number/expression ('2 in', '6.25', 'StockX/2', a reference to "
 "other parameters), or a quoted text value for text parameters (\"'Roughing'\"). "

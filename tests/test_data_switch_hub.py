@@ -1,4 +1,4 @@
-"""Unit tests for ``data_hubs.py`` — list Autodesk data hubs and switch the active one.
+"""Unit tests for ``data_switch_hub.py`` — list Autodesk data hubs and switch the active one.
 
 Switching hubs is a real need (templates/parts live on different TeamHubs). The Fusion API exposes
 app.data.dataHubs (reliable) but Data.activeHub is GETTER-ONLY, so 'switch' is best-effort: it
@@ -12,7 +12,7 @@ No live Fusion — fakes mimic app.data.dataHubs / activeHub in each shape.
 import json
 from conftest import load_tool
 
-dh = load_tool("data_hubs")
+dh = load_tool("data_switch_hub")
 
 
 class FakeHub:

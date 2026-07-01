@@ -16,14 +16,16 @@
 This is the gap that made earlier ops generate EMPTY: cam_create_operation makes an op but couldn't
 target geometry. Two API mechanisms (researched live + in pro sample docs, see
 docs/fusion-api-notes.md "Operation geometry selections"):
-  (A) CURVE selections — param.value.getCurveSelections() -> createNew*Selection() ->
+  (A) CURVE selections - param.value.getCurveSelections() -> createNew*Selection() ->
       sel.inputGeometry=[...] -> param.value.applyCurveSelections(cs).  contours/pockets/machiningBoundarySel.
-  (B) DIRECT object-list — param.value.value = [faces].  drill holeFaces.
+  (B) DIRECT object-list - param.value.value = [faces].  drill holeFaces.
 
 Heights are a 4-part group (_mode/_offset/_value/_ref): SET _mode + _offset; never _value.
-Generation is ASYNC — we gate on GenerateToolpathFuture.isGenerationCompleted, NOT op.isGenerating
-(the flag clears early -> a false empty/invalid read). An empty toolpath with no warning is almost
-always ZERO DEPTH (top & bottom resolving to the same Z) — we surface that hint.
+Generation is ASYNC - we gate on GenerateToolpathFuture.isGenerationCompleted, NOT op.isGenerating
+(the flag clears early -> a false empty/invalid read). EMPTY is reported by op.hasToolpath/
+isToolpathValid == False, and it can be SILENT on hasWarning/hasError (verified live: a zero-depth
+contour generates with no warning). So we report the observed has_toolpath=False + the candidate causes
+(zero depth, no bounding geometry, generation not finished) rather than asserting one.
 """
 
 import time
@@ -52,7 +54,7 @@ _SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _HOLES)
 # these the op actually has; we probe in order. (machiningBoundarySel = 3D adaptive/parallel boundary.)
 _CURVE_PARAM_CANDIDATES = ("contours", "pockets", "machiningBoundarySel", "stockContours")
 # 'holes' = the direct object-list family. DRILL uses 'holeFaces'; BORE/CIRCULAR use 'circularFaces'
-# (same CadObjectParameterValue shape — set .value to a list of cylinder faces). Probe in order.
+# (same CadObjectParameterValue shape - set .value to a list of cylinder faces). Probe in order.
 _HOLE_PARAM_CANDIDATES = ("holeFaces", "circularFaces")
 
 _CURVE_BUILDER = {
@@ -105,7 +107,7 @@ def _find_operation(cam, name):
         names = [safe(lambda o=o: o.name) for o in found]
         return None, f"No operation named '{name}'. Operations: {', '.join(str(n) for n in names)[:300]}."
     if len(matches) > 1:
-        return None, f"'{name}' is ambiguous — {len(matches)} operations share it. Rename so it's unique."
+        return None, f"'{name}' is ambiguous - {len(matches)} operations share it. Rename so it's unique."
     return matches[0], None
 
 
@@ -151,7 +153,7 @@ def _apply_curve(op, selection, entities, is_open, reverted):
     builder = _CURVE_BUILDER[selection]
     sel = safe(lambda: getattr(cs, builder)())
     if sel is None:
-        return None, f"createNew…({selection}) returned nothing on this operation."
+        return None, f"createNew...({selection}) returned nothing on this operation."
     try:
         sel.inputGeometry = entities          # MUTATION
     except Exception as e:
@@ -185,8 +187,8 @@ def _apply_holes(op, faces):
     nm, p = _hole_param(op)
     if p is None:
         return None, (f"Operation '{safe(lambda: op.name)}' has neither 'holeFaces' nor "
-                      "'circularFaces' — 'holes' selection is for drilling/boring strategies "
-                      "(drill / bore / circular / tap / …).")
+                      "'circularFaces' - 'holes' selection is for drilling/boring strategies "
+                      "(drill / bore / circular / tap / ...).")
     try:
         p.value.value = faces                 # MUTATION
     except Exception as e:
@@ -243,7 +245,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
             generate: bool = True) -> dict:
     """Select machining geometry on a CAM operation (+ optional heights), then optionally regenerate.
 
-    operation: op name (cam_get_operations). selection: chain/pocket/face/silhouette/holes.
+    operation: op name (cam_get(include=['operations'])). selection: chain/pocket/face/silhouette/holes.
     handles: find_geometry handles (edges for chain, faces for pocket/face/holes). is_open/reverted:
     chain knobs. min_diameter/max_diameter: filter cylinder faces (mm) for 'holes'. top_*/bottom_*:
     height mode+offset. generate: regenerate after (default true), gated on the async future. WRITES.
@@ -303,7 +305,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if aerr:
         return error(aerr)
     if not count:
-        return error("Selection applied but the operation reports 0 selections — the geometry was "
+        return error("Selection applied but the operation reports 0 selections - the geometry was "
                      "rejected. Check the handles match the strategy (edges for chain, the pocket "
                      "floor face for pocket, cylinder faces for holes).")
     result["selections"] = count
@@ -326,13 +328,16 @@ def handler(operation: str = "", selection: str = "", handles=None,
     elif has_tp and valid:
         result["note"] = "Selection applied and a valid toolpath generated."
     else:
-        # the classic trap: applied + generated but empty, with no warning -> almost always zero depth
+        # has_toolpath/toolpath_valid False is the authoritative EMPTY signal - and it can be silent on
+        # the warning channel (verified live: a zero-depth contour reports hasWarning/hasError False).
+        # Report the observed state + the candidate causes; don't assert one.
         if not warn:
-            result["note"] = ("Selection applied and generation completed, but the toolpath is EMPTY "
-                              "with no warning — this is almost always ZERO DEPTH (top & bottom "
-                              "resolve to the same Z). Set bottom_mode/bottom_offset (or top_*) to "
-                              "give the cut real depth. (Drill derives depth from the holes; contour "
-                              "does not.)")
+            result["note"] = ("Selection applied, but has_toolpath is False (the op produced no path) - "
+                              "the warning/error channels can be silent here. Candidate causes: the cut "
+                              "has zero depth (top & bottom resolve to the same Z - set bottom_mode/"
+                              "bottom_offset; drill derives depth from the holes, contour does not), the "
+                              "selected geometry doesn't bound a cut, or generation didn't finish "
+                              "(re-poll). Check the height settings and the selection.")
         else:
             result["warning"] = warn
             result["note"] = f"Selection applied; toolpath has a warning: {warn}"
@@ -346,21 +351,22 @@ TOOL_DESCRIPTION = (
     "filtered by min_diameter/max_diameter in mm). 'handles' = find_geometry handles (edges for chain, "
     "faces otherwise). Optional top_mode/top_offset + bottom_mode/bottom_offset set heights (mode = "
     "e.g. 'from stock top'/'from contour'/'from hole bottom'; never set the resolved _value). WRITES; "
-    "generation is async and gated internally. An empty toolpath with no warning usually means ZERO "
-    "DEPTH — set a bottom height. Pair: cam_create_operation -> this; find_geometry supplies handles."
+    "generation is async and gated internally. If has_toolpath comes back False the op produced no path "
+    "(the warning channel can be silent) - check the height settings (a zero-depth cut), the selection, "
+    "and that generation finished. Pair: cam_create_operation -> this; find_geometry supplies handles."
 )
 
 tool = (
     Tool.create_simple(name="cam_select_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property("operation", {"type": "string", "description": "Operation name (cam_get_operations)."})
+    .add_input_property("operation", {"type": "string", "description": "Operation name (cam_get(include=['operations']))."})
     .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
             "description": "chain / pocket / face / silhouette / holes."})
     .add_input_property("handles", {"type": "array", "items": {"type": "string"},
             "description": "find_geometry handles: edges for chain, faces for pocket/face/holes."})
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
-    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder Ø (mm)."})
-    .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder Ø (mm)."})
+    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (mm)."})
+    .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (mm)."})
     .add_input_property("top_mode", {"type": "string", "description": "top height mode, e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string", "description": "top height offset, e.g. '0 mm'."})
     .add_input_property("bottom_mode", {"type": "string", "description": "bottom height mode, e.g. 'from contour'."})

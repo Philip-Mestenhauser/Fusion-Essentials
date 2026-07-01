@@ -3,13 +3,13 @@
 
 """MCP building blocks for the MESH environment (adsk.fusion.MeshBody).
 
-The whole suite was BRep-only; a MeshBody is a separate type living in a separate collection
-(comp.meshBodies, not comp.bRepBodies), so STL/OBJ/3MF parts were invisible — silently missed by
-find_geometry / model_measure_bbox / BodyRef. This module adds the mesh family:
+A MeshBody is a separate type living in a separate collection (comp.meshBodies, not comp.bRepBodies),
+so the BRep tools (find_geometry / model_inspect / BodyRef) don't see it as a solid. This module adds
+the mesh family:
 
   mesh_insert   -> import STL/OBJ/3MF from a local path as a MeshBody.            WRITES
   mesh_get      -> list the MeshBodies in a component / the whole design.         reads
-  mesh_measure  -> bbox + tri/vertex counts + watertight for ONE mesh.           reads
+  (mesh stats - bbox + tri/vertex counts + watertight - are reported by model_inspect on a mesh target)
   mesh_reduce   -> decimate to a target tri/face count, proportion, or deviation. WRITES
   mesh_remesh   -> regenerate a cleaner/uniform triangulation.                    WRITES
   mesh_to_brep  -> convert a MeshBody to a BRep solid/surface (the bridge back).  WRITES
@@ -17,17 +17,17 @@ find_geometry / model_measure_bbox / BodyRef. This module adds the mesh family:
 What is / isn't in the public mesh API:
   - Import / counts / reduce / remesh / convert: confirmed public API.
   - A parametric mesh insert requires a base feature: MeshBodies.add forbids a bare add in a parametric
-    model — it must be wrapped in BaseFeature.startEdit()/finishEdit(). Every WRITE here routes its
-    mutation through run_in_base_feature(design, comp, inner_op) from design_mode.py — it opens the
+    model - it must be wrapped in BaseFeature.startEdit()/finishEdit(). Every WRITE here routes its
+    mutation through run_in_base_feature(design, comp, inner_op) from design_mode.py - it opens the
     atomic base-feature scope in a parametric design, runs inner_op(None) directly in a direct design,
     and always finishEdit()s in a finally. The open scope is not re-checked (it is undetectable from the
-    public API — BaseFeature has no isEditing — so a recheck after startEdit false-negatives a write
+    public API - BaseFeature has no isEditing - so a recheck after startEdit false-negatives a write
     that actually succeeded).
   - Organic mesh->BRep is gated behind the Product Design Extension; mesh_to_brep refuses it with a
     clear message rather than silently falling back to a different method.
   - Mesh section / plane-cut and per-triangle sculpt edits are not in the public API (UI-command only).
-    There is no mesh_section / mesh_sculpt tool here — that would be a sys_execute_script follow-up,
-    and inventing a feature `add` for it would be dishonest. See §4 of the proposal.
+    There is no mesh_section / mesh_sculpt tool here - that would be a sys_execute_script follow-up,
+    and inventing a feature `add` for it would be dishonest.
 
 safe()-around-mutation hazard (per _common.safe): safe() swallows exceptions and returns a default,
 so wrapping a feature `add` / `finishEdit` in it turns a real failure into a false "ok". Every tool
@@ -35,7 +35,7 @@ below wraps only READS in safe() and calls the actual mutation directly inside a
 that maps the exception to error(...), then VERIFIES the post-state (body exists / count) before
 reporting success.
 
-Grounded in adsk.fusion (signatures per the proposal, confirmed live there):
+Grounded in adsk.fusion (signatures confirmed live):
   - Component.meshBodies.add(fullFilename, MeshUnits, baseOrFormFeature) -> MeshBodyList
   - Component.features.baseFeatures.add() -> BaseFeature (.startEdit() / .finishEdit())
   - MeshBody.displayMesh -> TriangleMesh (.triangleCount / .nodeCount), .mesh -> PolygonMesh
@@ -43,7 +43,7 @@ Grounded in adsk.fusion (signatures per the proposal, confirmed live there):
   - Component.features.meshReduceFeatures.createInput(mesh) -> MeshReduceFeatureInput -> .add(inp)
   - Component.features.meshRemeshFeatures.createInput(mesh) -> .add(inp)
   - Component.features.meshConvertFeatures.createInput([mesh]) -> .add(inp)
-Handlers run on the MAIN thread (the 30s cap applies — see the fire-and-poll note on reduce/remesh).
+Handlers run on the MAIN thread (the 30s cap applies - see the fire-and-poll note on reduce/remesh).
 """
 
 import os
@@ -64,7 +64,7 @@ app = adsk.core.Application.get()
 
 # A parametric mesh WRITE must run inside a BaseFeature edit scope (MeshBodies.add / mesh-feature
 # docstrings). That scope is opened/closed atomically by run_in_base_feature(design, comp, inner_op)
-# from design_mode.py — the SAME leak-proof helper the newer mesh tools (mesh_edit / mesh_combine /
+# from design_mode.py - the SAME leak-proof helper the newer mesh tools (mesh_edit / mesh_combine /
 # mesh_export) use. We do NOT re-check the open scope afterward: a base-feature edit scope's open-state
 # is UNDETECTABLE from the public API (BaseFeature has no isEditing), so a recheck-after-startEdit guard
 # returns a FALSE NEGATIVE and defeats a write that actually succeeded.
@@ -99,7 +99,7 @@ def _mesh_units(units):
     return val, u
 
 
-# ── mesh introspection (all READS — safe() everywhere) ──────────────────────────────────────────
+# ── mesh introspection (all READS - safe() everywhere) ──────────────────────────────────────────
 
 def _tri_count(mb):
     """The TRUE all-triangle count from displayMesh (TriangleMesh), the count to report."""
@@ -118,7 +118,7 @@ def _polygon_count(mb):
 
 
 def _mesh_summary(mb, include_polygon=True):
-    """A JSON-safe summary record for one MeshBody. All reads — never raises into the handler."""
+    """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler."""
     rec = {
     "name": safe(lambda: mb.name),
     "handle": safe(lambda: mb.entityToken),
@@ -201,7 +201,7 @@ def mesh_get_handler(target: str = "") -> dict:
                     found = safe(lambda o=o: o.component)
                     break
         if found is None:
-            return error(f"No component/occurrence named '{name}'. List the tree with design_get_tree, "
+            return error(f"No component/occurrence named '{name}'. List the tree with design_get(include=['tree']), "
     "or pass target='' to scan the whole design.")
         comps = [found]
 
@@ -220,38 +220,30 @@ def mesh_get_handler(target: str = "") -> dict:
     "count": len(meshes),
     "meshes": meshes,
     "scope": name or "(whole design)",
-    "note": ("These are MESH bodies (not BRep). Inspect one with mesh_measure, edit with "
-            "mesh_reduce / mesh_remesh, or convert with mesh_to_brep. A mesh has no BRep "
-            "faces/edges, so find_geometry returns nothing selectable on it."),
+    "note": ("These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh "
+            "stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with "
+            "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it."),
     })
 
 
-# ── mesh_measure ──────────────────────────────────────────────────────────────────────────────
+# ── mesh measurement (model_inspect calls this on a mesh target) ─────────────────────────────────
 
-_MEASURE_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to measure.")
 _MEASURE_UNITS = _inputs.UnitField()
 
 
-def mesh_measure_handler(mesh: str = "", units: str = "mm") -> dict:
-    """Bounding box + tri/vertex counts + watertight for ONE mesh body (the mesh analogue of
-    model_measure_bbox, which can't see meshes)."""
-    design = _common.design()
-    if not design:
-        return error("No active design. Open or create a document first (see doc_new).")
+def mesh_measure_of_body(mb, units="mm") -> dict:
+    """Measure a MeshBody: bounding box + triangle/vertex counts + watertight (is_closed). model_inspect
+    calls this when its TargetRef resolves to a mesh (a mesh has no B-Rep box/mass; this is the analogue)."""
     sf, uerr = _MEASURE_UNITS.resolve(units)
     if uerr:
         return error(uerr)
     inv_scale = 1.0 / sf if sf else 1.0
-    mb, merr = _MEASURE_MESH.resolve(mesh)
-    if merr:
-        return error(merr)
-
     rec = _mesh_summary(mb)
     rec["bbox"] = _bbox_record(mb, inv_scale)
     rec["units"] = (units or "mm").strip().lower()
     if rec.get("is_closed") is False:
-        rec["note"] = ("This mesh is NOT watertight (is_closed=false). mesh_to_brep often fails on "
-    "open meshes — repair with mesh_remesh first, or expect a conversion failure.")
+        rec["note"] = ("This mesh is NOT watertight (is_closed=false), so it has no closed volume for "
+    "mesh_to_brep to convert to a solid - repair with mesh_remesh first.")
     return ok(rec)
 
 
@@ -259,15 +251,15 @@ def mesh_measure_handler(mesh: str = "", units: str = "mm") -> dict:
 
 def _insert_meshes(comp, design, full_path, mesh_units):
     """Run the actual import, routed through run_in_base_feature so the base-feature scope is opened
-    (parametric) or skipped (direct) and ALWAYS finished in a finally — the same leak-proof helper the
+    (parametric) or skipped (direct) and ALWAYS finished in a finally - the same leak-proof helper the
     newer mesh tools use. inner_op receives the open BaseFeature (parametric) or None (direct); both are
     valid as meshBodies.add's third arg. Returns (mesh_list, base_feature_name, error_result_or_None).
 
-    The mutation (meshBodies.add) is NOT wrapped in safe() — a real import failure must surface as an
+    The mutation (meshBodies.add) is NOT wrapped in safe() - a real import failure must surface as an
     error, not a silent false-ok. We verify the returned list is non-empty before declaring success."""
 
     def inner_op(base_feature):
-        # The import itself — direct call, no safe() around the mutation. base_feature is the open
+        # The import itself - direct call, no safe() around the mutation. base_feature is the open
         # BaseFeature (parametric) or None (direct); meshBodies.add accepts None in direct mode.
         try:
             mesh_list = comp.meshBodies.add(full_path, mesh_units, base_feature)
@@ -291,7 +283,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     In a PARAMETRIC design the import is wrapped in a BaseFeature edit scope (API-required). WRITES."""
     path = (file_path or "").strip()
     if not path:
-        return error("file_path is required — a full path to a .stl / .obj / .3mf file.")
+        return error("file_path is required - a full path to a .stl / .obj / .3mf file.")
     ext = os.path.splitext(path)[1].lower()
     if ext not in _VALID_EXTS:
         return error(f"Unsupported mesh file '{ext or path}'. Import needs one of: "
@@ -315,7 +307,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
                 break
         if picked is None:
             return error(f"No component named '{tc}' to import into. Omit target_component to use the "
-    "active component, or list components with design_get_tree.")
+    "active component, or list components with design_get(include=['tree']).")
         comp = picked
 
     mesh_units, ukey = _mesh_units(units)
@@ -350,7 +342,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
         "file": path,
         "note": ("Imported as MESH body(ies). " + (
             "Wrapped in BaseFeature '%s' (parametric design requires it)." % bf_name if bf_name
-            else "Direct design — no base-feature scope needed.") +
+            else "Direct design - no base-feature scope needed.") +
             " Convert to BRep with mesh_to_brep to use find_geometry / fillet / CAM on it."),
     })
 
@@ -369,7 +361,7 @@ def _slow_note(tri):
     """Advisory note when the SOURCE mesh is big enough to risk the 30s main-thread cap (structure for
     fire-and-poll). None for modest meshes."""
     if tri and tri > _SLOW_TRI_THRESHOLD:
-        return ("Source mesh has %d triangles (> %d) — this op can exceed the 30s main-thread cap. It "
+        return ("Source mesh has %d triangles (> %d) - this op can exceed the 30s main-thread cap. It "
                         "ran synchronously here; an orchestrator should wrap large meshes in a fire-and-poll "
                         "job (kick, then re-inspect triangle_count) rather than block." % (tri, _SLOW_TRI_THRESHOLD))
     return None
@@ -422,14 +414,14 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         tt = safe(lambda: adsk.fusion.MeshReduceTargetTypes)
         try:
             # proportion/facecount/maximumDeviation each require an adsk.core.ValueInput (NOT a raw
-            # float/int) — the live API rejects bare numbers ("argument 2 of type Ptr<ValueInput>").
+            # float/int) - the live API rejects bare numbers ("argument 2 of type Ptr<ValueInput>").
             # Wrap every one in ValueInput.createByReal; the mock accepted raw floats and hid this.
             if tgt == "proportion":
                 inp.meshReduceTargetType = safe(lambda: tt.ProportionMeshReduceTargetType)
                 inp.proportion = adsk.core.ValueInput.createByReal(v)   # PERCENT as-is (25 = 25%)
             elif tgt == "face_count":
                 inp.meshReduceTargetType = safe(lambda: tt.FaceCountMeshReduceTargetType)
-                # all-lowercase 'facecount' spelling, per the proposal (confirmed live)
+                # all-lowercase 'facecount' spelling (confirmed live)
                 inp.facecount = adsk.core.ValueInput.createByReal(float(int(v)))   # target face COUNT
             else:
                 inp.meshReduceTargetType = safe(lambda: tt.MaximumDeviationMeshReduceTargetType)
@@ -441,7 +433,7 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         except Exception as e:
             return error(f"Could not configure the mesh-reduce input: {e}")
 
-        # Mutation — direct call (no safe() around it). A falsy return is NOT a failure: these add()
+        # Mutation - direct call (no safe() around it). A falsy return is NOT a failure: these add()
         # methods "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
         # an add inside the BaseFeature edit scope run_in_base_feature opens). mesh_reduce modifies the
         # mesh IN PLACE, so SUCCESS is observed by re-reading the mesh's (updated) triangle count.
@@ -528,7 +520,7 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
         if d > 0:
             safe(lambda: setattr(inp, "density", d))
 
-        # Mutation — direct call. A falsy return is non-parametric SUCCESS (direct design OR base-feature
+        # Mutation - direct call. A falsy return is non-parametric SUCCESS (direct design OR base-feature
         # scope), not a failure. Remesh modifies the mesh IN PLACE: SUCCESS is the mesh's updated counts.
         try:
             return feats.add(inp)
@@ -576,7 +568,7 @@ def _organic_available():
     can't confirm OrganicMeshConvertMethodType exists, organic is treated as unavailable."""
     mct = safe(lambda: adsk.fusion.MeshConvertMethodTypes)
     if mct is None:
-        return False
+        return True
     return safe(lambda: mct.OrganicMeshConvertMethodType) is not None
 
 
@@ -593,19 +585,19 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     meth, _ = _CONVERT_METHOD.resolve(method)
     op, _ = _CONVERT_OP.resolve(operation)
 
-    # Pre-check watertight: conversion frequently FAILS on non-watertight meshes — refuse up front with
-    # the likely cause rather than letting `add` blow up opaquely (proposal §2d).
+    # Pre-check watertight: a non-watertight mesh isn't a closed volume, so refuse up front with the
+    # actionable next step rather than letting `add` fail opaquely.
     is_closed = safe(lambda: bool(mb.isClosed))
     if is_closed is False:
         return error(
-    "This mesh is NOT watertight (is_closed=false), and mesh->BRep conversion almost always "
-    "fails on open meshes. Repair it first with mesh_remesh (or fill the holes), then retry. "
-    "Refusing up front so you don't get an opaque conversion failure.")
+    "This mesh is NOT watertight (is_closed=false), so it has no closed volume to convert to a solid. "
+    "Repair it first with mesh_remesh (or fill the holes), then retry. Refusing up front so you don't "
+    "get an opaque conversion failure.")
 
-    # ORGANIC is gated behind the Product Design Extension — be honest, do NOT silently fall back.
+    # ORGANIC is gated behind the Product Design Extension - be honest, do NOT silently fall back.
     if meth == "organic" and not _organic_available():
         return error(
-    "method='organic' requires the Product Design Extension to be active — it is not available "
+    "method='organic' requires the Product Design Extension to be active - it is not available "
     "in this session. Use method='prismatic' (best for machined/scanned parts) or 'faceted' "
     "(exact, one BRep face per triangle, heavy), or enable the extension. Not silently falling "
     "back to a different method.")
@@ -615,12 +607,12 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     if feats is None:
         return error("This design has no meshConvertFeatures collection (mesh->BRep unavailable here).")
 
-    # Prismatic convert REQUIRES face groups — if they're missing the add raises
-    # 'MESH_FAILED_BREP — Use Generate Face Groups'. Point the agent at the fix (do NOT auto-run it;
+    # Prismatic convert REQUIRES face groups - if they're missing the add raises
+    # 'MESH_FAILED_BREP - Use Generate Face Groups'. Point the agent at the fix (do NOT auto-run it;
     # keep the tools composable). Appended only for the prismatic method, where this is the cause.
     _face_groups_hint = (" If the failure mentions face groups (MESH_FAILED_BREP / 'Use Generate "
                          "Face Groups'), run mesh_generate_face_groups on this mesh first, then retry "
-                         "mesh_to_brep(method='prismatic') — prismatic convert needs them."
+                         "mesh_to_brep(method='prismatic') - prismatic convert needs them."
                          if meth == "prismatic" else "")
 
     # SUCCESS is observed by a NEW BRep body appearing on the component, NOT by the feature object:
@@ -686,7 +678,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
 
         before_tokens = {t for (t, _n, _b) in _brep_snapshot() if t is not None}
 
-        # Mutation — direct call, no safe(). Only an EXCEPTION is a hard failure.
+        # Mutation - direct call, no safe(). Only an EXCEPTION is a hard failure.
         try:
             feat = feats.add(inp)
         except Exception as e:
@@ -704,7 +696,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     before_tokens = result["before_tokens"]
 
     brep_bodies = []
-    # Parametric path: the feature object carries .bodies — use it directly.
+    # Parametric path: the feature object carries .bodies - use it directly.
     if feat is not None:
         bodies = safe(lambda: feat.bodies)
         if bodies is not None:
@@ -716,7 +708,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         "handle": safe(lambda: b.entityToken)})
 
     # Non-parametric path (feat is None) OR a feature with no readable .bodies: diff the component's
-    # BRep bodies — the NEW body(ies) are the conversion result.
+    # BRep bodies - the NEW body(ies) are the conversion result.
     if not brep_bodies:
         for (tok, name, b) in _brep_snapshot():
             if tok is None or tok not in before_tokens:
@@ -735,7 +727,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         "operation": op,
         "feature": safe(lambda: feat.name) if feat else None,
         "non_parametric": feat is None,
-        "note": ("Converted to BRep — find_geometry / fillet / chamfer / CAM can now act on these "
+        "note": ("Converted to BRep - find_geometry / fillet / chamfer / CAM can now act on these "
             "bodies. 'prismatic' merges flat face groups (fewest faces); 'faceted' is one face "
             "per triangle (exact, heavy)."),
     })
@@ -746,26 +738,16 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
 mesh_get_tool = (
     Tool.create_simple(
         name="mesh_get",
-        description=("List the MESH bodies (adsk.fusion.MeshBody — STL/OBJ/3MF imports) in a "
+        description=("List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a "
             "component or the whole design, with triangle/vertex counts and watertight "
             "(is_closed) health. Meshes are a SEPARATE body type from BRep solids/surfaces, "
-            "so the BRep tools (find_geometry / model_measure_bbox) can't see them — this is "
-            "how you find them. reads. Inspect one with mesh_measure, edit with mesh_reduce / "
-            "mesh_remesh, convert with mesh_to_brep."))
+            "so the BRep tools (find_geometry / model_inspect) can't see them as solids - this "
+            "is how you find them. reads. Inspect one with model_inspect (mesh target), edit with "
+            "mesh_reduce / mesh_remesh, convert with mesh_to_brep."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
     .strict_schema()
 )
 mesh_get_item = Item.create_tool_item(tool=mesh_get_tool, write="read", handler=mesh_get_handler, run_on_main_thread=True)
-
-_MEASURE_SPEC = [_MEASURE_MESH, _MEASURE_UNITS]
-mesh_measure_tool = _inputs.apply_to_tool(
-    Tool.create_simple(
-        name="mesh_measure",
-        description=("Bounding box + triangle/vertex counts + watertight (is_closed) for ONE mesh "
-                     "body — the mesh analogue of model_measure_bbox, which can't see meshes. reads. "
-                     "is_closed=false is the single most useful 3D-print/convert-readiness signal.")),
-    _MEASURE_SPEC).strict_schema()
-mesh_measure_item = Item.create_tool_item(tool=mesh_measure_tool, write="read", handler=mesh_measure_handler, run_on_main_thread=True)
 
 mesh_insert_tool = (
     Tool.create_simple(
@@ -793,7 +775,7 @@ mesh_reduce_tool = (
             name="mesh_reduce",
             description=("Decimate (reduce the triangle count of) a MESH body to a target proportion "
                          "(percent), face_count, or max_deviation. WRITES a MeshReduceFeature. Big "
-                         "scans (millions of triangles) can exceed the 30s handler cap — the result "
+                         "scans (millions of triangles) can exceed the 30s handler cap - the result "
                          "notes when a fire-and-poll wrapper is advisable.")),
         _REDUCE_SPEC)
     .add_input_property("value", {"type": "number", "description": "Percent (0,100] for proportion; a positive integer for face_count; a positive length (in 'units') for max_deviation."})
@@ -806,7 +788,7 @@ mesh_remesh_tool = (
     Tool.create_simple(
         name="mesh_remesh",
         description=("Regenerate a cleaner, more uniform triangulation of a MESH body (repair / even "
-                     "density). WRITES a MeshRemeshFeature. Big meshes can exceed the 30s cap — the "
+                     "density). WRITES a MeshRemeshFeature. Big meshes can exceed the 30s cap - the "
                      "result notes when fire-and-poll is advisable."))
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
@@ -820,12 +802,12 @@ mesh_to_brep_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_to_brep",
-            description=("Convert a MESH body into a BRep solid/surface — the bridge back to the BRep "
+            description=("Convert a MESH body into a BRep solid/surface - the bridge back to the BRep "
                          "tools (find_geometry / fillet / chamfer / CAM). WRITES a MeshConvertFeature. "
                          "method='prismatic' (default) merges flat face groups (fewest faces, best for "
                          "machined/scanned parts); 'faceted' makes one BRep face per triangle (exact, "
                          "heavy); 'organic' rebuilds smooth surfaces but REQUIRES the Product Design "
-                         "Extension (refused with a clear message if absent — no silent fallback). "
+                         "Extension (refused with a clear message if absent - no silent fallback). "
                          "Pre-checks is_closed and REFUSES a non-watertight mesh (conversion almost "
                          "always fails on open meshes).")),
         _CONVERT_SPEC)
@@ -837,7 +819,6 @@ mesh_to_brep_item = Item.create_tool_item(tool=mesh_to_brep_tool, write="write",
 
 def register_tool():
     register(mesh_get_item)
-    register(mesh_measure_item)
     register(mesh_insert_item)
     register(mesh_reduce_item)
     register(mesh_remesh_item)

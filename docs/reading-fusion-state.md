@@ -57,12 +57,12 @@ right two parts?", "where is each piston?".
 - `assembly_probe` reports joints but not their *current driven value* — to see motion, drive with
   `assembly_move` + `assembly_capture_position` and re-probe positions.
 
-`design_get_tree` complements it (reference/x-ref resolution, child structure) but does NOT give
+`design_get(include=['tree'])` complements it (reference/x-ref resolution, child structure) but does NOT give
 position or ground flags — use `assembly_probe` for kinematic state.
 
 ---
 
-## 2. Parametric build / timeline — `design_get_timeline` + `design_get_timeline_health`
+## 2. Parametric build / timeline — `design_get` (default health; `include=['timeline']` for the feature list)
 
 **Reliably tells you:** the ordered features/sketches/joints that build the design, each one's type
 and whether it's suppressed/rolled-back/grouped, plus an error/warning health rollup. This is how
@@ -95,7 +95,7 @@ sketch's full structure — entities by id, constraints (and the entity ids they
 
 ---
 
-## 4. CAM / Manufacture — `cam_get_setups`, then `cam_get_operations`
+## 4. CAM / Manufacture — `cam_get`, then `cam_get(include=['operations'])`
 
 **Reliably tells you:** setups (machine, selected models/fixtures/stock, op counts) and, per setup,
 each operation's name, tool, and state.
@@ -115,13 +115,13 @@ each operation's name, tool, and state.
 
 ---
 
-## 5. Cloud data model — `data_list_projects` / `data_list_files`; `doc_list_open`
+## 5. Cloud data model — `data_get` (cloud); `doc_get` (session)
 
 **Reliably tells you:** projects, files (lineage id/version/web URL), and the documents loaded in the
 session.
 
 **BLIND SPOTS:**
-- **`app.documents` (what `doc_list_open` reports) is a SUPERSET of the visible tabs.** Opening an
+- **`app.documents` (what `doc_get` reports) is a SUPERSET of the visible tabs.** Opening an
   assembly loads its referenced components as real Documents too (`isVisible=true` means LOADED, not
   tabbed). Be careful before any close-all.
 - **Duplicating a multi-reference CAM template: use open-then-`doc_save_as`, never `doc_copy`.**
@@ -131,14 +131,14 @@ session.
   such a doc is fine on its own — the hazard was always the cold copy, not the open. (See
   `commands/mcpServer/tools` and the insert-into-template skill's reference.md for the full rationale.)
 - **Saves/opens/copies are ASYNC.** `doc_save_as`/`doc_copy` return before the cloud settles
-  (`document_id` is often null immediately). Confirm with a follow-up `doc_get_active_id` /
-  `data_list_files` read — never assume completion.
+  (`document_id` is often null immediately). Confirm with a follow-up `doc_get` /
+  `data_get` read — never assume completion.
 - An **unsaved** document has no `document_id` (`has_data_file=false`) — it must be saved before it
   can be addressed by URN or inserted as a reference.
 
 ---
 
-## 6. Measurement & datums — `model_measure_bbox`, `sys_get_selection`
+## 6. Measurement & datums — `model_inspect`, `sys_get_selection`
 
 **BLIND SPOTS:**
 - **Bounding-box center ≠ the modelling origin (0,0,0).** The modelling origin is arbitrary; the
@@ -185,7 +185,7 @@ So **check health first**:
 - `assembly_probe` reports `is_healthy`, `broken_joints`, `timeline_problems`, and a per-joint
   `healthy` flag — read those before reasoning about positions. `is_healthy=false` means stop and
   fix the named feature/joint; don't proceed to drive/test it.
-- `design_get_timeline_health` is the design-wide feature error/warning rollup.
+- `design_get` is the design-wide feature error/warning rollup.
 - Each entity exposes `healthState` (0 = healthy) + `errorOrWarningMessage` (the API path).
 
 Rule: a created joint that returns an object is NOT a working joint. Probe its health. A common cause
@@ -195,7 +195,7 @@ passing world-x for a pin whose axis isn't world-x), which over-constrains the l
 ## The verify discipline (applies everywhere)
 
 1. **Numbers over pixels.** After any structural change (joint, ground, insert, move), re-read the
-   relevant state tool (`assembly_probe`, `cam_get_operations`, `sketch_get`) and check the numbers.
+   relevant state tool (`assembly_probe`, `cam_get(include=['operations'])`, `sketch_get`) and check the numbers.
    Do not conclude "it worked" from a screenshot.
 2. **Isolated screenshots only.** When you do need to see geometry, `view_inspect(snapshot)` →
    `isolate` the one component → `orient` → `view_screenshot` → `restore`. Never reason from the

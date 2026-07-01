@@ -1,8 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for the DOCUMENT lifecycle: copy / save-as / new / save / close / activate /
-list-open, plus delete-file.
+"""MCP building blocks for the DOCUMENT lifecycle: copy / save-as / new / save / close / activate,
+plus delete-file. (Reading the open-document session is doc_get.)
 
   doc_copy        -> copy an existing cloud document into a project/folder (DataFile.copy; xrefs kept)
   data_delete_file-> delete a cloud document by URN, guarded (matching confirm_name; refuses
@@ -12,7 +12,6 @@ list-open, plus delete-file.
   doc_save        -> save the active document in place (a new cloud version)
   doc_close       -> close an open document (or all), saving or discarding unsaved changes
   doc_activate    -> bring an open document to the foreground
-  doc_list_open   -> list open documents (a SUPERSET of the user's visible tabs)
 
 Split out of the former data_management.py (the data-model container tools live in data_model_ops.py).
 Shared helpers (_data, _find_project, path resolution, _agent_description) live in _data_common.
@@ -50,7 +49,7 @@ def _xref_summary(data_file):
     """Best-effort list of a DataFile's child references (the components it pulls in).
 
     Reported so an agent can confirm a copied document still carries its referenced
-    components. Reference targets are NOT re-copied by DataFile.copy — they remain
+    components. Reference targets are NOT re-copied by DataFile.copy - they remain
     pointers to the original source files.
 
     Grounded in adsk.core: DataFile.hasChildReferences (bool) /
@@ -101,7 +100,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
             return error(f"findFileById failed for '{document_id}': {e}")
         if not src:
             return error(f"No file found for document_id '{document_id}'. "
-                                      "Pass the file's lineage id (URN) from data_list_files.")
+                                      "Pass the file's lineage id (URN) from data_get.")
     else:
         # Name lookup within a source project (needed because names aren't globally unique).
         if not (source_project or source_project_id):
@@ -118,7 +117,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
             return error(f"Document '{name}' not found in source project "
                           f"'{safe(lambda: sproj.name)}'. Files seen: "
                           f"{', '.join(candidates[:30]) or '(none)'}. "
-                          "Use data_list_files, or pass document_id (URN).")
+                          "Use data_get, or pass document_id (URN).")
 
     # --- resolve the destination project + folder ---
     dproj, davail = _find_project(data, name=project or None, project_id=project_id or None)
@@ -148,7 +147,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true, or use data_list_folders to see the structure.")
+                    "Pass create_path=true, or use data_get(include=['folders']) to see the structure.")
 
     src_name = safe(lambda: src.name) or "(unknown)"
     # The copied file's intended FINAL name: the requested 'name' if given, else the source's.
@@ -198,7 +197,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
     "external_references": xrefs,
     "external_reference_count": len(xrefs),
     "note": ("The copy preserves external references: each referenced component still "
-        "points at its ORIGINAL source file — the references are not re-copied. To "
+        "points at its ORIGINAL source file - the references are not re-copied. To "
         "save a copy that shares "
         "lineage for joint auto-repair, a Document.saveAs-based mode is needed "
         "(not yet built)."),
@@ -302,7 +301,7 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
     """Delete a cloud document (DataFile) by URN, guarded.
 
     SAFETY: requires both 'document_id' (lineage URN) and 'confirm_name' that EXACTLY
-    matches the file's current name — refuses on mismatch so you cannot delete the wrong
+    matches the file's current name - refuses on mismatch so you cannot delete the wrong
     file. Refuses a file that is currently open, or that is referenced by other files
     (would orphan them) UNLESS force=true. Deletion is irreversible.
     """
@@ -311,9 +310,9 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
     if not document_id:
         return error("Provide 'document_id' (the lineage URN of the file to delete).")
     if not confirm_name:
-        return error("Provide 'confirm_name' — the exact current name of the file, as a "
-    "safety confirmation. Get it from data_list_files or "
-    "doc_get_active_id.")
+        return error("Provide 'confirm_name' - the exact current name of the file, as a "
+    "safety confirmation. Get it from data_get or "
+    "doc_get.")
 
     try:
         data = _data()
@@ -326,19 +325,19 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
         return error(f"findFileById failed for '{document_id}': {e}")
     if not df:
         return error(f"No file found for document_id '{document_id}'. It may already be "
-            "deleted. Verify with data_list_files.")
+            "deleted. Verify with data_get.")
 
     actual_name = safe(lambda: df.name) or "(unknown)"
     # Case-SENSITIVE confirmation: this is a safety gate, so require an exact match
     # (only surrounding whitespace is forgiven).
     if actual_name.strip() != confirm_name:
         return error(
-            f"Name mismatch — refusing to delete. document_id resolves to '{actual_name}', "
+            f"Name mismatch - refusing to delete. document_id resolves to '{actual_name}', "
             f"but confirm_name was '{confirm_name}'. Pass confirm_name='{actual_name}' if you "
             "really mean this file.")
 
     if _is_document_open(document_id):
-        return error(f"'{actual_name}' is currently OPEN — close it before deleting "
+        return error(f"'{actual_name}' is currently OPEN - close it before deleting "
             "(Fusion will not delete an open document).")
 
     parents = _parent_ref_summary(df)
@@ -378,7 +377,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
     This saves the live (possibly never-saved) document, unlike data_upload_file (local file)
     or doc_copy (an existing saved cloud file). 'folder' may be a nested path;
     create_path=true makes missing destination folders (mkdir -p). The save is async on
-    the cloud side — confirm with doc_get_active_id / data_list_files afterward.
+    the cloud side - confirm with doc_get / data_get afterward.
     """
     name = (name or "").strip()
     if not name:
@@ -425,7 +424,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                     f"Destination folder path not found: '{folder}' (missing segment "
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
-                    "Pass create_path=true, or use data_list_folders to see the structure.")
+                    "Pass create_path=true, or use data_get(include=['folders']) to see the structure.")
 
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
@@ -434,7 +433,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
     if not did:
         return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
-    # After saveAs the DataFile id is NOT yet the cloud lineage URN — immediately post-save it
+    # After saveAs the DataFile id is NOT yet the cloud lineage URN - immediately post-save it
     # is a local pre-upload path/handle. Only surface it if it actually looks like a URN;
     # otherwise report null so the caller doesn't mistake the temp handle for the document id.
     new_id = None
@@ -454,7 +453,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
         "document_id": new_id,   # null until cloud processing assigns the lineage URN
         "note": ("Save is async on the cloud side. document_id is typically NULL right after "
             "saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm "
-            "with doc_get_active_id after a short wait — the saved copy becomes the "
+            "with doc_get after a short wait - the saved copy becomes the "
             "active document and will then report its real urn: lineage id."),
     })
 
@@ -465,7 +464,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
 def new_document_handler() -> dict:
     """Create and open a new, empty Fusion design document; it becomes the active document.
 
-    The document exists only in the session (unsaved) until you save it — use
+    The document exists only in the session (unsaved) until you save it - use
     doc_save_as to land it in a project/folder. Pair with sketch_create to start
     modelling.
     """
@@ -486,7 +485,7 @@ def new_document_handler() -> dict:
     "document_name": new_name,
     "is_active": is_active,
     "is_saved": safe(lambda: doc.isSaved),
-    "note": ("New blank design is now the active document (unsaved — it has no cloud id "
+    "note": ("New blank design is now the active document (unsaved - it has no cloud id "
         "yet). Save it with doc_save_as, or start modelling with sketch_create."),
     }
     return ok(info)
@@ -498,7 +497,7 @@ def new_document_handler() -> dict:
 
 def _find_open_document(name):
     """Return the open Document whose name matches (exact, then case-insensitive substring), and a
-    sample of the open names. Operates on app.documents (all loaded docs — see doc_list_open'
+    sample of the open names. Operates on app.documents (all loaded docs - see doc_get'
     note that this is a superset of the user's visible tabs)."""
     want = (name or "").strip()
     docs = safe(lambda: app.documents)
@@ -551,8 +550,8 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     name: the open document to close (omit to close the ACTIVE document). close_all: close every
     open document instead. save_changes: when true, save unsaved edits before closing; when false
     (default) DISCARD them. NOTE: app.documents includes referenced/dependency docs that have no
-    visible tab — close_all closes those too. Fusion always keeps one document open (a blank one
-    appears if you close the last). Hard to reverse — discarded edits are gone.
+    visible tab - close_all closes those too. Fusion always keeps one document open (a blank one
+    appears if you close the last). Hard to reverse - discarded edits are gone.
     """
     docs = safe(lambda: app.documents)
     if docs is None:
@@ -594,11 +593,11 @@ def close_document_handler(name: str = "", save_changes: bool = False,
 def activate_document_handler(name: str = "") -> dict:
     """Bring an open document to the foreground (make it the active document).
 
-    name: the open document to activate. Use doc_list_open to see what is open. Read-ish —
+    name: the open document to activate. Use doc_get to see what is open. Read-ish -
     only changes which document is active/foregrounded.
     """
     if not name.strip():
-        return error("Provide 'name' — the open document to activate.")
+        return error("Provide 'name' - the open document to activate.")
     d, names = _find_open_document(name)
     if not d:
         return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
@@ -606,40 +605,20 @@ def activate_document_handler(name: str = "") -> dict:
         did = d.activate()
     except Exception as e:
         return error(f"Activate failed for '{safe(lambda: d.name)}': {e}")
-    return ok({"activated": bool(did), "document_name": safe(lambda: d.name),
-        "is_active": safe(lambda: app.activeDocument is d)})
-
-
-def list_open_documents_handler() -> dict:
-    """List the documents currently open in the session.
-
-    IMPORTANT: app.documents is a SUPERSET of what the user sees as tabs. Opening an assembly
-    cloud-loads its referenced components as real Document objects too (e.g. 9 templates can show as
-    45 docs). Document.isVisible is TRUE for all of them — it means 'loaded/renderable', NOT 'has a
-    UI tab'. There is no fully reliable tab-vs-reference flag, so this reports isVisible/isActive/
-    isModified per doc and flags the active one; treat non-active entries cautiously before closing.
-    """
-    docs = safe(lambda: app.documents)
-    if docs is None:
-        return error("No documents are open.")
-    active = safe(lambda: app.activeDocument)
-    rows = []
-    for i in range(safe(lambda: docs.count, 0)):
-        d = docs.item(i)
-        rows.append({
-        "name": safe(lambda d=d: d.name),
-        "is_active": safe(lambda d=d: d is active),
-        "is_visible": safe(lambda d=d: d.isVisible),
-        "is_saved": safe(lambda d=d: d.isSaved),
-        "is_modified": safe(lambda d=d: d.isModified),
-        })
-    return ok({
-        "open_count": len(rows),
-        "documents": rows,
-        "note": ("app.documents is a SUPERSET of the user's visible tabs — referenced/dependency "
-            "docs are loaded as real Documents (isVisible=True means loaded, not tabbed). Be "
-            "careful with close_all."),
-    })
+    # Document.activate() returns whether the CALL was accepted, but the switch is ASYNC - the active
+    # document often hasn't propagated yet when we read it here. So report the VERIFIED state, not the
+    # intent: 'activated' is true only if it's actually active now; otherwise the switch is "pending"
+    # (the call took, the foreground hasn't caught up). Don't claim done when it isn't.
+    is_active = bool(safe(lambda: app.activeDocument is d, False))
+    out = {
+        "activated": True if is_active else ("pending" if did else False),
+        "document_name": safe(lambda: d.name),
+        "is_active": is_active,
+    }
+    if did and not is_active:
+        out["note"] = ("Switch ACCEPTED but not yet active - activation is async and hasn't propagated. "
+                       "Call doc_get to confirm it took before acting on the new document.")
+    return ok(out)
 
 
 # --- tool definitions ---
@@ -649,7 +628,7 @@ _copy_document_tool = (
         name="doc_copy",
         description=(
             "Copy an existing cloud document (a saved DataFile, identified by its lineage "
-            "'document_id' URN — preferred — or by 'name' within a 'source_project') INTO a "
+            "'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a "
             "destination project/folder. Generic cloud-to-cloud copy: it does NOT touch the "
             "active session (use a save-active-document tool for that). The copy PRESERVES the "
             "document's external references: each referenced component keeps pointing at its "
@@ -660,7 +639,7 @@ _copy_document_tool = (
             "the copy. WRITES to the cloud data model."
         ),
         input_param_name="document_id",
-        input_param_description="Lineage id (URN) of the document to copy (preferred; from data_list_files).",
+        input_param_description="Lineage id (URN) of the document to copy (preferred; from data_get).",
     )
     .add_input_property("name", {"type": "string",
         "description": "Document name (alt to document_id); requires source_project."})
@@ -685,10 +664,10 @@ _delete_document_tool = (
         description=(
         "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
         "GUARDED and IRREVERSIBLE: you must also pass 'confirm_name' that EXACTLY matches "
-        "the file's current name — the tool refuses on mismatch so you cannot delete the "
+        "the file's current name - the tool refuses on mismatch so you cannot delete the "
         "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
         "by other files (deleting it would orphan them) unless force=true. Get the URN and "
-        "name from data_list_files or doc_get_active_id. WRITES to the cloud data "
+        "name from data_get or doc_get. WRITES to the cloud data "
         "model (deletes)."
         ),
         input_param_name="document_id",
@@ -708,13 +687,13 @@ _save_document_as_tool = (
         name="doc_save_as",
         description=(
             "Save the ACTIVE Fusion document into a project/folder under a given 'name', via "
-            "Document.saveAs. Use this to save a design that is open in the session — including "
+            "Document.saveAs. Use this to save a design that is open in the session - including "
             "one that has NEVER been saved (no cloud id yet). This is different from data_upload_file "
             "(which uploads a LOCAL file) and doc_copy (which copies an existing SAVED "
             "cloud file): only this one captures the live session. 'folder' may be a nested "
             "path; set create_path=true to create missing destination folders. The save is "
-            "ASYNCHRONOUS on the cloud side — the returned document_id may be null immediately; "
-            "confirm with doc_get_active_id or data_list_files after a short wait. "
+            "ASYNCHRONOUS on the cloud side - the returned document_id may be null immediately; "
+            "confirm with doc_get or data_get after a short wait. "
             "WRITES to the cloud data model."
         ),
         input_param_name="name",
@@ -738,7 +717,7 @@ _new_document_tool = Tool.create_simple(
     description=(
     "Create and open a new, empty Fusion design document; it becomes the active "
     "document. The document is unsaved (no cloud id yet) until you save it with "
-    "doc_save_as. Use this to start fresh — e.g. then sketch_create and "
+    "doc_save_as. Use this to start fresh - e.g. then sketch_create and "
     "sketch_add_geometry to model. Creates a session document (does not write to the "
     "cloud until saved)."
     ),
@@ -751,7 +730,7 @@ _save_document_tool = (
     Tool.create_simple(
         name="doc_save",
         description=(
-            "Save the ACTIVE document in place — a new cloud version of the same file (the plain "
+            "Save the ACTIVE document in place - a new cloud version of the same file (the plain "
             "'Save', vs doc_save_as which needs a name+folder for a never-saved doc). The "
             "version 'description' is auto-prefixed with the AI-agent marker. The doc must already "
             "exist in the cloud. WRITES a new cloud version."),
@@ -770,8 +749,8 @@ _close_document_tool = (
             "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
             "doc); 'close_all' = close every open document; 'save_changes' = save unsaved edits "
             "first (default false = DISCARD them). NOTE: app.documents includes referenced/"
-            "dependency docs with no visible tab — close_all closes those too. Fusion always keeps "
-            "one doc open. Hard to reverse — discarded edits are gone."),
+            "dependency docs with no visible tab - close_all closes those too. Fusion always keeps "
+            "one doc open. Hard to reverse - discarded edits are gone."),
     )
     .add_input_property("name", {"type": "string",
             "description": "Open document to close (omit = active document)."})
@@ -789,7 +768,7 @@ _activate_document_tool = (
         name="doc_activate",
         description=(
             "Bring an open document to the foreground (make it the active document). 'name' = the "
-            "open document to activate (see doc_list_open). Only changes which document is "
+            "open document to activate (see doc_get). Only changes which document is "
             "active."),
         input_param_name="name",
         input_param_description="Open document name to activate.",
@@ -797,18 +776,6 @@ _activate_document_tool = (
 )
 activate_document_item = Item.create_tool_item(
     tool=_activate_document_tool, write="write", handler=activate_document_handler, run_on_main_thread=True)
-
-_list_open_documents_tool = Tool.create_simple(
-    name="doc_list_open",
-    description=(
-        "List the documents open in the session: name, is_active, is_visible, is_saved, "
-        "is_modified. IMPORTANT: app.documents is a SUPERSET of the user's visible tabs — opening "
-        "an assembly loads its referenced components as real Documents too (isVisible=True means "
-        "loaded, NOT tabbed). Use before close_all to avoid closing dependency docs."),
-).strict_schema()
-list_open_documents_item = Item.create_tool_item(
-    tool=_list_open_documents_tool, write="read", handler=list_open_documents_handler, run_on_main_thread=True)
-
 
 def register_tool():
     register(copy_document_item)
@@ -818,4 +785,3 @@ def register_tool():
     register(save_document_item)
     register(close_document_item)
     register(activate_document_item)
-    register(list_open_documents_item)

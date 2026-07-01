@@ -125,5 +125,5 @@ of how the part was modelled relative to world axes — it is always reported in
   same starting state, same plan.
 - The Phase 3 gate converts the crawl into explicit pass/fail assertions; a failed assertion
   stops the run instead of improvising.
-- Post-mutation re-reads (`cam_get_time`, `cam_compare_operations`, screenshot) verify the
+- Post-mutation re-reads (`cam_get(include=['time'])`, `cam_compare_operations`, screenshot) verify the
   change did what was intended, closing the loop.

@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Detail ENGINE behind sketch_get: X-ray ONE sketch — entities, construction geometry,
+"""Detail ENGINE behind sketch_get: X-ray ONE sketch - entities, construction geometry,
 constraints, dimensions.
 
 This is not a separately-registered tool. When sketch_get is called WITH a 'sketch_name', it
@@ -11,17 +11,17 @@ entity ids it links), every dimension (name / value / expression / driving), and
 is_fully_constrained. Read-only.
 
 Where sketch_get without a name gives only COUNTS, this detailed read lets an agent actually
-understand a constrained sketch — slots/ellipses/rectangles and their implicit construction
+understand a constrained sketch - slots/ellipses/rectangles and their implicit construction
 geometry, plus the relationships (perpendicular/parallel/coincident/...) that link entities. The
 entity ids match the references used by sketch_constrain / model_extrude / sketch_add_geometry, so
 you can read the structure then act on specific entities.
 
 Grounded in adsk.fusion (confirmed via sys_get_api_doc + live probe):
-  - Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs}, Sketch.sketchPoints — each entity
+  - Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs}, Sketch.sketchPoints - each entity
     has .isConstruction and a stable .entityToken.
-  - Sketch.geometricConstraints — each constraint exposes the entities it references (.line / .lineOne
+  - Sketch.geometricConstraints - each constraint exposes the entities it references (.line / .lineOne
     /.lineTwo / .point / .entity / .entityOne / .entityTwo), mapped back to ids by entityToken.
-  - Sketch.sketchDimensions — each .parameter has name / value / expression.
+  - Sketch.sketchDimensions - each .parameter has name / value / expression.
 Handler runs on the main thread; read-only.
 """
 
@@ -149,7 +149,7 @@ def _ent_id(ent, tok2id):
 
 def _describe_constraint(c, tok2id):
     """Map one geometric constraint to {type, entities:[ids]}. An attribute may be a single entity
-    or a VECTOR of entities (e.g. PolygonConstraint.lines) — both are expanded to ids."""
+    or a VECTOR of entities (e.g. PolygonConstraint.lines) - both are expanded to ids."""
     cls = type(c).__name__
     friendly, attrs = _CONSTRAINT_REFS.get(cls, (cls.replace("Constraint", "").lower(), ()))
     ids = []
@@ -169,7 +169,7 @@ def _describe_constraint(c, tok2id):
 def _vector_items(ent):
     """If ent is a vector/collection of entities, return a list of them; else None. Handles both the
     .count/.item collection idiom AND the SketchLineVector len()/[i] idiom (used by PolygonConstraint
-    .lines). A single BRep/sketch entity is NOT a vector — so a plain SketchLine returns None."""
+    .lines). A single BRep/sketch entity is NOT a vector - so a plain SketchLine returns None."""
     # A single sketch entity exposes entityToken; treat that as NOT a vector even if it has len.
     if safe(lambda: ent.entityToken) is not None:
         return None
@@ -186,7 +186,7 @@ def _profiles(sketch):
     """Per-profile records so an agent can SEE the closed regions and grab a specific one's HANDLE.
 
     A sketch yields one Profile per closed region; a sketch drawn ON A FACE yields the drawn region
-    PLUS the surrounding face-minus-region ring (and any sub-regions), so a blind index is ambiguous —
+    PLUS the surrounding face-minus-region ring (and any sub-regions), so a blind index is ambiguous -
     these records (area / centroid / loop_count / handle) are how you disambiguate. The handle is a
     composite entityToken (the same self-healing form find_geometry mints), validated durable across
     recompute / sketch-edit / boolean-cut / timeline-rollback (live probe), so it's a real ProfileRef
@@ -210,14 +210,14 @@ def _profiles(sketch):
             "loop_count": loops,
             "handle": _inputs.make_handle(p, "profile", pos) if pos else safe(lambda: p.entityToken),
         })
-    # largest first — the outer/main region is the common target; index preserves API order.
+    # largest first - the outer/main region is the common target; index preserves API order.
     out.sort(key=lambda r: (r["area"] is None, -(r["area"] or 0)))
     return out
 
 
 def _entity_xray(sketch):
     """The HEAVY layer: every entity / constraint / dimension as its own record. Built ONLY when the
-    caller asks (include_entities=true) — on a dense sketch this is dozens of records and would flood
+    caller asks (include_entities=true) - on a dense sketch this is dozens of records and would flood
     the agent's window if returned by default. Returns (entities, constraints, dimensions,
     construction_count, driving_dim_count)."""
     tok2id = _build_token_map(sketch)
@@ -246,14 +246,14 @@ def _entity_xray(sketch):
 
 
 def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
-    """Read ONE sketch at the right zoom level (progressive disclosure — see CLAUDE.md).
+    """Read ONE sketch at the right zoom level (progressive disclosure - see CLAUDE.md).
 
-    Default (light): the actionable OVERVIEW — entity counts, is_fully_constrained, and the
+    Default (light): the actionable OVERVIEW - entity counts, is_fully_constrained, and the
     'profiles' list (each closed region's area/centroid/loop_count + a HANDLE to pass as a ProfileRef
     to extrude/revolve/loft). This is what you need to pick a region to model on, without the flood.
 
-    include_entities=true (heavy): also the full X-ray — every entity ('<type>:<index>' + geometry),
-    every geometric constraint, every dimension — for understanding/editing a constrained sketch. On a
+    include_entities=true (heavy): also the full X-ray - every entity ('<type>:<index>' + geometry),
+    every geometric constraint, every dimension - for understanding/editing a constrained sketch. On a
     dense sketch this is dozens of records, so it is OPT-IN. Read-only.
     """
     design = _common.design()
@@ -264,7 +264,7 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
     if not name:
         names = all_sketch_names(design)
         return error("Provide 'sketch_name'. Available: " + (", ".join(n for n in names if n) or "(none)"))
-    # Resolve across the WHOLE design (active component first, then root, then all sub-components) — a
+    # Resolve across the WHOLE design (active component first, then root, then all sub-components) - a
     # sketch in an activated sub-component (the normal assembly flow) must be findable, not only one in
     # the root component.
     sketch = resolve_sketch(design, name)
@@ -287,7 +287,7 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
         "sketch": safe(lambda: sketch.name),
         "plane": safe(lambda: sketch.referencePlane.name),
         # is_fully_constrained = no remaining degrees of freedom (geometry can't be dragged). The only
-        # DOF signal the API exposes — no DOF count / over-constrained flag (use the in-product view).
+        # DOF signal the API exposes - no DOF count / over-constrained flag (use the in-product view).
         "is_fully_constrained": bool(fully) if fully is not None else None,
         "counts": counts,
         "constraint_count": constraint_count,
@@ -299,7 +299,7 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
     }
 
     if not include_entities:
-        out["note"] = ("Overview only. 'profiles[].handle' → ProfileRef for extrude/revolve/loft. For "
+        out["note"] = ("Overview only. 'profiles[].handle' -> ProfileRef for extrude/revolve/loft. For "
                        "the full entity/constraint/dimension X-ray (to edit the sketch), call again "
                        "with include_entities=true.")
         return ok(out)
@@ -321,12 +321,12 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
 TOOL_DESCRIPTION = (
     "X-RAY one sketch: its full structure, far beyond sketch_get' counts. Returns every entity "
     "(id '<type>:<index>', type, isConstruction flag, geometry), every geometric constraint (its "
-    "type + the entity ids it links — e.g. perpendicular: line:1, line:0), and every dimension "
-    "(name/value/expression). Use it to UNDERSTAND a constrained sketch — slots/ellipses/rectangles "
-    "and their implicit construction geometry, plus the relationships between entities — before "
+    "type + the entity ids it links - e.g. perpendicular: line:1, line:0), and every dimension "
+    "(name/value/expression). Use it to UNDERSTAND a constrained sketch - slots/ellipses/rectangles "
+    "and their implicit construction geometry, plus the relationships between entities - before "
     "editing it. Also reports 'is_fully_constrained' (false = free DOF remain, the sketch can still "
     "move/be driven) and each dimension's 'driving' flag (true = locks geometry; false = just "
-    "measures) — so you can tell whether a sketch is locked, driven, or free without experimenting. "
+    "measures) - so you can tell whether a sketch is locked, driven, or free without experimenting. "
     "Entity ids match those used by sketch_constrain / extrude. 'sketch_name' selects the sketch "
     "(sketch_get lists names)."
 )
@@ -338,5 +338,5 @@ TOOL_DESCRIPTION = (
 
 
 def register_tool():
-    # Intentionally registers nothing — see note above (folded into sketch_get).
+    # Intentionally registers nothing - see note above (folded into sketch_get).
     return

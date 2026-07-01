@@ -10,17 +10,17 @@
                    by 'radius', and/or 'nearest_to' a world point. Read-only.
 
 WHY THIS EXISTS (the design point): joints, datums, and many features need a SPECIFIC piece of
-geometry — a crank-pin's cylindrical face, a bore, a hole edge. Selecting it by a magic snap-string
+geometry - a crank-pin's cylindrical face, a bore, a hole edge. Selecting it by a magic snap-string
 ('<occ>:cylinder') is ambiguous when a part has many such faces, and a raw script must re-derive it
 every time. Instead, this returns each candidate as a HANDLE you can pass to other tools
-(joint_at_geometry, ...) — geometry as a first-class VALUE that flows between tool calls.
+(joint_at_geometry, ...) - geometry as a first-class VALUE that flows between tool calls.
 
-HANDLE LIFETIME (important — do not overstate stability): the handle is the entity's `entityToken`.
+HANDLE LIFETIME (important - do not overstate stability): the handle is the entity's `entityToken`.
 Fusion does NOT guarantee a stable token per entity: querying the SAME edge/face twice can return
 DIFFERENT tokens, and an older token can fail `findEntityByToken` even with NO model edit in between.
 Treat a handle as SHORT-LIVED: use it promptly, in the calls right after the find_geometry that minted
 it. If a handle fails to resolve ("stale"), re-run find_geometry (same target/kind/nearest_to) for a
-fresh one — don't assume the geometry changed. Prefer to find + consume in adjacent calls rather than
+fresh one - don't assume the geometry changed. Prefer to find + consume in adjacent calls rather than
 hoarding a batch of handles to use later.
 
 Grounded in adsk.fusion:
@@ -29,7 +29,7 @@ Grounded in adsk.fusion:
     .geometry.radius + .origin + .axis
   - BRepEdge.geometry.curveType (Circle3D/Line3D/Arc3D/...), .length, edge circle .center+.radius
   - entity.entityToken (the HANDLE) ; Design.findEntityByToken(token) resolves it back WHEN the token
-    is still live (see HANDLE LIFETIME above — not guaranteed stable across separate queries)
+    is still live (see HANDLE LIFETIME above - not guaranteed stable across separate queries)
 Handler runs on the main thread; read-only.
 """
 
@@ -49,7 +49,7 @@ from . import _outputs
 RETURNS = [
     _outputs.ReturnsHandle("handle", require="any", in_list=True, consumers=[
         "joint_at_geometry", "sketch_create", "model_extrude", "model_fillet", "model_chamfer",
-        "model_construction", "model_mirror", "model_combine", "model_measure_bbox", "view_section"]),
+        "model_construction", "model_mirror", "model_combine", "model_inspect", "view_section"]),
 ]
 
 app = adsk.core.Application.get()
@@ -65,10 +65,10 @@ def _resolve_target(design, target):
     """Resolve 'target' (occurrence name/fullPathName, or component name, or body name, or
     '' = whole design) to a list of (occurrence_or_None, body) to scan.
 
-    Scans root.allOccurrences (the flattened, RECURSIVE list — so a NESTED occurrence is reachable by
-    its fullPathName, the same key design_get_tree/assembly_probe emit) plus root-level bodies. This
+    Scans root.allOccurrences (the flattened, RECURSIVE list - so a NESTED occurrence is reachable by
+    its fullPathName, the same key design_get(include=['tree'])/assembly_probe emit) plus root-level bodies. This
     keeps find_geometry's reach consistent with the self-heal path (_inputs._refind_by_locator), which
-    also scans allOccurrences — otherwise a deep occurrence resolves on re-find but not on the initial
+    also scans allOccurrences - otherwise a deep occurrence resolves on re-find but not on the initial
     query."""
     root = design.rootComponent
     name = (target or "").strip()
@@ -83,7 +83,7 @@ def _resolve_target(design, target):
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
         return pairs, "whole design"
-    # by occurrence fullPathName (unambiguous), name, or component name — recursively.
+    # by occurrence fullPathName (unambiguous), name, or component name - recursively.
     for o in all_occs:
         if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
                 or safe(lambda o=o: o.component.name) == name):
@@ -133,7 +133,7 @@ def _edge_record(edge, inv_k):
             adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge"}.get(ct, "edge")
     pt = safe(lambda: edge.pointOnEdge)
     # Self-healing handle keyed to pointOnEdge (the same point _refind_by_locator compares against for
-    # an edge — NOT the circle center the display 'position' may show below).
+    # an edge - NOT the circle center the display 'position' may show below).
     handle = _inputs.make_handle(edge, kind, (pt.x, pt.y, pt.z)) if pt else safe(lambda: edge.entityToken)
     rec = {"handle": handle, "kind": kind,
             "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
@@ -154,7 +154,7 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     cylinder_face / planar_face / cone_face / sphere_face / torus_face / circular_edge / line_edge /
     arc_edge / vertex (omit = faces+edges). radius: keep only cylinder faces / circular edges whose
     radius matches (in 'units', tolerance 5%). nearest_to: [x,y,z] world point (in 'units') to sort
-    matches by distance to. max_results caps the list. Read-only — returns handles to pass to
+    matches by distance to. max_results caps the list. Read-only - returns handles to pass to
     joint_at_geometry etc.
     """
     k = scale(units)
@@ -169,7 +169,7 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     pairs, target_label = _resolve_target(design, target)
     if not pairs:
         return error(f"Could not resolve target '{target}'. Use an occurrence/component name, a "
-    "body name, or '' for the whole design (see assembly_probe / design_get_tree).")
+    "body name, or '' for the whole design (see assembly_probe / design_get(include=['tree'])).")
 
     knd = (kind or "").strip().lower()
     want_faces = (not knd) or knd in _FACE_KINDS
@@ -230,7 +230,7 @@ TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, "
     "world position, and shape data (cylinder radius+axis, edge radius, face area). 'target' = "
     "occurrence/component/body name ('' = whole design). 'kind' filters by geometry type; 'radius' keeps "
-    "matching round geometry; 'nearest_to'=[x,y,z] sorts by distance. Handles are SHORT-LIVED — use them "
+    "matching round geometry; 'nearest_to'=[x,y,z] sorts by distance. Handles are SHORT-LIVED - use them "
     "in the next call(s); if one is rejected as stale, re-run find_geometry for a fresh one.\n"
     + _outputs.produces_block(RETURNS)
 )

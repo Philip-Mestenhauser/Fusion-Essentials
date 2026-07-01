@@ -9,9 +9,21 @@ Fakes capture the assignments so a regression to a wrong attribute fails here.
 
 import json
 
+import pytest
+
 from conftest import load_tool
 
 ap = load_tool("appearance_set")
+
+_REAL_TARGET_RESOLVE = ap._TARGET.resolve
+
+
+@pytest.fixture(autouse=True)
+def _restore_target_resolve():
+    """The _resolve_to/_resolve_err helpers reassign ap._TARGET.resolve in place; restore it after each
+    test so a stub never leaks into the next (file-order independence — the rich-read fixture discipline)."""
+    yield
+    ap._TARGET.resolve = _REAL_TARGET_RESOLVE
 
 
 # ── color parsing (pure) ───────────────────────────────────────────────────────
@@ -196,6 +208,17 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
+def _resolve_to(entity, kind):
+    """Stub TargetRef to hand the handler an already-resolved (entity, kind). Target RESOLUTION is
+    covered once in test_inputs.TestTargetRef; here we pin appearance_set's own job — copy a base
+    appearance, set the color, apply it to the resolved entity (or all a component's bodies)."""
+    ap._TARGET.resolve = lambda raw: ((entity, kind), None)
+
+
+def _resolve_err(msg):
+    ap._TARGET.resolve = lambda raw: (None, msg)
+
+
 # ── apply to a body / occurrence / component ───────────────────────────────────
 
 class TestApply:
@@ -263,9 +286,8 @@ class TestApply:
     def test_color_a_component_applies_to_all_bodies(self):
         b1, b2 = FakeBody("B1"), FakeBody("B2")
         comp = FakeComponent("Tire", bodies=[b1, b2])
-        occ = FakeOcc("Tire:1", component=comp)
-        root = FakeRoot(occurrences=[occ])
-        _install(root)
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
         out = _payload(ap.handler(target="Tire", color="#FFFFFF"))
         assert out["kind"] == "component"
         assert b1.appearance is not None and b2.appearance is not None
@@ -303,9 +325,11 @@ class TestGuards:
         assert res["isError"] is True and "no active design" in res["message"].lower()
 
     def test_missing_target_errors(self):
+        # TargetRef rejects an unresolvable target; appearance_set surfaces that error.
         _install(FakeRoot(bodies=[FakeBody("Body1")]))
+        _resolve_err("'target': 'Ghost' did not resolve to a body handle, an occurrence/component/body name.")
         res = ap.handler(target="Ghost", color="#000000")
-        assert res["isError"] is True and "matching 'ghost'" in res["message"].lower()
+        assert res["isError"] is True and "ghost" in res["message"].lower()
 
     def test_no_base_appearance_errors(self):
         # design has no appearances AND no material libraries with any -> honest failure
@@ -318,17 +342,10 @@ class TestGuards:
 
     def test_component_with_no_bodies_errors(self):
         comp = FakeComponent("Empty", bodies=[])
-        occ = FakeOcc("Empty:1", component=comp)
-        _install(FakeRoot(occurrences=[occ]))
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
         res = ap.handler(target="Empty", color="#000000")
         assert res["isError"] is True and "no bodies" in res["message"].lower()
-
-    def test_handle_resolving_to_neither_face_nor_body_errors(self):
-        h = "/v" + "Q" * 70
-        root = FakeRoot(bodies=[FakeBody("Body1")])
-        _install(root, tokens={h: object()})   # resolves to a non-face/non-body
-        res = ap.handler(target=h, color="#000000")
-        assert res["isError"] is True and "matching" in res["message"].lower()
 
     def test_no_editable_color_property_errors(self):
         # the COPIED appearance exposes no ColorProperty -> honest failure, not a silent no-op
@@ -348,23 +365,26 @@ class TestGuards:
         assert res["isError"] is True and "color property" in res["message"].lower()
 
 
-# ── target resolution: root component name + base-appearance fallback ─────────
+# ── whole-design / component target applies to all bodies ─────────────────────
 
 class TestResolveExtra:
-    def test_root_component_by_name_resolves_to_root(self):
-        root = FakeRoot(name="Assembly", bodies=[FakeBody("B")])
-        design, apps = _install(root)
+    def test_component_target_applies_to_its_bodies(self):
+        comp = FakeComponent("Assembly", bodies=[FakeBody("B")])
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
         out = _payload(ap.handler(target="Assembly", color="#010203"))
-        # matched the root component by its name -> applies to its bodies
         assert out["kind"] == "component"
         assert out["applied_to"] == ["B"]
 
-    def test_empty_target_is_whole_design_root(self):
+    def test_empty_target_is_whole_design(self):
+        # TargetRef classifies '' as the whole design (a Component); appearance_set treats it as
+        # 'component' and colors every body.
         root = FakeRoot(name="Root", bodies=[FakeBody("B")])
         _install(root)
+        _resolve_to(root, "design")
         out = _payload(ap.handler(target="", color="#010203"))
         assert out["kind"] == "component"
-        assert "root component" in out["target"].lower()
+        assert out["applied_to"] == ["B"]
 
 
 class TestBaseAppearanceFallback:

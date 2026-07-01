@@ -6,7 +6,7 @@ from ... import config
 from adsk.cam import ToolLibrary, Tool
 
 # The holder GEOMETRY + library helpers now live in the headless core shared with the
-# model_create_holder MCP tool (one source of truth — the command and the agent drive the same code).
+# model_compute_holder MCP tool (one source of truth - the command and the agent drive the same code).
 # This module keeps only the COMMAND: the dialog, selection handlers, and the library write.
 from ..mcpServer.tools import _holder
 

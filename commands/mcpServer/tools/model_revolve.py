@@ -9,7 +9,7 @@
                    and whether it is symmetric about the profile plane. WRITES to the design.
 
 The companion to model_extrude: where extrude gives a profile straight-line depth, revolve sweeps it
-around an axis. General-purpose — it just revolves a profile about an axis; it says nothing about
+around an axis. General-purpose - it just revolves a profile about an axis; it says nothing about
 WHY. The axis is the sketch's own X/Y/Z origin axis, or a straight sketch LINE in the profile's
 sketch (so you can revolve about an arbitrary axis you drew).
 
@@ -29,7 +29,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, target_component
+from ._common import error, ok, safe, target_component, root_body_advisory
 from . import _common
 from . import _inputs
 
@@ -44,7 +44,7 @@ _OPERATIONS = {
 "intersect": "IntersectFeatureOperation",
 }
 
-# profile_index may carry a profile HANDLE (entityToken from sketch_get) — resolved via ProfileRef.
+# profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 _PROFILE = _inputs.ProfileRef("profile_index")
 
 # Axis keyword -> the active component's origin construction axis attribute.
@@ -91,7 +91,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     sketch_name: the sketch holding the profile (omit = most recent). profile_index: which closed
     profile (0-based). axis: x | y | z (the component origin axis) OR 'line:<index>' to revolve
     about a straight line in the sketch. angle_deg: revolve angle (360 = full). second_angle_deg:
-    revolve this much the OTHER direction too (an asymmetric two-sided revolve — e.g. 90 forward +
+    revolve this much the OTHER direction too (an asymmetric two-sided revolve - e.g. 90 forward +
     30 back); ignored when symmetric. operation: new | join | cut | intersect. symmetric: split the
     angle both ways about the profile plane. WRITES.
     """
@@ -118,7 +118,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
 
     profiles = safe(lambda: sketch.profiles)
     pcount = safe(lambda: profiles.count, 0) if profiles else 0
-    # HANDLE path: a profile entityToken from sketch_get (a ProfileRef) targets the exact region —
+    # HANDLE path: a profile entityToken from sketch_get (a ProfileRef) targets the exact region -
     # the robust pick on a multi-profile / on-face sketch, where a blind index is ambiguous.
     if _inputs.is_handle(profile_index):
         profile, perr = _PROFILE.resolve(profile_index)
@@ -133,7 +133,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         except Exception:
             idx = 0
         if idx < 0 or idx >= pcount:
-            return error(f"profile_index {idx} out of range — sketch has {pcount} profile(s).")
+            return error(f"profile_index {idx} out of range - sketch has {pcount} profile(s).")
         profile = profiles.item(idx)
 
     axis_entity, axis_label = _resolve_axis(comp, sketch, axis)
@@ -153,7 +153,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         second = float(second_angle_deg or 0.0)
         if second and not symmetric:
             # asymmetric two-sided revolve: 'ang' one way, 'second' the other.
-            # API is setTwoSideAngleExtent(angleOne, angleTwo) — confirmed live; the prior
+            # API is setTwoSideAngleExtent(angleOne, angleTwo) - confirmed live; the prior
             # setTwoSidesExtent name does NOT exist and raised AttributeError on every call.
             second_val = adsk.core.ValueInput.createByReal(math.radians(second))
             rev_input.setTwoSideAngleExtent(angle_val, second_val)
@@ -186,7 +186,8 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "second_angle_deg": round(float(second_angle_deg or 0.0), 6),
         "symmetric": bool(symmetric),
         "result_bodies": body_names,
-        "note": "Profile revolved into a solid. Pair with view_screenshot (iso) to view it.",
+        "note": ("Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
+                 + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, comp))) else "")),
     })
 
 

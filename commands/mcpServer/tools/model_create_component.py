@@ -9,7 +9,7 @@
 
 This is the prerequisite for building an ASSEMBLY: the modelling tools (sketch_create / extrude)
 build into the active component's bodies, so to make separate, independently jointable/groundable
-parts you create a component per part with this, activate it, then model into it. General-purpose —
+parts you create a component per part with this, activate it, then model into it. General-purpose -
 it just makes a component; what the part is is up to you.
 
 Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
@@ -39,7 +39,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
     name: optional name for the new component. x/y/z: optional placement of the occurrence (in
     'units', mm default; omit for the origin). rotate_deg / rotate_axis: optionally ORIENT the
-    occurrence — rotate it 'rotate_deg' about world axis x/y/z (through its placement point).
+    occurrence - rotate it 'rotate_deg' about world axis x/y/z (through its placement point).
     activate: make the new component the active edit target so subsequent sketch_create / extrude
     build into it. WRITES.
     """
@@ -77,7 +77,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         # than reporting success with the wrong name.
         actual = safe(lambda: occ.component.name)
         if actual != want_name:
-            name_warning = (f"requested name '{want_name}' was not applied (it is '{actual}') — "
+            name_warning = (f"requested name '{want_name}' was not applied (it is '{actual}') - "
                             "likely a duplicate or invalid name.")
 
     activated = False
@@ -102,7 +102,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Create a new EMPTY component occurrence in the active design — the prerequisite for building an "
+"Create a new EMPTY component occurrence in the active design - the prerequisite for building an "
 "assembly of separate, independently jointable/groundable parts (the modelling tools build into "
 "the active component, so make one component per part). 'name' names it; 'x'/'y'/'z' optionally "
 "place the occurrence (in 'units', mm default; omit for origin); 'activate' makes it the active "

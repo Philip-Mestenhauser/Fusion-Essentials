@@ -3,12 +3,12 @@
 
 """MCP building blocks for whole-DESIGN operations: timeline health + recompute.
 
-  design_get_timeline_health -> feature error/warning rollup. Read-only.
-  design_recompute           -> computeAll() so downstream features rebuild. WRITES.
+  health_handler() -> feature error/warning rollup. The timeline-health read consumed by design_get
+                      (its default slice); not a standalone tool here. Read-only.
+  design_recompute -> computeAll() so downstream features rebuild. WRITES.
 
-Split out of the former parameters.py so that file is purely param_* and this is purely design_*.
-Both read the active design's timeline; use design_get_timeline_health before/after a risky edit to
-confirm nothing broke, and design_recompute after an edit whose downstream features may show stale
+design_recompute reports timeline health afterwards (via health_handler) so a rebuild that breaks a
+downstream feature surfaces immediately; use it after an edit whose downstream features may show stale
 geometry (e.g. changing sketch text an emboss consumes).
 
 Grounded in adsk.fusion:
@@ -77,13 +77,8 @@ def recompute_handler() -> dict:
         "note": "Full recompute done; downstream features rebuilt."})
 
 
-_health_tool = Tool.create_simple(
-    name="design_get_timeline_health",
-    description=("Report the active design's parametric timeline health — feature error/warning "
-        "rollup (names of any errored/warning features). Use before/after a "
-        "risky edit to confirm nothing broke."),
-).strict_schema()
-health_item = Item.create_tool_item(tool=_health_tool, write="read", handler=health_handler, run_on_main_thread=True)
+# health_handler() is the timeline-health rollup consumed by design_get (the default slice + the
+# recompute report below); not a standalone tool.
 
 _recompute_tool = Tool.create_simple(
     name="design_recompute",
@@ -95,5 +90,4 @@ recompute_item = Item.create_tool_item(tool=_recompute_tool, write="write", hand
 
 
 def register_tool():
-    register(health_item)
     register(recompute_item)

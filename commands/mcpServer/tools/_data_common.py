@@ -3,7 +3,7 @@
 
 """Shared helpers for the cloud data-model tools (split out of the former data_management.py).
 
-data_management.py grew to ~1400 lines holding ~14 tools. It was split into two cohesive modules —
+data_management.py grew to ~1400 lines holding ~14 tools. It was split into two cohesive modules -
 data_model_ops.py (projects / folders / upload / delete-folder) and doc_lifecycle.py (new / save /
 save_as / copy / close / activate / list-open / delete-file). The helpers BOTH groups use live here so
 neither module owns them and there's no duplication.
@@ -22,7 +22,7 @@ app = adsk.core.Application.get()
 
 # Every save made through this server is authored by an AI agent, not a human. Document.save/saveAs
 # has no author field, so the version description carries the attribution. _agent_description() is the
-# single chokepoint — reuse it wherever a version description is written so the marker is never lost.
+# single chokepoint - reuse it wherever a version description is written so the marker is never lost.
 AI_AGENT_SAVE_MARKER = "[AI agent]"
 
 

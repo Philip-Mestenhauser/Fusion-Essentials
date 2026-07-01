@@ -9,7 +9,7 @@
 Why this exists: writing Fusion automation means constantly checking exact method signatures and
 behavioural notes (e.g. "getOrientedBoundingBox auto-determines the height direction"). Rather than
 hosting or bundling a doc database that drifts from the user's installed version, this introspects
-the `adsk.*` Python wrapper modules that ship with — and are already imported into — the running
+the `adsk.*` Python wrapper modules that ship with - and are already imported into - the running
 Fusion process. So the docs ALWAYS match the installed Fusion version, need no maintenance, and add
 no disk footprint. (This is the same source the docstrings come from: adsk.core/fusion/cam/... .py
 wrappers expose __doc__ and signatures via inspect.)
@@ -84,7 +84,7 @@ def _class_filter_from(namespace_filter):
 def _trim(doc):
     doc = (doc or "").strip()
     if len(doc) > _DOC_CHARS:
-        doc = doc[:_DOC_CHARS].rstrip() + " …"
+        doc = doc[:_DOC_CHARS].rstrip() + " ..."
     return doc
 
 
@@ -99,7 +99,7 @@ def handler(searchPattern: str = "", apiCategory: str = "all",
             filter: str = "", max_results: int = _MAX_RESULTS) -> dict:
     """Search the live Fusion API docs.
 
-    searchPattern: regex matched (case-insensitive) against names — and, for apiCategory in
+    searchPattern: regex matched (case-insensitive) against names - and, for apiCategory in
     {description, all}, against docstrings too. apiCategory: 'class' (class names) | 'member'
     (property/function/enum names) | 'description' (docstring text) | 'all'. filter: optional
     'adsk.<ns>' or 'adsk.<ns>.<Class>' to scope the search. max_results caps the hits.
@@ -199,7 +199,7 @@ def handler(searchPattern: str = "", apiCategory: str = "all",
     "members": members_out[:cap],
     "counts": {"classes": len(classes_out[:cap]), "members": len(members_out[:cap])},
     "truncated": (len(classes_out) >= cap or len(members_out) >= cap),
-    "note": ("Live introspection of the installed Fusion API (adsk.* docstrings/signatures) — "
+    "note": ("Live introspection of the installed Fusion API (adsk.* docstrings/signatures) - "
         "always matches this Fusion version. Narrow with 'filter' (e.g. 'adsk.cam' or "
         "'adsk.fusion.Extrude') and pick 'apiCategory' to focus on class/member/description."),
     }
@@ -209,7 +209,7 @@ def handler(searchPattern: str = "", apiCategory: str = "all",
 TOOL_DESCRIPTION = (
     "Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, "
     "returning names, signatures, and docstrings. This introspects the adsk.* Python modules in the "
-    "running Fusion process, so the docs ALWAYS match the installed version — nothing is bundled or "
+    "running Fusion process, so the docs ALWAYS match the installed version - nothing is bundled or "
     "hosted. Use it BEFORE writing an sys_execute_script to confirm exact signatures and behaviour "
     "(e.g. how getOrientedBoundingBox orients its box, what generateAllToolpaths returns). "
     "'searchPattern' is a case-insensitive regex over names (and over docstrings when apiCategory is "

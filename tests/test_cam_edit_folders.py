@@ -1,4 +1,4 @@
-"""Unit tests for ``cam_folder`` — interrogate / create / rename CAM folders + move operations in.
+"""Unit tests for ``cam_edit_folders`` — interrogate / create / rename CAM folders + move operations in.
 
 The adsk.cam API is mocked; what we pin is the tool's OWN action dispatch + logic: listing a setup's
 folders (with their contained operation/pattern/subfolder counts), creating a folder
@@ -13,7 +13,7 @@ import json
 
 from conftest import load_tool
 
-cf = load_tool("cam_folder")
+cf = load_tool("cam_edit_folders")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────

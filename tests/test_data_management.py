@@ -274,12 +274,25 @@ class TestCloseDocument:
 
 
 class TestActivateDocument:
-    def test_activate_named(self):
+    def test_activate_taken_reports_true(self):
+        # the switch propagated (active doc is now B) -> activated:true, is_active:true, no pending note.
         a, b = FakeDocument("A"), FakeDocument("B")
         _install_app([a, b], active=a)
+        dm.app.activeDocument = b              # model the switch having taken
         out = _payload(dm.activate_document_handler(name="B"))
-        assert b.activated is True
-        assert out["document_name"] == "B"
+        assert b.activated is True             # the .activate() call was issued
+        assert out["activated"] is True and out["is_active"] is True
+        assert out["document_name"] == "B" and "note" not in out
+
+    def test_activate_async_pending_reports_pending_not_true(self):
+        # the switch was ACCEPTED but the active doc hasn't propagated yet (the real async behavior the
+        # user observed). Must report 'pending', NOT a false 'true'.
+        a, b = FakeDocument("A"), FakeDocument("B")
+        _install_app([a, b], active=a)        # active stays A after activate() -> not propagated
+        out = _payload(dm.activate_document_handler(name="B"))
+        assert out["activated"] == "pending"   # honest: not done yet
+        assert out["is_active"] is False
+        assert "async" in out["note"] and "doc_get" in out["note"]
 
     def test_requires_name(self):
         _install_app([FakeDocument("A")])
@@ -290,19 +303,6 @@ class TestActivateDocument:
         _install_app([FakeDocument("A")])
         res = dm.activate_document_handler(name="Ghost")
         assert res["isError"] is True and "No open document matched" in res["message"]
-
-
-class TestListOpenDocuments:
-    def test_lists_with_state_and_flags_active(self):
-        a = FakeDocument("A", is_modified=True)
-        b = FakeDocument("B")
-        _install_app([a, b], active=b)
-        out = _payload(dm.list_open_documents_handler())
-        assert out["open_count"] == 2
-        by = {r["name"]: r for r in out["documents"]}
-        assert by["B"]["is_active"] is True
-        assert by["A"]["is_active"] is False
-        assert by["A"]["is_modified"] is True
 
 
 class TestFindOpenDocument:

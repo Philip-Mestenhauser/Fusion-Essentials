@@ -2,7 +2,7 @@
 
 sketch_get (summary list) and sketch_get (one sketch's full structure) were collapsed into
 ONE tool, sketch_get, switched by specificity: no sketch_name -> summary list; a sketch_name -> full
-detail (delegated to the sketch_detail engine). The return is always about sketches; only the depth
+detail (delegated to the _sketch_detail engine). The return is always about sketches; only the depth
 changes. These tests pin the ROUTING — that the right engine is called for each case — without
 needing a full fake design for both paths.
 """
@@ -36,10 +36,10 @@ class TestSketchGetRouting:
                 seen["include_entities"] = include_entities
                 return {"isError": False, "content": [{"type": "text", "text": "{}"}]}
 
-        # the handler imports `from . import sketch_detail` lazily; install a stub module
+        # the handler imports `from . import _sketch_detail` lazily; install a stub module
         import sys
-        sys.modules["mcpServer.tools.sketch_detail"] = FakeDetail
-        monkeypatch.setitem(sys.modules, "mcpServer.tools.sketch_detail", FakeDetail)
+        sys.modules["mcpServer.tools._sketch_detail"] = FakeDetail
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail", FakeDetail)
 
         res = sketches.sketch_get_handler(sketch_name="Emblem", include_entities=True)
         assert seen.get("name") == "Emblem"     # routed to the detail engine with the name

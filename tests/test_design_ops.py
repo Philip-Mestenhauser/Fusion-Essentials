@@ -1,6 +1,6 @@
 """Unit tests for ``design_ops.py`` — the whole-design timeline tools split out of parameters.py.
 
-  design_get_timeline_health -> rolls feature healthState (0/1/2) into errors/warnings + a healthy flag.
+  health_handler (design_get's health slice) -> rolls feature healthState (0/1/2) into errors/warnings + a healthy flag.
   design_recompute           -> computeAll() then re-reports health; surfaces a computeAll failure.
 
 Pure logic over a faked timeline; no live Fusion.

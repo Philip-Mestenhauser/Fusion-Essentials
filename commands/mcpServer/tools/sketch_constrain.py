@@ -6,11 +6,11 @@
   sketch_constrain -> add a geometric constraint (perpendicular / parallel / tangent / equal /
                        midpoint / symmetry / concentric / collinear / horizontal / vertical /
                        coincident / fix / unfix) between sketch entities, referenced by
-                       '<type>:<index>' within a named sketch — no human selection. WRITES.
+                       '<type>:<index>' within a named sketch - no human selection. WRITES.
 
 This makes a sketch PARAMETRIC: constraints capture design intent (these two lines stay
 perpendicular, these arcs stay equal, this point stays at the midpoint) so the shape flexes
-correctly when dimensions/points change. General-purpose — it just adds the relationship.
+correctly when dimensions/points change. General-purpose - it just adds the relationship.
 
 Entity references: '<type>:<index>' where type is line / arc / circle / point (e.g. 'line:0',
 'arc:1', 'point:2'), indexing the sketch's curve/point collections in creation order.
@@ -113,7 +113,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 
     try:
         if kind == "fix":
-            # The requested mutation — set it directly (inside this try) so a failure is reported, not
+            # The requested mutation - set it directly (inside this try) so a failure is reported, not
             # swallowed by safe() into the unconditional result_obj=True below.
             e1.isFixed = (cname == "fix")
             result_obj = (safe(lambda: e1.isFixed) == (cname == "fix"))
@@ -131,7 +131,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
                 return error(f"'symmetry' needs 'entity_two'. Got '{entity_two}'.")
             sline = _resolve_entity(sketch, symmetry_line)
             if not sline:
-                return error("'symmetry' needs 'symmetry_line' — the axis line ref (e.g. 'line:0').")
+                return error("'symmetry' needs 'symmetry_line' - the axis line ref (e.g. 'line:0').")
             result_obj = getattr(gc, method)(e1, e2, sline)
         else:
             return error(f"unsupported constraint kind '{kind}'.")
@@ -146,12 +146,12 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     "entity_one": entity_one,
     "entity_two": entity_two or None,
     "symmetry_line": symmetry_line or None,
-    "note": "Geometric constraint applied — the sketch is now parametric for this relationship.",
+    "note": "Geometric constraint applied - the sketch is now parametric for this relationship.",
     })
 
 
 TOOL_DESCRIPTION = (
-    "Apply a geometric CONSTRAINT to sketch entities — the Sketch Constrain menu — so the sketch is "
+    "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is "
     "parametric (captures design intent). 'constraint': perpendicular | parallel | tangent | equal | "
     "concentric | collinear | midpoint | coincident | horizontal | vertical | symmetry | fix | "
     "unfix. Reference entities as '<type>:<index>' within 'sketch_name', type = line/arc/circle/"

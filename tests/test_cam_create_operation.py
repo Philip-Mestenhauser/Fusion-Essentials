@@ -102,7 +102,7 @@ class _CAM:
 def _install(setups=("Setup1",), tools=2, doc_tools=()):
     cam = _CAM(list(setups), doc_tools=doc_tools)
     cco._get_cam = lambda: (cam, None)
-    # tool-by-reference resolver: (library_url, index) -> Tool, mirrors cam_tool_library's shared handle
+    # tool-by-reference resolver: (library_url, index) -> Tool, mirrors cam_edit_tools's shared handle
     lib = _ToolLib([_Tool("12mm Flat Endmill"), _Tool("6mm Ball Endmill")][:tools])
     cco._tool_at = lambda url, idx: (lib.item(idx) if 0 <= idx < lib.count else None,
                                      None if 0 <= idx < lib.count else "tool index %d out of range" % idx)

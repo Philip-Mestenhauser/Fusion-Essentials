@@ -1,10 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Typed INPUT KINDS — the meta-layer that keeps tools from re-inventing (and mis-shaping) their inputs.
+"""Typed INPUT KINDS - the meta-layer that keeps tools from re-inventing (and mis-shaping) their inputs.
 
 Early MVP tools each hand-rolled `target: str` / coordinate params, which (a) duplicated
-resolution+validation and (b) baked in happy-path assumptions — the biggest being "can't reference
+resolution+validation and (b) baked in happy-path assumptions - the biggest being "can't reference
 EXISTING geometry" (you can't sketch on a face, fillet specific edges, etc. because the tool only
 took a name or a coordinate).
 
@@ -19,14 +19,14 @@ place, so declaring an input also declares its resolution, validation, schema, a
 THE GUARDRAIL (why this prevents future gaps): a tool that needs "a face" uses GeometryHandle(...,
 require='planar_face'). That input can ONLY be a real find_geometry handle (never a hard-coded coord),
 it carries its own "must be planar" check, and it emits both schema and contract automatically. The
-tool author literally cannot take a bare coordinate where a face belongs — so the audit's ROOT CAUSE 1
+tool author literally cannot take a bare coordinate where a face belongs - so the audit's ROOT CAUSE 1
 ("tools can't consume existing geometry") becomes structurally hard to reintroduce.
 
 Resolution returns (value, error): on success error is None; on failure value is None and error is a
 ready-to-return message. Tools call `resolve_inputs(...)` to resolve all declared inputs at once.
 
 Typing an input is also what keeps a tool's exposed prose honest: if a description is explaining what
-an input's values MEAN or how it BEHAVES, that is a missing kind — convert the input so the schema
+an input's values MEAN or how it BEHAVES, that is a missing kind - convert the input so the schema
 carries the contract, rather than asserting it in prose nothing checks.
 """
 
@@ -37,7 +37,7 @@ from . import _common
 from ._common import UNIT_TO_CM
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "the typed reference kinds — see the kinds table above; resolve_inputs/apply_to_tool"
+MAP_BLURB = "the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool"
 
 app = adsk.core.Application.get()
 
@@ -49,7 +49,7 @@ class InputKind:
 
     json_type = "string"
 
-    # MAP_HINT: a single terse phrase — "what this kind references + the gotcha it avoids" — read by
+    # MAP_HINT: a single terse phrase - "what this kind references + the gotcha it avoids" - read by
     # tests/gen_manifest.py to build the CLAUDE.md anti-drift map a tool-AUTHOR sees at session start.
     # Lives ON the kind so it can't drift from it; a new kind with MAP_HINT="" shows up blank in the
     # generated map, which is the signal to fill it in. NOT loaded into a runtime agent's context.
@@ -75,7 +75,7 @@ class InputKind:
         return (self.description + (" " + note if note else "")).strip()
 
     def contract_note(self) -> str:
-        """One-line 'what this input needs' — assembled into the tool's CONTRACT block."""
+        """One-line 'what this input needs' - assembled into the tool's CONTRACT block."""
         return ""
 
     def resolve(self, raw):
@@ -106,9 +106,9 @@ class GeometryHandle(InputKind):
     """A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken).
     'require' constrains the kind (planar_face / cylinder_face / edge / vertex / face / any) and is
     enforced at resolve time. Resolves the handle to the live BRep entity. Tokens are not guaranteed
-    stable across separate find_geometry queries — use a handle promptly; re-find if it fails."""
+    stable across separate find_geometry queries - use a handle promptly; re-find if it fails."""
 
-    MAP_HINT = "one face/edge/vertex by find_geometry handle (require=face/edge/…), not a coordinate"
+    MAP_HINT = "one face/edge/vertex by find_geometry handle (require=face/edge/...), not a coordinate"
 
     def __init__(self, name, require="any", **kw):
         super().__init__(name, **kw)
@@ -133,7 +133,7 @@ class GeometryHandle(InputKind):
         # find_geometry minted keeps working across later calls without the caller re-querying.
         ent = _resolve_token_entity(des, h)
         if ent is None:
-            return None, (f"'{self.name}': handle did not resolve — the entityToken is stale AND no "
+            return None, (f"'{self.name}': handle did not resolve - the entityToken is stale AND no "
                           "geometry locator recovered it. Re-run find_geometry for a fresh handle "
                           "(the geometry itself may have changed, or this isn't a find_geometry handle).")
         label, ok_pred = _GEOMETRY_REQUIREMENTS[self.require]
@@ -184,7 +184,7 @@ class GeometryHandleList(GeometryHandle):
 # assemble the ObjectCollection the surface features want. EdgeLoopRef centralises that: it reuses the
 # handle resolution + staleness checks, optionally enforces single-body for an open chain, and returns
 # (ObjectCollection, meta) ready for Patch/Extend/createOpenProfile. The surface-side extension of the
-# geometry-as-values bridge — find_geometry edge handles flow in as a typed boundary value.
+# geometry-as-values bridge - find_geometry edge handles flow in as a typed boundary value.
 
 class EdgeLoopRef(GeometryHandleList):
     """A boundary defined by edge handles from find_geometry.
@@ -206,7 +206,7 @@ class EdgeLoopRef(GeometryHandleList):
         shape = ("a CLOSED loop" if self.closed
                  else "an OPEN chain (the OUTER edges of ONE surface body)")
         return (f"A list of find_geometry edge 'handle's forming {shape} "
-                "(a single edge is allowed — Fusion auto-finds the connected loop).")
+                "(a single edge is allowed - Fusion auto-finds the connected loop).")
 
     def _edge_body(self, edge):
         """The owning BRepBody of an edge, or None (best-effort; mocks may not model .body)."""
@@ -220,7 +220,7 @@ class EdgeLoopRef(GeometryHandleList):
             if self.required:
                 return None, f"'{self.name}' needs at least one edge handle from find_geometry."
             return (None, {"entities": [], "body_count": 0}), None
-        # For an OPEN chain, every edge must belong to the SAME body — a multi-body chain is invalid.
+        # For an OPEN chain, every edge must belong to the SAME body - a multi-body chain is invalid.
         if not self.closed:
             bodies = [self._edge_body(e) for e in ents]
             known = [b for b in bodies if b is not None]
@@ -234,18 +234,18 @@ class EdgeLoopRef(GeometryHandleList):
         return (coll, {"entities": ents, "body_count": body_count}), None
 
 
-# ── body reference (name OR handle — bodies have auto-names, so a handle is the precise path) ───
+# ── body reference (name OR handle - bodies have auto-names, so a handle is the precise path) ───
 
 def _resolve_token_entity(des, s, _expected=None):
     """Try to resolve `s` as an entityToken (find_geometry handle). Returns the entity if the token
-    resolves to ONE, else None — so the caller falls back to a name lookup.
+    resolves to ONE, else None - so the caller falls back to a name lookup.
 
     This replaces the old `len(s) > 60` heuristic: we no longer GUESS whether a string is a handle or
     a name by its length (which mis-routed long names). We just ask findEntityByToken; a name that
     isn't a real token simply returns nothing and the caller tries the name path. (_expected is unused;
     the caller type-checks the returned entity so it can give a precise wrong-kind message.)
 
-    SELF-HEALING: a find_geometry handle is a COMPOSITE — the entityToken plus a geometry locator
+    SELF-HEALING: a find_geometry handle is a COMPOSITE - the entityToken plus a geometry locator
     ('<token>|@<kind>:<x>,<y>,<z>'), see make_handle(). entityTokens are short-lived (the same entity
     yields different tokens across queries; an old one can fail with no model edit). So if the token
     fails, we re-find the entity by its kind+position locator instead of forcing the caller to re-query.
@@ -266,7 +266,7 @@ def _resolve_token_entity(des, s, _expected=None):
 #
 # A handle find_geometry mints is '<entityToken>|@<kind>:<x>,<y>,<z>' (positions in cm, the API unit).
 # The token is the fast path; the '@' locator is the fallback so a stale token re-resolves to the SAME
-# geometry by kind+position rather than erroring. A bare token (legacy / hand-passed) still works — it
+# geometry by kind+position rather than erroring. A bare token (legacy / hand-passed) still works - it
 # just has no fallback. The marker is '|@' so it can't collide with base64 token chars.
 _HANDLE_SEP = "|@"
 
@@ -311,7 +311,7 @@ def _split_handle(s):
 
 
 def handle_token(s):
-    """The bare entityToken part of a (possibly composite) handle — for callers that resolve a handle
+    """The bare entityToken part of a (possibly composite) handle - for callers that resolve a handle
     with a raw findEntityByToken and just need to strip the '|@<locator>' suffix off."""
     return _split_handle(s)[0] if isinstance(s, str) else s
 
@@ -395,12 +395,12 @@ def _isinstance(b, type_or_tuple) -> bool:
 
 def _is_brep(b) -> bool:
     """True if `b` is a BRepBody (solid OR open surface). Mocks set adsk.fusion.BRepBody, so this is
-    a plain isinstance — the runtime kind discrimination the whole BodyKind axis hangs on."""
+    a plain isinstance - the runtime kind discrimination the whole BodyKind axis hangs on."""
     return _isinstance(b, adsk.fusion.BRepBody)
 
 
 def _is_mesh(b) -> bool:
-    """True if `b` is a MeshBody. A MeshBody is adsk.fusion.MeshBody, NOT a BRepBody — the two live in
+    """True if `b` is a MeshBody. A MeshBody is adsk.fusion.MeshBody, NOT a BRepBody - the two live in
     separate collections (bRepBodies vs meshBodies) and only one of these predicates ever holds."""
     return _isinstance(b, adsk.fusion.MeshBody)
 
@@ -411,7 +411,7 @@ _BODY_KINDS = {
     "solid":   ("a SOLID body",          lambda b: _is_brep(b) and bool(_common.safe(lambda: b.isSolid))),
     "surface": ("an OPEN SURFACE body",  lambda b: _is_brep(b) and not bool(_common.safe(lambda: b.isSolid))),
     "mesh":    ("a MESH body",           lambda b: _is_mesh(b)),
-    # 'any' accepts whatever _resolve_any_body returned (it's already a body — handle-resolved to a
+    # 'any' accepts whatever _resolve_any_body returned (it's already a body - handle-resolved to a
     # BRep/Mesh, or name-resolved out of a body collection). No type re-check, so a name-resolved body
     # in a test that doesn't model adsk.fusion.BRepBody still passes (preserves pre-kind behaviour).
     "any":     ("a body",                lambda b: True),
@@ -419,9 +419,9 @@ _BODY_KINDS = {
 
 # kind -> the redirect a WRONG-kind body should suggest (the high-value fix-path text).
 _BODY_REDIRECTS = {
-    "solid":   "Use the solid-modelling tools, or convert it (a surface → thicken/stitch; a mesh → mesh_to_brep).",
+    "solid":   "Use the solid-modelling tools, or convert it (a surface -> thicken/stitch; a mesh -> mesh_to_brep).",
     "surface": "Use the surface_* tools. A solid has no open surface to act on; a mesh isn't a BRep surface.",
-    "mesh":    "Use the mesh_* tools. A BRep solid/surface isn't a mesh — convert with brep_to_mesh if you need one.",
+    "mesh":    "Use the mesh_* tools. A BRep solid/surface isn't a mesh - convert with brep_to_mesh if you need one.",
     "any":     "",
 }
 
@@ -436,7 +436,7 @@ def _body_kind_label(b) -> str:
 
 
 def _mesh_by_name(coll, name):
-    """Find a MeshBody by name by ITERATING the collection — the live adsk.fusion.MeshBodies has NO
+    """Find a MeshBody by name by ITERATING the collection - the live adsk.fusion.MeshBodies has NO
     itemByName (only count + item(i)), unlike BRepBodies. Iterating is the only name lookup that works
     for meshes. MeshBody.name exists (confirmed live). Returns the body or None."""
     if coll is None:
@@ -452,7 +452,7 @@ def _mesh_by_name(coll, name):
 
 
 def _body_by_name(comp, name):
-    """Find a body named `name` in one component scope — brep via itemByName (it has it), mesh via
+    """Find a body named `name` in one component scope - brep via itemByName (it has it), mesh via
     iteration (meshBodies does NOT have itemByName). Returns the body or None."""
     brep = _common.safe(lambda: getattr(comp, "bRepBodies").itemByName(name))
     if brep:
@@ -461,7 +461,7 @@ def _body_by_name(comp, name):
 
 
 def _resolve_body_by_name(comp, name):
-    """Find a body by name — brep first, then mesh — in the component, then root, then any occurrence.
+    """Find a body by name - brep first, then mesh - in the component, then root, then any occurrence.
     Returns the live body (BRepBody or MeshBody) or None. Mesh lookup mirrors the brep lookup (but via
     iteration, since meshBodies has no itemByName) so a mesh target is no longer an invisible miss."""
     b = _body_by_name(comp, name)
@@ -501,20 +501,20 @@ def _resolve_any_body(name, raw):
     if b:
         return b, None
     return None, (f"'{name}': no body named '{s}'. Pass a body handle from find_geometry, or "
-                  "a valid body name (see design_get_tree / model_extrude output).")
+                  "a valid body name (see design_get(include=['tree']) / model_extrude output).")
 
 
 class BodyRef(InputKind):
-    """A reference to a BODY, by a 'handle' from find_geometry (precise — bodies are auto-named
-    Body1/Body2… so names are fragile) OR by name. Resolves against BOTH bRepBodies AND meshBodies.
+    """A reference to a BODY, by a 'handle' from find_geometry (precise - bodies are auto-named
+    Body1/Body2... so names are fragile) OR by name. Resolves against BOTH bRepBodies AND meshBodies.
 
     The `kind` axis (solid | surface | mesh | any) is validated at resolve time, and a WRONG kind
-    returns a REDIRECTING error ('that's a MESH — use the mesh_* tools') rather than a silent miss or
+    returns a REDIRECTING error ('that's a MESH - use the mesh_* tools') rather than a silent miss or
     a misleading downstream exception. Default is "any" for back-compat: the pre-kind BodyRef accepted
     ANY BRepBody (no isSolid check), so defaulting to "solid" would newly reject the surface bodies
     existing callers may pass. Callers that truly need a solid declare kind="solid" explicitly.
 
-    Shared by model_combine / model_mirror / model_measure_bbox so they each stop hand-rolling
+    Shared by model_combine / model_mirror / model_fillet so they each stop hand-rolling
     body-by-name and all gain handle + mesh support."""
 
     MAP_HINT = "a body by handle (precise) or name; kind=solid/surface/mesh"
@@ -555,7 +555,7 @@ class BodyRef(InputKind):
 
 
 class BodyRefList(BodyRef):
-    """A LIST of body references (handles or names) — for tools that act on several bodies. Kind-checks
+    """A LIST of body references (handles or names) - for tools that act on several bodies. Kind-checks
     EVERY element BEFORE returning, so a wrong-kind body fails the call before any mutation runs."""
 
     json_type = "array"
@@ -604,7 +604,7 @@ def MeshBodyRef(name, **kw):
 
 # ── ModeGuard: declare the design mode / base-feature scope an op needs ──────────────────────────
 #
-# NOT an InputKind — a PRECONDITION guard a tool runs BEFORE any mutation. It computes its error FROM
+# NOT an InputKind - a PRECONDITION guard a tool runs BEFORE any mutation. It computes its error FROM
 # the requirement, so the message structurally cannot point the wrong way (the bug model_construction
 # hand-wrote: a direct-only op whose error told the agent to switch TO parametric).
 
@@ -618,8 +618,8 @@ def current_design_type(design) -> str:
 
     Reads Design.designType and compares against adsk.fusion.DesignTypes (ParametricDesignType /
     DirectDesignType). Guarded with _common.safe so a missing/mocked attribute degrades to 'unknown'
-    rather than crashing. This is the ONE source of truth a read-only design_get_mode tool and every
-    ModeGuard share — so the capability report and the runtime guards can never drift."""
+    rather than crashing. This is the ONE source of truth a read-only design_get(include=['mode']) tool and every
+    ModeGuard share - so the capability report and the runtime guards can never drift."""
     if design is None:
         return "unknown"
     dt = _common.safe(lambda: design.designType)
@@ -706,9 +706,9 @@ _ORIGIN_PLANES = {"xy": "xY", "xz": "xZ", "yz": "yZ", "top": "xY", "front": "xZ"
 
 class PlaneRef(InputKind):
     """A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply:
-      • an origin-plane alias: xy / xz / yz (or top/front/right)
-      • the NAME of a construction plane
-      • a 'handle' (entity token from find_geometry) pointing at a PLANAR FACE or a construction plane
+      - an origin-plane alias: xy / xz / yz (or top/front/right)
+      - the NAME of a construction plane
+      - a 'handle' (entity token from find_geometry) pointing at a PLANAR FACE or a construction plane
     This is the hard case for the input-kind base: one declared param, several resolution paths. It
     proves a kind can absorb multi-source resolution so tools (model_mirror, sketch_create,
     view_section, ...) stop each hand-rolling 'origin-plane-or-name' and gain face/handle support for
@@ -762,7 +762,7 @@ _AXIS_VECS = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
 class AxisRef(InputKind):
     """A direction/axis: a world axis (x / y / z) OR a 'handle' from find_geometry pointing at a
-    straight (linear) EDGE — the axis runs ALONG that edge. Resolves to a tagged value:
+    straight (linear) EDGE - the axis runs ALONG that edge. Resolves to a tagged value:
     ('world', (vx,vy,vz)) for a world axis, or ('edge', BRepEdge) for an edge. Lets construction
     axes / patterns / joints define their axis from real geometry, not just world directions."""
 
@@ -779,7 +779,7 @@ class AxisRef(InputKind):
                 return None, f"'{self.name}' is required (a world axis x/y/z or an edge handle)."
             return self.default, None
         if not isinstance(s, str):
-            # An axis is either a world-axis alias or a handle STRING — a non-string can be neither.
+            # An axis is either a world-axis alias or a handle STRING - a non-string can be neither.
             return None, (f"'{self.name}': expected a world axis (x/y/z) or an edge handle string, "
                           f"got {type(raw).__name__}.")
         low = s.lower()
@@ -799,7 +799,7 @@ class AxisRef(InputKind):
                 ct = _common.safe(lambda: ent.geometry.curveType)
                 if ct == adsk.core.Curve3DTypes.Line3DCurveType:
                     return ("edge", ent), None
-                return None, f"'{self.name}': that edge is not straight — an axis needs a LINEAR edge."
+                return None, f"'{self.name}': that edge is not straight - an axis needs a LINEAR edge."
             return None, f"'{self.name}': handle points at a {type(ent).__name__}, not an edge."
         return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z) or a resolvable edge handle "
                       "from find_geometry.")
@@ -847,7 +847,7 @@ class UnitField(InputKind):
     """The 'units' selector. resolve() returns the cm-per-unit scale factor.
 
     schema() emits a JSON-schema `enum` of the unit choices (mm/cm/in), so the legal values are
-    structured + validated and the description stops re-spelling "mm | cm | in" — the same prose that
+    structured + validated and the description stops re-spelling "mm | cm | in" - the same prose that
     was hand-copied into ~20 tools. Tools can adopt this for their `units` property even while keeping
     their own `_common.scale()` call on the raw string."""
 
@@ -876,10 +876,10 @@ class UnitField(InputKind):
 
 class Choice(InputKind):
     """One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are
-    machine-validated and carried by the SCHEMA — the description does NOT re-list them (that prose
+    machine-validated and carried by the SCHEMA - the description does NOT re-list them (that prose
     duplicated the enum and drifted out of sync with the options, the bug this kind closes)."""
 
-    MAP_HINT = "one of a fixed set → JSON enum"
+    MAP_HINT = "one of a fixed set -> JSON enum"
 
     def __init__(self, name, options, **kw):
         super().__init__(name, **kw)
@@ -926,7 +926,7 @@ class NameRef(InputKind):
 # silently grabs the FIRST of several same-named instances. An occurrence's `name` is only locally unique
 # (e.g. "Bolt:1" appears under every sub-assembly); its `fullPathName` is the unique key. This kind
 # resolves once, here, preferring fullPathName and refusing an AMBIGUOUS substring match (listing the
-# candidates) instead of guessing — so design_get_tree's fullPathName (now emitted) flows straight in.
+# candidates) instead of guessing - so design_get(include=['tree'])'s fullPathName (now emitted) flows straight in.
 
 def _all_occurrences(des):
     root = _common.safe(lambda: des.rootComponent) if des else None
@@ -937,12 +937,12 @@ def _resolve_occurrence(name, raw):
     """Resolve `raw` to a single live Occurrence. Returns (occurrence, error).
 
     Order: (1) exact fullPathName, (2) exact name, (3) case-insensitive substring on name ONLY when it
-    matches exactly one — an ambiguous substring is an ERROR (lists the candidate fullPathNames), never a
+    matches exactly one - an ambiguous substring is an ERROR (lists the candidate fullPathNames), never a
     silent first-match. The error on a miss samples available fullPathNames so the agent can re-issue the
-    unambiguous key (design_get_tree emits it)."""
+    unambiguous key (design_get(include=['tree']) emits it)."""
     want = (raw or "").strip() if isinstance(raw, str) else raw
     if not want:
-        return None, f"'{name}' is required (an occurrence name or fullPathName from design_get_tree)."
+        return None, f"'{name}' is required (an occurrence name or fullPathName from design_get(include=['tree']))."
     des = _common.design()
     if not des:
         return None, "No active design to resolve the occurrence against."
@@ -957,30 +957,30 @@ def _resolve_occurrence(name, raw):
     for o, nm in zip(occs, names):
         if nm == want:
             return o, None
-    # 3) substring on name — but ONLY if unique
+    # 3) substring on name - but ONLY if unique
     low = want.lower()
     hits = [(o, fp) for o, fp, nm in zip(occs, paths, names) if low in nm.lower()]
     if len(hits) == 1:
         return hits[0][0], None
     if len(hits) > 1:
         cands = ", ".join(fp or "?" for _, fp in hits[:8])
-        return None, (f"'{name}': '{want}' is ambiguous — matches {len(hits)} occurrences "
-                      f"({cands}). Pass the exact fullPathName (design_get_tree emits it).")
+        return None, (f"'{name}': '{want}' is ambiguous - matches {len(hits)} occurrences "
+                      f"({cands}). Pass the exact fullPathName (design_get(include=['tree']) emits it).")
     sample = ", ".join(p for p in paths[:12] if p)
     return None, (f"'{name}': no occurrence matching '{want}'. Available (sample): {sample or '(none)'}. "
-                  "Use design_get_tree for the full list / fullPathName.")
+                  "Use design_get(include=['tree']) for the full list / fullPathName.")
 
 
 class OccurrenceRef(InputKind):
     """A reference to an assembly OCCURRENCE (a component instance), by its `fullPathName` (unambiguous,
-    from design_get_tree) or its `name` (locally unique only — a bare substring is rejected when it
+    from design_get(include=['tree'])) or its `name` (locally unique only - a bare substring is rejected when it
     matches several instances rather than silently grabbing the first). Resolves to the live
     adsk.fusion.Occurrence."""
 
     MAP_HINT = "an assembly occurrence by fullPathName (refuses ambiguous names)"
 
     def contract_note(self) -> str:
-        return ("An occurrence's fullPathName (unambiguous, from design_get_tree) or its name "
+        return ("An occurrence's fullPathName (unambiguous, from design_get(include=['tree'])) or its name "
                 "(a name that matches several instances is rejected, not guessed).")
 
     def resolve(self, raw):
@@ -1003,7 +1003,7 @@ class OccurrenceRefList(InputKind):
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
-        return ("A list of occurrences, each a fullPathName (from design_get_tree) or a name "
+        return ("A list of occurrences, each a fullPathName (from design_get(include=['tree'])) or a name "
                 "(ambiguous names are rejected, not guessed).")
 
     def resolve(self, raw):
@@ -1024,12 +1024,95 @@ class OccurrenceRefList(InputKind):
         return out, None
 
 
+# ── target reference (MULTI-SOURCE: a thing to MEASURE/COLOUR - body/face/mesh/occurrence/component/design) ──
+#
+# model_inspect / appearance_set need "the thing the user named", which can be a body, a face, a mesh
+# body, an assembly occurrence, a component, or the WHOLE design. TargetRef unifies that (like PlaneRef
+# did for planes): one input, several resolution paths tried in order, returning (entity, kind) so the
+# consumer can branch on what it got. It composes the existing resolvers (_resolve_token_entity /
+# _resolve_occurrence / _resolve_any_body) rather than re-implementing them.
+
+def _component_by_name(des, name):
+    """A Component by name across the design (root + all components), or None."""
+    for comp in _common.all_components(des):
+        if (_common.safe(lambda c=comp: c.name) or "") == name:
+            return comp
+    return None
+
+
+class TargetRef(InputKind):
+    """A reference to a THING to measure/colour, resolved from any of several shapes:
+      - a find_geometry 'handle' -> a body / face / mesh body
+      - an occurrence fullPathName or name (an assembly instance)
+      - a component name
+      - a body name
+      - empty/'' -> the WHOLE design (the root component)
+    Resolves to (entity, kind) where kind is one of body/face/mesh/occurrence/component/design, so the
+    consumer can branch. 'allow' optionally restricts which kinds are accepted (e.g. allow=('mesh',) for
+    a mesh-only tool). The single resolver for model_inspect and appearance_set (they pass the resolved
+    entity to their own logic, so resolution lives in ONE place)."""
+
+    _ALL_KINDS = ("body", "face", "mesh", "occurrence", "component", "design")
+    MAP_HINT = "a thing to measure/colour: handle (body/face/mesh) OR occurrence/component/body name; ''=whole design"
+
+    def __init__(self, name, allow=None, **kw):
+        super().__init__(name, **kw)
+        self.allow = tuple(allow) if allow else self._ALL_KINDS
+
+    def contract_note(self) -> str:
+        return ("A target: a find_geometry 'handle' (body/face/mesh), an occurrence fullPathName or "
+                "name, a component name, or a body name; '' = the whole design.")
+
+    def _check(self, ent, kind):
+        if kind not in self.allow:
+            return None, (f"'{self.name}': that target is a {kind}, but this needs one of: "
+                          f"{', '.join(self.allow)}.")
+        return (ent, kind), None
+
+    def resolve(self, raw):
+        s = (raw or "").strip() if isinstance(raw, str) else raw
+        des = _common.design()
+        if not des:
+            return None, "No active design to resolve the target against."
+        # empty -> the whole design (root component)
+        if not s:
+            if "design" not in self.allow:
+                return None, f"'{self.name}' is required (a handle, occurrence/component/body name)."
+            return (_common.safe(lambda: des.rootComponent), "design"), None
+        if not isinstance(s, str):
+            return None, f"'{self.name}': expected a handle or a name string, got {type(raw).__name__}."
+        # 1) a handle (entityToken) -> body / face / mesh, by the entity type it resolves to.
+        ent = _resolve_token_entity(des, s)
+        if ent is not None:
+            if isinstance(ent, adsk.fusion.BRepFace):
+                return self._check(ent, "face")
+            if _is_mesh(ent):
+                return self._check(ent, "mesh")
+            if _is_brep(ent):
+                return self._check(ent, "body")
+            return None, f"'{self.name}': handle points at a {type(ent).__name__}, not a measurable target."
+        # 2) an occurrence (fullPathName preferred, then name); first-match-wins (the prior tools' behaviour).
+        occ, _ = _resolve_occurrence(self.name, s)
+        if occ is not None:
+            return self._check(occ, "occurrence")
+        # 3) a component by name
+        comp = _component_by_name(des, s)
+        if comp is not None:
+            return self._check(comp, "component")
+        # 4) a body by name (brep or mesh)
+        body, _ = _resolve_any_body(self.name, s)
+        if body is not None:
+            return self._check(body, "mesh" if _is_mesh(body) else "body")
+        return None, (f"'{self.name}': '{s}' did not resolve to a body handle, an occurrence/component/"
+                      "body name, or '' (whole design). See design_get(include=['tree']) / find_geometry.")
+
+
 # ── profile reference (a STABLE handle, or a {sketch, profile_index} legacy selector) ────────────
 #
 # Replaces the fragile sketch_name+profile_index pattern (a blind index into an order-UNSTABLE
 # collection). A handle (entityToken) is order-stable across rebuilds; the legacy selector stays as a
 # fallback so existing model_extrude-style callers keep working. ProfileRefList PRESERVES ORDER (no
-# sort/dedupe) — loft order is load-bearing, unlike fillet's edge set.
+# sort/dedupe) - loft order is load-bearing, unlike fillet's edge set.
 
 def _resolve_profile_legacy(name, sketch_name, profile_index):
     """Resolve a {sketch, profile_index} selector against the ACTIVE component's sketches.
@@ -1062,18 +1145,14 @@ def _resolve_profile_legacy(name, sketch_name, profile_index):
     except Exception:
         return None, f"'{name}': profile_index '{profile_index}' is not an integer."
     if idx < 0 or idx >= pcount:
-        return None, (f"'{name}': profile_index {idx} out of range — sketch has {pcount} profile(s) "
+        return None, (f"'{name}': profile_index {idx} out of range - sketch has {pcount} profile(s) "
                       f"(0..{pcount-1}).")
     return profiles.item(idx), None
 
 
 def _resolve_one_profile(name, raw):
     """Resolve a single profile from EITHER a stable handle (string entityToken) OR a legacy selector
-    dict {sketch, profile_index} / {sketch_name, profile_index}. Handle-first. Returns (profile, err).
-
-    TODO(open profiles): a sketch's open (unclosed) curves are not exposed through `sketch.profiles`
-    (only CLOSED regions are). Open-profile loft/extrude support would need an OpenProfile path here;
-    deferred until the API surface for it is confirmed live (no live calls in this phase)."""
+    dict {sketch, profile_index} / {sketch_name, profile_index}. Handle-first. Returns (profile, err)."""
     if isinstance(raw, dict):
         sk = raw.get("sketch", raw.get("sketch_name", ""))
         return _resolve_profile_legacy(name, sk, raw.get("profile_index", 0))
@@ -1093,7 +1172,7 @@ def _resolve_one_profile(name, raw):
 
 
 class ProfileRef(InputKind):
-    """A reference to a sketch PROFILE — a stable 'handle' (entityToken, order-stable across rebuilds)
+    """A reference to a sketch PROFILE - a stable 'handle' (entityToken, order-stable across rebuilds)
     OR a legacy {sketch, profile_index} selector (a blind index into an order-unstable collection,
     kept for back-compat). Resolves handle-first to the live adsk.fusion.Profile. Replaces the fragile
     sketch_name+profile_index pattern for loft/extrude."""
@@ -1101,7 +1180,7 @@ class ProfileRef(InputKind):
     MAP_HINT = "a sketch profile by stable handle, not sketch_name+profile_index"
 
     def contract_note(self) -> str:
-        return ("A profile — a stable 'handle' (entityToken; prefer this, it survives rebuilds) OR a "
+        return ("A profile - a stable 'handle' (entityToken; prefer this, it survives rebuilds) OR a "
                 "legacy {sketch, profile_index} selector (a blind, order-unstable index).")
 
     def resolve(self, raw):
@@ -1113,18 +1192,18 @@ class ProfileRef(InputKind):
 
 
 class ProfileRefList(ProfileRef):
-    """An ORDERED list of profile references — for loft, where profile ORDER is load-bearing (the loft
+    """An ORDERED list of profile references - for loft, where profile ORDER is load-bearing (the loft
     runs through the sections in the order given). PRESERVES ORDER: no sort, no dedupe. Each element is
     a handle or a {sketch, profile_index} selector, resolved via the single ProfileRef logic."""
 
     json_type = "array"
-    MAP_HINT = "an ORDERED list of profiles (loft — order is load-bearing)"
+    MAP_HINT = "an ORDERED list of profiles (loft - order is load-bearing)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
-        return ("An ORDERED list of profiles (order is load-bearing — loft runs through them in order). "
+        return ("An ORDERED list of profiles (order is load-bearing - loft runs through them in order). "
                 "Each a stable 'handle' (entityToken) or a {sketch, profile_index} selector.")
 
     def resolve(self, raw):
@@ -1138,7 +1217,7 @@ class ProfileRefList(ProfileRef):
             p, err = _resolve_one_profile(self.name, item)
             if err:
                 return None, f"'{self.name}'[{i}]: {err}"
-            out.append(p)          # append in order — NO sort/dedupe (loft order is load-bearing)
+            out.append(p)          # append in order - NO sort/dedupe (loft order is load-bearing)
         if not out:
             return None, f"'{self.name}': no valid profiles resolved."
         return out, None
@@ -1150,7 +1229,7 @@ def resolve_inputs(spec, raw_args):
     """Resolve a list of InputKinds against the raw MCP args.
 
     Handles the units/Distance dependency automatically: a UnitField is resolved first to a scale
-    factor, then each Distance is scaled by it. Returns (values_dict, error) — error is a
+    factor, then each Distance is scaled by it. Returns (values_dict, error) - error is a
     ready-to-return _common.error() result on the first failure, else None.
     """
     values = {}
@@ -1181,7 +1260,7 @@ def resolve_inputs(spec, raw_args):
 def apply_to_tool(tool, spec):
     """Add every InputKind's schema property to a Tool (and mark required ones). Returns the tool
     so it chains. This makes the SCHEMA auto-generate from the same declaration that drives
-    resolution + contract — one source of truth per input."""
+    resolution + contract - one source of truth per input."""
     for kind in spec:
         tool.add_input_property(kind.name, kind.schema())
         if kind.required:
@@ -1196,14 +1275,14 @@ def contract_block(spec, header="INPUTS") -> str:
     for kind in spec:
         note = kind.contract_note() or ""
         req = " (required)" if kind.required else ""
-        lines.append(f"• {kind.name}{req}: {note}".rstrip())
+        lines.append(f"- {kind.name}{req}: {note}".rstrip())
     return "\n".join(lines)
 
 
 # ── shared input singletons (the recurring enums, defined ONCE) ──────────────────────────────────
 #
 # These replace prose enums hand-copied across many tools. A tool wires one with
-# `.add_input_property(*_inputs.UNITS.as_property())` — one line, schema carries the validated `enum`,
+# `.add_input_property(*_inputs.UNITS.as_property())` - one line, schema carries the validated `enum`,
 # and the option list lives in exactly one place (so it can't drift the way the prose did). Per-tool
 # factories (units_for / boolean_op / world_axis) let a tool tweak the default or description while
 # still sharing the option set.
@@ -1214,7 +1293,7 @@ def units_property(description="Length units.", default="mm"):
 
 
 # A ready-to-splat default units property (mm|cm|in, default mm) for the common case. No description
-# override — UnitField.contract_note() already says "Display/length units (default mm)."
+# override - UnitField.contract_note() already says "Display/length units (default mm)."
 UNITS = UnitField()
 
 
@@ -1231,7 +1310,7 @@ def world_axis(name="axis", default="z", description="World axis."):
 
 
 # The canonical joint motion types. joint_create/edit support all six; tools that support a SUBSET
-# (e.g. joint_at_geometry omits planar) pass `options=` explicitly — but always as a Choice, so the
+# (e.g. joint_at_geometry omits planar) pass `options=` explicitly - but always as a Choice, so the
 # prose can't silently drift the way joint_type (6) and joint_at_geometry.motion (5) did.
 JOINT_MOTIONS = ("rigid", "revolute", "slider", "cylindrical", "planar", "ball")
 

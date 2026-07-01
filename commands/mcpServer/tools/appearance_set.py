@@ -7,8 +7,8 @@
                     component. WRITES.
 
 Why this exists: there was no appearance tool at all, so every part rendered identical gray. For an
-agent that drives by screenshot, distinct colors are a DEBUGGING INSTRUMENT — they make it possible to
-tell parts apart and confirm "the right body got the edit" — not just cosmetics.
+agent that drives by screenshot, distinct colors are a DEBUGGING INSTRUMENT - they make it possible to
+tell parts apart and confirm "the right body got the edit" - not just cosmetics.
 
 Mechanism (the reliable color-override idiom): copy a base appearance into the design with
 Appearances.addByCopy (so we own an editable instance), set its ColorProperty value to the requested
@@ -17,8 +17,8 @@ when available (always present once a body exists), else a generic appearance fr
 
 GUARDS:
   - parses '#RRGGBB' / 'RRGGBB' / 'r,g,b' colors; a malformed color is rejected with the accepted forms;
-  - resolves the target (body handle / occurrence / body name / component) the same way model_measure_bbox
-    does; a component applies to ALL its bodies (a Component has no single .appearance);
+  - resolves the target via TargetRef (a face/body handle, occurrence/body/component name, or '' = whole
+    design); a component (and the whole design) applies to ALL its bodies (no single .appearance);
   - if no base appearance can be found to copy, says so rather than failing opaquely.
 
 Grounded in adsk.core / adsk.fusion (signatures confirmed via sys_get_api_doc):
@@ -69,60 +69,10 @@ def _parse_color(spec):
     return rgb, None
 
 
-def _resolve_target(design, target):
-    """Resolve target name -> (entity, description, kind). kind in {body, occurrence, component}.
-
-    Same resolution shape as model_measure_bbox: a find_geometry handle / occurrence name-or-path /
-    body name / component name; empty -> the root component (whole design)."""
-    root = design.rootComponent
-    name = (target or "").strip()
-    if not name:
-        return root, "root component (whole design)", "component"
-
-    # A find_geometry handle pins a SPECIFIC body OR face (both carry a settable .appearance, so both
-    # are valid override targets — a face lets you color ONE face, not the whole body). Try the
-    # sanctioned resolver (composite-handle aware + self-healing) FIRST; a plain name returns None and
-    # falls through to the name lookups below — no handle-vs-name guess by string length.
-    ent = _inputs._resolve_token_entity(design, name)
-    if ent is not None:
-        if isinstance(ent, adsk.fusion.BRepFace):
-            return ent, f"face (handle {name[:10]}…)", "face"
-        if isinstance(ent, adsk.fusion.BRepBody):
-            return ent, f"body (handle {name[:10]}…)", "body"
-        return None, None, None
-
-    occ = safe(lambda: root.occurrences.itemByName(name))
-    if occ:
-        return occ, f"occurrence '{name}'", "occurrence"
-    try:
-        for o in root.allOccurrences:
-            if (safe(lambda o=o: o.fullPathName) or "") == name or (safe(lambda o=o: o.name) or "") == name:
-                return o, f"occurrence '{name}'", "occurrence"
-    except Exception:
-        pass
-
-    body = safe(lambda: root.bRepBodies.itemByName(name))
-    if body:
-        return body, f"body '{name}'", "body"
-    try:
-        for o in root.allOccurrences:
-            b = safe(lambda o=o: o.bRepBodies.itemByName(name))
-            if b:
-                return b, f"body '{name}' in '{safe(lambda o=o: o.name)}'", "body"
-    except Exception:
-        pass
-
-    # Component by name -> apply to all its bodies.
-    try:
-        for o in root.allOccurrences:
-            if (safe(lambda o=o: o.component.name) or "") == name:
-                return o.component, f"component '{name}'", "component"
-    except Exception:
-        pass
-    if (safe(lambda: root.name) or "") == name:
-        return root, f"component '{name}'", "component"
-
-    return None, None, None
+# A face/body/occurrence/component (or '' = whole design) all carry a settable .appearance - exactly
+# TargetRef's universe (minus mesh: a MeshBody has no appearance override). The whole-design ('') case
+# is a Component (apply to all bodies), so 'design' is folded into the component branch below.
+_TARGET = _inputs.TargetRef("target", allow=("body", "face", "occurrence", "component", "design"))
 
 
 def _base_appearance(design):
@@ -154,7 +104,7 @@ def _make_colored_appearance(design, rgb, opacity, name):
         return None, "Could not create an appearance copy (addByCopy returned nothing)."
     color = adsk.core.Color.create(rgb[0], rgb[1], rgb[2], opacity)
     # Find the color-bearing property and set it. Most appearances expose one ColorProperty
-    # (named 'Color' / 'Albedo' / etc.) — set every ColorProperty so the override takes regardless of
+    # (named 'Color' / 'Albedo' / etc.) - set every ColorProperty so the override takes regardless of
     # the localized name.
     set_any = False
     props = safe(lambda: appr.appearanceProperties)
@@ -194,10 +144,14 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
     if not design:
         return error("No active design with geometry.")
 
-    entity, desc, kind = _resolve_target(design, target)
-    if not entity:
-        return error(f"No face/body/occurrence/component matching '{target}'. Use design_get_tree "
-                     "for names, or a find_geometry handle for a specific body or FACE.")
+    resolved, terr = _TARGET.resolve(target)
+    if terr:
+        return terr if isinstance(terr, dict) else error(terr)
+    entity, kind = resolved
+    if kind == "design":
+        kind = "component"      # whole design = the root component; color all its bodies
+    desc = (f"{kind} '{safe(lambda: entity.fullPathName) or safe(lambda: entity.name)}'"
+            if safe(lambda: entity.name) else kind)
 
     appr_name = (name or "").strip() or f"AgentColor_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
     appr, aerr = _make_colored_appearance(design, rgb, opacity, appr_name)
@@ -247,9 +201,7 @@ _DESC = (
 
 tool = (
     Tool.create_simple(name="appearance_set", description=_DESC)
-    .add_input_property("target", {"type": "string",
-            "description": "find_geometry handle to a FACE or body, occurrence name/fullPath, body "
-            "name, or component name (empty = whole design)."})
+    .add_input_property(*_TARGET.as_property())
     .add_input_property("color", {"type": "string",
             "description": "Color as '#RRGGBB', 'RRGGBB', or 'r,g,b' (0-255 each)."})
     .add_input_property("opacity", {"type": "integer",

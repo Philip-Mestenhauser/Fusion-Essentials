@@ -1,26 +1,27 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks that EDIT mesh bodies with timeline features — the write-half sibling of
+"""MCP building blocks that EDIT mesh bodies with timeline features - the write-half sibling of
 mesh_ops.py. Two real features the original audit wrongly dismissed:
 
   mesh_generate_face_groups -> segment a MeshBody into planar face groups.            WRITES
   mesh_plane_cut            -> trim / split a MeshBody by a plane (with hole fill).    WRITES
 
-WHY face groups matter: a PRISMATIC mesh->BRep conversion REQUIRES face groups — without them the
-convert raises 'MESH_FAILED_BREP — Use Generate Face Groups' (hit live). mesh_generate_face_groups
+WHY face groups matter: a PRISMATIC mesh->BRep conversion REQUIRES face groups - without them the
+convert raises 'MESH_FAILED_BREP - Use Generate Face Groups' (hit live). mesh_generate_face_groups
 is the missing pre-step; mesh_to_brep's prismatic error path now points the agent here (it does NOT
-auto-run it — the tools stay composable).
+auto-run it - the tools stay composable).
 
 WHY plane cut matters: the original mesh proposal called mesh section / plane cut 'UI-only, not in
-the public API'. That was WRONG — MeshPlaneCutFeatures is a real feature. This module corrects it.
+the public API'. That was WRONG - MeshPlaneCutFeatures is a real feature. This module corrects it.
 
 Base-feature scope (the foundation a sibling fixed): a mesh WRITE that creates/edits a MeshBody in a
 PARAMETRIC design must run inside an open BaseFeature edit scope (MeshBodies.add docstring); in a
 DIRECT design it must NOT. Both feature `add`s below route through run_in_base_feature(design, comp,
-inner_op) from design_mode.py — it opens the atomic scope in parametric, runs inner_op(None) directly
-in direct, and ALWAYS finishEdit()s in a finally (the bug a bare start/finish pair caused). The
-feature.createInput->set->add happens INSIDE inner_op so the add lands in the open scope.
+inner_op) from design_mode.py - it opens the atomic scope in parametric, runs inner_op(None) directly
+in direct, and ALWAYS finishEdit()s in a finally so a raised inner_op can't leak an open scope (which
+corrupts later tool calls). The feature.createInput->set->add happens INSIDE inner_op so the add lands
+in the open scope.
 
 safe()-around-mutation hazard (per _common.safe): safe() swallows the exception and returns a
 default, so wrapping a feature `add` in it turns a real failure into a false 'ok'. The add() calls
@@ -54,7 +55,7 @@ app = adsk.core.Application.get()
 
 
 def _result_bodies(feat):
-    """The MeshBody(ies) a mesh feature produced, as JSON-safe records. Reads only — a feature with no
+    """The MeshBody(ies) a mesh feature produced, as JSON-safe records. Reads only - a feature with no
     .bodies (or an empty one) returns []. Used to report the cut/grouped result."""
     out = []
     bodies = safe(lambda: feat.bodies)
@@ -77,8 +78,8 @@ _FG_METHOD = _inputs.Choice("method", ["fast", "accurate"], default="accurate",
 
 
 def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") -> dict:
-    """Segment a MeshBody into planar FACE GROUPS — the pre-step a PRISMATIC mesh_to_brep REQUIRES
-    (without groups it fails 'MESH_FAILED_BREP — Use Generate Face Groups'). WRITES a
+    """Segment a MeshBody into planar FACE GROUPS - the pre-step a PRISMATIC mesh_to_brep REQUIRES
+    (without groups it fails 'MESH_FAILED_BREP - Use Generate Face Groups'). WRITES a
     MeshGenerateFaceGroupsFeature, routed through run_in_base_feature (open scope in parametric,
     direct call in direct)."""
     design = _common.design()
@@ -108,7 +109,7 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
             method_enum = safe(lambda: (mt.FastMeshGenerateFaceGroupsMethodType if meth == "fast"
                                         else mt.AccurateMeshGenerateFaceGroupsMethodType))
             safe(lambda: setattr(inp, "method", method_enum))
-        # Mutation — direct call, no safe() around it. A falsy return is NOT a failure: this add()
+        # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
         # method "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
         # an add inside the BaseFeature scope run_in_base_feature opens). SUCCESS is observed on the
         # mesh itself (its faceGroups now exist), not via the (None) feature object.
@@ -134,7 +135,7 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
         "feature": safe(lambda: feat.name) if feat else None,
         "non_parametric": feat is None,        # add() returned nothing -> non-parametric = success
         "face_group_count": group_count,       # the observable side effect proving it applied
-        "note": ("Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh — "
+        "note": ("Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - "
             "prismatic convert REQUIRES face groups (it merges each flat group into one BRep "
             "face)."),
     })
@@ -152,8 +153,8 @@ _CUT_FILL = _inputs.Choice("fill", ["none", "minimal", "uniform"], default="mini
 
 def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "trim",
                            fill: str = "minimal", flip: bool = False) -> dict:
-    """Cut a MeshBody by a plane — trim (keep one side), split_body (two bodies), or split_faces
-    (cut the triangulation in place) — optionally filling the opening. The plane is an origin alias
+    """Cut a MeshBody by a plane - trim (keep one side), split_body (two bodies), or split_faces
+    (cut the triangulation in place) - optionally filling the opening. The plane is an origin alias
     (xy/xz/yz), a construction-plane name, or a planar-face/plane handle from find_geometry. WRITES a
     MeshPlaneCutFeature, routed through run_in_base_feature."""
     design = _common.design()
@@ -218,7 +219,7 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
             return safe(lambda: comp.meshBodies.count)
         before_mesh_count = _mesh_count()
 
-        # Mutation — direct call, no safe() around it. A falsy return is NOT a failure: this add()
+        # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
         # method "Return nothing in the case where the feature is non-parametric" (DIRECT design OR an
         # add inside the BaseFeature scope). SUCCESS is the changed mesh body set, not the feature.
         try:
@@ -261,10 +262,10 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     }
 
     # HONESTY SIGNAL (Bug B): split_body only actually SEPARATES the mesh when the body count rises.
-    # On a non-watertight (open) mesh the cut still applies but yields ONE body — the API silently
+    # On a non-watertight (open) mesh the cut still applies but yields ONE body - the API silently
     # doesn't split. Surface that via `became_split` (analogous to model_stitch's `became_solid`) so
     # the agent isn't misled by cut:true. trim/split_faces never add bodies by design, so only gate
-    # this on split_body. Not an error — the cut DID apply; just an honest signal.
+    # this on split_body. Not an error - the cut DID apply; just an honest signal.
     if ct == "split_body":
         before = before_mesh_count if before_mesh_count is not None else 0
         after = after_mesh_count if after_mesh_count is not None else 0
@@ -272,8 +273,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         payload["became_split"] = became_split
         if not became_split:
             note += (" NOTE: split_body did not separate the mesh into two bodies (the mesh is likely "
-    "not watertight — split_body needs a closed mesh; run mesh_remesh or check "
-    "is_closed via mesh_measure).")
+    "not watertight - split_body needs a closed mesh; run mesh_remesh or check "
+    "is_closed via model_inspect).")
 
     payload["note"] = note
     return ok(payload)
@@ -289,7 +290,7 @@ mesh_generate_face_groups_tool = (
             description=("Segment a MESH body into planar FACE GROUPS. WRITES a "
                          "MeshGenerateFaceGroupsFeature. This is the REQUIRED pre-step for a PRISMATIC "
                          "mesh_to_brep: without face groups, prismatic convert fails with "
-                         "'MESH_FAILED_BREP — Use Generate Face Groups'. Run this first, then "
+                         "'MESH_FAILED_BREP - Use Generate Face Groups'. Run this first, then "
                          "mesh_to_brep(method='prismatic'). method='accurate' (default) is slower but "
                          "cleaner; 'fast' is quicker. In a PARAMETRIC design the feature runs inside a "
                          "BaseFeature edit scope (handled for you); in DIRECT no scope is needed.")),

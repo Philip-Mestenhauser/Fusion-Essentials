@@ -1,4 +1,4 @@
-"""Unit tests for ``design_configure`` — the WRITE counterpart to design_get_configurations.
+"""Unit tests for ``design_configure`` — the configured-design build+switch tool.
 
 The Fusion configurations API is mocked; what we pin is the tool's OWN logic: the action dispatch and
 guards (unknown action, no design, not-yet-configured for column actions), creating a configured

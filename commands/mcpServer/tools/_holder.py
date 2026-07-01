@@ -1,28 +1,23 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared core for turning a solid model into a CAM TOOL HOLDER profile — the headless,
-UI-free half of the "Add Tool Holder" command (commands/addHolder/entry.py).
+"""Shared core for turning a solid model into a CAM TOOL HOLDER profile - the headless, UI-free half
+of the "Add Tool Holder" command (commands/addHolder/entry.py).
 
-WHY THIS EXISTS: the create-holder geometry is the reason many people cloned this repo. It used to
-live entirely inside the Add Holder COMMAND, reachable only by a human clicking body + axis + end
-face in a dialog. The math is pure, though — given a solid body, an axis of rotation, and a point on
-that axis (the end datum), it reduces the body's rotation-coincident faces to a stack of
-(height, lower-diameter, upper-diameter) segments and emits the holder's library JSON. None of that
-needs the UI. Extracting it here lets BOTH the interactive command AND an MCP tool
-(model_create_holder) drive the SAME code, so an agent can batch-convert many uploaded holders while
-the dialog still serves one-at-a-time users.
+The geometry is pure: given a solid body, an axis of rotation, and a point on that axis (the end
+datum), it reduces the body's rotation-coincident faces to a stack of (height, lower-diameter,
+upper-diameter) segments and emits the holder's library JSON - none of which needs the UI. Both the
+interactive command AND the MCP tool (model_compute_holder) drive this SAME code, so an agent can
+batch-convert many holders while the dialog serves one-at-a-time users.
 
 This module is deliberately import-light: only ``adsk.*`` + stdlib, NO ``futil`` / ``config`` / UI
-handlers. So it loads in the test harness the same way every other ``tools/`` helper does
-(``load_tool("_holder")``), and the interactive command imports it without circularity.
+handlers. So it loads in the test harness like every other ``tools/`` helper
+(``load_tool("_holder")``), and the interactive command imports it without circularity. A ``_`` prefix
+keeps the tool auto-discovery sweep from treating it as a tool. The geometry routines (cylindrical-
+coordinate reduction, duplicate/occlusion filtering, chamfer-as-cone assumption) are shared verbatim
+with the interactive command.
 
-The geometry routines are lifted VERBATIM from the original command (the hard-won cylindrical-
-coordinate reduction, the duplicate/occlusion filtering, the chamfer-as-cone assumption) — this is a
-move, not a rewrite. The only changes are dropping ``futil`` logging and adding docstrings. A
-``_`` prefix keeps the tool auto-discovery sweep from treating it as a tool.
-
-Grounded in adsk.core / adsk.cam (signatures as used by the original command):
+Grounded in adsk.core / adsk.cam:
   - adsk.core.InfiniteLine3D / Plane / Cone / Cylinder / Torus / Circle3D / Arc3D (geometry casts)
   - adsk.cam.Tool.createFromJson(jsonStr)  -> a holder Tool (type='holder')
   - adsk.cam.CAMManager.get().libraryManager.toolLibraries (library enumeration; reads only here)
@@ -48,7 +43,7 @@ def get_axis(axis_base):
     """An InfiniteLine3D for the holder's axis of rotation, from a cylindrical/conical/toroidal FACE,
     a linear EDGE, or a construction axis. None if the entity can't define an axis.
 
-    (Verbatim from the Add Holder command — the same cast-by-surface/curve-type logic.)"""
+    (Verbatim from the Add Holder command - the same cast-by-surface/curve-type logic.)"""
     if isinstance(axis_base, adsk.fusion.BRepFace):
         face_type = axis_base.geometry.surfaceType
         if face_type == adsk.core.SurfaceTypes.ConeSurfaceType:
@@ -71,7 +66,7 @@ def get_axis(axis_base):
 
 
 def is_valid_axial_datum(surface, axis):
-    """The Point3D where the end datum meets the axis — for a planar face NORMAL to the axis, a linear
+    """The Point3D where the end datum meets the axis - for a planar face NORMAL to the axis, a linear
     edge perpendicular to it, or a vertex (projected onto the axis). None if the datum isn't valid for
     this axis. This is the 'end face' input: it pins where z=0 sits along the axis.
 
@@ -127,10 +122,10 @@ def is_valid_axial_datum(surface, axis):
 def get_tool_profile(body, axis, plane_intersect):
     """Reduce a holder body to a turned PROFILE: a list of [z0, z1, r0, r1] segments along the axis.
 
-    Collects the body's faces that are coaxial with `axis` (cones/cylinders/tori — a torus is treated
+    Collects the body's faces that are coaxial with `axis` (cones/cylinders/tori - a torus is treated
     as a chamfer/cone), expresses their edges in cylindrical (r, z) coordinates about the axis with z=0
     at `plane_intersect`, de-duplicates and removes faces occluded by a larger coaxial face, and
-    returns the ordered radial profile. (Verbatim from the Add Holder command — the load-bearing
+    returns the ordered radial profile. (Verbatim from the Add Holder command - the load-bearing
     geometry; do not 'tidy' it without re-validating against real holders.)"""
     plane = adsk.core.Plane.create(plane_intersect, axis.direction)
     points = []
@@ -266,11 +261,11 @@ def get_cylindrical_coordinates_point(point, axis, plane):
 
 def build_holder_data(profile, desc, prodid="", prodlink="", prodvendor=""):
     """The holder library JSON dict (type='holder', millimeters) for a profile. Profile lengths are in
-    cm (the API unit); segment heights/diameters are emitted in MM (×10 / ×20 for diameter), matching
+    cm (the API unit); segment heights/diameters are emitted in MM (x10 / x20 for diameter), matching
     the original command. Returned as a dict so a tool can surface it without minting a Tool object.
 
     A fresh random guid/reference_guid + last_modified timestamp are generated (same as the command).
-    Diameter = radius × 2; both rounded to 3 dp. Segment height = z1 − z0."""
+    Diameter = radius x 2; both rounded to 3 dp. Segment height = z1 - z0."""
     guid = "00000000-0000-0000-0000-" + str(random.randint(100000000000, 999999999999))
     data = {
         "description": desc,
@@ -306,7 +301,7 @@ def generate_tool(profile, desc, prodid="", prodlink="", prodvendor=""):
 
 def get_tooling_libraries() -> List:
     """URLs of every cloud + local + external tool library (read-only enumeration). The eventual
-    library building-block family will own WRITES — note a tool brought into a document is a hard FORK
+    library building-block family will own WRITES - note a tool brought into a document is a hard FORK
     of the library data, not a live link, so library writes need their own correct semantics."""
     camManager = adsk.cam.CAMManager.get()
     libraryManager = camManager.libraryManager
@@ -329,8 +324,3 @@ def _libraries_urls(libraries, url) -> List:
     for folder in libraries.childFolderURLs(url):
         urls = urls + _libraries_urls(libraries, folder)
     return urls
-
-
-def format_library_names(libraries: List) -> List:
-    """The trailing-segment display name of each library URL. (Verbatim.)"""
-    return [library.split('/')[-1] for library in libraries]

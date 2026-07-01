@@ -5,26 +5,26 @@
 
   model_hole -> add simple / counterbore / countersink holes at one or more points on a face, blind or
                 through, optionally TAPPED with a thread designation (e.g. M5x0.8). This is the
-                idiomatic hole — it carries hole/thread metadata (so downstream fastener/CAM tooling
+                idiomatic hole - it carries hole/thread metadata (so downstream fastener/CAM tooling
                 recognises it), unlike a plain cut.
 
-Companion to model_extrude (which is the generic profile cut). Use THIS for actual holes — bolt
-circles, tapped holes, counterbores for cap screws — so the feature reads as a Hole in the timeline
+Companion to model_extrude (which is the generic profile cut). Use THIS for actual holes - bolt
+circles, tapped holes, counterbores for cap screws - so the feature reads as a Hole in the timeline
 and tap info is attached.
 
-Grounded in adsk.fusion (every call live-verified on a plate — see docs/fusion-api-notes.md "Holes"):
+Grounded in adsk.fusion (every call live-verified on a plate - see docs/fusion-api-notes.md "Holes"):
   - Component.features.holeFeatures.createSimpleInput(dia) / createCounterboreInput(dia, cbDia, cbDepth)
     / createCountersinkInput(dia, csDia, csAngle) -> HoleFeatureInput.
   - Placement: HoleFeatureInput.setPositionBySketchPoint(sp) / setPositionBySketchPoints(collection of
     co-planar points). We build a sketch on the target face and add the requested points to it.
   - Extent: setDistanceExtent(value) for blind; setAllExtent(direction) for through. THROUGH MUST use
-    PositiveExtentDirection — NegativeExtentDirection fails with "InternalValidationError:
+    PositiveExtentDirection - NegativeExtentDirection fails with "InternalValidationError:
     logicalSelection" (the hole's natural direction is already into the body).
   - Tap: features.threadFeatures.createThreadInfo(isInternal, threadType, threadDesignation, threadClass)
     then HoleFeatureInput.setToTappedHole(threadInfo); isModeled=False keeps it cosmetic. The size is
     embedded in the designation ("M5x0.8"), NOT a separate argument.
   - holeFeatures.add(input) RAISES if placement/extent is incomplete, and a raised exception ABORTS the
-    whole script transaction — so this tool fully validates inputs and resolves the thread BEFORE add.
+    whole script transaction - so this tool fully validates inputs and resolves the thread BEFORE add.
 Handler runs on the main thread; WRITES.
 """
 
@@ -43,7 +43,7 @@ app = adsk.core.Application.get()
 _TYPES = ("simple", "counterbore", "countersink")
 _EXTENTS = ("blind", "through")
 
-# the face the holes are drilled into (a find_geometry planar-face handle) — defines orientation.
+# the face the holes are drilled into (a find_geometry planar-face handle) - defines orientation.
 _FACE = _inputs.GeometryHandle("face", require="face", required=True,
     description="Planar face to drill into (a find_geometry face handle). Holes go into the body, "
                 "normal to this face.")
@@ -193,7 +193,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     extent: 'blind' (needs 'depth') or 'through'. counterbore needs cbore_diameter/cbore_depth;
     countersink needs csink_diameter/csink_angle. tap: optional thread designation ('M5x0.8') to make
     it a tapped hole. fastener: a clearance fastener spec like 'M6 Socket Head Cap Screw' (with 'fit'
-    close/normal/loose) — sizes + TAGS the hole for that fastener, overriding 'diameter'. WRITES.
+    close/normal/loose) - sizes + TAGS the hole for that fastener, overriding 'diameter'. WRITES.
     """
     hole_type = (hole_type or "simple").strip().lower()
     if hole_type not in _TYPES:
@@ -214,7 +214,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
                      "Screw') to size the hole.")
     pts = points or []
     if not pts:
-        return error("Provide 'points' — a list of [x, y, z] positions on the face to drill at.")
+        return error("Provide 'points' - a list of [x, y, z] positions on the face to drill at.")
     # type-specific dimensions (before extent details, so the most fundamental gap is reported first)
     if hole_type == "counterbore" and (not cbore_diameter or not cbore_depth):
         return error("A counterbore hole needs 'cbore_diameter' and 'cbore_depth'.")
@@ -234,7 +234,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if not comp:
         return error("No target component.")
 
-    face_ent = _resolve_face(design, face)
+    face_ent, ferr = _resolve_face(design, face)   # _FACE.resolve returns (entity, error)
+    if ferr:
+        return error(ferr)
     if not face_ent:
         return error("Could not resolve 'face' to a planar face. Pass a find_geometry face handle.")
 
@@ -260,20 +262,14 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if berr:
         return error(berr)
 
-    # Build a sketch on the face and add the placement points.
-    # BUGNOTE (live, 2026-06-29): on a part where intervening edits (fillets, earlier holes) have
-    # restamped tokens, the resolved `face_ent` can be a STALE face that sketches.add() silently
-    # rejects -> the generic error below, with no hint that the real cause is a stale handle. The raw
-    # API (root.sketches.add(<freshly-fetched face>)) works fine on the SAME multi-loop face, so this
-    # is a handle-freshness problem, not a multi-loop-face limitation. FIX TODO: when add() fails,
-    # re-resolve the face by its locator (kind+position) and retry, and/or report "handle may be stale
-    # — re-run find_geometry" instead of the opaque message. Until then: pass a handle fetched
-    # IMMEDIATELY before this call (no edits in between).
-    sketch = safe(lambda: comp.sketches.add(face_ent))
+    # Build the placement sketch on the face. Surface the real exception (no safe() swallowing it) so a
+    # genuine API failure is reported as itself, not misattributed to a stale handle.
+    try:
+        sketch = comp.sketches.add(face_ent)
+    except Exception as e:
+        return error(f"Could not create a placement sketch on the face: {e}")
     if not sketch:
-        return error("Could not create a placement sketch on the face — the face handle may be STALE "
-                     "(restamped by an intervening edit). Re-run find_geometry for a fresh handle and "
-                     "call model_hole immediately, with no edits in between.")
+        return error("Could not create a placement sketch on the face (sketches.add returned nothing).")
     sketch_pts = []
     for xyz in pts:
         try:
@@ -294,7 +290,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             coll.add(sp)
         hin.setPositionBySketchPoints(coll)
 
-    # Extent (THROUGH must be Positive — verified live).
+    # Extent (THROUGH must be Positive - verified live).
     if extent == "blind":
         hin.setDistanceExtent(_value(depth))
     else:
@@ -313,7 +309,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if clearance_info is not None:
         safe(lambda: hin.setToClearanceHole(clearance_info))
 
-    feature = holes.add(hin)             # MUTATION — raises (and aborts) if anything is inconsistent
+    feature = holes.add(hin)             # MUTATION - raises (and aborts) if anything is inconsistent
     if not feature:
         return error("holeFeatures.add returned no feature.")
 
@@ -323,7 +319,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         "hole_type": hole_type,
         "extent": extent,
         "feature": safe(lambda: feature.name),
-        "note": "Hole feature added (a real Hole, with hole/thread metadata — not an extrude-cut). "
+        "note": "Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). "
                 "Pattern it with model_pattern for a bolt circle.",
     }
     if tap:

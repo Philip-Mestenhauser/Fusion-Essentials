@@ -3,20 +3,20 @@
 
 """MCP building block: list the user's Autodesk data hubs and SWITCH the active one.
 
-  data_hubs(action="list")                 -> every hub (name, id, is_active)
-  data_hubs(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort; the API
-                                               exposes activeHub getter-only — verified, may refuse)
+  data_switch_hub(action="list")                 -> every hub (name, id, is_active)
+  data_switch_hub(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort; the API
+                                               exposes activeHub getter-only - verified, may refuse)
 
 Templates, parts and fixtures often live on DIFFERENT TeamHubs (a shop hub, a personal hub, a team
 hub). 'list' enumerates them reliably. 'switch' attempts to change the active hub, BUT:
 
 API LIMITATION (confirmed live): Data.activeHub is documented GETTER-ONLY ("Gets the active
-DataHub") — there is no public setter. So a programmatic hub switch is NOT reliably supported. The
+DataHub") - there is no public setter. So a programmatic hub switch is NOT reliably supported. The
 'switch' action attempts the assignment, then VERIFIES the active hub actually changed; if it didn't,
 it returns an honest error telling the user to switch from the Fusion data-panel hub dropdown. (This
-is the known data_set_active_hub gap — kept as a best-effort that won't lie about success.)
+is the known data_set_active_hub gap - kept as a best-effort that won't lie about success.)
 
-IMPORTANT — when a switch DOES take effect it CLOSES the open documents (Fusion reloads the data
+IMPORTANT - when a switch DOES take effect it CLOSES the open documents (Fusion reloads the data
 context). Treat it like closing everything: save first, re-resolve URNs afterward (URNs are
 hub-scoped). The tool reports this in its note.
 
@@ -52,7 +52,7 @@ def handler(action: str = "list", hub: str = "") -> dict:
 
     action='list' (default): report every hub with its name, id, and is_active flag.
     action='switch': set the active hub to 'hub' (matched by id, else case-insensitive name).
-    NOTE: switching CLOSES open documents — save first; URNs are hub-scoped, re-resolve after.
+    NOTE: switching CLOSES open documents - save first; URNs are hub-scoped, re-resolve after.
     """
     act = (action or "list").strip().lower()
     if act not in _ACTIONS:
@@ -76,7 +76,7 @@ def handler(action: str = "list", hub: str = "") -> dict:
     # switch
     want = (hub or "").strip()
     if not want:
-        return error("Provide 'hub' — the name or id of the hub to switch to (see action='list').")
+        return error("Provide 'hub' - the name or id of the hub to switch to (see action='list').")
 
     # match by id first (exact), then by case-insensitive name
     target = None
@@ -100,10 +100,10 @@ def handler(action: str = "list", hub: str = "") -> dict:
         "switched": False,
         "already_active": True,
         "active_hub": {"name": tname, "id": tid},
-        "note": f"'{tname}' is already the active hub — nothing to do.",
+        "note": f"'{tname}' is already the active hub - nothing to do.",
         })
 
-    # Data.activeHub is documented GETTER-ONLY ("Gets the active DataHub") — there is no public
+    # Data.activeHub is documented GETTER-ONLY ("Gets the active DataHub") - there is no public
     # setter. The assignment below may raise, OR silently no-op. So we don't TRUST it: we attempt it,
     # then VERIFY the active hub's id actually became the target. If it didn't change, report the API
     # limitation honestly instead of a false switched:True over a hub that never switched.
@@ -129,25 +129,24 @@ def handler(action: str = "list", hub: str = "") -> dict:
     "already_active": False,
     "active_hub": {"name": safe(lambda: new_active.name) or tname, "id": new_id or tid},
     "note": ("Active hub switched. This CLOSES the previously open documents (Fusion reloads the "
-            "data context). Re-list projects with data_list_projects, and re-resolve any URNs — "
+            "data context). Re-list projects with data_get, and re-resolve any URNs - "
             "they are hub-scoped. Reopen the document you need on the new hub."),
     })
 
 
 TOOL_DESCRIPTION = (
-    "List the user's Autodesk data hubs, or attempt to SWITCH the active hub. 'action'='list' "
-    "(default) reports every hub (name, id, is_active) — reliable. 'action'='switch' with 'hub' (a "
-    "hub name — case-insensitive — or id) attempts to set the active hub, BUT Fusion's API exposes "
-    "Data.activeHub getter-only (no public setter), so the switch is best-effort: it verifies the "
-    "hub actually changed and returns an honest error if not (switch from the Fusion data panel "
-    "instead). When a switch DOES take effect it CLOSES open documents and URNs are hub-scoped — so "
-    "save first, then re-resolve projects/URNs and reopen what you need. 'list' is read-only."
+    "Attempt to SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])). "
+    "Pass 'hub' (a hub name - case-insensitive - or id) to set the active hub, BUT Fusion's API "
+    "exposes Data.activeHub getter-only (no public setter), so the switch is best-effort: it verifies "
+    "the hub actually changed and returns an honest error if not (switch from the Fusion data panel "
+    "instead). When a switch DOES take effect it CLOSES open documents and URNs are hub-scoped - so "
+    "save first, then re-resolve projects/URNs (data_get) and reopen what you need. WRITES."
 )
 
 tool = (
-    Tool.create_simple(name="data_hubs", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "description": "list (default) | switch."})
-    .add_input_property("hub", {"type": "string", "description": "For switch: the hub name (case-insensitive) or id to activate."})
+    Tool.create_simple(name="data_switch_hub", description=TOOL_DESCRIPTION)
+    .add_input_property("action", {"type": "string", "description": "switch (default here) | list. To list, prefer data_get(include=['hubs'])."})
+    .add_input_property("hub", {"type": "string", "description": "The hub name (case-insensitive) or id to activate."})
     .strict_schema()
 )
 

@@ -63,18 +63,19 @@ class _Joints:
 
 
 class _Root:
-    def __init__(self, joints):
+    def __init__(self, joints, asbuilt=()):
         self.joints = _Joints(joints)
+        self.asBuiltJoints = _Joints(asbuilt)
 
 
 class _Design:
-    def __init__(self, joints):
-        self.rootComponent = _Root(joints)
+    def __init__(self, joints, asbuilt=()):
+        self.rootComponent = _Root(joints, asbuilt)
         self.allComponents = []
 
 
-def _install(joint):
-    design = _Design([joint])
+def _install(joint, asbuilt=()):
+    design = _Design([joint], asbuilt)
     jd._common.design = lambda: design
     return design
 
@@ -101,6 +102,15 @@ class TestGuards:
         _install(FakeJoint("J", RevoluteJointMotion()))
         res = jd.handler(joint_name="Ghost", angle_deg=10)
         assert res["isError"] is True and "Ghost" in res["message"]
+
+    def test_as_built_joint_is_drivable_by_name(self):
+        # an as-built REVOLUTE (in root.asBuiltJoints, a separate collection) must be found + driven,
+        # not reported "no joint named ...". This is the cold-build case (script-created as-built spin).
+        spin = FakeJoint("AsBuiltSpin", RevoluteJointMotion())
+        _install(FakeJoint("Regular", RigidJointMotion()), asbuilt=[spin])
+        out = _payload(jd.handler(joint_name="AsBuiltSpin", angle_deg=90))
+        assert out["driven"] is True
+        assert abs(spin.jointMotion.rotationValue - math.pi / 2) < 1e-9
 
     def test_rigid_is_refused(self):
         _install(FakeJoint("J", RigidJointMotion()))

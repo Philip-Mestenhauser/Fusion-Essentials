@@ -4,17 +4,17 @@
 """MCP building block: mirror solid bodies across a plane.
 
   model_mirror -> reflect one or more BODIES across an origin plane (xy / xz / yz) to make the
-                  symmetric half — the other side of a V-bank, a left/right bracket, a symmetric
+                  symmetric half - the other side of a V-bank, a left/right bracket, a symmetric
                   housing. Optionally join the mirror to the original. WRITES.
 
 Symmetric parts are common and tedious to rebuild by hand; this makes the mirror in one call.
 Bodies are referenced BY NAME within the active component; the mirror plane is one of the
-component's origin planes. General-purpose — it just reflects geometry.
+component's origin planes. General-purpose - it just reflects geometry.
 
 Grounded in adsk.fusion (signatures confirmed live):
   - Component.features.mirrorFeatures.createInput(ObjectCollection(bodies), mirrorPlane) -> input
   - MirrorFeatures.add(input) -> MirrorFeature (.bodies)
-  - mirrorPlane: a planar entity — here the component's xY/xZ/yZ ConstructionPlane
+  - mirrorPlane: a planar entity - here the component's xY/xZ/yZ ConstructionPlane
 Handler runs on the main thread; WRITES.
 """
 
@@ -37,31 +37,6 @@ app = adsk.core.Application.get()
 _PLANES = {"xy": "xYConstructionPlane", "xz": "xZConstructionPlane", "yz": "yZConstructionPlane"}
 
 
-def _resolve_body(comp, name):
-    name = (name or "").strip()
-    if not name:
-        return None
-    b = safe(lambda: comp.bRepBodies.itemByName(name))
-    if b:
-        return b
-    root = safe(lambda: _common.design().rootComponent)
-    if root:
-        b = safe(lambda: root.bRepBodies.itemByName(name))
-        if b:
-            return b
-        for o in (safe(lambda: root.allOccurrences) or []):
-            b = safe(lambda o=o: o.bRepBodies.itemByName(name))
-            if b:
-                return b
-    return None
-
-
-def _split_names(bodies):
-    if isinstance(bodies, (list, tuple)):
-        return [str(b).strip() for b in bodies if str(b).strip()]
-    return [b.strip() for b in (bodies or "").split(",") if b.strip()]
-
-
 def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
     """Mirror solid bodies across a plane.
 
@@ -76,8 +51,7 @@ def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
     comp = target_component(design)
 
     # plane is a PlaneRef input: resolves an origin alias OR a construction-plane name OR a
-    # planar-face/plane handle — the kind handles all three + their validation. Retrofit gains
-    # arbitrary-plane mirroring for free; the handler drops the origin-only branch it used to carry.
+    # planar-face/plane handle - the kind handles all three (including arbitrary planes) + validation.
     mirror_plane, perr = _PLANE.resolve(plane)
     if perr:
         return error(perr)
@@ -122,7 +96,7 @@ def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Mirror solid BODIES across an origin plane — make the symmetric half (the other side of a "
+    "Mirror solid BODIES across an origin plane - make the symmetric half (the other side of a "
     "V-bank, a left/right part, a symmetric housing). 'bodies' is the body name(s) to mirror (a "
     "list or comma-separated). 'plane' is the mirror plane xy | xz | yz (active component origin "
     "planes). 'join' combines the mirror with the original into one body (default false = separate). "

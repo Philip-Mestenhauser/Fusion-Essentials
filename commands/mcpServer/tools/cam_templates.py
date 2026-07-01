@@ -3,8 +3,8 @@
 
 """MCP building blocks for CAM toolpath templates.
 
-  cam_list_templates    -> navigate the template library (cloud / local / Fusion):
-                           folders and the templates they contain, by URL. Read-only.
+  cam_get(include=['templates']) -> navigate the template library (cloud / local / Fusion):
+                           folders and the templates they contain, by URL. Read-only (a cam_get slice).
   cam_apply_template -> instantiate a template into a named CAM setup, recreating
                            its operations there. WRITES to the document.
 
@@ -87,7 +87,7 @@ def _template_library():
 
 
 # ---------------------------------------------------------------------------
-# cam_list_templates
+# template listing engine -> cam_get(include=['templates'])
 # ---------------------------------------------------------------------------
 
 def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth: int = 4) -> dict:
@@ -220,7 +220,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     generate_new); default 'skip' just creates the operations.
     """
     if not (setup or "").strip():
-        return error("Provide 'setup' — the name of the setup to apply the template to.")
+        return error("Provide 'setup' - the name of the setup to apply the template to.")
     if not (template_url.strip() or template_name.strip()):
         return error("Provide 'template_url' or 'template_name'.")
 
@@ -293,7 +293,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         "created_count": len(created_names),
         "created_operations": created_names,
         "note": ("Operations were added to the setup. If generation_mode was 'skip', "
-            "the toolpaths are not yet generated. Use cam_get_operations or "
+            "the toolpaths are not yet generated. Use cam_get(include=['operations']) or "
             "view_screenshot to verify, and cam_compare_operations to check settings."),
     })
 
@@ -339,7 +339,7 @@ def _find_template_by_name(lib, location, name):
 def _as_cam_template(result):
     """Normalise createFromOperations' result to a CAMTemplate (or None).
 
-    The live API annotation is list[Operation] but the docstring claims a CAMTemplate — so be robust:
+    The live API annotation is list[Operation] but the docstring claims a CAMTemplate - so be robust:
       - already a CAMTemplate (or casts to one) -> use it directly;
       - a list/collection -> try its single element, else CAMTemplate.cast on the container;
       - anything else -> None (caller reports it honestly rather than crashing on .name later).
@@ -377,10 +377,10 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     if not template_name:
         return error("Provide 'template_name' for the new template.")
     if not (setup or "").strip():
-        return error("Provide 'setup' — the setup containing the operations.")
+        return error("Provide 'setup' - the setup containing the operations.")
     op_names = [o.strip() for o in (operations or "").split(",") if o.strip()]
     if not op_names:
-        return error("Provide 'operations' — a comma-separated list of operation names to bundle.")
+        return error("Provide 'operations' - a comma-separated list of operation names to bundle.")
 
     cam, err = _get_cam()
     if err:
@@ -434,9 +434,8 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
 
     # Build the template from the operations. NOTE the live API is self-contradictory here:
     # CAMTemplate.createFromOperations' docstring says "Returns the newly created template" but its
-    # type annotation says -> list[Operation]. So the result may be EITHER a CAMTemplate OR a list.
-    # The old code assumed a single CAMTemplate (set .name, passed straight to importTemplate); if the
-    # binding returns a list that silently broke the save. Normalise to a real CAMTemplate first.
+    # type annotation says -> list[Operation]. So the result may be EITHER a CAMTemplate OR a list -
+    # normalise to a real CAMTemplate before set .name / importTemplate, or a list-return breaks the save.
     try:
         result = adsk.cam.CAMTemplate.createFromOperations(selected)
     except Exception as e:
@@ -447,7 +446,7 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     if template is None:
         return error("createFromOperations did not yield a usable CAMTemplate (got "
                      f"{type(result).__name__}). The operation set may not be templatable together, "
-                     "or this Fusion build's API returns an unexpected shape — please report.")
+                     "or this Fusion build's API returns an unexpected shape - please report.")
     try:
         template.name = template_name
         if description.strip():
@@ -504,7 +503,7 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         "folder": (folder or "(library root)"),
         "created_folder": created_folder,
         "template_url": safe(lambda: new_url.toString()),
-        "note": ("New template saved. Verify with cam_list_templates (which reports each "
+        "note": ("New template saved. Verify with cam_get(include=['templates']) (which reports each "
             "template's asset URL). This tool always creates a NEW template; "
             "overwriting an existing one is a separate capability."),
     })
@@ -514,28 +513,8 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
 
 
 # --- tool definitions ---
-
-_list_tool = (
-    Tool.create_simple(
-        name="cam_list_templates",
-        description=(
-        "Navigate the CAM toolpath template library. Lists folders and the templates "
-        "they contain (name, description, validity) for a library 'location' "
-        "(cloud, local, fusion, samples, hub, ...) or a specific folder 'url'. Each "
-        "template/folder reports its URL so you can apply it with cam_apply_template. "
-        " Pass 'max_depth' (default 4)."
-        ),
-    )
-    .add_input_property("location", {"type": "string",
-        "description": "Library location: cloud (default), local, fusion, samples, hub."})
-    .add_input_property("url", {"type": "string",
-        "description": "Optional specific folder URL to start at (overrides location)."})
-    .add_input_property("max_depth", {"type": "integer", "description": "Folder depth to walk (default 4)."})
-    .strict_schema()
-)
-list_cam_templates_item = Item.create_tool_item(
-    tool=_list_tool, write="read", handler=list_cam_templates_handler, run_on_main_thread=True
-)
+# The template LISTING (list_cam_templates_handler) is a passive read - surfaced as
+# cam_get(include=['templates']) (it calls this handler). The two WRITES below stay here as tools.
 
 _apply_tool = (
     Tool.create_with_string_input(
@@ -543,17 +522,17 @@ _apply_tool = (
         description=(
             "Apply a CAM toolpath template to a setup, recreating the template's operations "
             "in that setup. Identify the template by 'template_url' (the precise asset URL "
-            "from cam_list_templates) or 'template_name' (searched under 'location'). "
-            "'generate' controls toolpath generation: 'skip' (default — just create "
+            "from cam_get(include=['templates'])) or 'template_name' (searched under 'location'). "
+            "'generate' controls toolpath generation: 'skip' (default - just create "
             "operations) or 'generate' (also compute the toolpaths). WRITES to the document "
             "(adds operations to the setup). Note: with generate='generate' a large template "
             "can exceed the 30s call limit and return a timeout even though the work is still "
-            "running — do NOT blindly retry; verify with cam_get_operations / view_screenshot first."
+            "running - do NOT blindly retry; verify with cam_get(include=['operations']) / view_screenshot first."
         ),
         input_param_name="setup",
         input_param_description="Name of the setup to apply the template to.",
     )
-    .add_input_property("template_url", {"type": "string", "description": "Template asset URL (from cam_list_templates 'url')."})
+    .add_input_property("template_url", {"type": "string", "description": "Template asset URL (from cam_get(include=['templates'])."})
     .add_input_property("template_name", {"type": "string", "description": "Template name (searched under location)."})
     .add_input_property("location", {"type": "string", "description": "Library location to search by name (default cloud)."})
     .add_input_property("generate", {"type": "string", "description": "skip (default) | generate."})
@@ -570,7 +549,7 @@ _save_tool = (
         "library. 'operations' is a comma-separated list of operation names within "
         "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
         "if missing). Optional 'description'. Always creates a new template. WRITES to the "
-        "template library. Verify with cam_list_templates."
+        "template library. Verify with cam_get(include=['templates'])."
         ),
         input_param_name="template_name",
         input_param_description="Name for the new template.",
@@ -587,6 +566,5 @@ save_operations_as_template_item = Item.create_tool_item(
 
 
 def register_tool():
-    register(list_cam_templates_item)
     register(apply_template_to_setup_item)
     register(save_operations_as_template_item)

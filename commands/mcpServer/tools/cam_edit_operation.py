@@ -88,13 +88,13 @@ def _parse_parameters(parameters):
 def handler(operation: str = "", parameters=None) -> dict:
     """Set named parameters on a CAM operation. parameters = {name: expression} or 'name=value,...'."""
     if not (operation or "").strip():
-        return error("Provide 'operation' — the CAM operation name to edit (see cam_get_operations).")
+        return error("Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).")
 
     wanted, perr = _parse_parameters(parameters)
     if perr:
         return error(perr)
     if not wanted:
-        return error("Provide 'parameters' — at least one name=value to set (e.g. "
+        return error("Provide 'parameters' - at least one name=value to set (e.g. "
     "{'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).")
 
     cam, cam_err = _get_cam()
@@ -139,18 +139,18 @@ def handler(operation: str = "", parameters=None) -> dict:
     "strategy": safe(lambda: op.strategy),
     "updated_count": len(changed),
     "changed": changed,
-    "note": ("Parameters set. The toolpath is now OUT OF DATE — regenerate it with cam_generate "
+    "note": ("Parameters set. The toolpath is now OUT OF DATE - regenerate it with cam_generate "
             "(be in the Manufacture workspace)."),
     })
 
 
 TOOL_DESCRIPTION = (
-    "Edit a CAM operation's PARAMETERS — the feeds/speeds/depths/tool values the other CAM tools "
-    "can't reach. 'operation' is the operation name (see cam_get_operations). 'parameters' is an "
+    "Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools "
+    "can't reach. 'operation' is the operation name (see cam_get(include=['operations'])). 'parameters' is an "
     "object {name: expression} or a 'name=value, name=value' string; each expression is set on the "
     "named parameter (e.g. tool_feedCutting='3000', tool_spindleSpeed='12000', maximumStepdown='1.5', "
     "tool_stepover='2.', tolerance='0.025'). Every named parameter must EXIST (validated before any "
-    "is applied, so a typo can't half-edit the op). After editing, the toolpath is out of date — "
+    "is applied, so a typo can't half-edit the op). After editing, the toolpath is out of date - "
     "regenerate with cam_generate. WRITES CAM data."
 )
 

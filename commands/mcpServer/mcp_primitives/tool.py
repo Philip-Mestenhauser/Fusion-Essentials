@@ -40,7 +40,7 @@ class Tool:
 
     def writes(self, destructive: bool = False) -> 'Tool':
         """Declare this tool a WRITE. Sets readOnlyHint=false; destructive=true for a hard-to-reverse
-        write (deletes, history-discarding conversions, closing docs) → destructiveHint=true."""
+        write (deletes, history-discarding conversions, closing docs) -> destructiveHint=true."""
         if self.annotations is None:
             self.annotations = Annotations()
         self.annotations.set_read_only(False)

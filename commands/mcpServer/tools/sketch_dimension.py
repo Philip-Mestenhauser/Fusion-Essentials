@@ -11,7 +11,7 @@ constraints): a dimension pins an actual size and can be DRIVEN by an expression
 a reference to a parameter), so the sketch resizes predictably. sketch_constrain captures intent
 (stays perpendicular); sketch_dimension captures size (is 25 mm / equals StockX).
 
-Entity references: '<type>:<index>' (line/arc/circle/point) — the same scheme as sketch_constrain.
+Entity references: '<type>:<index>' (line/arc/circle/point) - the same scheme as sketch_constrain.
 
 Grounded in adsk.fusion:
   - Sketch.sketchDimensions.addDistanceDimension(pointOne, pointTwo, orientation, textPoint)
@@ -38,10 +38,10 @@ _DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", 
 def _target_sketch(design, name):
     nm = (name or "").strip()
     if nm:
-        # Resolve across the whole design (active component first), not just the root component — so a
+        # Resolve across the whole design (active component first), not just the root component - so a
         # sketch drawn in an activated sub-component is dimensionable like one in the root.
         return resolve_sketch(design, nm), nm
-    # No name → most recent sketch in the ACTIVE component (where the agent is building), matching the
+    # No name -> most recent sketch in the ACTIVE component (where the agent is building), matching the
     # active-component convention model_extrude/sketch_add_geometry already use.
     comp = target_component(design)
     sks = safe(lambda: comp.sketches)
@@ -86,8 +86,8 @@ def _radial_text_point(curve):
     """A valid text-point for a radial/diameter dimension: a point OFFSET from the arc/circle CENTER
     by one radius (in sketch space). addRadialDimension/addDiameterDimension derive the dimension's
     radial DIRECTION from (textPoint - center); a text-point AT the center gives a zero-length vector
-    and the API raises "Some input argument is invalid". This bit hard whenever the curve was centered
-    at the sketch origin (the natural place to draw a hub/boss) and the old code passed (0,0,0).
+    and the API raises "Some input argument is invalid" - which happens when the curve is centered at
+    the sketch origin (a natural place to draw a hub/boss) and the text-point is (0,0,0).
     Returns a Point3D offset along +X from the center (sketch-local; z=0)."""
     P = adsk.core.Point3D.create
     geo = safe(lambda: curve.geometry)            # SketchCircle/SketchArc geometry (Circle3D/Arc3D)
@@ -133,9 +133,9 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 
     dims = sketch.sketchDimensions
     P = adsk.core.Point3D.create
-    # Text position for LINEAR/ANGLE dims is cosmetic — (0,0,0) is fine. For RADIAL/DIAMETER dims it is
+    # Text position for LINEAR/ANGLE dims is cosmetic - (0,0,0) is fine. For RADIAL/DIAMETER dims it is
     # NOT cosmetic: the API derives the radial direction from (textPoint - center), so it must be
-    # OFFSET from the curve's center (see _radial_text_point) — (0,0,0) is degenerate at an
+    # OFFSET from the curve's center (see _radial_text_point) - (0,0,0) is degenerate at an
     # origin-centered curve and the add raises "Some input argument is invalid".
     tp = P(0, 0, 0)
     try:
@@ -154,7 +154,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             dim = dims.addAngularDimension(e1, e2, tp)
     except Exception as e:
         return error(f"Could not add the {dt} dimension: {e}. (Check the entity types match the "
-    "dimension — radius/diameter need an arc/circle, angle needs two lines.)")
+    "dimension - radius/diameter need an arc/circle, angle needs two lines.)")
     if not dim:
         return error(f"Adding the {dt} dimension returned nothing.")
 
@@ -178,11 +178,11 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 
 
 TOOL_DESCRIPTION = (
-"Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value — the sizing half of "
+"Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of "
 "parametric sketching (sketch_constrain does the geometric half). 'dim_type': distance | "
 "horizontal_distance | vertical_distance (two points/lines) | radius | diameter (one arc/circle) "
 "| angle (two lines). 'entity_one'/'entity_two' are '<type>:<index>' refs (line/arc/circle/point, "
-"e.g. 'line:0') — the same scheme as sketch_constrain. 'value' drives the dimension by expression "
+"e.g. 'line:0') - the same scheme as sketch_constrain. 'value' drives the dimension by expression "
 "('25 mm', '90 deg', 'StockX/2'); omit to keep the auto-measured value. The created dimension "
 "becomes a model parameter you can later drive with param_set."
 )

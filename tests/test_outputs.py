@@ -38,7 +38,7 @@ class TestProducesBlock:
                 out.ReturnsValue("match_count", "how many matched")]
         block = out.produces_block(spec)
         assert block.startswith("PRODUCES:")
-        assert block.count("•") == 2
+        assert block.count("\n- ") == 2          # one ASCII bullet line per output
         assert "handle:" in block and "match_count:" in block
 
 

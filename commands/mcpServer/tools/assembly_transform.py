@@ -7,15 +7,15 @@
                    false frees a fresh/patterned occurrence for moving/jointing). Fix a part in
                    space with ground_to_parent + assembly_move. WRITES.
   assembly_move -> translate (and optionally rotate about a world axis) an occurrence by editing
-                   its transform — a free move, no joint/relationship created. WRITES.
+                   its transform - a free move, no joint/relationship created. WRITES.
   assembly_rigid_group   -> lock two or more occurrences together as one rigid unit. WRITES.
 
 General-purpose assembly positioning. For RELATIONSHIPS (joints, as-built joints, assembly
-constraints) see joint / joint_create_as_built / assembly_constrain — those maintain a constraint;
+constraints) see joint / joint_create_as_built / assembly_constrain - those maintain a constraint;
 assembly_move just repositions.
 
 Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Occurrence.isGroundToParent (parent lock — what ground sets) / transform (Matrix3D)
+  - Occurrence.isGroundToParent (parent lock - what ground sets) / transform (Matrix3D)
   - rootComponent.rigidGroups.add(ObjectCollection, includeChildren) -> RigidGroup
 Handlers run on the main thread; WRITE.
 """
@@ -41,7 +41,7 @@ _AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
 def _find_one(design, name):
     """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name, via the shared OccurrenceRef
-    logic — which REFUSES an ambiguous substring (several same-named instances) instead of silently
+    logic - which REFUSES an ambiguous substring (several same-named instances) instead of silently
     grabbing the first (the wrong-instance bug). Returns (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence(name, name)
 
@@ -71,7 +71,7 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     """Set an occurrence's STATELESS parent lock (isGroundToParent).
 
     occurrence: the occurrence to change. 'ground_to_parent' (true/false): the default rigid-to-parent
-    lock — true holds the part fixed relative to its parent/assembly; set false to FREE a
+    lock - true holds the part fixed relative to its parent/assembly; set false to FREE a
     fresh/patterned occurrence so it can be moved (assembly_move) or jointed. To fix a part in space,
     ground_to_parent=true and position it with assembly_move. WRITES.
     """
@@ -119,16 +119,16 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
                  rotate_deg: float = 0.0, rotate_axis: str = "z", units: str = "mm",
                  rotate_x: float = 0.0, rotate_y: float = 0.0, rotate_z: float = 0.0,
                  quiet: bool = False) -> dict:
-    """Translate (and optionally rotate) an occurrence by editing its transform — a free move.
+    """Translate (and optionally rotate) an occurrence by editing its transform - a free move.
 
     occurrence: the occurrence to move. dx/dy/dz: translation in 'units' (mm default). rotate_deg /
     rotate_axis: a SINGLE rotation about a world axis (x/y/z) or a straight-edge handle, through the
     occurrence's current position. rotate_x / rotate_y / rotate_z: compose a MULTI-AXIS orientation in
-    one call (applied X then Y then Z, about the occurrence's current origin) — use these OR
+    one call (applied X then Y then Z, about the occurrence's current origin) - use these OR
     rotate_deg, not both. One-shot reposition (no joint). WRITES.
 
     JOINTED PARTS: moving an occurrence that participates in JOINTS is how you POSE a mechanism along
-    its free DOF (e.g. spin a part on its revolute axis) — this is the sanctioned path. AFTER the move,
+    its free DOF (e.g. spin a part on its revolute axis) - this is the sanctioned path. AFTER the move,
     call assembly_capture_position to record the pose into the timeline (otherwise it is transient), and
     assembly_probe to confirm the joints stayed healthy: a move that FIGHTS the joints (e.g. rotating a
     rigidly-jointed member off its mate) over-constrains the solve. When the target is jointed, the
@@ -139,7 +139,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     multi = (rotate_x or 0) or (rotate_y or 0) or (rotate_z or 0)
     if dx == 0 and dy == 0 and dz == 0 and (rotate_deg or 0) == 0 and not multi:
-        return error("Provide a translation (dx/dy/dz), rotate_deg, or rotate_x/y/z — no movement specified.")
+        return error("Provide a translation (dx/dy/dz), rotate_deg, or rotate_x/y/z - no movement specified.")
     if (rotate_deg or 0) and multi:
         return error("Use EITHER rotate_deg (single axis) OR rotate_x/y/z (multi-axis), not both.")
     design = _common.design()
@@ -149,7 +149,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
     if not occ:
         return error(occ_err)
 
-    # Moving a JOINTED occurrence poses it along its DOF — allowed (this is the sanctioned pose path),
+    # Moving a JOINTED occurrence poses it along its DOF - allowed (this is the sanctioned pose path),
     # but the pose is transient and a move that fights the joints over-constrains the solve. So we
     # proceed and WARN (naming the joints + the capture/probe next step) rather than refuse.
     joint_names = _occurrence_joint_names(occ)
@@ -160,7 +160,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
     try:
         if rotate_deg:
             # rotate_axis is an AxisRef: a world axis x/y/z (rotation axis through the occurrence's
-            # current origin), OR a straight-edge handle (rotation about THAT edge's line — direction
+            # current origin), OR a straight-edge handle (rotation about THAT edge's line - direction
             # AND a point both come from the edge, so you can swing a part about a real hinge edge).
             ax, aerr = _ROTATE_AXIS.resolve(rotate_axis)
             if aerr:
@@ -192,7 +192,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
                     r.setToRotation(math.radians(float(ang)), adsk.core.Vector3D.create(*vec), origin)
                     mat.transformBy(r)
             axis_desc = "multi"
-        # translation — COMPOSE it as its own matrix, never assign mat.translation directly. When mat
+        # translation - COMPOSE it as its own matrix, never assign mat.translation directly. When mat
         # already holds a rotation about a non-origin pivot, setToRotation baked a pivot-correction term
         # into mat's translation column; `mat.translation = vec` would OVERWRITE that column and the part
         # would rotate about the WORLD origin instead of its own. Composing a separate translation matrix
@@ -209,7 +209,8 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
     except Exception as e:
         return error(f"Could not move '{safe(lambda: occ.name)}': {e}")
 
-    note = "Occurrence repositioned (free move, no joint). Pair with view_screenshot to view."
+    note = ("Occurrence repositioned (free move, no joint). Pair with view_screenshot to view, and "
+            "assembly_interference to check the new position doesn't clash with other parts.")
     result = {
     "moved": True,
     "occurrence": safe(lambda: occ.name),
@@ -223,10 +224,10 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
         result["jointed_joints"] = joint_names
         result["jointed_warning"] = (
             f"'{safe(lambda: occ.name)}' is in {len(joint_names)} joint(s) "
-            f"({', '.join(joint_names[:6])}): this pose is TRANSIENT — call assembly_capture_position "
+            f"({', '.join(joint_names[:6])}): this pose is TRANSIENT - call assembly_capture_position "
             "to keep it, and assembly_probe to confirm the joints stayed healthy (a move that fights "
             "the joints over-constrains the solve).")
-        note = "Occurrence posed (jointed — see jointed_warning). Pair with view_screenshot to view."
+        note = "Occurrence posed (jointed - see jointed_warning). Pair with view_screenshot to view."
     result["note"] = note
     return ok(result)
 
@@ -264,7 +265,7 @@ def rigid_group_handler(occurrences: str = "", include_children: bool = False) -
 # ----------------------------------------------------------------------- tools
 
 _GROUND_DESC = (
-"Set an occurrence's 'ground_to_parent' lock — the STATELESS rigid-to-parent flag. true holds the "
+"Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag. true holds the "
 "part fixed relative to its parent/assembly; false FREES a fresh/patterned occurrence so it can be "
 "moved (assembly_move) or jointed. To fix a part IN SPACE, ground_to_parent=true and position it "
 "with assembly_move."
@@ -278,12 +279,12 @@ ground_tool = (
 ground_item = Item.create_tool_item(tool=ground_tool, write="write", handler=ground_handler, run_on_main_thread=True)
 
 _MOVE_DESC = (
-"Move an occurrence by editing its transform — a free reposition with NO joint/relationship "
+"Move an occurrence by editing its transform - a free reposition with NO joint/relationship "
 "created (use joint_create/assembly_constrain for a maintained relationship). 'dx'/'dy'/'dz' translate "
 "in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) optionally rotate about a world "
 "axis through the current position. The occurrence must be free to move (see assembly_ground: "
 "ground_to_parent=false). Moving a JOINTED occurrence POSES it (allowed) but the pose is transient "
-"— the result warns to assembly_capture_position it + assembly_probe its health."
+"- the result warns to assembly_capture_position it + assembly_probe its health."
 )
 move_tool = (
     Tool.create_simple(name="assembly_move", description=_MOVE_DESC)

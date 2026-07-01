@@ -1,9 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: CAM folders — interrogate / create / rename, and move operations into them.
+"""MCP building block: CAM folders - interrogate / create / rename, and move operations into them.
 
-  cam_folder(action=list|create|rename|move, setup=..., ...)
+  cam_edit_folders(action=list|create|rename|move, setup=..., ...)
 
 Folders organise a setup's operation tree. This tool covers their lifecycle:
   - list    -> the setup's folders, each with its operation / pattern / subfolder counts
@@ -13,13 +13,13 @@ Folders organise a setup's operation tree. This tool covers their lifecycle:
 
 Note on PATTERNS (mirror / linear / rotary): the API EXPOSES existing patterns (read + edit their
 parameters via cam_edit_operation, since a pattern has a .parameters collection) but does NOT allow
-CREATING them — operations.add() for a 'pattern' strategy raises "Strategy is not exposed to the API".
+CREATING them - operations.add() for a 'pattern' strategy raises "Strategy is not exposed to the API".
 Create patterns in the Manufacture UI; this tool is folders + moving existing operations.
 
 Grounded in adsk.cam (verified live):
   - Setup.folders (CAMFolders): .count / .item(i) / .itemByName / .addFolder(name) -> CAMFolder
   - CAMFolder(.name get/set, .operations, .patterns, .folders, .deleteMe())
-  - OperationBase.moveInto(container) -> bool ("works with setups, patterns and folders") — shared by
+  - OperationBase.moveInto(container) -> bool ("works with setups, patterns and folders") - shared by
     operations / folders / patterns
 Handler runs on the main thread; WRITES CAM data (create/rename/move). 'list' is read-only.
 """
@@ -84,7 +84,7 @@ def _do_list(setup):
         })
     return ok({"setup": safe(lambda: setup.name), "folder_count": len(out), "folders": out,
                "note": "Folders organise the operation tree. Create with action='create', move ops in "
-                       "with action='move'. (Patterns are created in the UI — the API won't add them.)"})
+                       "with action='move'. (Patterns are created in the UI - the API won't add them.)"})
 
 
 def _do_create(setup, name):
@@ -181,14 +181,14 @@ TOOL_DESCRIPTION = (
     "'create' (new folder by 'name'), 'rename' ('folder' -> 'new_name'), 'move' ('operations' names INTO "
     "'folder'). 'setup' = the setup name throughout. WRITES (except list). NOTE: patterns "
     "(mirror/linear/rotary) can be READ + their parameters EDITED (via cam_edit_operation) but NOT "
-    "created via the API — make those in the Manufacture UI."
+    "created via the API - make those in the Manufacture UI."
 )
 
 tool = (
-    Tool.create_simple(name="cam_folder", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="cam_edit_folders", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
             "description": "list / create / rename / move."})
-    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get_setups)."})
+    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("name", {"type": "string", "description": "New folder name (create)."})
     .add_input_property("folder", {"type": "string", "description": "Target folder (rename / move)."})
     .add_input_property("new_name", {"type": "string", "description": "New name (rename)."})

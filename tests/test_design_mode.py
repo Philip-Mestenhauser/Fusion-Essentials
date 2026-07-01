@@ -1,7 +1,7 @@
-"""Unit tests for design_mode.py — design_get_mode / design_set_mode / model_base_feature.
+"""Unit tests for design_mode.py — get_mode_handler (design_get's mode slice) / design_set_mode / model_base_feature.
 
 Pinned (the definition of done):
-  • design_get_mode reports each designType + the capability `can{}` map (derived from the ONE true
+  • get_mode_handler reports each designType + the capability `can{}` map (derived from the ONE true
     reader, so report and guards agree).
   • design_set_mode REFUSES parametric->direct without confirm, SUCCEEDS with confirm, and
     direct->parametric is free (no confirm); idempotent no-op when already in target.
@@ -199,7 +199,7 @@ def _reset_open_scopes():
     dm._OPEN_BASE_FEATURES.clear()
 
 
-# ── design_get_mode ─────────────────────────────────────────────────────────
+# ── get_mode_handler (mode slice) ─────────────────────────────────────────────────────────
 
 class TestGetMode:
     def test_no_active_design(self):

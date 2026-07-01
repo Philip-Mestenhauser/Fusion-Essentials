@@ -32,12 +32,12 @@ in-Fusion integration layer (driven via the Fusion MCP server), not here.
 ### Triage when deciding whether a tool needs tests
 
 - **Tier 1 — test thoroughly.** Real logic: unit math, parsing, classification,
-  path/name resolution, state tallies. (model_measure_bbox, sys_selection,
-  cam_read, data_ops/doc_lifecycle, param_ops, design_get_configurations,
+  path/name resolution, state tallies. (model_inspect, sys_selection,
+  cam_read, data_ops/doc_lifecycle, param_ops, design_configure,
   joint_create_edit, joint_create_origin, cam_templates, sketch_core.)
 - **Tier 2 — test the one or two real helpers.** Mostly Fusion orchestration
   with a pure helper or two worth pinning. (doc_open URN parsing, quoting
-  helpers, design_get_tree/view_set_visibility lookups, design_get_timeline/
+  helpers, design_get tree/timeline slices,
   doc_update_xref/cam_generate helpers.)
 - **Tier 3 — skip.** Fusion pass-throughs with no pure logic. Skipping is
   correct, not lazy.
@@ -53,14 +53,14 @@ Two problems make these tools awkward to import in a test, both solved in
    **before** any tool is imported (it's called at collection time).
 2. **Importing the package pulls in Fusion-dependent code.** `entry.py`
    auto-discovers and imports every tool (most need Fusion) and
-   `commands/__init__.py` builds UI panels. `load_tool("model_measure_bbox")`
+   `commands/__init__.py` builds UI panels. `load_tool("model_inspect")`
    sidesteps both: it puts `commands/` on the path, imports only the cheap
    adsk-free packages, stubs `mcpServer.tools`, then spec-loads the single
    requested module so its `from ..mcp_primitives ...` relative imports resolve.
 
 ```python
 from conftest import load_tool
-mbb = load_tool("model_measure_bbox")   # at module level
+mi = load_tool("model_inspect")   # at module level
 ```
 
 ### The one rule the mocks impose: assert on concrete values
@@ -79,16 +79,41 @@ behave correctly. If a tool reads some `adsk` attribute that returns a stray
 Mock and pollutes a JSON payload, fix it **in the harness** (model that
 attribute) rather than in each test.
 
-### Fakes
+### Fakes — extend the shared ones; don't fork a bespoke hierarchy
 
-Small classes named to match Fusion's runtime type names (because tools branch
-on `type(x).__name__`): `BRepFace`, `BRepEdge`, `Plane`, `Cylinder`, `Line3D`,
-`Circle3D`, `BRepBody`, `Component`, `FakeVector3D`, `FakePoint`, etc. They
-implement only the interface a tool actually reads. **Extend them as needed** —
-that's the intended workflow, the same "grow the mock as you go" model the
-bootstrap kit's `mock_adsk.py` uses, adapted to this project's layout.
+`conftest.py` ships the shared fakes: `make_design` / `MakeComp` / `MakeDesign`
+build a design, and `install(mod, design)` wires it into a tool. Smaller classes
+named to match Fusion's runtime type names (tools branch on `type(x).__name__`):
+`BRepFace`, `BRepEdge`, `Plane`, `Cylinder`, `Line3D`, `Circle3D`, `BRepBody`,
+`Component`, `FakeVector3D`, `FakePoint`. They implement only the interface a tool
+actually reads.
+
+**When `MakeComp`/`MakeDesign` lack a surface your tool needs, extend the shared
+fake — do not fork a bespoke `Fake*` hierarchy into your test file.** Most of the
+older tests roll their own `Fake*` classes plus an imperative `_install()` that
+pokes module-level seams (`mod.app = ...`); that pattern leaks state into the next
+test and is the reason `conftest.py` carries a large snapshot/restore fixture to
+compensate. It's the anti-pattern, not the model. (Same "extend the kind, don't
+copy it" rule the tools themselves follow.)
 
 ## Adding tests for a new tool
+
+### The canonical examples — copy one of these
+
+Pick the closest and copy its shape. Each is kept clean on purpose; a new test
+should be indistinguishable in structure from its model.
+
+- **A rich read (`<domain>_get`)** → copy **`test_design_get.py`**. A
+  `@pytest.fixture` stubs the `_slice_*` seams with `monkeypatch`; tests assert the
+  router's composition (default = orientation slice only; each `include=` adds its
+  slice; the note advertises the rest). `test_cam_get.py` is the same shape.
+- **A logic tool (geometry / resolution / state)** → copy **`test_model_inspect.py`**.
+  It uses the shared `make_design`/`MakeComp` fakes via `install`, all set up with
+  `monkeypatch` — no local `Fake*` classes, no imperative seam-poking.
+- **A pure function (parse / encode / convert)** → copy **`test_quoting.py`**.
+  No Fusion at all; just call it and round-trip the result.
+
+Then:
 
 1. Read the tool. List its `_helper` functions and the `handler`. Find the pure
    logic: unit math, parsing, the 0/1/N branches, validation gates, the
@@ -99,8 +124,11 @@ bootstrap kit's `mock_adsk.py` uses, adapted to this project's layout.
    ends up in `SPEC.md`.
 4. Assert on concrete values. Cover sizes **0, 1, 2, N** for anything taking a
    collection. Round-trip any encode/decode pair (see `test_quoting.py`).
-5. Add fakes to `conftest.py` only if more than one test file needs them;
-   otherwise keep them local to the test file.
+5. **Set up state with `monkeypatch` or a `@pytest.fixture`, never an imperative
+   `mod.app = …` poke.** Both undo themselves after the test, so no state leaks
+   into the next one. Use the shared `make_design`/`install` fakes; if they lack a
+   surface, **extend them in `conftest.py`** rather than forking a local `Fake*`
+   hierarchy (see "Fakes" above).
 6. If a tool needs an `adsk` attribute that isn't modelled, add it to
    `install_mock_adsk()` (or a `.cast` pass-through) — once, in the harness.
 

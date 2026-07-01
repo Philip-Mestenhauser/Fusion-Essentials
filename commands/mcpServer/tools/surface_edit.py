@@ -1,19 +1,19 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: EDIT open (non-solid) surface bodies — clean boundaries, push them out.
+"""MCP building blocks: EDIT open (non-solid) surface bodies - clean boundaries, push them out.
 
   surface_trim    -> remove cells of a surface on one side of a tool (TrimFeatures).
   surface_extend  -> grow a surface outward from its open edges (ExtendFeatures).
   surface_offset  -> offset faces by a distance into ANOTHER surface (OffsetFeatures).
-  surface_thicken -> thicken faces into a SOLID wall (ThickenFeatures) — the surface->solid bridge.
+  surface_thicken -> thicken faces into a SOLID wall (ThickenFeatures) - the surface->solid bridge.
 
 These consume the open surfaces surface_create produces and, once boundaries are coincident (trim/
 extend), hand off to stitch (sibling proposal). offset stays a surface; thicken yields a solid.
 
 THE TRIM LIFECYCLE HAZARD (baked in here): TrimFeatures.createInput opens a partial-compute
 transaction. You MUST either commit it via TrimFeatures.add(input) or abort it via
-TrimFeatureInput.cancel() — "if you don't call add it leaves Fusion in a bad state ... possibly crash."
+TrimFeatureInput.cancel() - "if you don't call add it leaves Fusion in a bad state ... possibly crash."
 So the trim handler runs the whole create->add sequence in an explicit try, and on ANY failure calls
 input.cancel() in a finally-style guard BEFORE returning an error. This path is deliberately NOT
 wrapped in safe(): swallowing the exception would leak the open transaction. (safe() is fine for the
@@ -139,7 +139,7 @@ def _select_cells(trim_input, keep):
 
 
 def _result_bodies(feature):
-    """(names, any_solid) for a feature's bodies — read name + isSolid LIVE per body."""
+    """(names, any_solid) for a feature's bodies - read name + isSolid LIVE per body."""
     names = []
     any_solid = False
     bodies = safe(lambda: feature.bodies)
@@ -155,13 +155,13 @@ def _result_bodies(feature):
 # ── surface_trim (the cancel-hazard handler) ────────────────────────────────
 
 def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
-    """Trim a surface against a tool that intersects it — remove the unwanted cell(s).
+    """Trim a surface against a tool that intersects it - remove the unwanted cell(s).
 
     'surface': the OPEN surface body (isSolid==false). 'trim_tool': a face / patch body / plane that
     intersects it. 'keep': optional cell(s) to keep (default keeps the larger remainder). WRITES.
 
     Lifecycle: createInput opens a partial-compute transaction; this handler commits it via add() or
-    aborts it via input.cancel() on ANY failure — never swallowed (a leaked transaction can crash).
+    aborts it via input.cancel() on ANY failure - never swallowed (a leaked transaction can crash).
     """
     design = _common.design()
     if not design:
@@ -175,7 +175,7 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
     if terr:
         return error(terr)
 
-    # CRITICAL: createInput opens a transaction. Commit via add() or abort via cancel() — explicitly,
+    # CRITICAL: createInput opens a transaction. Commit via add() or abort via cancel() - explicitly,
     # NOT under safe(). On any exception (or a null feature) cancel() the input before returning.
     # createInput partial-computes and populates input.bRepCells; you MUST set isSelected on the cells
     # to remove BEFORE add() (selected == removed) or add() raises "No cells are selected".
@@ -198,7 +198,7 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
             safe(lambda: trim_input.cancel())
         return error(f"Trim failed: {e}. (The trim tool must INTERSECT the surface and divide it.)")
     if not feature:
-        # add() returned nothing but didn't raise — still must abort the transaction we opened
+        # add() returned nothing but didn't raise - still must abort the transaction we opened
         if trim_input is not None:
             safe(lambda: trim_input.cancel())
         return error("Trim returned no feature (the tool may not intersect the surface). "
@@ -330,7 +330,7 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
 
 def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
                     symmetric: bool = False, chaining: bool = True, operation: str = "new") -> dict:
-    """Thicken faces into a SOLID wall — the surface->solid bridge (competes with stitch).
+    """Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch).
 
     'faces': faces (or patch bodies) to thicken; need not be connected or from the same body.
     'thickness' (non-zero) in 'units'. 'symmetric' thickens both sides. 'operation': new | join | cut.
@@ -385,7 +385,7 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
 # ── tool / item wiring ──────────────────────────────────────────────────────
 
 _TRIM_DESC = (
-"Trim an OPEN surface body against a tool that intersects it — remove the unwanted cell(s). "
+"Trim an OPEN surface body against a tool that intersects it - remove the unwanted cell(s). "
 "'surface' is the surface (isSolid==false, validated); 'trim_tool' is a face / patch body that "
 "intersects and divides it; 'keep' optionally picks which cell(s) to keep (default the larger "
 "remainder). Lifecycle-safe: createInput opens a partial-compute transaction committed via add() "
@@ -445,7 +445,7 @@ surface_offset_item = Item.create_tool_item(tool=surface_offset_tool, write="wri
                                             run_on_main_thread=True)
 
 _THICKEN_DESC = (
-                                            "Thicken faces into a SOLID wall — the surface->solid bridge (competes with stitch: thicken makes "
+                                            "Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes "
                                             "a wall, stitch closes a watertight surface set). 'faces' (or patch bodies) need not be connected "
                                             "or from one body; 'thickness' (non-zero) in 'units'; 'symmetric' thickens both sides; "
                                             "'operation': new | join | cut; 'chaining' selects the connected face set (default true). Produces "

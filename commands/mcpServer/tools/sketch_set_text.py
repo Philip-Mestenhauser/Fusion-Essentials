@@ -12,13 +12,13 @@ fixture or label, but the tool is agnostic about why.
 
 HOW (grounded live): a SketchText's content is NOT settable via its definition
 (`MultiLineTextDefinition` has no `.text`). The writable handle is `SketchText.textParameter`
-— a ModelParameter whose expression is the QUOTED string (e.g. `'Label Text'`). Setting
+- a ModelParameter whose expression is the QUOTED string (e.g. `'Label Text'`). Setting
 `textParameter.expression = "'NewText'"` updates the engraving. No assembly-context proxy is
 needed for the write (verified live).
 
 Grounded in adsk.fusion:
-  - Sketch.sketchTexts (SketchTexts) — iterate; each is a SketchText
-  - SketchText.textParameter (ModelParameter) — .expression is the quoted string (settable)
+  - Sketch.sketchTexts (SketchTexts) - iterate; each is a SketchText
+  - SketchText.textParameter (ModelParameter) - .expression is the quoted string (settable)
   - Design.allComponents -> Component.sketches.itemByName / iterate
 Handler runs on the main thread; WRITES to the design.
 """
@@ -42,7 +42,7 @@ _MAX = 500
 def _create_text(design, text, sketch_name, height, x, y, units):
     """Create a new SketchText in the named sketch at (x,y) with the given height. WRITES."""
     if not (sketch_name or "").strip():
-        return error("create=true needs 'sketch_name' — the sketch to add the text to (create one "
+        return error("create=true needs 'sketch_name' - the sketch to add the text to (create one "
     "first with sketch_create).")
     k = scale(units)
     if k is None:
@@ -54,7 +54,7 @@ def _create_text(design, text, sketch_name, height, x, y, units):
     if h <= 0:
         return error("'height' must be > 0.")
 
-    # Resolve across the whole design (active component first) — a sketch created in an activated
+    # Resolve across the whole design (active component first) - a sketch created in an activated
     # sub-component must be a valid text target, not only one in the root component.
     sk = resolve_sketch(design, sketch_name.strip())
     if not sk:
@@ -126,7 +126,7 @@ def _iter_sketch_texts(design, sketch_name):
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
             create: bool = False, height: float = 5.0, x: float = 0.0, y: float = 0.0,
             units: str = "mm") -> dict:
-    """Set the displayed string of sketch text entities — or CREATE new text (create=true).
+    """Set the displayed string of sketch text entities - or CREATE new text (create=true).
 
     text: the string to display. sketch_name: the sketch to act in (for create it's REQUIRED; for
     edit, omit to update EVERY sketch text). index: for edit, the 0-based text to update (-1 = all).
@@ -134,7 +134,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     in the named sketch, instead of editing. WRITES.
     """
     if text is None:
-        return error("Provide 'text' — the string to display.")
+        return error("Provide 'text' - the string to display.")
 
     design = _common.design()
     if not design:
@@ -177,7 +177,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
 
     # Force a recompute so DOWNSTREAM features rebuild against the new text. Changing
     # textParameter.expression updates the sketch, but a feature that consumes the text (e.g. an
-    # Emboss/extrude that engraves it) can show STALE geometry until the design recomputes — which
+    # Emboss/extrude that engraves it) can show STALE geometry until the design recomputes - which
     # is why an engraving can look unchanged even though the text value is correct. computeAll()
     # makes the visible model match. Only meaningful in parametric mode (direct mode has no tree).
     recomputed = False
@@ -203,9 +203,9 @@ TOOL_DESCRIPTION = (
 "Set the displayed string of sketch text entities (e.g. an engraved label / nameplate) in "
 "the active design. 'text' is the new string. 'sketch_name' limits the change to sketch "
 "texts inside the sketch with that exact name (omit to update EVERY sketch text in the "
-"design — use a name like 'File_Name' to target one). 'index' picks one text if a sketch "
+"design - use a name like 'File_Name' to target one). 'index' picks one text if a sketch "
 "has several (0-based; default all). WRITES to the design; reports each text's before/after. "
-"Read sketch names with sketch_get. Generic: it just edits the text — stamping a part/file "
+"Read sketch names with sketch_get. Generic: it just edits the text - stamping a part/file "
 "name onto a fixture is a common use but not the only one."
 )
 

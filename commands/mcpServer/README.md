@@ -57,8 +57,9 @@ Work by **progressive disclosure**, not by dumping whole documents:
    *pointers* to the right narrow tool for each area. The workspace/product decides
    which environment you're in and which deep read is meaningful.
 2. **Read state with the right tool** before reasoning — `assembly_probe` (kinematics: positions,
-   ground flags, joint wiring), `design_get_timeline` (build intent), `cam_get_setups`/
-   `cam_get_operations` (CAM), `param_get` (the parametric skeleton), `sketch_get` (one sketch's
+   ground flags, joint wiring), `design_get` (mode/tree/timeline/health/configs in one read — default
+   for orientation, `include=['timeline']` for build intent), `cam_get` (CAM setups/operations/tools
+   in one read), `param_get` (the parametric skeleton), `sketch_get` (one sketch's
    structure). These give STRUCTURED STATE.
 3. **Verify with numbers, not pixels.** A screenshot of an assembly is the least reliable input —
    parts overlap at the origin and the active component greys the rest out. Reach for it last, and
@@ -67,7 +68,7 @@ Work by **progressive disclosure**, not by dumping whole documents:
 
 **Know the blind spots** — places a read looks authoritative but isn't, so you draw a silent wrong
 conclusion (CAM validity is stale outside Manufacture; `is_fully_constrained` is sketch-only with no
-DOF count; grounding is a two-flag trap; `doc_list_open` is a superset of tabs; bbox-center ≠
+DOF count; grounding is a two-flag trap; `doc_get` is a superset of tabs; bbox-center ≠
 modelling origin; saves/opens are async). The full per-environment reference is
 [`docs/reading-fusion-state.md`](../../docs/reading-fusion-state.md) — consult it on a first-contact
 session or whenever a read result is ambiguous.
@@ -83,9 +84,9 @@ prefix tells you the area —
 | Prefix | Area | Examples |
 |--------|------|----------|
 | `sys_` | session / introspection / the script escape hatch | `sys_find_tool`, `sys_get_api_doc`, `sys_execute_script` |
-| `data_` | the cloud data model (projects, folders, files) | `data_list_files`, `data_upload_file`, `data_delete_file` |
+| `data_` | the cloud data model (projects, folders, files) | `data_get`, `data_upload_file`, `data_delete_file` |
 | `doc_` | document lifecycle (open / save / copy / insert) | `doc_open`, `doc_save_as`, `doc_insert_occurrence` |
-| `design_` | the active design as a whole (tree, timeline, mode) | `design_get_tree`, `design_get_timeline`, `design_recompute` |
+| `design_` | the active design as a whole (tree, timeline, mode) | `design_get`, `design_configure`, `design_recompute` |
 | `sketch_` | 2D sketching | `sketch_create`, `sketch_add_geometry`, `sketch_constrain` |
 | `model_` | solid features | `model_extrude`, `model_revolve`, `model_fillet`, `model_pattern_circular` |
 | `joint_` | joints & joint origins | `joint_create`, `joint_at_geometry`, `joint_create_origin` |
@@ -93,7 +94,7 @@ prefix tells you the area —
 | `param_` | parameters | `param_get`, `param_set`, `param_add` |
 | `find_` | geometry queries returning handles | `find_geometry` |
 | `view_` | workspace & viewport (screenshots, isolate, section) | `view_screenshot`, `view_inspect`, `view_section` |
-| `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get_setups`, `cam_generate`, `cam_get_status` |
+| `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get`, `cam_generate`, `cam_get_status` |
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
 
 Every tool's result declares whether it **mutates** (read / writes the design / writes to
@@ -123,8 +124,8 @@ here when learning the surface:
 - The CAM tools read CAM data **without requiring you to switch to the Manufacture
   workspace**.
 - `doc_open` / `doc_save_as` are **asynchronous**: the call returns before the document is
-  fully active/saved — confirm with `workspace_orient` / `doc_get_active_id` afterward.
-- `cam_get_time` needs generated toolpaths to be meaningful.
+  fully active/saved — confirm with `workspace_orient` / `doc_get` afterward.
+- `cam_get(include=['time'])` needs generated toolpaths to be meaningful.
 - `cam_generate` is fire-and-poll: it returns immediately with a handle; poll `cam_get_status`
   until done (it never blocks for the multi-minute compute).
 

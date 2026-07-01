@@ -5,20 +5,20 @@
 
   sys_request_selection -> clear the current selection and ask the user to click a
                             face/edge/vertex/body/component in Fusion. Returns IMMEDIATELY
-                            (non-blocking). No Fusion dialog — the *agent* presents the
+                            (non-blocking). No Fusion dialog - the *agent* presents the
                             confirmation (e.g. a chat button) and the user clicks it to hand
                             control back, with one click and no typing.
   sys_get_selection     -> read what the user has selected in Fusion (ui.activeSelections)
                             and return structured details per entity (type, owning body /
                             component, geometry hints, click point) for the agent to intuit.
 
-DESIGN — the confirmation lives in the AGENT'S UI, not Fusion. The user clicks an entity in
+DESIGN - the confirmation lives in the AGENT'S UI, not Fusion. The user clicks an entity in
 Fusion, then clicks the agent's "I've selected it" control (a structured-output button in the
 chat) which returns straight to the agent; the agent then calls sys_get_selection. There is
 NO Fusion OK button and no "type ready" step. (A Fusion command dialog with an OK button was
 tried but rejected: it forces a second hand-off inside Fusion instead of in the chat.)
 
-Both handlers read ui.activeSelections — they never block (ui.selectEntity() WOULD block the
+Both handlers read ui.activeSelections - they never block (ui.selectEntity() WOULD block the
 main thread, so it is deliberately avoided).
 
 Grounded in adsk.core / adsk.fusion:
@@ -221,7 +221,7 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
     By default clears the existing selection so the user starts clean. 'what' (face/edge/
     vertex/body/component/any) only shapes the prompt. The agent should then present its OWN
     one-click confirmation (e.g. a chat button); when the user clicks it, call
-    sys_get_selection — there is no Fusion OK button and no need for the user to type.
+    sys_get_selection - there is no Fusion OK button and no need for the user to type.
     """
     ui = _ui()
     if not ui:
@@ -241,7 +241,7 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
         "active_document": safe(lambda: app.activeDocument.name),
     "instructions_for_user": (
             f"Click {hint} in the Fusion window (rotate/zoom as needed). You don't need to "
-            "press anything in Fusion — just select it, then confirm here when ready."),
+            "press anything in Fusion - just select it, then confirm here when ready."),
     "next_step": ("Present a one-click confirmation to the user (a structured-output "
             "button). When they click it, call sys_get_selection to read the pick."),
     })
@@ -304,7 +304,7 @@ def get_user_selection_handler(require: str = "") -> dict:
 _REQUEST_DESC = (
     "Hand control to the USER to pick an entity in Fusion. Use this when you need the user to "
     "identify a face, edge, vertex, body, or component you cannot unambiguously name. It clears "
-    "the current selection (by default) and returns IMMEDIATELY — it does NOT open a Fusion "
+    "the current selection (by default) and returns IMMEDIATELY - it does NOT open a Fusion "
     "dialog and does NOT block. The user simply clicks the entity in the model; YOU provide the "
     "one-click confirmation in the chat (a structured-output button). 'what' = face | edge | "
     "vertex | body | component | any (default any) only shapes the prompt. After the user "

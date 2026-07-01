@@ -1,13 +1,14 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Read-only MCP building blocks for understanding the Fusion data model.
+"""Cloud data-model READ cores: the project list + a project's file listing.
 
-Lets an AI agent answer questions like "what files are in project X?" and return
-each document's unique IDs and an openable Fusion URL.
+These are the cores behind data_get (the registered cloud rich read); data_get delegates to them so the
+cloud-error guards + enumeration caps live in one place. They answer "what projects exist?" and "what
+files are in project X?" - each file with its unique IDs and an openable Fusion URL.
 
 Grounded in the Fusion Data API (adsk.core.Data / DataProject / DataFolder /
-DataFile) — see FusionAPIReference defs:
+DataFile) - see FusionAPIReference defs:
   - app.data.dataProjects -> DataProjects.asArray() -> DataProject(.name/.id)
   - DataProject.rootFolder -> DataFolder(.dataFolders / .dataFiles)
   - DataFile: .name, .id (lineage URN), .versionId (versioned URN),
@@ -33,7 +34,7 @@ _MAX_FOLDER_DEPTH = 25
 
 
 # ---------------------------------------------------------------------------
-# data_list_projects
+# data_get default scope: the active hub's projects
 # ---------------------------------------------------------------------------
 
 def list_projects_handler() -> dict:
@@ -62,7 +63,7 @@ def list_projects_handler() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# data_list_files
+# data_get(project=...) scope: a project's files
 # ---------------------------------------------------------------------------
 
 def list_project_files_handler(project: str = "", project_id: str = "",
@@ -74,7 +75,7 @@ def list_project_files_handler(project: str = "", project_id: str = "",
     recursively (capped).
 
     Optional 'folder' = a folder PATH within the project (e.g. "Workflow Templates" or a nested
-    "Parts/Fixtures") to scope the listing to JUST that folder — avoids dumping the whole project
+    "Parts/Fixtures") to scope the listing to JUST that folder - avoids dumping the whole project
     (which can overflow on large projects). With 'folder', set recursive=false to list only the
     immediate files in that folder (not its subfolders).
     """
@@ -148,7 +149,7 @@ def list_project_files_handler(project: str = "", project_id: str = "",
 
     try:
         if want_folder and not recursive:
-            # immediate files only — do not descend
+            # immediate files only - do not descend
             for f in start_folder.dataFiles.asArray():
                 if len(files) >= _MAX_FILES:
                     truncated["value"] = True
@@ -245,53 +246,6 @@ def _file_summary(f, folder_path: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# tool definitions
-# ---------------------------------------------------------------------------
-
-_list_projects_tool = Tool.create_simple(
-    name="data_list_projects",
-    description=(
-    "List the Fusion data projects in the user's active hub. Returns each "
-    "project's name and id. Use this to discover available projects before "
-    "listing their files."
-    ),
-).strict_schema()
-
-list_projects_item = Item.create_tool_item(
-    tool=_list_projects_tool, write="read", handler=list_projects_handler, run_on_main_thread=True
-)
-
-_list_project_files_tool = (
-    Tool.create_simple(
-        name="data_list_files",
-        description=(
-            "List the files in a Fusion data project, identified by name (project) "
-            "or id (project_id). Returns each file's name, id (stable lineage UID), "
-            "versionId (versioned UID), fileExtension, versionNumber, and "
-            "fusionWebURL — a URL that opens the file in Fusion/the Fusion web "
-            "interface. Read-only. Results are capped for very large projects (see "
-            "'truncated'). Pass 'folder' (a folder PATH like 'Workflow Templates' or nested "
-            "'Parts/Fixtures') to scope the listing to JUST that folder — use this to avoid "
-            "dumping a whole large project. With 'folder', set recursive=false to list only the "
-            "immediate files in it (default true descends into subfolders)."
-        ),
-    )
-    .add_input_property("project", {"type": "string", "description": "Project name (case-insensitive)."})
-    .add_input_property("project_id", {"type": "string", "description": "Project id (alternative to name)."})
-    .add_input_property("folder", {"type": "string",
-        "description": "Optional folder path within the project to scope the listing to (e.g. 'Workflow Templates')."})
-    .add_input_property("recursive", {"type": "boolean",
-        "description": "With 'folder': descend into subfolders (default true) or list only immediate files (false)."})
-    .strict_schema()
-)
-
-list_project_files_item = Item.create_tool_item(
-    tool=_list_project_files_tool, write="read", handler=list_project_files_handler, run_on_main_thread=True
-)
-
-
-def register_tool():
-    """Register both data-model read tools."""
-    register(list_projects_item)
-    register(list_project_files_item)
+# list_projects_handler / list_project_files_handler are the project + file read cores that data_get
+# delegates to (data_get is the registered rich read; these carry the cloud-error guards + caps). No
+# register_tool() here - this module exposes cores, not tools.

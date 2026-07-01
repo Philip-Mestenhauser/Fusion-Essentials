@@ -85,8 +85,8 @@ def _collect_items():
 
     Tools live one-per-module under ``tools/`` and expose a ``register_tool()`` (a few self-register on
     import; ``register_tool()`` is then a harmless no-op). Rather than hand-maintain a parallel list of
-    ~64 ``tools.X.register_tool()`` calls here AND a parallel import list in ``tools/__init__.py`` — two
-    registries that drift whenever a tool is added — we sweep the package with ``pkgutil`` and call each
+    ~64 ``tools.X.register_tool()`` calls here AND a parallel import list in ``tools/__init__.py`` - two
+    registries that drift whenever a tool is added - we sweep the package with ``pkgutil`` and call each
     module's ``register_tool()``. The registry's name-collision guard makes a double-register loud, and
     a module without ``register_tool()`` (a ``_``-prefixed helper) is skipped.
 
@@ -124,7 +124,7 @@ def _collect_items():
     except Exception as e:
         futil.log(f'{CMD_NAME}: sys_reload_addin.install_reload_event() failed: {e}')
 
-    # The high-risk arbitrary-script tool is gated and SKIPPED by the sweep — import it explicitly and
+    # The high-risk arbitrary-script tool is gated and SKIPPED by the sweep - import it explicitly and
     # register it ONLY when the user has opted in.
     if _execute_api_script_allowed():
         try:
@@ -225,9 +225,9 @@ def _warn_port_conflict(reason: str):
     """
     msg = (
         f'{reason}\n\n'
-        'To use the Fusion-Essentials MCP server instead, turn OFF Fusion’s '
+        "To use the Fusion-Essentials MCP server instead, turn OFF Fusion's "
         'built-in "Fusion MCP Server" setting in Preferences, then reload '
-        'Fusion-Essentials (Utilities → Add-Ins → Stop, then Run).\n\n'
+        'Fusion-Essentials (Utilities -> Add-Ins -> Stop, then Run).\n\n'
         'Opening Preferences now...'
     )
     futil.log(msg)

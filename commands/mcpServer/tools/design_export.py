@@ -10,7 +10,7 @@ This closes the export half of a neutral-format round-trip: pair it with data_up
 the exported file back into the cloud (where STEP/IGES are translated to a Fusion design). Without
 this, an agent had no tool to get a body out to STEP.
 
-'target' is a BodyRef (a find_geometry HANDLE — precise, since bodies are auto-named — or a body
+'target' is a BodyRef (a find_geometry HANDLE - precise, since bodies are auto-named - or a body
 NAME), or a component/occurrence name, or omitted for the WHOLE design. 'format' is one of
 step/iges/sat/stl. 'file_path' is the local output path (the format extension is appended if missing).
 
@@ -66,11 +66,11 @@ def _resolve_target(design, target):
 
     # Handle / entity token -> a specific body (bodies are auto-named, so a handle is precise). Try the
     # sanctioned resolver (composite-handle aware + self-healing) FIRST; a plain name returns None here
-    # and falls through to the name lookups below — so we never guess handle-vs-name by string length.
+    # and falls through to the name lookups below - so we never guess handle-vs-name by string length.
     ent = _inputs._resolve_token_entity(design, name)
     if ent is not None:
         if isinstance(ent, adsk.fusion.BRepBody):
-            return ent, f"body (handle {name[:10]}…)"
+            return ent, f"body (handle {name[:10]}...)"
         return None, None
 
     # Component by name (export the whole component).
@@ -123,7 +123,7 @@ def _export_one(em, factory_name, is_stl, geom, path):
     except Exception as e:
         return False, str(e)
     if not did:
-        return False, "export returned false — nothing was written"
+        return False, "export returned false - nothing was written"
     return True, None
 
 
@@ -131,7 +131,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             split_by_component: bool = False) -> dict:
     """Export 'target' (body/component/occurrence, or whole design) to 'file_path' in 'format'.
 
-    split_by_component=true exports EACH top-level occurrence to its own file (one per part — what 3D
+    split_by_component=true exports EACH top-level occurrence to its own file (one per part - what 3D
     printing wants) into the directory 'file_path', named '<part><ext>'; 'target' is ignored in that mode.
     """
     fmt, ferr = _FORMAT.resolve(format)
@@ -141,7 +141,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
     path = (file_path or "").strip().strip('"')
     if not path:
-        return error("Provide 'file_path' — the local output path (a file, or a DIRECTORY when "
+        return error("Provide 'file_path' - the local output path (a file, or a DIRECTORY when "
     "split_by_component=true). The format extension is appended if missing.")
 
     design = _common.design()
@@ -161,7 +161,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         occs = list(safe(lambda: root.occurrences) and
                     [root.occurrences.item(i) for i in range(root.occurrences.count)] or [])
         if not occs:
-            return error("No top-level occurrences to split — the design has no component instances. "
+            return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
         files, errors, used = [], [], {}
         for occ in occs:
@@ -185,7 +185,7 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "file_count": len(files),
             "files": files,
             "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} files. Each "
-            "top-level occurrence is one file — ready to print/assemble individually.",
+            "top-level occurrence is one file - ready to print/assemble individually.",
         }
         if errors:
             out["failed"] = errors
@@ -228,15 +228,12 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export a body, component/occurrence, or the WHOLE design to a neutral CAD file on local disk "
-    "(STEP / IGES / SAT / STL). 'target' is a body HANDLE from find_geometry (precise — bodies are "
-    "auto-named) OR a body/component/occurrence NAME, or omit it to export the whole design. "
-    "'format' is one of step/iges/sat/stl (default step). 'file_path' is the local output path (the "
-    "format extension is appended if missing; the directory is created if needed). Set "
-    "split_by_component=true to export EACH top-level occurrence to its own file (one per part — what "
-    "3D printing wants) into the DIRECTORY 'file_path' ('target' is ignored in that mode). Pair with "
-    "data_upload_file to round-trip the file back into the cloud (STEP/IGES are translated to a "
-    "Fusion design there). WRITES a file to disk (does not modify the design)."
+    "Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file on "
+    "local disk - STEP / IGES / SAT / STL. split_by_component=true exports EACH top-level occurrence to "
+    "its own file (one per part - what 3D printing wants) into the DIRECTORY 'file_path' ('target' is "
+    "ignored in that mode). Pair with data_upload_file to round-trip the file back into the cloud "
+    "(STEP/IGES are translated to a Fusion design there). WRITES a file to disk (does not modify the "
+    "design)."
 )
 
 tool = (

@@ -6,7 +6,7 @@
   cam_delete(entity="<name>") -> remove that CAM browser item via .deleteMe().
 
 Fills a real gap: design_delete_feature / design_delete_occurrence act on the DESIGN timeline and
-occurrences — they do NOT reach CAM data (setups/operations/folders/patterns live in cam.setups, not
+occurrences - they do NOT reach CAM data (setups/operations/folders/patterns live in cam.setups, not
 the timeline). This is the CAM-side delete.
 
 Honesty contract (mirrors design_delete_feature):
@@ -45,7 +45,7 @@ def _get_cam():
 
 def _walk_container(container, out):
     """Recursively collect (name, object) for a setup/folder/pattern's operations, folders, and patterns.
-    NB: `allOperations` returns ONLY operations — NOT folders/patterns (verified live) — so folders and
+    NB: `allOperations` returns ONLY operations - NOT folders/patterns (verified live) - so folders and
     patterns must be walked explicitly via .folders / .patterns, recursing because they nest."""
     ops = safe(lambda: container.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
@@ -78,8 +78,8 @@ def handler(entity: str = "") -> dict:
     """Delete a CAM entity (setup / operation / folder / pattern) by name."""
     want = (entity or "").strip()
     if not want:
-        return error("Provide 'entity' — the CAM item name to delete (see cam_get_setups / "
-                     "cam_get_operations / cam_folder).")
+        return error("Provide 'entity' - the CAM item name to delete (see cam_get / "
+                     "cam_get(include=['operations']) / cam_edit_folders).")
 
     cam, cerr = _get_cam()
     if cerr:
@@ -92,7 +92,7 @@ def handler(entity: str = "") -> dict:
         return error(f"No CAM entity named '{want}'. Available: "
                      f"{', '.join(available)[:300] or '(none)'}.")
     if len(matches) > 1:
-        return error(f"'{want}' is ambiguous — {len(matches)} CAM items share that name. Rename so it's "
+        return error(f"'{want}' is ambiguous - {len(matches)} CAM items share that name. Rename so it's "
                      "unique, then delete.")
 
     _, obj = matches[0]
@@ -110,14 +110,14 @@ def handler(entity: str = "") -> dict:
         "deleted": True,
         "entity": want,
         "entity_type": label,
-        "note": "CAM entity removed. (design_delete_* don't reach CAM — this is the CAM-side delete.)",
+        "note": "CAM entity removed. (design_delete_* don't reach CAM - this is the CAM-side delete.)",
     })
 
 
 TOOL_DESCRIPTION = (
-    "Delete a CAM entity — a setup / operation / folder / pattern — by name (the CAM-side delete; "
+    "Delete a CAM entity - a setup / operation / folder / pattern - by name (the CAM-side delete; "
     "design_delete_feature / _occurrence only act on the DESIGN timeline, not CAM data). 'entity' is the "
-    "item name (from cam_get_setups / cam_get_operations / cam_folder). An ambiguous name (shared across "
+    "item name (from cam_get / cam_edit_folders). An ambiguous name (shared across "
     "items) is refused; a delete Fusion declines is reported as an error, not a false success. DESTRUCTIVE."
 )
 

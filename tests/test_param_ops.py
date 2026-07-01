@@ -5,7 +5,7 @@ fallback), ``_find_parameter`` (user-params-first lookup, then full search,
 boundaries 0/1/match), ``set_handler`` input validation — including the
 subtle carve-out that an expression of ``"0"`` is NOT treated as "empty" — and
 the ``_timeline_health`` helper the add/delete health-guard uses. (The
-design_get_timeline_health / design_recompute TOOLS are tested in test_design_ops.py.)
+design_recompute is tested in test_design_ops.py.)
 """
 
 from types import SimpleNamespace
@@ -193,7 +193,7 @@ def _stub_design(monkeypatch, design):
 
 class TestTimelineHealth:
     # the LOCAL _timeline_health helper that add/delete use for their rollback guard
-    # (the design_get_timeline_health TOOL is tested in test_design_ops.py)
+    # (health_handler is exercised via test_design_get.py + test_design_ops.py)
     def test_rolls_up_errors_and_warnings(self):
         tl = FakeTimeline([FakeTimelineItem("A", 0), FakeTimelineItem("B", 2),
                            FakeTimelineItem("C", 1), FakeTimelineItem("D", 2)])

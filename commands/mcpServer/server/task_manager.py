@@ -10,7 +10,7 @@ API is only safe to touch from the main (UI) thread. TaskManager bridges the two
 using a Fusion custom event: a worker thread posts a callback and fires the
 event; Fusion delivers the event on the main thread, where the callback runs.
 
-This is the single most important piece to get right — calling adsk.* from a
+This is the single most important piece to get right - calling adsk.* from a
 request thread can crash Fusion.
 """
 
@@ -46,7 +46,7 @@ class TaskManager:
     _event_handler = None
     _custom_event = None
     # Posted from worker (request) threads and consumed (read + deleted) on Fusion's
-    # main thread when the custom event fires. Both sides take _tasks_lock — this is
+    # main thread when the custom event fires. Both sides take _tasks_lock - this is
     # the single most concurrency-sensitive object in the server.
     _pending_tasks: Dict[str, Dict[str, Any]] = {}
     _tasks_lock = threading.Lock()
@@ -126,13 +126,13 @@ class TaskManager:
 
     @classmethod
     def _reap_stale(cls, ttl: float = _PENDING_TASK_TTL_S) -> int:
-        """Drop pending tasks older than `ttl` seconds — orphans left when Fusion dropped their custom
+        """Drop pending tasks older than `ttl` seconds - orphans left when Fusion dropped their custom
         event and no cancel() removed them. Called opportunistically from post() (no background thread,
         so it stays off the main-thread-safety critical path). Returns the number reaped.
 
         A reaped task's callback will NEVER run. That is the correct outcome for a dropped event: the
         poster has long since timed out (TTL >> the request timeout), so the result was already reported
-        as a timeout — running the callback minutes later would apply a side effect nobody is waiting
+        as a timeout - running the callback minutes later would apply a side effect nobody is waiting
         for. notify() pops under the same lock, so a task claimed in the same instant is not double-freed.
         """
         now = time.monotonic()
@@ -152,7 +152,7 @@ class TaskManager:
 
         Used when the poster has given up waiting (see _execute_on_main_thread's timeout): if the
         event has not yet fired on the main thread, removing the task here prevents the now-orphaned
-        callback from running after the caller moved on — and we return True so the caller can
+        callback from running after the caller moved on - and we return True so the caller can
         truthfully say "cancelled before running". If the task was already CLAIMED by notify() (it
         is running, or finished, on the main thread), there is nothing to pop: we return False,
         because the callback's side effect may already be committing and the caller must NOT claim
@@ -188,7 +188,7 @@ class TaskEventHandler(adsk.core.CustomEventHandler):
 
             # Atomically claim the task: pop under the lock so a concurrent cancel()
             # (poster timed out) can't double-fire or run after removal. A missing
-            # id means it was already cancelled — nothing to do.
+            # id means it was already cancelled - nothing to do.
             with TaskManager._tasks_lock:
                 task_info = self._pending_tasks.pop(task_id, None) if task_id else None
             if task_info is None:

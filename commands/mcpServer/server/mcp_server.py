@@ -38,6 +38,19 @@ MCP_PATH = '/mcp'
 # We echo the client's requested version on initialize when it sends one.
 PROTOCOL_VERSION = '2025-03-26'
 
+# Server-level instructions, returned on `initialize` (the MCP spec field). This is the ONLY server text
+# a client sees BEFORE it fetches any tool schema - so it's the one place a cold agent is guaranteed to
+# read. When tools are deferred (names only until searched), a per-tool "call FIRST" instruction is
+# invisible at cold start; this routes the agent to the two orientation tools before it fishes blindly.
+INSTRUCTIONS = (
+    "Autodesk Fusion control. COLD START: before reaching for specific tools, call two orientation reads "
+    "first - sys_capability_map (what this server can do: the tool families + each one's entry tool) "
+    "and workspace_orient (what's in front of you: the active document, its health, contents, and "
+    "pointers to the right deep tool). Then drill with the family's tools. Searching by keyword for an "
+    "existing capability/input-kind: sys_find_tool. Most reads are RICH: a <domain>_get (cam_get, "
+    "design_get, doc_get, data_get) gives a light default plus include=[...] for depth."
+)
+
 # Header names (Streamable HTTP transport).
 SESSION_HEADER = 'Mcp-Session-Id'
 PROTOCOL_VERSION_HEADER = 'MCP-Protocol-Version'
@@ -100,7 +113,7 @@ class SimpleMCPServer:
             # Notifications (no "id") get no response body; caller returns 202.
             is_notification = "id" not in request
             if is_notification:
-                # e.g. notifications/initialized, notifications/cancelled — accept silently.
+                # e.g. notifications/initialized, notifications/cancelled - accept silently.
                 return None
 
             if method == "initialize":
@@ -131,6 +144,9 @@ class SimpleMCPServer:
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {}, "resources": {"listChanged": False}},
                 "serverInfo": self.server_info,
+                # Visible to the client BEFORE any tool schema is fetched - the cold-start front door
+                # (routes a contextless agent to sys_capability_map / workspace_orient first).
+                "instructions": INSTRUCTIONS,
             },
         }
 
@@ -168,7 +184,7 @@ class SimpleMCPServer:
                                       enforce_timeout: bool = True) -> Any:
         """Run handler_func(**arguments) on Fusion's main thread via TaskManager.
 
-        enforce_timeout=False waits indefinitely for the callback to complete — for tools (e.g.
+        enforce_timeout=False waits indefinitely for the callback to complete - for tools (e.g.
         sys_execute_script) whose work cannot be interrupted and would still commit, so a timeout
         would only report a false failure for a change that actually applied.
         """
@@ -206,26 +222,26 @@ class SimpleMCPServer:
             await asyncio.sleep(0.01)
 
         # Timed out. Try to cancel the still-pending task so it never runs after we've given up.
-        # cancel() returns True ONLY if it removed a task that had NOT yet started — in that case
+        # cancel() returns True ONLY if it removed a task that had NOT yet started - in that case
         # the operation truly never ran. If it returns False the callback was already CLAIMED by
         # the main thread: it is running (or finished) and CANNOT be interrupted, so its side
         # effect (e.g. a cloud write or a committed design edit) may already be applying. We must
-        # not lie that it was "cancelled before running" — that invites a blind retry → double-apply.
+        # not lie that it was "cancelled before running" - that invites a blind retry -> double-apply.
         cancelled = TaskManager.cancel(task_id)
         with result_lock:
             if result_container['completed']:
-                # Finished in the cancel window — honor the real result, don't fake a timeout.
+                # Finished in the cancel window - honor the real result, don't fake a timeout.
                 if result_container['exception'] is not None:
                     raise result_container['exception']
                 return result_container['result']
         if cancelled:
             raise Exception(
                 f"Handler execution timed out ({timeout}s); the operation was cancelled before it "
-                "started running. No change was made — safe to retry.")
+                "started running. No change was made - safe to retry.")
         raise Exception(
             f"Handler is still running after {timeout}s and could NOT be cancelled (an in-flight "
             "main-thread operation cannot be interrupted). It may still COMMIT its result. Do NOT "
-            "blindly retry — re-check the design/document state first, then retry only if the "
+            "blindly retry - re-check the design/document state first, then retry only if the "
             "change did not take effect. (For long operations, prefer a fire-and-poll tool.)")
 
     def _handle_resources_list(self, request_id: Any) -> Dict[str, Any]:
@@ -262,7 +278,7 @@ class SimpleMCPServer:
             futil.handle_error(f"MCP resource '{uri}'")
             return self._error(request_id, -32603, f"Resource read error: {e}")
 
-    def error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
+    def _error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 

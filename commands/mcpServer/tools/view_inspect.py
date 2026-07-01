@@ -1,10 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: the agent's "eyes" — move the camera, isolate/show/hide, toggle
+"""MCP building block: the agent's "eyes" - move the camera, isolate/show/hide, toggle
 wireframe, and RESTORE the prior visual state when done.
 
-  view_inspect(action=...) — a set of composable view verbs so an agent can intuit a design
+  view_inspect(action=...) - a set of composable view verbs so an agent can intuit a design
   by looking at it from different angles and in different states, WITHOUT permanently
   disturbing what the user had on screen:
 
@@ -27,7 +27,7 @@ Pair with view_screenshot to actually capture what you've aimed at. Typical flow
   -> view_screenshot -> view_inspect(style, style='wireframe') -> view_screenshot
   -> view_inspect(restore)
 
-This is VIEW state only — no geometry changes. Generic: it's a general set of eyes (orient,
+This is VIEW state only - no geometry changes. Generic: it's a general set of eyes (orient,
 isolate, wireframe, restore) usable for CAM evaluation, assembly review, or anything visual.
 
 Grounded in adsk.core / adsk.fusion:
@@ -58,7 +58,7 @@ _SNAPSHOTS = {}
 
 # Explicit (view_direction, up_vector) per orientation. view_direction = (eye - target), i.e. the
 # direction FROM the model TO the camera. We set eye/target/up directly rather than relying on
-# camera.viewOrientation — setting that property does NOT reliably move the camera's eye/target in
+# camera.viewOrientation - setting that property does NOT reliably move the camera's eye/target in
 # this API flow (verified: a 'front' viewOrientation left the eye on the previous iso vector), which
 # made focused orthographic views come out tilted. Fusion is Z-up.
 _ORIENTATIONS = {
@@ -241,7 +241,7 @@ def _do_visibility(design, action, target):
             if action == "isolate":
                 o.isIsolated = True
             elif action == "show":
-                # An occurrence stays hidden if any ANCESTOR occurrence's bulb is off — so turning
+                # An occurrence stays hidden if any ANCESTOR occurrence's bulb is off - so turning
                 # on a nested child alone does nothing visible. Light up the whole ancestor chain.
                 lit = _show_with_ancestors(o)
                 ancestors_lit.extend(a for a in lit if a != safe(lambda o=o: o.name))
@@ -259,7 +259,7 @@ def _do_visibility(design, action, target):
 
 def _do_style(style):
     if not style or style.strip().lower() not in _STYLES:
-        return error(f"Provide 'style' — one of: {', '.join(_STYLES)}.")
+        return error(f"Provide 'style' - one of: {', '.join(_STYLES)}.")
     vp = app.activeViewport
     before = int(safe(lambda: vp.visualStyle, 0))
     vp.visualStyle = getattr(adsk.core.VisualStyles, _STYLES[style.strip().lower()])
@@ -273,7 +273,7 @@ def _do_restore(design):
     snap = _SNAPSHOTS.get(key)
     if not snap:
         return error(f"No snapshot saved for '{key}'. Call view_inspect(snapshot) first. "
-    "(Snapshots are held in memory for this session only — reloading the add-in "
+    "(Snapshots are held in memory for this session only - reloading the add-in "
     "clears them. To recover a clean state without a snapshot, use "
     "clear_isolation then show the components you want.)")
     vp = app.activeViewport
@@ -318,7 +318,7 @@ def _do_save_view(design, view_name):
     in-memory push/pop of camera+style+visibility), named views are a durable, multi-slot library
     of camera angles.
 
-    SCOPE: a named view stores the CAMERA ONLY — not section state or visibility. It is a pure
+    SCOPE: a named view stores the CAMERA ONLY - not section state or visibility. It is a pure
     camera bookmark. It does NOT reconstitute a section cut (Fusion allows one active section and a
     NamedView can't carry that). To navigate between section perspectives, just re-issue
     view_section(cut, plane=...): that re-cuts AND auto-aims at the cut face in one call."""
@@ -329,7 +329,7 @@ def _do_save_view(design, view_name):
     if nvs is None:
         return error("This design does not expose Named Views.")
     vp = app.activeViewport
-    # overwrite an existing same-named view (itemByName THROWS when absent — guard it)
+    # overwrite an existing same-named view (itemByName THROWS when absent - guard it)
     try:
         ex = nvs.itemByName(name)
         if ex:
@@ -365,7 +365,7 @@ def _do_apply_view(design, view_name):
     safe(lambda: nv.apply())
     app.activeViewport.refresh()
     return ok({"action": "apply_view", "view_name": safe(lambda: nv.name),
-        "note": "Camera moved to the named view (camera only — does not change any active "
+        "note": "Camera moved to the named view (camera only - does not change any active "
         "section cut or visibility). If a section is live and this view was a "
         "section perspective, re-issue view_section(cut, ...) to recut for this angle."})
 
@@ -421,7 +421,7 @@ def handler(action: str = "", target: str = "", orientation: str = "", focus: st
 
 
 TOOL_DESCRIPTION = (
-    "View-state verbs to inspect the model from different angles, then restore — no geometry changes. "
+    "View-state verbs to inspect the model from different angles, then restore - no geometry changes. "
     "'action': 'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
     "them back to the last snapshot) | 'orient' ('orientation'=front/back/top/bottom/left/right/iso-*; "
     "and/or 'focus'=fit to a named occurrence) | 'isolate'/'show'/'hide'/'clear_isolation' "

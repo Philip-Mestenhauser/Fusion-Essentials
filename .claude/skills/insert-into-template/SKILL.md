@@ -12,15 +12,13 @@ description: >-
   only human step is clicking the machining face. Edit the CONFIGURATION block below to adapt
   it to your shop. Requires the fusion-essentials MCP server.
 allowed-tools: >-
-  fusion-essentials:sys_get_session
-  fusion-essentials:doc_get_active_id
-  fusion-essentials:data_list_projects
-  fusion-essentials:data_list_folders
-  fusion-essentials:data_list_files
+  fusion-essentials:workspace_orient
+  fusion-essentials:doc_get
+  fusion-essentials:data_get
   fusion-essentials:data_create_folder
   fusion-essentials:doc_save_as
   fusion-essentials:doc_close
-  fusion-essentials:design_get_tree
+  fusion-essentials:design_get
   fusion-essentials:param_get
   fusion-essentials:param_set
   fusion-essentials:sketch_get
@@ -28,6 +26,7 @@ allowed-tools: >-
   fusion-essentials:sys_get_selection
   fusion-essentials:sketch_create
   fusion-essentials:sketch_add_3d_line
+  fusion-essentials:sys_execute_script
   fusion-essentials:joint_create
   fusion-essentials:find_geometry
   fusion-essentials:assembly_ground
@@ -36,13 +35,8 @@ allowed-tools: >-
   fusion-essentials:doc_update_xref
   fusion-essentials:sketch_set_text
   fusion-essentials:cam_set_nc_comment
-  fusion-essentials:model_measure_bbox
   fusion-essentials:doc_open
-  fusion-essentials:cam_get_setups
-  fusion-essentials:cam_get_operations
-  fusion-essentials:cam_get_nc_programs
-  fusion-essentials:sys_get_tool_list
-  fusion-essentials:cam_get_time
+  fusion-essentials:cam_get
   fusion-essentials:cam_activate_setup
   fusion-essentials:view_screenshot
   fusion-essentials:view_switch_workspace
@@ -118,7 +112,7 @@ lineage) is in [reference.md](reference.md). Read it if a crawl result is ambigu
   bundled into one `sys_execute_script` per logical step (atomic, all-or-nothing, prints what you
   need to verify). What STAYS a named tool: (i) data-model ops that CROSS documents or are async —
   `doc_save_as` (the template-copy mechanism — NOT `doc_copy`, which crashes on CAM templates) and
-  `doc_open`; (ii) the FRAGILE design ops whose tools encode hard-won
+  `doc_open`; (ii) the FRAGILE design ops whose tools encode non-obvious
   fixes — `doc_insert_occurrence`, `joint_create` (the proxy-by-NAME fix for joining a JO inside a
   referenced occurrence — used for BOTH the root-JO mate and the stock-top fallback), and
   `find_geometry` (locating the stock top face) — do not re-implement these in a script. Concretely:
@@ -129,7 +123,7 @@ lineage) is in [reference.md](reference.md). Read it if a crawl result is ambigu
   the SAME built operations. Read each result and verify the printed values.
 - **Address by id (URN) once resolved.** Names are for humans; URNs drive the flow.
 - **Async tools** (`doc_save_as`, `doc_open`) return before completion —
-  confirm with a follow-up read; never assume.
+  confirm with a follow-up `doc_get` (active document); never assume.
 - **Pass the GATE (Phase 4) before any template write.** If any gate assertion fails, STOP and
   report the failing assertion with its evidence. Do not improvise past it.
 - **Carry state forward.** After each phase, restate the recorded values so the next phase uses
@@ -160,13 +154,14 @@ Do the human input FIRST, and skip the prompt cycle if a face is already selecte
    reproducible run-to-run instead of depending on how the agent phrases a chat sentence.)
 4. VALIDATE: exactly one selection with a non-null `direction`. If null (e.g. a sphere), re-prompt
    via the same handshake. Record `zdir = direction`, `direction_kind`, and the owning `body_name`.
-5. `sys_get_session` + `doc_get_active_id` — record model name, units, and the doc's identity:
+5. `workspace_orient` (workspace/product/units) + `doc_get` (active document + identity) — record
+   model name, units, and the doc's identity:
    - `has_data_file` **false** (unsaved): the doc name is "Untitled" — NOT a usable model name. Derive
      a name: use the operator's name for the part if they gave one, else the dominant body's name, else
      ask once. Destination = CONFIGURATION default (`DEFAULT_PROJECT`, folder `DEFAULT_FOLDER` with
      `{model}` → the derived name, never "Untitled"). Phase 3 will save it under that name.
    - `has_data_file` **true** (already saved): destination = the part's OWN folder — find this
-     `document_id` via `data_list_files` and read its `folder_path`; carry the existing URN
+     `document_id` via `data_get` and read its `folder_path`; carry the existing URN
      forward; Phase 3's save-as is skipped (but the re-save to capture the JO still applies).
 
 → Record: `zdir`, `body_name`, model name, units, lineage URN (or null), destination project+folder.
@@ -229,7 +224,7 @@ SAVED version — so the CAD must be saved with the JO BEFORE Phase 6 inserts it
 1. UNSAVED: `doc_save_as(name=<model name>, project_id, folder, create_path=true)` — saveAs
    captures the live session (incl. the JO) into one new version. ALREADY SAVED: `Document.save()`
    via `sys_execute_script` for a new version containing the JO.
-2. `doc_get_active_id` (after a short wait) — record the URN + version that contains the JO.
+2. `doc_get` (after a short wait) — record the URN + version that contains the JO.
    (If the CAD has its OWN stock parameters, set them from `extents_mm` and re-save — most parts
    don't; the template's PartX/Y/Z are driven in Phase 6.)
 
@@ -249,7 +244,7 @@ Assert ALL, each with its evidence value. If ANY fails, STOP and report it — d
 template MUST come from the configured `TEMPLATE_LIBRARY_PROJECT` / `TEMPLATE_LIBRARY_FOLDER` and
 nowhere else — this is the only authoritative source. Do NOT reuse a URN from memory, from a prior
 run, or a similarly-named template found in another project/folder.
-- `data_list_files(project=TEMPLATE_LIBRARY_PROJECT, folder=TEMPLATE_LIBRARY_FOLDER,
+- `data_get(project=TEMPLATE_LIBRARY_PROJECT, folder=TEMPLATE_LIBRARY_FOLDER,
   recursive=false)` — returns ONLY the files in the library folder. That set is the eligible
   templates (no need to dump/scan the whole project).
 - Choose the template: if the operator named one, match it (exact, case-insensitive) within the
@@ -264,20 +259,20 @@ graph and destabilises the session, while `Document.saveAs` writes the already-l
 reference.md "Copying a CAM template safely".) The library original is never modified.
 
 1. **Open the TEMPLATE** (the library original) as one settled step:
-   - `doc_open(TEMPLATE_URN, force_api_open=true)`, then `sys_get_session` and ASSERT
+   - `doc_open(TEMPLATE_URN, force_api_open=true)`, then `doc_get` and ASSERT
      `active_document` == the template name (the open is async — poll until active). A `view_screenshot`
      here confirms it loaded AND shows the operator the doc (work VISIBLY). Do NOT write until active.
 
 2. **`doc_save_as` the open template as `<model>_CAM`** — this makes the copy AND leaves it active:
    - `doc_save_as(name="<model name>" + TEMPLATE_NAME_SUFFIX, project_id, folder=<destination folder>,
      create_path=true)`. The saved-as copy becomes the ACTIVE document (no separate re-open needed).
-   - `doc_get_active_id` (after a moment — saveAs is async) → confirm `active_document` == `<model>_CAM`
-     and record its lineage URN. VERIFY the copy is usable: `cam_get_setups` lists the template's setups,
+   - `doc_get` (after a moment — saveAs is async) → confirm `active_document` == `<model>_CAM`
+     and record its lineage URN. VERIFY the copy is usable: `cam_get` lists the template's setups,
      their model container, and references. If the name still reads as the template's, STOP and report it.
    (NO human step here. NO `doc_copy`.)
 
 → Record: the resolved template name + URN (from the library); the `<model>_CAM` lineage URN; that
-it is the active document (confirmed via sys_get_session, NOT assumed).
+it is the active document (confirmed via `doc_get`, NOT assumed).
 
 ## Phase 6 — Stand up the part in the template (WRITE) — JO-FIRST, GEOMETRY FALLBACK
 
@@ -300,7 +295,7 @@ world axes. The skill never assumes the part's world +Z is the machining face; t
 face is the single source of truth for orientation. (`partZ` everywhere is the part-space Z extent
 from Phase 2's oriented bbox — i.e. the depth along that machining axis, not the world Z extent.)
 
-Reminder: the doc just opened (Phase 5.2) — confirm it is SETTLED (sys_get_session active) before
+Reminder: the doc just opened (Phase 5.2) — confirm it is SETTLED (`doc_get` shows it active) before
 these writes, or a configured-design template can crash mid-recompute.
 
 **Script A — name + resolve the model container + classify its children + detect a root JO** (one
@@ -397,11 +392,11 @@ def run(context):
      `is_healthy:false` for PRE-EXISTING template fixturing/feature warnings (e.g. an unused reversed
      jaw joint, encapsulation features) that have nothing to do with your insert — those are OK to
      leave. Judge ONLY your new joint; if IT is unhealthy, report the probe error and STOP.
-   - CONFIRM seating by the part occurrence's WORLD bbox center in the probe output: its X,Y should sit
-     at the workpiece origin (≈ 0,0 for a centered fixture) and Z lifted onto/into the stock. Do NOT
-     use `model_measure_bbox` on the container for this — that returns a LOCAL-frame center (not world)
-     and will look off-origin even when the part is correctly seated. The probe's world center is the
-     real proof.
+   - CONFIRM seating by the PART OCCURRENCE's WORLD bbox center in the `assembly_probe` output: its
+     X,Y should sit at the workpiece origin (≈ 0,0 for a centered fixture) and Z lifted onto/into the
+     stock. Measure the PART occurrence specifically — do NOT judge seating from the CONTAINER
+     component's box (it spans the fixture/stock too, so it looks off-origin even when the part is
+     seated). `assembly_probe`'s per-occurrence world center is the real proof.
 
 4. **Stock (OPTIONAL — only if the template exposes PART_PARAMS).** If Script A's `has_part_params`
    lists PartX/Y/Z, `param_set` each to the PART size (Phase 2 extents). The template's own stock
@@ -414,8 +409,9 @@ and PartX/Y/Z written (or "skipped").
 
 ## Phase 7 — Verify and report (READ)
 
-1. `data_list_files(<destination folder>)` — confirm the part and `<model>_CAM` are both present.
-2. `cam_get_setups` / `sys_get_tool_list` — confirm the machining recipe is intact.
+1. `data_get(project=<destination project>, folder=<destination folder>)` — confirm the part and
+   `<model>_CAM` are both present.
+2. `cam_get` / `cam_get(include=['tools'])` — confirm the machining recipe is intact.
 3. `view_screenshot` (iso) — visually confirm the part seated in the fixture and the stock sized.
 
 Report: the destination folder, the part URN, the `<model>_CAM` URN, the part-space bounding box,

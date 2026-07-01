@@ -40,7 +40,7 @@ def update_doc_settings(eventArgs: adsk.core.DocumentEventArgs):
     #
     # CRITICAL: this runs INSIDE Fusion's documentOpened callback on the main thread, mid-open. Any
     # exception here is thrown during the document load itself and can destabilize/CRASH the session
-    # — observed live opening a multi-reference CAM document: 'eventArgs.document.dataFile' was None
+    # - observed live opening a multi-reference CAM document: 'eventArgs.document.dataFile' was None
     # (the dataFile isn't populated yet at this point in a heavy/reference-resolving open), so the
     # original 'eventArgs.document.dataFile.versions.count' raised AttributeError mid-open. So EVERY
     # access is now defensive and the whole body is wrapped: this handler must NEVER raise.
@@ -48,7 +48,7 @@ def update_doc_settings(eventArgs: adsk.core.DocumentEventArgs):
         doc = eventArgs.document
         if doc is None or doc.objectType != "adsk::fusion::FusionDocument":
             return
-        data_file = doc.dataFile          # may be None during a heavy/cold open — do not chain
+        data_file = doc.dataFile          # may be None during a heavy/cold open - do not chain
         if data_file is None:
             return
         try:
@@ -66,8 +66,8 @@ def update_doc_settings(eventArgs: adsk.core.DocumentEventArgs):
         if update_units and unit is not None:
             design.fusionUnitsManager.distanceDisplayUnits = unit
     except Exception:
-        # Never let this open-time handler raise — log and swallow so the document open can't crash.
-        futil.log("update_doc_settings: skipped (guarded) — could not apply doc settings on open")
+        # Never let this open-time handler raise - log and swallow so the document open can't crash.
+        futil.log("update_doc_settings: skipped (guarded) - could not apply doc settings on open")
 
 def get_settings():
     settings = shared_state.load_settings(CMD_ID)

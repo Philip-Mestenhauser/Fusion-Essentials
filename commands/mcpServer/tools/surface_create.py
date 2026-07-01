@@ -1,16 +1,16 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: CREATE open (non-solid) surface bodies — the entry point to surface modelling.
+"""MCP building blocks: CREATE open (non-solid) surface bodies - the entry point to surface modelling.
 
   surface_extrude -> extrude an OPEN sketch profile (or B-Rep edges) into a sheet body (isSolid=False).
   surface_revolve -> spin an OPEN profile about an axis into a sheet body (isSolid=False).
   surface_patch   -> fill a CLOSED loop of edges/curves with a new surface face ("cap the hole").
 
 Surface modelling is the opposite discipline to solids: you build open sheet bodies and only later
-knit them into a solid (stitch — sibling proposal). These three TOOLS produce the open surfaces the
+knit them into a solid (stitch - sibling proposal). These three TOOLS produce the open surfaces the
 rest of the surface_* family (trim/extend/offset/thicken) consumes. The discriminator throughout is
-BRepBody.isSolid == False — an open surface has no end caps.
+BRepBody.isSolid == False - an open surface has no end caps.
 
 Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - Component.createOpenProfile(curves, isChained) / createBRepEdgeProfile(edges) -> an OPEN profile
@@ -18,7 +18,7 @@ Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
   - RevolveFeatures.createInput(profile, axis, op); RevolveFeatureInput.isSolid = False; setAngleExtent
   - PatchFeatures.createInput(boundaryCurve: Base, op) -> PatchFeatureInput; .continuity; add -> PatchFeature
 Handlers run on the main thread; they WRITE. NEVER wrap a feature .add() in safe() (a None feature with
-no exception is the silent-success trap) — assert the returned feature/body and report isSolid back.
+no exception is the silent-success trap) - assert the returned feature/body and report isSolid back.
 """
 
 import math
@@ -35,7 +35,7 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-# Surface create/join only — cut/intersect aren't meaningful for a new open sheet.
+# Surface create/join only - cut/intersect aren't meaningful for a new open sheet.
 _SURFACE_OPS = {
 "new": "NewBodyFeatureOperation",
 "new_body": "NewBodyFeatureOperation",
@@ -112,7 +112,7 @@ def _open_sketch_profile(comp, sketch):
 
 
 def _body_names_and_solid(feature):
-    """(names, any_solid) for a feature's result bodies — read each body's name + isSolid LIVE."""
+    """(names, any_solid) for a feature's result bodies - read each body's name + isSolid LIVE."""
     names = []
     any_solid = False
     bodies = safe(lambda: feature.bodies)
@@ -129,12 +129,13 @@ def _body_names_and_solid(feature):
 
 def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
                     units: str = "mm", symmetric: bool = False, operation: str = "new") -> dict:
-    """Extrude an OPEN profile into a sheet (surface) body — isSolid == False.
+    """Extrude an OPEN profile into a sheet (surface) body - isSolid == False.
 
     Provide EITHER 'curves' (edge/sketch-curve handles forming an open chain) OR a 'sketch_name' whose
     open curves form the profile (omit = most recent). 'distance' (non-zero) is the depth in 'units'.
     'symmetric' extrudes both sides. 'operation': new | join (cut/intersect are excluded for surfaces).
-    FAILS if the profile is closed (would make a solid — use model_extrude). WRITES.
+    The profile is built via createOpenProfile + isSolid=False, so it's swept as an open SHEET - a closed
+    boundary becomes a tube/wall, not a capped solid (use model_extrude for a solid). WRITES.
     """
     k = scale(units)
     if k is None:
@@ -180,15 +181,11 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         ext_input.setDistanceExtent(bool(symmetric), dist_val)
         feature = comp.features.extrudeFeatures.add(ext_input)
     except Exception as e:
-        return error(f"Surface extrude failed: {e}. (The profile must be OPEN — a closed profile "
-    "makes a solid; use model_extrude for that.)")
+        return error(f"Surface extrude failed: {e}.")
     if not feature:
-        return error("Surface extrude returned no feature (the profile may have been closed).")
+        return error("Surface extrude returned no feature.")
 
     names, any_solid = _body_names_and_solid(feature)
-    if any_solid:
-        return error("Surface extrude produced a SOLID body — the profile was closed after all. "
-    "Use model_extrude for closed profiles; pass an OPEN chain here.")
 
     return ok({
         "created": True,
@@ -196,7 +193,7 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         "operation": op_key,
         "source": source,
         "result_bodies": names,
-        "is_solid": False,
+        "is_solid": any_solid,       # read back from the body, not assumed (expected False for a sheet)
         "open_edge_count": len(meta["entities"]) if curves not in (None, "", []) else None,
         "distance": round(float(distance), 6),
         "units": units,
@@ -209,11 +206,12 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
 
 def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
                     angle_deg: float = 360.0, symmetric: bool = False, operation: str = "new") -> dict:
-    """Revolve an OPEN profile about an axis into a sheet (surface) body — isSolid == False.
+    """Revolve an OPEN profile about an axis into a sheet (surface) body - isSolid == False.
 
     EITHER 'curves' (open edge/curve handles) OR a 'sketch_name' (its open chain; omit = most recent).
     'axis': x | y | z (the component origin axis). 'angle_deg' (non-zero) is the sweep. 'symmetric'
-    splits it both ways. 'operation': new | join. FAILS if the profile is closed. WRITES.
+    splits it both ways. 'operation': new | join. Swept as an open SHEET (isSolid=False) - a closed
+    boundary becomes a shell, not a capped solid (use model_revolve for a solid). WRITES.
     """
     try:
         ang = float(angle_deg)
@@ -266,15 +264,11 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         rev_input.setAngleExtent(bool(symmetric), angle_val)
         feature = comp.features.revolveFeatures.add(rev_input)
     except Exception as e:
-        return error(f"Surface revolve failed: {e}. (The profile must be OPEN and coplanar with the "
-    "axis; a closed profile makes a solid — use model_revolve.)")
+        return error(f"Surface revolve failed: {e}. (The profile must be coplanar with the axis.)")
     if not feature:
-        return error("Surface revolve returned no feature (the profile may have been closed).")
+        return error("Surface revolve returned no feature.")
 
     names, any_solid = _body_names_and_solid(feature)
-    if any_solid:
-        return error("Surface revolve produced a SOLID body — the profile was closed. Use "
-    "model_revolve for closed profiles; pass an OPEN chain here.")
 
     return ok({
         "created": True,
@@ -284,7 +278,7 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         "axis": f"{a}-axis",
         "angle_deg": round(ang, 6),
         "result_bodies": names,
-        "is_solid": False,
+        "is_solid": any_solid,       # read back from the body, not assumed (expected False for a shell)
         "symmetric": bool(symmetric),
         "note": "Open surface body created (isSolid=false).",
     })
@@ -311,7 +305,7 @@ def _patch_one_loop(comp, boundary, op, cont):
             safe(lambda: setattr(patch_input, "continuity", cont))
         feature = comp.features.patchFeatures.add(patch_input)
     except Exception as e:
-        return None, (f"Patch failed: {e}. (The boundary must form a CLOSED loop — pass the loop's "
+        return None, (f"Patch failed: {e}. (The boundary must form a CLOSED loop - pass the loop's "
     "edges, or a single edge Fusion can auto-complete.)")
     if not feature:
         return None, "Patch returned no feature (the boundary may not form a closed loop)."
@@ -326,11 +320,11 @@ def _patch_one_loop(comp, boundary, op, cont):
 
 def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
                   operation: str = "new") -> dict:
-    """Fill CLOSED loop(s) of edges with surface face(s) — "cap the hole(s)" / "bridge the gap(s)".
+    """Fill CLOSED loop(s) of edges with surface face(s) - "cap the hole(s)" / "bridge the gap(s)".
 
     Two shapes, ONE call:
-      • 'boundary'  : a SINGLE closed loop (an edge handle, or a list of edge handles for one loop).
-      • 'boundaries': a LIST of loops — patch them ALL in one call (the common "patch every hole"
+      - 'boundary'  : a SINGLE closed loop (an edge handle, or a list of edge handles for one loop).
+      - 'boundaries': a LIST of loops - patch them ALL in one call (the common "patch every hole"
                       case). Each element is one edge handle (Fusion auto-completes that hole's loop)
                       OR a list of handles forming one loop. Pass the rims of N holes -> N patches.
     'continuity': connected | tangent | curvature. 'operation': new | new_component. A loop that
@@ -359,7 +353,7 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         multi = False
     else:
         return error("Pass 'boundary' (one loop) or 'boundaries' (a list of loops, each an edge "
-    "handle Fusion auto-completes — the way to patch every hole in one call).")
+    "handle Fusion auto-completes - the way to patch every hole in one call).")
 
     results, errors = [], []
     for i, loop in enumerate(loops):
@@ -399,19 +393,20 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         "errors": errors,
         "is_solid": False,
         "note": (f"Patched {len(results)} of {len(loops)} loop(s) into surface bodies (isSolid=false)."
-                 + (" Some loops failed — see 'errors'." if errors else "")),
+                 + (" Some loops failed - see 'errors'." if errors else "")),
     })
 
 
 # ── tool / item wiring ──────────────────────────────────────────────────────
 
 _EXTRUDE_DESC = (
-"Extrude an OPEN sketch profile (or B-Rep/sketch 'curves' handles) into a SHEET (surface) body — "
+"Extrude an OPEN sketch profile (or B-Rep/sketch 'curves' handles) into a SHEET (surface) body - "
 "isSolid == false, the entry point to surface modelling. Provide EITHER 'curves' (an open chain of "
 "edge/curve handles from find_geometry) OR a 'sketch_name' whose open curves form the profile "
 "(omit = most recent). 'distance' (non-zero) is the depth in 'units'; 'symmetric' extrudes both "
-"sides. 'operation': new | join (cut/intersect don't apply to a new sheet). FAILS if the profile "
-"is closed (that makes a SOLID — use model_extrude). WRITES; returns is_solid=false + the body."
+"sides. 'operation': new | join (cut/intersect don't apply to a new sheet). The profile is swept as "
+"an OPEN sheet - a closed boundary becomes a tube/wall, NOT a capped solid (use model_extrude for a "
+"solid). WRITES; returns the body + is_solid (read back, expected false)."
 )
 
 surface_extrude_tool = (
@@ -430,9 +425,10 @@ surface_extrude_item = Item.create_tool_item(tool=surface_extrude_tool, write="w
 
 _REVOLVE_DESC = (
                                              "Revolve an OPEN profile (sketch open chain, or 'curves' handles) about an x/y/z axis into a SHEET "
-                                             "(surface) body — isSolid == false. 'angle_deg' (non-zero) is the sweep (360 = full); 'symmetric' "
-                                             "splits it both ways. 'operation': new | join. FAILS if the profile is closed (use model_revolve). "
-                                             "WRITES; returns is_solid=false + the body."
+                                             "(surface) body - isSolid == false. 'angle_deg' (non-zero) is the sweep (360 = full); 'symmetric' "
+                                             "splits it both ways. 'operation': new | join. The profile is spun as an OPEN sheet - a closed "
+                                             "boundary becomes a shell, NOT a capped solid (use model_revolve for a solid). WRITES; returns "
+                                             "the body + is_solid (read back, expected false)."
 )
 
 surface_revolve_tool = (
@@ -450,10 +446,10 @@ surface_revolve_item = Item.create_tool_item(tool=surface_revolve_tool, write="w
                                              run_on_main_thread=True)
 
 _PATCH_DESC = (
-                                             "Fill CLOSED loop(s) of edges with surface face(s) — 'cap the hole(s)' / 'bridge the gap(s)'. "
-                                             "Pass EITHER 'boundary' (ONE loop: a single edge handle, or a list of edge handles for one loop — "
+                                             "Fill CLOSED loop(s) of edges with surface face(s) - 'cap the hole(s)' / 'bridge the gap(s)'. "
+                                             "Pass EITHER 'boundary' (ONE loop: a single edge handle, or a list of edge handles for one loop - "
                                              "Fusion auto-completes a connected loop), OR 'boundaries' (a LIST of loops, patched ALL in one "
-                                             "call — each element is one edge handle Fusion auto-completes, or a list of handles forming one "
+                                             "call - each element is one edge handle Fusion auto-completes, or a list of handles forming one "
                                              "loop). Use 'boundaries' to patch every hole of a part at once (pass each hole's rim edge). "
                                              "'continuity': connected | tangent | curvature. 'operation': new | new_component. In the multi "
                                              "form a loop that fails is reported per-loop without aborting the rest. WRITES; returns the patch "
@@ -464,7 +460,7 @@ surface_patch_tool = (
     Tool.create_simple(name="surface_patch", description=_PATCH_DESC)
     .add_input_property("boundary", _BOUNDARY.schema())
     .add_input_property("boundaries", {"type": "array", "items": {"type": ["string", "array"]},
-            "description": "A LIST of closed loops to patch in ONE call — "
+            "description": "A LIST of closed loops to patch in ONE call - "
             "each element an edge handle (Fusion auto-completes that hole's "
             "loop) or a list of handles forming one loop. The way to patch "
             "every hole at once."})

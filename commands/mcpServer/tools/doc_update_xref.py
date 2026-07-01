@@ -4,7 +4,7 @@
 """MCP building block: refresh out-of-date external references in the active document.
 
   doc_update_xref -> bring the active document's external references (X-refs) up to their latest
-                 cloud version — one by name, or all that are out of date. Reports what changed.
+                 cloud version - one by name, or all that are out of date. Reports what changed.
 
 When an inserted/referenced component points at an OLDER version of its source file, the
 reference is "out of date" and the host shows stale geometry (and, importantly, missing newer
@@ -97,7 +97,7 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Refresh the active document's external references (X-refs) to their latest cloud version — "
+    "Refresh the active document's external references (X-refs) to their latest cloud version - "
     "the API equivalent of 'Get Latest' on a referenced component. By default it updates every "
     "reference that is OUT OF DATE; pass 'name' to target one reference by its source document "
     "name, or only_out_of_date=false to force-refresh matched references regardless. Reports each "

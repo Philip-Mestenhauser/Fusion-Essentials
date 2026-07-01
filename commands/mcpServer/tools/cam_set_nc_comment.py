@@ -10,7 +10,7 @@ The NC program's Comment is what most posts emit near the top of the G-code, so 
 part/job identifier there is a common pre-post step. General-purpose: it just edits the field.
 
 HOW (grounded live): the comment is a CAM parameter named `nc_program_comment` on
-`NCProgram.parameters` (NOT `postParameters` — which is why cam_get_nc_programs does not report it).
+`NCProgram.parameters` (NOT `postParameters` - which is why cam_get(include=['nc_programs']) does not report it).
 It is an editable string parameter whose `.expression` is a QUOTED string (e.g. `'Job 1234'`).
 Setting `parameters.itemByName('nc_program_comment').expression = "'text'"` updates it. The NC
 program NAME is the sibling parameter `nc_program_name` (same quoting).
@@ -46,7 +46,7 @@ def _get_cam():
     except Exception as e:
         return None, f"Could not access CAM product: {e}"
     if not cam:
-        return None, ("This document has no CAM (Manufacture) data — no NC programs to edit.")
+        return None, ("This document has no CAM (Manufacture) data - no NC programs to edit.")
     return cam, None
 
 
@@ -82,17 +82,17 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     """Set the comment (and optionally name) on NC programs.
 
     comment: the text to put in the NC program's Comment field. program: the name of one NC
-    program to edit (omit to edit ALL programs). set_name: optional — also set the NC program's
+    program to edit (omit to edit ALL programs). set_name: optional - also set the NC program's
     Name field to this. WRITES to the CAM data; reports before/after per program.
     """
     # Guard against the silent wipe-all: comment defaults to "" (never None), so the old
-    # `comment is None` check was DEAD CODE. Refuse when there's genuinely nothing to write —
+    # `comment is None` check was DEAD CODE. Refuse when there's genuinely nothing to write -
     # an empty/whitespace comment AND no set_name. (An empty comment WITH a set_name is fine:
     # the caller is renaming, not clearing comments; an explicit non-empty comment is fine.)
     write_comment = bool((comment or "").strip())
     write_name = bool((set_name or "").strip())
     if not write_comment and not write_name:
-        return error("Provide a non-empty 'comment' (and/or 'set_name') — the value(s) to write. "
+        return error("Provide a non-empty 'comment' (and/or 'set_name') - the value(s) to write. "
     "Refusing: an empty comment with no name would blank the comment on every "
     "matched NC program.")
 
@@ -122,7 +122,7 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     # Pre-validate every target's params BEFORE writing anything. There is no true CAM
     # transaction here, so a mid-loop failure across multiple programs would leave earlier ones
     # already mutated. Checking presence + editability up front makes a partial-apply far less
-    # likely (the common failure — a locked/missing param — is caught before the first write).
+    # likely (the common failure - a locked/missing param - is caught before the first write).
     for ncp, nm in targets:
         if write_comment:
             p = safe(lambda ncp=ncp: ncp.parameters.itemByName(_COMMENT_PARAM))
@@ -169,12 +169,12 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Set the COMMENT field of the active document's NC programs (post/output jobs) — what most "
+    "Set the COMMENT field of the active document's NC programs (post/output jobs) - what most "
     "posts emit near the top of the G-code. 'comment' is the text to write. 'program' limits the "
     "change to one NC program by name (omit to update ALL programs). 'set_name' optionally also "
     "sets each program's Name field. WRITES to the CAM data; reports before/after per program. "
-    "Works without switching to the Manufacture workspace. (Use cam_get_nc_programs to list program "
-    "names — note it reports post parameters, not the comment, which this tool edits directly.)"
+    "Works without switching to the Manufacture workspace. (Use cam_get(include=['nc_programs']) to list program "
+    "names - note it reports post parameters, not the comment, which this tool edits directly.)"
 )
 
 tool = (

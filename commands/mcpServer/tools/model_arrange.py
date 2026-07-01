@@ -9,7 +9,7 @@
 
 This is the API equivalent of the Manufacture/Design "Arrange" command (nesting). Give it a boundary
 (a named sketch whose profile is the envelope) and the occurrences to lay out; Fusion solves the
-placement. General-purpose — it just nests whatever occurrences you pass.
+placement. General-purpose - it just nests whatever occurrences you pass.
 
 NOTE: the advanced true-shape nesting can require a Fusion extension on some accounts; this catches
 the gate and reports it instead of failing opaquely (rectangular is the lighter fallback).
@@ -51,7 +51,7 @@ def _find_sketch(design, name):
 
 def _find_occurrences(design, shapes):
     """Resolve a comma-string (or list) of occurrence names/fullPathNames via the shared OccurrenceRef
-    logic (fullPathName-preferring, ambiguity-refusing — no silent wrong-instance grab).
+    logic (fullPathName-preferring, ambiguity-refusing - no silent wrong-instance grab).
     Returns (occurrences, resolved_names, errors)."""
     if isinstance(shapes, str):
         wanted = [s.strip() for s in shapes.split(",") if s.strip()]
@@ -98,12 +98,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     envelope_profile = profiles.item(0)
 
     if not (shapes or "").strip() if isinstance(shapes, str) else not shapes:
-        return error("Provide 'shapes' — the occurrence name(s) to arrange (comma-separated).")
+        return error("Provide 'shapes' - the occurrence name(s) to arrange (comma-separated).")
     occs, resolved, errors = _find_occurrences(design, shapes)
     if errors:
         return error("; ".join(errors))
     if not occs:
-        return error("Provide 'shapes' — at least one occurrence to arrange.")
+        return error("Provide 'shapes' - at least one occurrence to arrange.")
 
     af = safe(lambda: design.rootComponent.features.arrangeFeatures)
     if af is None:
@@ -146,7 +146,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 
 
 TOOL_DESCRIPTION = (
-"ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile — "
+"ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - "
 "the Arrange command. 'boundary_sketch' = the sketch whose closed profile is the envelope to "
 "pack into; 'shapes' = the occurrence name(s) to lay out (comma-separated). 'solver': "
 "'true_shape' (nest the actual part outlines, tightest) or 'rectangular' (nest bounding boxes). "

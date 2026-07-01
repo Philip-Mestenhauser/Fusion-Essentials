@@ -7,7 +7,7 @@
   sketch_create       -> add a new sketch on an origin plane (xy/xz/yz) or a planar face. WRITES.
   sketch_add_geometry -> draw a line / rectangle / circle / arc / polygon on a sketch. WRITES.
 
-Together these let an agent start a sketch and lay down geometry — the front half of the
+Together these let an agent start a sketch and lay down geometry - the front half of the
 modelling flow (a later extrude/revolve building block would consume the resulting profiles).
 
 UNITS: the Fusion API works in **centimeters** internally. These tools accept a 'units'
@@ -51,7 +51,7 @@ _PLANE_ALIASES = {
 
 
 def _pt(x, y, k):
-    """Point3D at (x*k, y*k, 0) — sketch-plane coordinates in cm."""
+    """Point3D at (x*k, y*k, 0) - sketch-plane coordinates in cm."""
     return adsk.core.Point3D.create(x * k, y * k, 0.0)
 
 
@@ -66,7 +66,7 @@ def _sketch_world_frame(sketch) -> dict:
     """Map a sketch's local 2D coords to world: where sketch (0,0) lands and where +X/+Y point.
 
     On a face (or xz/yz) the sketch origin is NOT the face centre and the in-plane axes need not align
-    with world — reporting this lets the caller place geometry by computed coords, not trial+error.
+    with world - reporting this lets the caller place geometry by computed coords, not trial+error.
     All vectors are unit world directions; origin is in mm.
     """
     def _vec(g):
@@ -118,17 +118,17 @@ def get_sketches_handler() -> dict:
 
 
 def sketch_get_handler(sketch_name: str = "", include_entities: bool = False) -> dict:
-    """Read sketches at the right ZOOM LEVEL (progressive disclosure — see CLAUDE.md).
+    """Read sketches at the right ZOOM LEVEL (progressive disclosure - see CLAUDE.md).
 
-    No 'sketch_name' → a SUMMARY list of every sketch (name/plane/counts/visibility) to find what
-    exists. A 'sketch_name' → that sketch's OVERVIEW: counts, is_fully_constrained, and the 'profiles'
-    list (each region's area/centroid/loop_count + a HANDLE for ProfileRef) — the actionable layer,
+    No 'sketch_name' -> a SUMMARY list of every sketch (name/plane/counts/visibility) to find what
+    exists. A 'sketch_name' -> that sketch's OVERVIEW: counts, is_fully_constrained, and the 'profiles'
+    list (each region's area/centroid/loop_count + a HANDLE for ProfileRef) - the actionable layer,
     without the flood. Add include_entities=true for the heavy X-ray (every entity/constraint/
     dimension) when you actually need to edit the sketch geometry.
     """
     if (sketch_name or "").strip():
         # delegate to the detail engine (imported lazily; no circular dependency)
-        from . import sketch_detail
+        from . import _sketch_detail as sketch_detail
         return sketch_detail.handler(sketch_name=sketch_name, include_entities=include_entities)
     return get_sketches_handler()
 
@@ -160,14 +160,14 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    # on_face (a GeometryHandle input) takes precedence — closes the 'sketch on a face' gap.
+    # on_face (a GeometryHandle input) takes precedence - closes the 'sketch on a face' gap.
     # The input-kind resolves+validates the handle to a PLANAR face (or returns a clear error),
     # so this handler never has to re-implement that logic.
     if (on_face or "").strip():
         face, ferr = _ON_FACE.resolve(on_face)
         if ferr:
             return error(ferr)
-        planar, desc = face, f"face {on_face[:12]}…"
+        planar, desc = face, f"face {on_face[:12]}..."
     else:
         planar, desc = _resolve_plane(design, plane)
         if not planar:
@@ -191,7 +191,7 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
 
     # Encode the sketch's world FRAME so the caller can place geometry on the first try instead of
     # guess-and-screenshot. On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its
-    # axes may not line up with world — report where sketch (0,0) is in world and where +X/+Y point.
+    # axes may not line up with world - report where sketch (0,0) is in world and where +X/+Y point.
     frame = _sketch_world_frame(sketch)
 
     return ok({
@@ -202,7 +202,7 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
         "frame": frame,
         "note": ("Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps "
             "sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along "
-            "frame.x_world, +Y along frame.y_world — place geometry from those, not by eye."),
+            "frame.x_world, +Y along frame.y_world - place geometry from those, not by eye."),
     })
 
 
@@ -231,7 +231,7 @@ def _draw_polyline(sketch, points, k, close):
     """Draw a connected chain of lines through 'points' (a list of (x,y) in user units * k = cm).
 
     Each segment STARTS at the previous segment's endSketchPoint (the same SketchPoint object), so
-    consecutive segments SHARE a point — the loop is continuous and parametric (drags as one shape),
+    consecutive segments SHARE a point - the loop is continuous and parametric (drags as one shape),
     not a set of independent segments. With close=True, a final segment connects the last point back
     to the first and a coincident constraint welds them. Returns a label, or None if < 2 points.
     """
@@ -263,7 +263,7 @@ def _draw_polyline(sketch, points, k, close):
 
 
 def _all_sketch_curves_count(sketch):
-    """Total count of sketch curves (across all curve collections) — a cheap 'how many before' marker."""
+    """Total count of sketch curves (across all curve collections) - a cheap 'how many before' marker."""
     return safe(lambda: sketch.sketchCurves.count, 0) or 0
 
 
@@ -313,7 +313,7 @@ def _draw(sketch, kind, p, k):
         return f"ellipse c=({p['cx']},{p['cy']}) major={p['radius']} minor={p.get('minor')}" if e else None
     if kind == "slot":
         # a slot between two centers (x1,y1)-(x2,y2) with overall width = radius*2.
-        # addCenterToCenterSlot is a method on the SKETCH (not sketchLines — confirmed live), and
+        # addCenterToCenterSlot is a method on the SKETCH (not sketchLines - confirmed live), and
         # 'width' must be a ValueInput (real -> cm), not a bare float. Don't wrap in safe(): a real
         # failure must surface its message, not collapse to a misleading "check the parameters".
         p1, p2 = _pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k)
@@ -356,7 +356,7 @@ def _parse_points(points):
     """Normalize a 'points' argument into a list of (x, y) floats. Accepts a list of [x,y] pairs or
     {x,y} dicts. Returns (list, error_or_None)."""
     if not points or not isinstance(points, (list, tuple)):
-        return None, "Provide 'points' — a list of [x, y] pairs for the polyline/closed_path."
+        return None, "Provide 'points' - a list of [x, y] pairs for the polyline/closed_path."
     out = []
     for i, pt in enumerate(points):
         try:
@@ -380,7 +380,7 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
 
     kind: line | rectangle | center_rectangle | circle | ellipse | arc | polygon | slot | point |
     spline | polyline | closed_path. Most kinds use the coordinate/size params (in 'units', default
-    mm; angles in degrees) — see _REQUIRED. ellipse: 'radius'=major, 'minor' optional. center_rectangle:
+    mm; angles in degrees) - see _REQUIRED. ellipse: 'radius'=major, 'minor' optional. center_rectangle:
     center (cx,cy) + corner half-extents (x2,y2). slot: two centers (x1,y1)-(x2,y2) + 'radius'
     (half-width). spline/polyline/closed_path use 'points' (a list of [x,y]). is_construction=true
     draws it as CONSTRUCTION geometry (reference, not a profile edge). Targets the named sketch, or
@@ -466,7 +466,7 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
 # --------------------------------------------------------------- sketch_add_3d_line
 
 def _pt3(x, y, z, k):
-    """Point3D at (x,y,z)*k in cm — a TRUE 3D point (z may be non-zero, i.e. off the sketch plane)."""
+    """Point3D at (x,y,z)*k in cm - a TRUE 3D point (z may be non-zero, i.e. off the sketch plane)."""
     return adsk.core.Point3D.create(x * k, y * k, z * k)
 
 
@@ -560,11 +560,11 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
 
 _GET_DESC = (
     "Read sketches by zoom level. WITHOUT 'sketch_name': a summary list of every sketch (name, plane, "
-    "entity + profile counts, visibility) to find names. WITH 'sketch_name': that sketch's OVERVIEW — "
+    "entity + profile counts, visibility) to find names. WITH 'sketch_name': that sketch's OVERVIEW - "
     "entity counts, is_fully_constrained, and a 'profiles' list (each closed region's area, centroid, "
     "loop_count, and a 'handle' to pass as a ProfileRef to model_extrude / model_revolve / "
-    "model_loft — so you pick a region by area/position, not a guessed index). Add include_entities="
-    "true for the full per-entity/constraint/dimension X-ray (heavier — only when editing the sketch). "
+    "model_loft - so you pick a region by area/position, not a guessed index). Add include_entities="
+    "true for the full per-entity/constraint/dimension X-ray (heavier - only when editing the sketch). "
     "Entity ids match those used by sketch_constrain."
 )
 sketch_get_tool = (
@@ -572,7 +572,7 @@ sketch_get_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Omit for a summary list of all sketches; give a name for that sketch's overview (counts + profiles)."})
     .add_input_property("include_entities", {"type": "boolean",
-            "description": "Also return the full per-entity/constraint/dimension X-ray (default false — heavier; for editing geometry)."})
+            "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier; for editing geometry)."})
     .strict_schema()
 )
 sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", handler=sketch_get_handler,
@@ -582,7 +582,7 @@ _CREATE_DESC = (
                                         "Create a new sketch on a plane OR on an existing planar face. Use 'plane' = xy / xz / yz "
                                         "(origin planes; aliases top/front/right) or a construction-plane name; OR 'on_face' = a "
                                         "planar-face handle from find_geometry to sketch directly ON a part's face (e.g. the top of a "
-                                        "boss) — on_face takes precedence. Optional 'name' renames the sketch. WRITES; then draw on it "
+                                        "boss) - on_face takes precedence. Optional 'name' renames the sketch. WRITES; then draw on it "
                                         "with sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
@@ -591,7 +591,7 @@ create_sketch_tool = (
             "description": "xy | xz | yz (or top/front/right, or a construction-plane name). Default xy. Ignored if on_face is given."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the new sketch."})
     # on_face's schema (incl. its 'needs a planar-face handle from find_geometry' contract note) is
-    # generated by the InputKind itself — single source of truth for resolution + schema + contract.
+    # generated by the InputKind itself - single source of truth for resolution + schema + contract.
     .add_input_property(_ON_FACE.name, _ON_FACE.schema())
     .strict_schema()
 )
@@ -606,7 +606,7 @@ _ADD_DESC = (
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
                                            "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
                                            "chain whose segments SHARE endpoints (coincident) so the shape is continuous + parametric "
-                                           "(drags as one shape, unlike independent 'line' calls) — use 'closed_path' for a custom closed "
+                                           "(drags as one shape, unlike independent 'line' calls) - use 'closed_path' for a custom closed "
                                            "boundary. Targets 'sketch_name', or the most recently created sketch if omitted. WRITES to the "
                                            "design. Pair with view_screenshot to view it."
 )

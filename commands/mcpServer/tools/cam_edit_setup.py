@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: edit a CAM SETUP — its parameters AND its model/fixture/stock bodies.
+"""MCP building block: edit a CAM SETUP - its parameters AND its model/fixture/stock bodies.
 
   cam_edit_setup(setup=..., parameters={...}, models=[...], fixtures=[...], stock=[...])
 
@@ -9,20 +9,20 @@ The setup-level companion to cam_edit_operation. A Setup carries ~287 named para
 orientation/origin, stock dimensions, job options, ...) PLUS three editable body collections (the parts
 to machine, the fixtures, the solid stock). This one tool covers the broad setup surface:
 
-  - 'parameters' {name: expression}  — set ANY setup parameter. This is how the WCS is configured
+  - 'parameters' {name: expression}  - set ANY setup parameter. This is how the WCS is configured
     (wcs_orientation_mode, wcs_origin_mode, wcs_origin_boxPoint, wcs_orientation_axisZ/flipZ, ...) and
     how stock is sized (stockXLow/High, stockZHigh, ...). The WCS matrix itself is read-only; you steer
     it through these parameters.
-  - 'models' / 'fixtures' / 'stock'  — REPLACE that collection with the given bodies (find_geometry
+  - 'models' / 'fixtures' / 'stock'  - REPLACE that collection with the given bodies (find_geometry
     handles or names, resolved strictly through _inputs BodyRefList). Pass to set; omit to leave alone.
 
 Parameters are validated ALL-before-applying-ANY (same as cam_edit_operation), so a typo can't leave a
-half-edited setup. Setting any of these makes existing toolpaths out of date — regenerate with cam_generate.
+half-edited setup. Setting any of these makes existing toolpaths out of date - regenerate with cam_generate.
 
 Grounded in adsk.cam (every setter verified live):
   - Setup.parameters (CAMParameters): .itemByName(name) -> CAMParameter(.expression get/set)
-  - Setup.models / .fixtures / .stockSolids  — get/SET an ObjectCollection of Occurrence/BRepBody/MeshBody
-  - Setup.workCoordinateSystem is READ-ONLY (a Matrix3D) — drive it via the wcs_* parameters above
+  - Setup.models / .fixtures / .stockSolids  - get/SET an ObjectCollection of Occurrence/BRepBody/MeshBody
+  - Setup.workCoordinateSystem is READ-ONLY (a Matrix3D) - drive it via the wcs_* parameters above
 Handler runs on the main thread; WRITES CAM data.
 """
 
@@ -46,7 +46,7 @@ _BODY_COLLECTIONS = {
     "stock": ("stockSolids", "stock_set"),
 }
 
-# strict body-list input kind (handles or names; solid/mesh/surface aware) — reused for all three.
+# strict body-list input kind (handles or names; solid/mesh/surface aware) - reused for all three.
 _BODIES = _inputs.BodyRefList("bodies", required=False)
 
 
@@ -90,12 +90,12 @@ def _setup_names(cam):
 def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None) -> dict:
     """Edit a CAM setup's parameters and/or its model/fixture/stock bodies.
 
-    setup: setup name (from cam_get_setups). parameters: {name: expression} (or 'name=value,...') — set
+    setup: setup name (from cam_get). parameters: {name: expression} (or 'name=value,...') - set
     any setup parameter incl. the wcs_* (WCS) and stock* controls. models/fixtures/stock: lists of body
     handles/names to REPLACE that collection with. Pass what you want to change; omit the rest. WRITES.
     """
     if not (setup or "").strip():
-        return error("Provide 'setup' — the CAM setup name (see cam_get_setups).")
+        return error("Provide 'setup' - the CAM setup name (see cam_get).")
 
     # parse parameters (may be empty)
     wanted = {}
@@ -170,16 +170,16 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                          "(Fixtures need fixtures enabled; solid stock needs stockMode='SolidStock'.)")
         result[key] = safe(lambda target=target, attr=attr: getattr(target, attr).count, len(bodies))
 
-    result["note"] = ("Setup edited. Existing toolpaths are now OUT OF DATE — regenerate with "
+    result["note"] = ("Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with "
                       "cam_generate. The WCS is steered via the wcs_* parameters (the matrix itself is "
                       "read-only).")
     return ok(result)
 
 
 TOOL_DESCRIPTION = (
-    "Edit a CAM SETUP — its parameters and/or its model/fixture/stock bodies (the setup-level companion "
+    "Edit a CAM SETUP - its parameters and/or its model/fixture/stock bodies (the setup-level companion "
     "to cam_edit_operation). 'setup' = setup name. 'parameters' = {name: expression} (or 'name=value,...') "
-    "to set ANY setup parameter — this is how you configure the WCS (wcs_orientation_mode, wcs_origin_mode, "
+    "to set ANY setup parameter - this is how you configure the WCS (wcs_orientation_mode, wcs_origin_mode, "
     "wcs_origin_boxPoint, wcs_orientation_axisZ/flipZ, ...) and stock size (stockXLow/High, stockZHigh, ...); "
     "the WCS matrix itself is read-only. 'models'/'fixtures'/'stock' = body lists (find_geometry handles or "
     "names) that REPLACE that collection. Parameters are validated all-before-any (a typo can't half-edit). "
@@ -188,15 +188,15 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="cam_edit_setup", description=TOOL_DESCRIPTION)
-    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get_setups)."})
+    .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("parameters", {"type": "object",
             "description": "Setup parameters to set: {name: expression} (or 'name=value,...'). e.g. {'wcs_origin_boxPoint': \"'top center'\", 'stockZHigh': '2.5'}."})
     .add_input_property("models", {"type": "array", "items": {"type": "string"},
-            "description": "Bodies to machine (handles/names) — REPLACES the model set."})
+            "description": "Bodies to machine (handles/names) - REPLACES the model set."})
     .add_input_property("fixtures", {"type": "array", "items": {"type": "string"},
-            "description": "Fixture bodies (handles/names) — REPLACES the fixture set."})
+            "description": "Fixture bodies (handles/names) - REPLACES the fixture set."})
     .add_input_property("stock", {"type": "array", "items": {"type": "string"},
-            "description": "Solid stock bodies (handles/names) — REPLACES the stock set."})
+            "description": "Solid stock bodies (handles/names) - REPLACES the stock set."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

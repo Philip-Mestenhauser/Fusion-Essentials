@@ -31,7 +31,7 @@ class Item:
         self.run_on_main_thread = run_on_main_thread
         # enforce_timeout=False exempts a tool from the server's main-thread task timeout. Use it
         # ONLY for tools whose work cannot be interrupted AND would still commit if we "timed out"
-        # (e.g. sys_execute_script) — timing those out would report a false failure for a change
+        # (e.g. sys_execute_script) - timing those out would report a false failure for a change
         # that actually applied. Default True keeps the safety timeout for everything else.
         self.enforce_timeout = enforce_timeout
 
@@ -79,6 +79,15 @@ class Item:
             tool.writes(destructive=True)
         elif write is not None:
             raise ValueError(f"write must be 'read'/'write'/'destructive', got {write!r}")
+        # WRITE-DOCUMENT BINDING (the concurrency guard): a write can land on the WRONG document if the
+        # active doc moved since the agent's read (async open / a human switching tabs). Wrap every
+        # write/destructive handler with the shared guard - it accepts an optional expect_document
+        # (REFUSE on mismatch) and stamps acted_on on the result. One seam covers all write tools; read
+        # tools are untouched. (Lazy import: item.py is a primitive; the guard lives in tools/.)
+        if write in ("write", "destructive"):
+            from ..tools import _write_guard
+            handler = _write_guard.wrap(handler)
+            tool.add_input_property(*_write_guard.EXPECT_DOCUMENT_PROP)
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
                    enforce_timeout=enforce_timeout)
 

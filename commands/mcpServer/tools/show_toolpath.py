@@ -3,7 +3,7 @@
 
 """MCP building block: control which CAM toolpaths are DISPLAYED (the blue paths).
 
-  cam_show_toolpath(action=...) — show / hide individual generated toolpaths so an agent can look at
+  cam_show_toolpath(action=...) - show / hide individual generated toolpaths so an agent can look at
   one operation's path at a time (the CAM analog of view_inspect's visibility verbs, but for operations rather than
   component occurrences). Toolpaths only render in the Manufacture (CAM) workspace.
 
@@ -15,7 +15,7 @@
     list         -> list operations with their toolpath/visibility state.
 
   Optional 'fit' (with show/isolate): aim+fit the camera to that operation's TOOLPATH bounding box
-  (which is bigger than the part — it includes approach/retract moves; focusing on the part clips
+  (which is bigger than the part - it includes approach/retract moves; focusing on the part clips
   it). Pair with view_screenshot to capture.
 
 SAFE BY DESIGN: this toggles Operation.isLightBulbOn (a clean data-model property). It does NOT
@@ -159,10 +159,10 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     if action == "show_folder":
         if not folder.strip():
-            return error("Provide 'folder' — the folder or setup name to show.")
+            return error("Provide 'folder' - the folder or setup name to show.")
         ops, matched = _find_folder_ops(cam, folder)
         if matched is None:
-            return error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get_operations.")
+            return error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get(include=['operations']).")
         # hide everything, then show this folder's generated ops
         for _, o in _all_operations(cam):
             _set_bulb(o, False)
@@ -178,7 +178,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     # show / hide / isolate a single operation
     if not operation.strip():
-        return error(f"Provide 'operation' — the operation name to {action}.")
+        return error(f"Provide 'operation' - the operation name to {action}.")
     o, names = _find_op(cam, operation)
     if not o:
         return error(f"No operation matched '{operation}'. Some: "
@@ -200,7 +200,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if not safe(lambda: o.hasToolpath):
         app.activeViewport.refresh()
         return ok({"action": action, "operation": name,
-        "warning": "This operation has no generated toolpath yet — nothing to display. "
+        "warning": "This operation has no generated toolpath yet - nothing to display. "
         "Generate it first (cam_generate).",
         "has_toolpath": False})
 
@@ -218,9 +218,9 @@ TOOL_DESCRIPTION = (
     "operation's path at a time. 'action': "
     "'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
-    "+ state). 'fit' fits the camera to the operation's TOOLPATH extents (bigger than the part — "
+    "+ state). 'fit' fits the camera to the operation's TOOLPATH extents (bigger than the part - "
     "includes approach/retract moves). Toolpaths render only in the MANUFACTURE workspace; pair "
-    "with view_screenshot. Toggles Operation.isLightBulbOn — does NOT touch simulation/in-process-"
+    "with view_screenshot. Toggles Operation.isLightBulbOn - does NOT touch simulation/in-process-"
     "stock commands (those are unsafe to drive from here)."
 )
 
@@ -240,7 +240,7 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

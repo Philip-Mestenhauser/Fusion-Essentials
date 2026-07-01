@@ -188,11 +188,20 @@ class TestStatusHandler:
                                           numberOfCompleted=2),
                 "target": "all setups", "started_at": 0.0, "total": 2}
 
+    # status_handler now DELEGATES CAM health to _cam_common.live_readiness (the single source) - tests
+    # patch that seam (gen._cam_common.live_readiness -> (signal, None)) instead of a local tally.
+    def _readiness(self, **kw):
+        base = {"valid": 0, "out_of_date": 0, "errored": 0, "generating": 0, "suppressed": 0,
+                "total": 0, "active": None, "setups_errored": 0, "programs_errored": 0,
+                "readiness": "", "samples": {"op": None, "setup": None, "program": None}}
+        base.update(kw)
+        return lambda: (base, None)
+
     def test_latest_resolves_to_last_handle(self, monkeypatch):
         gen._GENERATIONS["gen1"] = self._completed_entry()
         gen._GENERATIONS["gen2"] = self._completed_entry()
         gen._HANDLE_SEQ[0] = 2
-        monkeypatch.setattr(gen, "_live_op_tally", lambda: None)
+        monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(readiness="ready to post."))
         monkeypatch.setattr(gen, "_collect_op_health",
                             lambda: {"warnings": [], "errors": [], "empty": []})
         out = _payload(gen.status_handler(handle="latest", pump_seconds=0))
@@ -204,18 +213,59 @@ class TestStatusHandler:
                                       numberOfCompleted=0),
             "target": "all setups", "started_at": 0.0, "total": 2}
         gen._HANDLE_SEQ[0] = 1
-        monkeypatch.setattr(gen, "_live_op_tally",
-                            lambda: {"valid": 0, "out_of_date": 2, "generating": 0,
-                                     "suppressed": 0, "total": 2, "active": None})
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(out_of_date=2, generating=0, total=2,
+                                            readiness="0 of 2 active ops valid - run cam_generate to finish the rest."))
         out = _payload(gen.status_handler(handle="gen1", pump_seconds=0))
         assert out["completed"] is False
         assert "WARNING" in out["note"]
+
+    def test_errored_op_surfaced_while_still_generating(self, monkeypatch):
+        # THE refinement: an errored op (hasError) will NEVER finish, so a still-generating poll must
+        # flag it NOW (the BLOCKER readiness + one sample + a pointer to cam_get), not wait for a
+        # completion that can't come. The verdict comes from _cam_common.live_readiness (one source).
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=3,
+                                      numberOfCompleted=0),
+            "target": "all setups", "started_at": 0.0, "total": 3}
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(errored=1, generating=2, total=3,
+                                            readiness="BLOCKER: 1 operation(s) have errors - the job will not post until fixed.",
+                                            samples={"op": {"name": "Rough to Model Top",
+                                                            "error": "Top height must not be below the bottom height"},
+                                                     "setup": None, "program": None}))
+        out = _payload(gen.status_handler(handle="gen1", pump_seconds=0))
+        assert out["completed"] is False
+        assert out["live_states"]["errored"] == 1
+        # the note carries the BLOCKER verdict, the sample op, and points at the deeper read
+        assert "BLOCKER" in out["note"]
+        assert "Rough to Model Top" in out["note"]
+        assert "will NOT complete" in out["note"]
+        assert "cam_get(include=['operations'])" in out["note"]
+
+    def test_setup_error_blocks_via_readiness(self, monkeypatch):
+        # a faulted SETUP is in the BLOCKER readiness from live_readiness - status surfaces it + stops.
+        gen._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
+                                      numberOfCompleted=0),
+            "target": "all setups", "started_at": 0.0, "total": 2}
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=1, out_of_date=1, generating=1, total=2, setups_errored=1,
+                                            readiness="BLOCKER: 1 setup(s) have errors - the job will not post until fixed.",
+                                            samples={"op": None, "program": None,
+                                                     "setup": {"name": "Op1", "error": "WCS orientation is invalid"}}))
+        out = _payload(gen.status_handler(handle="gen1", pump_seconds=0))
+        assert "BLOCKER" in out["note"]
+        assert "Op1" in out["note"]
+        assert "will NOT complete" in out["note"]
 
     def test_pump_budget_is_clamped(self, monkeypatch):
         # a huge pump_seconds must be clamped to <=10; with a completed future no pumping happens.
         gen._GENERATIONS["gen1"] = self._completed_entry()
         gen._HANDLE_SEQ[0] = 1
-        monkeypatch.setattr(gen, "_live_op_tally", lambda: None)
+        monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(readiness="ready to post."))
         monkeypatch.setattr(gen, "_collect_op_health",
                             lambda: {"warnings": [], "errors": [], "empty": []})
         out = _payload(gen.status_handler(handle="gen1", pump_seconds=9999))

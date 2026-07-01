@@ -7,7 +7,7 @@
   model_chamfer -> bevel edges with a constant distance (a Chamfer feature).
 
 Every real part needs edge breaks (deburr/round). These apply to ALL edges of a named body by
-default — the common "break all the edges" case — with an optional 'edge_filter' to limit to convex
+default - the common "break all the edges" case - with an optional 'edge_filter' to limit to convex
 (outer) or concave (inner) edges. Edges are not picked individually (fragile across rebuilds);
 operate per-body. WRITES.
 
@@ -76,13 +76,13 @@ def _collect_edges(body, edge_filter):
 
 def _fillet_handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
                     edge_filter: str = "all", edges=None) -> dict:
-    """Round edges with a constant radius (Fillet) — specific edge handles, or all/filtered on a body."""
+    """Round edges with a constant radius (Fillet) - specific edge handles, or all/filtered on a body."""
     return _apply("fillet", body_name, radius, units, edge_filter, edges)
 
 
 def _chamfer_handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
                      edge_filter: str = "all", edges=None, distance_two: float = 0.0) -> dict:
-    """Bevel edges with a Chamfer — equal-distance, or a two-distance (asymmetric) chamfer when
+    """Bevel edges with a Chamfer - equal-distance, or a two-distance (asymmetric) chamfer when
     'distance_two' is set. Specific edge handles, or all/filtered on a body."""
     return _apply("chamfer", body_name, distance, units, edge_filter, edges, distance_two)
 
@@ -105,7 +105,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
     edge_src = "filter"
     body_label = None
-    # 'edges' (a GeometryHandleList of edge handles) takes precedence — closes the
+    # 'edges' (a GeometryHandleList of edge handles) takes precedence - closes the
     # 'fillet THESE specific edges' gap. The kind resolves+validates each handle to a BRep edge.
     if edge_handles not in (None, "", []):
         ents, herr = _EDGES.resolve(edge_handles)
@@ -146,7 +146,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             feature = comp.features.chamferFeatures.add(ci)
     except Exception as e:
         return error(f"{kind.capitalize()} failed: {e}. (The {'radius' if kind == 'fillet' else 'distance'} "
-        "may be too large for the geometry — try a smaller value.)")
+        "may be too large for the geometry - try a smaller value.)")
     if not feature:
         return error(f"{kind.capitalize()} returned no feature.")
 
@@ -167,14 +167,14 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
 
 _FILLET_DESC = (
-    "Round (fillet) edges with a constant radius — the deburr/edge-break every real part needs. "
+    "Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs. "
     "TARGET the edges one of two ways: (a) 'edges' = a list of edge handles from find_geometry to "
     "fillet SPECIFIC edges (the precise way); or (b) omit 'edges' and give 'body_name' (a body handle "
     "or name; omit = most recent body) to fillet ALL its edges, optionally narrowed by 'edge_filter' "
     "(convex/concave). 'radius' is in 'units' (mm default). 'edges' takes precedence."
 )
 _CHAMFER_DESC = (
-"Bevel (chamfer) edges with a constant distance — an angled edge break. TARGET via 'edges' = "
+"Bevel (chamfer) edges with a constant distance - an angled edge break. TARGET via 'edges' = "
 "edge handles from find_geometry (specific edges), OR 'body_name' (a body handle or name) + optional "
 "'edge_filter' (convex/concave) for all/filtered edges of a body. 'distance' is in 'units' (mm "
 "default). 'edges' takes precedence."

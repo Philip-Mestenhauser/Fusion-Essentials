@@ -1110,3 +1110,108 @@ class TestOccurrenceRefList:
         _install_occurrences(a, b)
         val, err = inp.OccurrenceRefList("occs").resolve(["Sub-A:1+Bolt:1", "Bolt"])
         assert val is None and "ambiguous" in err.lower() and "occs[1]" in err
+
+
+# ── TargetRef (the polymorphic measure/colour target) ───────────────────────
+
+def _install_target(*, handle_map=None, occurrences=(), components=(), brep_named=None, mesh_named=None):
+    """A design wired for every TargetRef path: findEntityByToken (handle), allOccurrences (occurrence),
+    allComponents (component), bRepBodies/meshBodies (body-by-name)."""
+    import adsk.fusion
+    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
+    handle_map = handle_map or {}
+    brep_named = brep_named or {}
+    mesh_named = mesh_named or {}
+
+    class _BColl:
+        def __init__(self, m): self._m = m
+        def itemByName(self, n): return self._m.get(n)
+
+    class _MColl:
+        def __init__(self, m): self._l = list(m.values())
+        @property
+        def count(self): return len(self._l)
+        def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
+
+    class _Comp:
+        def __init__(self, name): self.name = name
+
+    class _CompColl:
+        """allComponents is a COUNTED collection (count + item(i)), not a plain list."""
+        def __init__(self, items): self._l = list(items)
+        @property
+        def count(self): return len(self._l)
+        def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
+    comp_coll = _CompColl([_Comp("Root")] + [_Comp(n) for n in components])
+
+    class _Root:
+        name = "Root"
+        allOccurrences = list(occurrences)
+        allComponents = comp_coll
+        bRepBodies = _BColl(brep_named)
+        meshBodies = _MColl(mesh_named)
+
+    class FakeDesign:
+        rootComponent = _Root()
+        def findEntityByToken(self, h):
+            e = handle_map.get(h)
+            return [e] if e is not None else []
+    inp._common.design = lambda: FakeDesign()
+    inp._common.target_component = lambda d=None: FakeDesign().rootComponent
+    return FakeDesign()
+
+
+class TestTargetRef:
+    def test_empty_is_whole_design(self):
+        d = _install_target()
+        (ent, kind), err = inp.TargetRef("target").resolve("")
+        assert err is None and kind == "design" and ent is d.rootComponent
+
+    def test_handle_to_body(self):
+        b = FakeBRep("Body1", is_solid=True)
+        _install_target(handle_map={"H": b})
+        (ent, kind), err = inp.TargetRef("target").resolve("H")
+        assert err is None and kind == "body" and ent is b
+
+    def test_handle_to_face(self):
+        f = FakePlanarFace()
+        _install_target(handle_map={"H": f})
+        (ent, kind), err = inp.TargetRef("target").resolve("H")
+        assert err is None and kind == "face"
+
+    def test_handle_to_mesh(self):
+        m = FakeMesh("M1")
+        _install_target(handle_map={"H": m})
+        (ent, kind), err = inp.TargetRef("target").resolve("H")
+        assert err is None and kind == "mesh" and ent is m
+
+    def test_occurrence_by_fullpath(self):
+        occ = _FakeOcc("Wheel:1", "Chassis:1+Wheel:1")
+        _install_target(occurrences=[occ])
+        (ent, kind), err = inp.TargetRef("target").resolve("Chassis:1+Wheel:1")
+        assert err is None and kind == "occurrence" and ent is occ
+
+    def test_component_by_name(self):
+        _install_target(components=["Bracket"])
+        (ent, kind), err = inp.TargetRef("target").resolve("Bracket")
+        assert err is None and kind == "component" and ent.name == "Bracket"
+
+    def test_body_by_name(self):
+        b = FakeBRep("Plate", is_solid=True)
+        _install_target(brep_named={"Plate": b})
+        (ent, kind), err = inp.TargetRef("target").resolve("Plate")
+        assert err is None and kind == "body" and ent is b
+
+    def test_allow_restricts_kind(self):
+        # a mesh-only TargetRef refuses a brep-body handle
+        b = FakeBRep("Body1", is_solid=True)
+        _install_target(handle_map={"H": b})
+        res, err = inp.TargetRef("target", allow=("mesh",)).resolve("H")
+        assert res is None and "mesh" in err.lower()
+
+    def test_unresolvable_errors(self):
+        _install_target()
+        res, err = inp.TargetRef("target").resolve("Ghost")
+        assert res is None and "Ghost" in err

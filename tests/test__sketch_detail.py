@@ -14,7 +14,7 @@ import json
 
 from conftest import load_tool
 
-sd = load_tool("sketch_detail")
+sd = load_tool("_sketch_detail")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -525,7 +525,7 @@ class TestProfiles:
 
 
 class TestProgressiveDisclosure:
-    """The fractal-disclosure contract: light overview by default, heavy X-ray only on request."""
+    """Progressive disclosure: light overview by default, heavy X-ray only on request."""
 
     def test_default_omits_the_heavy_entity_xray(self):
         # The flood we must NOT dump by default: per-entity/constraint/dimension records.

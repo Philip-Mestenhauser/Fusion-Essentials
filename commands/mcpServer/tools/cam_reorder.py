@@ -5,10 +5,10 @@
 
   cam_reorder(entity="<name>", position="before"|"after", reference="<name>")
 
-Operation order in a setup is the machining sequence — agents need to control it (e.g. rough before
+Operation order in a setup is the machining sequence - agents need to control it (e.g. rough before
 finish, drill before bore). This moves one CAM item relative to another in the tree.
 
-Grounded in adsk.cam (verified live — made 5 ops, reordered them):
+Grounded in adsk.cam (verified live - made 5 ops, reordered them):
   - OperationBase.moveBefore(op) / moveAfter(op) -> bool ("throws/false if not allowed, e.g. moving an
     operation out of its setup"). Shared by operations / folders / patterns.
   - allOperations omits folders/patterns, so both the moving and reference entities are found by walking
@@ -73,7 +73,7 @@ def _resolve(named, name):
         return None, (f"No CAM operation/folder/pattern named '{name}'. Available: "
                       f"{', '.join(avail)[:300] or '(none)'}.")
     if len(matches) > 1:
-        return None, f"'{name}' is ambiguous — {len(matches)} items share that name. Rename so it's unique."
+        return None, f"'{name}' is ambiguous - {len(matches)} items share that name. Rename so it's unique."
     return matches[0], None
 
 
@@ -88,7 +88,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
     if position not in _POSITIONS:
         return error(f"Unknown position '{position}'. Use 'before' or 'after'.")
     if entity == reference:
-        return error("'entity' and 'reference' are the same item — nothing to reorder.")
+        return error("'entity' and 'reference' are the same item - nothing to reorder.")
 
     cam, cerr = _get_cam()
     if cerr:
@@ -119,7 +119,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
 
 TOOL_DESCRIPTION = (
     "REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or "
-    "'after' 'reference' (both are item names from cam_get_operations / cam_folder). Works on operations, "
+    "'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_edit_folders). Works on operations, "
     "folders, and patterns, anywhere in the tree. An illegal move (e.g. out of its setup) is reported as "
     "an error, not a false success. WRITES CAM data (doesn't invalidate toolpaths)."
 )

@@ -343,7 +343,7 @@ class TestMeshGet:
         _install(FakeDesign(root, all_comps=[root]))
         res = mo.mesh_get_handler(target="Ghost")
         assert res["isError"] is True
-        assert "Ghost" in res["message"] and "design_get_tree" in res["message"]
+        assert "Ghost" in res["message"] and "design_get" in res["message"]
 
     def test_dedup_same_mesh_listed_once(self):
         # the same MeshBody reachable through two components must appear only once (seen-set dedup)
@@ -368,15 +368,13 @@ class TestMeshGet:
         assert out["count"] == 1
 
 
-# ── mesh_measure: bbox + counts + watertight; via MeshBodyRef ───────────────────────────────────
+# ── mesh measurement: bbox + counts + watertight (model_inspect calls this on a mesh target) ────
 
 class TestMeshMeasure:
-    def test_measures_via_handle(self):
+    def test_measures_a_mesh_body(self):
         _wire_adsk()
         m = MeshBody("Scan", tri=999, nodes=500, bbox=FakeBBox((0, 0, 0), (1, 2, 4)))
-        comp = FakeComp("Comp", meshes=[m])
-        _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mo.mesh_measure_handler(mesh="H", units="mm"))
+        out = _payload(mo.mesh_measure_of_body(m, units="mm"))
         assert out["triangle_count"] == 999 and out["node_count"] == 500
         assert out["is_closed"] is True
         # bbox scaled from cm -> mm (x10): 1cm,2cm,4cm -> 10,20,40
@@ -386,25 +384,8 @@ class TestMeshMeasure:
     def test_non_watertight_carries_warning(self):
         _wire_adsk()
         m = MeshBody("Open", is_closed=False)
-        comp = FakeComp("Comp", meshes=[m])
-        _install(FakeDesign(comp), handle_map={"H": m})
-        out = _payload(mo.mesh_measure_handler(mesh="H"))
+        out = _payload(mo.mesh_measure_of_body(m))
         assert out["is_closed"] is False and "not watertight" in out["note"].lower()
-
-
-# ── MeshBodyRef rejects a BRep handle with the redirect message ─────────────────────────────────
-
-class TestMeshBodyRefRedirect:
-    def test_brep_handle_rejected_with_redirect(self):
-        _wire_adsk()
-        brep = BRepBody("SolidBody", is_solid=True)
-        comp = FakeComp("Comp")
-        _install(FakeDesign(comp), handle_map={"H": brep})
-        # mesh_measure takes a MeshBodyRef — a BRep handle must be redirected, not measured
-        res = mo.mesh_measure_handler(mesh="H")
-        assert res["isError"] is True
-        assert "must be a MESH body" in res["message"]
-        assert "SOLID body" in res["message"]
 
 
 # ── mesh_insert: base-feature gate in parametric; works in direct ───────────────────────────────

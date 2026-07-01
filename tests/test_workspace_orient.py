@@ -84,11 +84,12 @@ class _UnitsMgr:
 
 
 class FakeDesign:
-    def __init__(self, root, timeline=(), units="mm", design_type=1):
+    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0):
         self.rootComponent = root
         self.timeline = _Coll(timeline)
         self.unitsManager = _UnitsMgr(units)
         self.designType = design_type        # 1 = parametric, 0 = direct
+        self.userParameters = type("UP", (), {"count": parameters})()
 
 
 class FakeSetup:
@@ -245,6 +246,22 @@ class TestOrientation:
         assert out["design"]["sketches"] == 3
         assert out["design"]["top_level_occurrences"] == 2
 
+    def test_reports_parameters_count_and_pointer(self):
+        # parameters were invisible in the front-door orient - a design WITH them must report the count
+        # AND a param_get breadcrumb (the same inbound crumb design_get now gives).
+        des = self._small_design(parameters=18)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["parameters"] == 18
+        assert "param_get" in out["pointers"]["parameters"]
+
+    def test_no_param_pointer_when_zero(self):
+        des = self._small_design(parameters=0)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["parameters"] == 0            # count still reported (like bodies/sketches)
+        assert "parameters" not in out["pointers"]         # but no pointer when there's nothing to point at
+
     def test_healthy_rollup(self):
         des = self._small_design()
         _install(active_product=des, doc=FakeDoc(design=des))
@@ -264,6 +281,7 @@ class TestOrientation:
         assert h["is_healthy"] is False
 
     def test_broken_joint_surfaced_by_name(self):
+        # healthState 2 = error (a real compute failure) -> flagged as failed-to-compute.
         root = FakeRoot(top_occs=[FakeOcc("A:1")],
                         joints=[FakeJoint("Good", 0), FakeJoint("PistonSlide", 2)])
         des = FakeDesign(root, timeline=[FakeTL(0)])
@@ -271,13 +289,27 @@ class TestOrientation:
         out = _payload(wo.handler())
         assert out["health"]["broken_joints"] == ["PistonSlide"]
         assert out["health"]["is_healthy"] is False
-        # the note must LEAD with the unhealthy verdict so a skimming agent can't miss it
-        assert out["note"].startswith("⚠ UNHEALTHY")
+        # the note LEADS with the FINDINGS (not a laundered "UNHEALTHY" verdict) so a skimming agent
+        # sees the fact but isn't told a deliberate config is broken.
+        assert out["note"].startswith("Attention")
+        assert "failed to compute" in out["note"]
+
+    def test_suppressed_joint_is_not_broken(self):
+        # healthState 3 = SUPPRESSED (author-parked alternate, e.g. a fixture template's reversed jaw).
+        # It must NOT count as broken and must NOT drop is_healthy. (Live: 'Jaw ... REVERSED' hs=3.)
+        root = FakeRoot(top_occs=[FakeOcc("A:1")],
+                        joints=[FakeJoint("Active", 0), FakeJoint("Parked REVERSED", 3)])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["broken_joints"] == []
+        assert out["health"]["is_healthy"] is True
+        assert out["note"].startswith("No compute errors")
 
     def test_healthy_note_says_so(self):
         des = self._small_design()
         _install(active_product=des, doc=FakeDoc(design=des))
-        assert _payload(wo.handler())["note"].startswith("Healthy")
+        assert _payload(wo.handler())["note"].startswith("No compute errors")
 
     def test_direct_mode_has_no_timeline(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
@@ -358,17 +390,19 @@ class TestExternalReferences:
         assert out["health"]["is_healthy"] is True
         assert "fix_references" not in out["pointers"]
 
-    def test_out_of_date_reference_makes_design_unhealthy(self):
+    def test_out_of_date_reference_is_flagged_for_attention(self):
         self._design_with_refs([FakeRef("Fresh"), FakeRef("StalePart", out_of_date=True)])
         out = _payload(wo.handler())
         assert out["references"]["out_of_date"] == ["StalePart"]
         assert out["health"]["out_of_date_references"] == ["StalePart"]
-        assert out["health"]["is_healthy"] is False              # OOD counts against health
+        assert out["health"]["is_healthy"] is False              # OOD still counts against health
         assert "fix_references" in out["pointers"]
         assert "doc_update_xref" in out["pointers"]["fix_references"]
         assert "StalePart" in out["pointers"]["fix_references"]
-        assert out["note"].startswith("⚠ UNHEALTHY")
-        assert "OUT-OF-DATE reference" in out["note"]
+        # findings-first framing (not a laundered verdict), and it flags the fact may be intentional
+        assert out["note"].startswith("Attention")
+        assert "out-of-date reference" in out["note"]
+        assert "intentional" in out["note"]                      # tells the agent to confirm, not assume
 
     def test_ood_reported_even_without_an_active_design(self):
         # a non-Design doc (e.g. a drawing) that still has stale xrefs must surface them

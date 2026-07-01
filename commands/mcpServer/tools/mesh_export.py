@@ -1,19 +1,19 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for MESH export / tessellation — the mesh-aware siblings of design_export
+"""MCP building blocks for MESH export / tessellation - the mesh-aware siblings of design_export
 and the inverse of mesh_to_brep.
 
   mesh_export(format=obj|3mf|stl, file_path=..., target=...) -> write a mesh file to local disk.
   save_as_mesh(body=..., quality=...) -> tessellate a BRep solid/surface into a MeshBody IN the design.
 
 design_export already covers STEP/IGES/SAT/STL-of-a-solid; mesh_export adds the dedicated mesh
-formats (OBJ / 3MF / STL) and a BROAD target (a BRepBody, a MeshBody, an Occurrence, or a Component —
-or the whole design). It only WRITES A FILE — it never touches the design.
+formats (OBJ / 3MF / STL) and a BROAD target (a BRepBody, a MeshBody, an Occurrence, or a Component -
+or the whole design). It only WRITES A FILE - it never touches the design.
 
 save_as_mesh is the OTHER direction: it tessellates a BRep body into a persistent MeshBody added to
 the design (the inverse of mesh_to_brep). That is a WRITE that creates a MeshBody, so in a PARAMETRIC
-design it MUST run inside a BaseFeature edit scope — routed through the shared, leak-proof
+design it MUST run inside a BaseFeature edit scope - routed through the shared, leak-proof
 run_in_base_feature(design, comp, inner_op) from design_mode.py (direct mode: runs inner directly;
 parametric: an atomic open->op->finishEdit scope). The read-only calculate() runs OUTSIDE the scope.
 
@@ -70,7 +70,7 @@ _QUALITIES = {
 }
 
 # mesh_export's target accepts ANY body (BRep OR mesh), a component/occurrence name, or the whole
-# design — so a broad BodyRef (kind="any") plus the component/occurrence fallback below.
+# design - so a broad BodyRef (kind="any") plus the component/occurrence fallback below.
 _EXPORT_TARGET = _inputs.BodyRef("target", kind="any", required=False,
                                  description="What to export (a body/component/occurrence; omit = whole design).")
 _EXPORT_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="3mf",
@@ -104,7 +104,7 @@ def _resolve_export_target(design, target):
     nothing.
 
     MESH-TARGET REDIRECT (Bug A, live-confirmed): ExportManager.execute() on a bare MeshBody geometry
-    returns True but writes NO FILE (a mesh-in -> file is a no-op — the API only tessellates a BRep to
+    returns True but writes NO FILE (a mesh-in -> file is a no-op - the API only tessellates a BRep to
     a file). So a MeshBody target is REDIRECTED to its parentComponent, which DOES write a file (the
     file then contains that component's mesh bodies). The third return value records that redirect so
     the handler can note it.
@@ -114,7 +114,7 @@ def _resolve_export_target(design, target):
     if not name:
         return root, "whole design (root component)", False
 
-    # A handle (or a name) that resolves to a real body — BRep OR mesh — via the shared resolver.
+    # A handle (or a name) that resolves to a real body - BRep OR mesh - via the shared resolver.
     body, berr = _EXPORT_TARGET.resolve(name)
     if body is not None and berr is None and not isinstance(body, str):
         if _inputs._is_mesh(body):
@@ -165,7 +165,7 @@ def _sanitize(name):
 
 def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
     """Create options, apply refinement, execute, and VERIFY a non-empty file landed (execute() can
-    return True while writing nothing — Bug A). Returns (size_or_None, applied_refinement, error_str)."""
+    return True while writing nothing - Bug A). Returns (size_or_None, applied_refinement, error_str)."""
     factory = safe(lambda: getattr(em, factory_name))
     if factory is None:
         return None, None, f"this build's ExportManager has no {factory_name}"
@@ -191,7 +191,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
                    refinement: str = "medium", split_by_component: bool = False) -> dict:
     """Export 'target' (body/mesh/component/occurrence, or whole design) to 'file_path' as a mesh.
 
-    split_by_component=true exports EACH top-level occurrence to its own mesh file (one per part — what
+    split_by_component=true exports EACH top-level occurrence to its own mesh file (one per part - what
     3D printing wants) into the directory 'file_path'; 'target' is ignored in that mode.
     """
     fmt, ferr = _EXPORT_FORMAT.resolve(format)
@@ -204,7 +204,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
 
     path = (file_path or "").strip().strip('"')
     if not path:
-        return error("Provide 'file_path' — the local output path (a file, or a DIRECTORY when "
+        return error("Provide 'file_path' - the local output path (a file, or a DIRECTORY when "
     "split_by_component=true). The format extension is appended if missing.")
 
     design = _common.design()
@@ -215,7 +215,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     if split_by_component:
         em = safe(lambda: design.exportManager)
         if em is None:
-            return error("This design exposes no exportManager — cannot export.")
+            return error("This design exposes no exportManager - cannot export.")
         out_dir = path
         try:
             os.makedirs(out_dir, exist_ok=True)
@@ -224,7 +224,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         root = safe(lambda: design.rootComponent)
         n_occ = safe(lambda: root.occurrences.count, 0) or 0
         if not n_occ:
-            return error("No top-level occurrences to split — the design has no component instances. "
+            return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
         files, errors, used = [], [], {}
         for i in range(n_occ):
@@ -247,7 +247,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             "directory": out_dir,
             "file_count": len(files),
             "files": files,
-            "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files — each "
+            "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files - each "
             "top-level occurrence is one printable file.",
         }
         if errors:
@@ -274,10 +274,10 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
 
     em = safe(lambda: design.exportManager)
     if em is None:
-        return error("This design exposes no exportManager — cannot export.")
+        return error("This design exposes no exportManager - cannot export.")
     factory = safe(lambda: getattr(em, factory_name))
     if factory is None:
-        return error(f"This build's ExportManager has no {factory_name} — {fmt.upper()} export "
+        return error(f"This build's ExportManager has no {factory_name} - {fmt.upper()} export "
     "is unavailable here.")
 
     # All three mesh factories take (geometry, filename). Mutation (execute) is NOT wrapped in safe().
@@ -291,9 +291,9 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     except Exception as e:
         return error(f"{fmt.upper()} export failed: {e}")
     if not did:
-        return error(f"{fmt.upper()} export returned false — nothing was written.")
+        return error(f"{fmt.upper()} export returned false - nothing was written.")
 
-    # VERIFY the file is actually on disk and non-empty — execute() returning truthy is NOT proof a
+    # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT proof a
     # file was written (Bug A: a MeshBody target makes execute() return True while writing nothing).
     # file_exists + size>0 is the SOURCE OF TRUTH for success; never report exported:true otherwise.
     exists = bool(safe(lambda: os.path.isfile(path), False))
@@ -302,7 +302,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         if redirected_from_mesh:
             return error(
                 f"{fmt.upper()} export wrote no file for this MESH target. Exporting an existing MESH "
-                f"body to a file via ExportManager writes nothing (a Fusion limitation — execute() "
+                f"body to a file via ExportManager writes nothing (a Fusion limitation - execute() "
                 f"returns True but no file lands), and the redirect to its owning component "
                 f"({desc}) produced no file either (the component may hold no exportable mesh "
                 f"geometry). To get the mesh on disk, convert it first (mesh_to_brep) and export the "
@@ -310,7 +310,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         return error(
             f"{fmt.upper()} export reported success but NO file was written to '{path}' "
             f"(file_exists={exists}, size_bytes={size}). execute() returned True but produced nothing "
-            f"— treating this as a FAILURE, not a false success. Check the target geometry and the "
+            f"- treating this as a FAILURE, not a false success. Check the target geometry and the "
             f"output path are valid.")
 
     note = ("Exported a MESH file to local disk (the design was not modified). To round-trip it "
@@ -318,7 +318,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             "mesh_insert.")
     if redirected_from_mesh:
         note = ("Target was a MESH body, which ExportManager cannot write to a file on its own (it "
-            "returns success but writes nothing). Exported its owning component instead — the "
+            "returns success but writes nothing). Exported its owning component instead - the "
             "file contains that component's mesh bodies. " + note)
     return ok({
         "exported": True,
@@ -337,20 +337,20 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
 
 def _tessellate(body, quality_key):
     """Run the BRep body's mesh calculator and return (TriangleMesh, error). READ-ONLY (no design
-    mutation) — so it can run OUTSIDE the base-feature scope. The mutation is the later addBy… call."""
+    mutation) - so it can run OUTSIDE the base-feature scope. The mutation is the later addBy... call."""
     mm = safe(lambda: body.meshManager)
     if mm is None:
-        return None, error("This body has no meshManager — cannot tessellate it into a mesh.")
+        return None, error("This body has no meshManager - cannot tessellate it into a mesh.")
     calc = safe(lambda: mm.createMeshCalculator())
     if calc is None:
-        return None, error("meshManager.createMeshCalculator() returned nothing — cannot tessellate.")
+        return None, error("meshManager.createMeshCalculator() returned nothing - cannot tessellate.")
 
     tmo = safe(lambda: adsk.fusion.TriangleMeshQualityOptions)
     qual = safe(lambda: getattr(tmo, _QUALITIES[quality_key])) if tmo is not None else None
     if qual is not None:
         safe(lambda: calc.setQuality(qual))
 
-    # calculate() is a real computation that can raise on a degenerate body — surface it, don't swallow.
+    # calculate() is a real computation that can raise on a degenerate body - surface it, don't swallow.
     try:
         tm = calc.calculate()
     except Exception as e:
@@ -364,9 +364,9 @@ def _weld(coords, coord_idx):
     """Merge coincident vertices in a tessellation and remap the triangle indices to the merged set.
 
     The mesh calculator emits one node PER triangle corner (a box yields 24 nodes for 8 real
-    vertices), so the resulting mesh is topologically open — adjacent triangles do not share edges —
+    vertices), so the resulting mesh is topologically open - adjacent triangles do not share edges -
     and reports isClosed=false even for a watertight solid, which blocks mesh_to_brep. Welding
-    deduplicates vertices at a fixed quantization (1e-6 cm ≈ 10 nm, far below any modelling
+    deduplicates vertices at a fixed quantization (1e-6 cm ~ 10 nm, far below any modelling
     tolerance) so a watertight solid produces a watertight mesh. Geometry is preserved exactly:
     only identical coordinates are merged.
 
@@ -407,7 +407,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     if berr:
         return error(berr)
     if _inputs._is_mesh(src):
-        return error("'body' is already a MESH body — save_as_mesh tessellates a BRep solid/surface. "
+        return error("'body' is already a MESH body - save_as_mesh tessellates a BRep solid/surface. "
     "To re-triangulate an existing mesh use mesh_remesh; to copy/export it use "
     "mesh_export.")
     qual, qerr = _SAVE_QUALITY.resolve(quality)
@@ -419,7 +419,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     if comp is None:
         return error("Could not resolve a component to add the mesh body into.")
 
-    # 1) calculate() — READ-ONLY, runs OUTSIDE the base-feature scope.
+    # 1) calculate() - READ-ONLY, runs OUTSIDE the base-feature scope.
     tm, terr = _tessellate(src, qual)
     if terr:
         return terr
@@ -429,7 +429,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     normals = safe(lambda: tm.normalVectorsAsDouble)
     normal_idx = safe(lambda: tm.normalIndices)
     if coords is None or coord_idx is None:
-        return error("Tessellation produced no coordinate/index data — cannot build a mesh body.")
+        return error("Tessellation produced no coordinate/index data - cannot build a mesh body.")
     tri_count = safe(lambda: tm.triangleCount)
 
     # WELD coincident vertices: the calculator emits one node per triangle corner, so without this the
@@ -439,7 +439,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     coords, coord_idx = _weld(coords, coord_idx)
     node_count = len(coords) // 3
 
-    # 2) addByTriangleMeshData — the WRITE. In PARAMETRIC it MUST be inside a base-feature scope; the
+    # 2) addByTriangleMeshData - the WRITE. In PARAMETRIC it MUST be inside a base-feature scope; the
     #    shared run_in_base_feature opens/closes that atomically (direct mode runs inner directly). The
     #    add itself is a direct call (no safe() around the mutation) so a real failure surfaces.
     def _add(_base_feature):
@@ -450,7 +450,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
         return scope_err
     mb = result
     if mb is None:
-        return error("meshBodies.addByTriangleMeshData returned nothing — no mesh body was created.")
+        return error("meshBodies.addByTriangleMeshData returned nothing - no mesh body was created.")
 
     rename = (name or "").strip()
     if rename:
@@ -469,9 +469,9 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
         "note": ("Tessellated the BRep body into a persistent MESH body. " + (
             "Wrapped in a BaseFeature edit scope (parametric design requires it for a mesh write)."
             if mode == _inputs.MODE_PARAMETRIC else
-            "Direct design — no base-feature scope needed.") +
-            " Inspect it with mesh_measure, edit with mesh_reduce / mesh_remesh, or export it with "
-            "mesh_export."),
+            "Direct design - no base-feature scope needed.") +
+            " Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or "
+            "export it with mesh_export."),
     })
 
 
@@ -484,14 +484,14 @@ mesh_export_tool = (
             name="mesh_export",
             description=(
                 "Export a body, MESH, component/occurrence, or the WHOLE design to a MESH file on local "
-                "disk (OBJ / 3MF / STL) — the mesh-aware sibling of design_export (which does neutral "
+                "disk (OBJ / 3MF / STL) - the mesh-aware sibling of design_export (which does neutral "
                 "BRep formats). 'target' is a body HANDLE from find_geometry (precise; works for BRep "
                 "AND mesh bodies) OR a body/mesh/component/occurrence NAME, or omit it to export the "
                 "whole design. 'format' is obj/3mf/stl (default 3mf). 'file_path' is the local output "
                 "path (the extension is appended if missing; the directory is created if needed). "
                 "'refinement' (high|medium|low) sets mesh density where the format supports it. Set "
                 "split_by_component=true to export EACH top-level occurrence to its own file (one per "
-                "part — what 3D printing wants) into the DIRECTORY 'file_path' ('target' ignored). "
+                "part - what 3D printing wants) into the DIRECTORY 'file_path' ('target' ignored). "
                 "WRITES a file to disk (does NOT modify the design).")),
         _EXPORT_SPEC)
     .add_input_property("file_path", {"type": "string",
@@ -510,10 +510,10 @@ save_as_mesh_tool = (
         Tool.create_simple(
             name="save_as_mesh",
             description=(
-                "Tessellate a BRep solid/surface into a persistent MESH body IN the design — the "
+                "Tessellate a BRep solid/surface into a persistent MESH body IN the design - the "
                 "inverse of mesh_to_brep ('save as mesh'). 'body' is a BRep body HANDLE from "
                 "find_geometry (precise) or a body NAME; 'quality' is low|normal|high|very_high "
-                "(default normal) — the tessellation level of detail. WRITES a MeshBody. In a "
+                "(default normal) - the tessellation level of detail. WRITES a MeshBody. In a "
                 "PARAMETRIC design the mesh write is wrapped in a BaseFeature edit scope automatically "
                 "(the API requires it); in DIRECT no scope is needed. The new mesh lands beside the "
                 "source body. Inspect/edit it with the mesh_* tools.")),

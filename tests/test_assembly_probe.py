@@ -67,20 +67,26 @@ class _Coll:
         return self._i[i]
 
 
+class _NamedBody:
+    def __init__(self, name): self.name = name
+
+
 class FakeRoot:
-    def __init__(self, occs, joints):
+    def __init__(self, occs, joints, root_bodies=(), asbuilt=()):
         self.occurrences = _Coll(occs)
         self.joints = _Coll(joints)
+        self.asBuiltJoints = _Coll(asbuilt)
+        self.bRepBodies = _Coll([_NamedBody(n) for n in root_bodies])
 
 
 class FakeDesign:
-    def __init__(self, occs, joints, timeline=None):
-        self.rootComponent = FakeRoot(occs, joints)
+    def __init__(self, occs, joints, timeline=None, root_bodies=(), asbuilt=()):
+        self.rootComponent = FakeRoot(occs, joints, root_bodies, asbuilt)
         self.timeline = _Coll(timeline or [])
 
 
-def _install(occs, joints, timeline=None):
-    design = FakeDesign(occs, joints, timeline)
+def _install(occs, joints, timeline=None, root_bodies=(), asbuilt=()):
+    design = FakeDesign(occs, joints, timeline, root_bodies, asbuilt)
     ap.app = type("A", (), {"activeProduct": design})()
     ap._common.app = ap.app
     import adsk.fusion
@@ -100,6 +106,21 @@ class TestGuards:
 
 
 class TestProbe:
+    def test_reports_root_bodies_not_just_occurrences(self):
+        # bodies directly in the root aren't occurrences, so the occurrence loop misses them; the probe
+        # must still surface them (they can't be jointed — the user needs to know they exist).
+        occ = FakeOcc("Sub:1", "Sub")
+        _install([occ], [], root_bodies=["RootBlock"])
+        out = _payload(ap.handler())
+        assert out["root_bodies"] == ["RootBlock"]
+        assert "can't be jointed" in out["note"]
+
+    def test_no_root_bodies_is_empty_and_no_note(self):
+        _install([FakeOcc("Sub:1", "Sub")], [])
+        out = _payload(ap.handler())
+        assert out["root_bodies"] == []
+        assert "root_bodies lists geometry" not in out["note"]   # note clause only when non-empty
+
     def test_positions_scaled_to_display_units(self):
         # origin in cm -> reported in mm
         occ = FakeOcc("Block:1", "Block", origin=(2.0, 0.0, 0.0),
@@ -175,6 +196,27 @@ class TestProbe:
         assert out["joints"] is None
         assert "joints" not in out["occurrences"][0]
 
+    def test_as_built_joints_are_visible(self):
+        # as-built joints live in root.asBuiltJoints, a SEPARATE collection from root.joints. The probe
+        # must read both, or a script-created as-built joint is invisible (joint_count undercounts and
+        # the occurrence cross-index misses it). AsBuiltJoint exposes the same name/jointMotion/
+        # occurrenceOne/Two surface, so FakeJoint stands in.
+        _install([FakeOcc("Ring:1", "Ring"), FakeOcc("Rotor:1", "Rotor")],
+                 [FakeJoint("RegularPin", 1, "Ring:1", "Rotor:1")],
+                 asbuilt=[FakeJoint("AsBuiltSpin", 1, "Rotor:1", "Ring:1")])
+        out = _payload(ap.handler())
+        by = {j["name"]: j for j in out["joints"]}
+        assert "AsBuiltSpin" in by and by["AsBuiltSpin"]["type"] == "revolute"
+        assert out["joint_count"] == 2                       # both collections counted
+        occ = {o["name"]: o for o in out["occurrences"]}
+        assert "AsBuiltSpin" in occ["Rotor:1"]["joints"]     # cross-indexed like any joint
+
+    def test_broken_as_built_joint_breaks_health(self):
+        # an as-built joint that failed to compute must drop is_healthy, same as a regular joint.
+        _install([], [], asbuilt=[FakeJoint("AB", 1, "A:1", "B:1", health_state=1, message="conflict")])
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is False and out["broken_joints"] == ["AB"]
+
 
 # ── HEALTH: the thing a user sees FIRST (Compute Failed), which the probe was blind to ──────────
 #
@@ -205,6 +247,18 @@ class TestHealth:
         assert by["PistonSlide1"]["healthy"] is False
         assert "conflicts" in by["PistonSlide1"]["error"]
         assert by["Good"]["healthy"] is True
+
+    def test_suppressed_joint_is_not_broken(self):
+        # healthState 3 = SUPPRESSED (an author-parked alternate, e.g. a fixture template's reversed jaw)
+        # - it is INTENTIONAL, not a compute failure. Must report healthy=True and NOT drop is_healthy.
+        # (Live case: 'Jaw to Y+ Stock REVERSED' healthState=3 isValid=True in a CAM template.)
+        _install([], [FakeJoint("Active", 1, "A:1", "B:1"),
+                      FakeJoint("Parked REVERSED", 1, "A:1", "B:1", health_state=3)])
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is True                 # suppression is not breakage
+        assert out["broken_joints"] == []
+        by = {j["name"]: j for j in out["joints"]}
+        assert by["Parked REVERSED"]["healthy"] is True
 
     def test_stale_joint_health_flagged_when_timeline_is_clean(self):
         # per-joint healthState LAGS the timeline after an in-place edit. When a joint reads broken but

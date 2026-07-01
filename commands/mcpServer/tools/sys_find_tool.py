@@ -4,16 +4,16 @@
 """MCP building block: SEARCH the server's own tools + input kinds (the anti-blindness tool).
 
   sys_find_tool(query="profile") -> the registered tools whose name/description/inputs match, AND the
-                                    _inputs.py input-kinds that match — so an agent can ask "is there
+                                    _inputs.py input-kinds that match - so an agent can ask "is there
                                     already a way to do/reference X?" BEFORE hand-rolling it.
 
 Why this exists: the tool set + the typed input-kinds in _inputs.py have grown large enough that
-agents (and compactions) lose track of what already exists and re-invent it — a fresh
+agents (and compactions) lose track of what already exists and re-invent it - a fresh
 `sketch_name+profile_index` resolver when ProfileRef already exists, a second CAM-tool reader, etc.
-A STATIC index goes stale the instant a tool is added (a prior TOOL_INDEX was removed for exactly
-that). So this searches the LIVE registry + the live _inputs module every call — it can't drift.
+A STATIC index goes stale the instant a tool is added. So this searches the LIVE registry + the live
+_inputs module every call - it can't drift.
 
-Read-only, no adsk.* — pure introspection of the registry and _inputs. Safe to run anytime.
+Read-only, no adsk.* - pure introspection of the registry and _inputs. Safe to run anytime.
 """
 
 import inspect
@@ -27,7 +27,7 @@ from . import _inputs
 
 def _score(query_terms, *texts):
     """A simple relevance score: how many query terms appear in the combined text (name hits weigh
-    more — handled by the caller passing name first and we bonus early matches)."""
+    more - handled by the caller passing name first and we bonus early matches)."""
     blob = " ".join(t for t in texts if t).lower()
     if not blob:
         return 0
@@ -49,8 +49,8 @@ def _tool_matches(query_terms):
             out.append((s, {
                 "tool": name,
                 "inputs": props,
-                # first sentence of the description — enough to decide relevance without the full blob
-                "summary": (desc.split(". ")[0][:160] + ("…" if len(desc) > 160 else "")),
+                # first sentence of the description - enough to decide relevance without the full blob
+                "summary": (desc.split(". ")[0][:160] + ("..." if len(desc) > 160 else "")),
             }))
     out.sort(key=lambda t: -t[0])
     return [m for _, m in out]
@@ -58,7 +58,7 @@ def _tool_matches(query_terms):
 
 def _kind_matches(query_terms):
     """Search the _inputs.py InputKind subclasses by class name + first docstring line. This is the
-    'is there already a typed kind for referencing X?' half — the answer that stops a hand-rolled
+    'is there already a typed kind for referencing X?' half - the answer that stops a hand-rolled
     name/index resolver."""
     out = []
     base = getattr(_inputs, "InputKind", None)
@@ -80,11 +80,11 @@ def handler(query: str = "", include_kinds: bool = True) -> dict:
 
     query: words to match against tool names/descriptions/input names and kind names/docs (e.g.
     'profile', 'select cam geometry', 'body reference'). include_kinds: also search the typed input
-    kinds (default true) — check these BEFORE hand-rolling a name/index input. Read-only.
+    kinds (default true) - check these BEFORE hand-rolling a name/index input. Read-only.
     """
     q = (query or "").strip().lower()
     if not q:
-        return error("Provide 'query' — keywords to search tool names/descriptions/inputs (and the "
+        return error("Provide 'query' - keywords to search tool names/descriptions/inputs (and the "
                      "_inputs.py kinds). E.g. 'profile', 'cam geometry', 'reference a body'.")
     terms = [t for t in q.replace(",", " ").split() if t]
 
@@ -102,17 +102,19 @@ def handler(query: str = "", include_kinds: bool = True) -> dict:
                               "body/etc., use one of these _inputs.py kinds (extend the kind if it's "
                               "close); don't hand-roll a name/index. See CLAUDE.md 'Input kinds'.")
     if not tools and not result.get("kinds"):
-        result["note"] = "No tool or input-kind matched. Try broader/different keywords."
+        result["note"] = ("No tool or input-kind matched. Try broader/different keywords, or see "
+                          "sys_capability_map for the family overview (breadth) to pick a branch to search.")
     return ok(result)
 
 
 TOOL_DESCRIPTION = (
-    "SEARCH this server's own tools + the typed input-kinds (in _inputs.py) by keyword — to find "
+    "SEARCH this server's own tools + the typed input-kinds (in _inputs.py) by keyword - to find "
     "what ALREADY EXISTS before building or hand-rolling it. 'query' matches tool names/descriptions/"
     "input names and kind names/docs (e.g. 'profile', 'cam geometry', 'reference a body'). Returns "
     "ranked tools (name + inputs + one-line summary) and matching input-kinds. LIVE (reads the "
-    "registry each call, never stale). Use it before adding a tool or a name/index input — there's "
-    "usually already a tool or a ProfileRef/BodyRef/GeometryHandle kind for it. Read-only."
+    "registry each call, never stale). Use it before adding a tool or a name/index input - there's "
+    "usually already a tool or a ProfileRef/BodyRef/GeometryHandle kind for it. For the BREADTH view "
+    "(what families exist) see sys_capability_map. Read-only."
 )
 
 tool = (

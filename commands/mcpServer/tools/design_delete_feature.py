@@ -7,14 +7,14 @@
                     name, deleting its associated entity. WRITES (destructive).
 
 Why this exists: it is the other half of the occurrence-delete gap. A pattern/mirror CHILD occurrence
-cannot be deleted on its own — design_delete_occurrence correctly refuses it and points at "delete the
+cannot be deleted on its own - design_delete_occurrence correctly refuses it and points at "delete the
 owning feature instead", but until now there was no tool to do that, so recovering from a botched
 pattern still meant rebuilding the document. This closes that loop.
 
 GUARDS (honest failure over silent corruption):
   - matches the target by timeline-object name; an ambiguous name (several objects share it) is
     REFUSED, listing the candidates with their indices, rather than guessing one;
-  - refuses a TIMELINE GROUP (it has no deletable entity — ungroup or delete its members instead);
+  - refuses a TIMELINE GROUP (it has no deletable entity - ungroup or delete its members instead);
   - turns a deleteMe() == False result (Fusion declined the delete) into an explicit error;
   - reports the timeline health before/after, so a delete that breaks a DOWNSTREAM feature (one that
     consumed this feature's geometry) is surfaced, not swallowed.
@@ -42,7 +42,7 @@ def _timeline(design):
 
 
 def _health(timeline):
-    """(errors, warnings, total) over the timeline by healthState (2=error, 1=warning) — the same
+    """(errors, warnings, total) over the timeline by healthState (2=error, 1=warning) - the same
     before/after guard param_delete / design_delete_occurrence use, so a delete that breaks a
     downstream feature is reported instead of silently corrupting the model."""
     errors, warnings, total = [], [], 0
@@ -61,7 +61,7 @@ def _health(timeline):
 
 def _find_objects_by_name(timeline, want):
     """All timeline objects whose name matches `want` (exact first; else case-insensitive substring).
-    Returns a list — the caller refuses when it is not exactly one (ambiguity guard)."""
+    Returns a list - the caller refuses when it is not exactly one (ambiguity guard)."""
     n = safe(lambda: timeline.count, 0) or 0
     objs = [timeline.item(i) for i in range(n)]
     exact = [o for o in objs if (safe(lambda o=o: o.name) or "") == want]
@@ -74,14 +74,14 @@ def _find_objects_by_name(timeline, want):
 def handler(feature: str = "") -> dict:
     """Delete one timeline feature by name. WRITES (destructive).
 
-    feature: the timeline object's name (as shown by design_get_timeline). An ambiguous name is refused
+    feature: the timeline object's name (as shown by design_get(include=['timeline'])). An ambiguous name is refused
     (with the candidates), and a timeline GROUP is refused (it has no deletable entity). The result
     reports the timeline health before/after, since deleting a feature whose geometry a later feature
     consumes can leave that downstream feature in error.
     """
     want = (feature or "").strip()
     if not want:
-        return error("Provide 'feature' — the timeline object name to delete (see design_get_timeline).")
+        return error("Provide 'feature' - the timeline object name to delete (see design_get(include=['timeline'])).")
 
     design = _common.design()
     if not design:
@@ -98,10 +98,10 @@ def handler(feature: str = "") -> dict:
                  (timeline.item(i) for i in range(min(safe(lambda: timeline.count, 0) or 0, 12)))]
         sample = ", ".join(n for n in names if n)
         return error(f"No timeline feature matching '{want}'. Available (sample): {sample or '(none)'}. "
-                     "Use design_get_timeline for the full list.")
+                     "Use design_get(include=['timeline']) for the full list.")
     if len(matches) > 1:
         cands = ", ".join(f"{safe(lambda o=o: o.name)}@{safe(lambda o=o: o.index)}" for o in matches[:8])
-        return error(f"'{want}' is ambiguous — matches {len(matches)} timeline objects ({cands}). "
+        return error(f"'{want}' is ambiguous - matches {len(matches)} timeline objects ({cands}). "
                      "Rename the target in Fusion, or delete its instances another way.")
 
     obj = matches[0]
@@ -135,29 +135,29 @@ def handler(feature: str = "") -> dict:
         "index": index,
         "entity_type": entity_type,
         "note": "Timeline feature deleted. Geometry it produced is removed; instances it created "
-        "(pattern/mirror copies) go with it. Pair with design_get_timeline / workspace_orient to confirm.",
+        "(pattern/mirror copies) go with it. Pair with design_get(include=['timeline']) / workspace_orient to confirm.",
     }
     if len(err_after) > len(err_before):
         out["timeline_warning"] = (
             f"The delete left the timeline with a new error ({err_after}). A downstream feature "
-            "consumed the removed geometry — the deletion stands; undo in Fusion if unintended.")
+            "consumed the removed geometry - the deletion stands; undo in Fusion if unintended.")
     elif warn_after:
         out["timeline_warnings"] = warn_after
     return ok(out)
 
 
 _DESC = (
-"Delete ONE timeline feature by name (from design_get_timeline) — e.g. a botched pattern/mirror, "
+"Delete ONE timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched pattern/mirror, "
 "which removes all the instances it created (the way to clear a pattern/mirror child occurrence). "
 "An ambiguous name is refused (candidates listed); a timeline GROUP is refused; the result reports if "
-"the delete left a downstream feature in error. DESTRUCTIVE — undo in Fusion if unintended. "
+"the delete left a downstream feature in error. DESTRUCTIVE - undo in Fusion if unintended. "
 "(Direct-modelling designs have no timeline.)"
 )
 
 tool = (
     Tool.create_simple(name="design_delete_feature", description=_DESC)
     .add_input_property("feature", {"type": "string",
-            "description": "Timeline object name to delete (from design_get_timeline). An ambiguous "
+            "description": "Timeline object name to delete (from design_get(include=['timeline'])). An ambiguous "
             "name is refused; a timeline group is refused."})
     .strict_schema()
 )

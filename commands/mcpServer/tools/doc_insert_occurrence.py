@@ -4,12 +4,12 @@
 """MCP building block: insert a saved cloud document into the active design as an occurrence.
 
   doc_insert_occurrence -> insert a saved cloud document (by lineage URN / web URL) into the active
-                       design as a new component OCCURRENCE — as an external reference (default)
-                       or embedded — under the root or a named component. Optionally remove a
+                       design as a new component OCCURRENCE - as an external reference (default)
+                       or embedded - under the root or a named component. Optionally remove a
                        named existing occurrence first. WRITES to the design.
 
 General-purpose: this is the API equivalent of Insert > Insert Derive / Insert into Current
-Design. It says nothing about WHY you are inserting — it just creates the occurrence. Composing
+Design. It says nothing about WHY you are inserting - it just creates the occurrence. Composing
 inserts into a fixture assembly, swapping a model in a CAM template, or laying out a kit is the
 job of a skill that calls this, not of this tool.
 
@@ -17,7 +17,7 @@ The new occurrence is placed at the identity transform; position it afterward wi
 (see joint_create) or by editing its transform.
 
 KEY CONSTRAINT: inserting as an EXTERNAL REFERENCE (`as_reference=true`, the default) requires
-the inserted document to be in the SAME PROJECT as the host document — Fusion's
+the inserted document to be in the SAME PROJECT as the host document - Fusion's
 Occurrences.addByInsert enforces this. Embedding (`as_reference=false`) has no such constraint.
 
 Grounded in adsk.core / adsk.fusion:
@@ -122,7 +122,7 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
     """
     raw = (document_id or "").strip()
     if not raw:
-        return error("Provide 'document_id' — the lineage URN (or web URL) of the saved cloud "
+        return error("Provide 'document_id' - the lineage URN (or web URL) of the saved cloud "
     "document to insert.")
 
     design = _common.design()
@@ -132,11 +132,11 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
     data_file, resolved = _resolve_data_file(raw)
     if not data_file:
         return error(f"Could not resolve '{raw}' to a saved document. Pass a lineage URN or web "
-    "URL (from data_list_files). The document must be SAVED to the cloud.")
+    "URL (from data_get). The document must be SAVED to the cloud.")
 
     comp, comp_desc = _find_component(design, into_component)
     if not comp:
-        return error(f"Component '{into_component}' not found. Use design_get_tree to list "
+        return error(f"Component '{into_component}' not found. Use design_get(include=['tree']) to list "
     "components, or omit 'into_component' to insert under the root.")
 
     # Optionally remove a named existing occurrence first (its joints are removed with it).
@@ -145,7 +145,7 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
         existing = _find_child_occurrence(comp, remove_existing)
         if not existing:
             return error(f"No child occurrence named '{remove_existing}' in {comp_desc}. Check "
-    "the name with design_get_tree (start at that component).")
+    "the name with design_get(include=['tree']) (start at that component).")
         removed = safe(lambda: existing.name)
         did = safe(lambda: existing.deleteMe(), False)
         if not did:
@@ -172,7 +172,7 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
         new_occ = comp.occurrences.addByInsert(data_file, transform, bool(as_reference))
     except Exception as e:
         hint = ("(Inserting as an external reference requires the document to be in the SAME "
-    "PROJECT as the host design — save it into this project first, or pass "
+    "PROJECT as the host design - save it into this project first, or pass "
     "as_reference=false to embed it.)") if as_reference else ""
         return error(f"Insert failed: {e}. {hint}")
     if not new_occ:
@@ -195,13 +195,13 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
 
 
 TOOL_DESCRIPTION = (
-    "Insert a SAVED cloud document into the active design as a new component occurrence — the API "
+    "Insert a SAVED cloud document into the active design as a new component occurrence - the API "
     "equivalent of Insert into Current Design. 'document_id' is the lineage URN (or web URL) of "
     "the document to insert. 'into_component' is the component to insert into (default: the root "
-    "component). 'as_reference' inserts it as an external reference (default true — requires the "
+    "component). 'as_reference' inserts it as an external reference (default true - requires the "
     "document to be in the SAME PROJECT as the host) or embedded (false). Optional "
     "'remove_existing' = the name of an existing child occurrence to delete first (its joints go "
-    "with it). The new occurrence is placed at the identity transform — position it afterward "
+    "with it). The new occurrence is placed at the identity transform - position it afterward "
     "with joint_create or a transform edit. WRITES to the design. Generic: this just creates "
     "the occurrence; how you use it (fixtures, template model swap, layouts) is up to you."
 )

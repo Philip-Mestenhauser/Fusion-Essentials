@@ -29,7 +29,7 @@ predictable from any other.
   both a human name and the precise id, and on no match return an error listing what IS
   available — forgiving for an agent that only has a name.
 - **Make structure visible, then address by path.** Folder/data tools accept nested paths
-  (`Fixtures/Vises`, split on `/` or `\`); `data_list_folders` reveals the tree; `data_list_files`
+  (`Fixtures/Vises`, split on `/` or `\`); `data_get(include=['folders'])` reveals the tree; `data_get`
   stamps each file with its `folder_path`. Creation tools do `mkdir -p` (auto-create missing
   parents); when a required path is missing, the error lists the folders that DO exist at the
   failure point. Duplicate guards are scoped to the resolved path, not the whole tree.
@@ -46,14 +46,14 @@ workholding (clamping unit + vise, the machined part, a WCS cube) lives *inside*
 as **external references**. Therefore:
 
 - To see what a setup actually holds, descend into the selected occurrence's
-  `childOccurrences` — a top-level read shows only the container. `design_get_tree` does this
-  (depth-bounded, resolving each X-ref to its source UID). `cam_get_references` only resolves
+  `childOccurrences` — a top-level read shows only the container. `design_get(include=['tree'])` does this
+  (depth-bounded, resolving each X-ref to its source UID). `cam_get(include=['references'])` only resolves
   top-level refs.
 - A lone cube referenced by a setup is very likely a **WCS-defining component**, not a
   placeholder — descend and report rather than assuming.
 - The tools that cover the common machinist flow without `sys_execute_script`:
-  `design_get_tree`, `cam_activate_setup` (+ `view_screenshot` to review), `sys_get_tool_list`,
-  `cam_get_time`, `cam_get_setups` / `cam_get_operations`. Reach for `sys_execute_script`
+  `design_get(include=['tree'])`, `cam_activate_setup` (+ `view_screenshot` to review), `cam_get(include=['tools'])`,
+  `cam_get(include=['time'])`, `cam_get` / `cam_get(include=['operations'])`. Reach for `sys_execute_script`
   only for genuine one-offs — if you run the same kind of script twice, it probably wants to be
   a tool.
 
@@ -146,8 +146,8 @@ as **external references**. Therefore:
   `.parameters.itemByName('tool_type' / 'tool_diameter' / 'tool_numberOfFlutes' / 'tool_description'
   / 'tool_unit' / ...).value.value` (182 params) plus `.presets`, `.toJson()`. Diameters come back in
   the cm scale → *10 for mm (a 12mm endmill reads 1.2). The stable tool REFERENCE for downstream use is
-  `(library_url, index)` — what `cam_tool_library` (list action) returns and `cam_create_operation` consumes.
-- **Creating a tool library** (cam_tool_library, action=create_library): `ToolLibrary.createEmpty()` (or
+  `(library_url, index)` — what `cam_edit_tools` (list action) returns and `cam_create_operation` consumes.
+- **Creating a tool library** (cam_edit_tools, action=create_library): `ToolLibrary.createEmpty()` (or
   `createFromJson(json)`) → `.add(tool)` to seed → `ToolLibraries.importToolLibrary(lib, destinationUrl,
   name)` → URL of the new persisted library (numeric suffix if the name exists; throws on a read-only
   destination). **Verified live: Local + Cloud work** (write `…/Name.json`). **Hub does NOT** — import at
@@ -158,7 +158,7 @@ as **external references**. Therefore:
   Fusion360 samples are read-only (refuse). To create at Hub you must target its child folder, not
   `hub://`. (A Hub library MADE IN THE UI can then be populated via updateToolLibrary — only the *create*
   is UI-only.)
-- **Build a tool / preset / holder** (the cam_tool_library demo): a `Tool` round-trips as JSON —
+- **Build a tool / preset / holder** (the cam_edit_tools demo): a `Tool` round-trips as JSON —
   `tool.toJson()` / `Tool.createFromJson(json)`. Top-level keys: `type`, `description`, `geometry`,
   `holder`, `start-values`, `presets`, `guid`, vendor info. To MAKE a tool of a given geometry type,
   clone a sample tool's JSON of that type and change `description` (don't hand-author the schema). The
@@ -187,7 +187,7 @@ as **external references**. Therefore:
   Matrix3D itself is READ-ONLY), and stock via `stockXLow/High` / `stockZHigh` / ... `Setup.models` /
   `.fixtures` / `.stockSolids` are get/SET ObjectCollections of Occurrence/BRepBody/MeshBody (empty
   collection clears). All verified live.
-- **Folders & patterns** (cam_folder): `Setup.folders` (CAMFolders) `.addFolder(name)` → `CAMFolder`
+- **Folders & patterns** (cam_edit_folders): `Setup.folders` (CAMFolders) `.addFolder(name)` → `CAMFolder`
   (`.name` get/set, `.operations`/`.patterns`/`.folders`, `.deleteMe()`). Move any item with
   `OperationBase.moveInto(container)` (works into setups/folders/patterns) / `moveAfter` / `moveBefore`.
   **PATTERNS (mirror/linear/rotary) CANNOT be created via the API** — `createInput('pattern')` returns
@@ -247,8 +247,8 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
   the timeline recomputes — and ANY later edit (a fillet, a parameter change, `design_recompute`)
   triggers that recompute. When it does, the feature overwrites the free move and the patterned parts
   snap back to where the feature thinks they belong. Symptom: parts that looked correct in an early
-  screenshot are scattered after an unrelated later edit; `model_measure_bbox` shows the occurrence
-  centre at the pre-move location. This cost a full assembly rebuild during the tractor build.
+  screenshot are scattered after an unrelated later edit; `model_inspect` shows the occurrence
+  centre at the pre-move location.
 - **The robust pattern: bake position into geometry, don't move-then-pattern.** Build each part's
   geometry at its FINAL position inside an origin-placed component (offset `model_construction` plane for
   an off-plane axis, e.g. a wheel centred away from the sketch plane), then `model_mirror` the *bodies*
@@ -258,7 +258,7 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
   `model_create_component(x=…, y=…, z=…)` AND then sketch geometry at world coordinates inside it, the
   occurrence transform applies on top of the world coords — the part lands at (placement + world). Pick
   one: place the component at the origin and draw at world coords, OR place the occurrence and draw at
-  local (component-relative) coords. `model_measure_bbox` on the occurrence confirms the true location.
+  local (component-relative) coords. `model_inspect` on the occurrence confirms the true location.
 
 ## Occurrence delete
 
@@ -324,25 +324,10 @@ timeline and carries hole/thread metadata (what fastener/CAM tooling recognises)
   in the geometry. So `occurrences.addByInsert(libraryDataFile, t, isReferenced=False)` /
   `addExistingComponent` only ever clone a DUMB STATIC model of the screw (generic OccurrenceDefinition,
   no updateSize, no joint) — NOT a real fastener. There is no API to construct a FastenerOccurrenceDefinition.
-- **Headless library hack (PARTIAL — initialize + lookup proven, commit blocked).** The fastener
-  library is the `MSFWmdComponentLibraryVM`, normally only live inside the modal command. You CAN bring
-  it up headless: `app.executeTextCommand('Commands.Start MSFWmdComponentLibraryCmd')` makes it the
-  active command, and then `MSFWmdComponentSources.AddSource <library-fastener-urn>` STAGES the source
-  and returns OK (the exact call that fails "test object cannot be found: MSFWmdComponentLibraryVM" when
-  the command isn't live). The library DataFiles are browsable via `app.data.findFolderById('urn:...
-  fs.folder:<id>')` → Fasteners → Bolts and Screws → <standard> → DataFile (only types ALREADY
-  materialised by the dialog appear). BLOCKED at COMMIT: instancing a staged source needs
-  `MSFWmdCompManagerCmd.AddCompInstances <component path> <qty>` or `MSFWmdComponentSources.SetSelection
-  <onk1>@<onk2>` — but the VM exposes NO read command to enumerate the staged sources' onk/path keys,
-  raw URNs break the text-cmd parser (':' is a command separator), the text-cmd "pipe to file" doesn't
-  write via executeTextCommand, and GUESSING AddCompInstances paths / starting the heavier
-  `MSFWmdCompManagerCmd` CRASHED Fusion (twice). Next: get the onk format from Autodesk-internal docs on
-  the WMD/Standard-Content commands, then AddSource+SetSelection+commit could be fully headless. Do any
-  WMD probing on a THROWAWAY doc_new (crash-prone).
-  `FastenerOccurrenceDefinition` (vs the generic `OccurrenceDefinition` for normal occs) with
-  `isSizeUpToDate` + `updateSize()` (auto-resizes a placed fastener to its hole — check isSizeUpToDate
-  first; updateSize isn't a no-op) + `parentOccurrence`. `Component.isLibraryItem` flags library comps.
-  A `fastener_sync` building block (find FastenerOccurrenceDefinitions, updateSize the stale ones) IS buildable.
+- **Fastener objects expose** `FastenerOccurrenceDefinition` (vs the generic `OccurrenceDefinition`
+  for normal occurrences) with `isSizeUpToDate` + `updateSize()` (auto-resizes a placed fastener to its
+  hole — check isSizeUpToDate first; updateSize isn't a no-op) + `parentOccurrence`.
+  `Component.isLibraryItem` flags library components.
 - **Stray add-in note:** the bundled `colorHoles` command's `active_selection_changed` handler throws
   `NoneType has no attribute 'parent'` on programmatic `activeSelections` changes — harmless noise in
   script output (the selection still takes), but a real bug in that command worth fixing separately.
@@ -357,8 +342,7 @@ timeline and carries hole/thread metadata (what fastener/CAM tooling recognises)
 - **Stale face after each hole:** drilling a hole recomputes the body, invalidating a cached BRepFace
   reference — re-find the placement face for EACH hole when drilling several in a loop.
 - **Spike in a throwaway doc_new, never the saved working doc** — a partial spike leaves scratch
-  bodies/features in the timeline (learned the hard way: had to excise a ClearScratch block from the
-  saved part).
+  bodies/features in the timeline that then have to be excised from the saved part.
 
 ## Mesh bodies
 
@@ -434,7 +418,7 @@ The write side. All live-verified on a parametric bracket.
   the UI rebuild and show the Configurations dropdown. An already-open document will NOT retrofit the
   dropdown — Fusion builds that toolbar at open time. So `design_configure(create)` requires a saved
   doc and its note tells the caller to save+reopen. (Right after `saveAs`, the cloud lineage lags:
-  `doc.dataFile` may raise `can't fetch table from PIM` and `doc_get_active_id` returns a local cache
+  `doc.dataFile` may raise `can't fetch table from PIM` and `doc_get` returns a local cache
   path instead of a `urn:` — retry the DataFile read after the async save lands.)
 - **Columns live on `table.columns` (`ConfigurationColumns`)**: `addParameterColumn(Parameter)`,
   `addSuppressColumn(feature)`, `addVisibilityColumn(entity)`, `addInsertColumn(occurrence)`. The
@@ -474,13 +458,13 @@ The write side. All live-verified on a parametric bracket.
 - **Active document → identity:** `app.activeDocument` → `Document(.name, .isSaved, .isModified,
   .version [the Fusion APP version it was saved with, NOT a file version], .dataFile)`.
   `Document.dataFile` is the A360 `DataFile`; for a never-saved doc it is null / raises — guard
-  it (`doc_get_active_id` does, and reports `has_data_file=false`).
+  it (`doc_get` does, and reports `has_data_file=false`).
 - **Saving the active doc:** `Document.saveAs(name, DataFolder, description, tag) -> bool` saves
   the LIVE session — including a never-saved doc — distinct from `data_upload_file` (local file) and
   `doc_copy` (existing saved cloud file). Right after `saveAs`, `doc.dataFile.id` is a
   LOCAL pre-upload handle (a temp `.f3d` path), NOT the lineage URN — cloud processing assigns
   the `urn:` id a moment later. So `doc_save_as` returns `document_id=null` unless `.id`
-  already `startswith("urn:")`, and tells the caller to confirm via `doc_get_active_id`
+  already `startswith("urn:")`, and tells the caller to confirm via `doc_get`
   after a short wait. Don't block waiting for it.
 - **Copying a saved cloud file:** `Data.findFileById(urn).copy(targetFolder) -> DataFile`.
   External references are PRESERVED as pointers to their originals (not re-copied) — read them

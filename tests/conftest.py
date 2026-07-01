@@ -11,7 +11,7 @@ through ``adsk.fusion``. To unit-test their pure logic outside Fusion we:
      ``commands/__init__.py`` (which builds Fusion UI panels) or
      ``tools/__init__.py`` (which imports all ~30 tools, most needing adsk).
 
-``load_tool("model_measure_bbox")`` does both and returns the module so a
+``load_tool("model_inspect")`` does both and returns the module so a
 test can call its ``handler(...)`` and private helpers directly.
 
 The mocks here are deliberately small: they implement only what a tool actually
@@ -546,6 +546,22 @@ def assert_no_active_design(mod, handler, **valid_kwargs):
     res = handler(**valid_kwargs)
     msg = error_message(res).lower()
     assert "design" in msg or "document" in msg, res
+
+
+def rich_read_caller(mod, design):
+    """Wire `design` into `mod` (both seams, via install) and return a caller that invokes the tool's
+    handler and returns the decoded ok() payload. The one-liner a rich-read test's fixture uses:
+
+        @pytest.fixture
+        def call(): return rich_read_caller(dg, make_design(...))
+        def test_default(call): assert "mode" in call()           # no include= → orientation slice
+        def test_slice(call):   assert "tree" in call(include=["tree"])
+
+    Setup happens INSIDE the fixture, so the autouse restore tears the seam down in scope order — a
+    leaked seam is structurally impossible (the cure for the suite's order-dependence; see
+    CLAUDE.md 'Tests')."""
+    install(mod, design)
+    return lambda **kw: payload(mod.handler(**kw))
 
 
 def assert_unknown_units(handler, units_param="units", **valid_kwargs):

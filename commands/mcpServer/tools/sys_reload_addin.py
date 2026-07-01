@@ -4,10 +4,10 @@
 """MCP tool: reload the Fusion-Essentials add-in (developer / self-iteration loop).
 
 This is the building block that lets an AI agent edit a Fusion-Essentials command, then
-reload the add-in to pick up the change — without the user manually toggling it
+reload the add-in to pick up the change - without the user manually toggling it
 in the Scripts and Add-Ins dialog.
 
-THE HARD PART — the tool's own server is part of the add-in it reloads.
+THE HARD PART - the tool's own server is part of the add-in it reloads.
 A naive reload calls Script.stop() on ourselves, tearing down the MCP server and
 TaskManager *while we are mid-request*, so the in-flight HTTP response would never
 be sent. To avoid that, the reload is DEFERRED:
@@ -23,7 +23,7 @@ be sent. To avoid that, the reload is DEFERRED:
 The sys.modules purge in step 3 is essential: Fusion's Script.run() re-executes the
 entry point but does NOT clear Python's import cache, so without the purge it would
 re-import the STALE cached modules and edits to already-imported files would never
-load (only brand-new files would). With the purge, a reload picks up ALL edits —
+load (only brand-new files would). With the purge, a reload picks up ALL edits -
 including changes to existing tools and their MCP schemas.
 
 The client should expect the connection to drop during reload and reconnect.
@@ -96,7 +96,7 @@ def _purge_addin_modules() -> int:
     Script.run() re-imports them FRESH from disk.
 
     THE BUG THIS FIXES: Fusion's Script.run() re-executes the add-in entry point, but
-    Python's import system returns the CACHED module objects from sys.modules — so
+    Python's import system returns the CACHED module objects from sys.modules - so
     `from . import tools`, `import ...surface_create`, etc. hand back the OLD code and
     edits to already-imported files never take effect (only brand-new files load).
     A soft reload that doesn't bust the cache silently runs stale code.
@@ -123,7 +123,7 @@ def _purge_addin_modules() -> int:
                 doomed.append(name)
         except Exception:
             continue
-    # NOTE: do NOT delete THIS module (sys_reload_addin) mid-execution — we're running
+    # NOTE: do NOT delete THIS module (sys_reload_addin) mid-execution - we're running
     # inside its notify(). Removing its sys.modules entry is harmless (the live frame
     # keeps running), and a fresh copy loads on run(); but keep it for safety/clarity:
     # the next run() reimports it regardless, and leaving it avoids any surprise if a
@@ -150,7 +150,7 @@ class _ReloadEventHandler(adsk.core.CustomEventHandler):
             script.stop()
             # CRITICAL: bust the module cache BEFORE run(), or run() re-imports the
             # STALE cached modules and edits to existing files don't load. This is the
-            # whole point of a reload tool — without it, only brand-new files appear.
+            # whole point of a reload tool - without it, only brand-new files appear.
             try:
                 purged = _purge_addin_modules()
                 app.log(f'Fusion-Essentials MCP reload: purged {purged} cached add-in module(s)')
@@ -221,7 +221,7 @@ def handler() -> dict:
 
 TOOL_DESCRIPTION = (
     "Reload the Fusion-Essentials add-in to pick up code changes (developer tool). "
-    "Use this after editing ANY Fusion-Essentials command/tool — it purges the Python "
+    "Use this after editing ANY Fusion-Essentials command/tool - it purges the Python "
     "module cache and re-imports fresh from disk, so edits to EXISTING tools (and their "
     "MCP schemas), not just brand-new files, take effect. No manual add-in toggle needed.\n\n"
     "IMPORTANT: this restarts the MCP server itself. The reload is deferred so this "

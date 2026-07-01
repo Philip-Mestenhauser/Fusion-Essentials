@@ -12,7 +12,7 @@ rebuilding. This closes that gap with a single guarded verb.
 
 GUARDS (honest failure over silent corruption):
   - resolves the target via the shared OccurrenceRef logic (fullPathName-preferring, ambiguity-
-    refusing — never deletes the wrong instance on a bare substring);
+    refusing - never deletes the wrong instance on a bare substring);
   - a pattern/mirror CHILD cannot be deleted on its own: Occurrence.deleteMe returns FALSE (no
     exception) for a feature-owned instance, which we turn into a precise error pointing at the owning
     feature (there is no Occurrence-level "is a pattern child" flag in the API to pre-check, so this is
@@ -44,7 +44,7 @@ app = adsk.core.Application.get()
 
 
 def _timeline_health(design):
-    """Return (errors, warnings, total) for the parametric timeline — the same before/after health
+    """Return (errors, warnings, total) for the parametric timeline - the same before/after health
     guard param_delete uses, so a delete that breaks a downstream feature is reported, not swallowed.
     (No timeline in a direct-modelling design -> empty lists.)"""
     errors, warnings, total = [], [], 0
@@ -78,10 +78,10 @@ def _joint_names(occ):
 def handler(occurrence: str = "") -> dict:
     """Delete one occurrence (component instance) from the active design. WRITES (destructive).
 
-    occurrence: the instance to delete, by fullPathName (unambiguous, from design_get_tree) or name
+    occurrence: the instance to delete, by fullPathName (unambiguous, from design_get(include=['tree'])) or name
     (a name matching several instances is refused, not guessed). The result names any joints the
     delete removed and reports timeline health before/after. A pattern/mirror child can't be deleted
-    on its own (deleteMe returns false) — that is reported with a pointer to the owning feature.
+    on its own (deleteMe returns false) - that is reported with a pointer to the owning feature.
     """
     design = _common.design()
     if not design:
@@ -103,11 +103,11 @@ def handler(occurrence: str = "") -> dict:
     except Exception as e:
         return error(f"Could not delete '{name}': {e}")
     if not did:
-        # deleteMe returns false (not an exception) for an instance Fusion won't remove on its own —
+        # deleteMe returns false (not an exception) for an instance Fusion won't remove on its own -
         # most often a feature-owned (pattern/mirror) child.
         return error(
             f"Fusion refused to delete '{name}' (deleteMe returned false). It is likely owned by a "
-            "pattern/mirror feature — delete or reduce that feature's count instead.")
+            "pattern/mirror feature - delete or reduce that feature's count instead.")
 
     err_after, warn_after, _ = _timeline_health(design)
 
@@ -118,15 +118,15 @@ def handler(occurrence: str = "") -> dict:
         "removed_joints": joints,
         "was_grounded": was_grounded,
         "note": "Occurrence deleted. If it was the last instance of its component, the component was "
-        "removed too. Pair with workspace_orient / design_get_tree to confirm the assembly.",
+        "removed too. Pair with workspace_orient / design_get(include=['tree']) to confirm the assembly.",
     }
     if joints:
         out["joints_warning"] = (
             f"Deleting '{name}' also removed {len(joints)} joint(s) it participated in "
-            f"({', '.join(joints[:6])}) — other parts those joints positioned are now free.")
+            f"({', '.join(joints[:6])}) - other parts those joints positioned are now free.")
     if len(err_after) > len(err_before):
         out["timeline_warning"] = (
-            f"The delete introduced a timeline error ({err_after}). The deletion stands — a "
+            f"The delete introduced a timeline error ({err_after}). The deletion stands - a "
             "downstream feature referenced the removed geometry; undo in Fusion if unintended.")
     elif warn_after:
         out["timeline_warnings"] = warn_after
@@ -135,16 +135,16 @@ def handler(occurrence: str = "") -> dict:
 
 _DESC = (
 "Delete ONE component occurrence from the active design (e.g. a stray/duplicate from a botched "
-"pattern). 'occurrence' = a fullPathName (from design_get_tree) or name (ambiguous names refused). "
+"pattern). 'occurrence' = a fullPathName (from design_get(include=['tree'])) or name (ambiguous names refused). "
 "The result names any joints the delete removed; if it was the last instance of its component, the "
 "component goes too. A pattern/mirror child can't be deleted individually (delete its owning feature "
-"with design_delete_feature). DESTRUCTIVE — undo in Fusion if unintended."
+"with design_delete_feature). DESTRUCTIVE - undo in Fusion if unintended."
 )
 
 tool = (
     Tool.create_simple(name="design_delete_occurrence", description=_DESC)
     .add_input_property("occurrence", {"type": "string",
-            "description": "Occurrence to delete: a fullPathName (from design_get_tree) or a name "
+            "description": "Occurrence to delete: a fullPathName (from design_get(include=['tree'])) or a name "
             "(ambiguous names are refused)."})
     .strict_schema()
 )
