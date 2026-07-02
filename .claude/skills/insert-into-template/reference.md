@@ -110,6 +110,21 @@ healthy. (A healthy joint to a ROOT-level joint origin still reports `occurrence
 normal for a root-anchored JO; trust the `healthy` flag and the part's measured position, not that
 field.)
 
+## Joining a JO inside a referenced occurrence (the assembly-context proxy)
+
+A joint origin that lives inside an inserted/referenced part (like "Center of Model") is a NATIVE
+object of that part's component. `Joints.createInput` on the template's root component rejects the
+native JO — and its `.geometry` — with **"Provided input paths for joint are not valid"**: joint
+inputs must be in the ROOT's assembly context. The fix is the occurrence PROXY:
+`nativeJO.createForAssemblyContext(<the occurrence that instances the part>)` — the proxy carries
+the occurrence path, and the joint then computes.
+
+`joint_create` does this proxying automatically when you pass the JO by NAME (bare, or scoped as
+`<occurrence>:<JO name>` when several instances carry the same JO). This is why the skill says to
+join with `joint_create` and never to script the joint by hand: a hand-rolled script that reaches
+for `component.jointOrigins.itemByName(...)` gets the native JO and hits the error above — which a
+live run of this skill demonstrated (three failed script variants before the root cause surfaced).
+
 ## Part-space extents and orientation (the oriented bounding box)
 
 The "Center of Model" JO is built with its Z along the machining direction (`zdir`) the operator

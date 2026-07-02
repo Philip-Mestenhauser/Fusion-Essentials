@@ -260,6 +260,21 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
   one: place the component at the origin and draw at world coords, OR place the occurrence and draw at
   local (component-relative) coords. `model_inspect` on the occurrence confirms the true location.
 
+## Joints across occurrences (assembly-context proxies)
+
+- **`Joints.createInput` rejects a sub-component's NATIVE joint origin** — and its `.geometry` —
+  with `RuntimeError: 3 : Provided input paths for joint are not valid`. A joint owned by the root
+  component needs each input in the ROOT's assembly context, and a JO fetched via
+  `component.jointOrigins.itemByName(...)` is native to that component, not to the assembly. The fix
+  is the occurrence proxy: `nativeJO.createForAssemblyContext(<occurrence that instances the
+  component>)`. This bites hardest for a JO inside an INSERTED/x-ref part (confirmed live: three
+  hand-rolled script variants all failed before the proxy). `joint_create` proxies automatically when
+  given a JO name (bare or `'<occurrence>:<JO name>'`) — steer agents to it instead of scripting
+  joints.
+- **Match the proxying occurrence by component NAME, not identity.** The API returns fresh wrapper
+  objects for the same component, so `occ.component is owner` silently fails; compare
+  `occ.component.name` (see `_find_joint_origin` in `joint_create_edit.py`).
+
 ## Occurrence delete
 
 - **`Occurrence.deleteMe() -> bool`** removes one instance; if it was the last instance referencing its

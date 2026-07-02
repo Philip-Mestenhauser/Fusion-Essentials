@@ -30,6 +30,7 @@ allowed-tools: >-
   fusion-essentials:joint_create
   fusion-essentials:find_geometry
   fusion-essentials:assembly_ground
+  fusion-essentials:assembly_move
   fusion-essentials:assembly_probe
   fusion-essentials:doc_insert_occurrence
   fusion-essentials:doc_update_xref
@@ -376,6 +377,13 @@ def run(context):
    rigidly mates it to the template JO (whose offsets position the part). No measuring/moving needed.
    (A healthy root-JO join reports `occurrence_two = null` in assembly_probe — that's normal for a
    root-anchored JO, NOT a failure; trust the `healthy` flag + the part's measured position.)
+
+   **The argument shape is load-bearing.** Each side is a Joint Origin NAME — bare
+   (`"Center of Model"`) or scoped through the occurrence that carries it
+   (`"<new_occurrence_name>:Center of Model"`, e.g. `"SculpturalTower:1:Center of Model"`). Those
+   are the ONLY JO forms `joint_create` accepts — do not invent others. If the call errors, read
+   the error: it lists the design's Joint Origins — correct the name and retry ONCE. 
+   (`createForAssemblyContext`, see reference.md "Joining a JO inside a referenced occurrence").
 
    **2b. FALLBACK (no root JO):** seat the part on the stock top:
    - `find_geometry(target="<stock occurrence>", kind="planar_face")` and pick the TOP face (max Z

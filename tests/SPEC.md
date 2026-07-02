@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 96  |  **Behaviors pinned:** 1863
+**Tools with a test file:** 97  |  **Behaviors pinned:** 1877
 
 ## `_data_read`
 
@@ -1363,6 +1363,15 @@ after changing tests._
 - handle resolves to joint geometry at real face
 - non token falls through to jo name
 - unresolvable spec errors naming all paths
+**OccurrenceScopedJO**
+- scoped spec resolves to proxy
+- resolve input falls through to scoped jo
+- plain occurrence name is not treated as scoped
+- missing occurrence returns none
+**ResolveErrorListsJointOrigins**
+- error names each jo and owner
+- listing is capped with overflow count
+- no jos keeps error unadorned
 **FmtNum**
 - whole number drops trailing zero
 - fractional kept
@@ -1397,6 +1406,8 @@ after changing tests._
 - angle converted to radians
 - flip sets is flipped
 - no offset angle reported as none
+- add failure on input paths hints the proxy fix
+- add failure other errors unadorned
 
 ## `joint_create_origin`
 
@@ -2496,6 +2507,18 @@ after changing tests._
 - note cross links to find tool
 **FamilyOf**
 - prefix split
+
+## `sys_execute_script`
+
+> Unit tests for ``sys_execute_script``'s pure error-shaping helper.
+
+**ExtractScriptError**
+- returns only the inner traceback
+- console noise lines stripped
+- single traceback returned whole
+- non traceback text passes through
+**HandlerGuard**
+- script without run function is rejected
 
 ## `sys_find_tool`
 

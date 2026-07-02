@@ -114,6 +114,63 @@ def _find_occurrence(design, name):
     return _inputs._resolve_occurrence(name, name)
 
 
+def _resolve_occurrence_scoped_jo(design, spec):
+    """Resolve '<occurrence>:<JO name>' - a joint origin addressed THROUGH the occurrence that
+    carries it (e.g. 'SculpturalTower:1:Center of Model', the form agents naturally write for a JO
+    inside an inserted/referenced part). Also the unambiguous form when several instances of the
+    same component each carry the JO. Returns the JO proxied into that occurrence's assembly
+    context, or None when the spec doesn't parse as occurrence+JO."""
+    s = (spec or "").strip()
+    if ":" not in s:
+        return None
+    head, _, tail = s.rpartition(":")
+    tail = tail.strip()
+    if not head or not tail:
+        return None
+    occ, _err = _find_occurrence(design, head)
+    if not occ:
+        return None
+    native = safe(lambda: occ.component.jointOrigins.itemByName(tail))
+    if not native:
+        return None
+    return safe(lambda: native.createForAssemblyContext(occ)) or native
+
+
+def _iter_names(coll):
+    """Yield each item's .name from a Fusion collection, tolerating both iteration styles
+    (a live adsk collection iterates; a count/item-only one is walked by index)."""
+    if not coll:
+        return
+    try:
+        for it in coll:
+            nm = safe(lambda it=it: it.name)
+            if nm:
+                yield nm
+    except TypeError:
+        for i in range(safe(lambda: coll.count, 0) or 0):
+            nm = safe(lambda i=i: coll.item(i).name)
+            if nm:
+                yield nm
+
+
+def _available_joint_origins(design, limit=8):
+    """List the design's joint-origin names with where each lives - so a resolve failure can be
+    corrected from the error alone instead of the agent guessing or dropping to a raw script.
+    Returns (listed, overflow_count)."""
+    found = []
+    root = design.rootComponent
+    root_name = safe(lambda: root.name)
+    for nm in _iter_names(safe(lambda: root.jointOrigins)):
+        found.append(f"'{nm}' (root)")
+    for c in safe(lambda: design.allComponents, []) or []:
+        cname = safe(lambda c=c: c.name)
+        if not cname or cname == root_name:  # root's JOs already listed (name-match: see proxy note)
+            continue
+        for nm in _iter_names(safe(lambda c=c: c.jointOrigins)):
+            found.append(f"'{nm}' (in component '{cname}')")
+    return found[:limit], max(len(found) - limit, 0)
+
+
 def _resolve_snap_entity(design, occ_name, snap):
     """Resolve an occurrence's geometry to a single PROXIED BRep entity (no human selection),
     in the occurrence's assembly context. snap: origin | center | top | bottom | cylinder.
@@ -204,8 +261,9 @@ def _jg_from_entity(entity):
 
 def _resolve_input(design, spec):
     """Resolve one joint input, in order: (1) a find_geometry 'handle' (entity token) -> a JointGeometry
-    AT that real geometry; (2) a geometry snap '<occ>:<snap>'; (3) a joint-origin name. Returns
-    (input_object_or_None, label, error_or_None)."""
+    AT that real geometry; (2) a geometry snap '<occ>:<snap>'; (3) a joint-origin name; (4) an
+    occurrence-scoped joint-origin '<occ>:<JO name>'. On failure the error lists the design's JOs.
+    Returns (input_object_or_None, label, error_or_None)."""
     # (1) handle first: a find_geometry token resolves to a live entity. Distinguished from a JO name
     # by RESOLVING - if findEntityByToken yields nothing, fall through to snap/name (a JO name is never
     # a valid token). This is the geometry-as-values path: joint AT the geometry, not at a collapsed origin.
@@ -220,8 +278,18 @@ def _resolve_input(design, spec):
     jo = _find_joint_origin(design, spec)
     if jo:
         return jo, spec, None
-    return None, spec, (f"'{spec}' is not a find_geometry handle, a Joint Origin name, or a recognized "
-    "'<occurrence>:<snap>' spec (snap = origin/center/top/bottom/left/right/front/back/cylinder).")
+    jo = _resolve_occurrence_scoped_jo(design, spec)
+    if jo:
+        return jo, spec, None
+    msg = (f"'{spec}' is not a find_geometry handle, a Joint Origin name, or a recognized "
+    "'<occurrence>:<snap>' spec (snap = origin/center/top/bottom/left/right/front/back/cylinder). "
+    "A Joint Origin may be passed bare ('Center of Model') or scoped through the occurrence that "
+    "carries it ('<occurrence>:<JO name>').")
+    listed, more = _available_joint_origins(design)
+    if listed:
+        msg += " Joint Origins in this design: " + ", ".join(listed)
+        msg += f" (+{more} more)." if more else "."
+    return None, spec, msg
 
 
 # Autonomous geometry "snaps": resolve a joint input from an occurrence's geometry - no human
@@ -474,7 +542,15 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     try:
         joint = joints.add(ji)
     except Exception as e:
-        return error(f"Joint creation failed: {e}")
+        msg = f"Joint creation failed: {e}"
+        if "input paths" in str(e).lower():
+            # Fusion's "Provided input paths for joint are not valid": an input is not in assembly
+            # context (typical when scripting a joint to a native sub-component JO). This tool's
+            # by-name resolution proxies JOs for exactly that reason - so steer to it.
+            msg += (" - an input is likely not in assembly context. Pass Joint Origins by NAME "
+    "(bare or '<occurrence>:<JO name>') so this tool proxies them into the assembly; "
+    "for geometry, use a fresh find_geometry handle.")
+        return error(msg)
     if not joint:
         return error("joints.add returned nothing.")
 
@@ -734,11 +810,13 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 TOOL_DESCRIPTION = (
     "Create a Joint between two inputs. Each input ('occurrence_one'/'occurrence_two'), most precise "
     "first: a find_geometry handle (joints AT that exact face/edge - a real offset); a Joint Origin "
-    "name (from joint_create_origin); or a snap-string '<occurrence>:<snap>' where snap = origin | "
-    "center (largest planar face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note "
-    "':origin' collapses to the part origin (zero offset) - use a handle for a real offset. 'joint_type' "
-    "= rigid (default)/revolute/slider/cylindrical/planar/ball; 'axis' = x/y/z for types needing a "
-    "motion axis. Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
+    "name - bare ('Center of Model') or scoped '<occurrence>:<JO name>' for a JO inside an inserted/"
+    "referenced part (either way the tool proxies it into assembly context; do NOT script this "
+    "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
+    "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
+    "the part origin (zero offset) - use a handle for a real offset. 'joint_type' = rigid (default)/"
+    "revolute/slider/cylindrical/planar/ball; 'axis' = x/y/z for types needing a motion axis. "
+    "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
 )
 
 tool = (
@@ -746,10 +824,10 @@ tool = (
         name="joint_create",
         description=TOOL_DESCRIPTION,
         input_param_name="occurrence_one",
-        input_param_description="First input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name, OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder).",
+        input_param_description="First input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder).",
     )
     .add_input_property("occurrence_two", {"type": "string",
-            "description": "Second input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name, OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder)."})
+            "description": "Second input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder)."})
     .add_input_property(*_inputs.joint_motion(default="rigid").as_property())
     .add_input_property("axis", {"type": "string",
             "description": "Motion axis for types that need one: x | y | z (default z)."})

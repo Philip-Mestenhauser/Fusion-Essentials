@@ -107,13 +107,36 @@ def handler(script: str) -> dict:
                 pass  # if abort itself fails, nothing more we can do
         tb = traceback.format_exc()
         app.log(f"Fusion-Essentials MCP sys_execute_script error: {e}\n{tb}")
-        return _error_result(tb)
+        return _error_result(_extract_script_error(tb))
     finally:
         if temp_file and os.path.exists(temp_file):
             try:
                 os.unlink(temp_file)
             except Exception:
                 pass
+
+
+# Lines the add-in logs to the TextCommands console; Python.Run's RuntimeError message embeds the
+# accumulated console text, so these show up INSIDE the script-failure traceback as noise.
+_CONSOLE_NOISE = re.compile(r"^MCP calling tool: .*$", re.MULTILINE)
+_TB_MARKER = "Traceback (most recent call last):"
+
+
+def _extract_script_error(tb: str) -> str:
+    """Reduce a script-failure traceback to the SCRIPT's own error.
+
+    A failing script surfaces as a RuntimeError from executeTextCommand whose message embeds
+    (a) whatever the add-in logged to the TextCommands console since the last call and (b) the
+    script's inner traceback. The outer frames (handler -> executeTextCommand) and the console
+    noise say nothing about the script bug, so return just the LAST traceback block - the
+    script's - with the noise lines stripped. A single-traceback text (an error outside
+    Python.Run) is returned whole. The full text still goes to app.log for deep debugging."""
+    cleaned = _CONSOLE_NOISE.sub("", tb)
+    first = cleaned.find(_TB_MARKER)
+    last = cleaned.rfind(_TB_MARKER)
+    if first != -1 and last > first:
+        cleaned = cleaned[last:]
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _error_result(text: str) -> dict:

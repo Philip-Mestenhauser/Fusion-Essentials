@@ -228,6 +228,100 @@ class TestResolveInputHandle:
         assert "handle" in err and "Joint Origin" in err and "snap" in err
 
 
+# ── occurrence-scoped JO: '<occurrence>:<JO name>' resolves to the assembly-context proxy ────
+# The form an agent naturally writes for a JO inside an inserted part ('SculpturalTower:1:Center
+# of Model'). It must resolve to the JO PROXIED into that occurrence's context - a live run showed
+# the old resolver rejecting it, sending the agent down a raw-script path that hits Fusion's
+# "Provided input paths for joint are not valid".
+
+class _IterableJOs:
+    """itemByName + iteration, like a live adsk JointOrigins collection."""
+    def __init__(self, by_name):
+        self._by_name = by_name
+
+    def itemByName(self, name):
+        return self._by_name.get(name)
+
+    def __iter__(self):
+        return iter(self._by_name.values())
+
+
+def _occ_with_jo(occ_name, jo_name, proxy):
+    native = SimpleNamespace(name=jo_name,
+                             createForAssemblyContext=lambda occ: proxy)
+    comp = SimpleNamespace(name=occ_name.rsplit(":", 1)[0],
+                           jointOrigins=_IterableJOs({jo_name: native}))
+    return SimpleNamespace(name=occ_name, component=comp)
+
+
+class TestOccurrenceScopedJO:
+    def test_scoped_spec_resolves_to_proxy(self, monkeypatch):
+        proxy = SimpleNamespace(name="Center of Model (proxy)")
+        occ = _occ_with_jo("SculpturalTower:1", "Center of Model", proxy)
+        design = _design_with_root_jos()
+        monkeypatch.setattr(joint, "_find_occurrence",
+                            lambda d, n: (occ, None) if n == "SculpturalTower:1" else (None, "no"))
+        got = joint._resolve_occurrence_scoped_jo(design, "SculpturalTower:1:Center of Model")
+        assert got is proxy
+
+    def test_resolve_input_falls_through_to_scoped_jo(self, monkeypatch):
+        proxy = SimpleNamespace(name="proxy")
+        occ = _occ_with_jo("SculpturalTower:1", "Center of Model", proxy)
+        design = _install_resolve_seam({})
+        monkeypatch.setattr(joint, "_find_occurrence",
+                            lambda d, n: (occ, None) if n == "SculpturalTower:1" else (None, "no"))
+        g, label, err = joint._resolve_input(design, "SculpturalTower:1:Center of Model")
+        assert err is None and g is proxy
+
+    def test_plain_occurrence_name_is_not_treated_as_scoped(self, monkeypatch):
+        # 'Boom:1' rpartitions into ('Boom', '1') - '1' is no JO, so the spec must NOT resolve.
+        occ = _occ_with_jo("Boom:1", "Center of Model", SimpleNamespace())
+        design = _design_with_root_jos()
+        monkeypatch.setattr(joint, "_find_occurrence", lambda d, n: (occ, None))
+        assert joint._resolve_occurrence_scoped_jo(design, "Boom:1") is None
+
+    def test_missing_occurrence_returns_none(self, monkeypatch):
+        design = _design_with_root_jos()
+        monkeypatch.setattr(joint, "_find_occurrence", lambda d, n: (None, "no such occurrence"))
+        assert joint._resolve_occurrence_scoped_jo(design, "Ghost:1:Center of Model") is None
+
+
+# ── resolve-failure error lists the design's Joint Origins (self-correction data) ───────────
+
+class TestResolveErrorListsJointOrigins:
+    def _design_with_jos(self):
+        root_jo = SimpleNamespace(name="Attach Center of Workpiece")
+        sub_jo = SimpleNamespace(name="Center of Model")
+        root = SimpleNamespace(name="RootComp", jointOrigins=_IterableJOs(
+            {"Attach Center of Workpiece": root_jo}))
+        sub = SimpleNamespace(name="SculpturalTower", jointOrigins=_IterableJOs(
+            {"Center of Model": sub_jo}))
+        design = _install_resolve_seam({})
+        design.rootComponent = root
+        design.allComponents = [root, sub]
+        return design
+
+    def test_error_names_each_jo_and_owner(self):
+        design = self._design_with_jos()
+        g, label, err = joint._resolve_input(design, "Wrong Name")
+        assert g is None
+        assert "'Attach Center of Workpiece' (root)" in err
+        assert "'Center of Model' (in component 'SculpturalTower')" in err
+
+    def test_listing_is_capped_with_overflow_count(self):
+        design = self._design_with_jos()
+        many = {f"JO_{i}": SimpleNamespace(name=f"JO_{i}") for i in range(12)}
+        design.rootComponent.jointOrigins = _IterableJOs(many)
+        listed, more = joint._available_joint_origins(design, limit=8)
+        assert len(listed) == 8
+        assert more == 5  # 12 root + 1 sub-component JO, 8 listed
+
+    def test_no_jos_keeps_error_unadorned(self):
+        design = _install_resolve_seam({})
+        g, label, err = joint._resolve_input(design, "Nope")
+        assert "Joint Origins in this design" not in err
+
+
 # ── _fmt_num: parameter-expression number formatting ────────────────────────
 # offset/angle expressions feed straight into a Fusion ModelParameter ("{n} mm"); a trailing ".0"
 # is undesirable. _fmt_num drops it for whole numbers but keeps real fractions.
@@ -527,3 +621,25 @@ class TestCreateHandler:
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="rigid"))
         assert out["offset"] is None and out["angle_deg"] is None
+
+    def test_add_failure_on_input_paths_hints_the_proxy_fix(self):
+        # Fusion's "Provided input paths for joint are not valid" = an input not in assembly
+        # context. The error must carry the fix (pass JOs by name so the tool proxies them),
+        # not just echo Fusion's opaque message.
+        _, coll = _install_create()
+        def boom(ji):
+            raise RuntimeError("3 : Provided input paths for joint are not valid.")
+        coll.add = boom
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "assembly context" in res["message"]
+        assert "<occurrence>:<JO name>" in res["message"]
+
+    def test_add_failure_other_errors_unadorned(self):
+        _, coll = _install_create()
+        def boom(ji):
+            raise RuntimeError("5 : something else entirely")
+        coll.add = boom
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "assembly context" not in res["message"]
