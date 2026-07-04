@@ -1,30 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: EDIT open (non-solid) surface bodies - clean boundaries, push them out.
-
-  surface_trim    -> remove cells of a surface on one side of a tool (TrimFeatures).
-  surface_extend  -> grow a surface outward from its open edges (ExtendFeatures).
-  surface_offset  -> offset faces by a distance into ANOTHER surface (OffsetFeatures).
-  surface_thicken -> thicken faces into a SOLID wall (ThickenFeatures) - the surface->solid bridge.
-
-These consume the open surfaces surface_create produces and, once boundaries are coincident (trim/
-extend), hand off to stitch (sibling proposal). offset stays a surface; thicken yields a solid.
-
-THE TRIM LIFECYCLE HAZARD (baked in here): TrimFeatures.createInput opens a partial-compute
-transaction. You MUST either commit it via TrimFeatures.add(input) or abort it via
-TrimFeatureInput.cancel() - "if you don't call add it leaves Fusion in a bad state ... possibly crash."
-So the trim handler runs the whole create->add sequence in an explicit try, and on ANY failure calls
-input.cancel() in a finally-style guard BEFORE returning an error. This path is deliberately NOT
-wrapped in safe(): swallowing the exception would leak the open transaction. (safe() is fine for the
-read-only result inspection afterwards.)
-
-Grounded in adsk.fusion (confirmed via sys_get_api_doc):
-  - TrimFeatures.createInput(trimTool: Base) -> TrimFeatureInput; .cancel() to abort; add to commit
-  - ExtendFeatures.createInput(edges: ObjectCollection, distance, extendType, isChainingEnabled=True)
-  - OffsetFeatures.createInput(entities: ObjectCollection, distance, op, isChainSelection=True) -> surface
-  - ThickenFeatures.createInput(inputFaces, thickness, isSymmetric, op, isChainSelection=True) -> solid
-Handlers run on the main thread; they WRITE.
+"""MCP building blocks that EDIT open (non-solid) surface bodies - surface_trim, surface_extend,
+surface_offset, surface_thicken (the surface->solid bridge). WRITES. TrimFeatures.createInput opens a
+partial-compute transaction that must be committed via add() or aborted via
+TrimFeatureInput.cancel() - never let an exception leak it open. See docs/fusion-api-notes.md
+("Surfaces") for the underlying adsk.fusion signatures.
 """
 
 import adsk.core
@@ -155,14 +136,7 @@ def _result_bodies(feature):
 # ── surface_trim (the cancel-hazard handler) ────────────────────────────────
 
 def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
-    """Trim a surface against a tool that intersects it - remove the unwanted cell(s).
-
-    'surface': the OPEN surface body (isSolid==false). 'trim_tool': a face / patch body / plane that
-    intersects it. 'keep': optional cell(s) to keep (default keeps the larger remainder). WRITES.
-
-    Lifecycle: createInput opens a partial-compute transaction; this handler commits it via add() or
-    aborts it via input.cancel() on ANY failure - never swallowed (a leaked transaction can crash).
-    """
+    """Trim a surface against a tool that intersects it - remove the unwanted cell(s)."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -223,12 +197,7 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
 
 def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
                    extend_type: str = "natural", chaining: bool = True) -> dict:
-    """Extend a surface outward from its open edges.
-
-    'edges': the OUTER open edges of ONE surface body (a multi-body set is rejected). 'distance' is the
-    extend amount in 'units'. 'extend_type': natural | tangent | perpendicular. 'chaining' follows the
-    connected chain (default true). WRITES.
-    """
+    """Extend a surface outward from its open edges."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -279,11 +248,7 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
 
 def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
                    chaining: bool = True, operation: str = "new") -> dict:
-    """Offset faces by a distance into ANOTHER surface (positive = along the face normal).
-
-    'faces': the faces to offset (need not be one body). 'distance' in 'units'. 'chaining' selects the
-    connected face set (default true). 'operation': new | new_component. Produces a SURFACE. WRITES.
-    """
+    """Offset faces by a distance into ANOTHER surface (positive = along the face normal)."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -330,12 +295,7 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
 
 def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
                     symmetric: bool = False, chaining: bool = True, operation: str = "new") -> dict:
-    """Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch).
-
-    'faces': faces (or patch bodies) to thicken; need not be connected or from the same body.
-    'thickness' (non-zero) in 'units'. 'symmetric' thickens both sides. 'operation': new | join | cut.
-    'chaining' selects the connected face set (default true). Produces a SOLID. WRITES.
-    """
+    """Thicken faces into a SOLID wall - the surface->solid bridge."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -388,8 +348,7 @@ _TRIM_DESC = (
 "Trim an OPEN surface body against a tool that intersects it - remove the unwanted cell(s). "
 "'surface' is the surface (isSolid==false, validated); 'trim_tool' is a face / patch body that "
 "intersects and divides it; 'keep' optionally picks which cell(s) to keep (default the larger "
-"remainder). Lifecycle-safe: createInput opens a partial-compute transaction committed via add() "
-"or aborted via cancel() on failure (never swallowed)."
+"remainder). A failed trim leaves the surface unchanged - never a partial cut."
 )
 surface_trim_tool = (
     Tool.create_simple(name="surface_trim", description=_TRIM_DESC)

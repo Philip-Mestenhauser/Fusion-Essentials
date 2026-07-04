@@ -1,28 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Detail ENGINE behind sketch_get: X-ray ONE sketch - entities, construction geometry,
-constraints, dimensions.
-
-This is not a separately-registered tool. When sketch_get is called WITH a 'sketch_name', it
-delegates to handler() here for the full structure of that sketch: every entity (id
-'<type>:<index>', type, isConstruction flag, key geometry), every geometric constraint (type + the
-entity ids it links), every dimension (name / value / expression / driving), and
-is_fully_constrained. Read-only.
-
-Where sketch_get without a name gives only COUNTS, this detailed read lets an agent actually
-understand a constrained sketch - slots/ellipses/rectangles and their implicit construction
-geometry, plus the relationships (perpendicular/parallel/coincident/...) that link entities. The
-entity ids match the references used by sketch_constrain / model_extrude / sketch_add_geometry, so
-you can read the structure then act on specific entities.
-
-Grounded in adsk.fusion (confirmed via sys_get_api_doc + live probe):
-  - Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs}, Sketch.sketchPoints - each entity
-    has .isConstruction and a stable .entityToken.
-  - Sketch.geometricConstraints - each constraint exposes the entities it references (.line / .lineOne
-    /.lineTwo / .point / .entity / .entityOne / .entityTwo), mapped back to ids by entityToken.
-  - Sketch.sketchDimensions - each .parameter has name / value / expression.
-Handler runs on the main thread; read-only.
+"""Detail engine behind sketch_get: X-rays ONE sketch - entities, construction geometry,
+constraints, dimensions. Not a separately-registered tool; sketch_get delegates here when called
+with a 'sketch_name'. Entity ids ('<type>:<index>') match the references sketch_constrain /
+model_extrude / sketch_add_geometry use. Read-only; see docs/fusion-api-notes.md ("Sketches") for
+the underlying adsk.fusion signatures.
 """
 
 import adsk.core
@@ -215,11 +198,16 @@ def _profiles(sketch):
     return out
 
 
-def _entity_xray(sketch):
+_XRAY_CAP = 200   # a dense sketch can carry hundreds of entities/constraints/dimensions; bound each
+
+
+def _entity_xray(sketch, max_results=_XRAY_CAP):
     """The HEAVY layer: every entity / constraint / dimension as its own record. Built ONLY when the
     caller asks (include_entities=true) - on a dense sketch this is dozens of records and would flood
-    the agent's window if returned by default. Returns (entities, constraints, dimensions,
-    construction_count, driving_dim_count)."""
+    the agent's window if returned by default. Each of entities/constraints/dimensions is independently
+    capped at max_results (default _XRAY_CAP). Returns (entities, constraints, dimensions,
+    construction_count, driving_dim_count, truncated) - construction_count/driving_dim_count are
+    computed over the FULL (uncapped) walk, so they stay honest even when the arrays are capped."""
     tok2id = _build_token_map(sketch)
     entities, construction_count = _entities(sketch)
 
@@ -242,20 +230,19 @@ def _entity_xray(sketch):
             "type": type(d).__name__.replace("SketchDimension", "").replace("Dimension", "").lower(),
         })
     driving_dims = sum(1 for d in dimensions if d.get("driving"))
-    return entities, constraints, dimensions, construction_count, driving_dims
+
+    cap = max(1, int(max_results))
+    entities_out = entities[:cap]
+    constraints_out = constraints[:cap]
+    dimensions_out = dimensions[:cap]
+    truncated = (len(entities_out) < len(entities) or len(constraints_out) < len(constraints)
+                 or len(dimensions_out) < len(dimensions))
+    return (entities_out, constraints_out, dimensions_out, construction_count, driving_dims, truncated)
 
 
 def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
-    """Read ONE sketch at the right zoom level (progressive disclosure - see CLAUDE.md).
-
-    Default (light): the actionable OVERVIEW - entity counts, is_fully_constrained, and the
-    'profiles' list (each closed region's area/centroid/loop_count + a HANDLE to pass as a ProfileRef
-    to extrude/revolve/loft). This is what you need to pick a region to model on, without the flood.
-
-    include_entities=true (heavy): also the full X-ray - every entity ('<type>:<index>' + geometry),
-    every geometric constraint, every dimension - for understanding/editing a constrained sketch. On a
-    dense sketch this is dozens of records, so it is OPT-IN. Read-only.
-    """
+    """Read one sketch: light overview by default, the full entity/constraint/dimension X-ray with
+    include_entities=true."""
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -304,39 +291,22 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
                        "with include_entities=true.")
         return ok(out)
 
-    entities, constraints, dimensions, construction_count, driving_dims = _entity_xray(sketch)
+    entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch)
+    note = ("Full X-ray. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain / extrude "
+                 "refs. is_fully_constrained=false means free DOF remain; a dimension driving=true "
+                 "locks geometry, driving=false only measures.")
+    if truncated:
+        note += (f" entities/constraints/dimensions each capped at {_XRAY_CAP}; counts above "
+                 "(constraint_count/dimension_count/counts) are the full, uncapped totals.")
     out.update({
         "driving_dimension_count": driving_dims,
         "construction_count": construction_count,
         "entities": entities,
         "constraints": constraints,
         "dimensions": dimensions,
-        "note": ("Full X-ray. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain / extrude "
-                 "refs. is_fully_constrained=false means free DOF remain; a dimension driving=true "
-                 "locks geometry, driving=false only measures."),
+        "truncated": truncated,
+        "note": note,
     })
     return ok(out)
 
 
-TOOL_DESCRIPTION = (
-    "X-RAY one sketch: its full structure, far beyond sketch_get' counts. Returns every entity "
-    "(id '<type>:<index>', type, isConstruction flag, geometry), every geometric constraint (its "
-    "type + the entity ids it links - e.g. perpendicular: line:1, line:0), and every dimension "
-    "(name/value/expression). Use it to UNDERSTAND a constrained sketch - slots/ellipses/rectangles "
-    "and their implicit construction geometry, plus the relationships between entities - before "
-    "editing it. Also reports 'is_fully_constrained' (false = free DOF remain, the sketch can still "
-    "move/be driven) and each dimension's 'driving' flag (true = locks geometry; false = just "
-    "measures) - so you can tell whether a sketch is locked, driven, or free without experimenting. "
-    "Entity ids match those used by sketch_constrain / extrude. 'sketch_name' selects the sketch "
-    "(sketch_get lists names)."
-)
-
-# This module is now the DETAIL ENGINE behind sketch_get (sketches.py): when sketch_get is given a
-# 'sketch_name' it delegates to handler() here. The single-sketch read is no longer a separate tool
-# (the old 'sketch_get' name was merged into 'sketch_get'), so nothing is registered here.
-# TOOL_DESCRIPTION is kept for reference/docs; handler() remains the importable engine.
-
-
-def register_tool():
-    # Intentionally registers nothing - see note above (folded into sketch_get).
-    return

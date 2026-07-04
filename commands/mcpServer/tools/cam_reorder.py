@@ -1,20 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: REORDER a CAM operation/folder/pattern before or after another.
-
-  cam_reorder(entity="<name>", position="before"|"after", reference="<name>")
-
-Operation order in a setup is the machining sequence - agents need to control it (e.g. rough before
-finish, drill before bore). This moves one CAM item relative to another in the tree.
-
-Grounded in adsk.cam (verified live - made 5 ops, reordered them):
-  - OperationBase.moveBefore(op) / moveAfter(op) -> bool ("throws/false if not allowed, e.g. moving an
-    operation out of its setup"). Shared by operations / folders / patterns.
-  - allOperations omits folders/patterns, so both the moving and reference entities are found by walking
-    .operations / .folders / .patterns recursively (same as cam_delete).
-Handler runs on the main thread; WRITES CAM data (reordering does not invalidate toolpaths).
-"""
+"""Reorder a CAM operation/folder/pattern relative to another, via OperationBase.moveBefore/
+moveAfter. Operation order in a setup is the machining sequence (rough before finish, drill before
+bore)."""
 
 import adsk.core
 import adsk.cam
@@ -23,20 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
 _POSITIONS = ("before", "after")
-
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
 
 
 def _walk_container(container, out):
@@ -90,7 +70,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
     if entity == reference:
         return error("'entity' and 'reference' are the same item - nothing to reorder.")
 
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if cerr:
         return error(cerr)
     named = _all_named(cam)

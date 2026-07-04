@@ -1,35 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP RICH READ: cam_get - one read for the active document's CAM (Manufacture) state, by zoom level.
-
-The "rich read" pattern (see CLAUDE.md "Reads are RICH"): a default
-orientation slice + `include=[...]` to pull deeper slices on demand. GraphQL-shaped - ask for the
-fields you need, pay for depth only when you want it.
-
-Zoom levels:
-  default (no include)  -> ORIENTATION: the setups (machine + selected models/fixtures/stock) + per-setup
-                           op_states (valid/out_of_date/suppressed/error/warning/no_toolpath tally - zero
-                           buckets dropped), invalidation_reasons (WHY the out-of-date ops are stale:
-                           Design changed: WCS/Fixture/Model, Dependency changed, ...),
-                           machine_out_of_date, and blocked_by (e.g. no_machine_selected). "What CAM
-                           jobs exist, are they current, and why not."
-  include=['operations']  -> per-op state grouped by setup, LED BY a summary (states tally + exceptions
-                           = the active blockers + a validity_basis-gated readiness verdict). Each op
-                           carries blocked_by/requires. (The setup-level invalidation_reasons is dropped
-                           here - each op restates it.)
-  include=['references']  -> each setup's external (X-ref) models/fixtures/stock -> source document.
-  include=['nc_programs'] -> the NC/post programs.
-  include=['time']        -> machining cycle-time estimate (per setup + total).
-  include=['tools']       -> the distinct cutting tools used across operations (the tool sheet).
-
-A 'setup' filter scopes operations/references/time to one setup. The handler is a THIN ROUTER over
-_slice_*() helpers - one per slice, each independently testable; the file stays readable-whole.
-
-CAVEAT (carried from the CAM reads): operation VALIDITY / is_out_of_date is only trustworthy once the
-MANUFACTURE workspace has been entered - the CAM model doesn't re-evaluate against changed geometry
-until then. The status slice reports the flags but they can be stale from Design. Read-only.
-"""
+"""The rich CAM read (CLAUDE.md "Reads are RICH"): the active document's CAM state, zoomed via
+include=[...]. The handler is a thin router over _slice_*() helpers, one per slice. Operation
+validity is only trustworthy once the Manufacture workspace has been entered."""
 
 import json
 
@@ -40,6 +14,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
@@ -299,14 +274,8 @@ def _slice_tool(cam, operation, preset):
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
             scope: str = "", library: str = "", tool_type: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0) -> dict:
-    """Read the active document's CAM state at the right zoom level (rich read - CLAUDE.md "Reads are
-    RICH"). Default (no 'include'): the orientation slice - setups + per-setup op counts + status.
-    'include' widens; scope first, then deepen:
-      setups (default) -> include=['operations'] (per-op, 'setup' scopes) -> include=['parameters']
-      or ['tool'] with 'operation' (ONE op's settings / tool) -> 'preset' drills one tool preset.
-    Also: 'references', 'nc_programs', 'time' (document/setup level). Read-only.
-    """
-    cam, cerr = _get_cam()
+    """Route to the requested slice(s); default is the setups orientation slice."""
+    cam, cerr = get_cam()
     if not cam:
         return error(cerr)
 
@@ -373,17 +342,6 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
     return ok(out)
 
 
-def _get_cam():
-    """The active document's CAM product, or (None, reason). Works regardless of active workspace."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
-
-
 def _normalize_include(include):
     if include in (None, "", []):
         return []
@@ -413,8 +371,8 @@ tool = (
     Tool.create_simple(name="cam_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices: operations | parameters | tool | references | nc_programs | "
-                           "time | tools (list or comma-string). parameters/tool need 'operation'. "
-                           "Omit for the setups orientation slice."})
+                           "time | tools | library | templates (list or comma-string). parameters/tool "
+                           "need 'operation'. Omit for the setups orientation slice."})
     .add_input_property("setup", {"type": "string",
             "description": "Scope operations/references/time to this setup name (omit = all setups)."})
     .add_input_property("operation", {"type": "string",

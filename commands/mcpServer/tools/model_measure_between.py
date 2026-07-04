@@ -6,22 +6,9 @@
   model_measure_between -> the minimum distance (a gap / clearance / wall thickness) or the angle
                            between two targets - each a face/body/occurrence/component by a
                            find_geometry handle or a name. The relational complement to model_inspect
-                           (which measures ONE target's own size/mass).
+                           (which measures ONE target's own size/mass). Read-only.
 
-Two modes:
-  - distance (default): MeasureManager.measureMinimumDistance -> the closest gap + the two closest
-    points (and the midpoint). "How far apart are these? What's the clearance / wall thickness?"
-  - angle: MeasureManager.measureAngle -> the angle between the two entities. "What angle is this face
-    to that one?"
-
-Both targets resolve via TargetRef (the same kind model_inspect/appearance_set use), so a handle or a
-name works for either. Read-only. Handler runs on the main thread.
-
-Grounded in adsk.core (signatures confirmed live):
-  - app.measureManager.measureMinimumDistance(entityOne, entityTwo) -> MeasureResults
-  - app.measureManager.measureAngle(entityOne, entityTwo) -> MeasureResults
-  - MeasureResults.value (cm for distance, RADIANS for angle), .positionOne / .positionTwo (Point3D,
-    the closest/defining points, cm), .positionThree (a third defining point where relevant)
+API signatures: docs/fusion-api-notes.md "Measurement".
 """
 
 import math
@@ -38,28 +25,14 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_CM_TO_UNIT = {"mm": 10.0, "cm": 1.0, "in": 1.0 / 2.54, "inch": 1.0 / 2.54}
 _MODES = ("distance", "angle")
 
 _A = _inputs.TargetRef("a", required=True, allow=("body", "face", "occurrence", "component"))
 _B = _inputs.TargetRef("b", required=True, allow=("body", "face", "occurrence", "component"))
 
 
-def _ptxyz(p, f):
-    if p is None:
-        return None
-    return {"x": round(safe(lambda: p.x, 0.0) * f, 6),
-            "y": round(safe(lambda: p.y, 0.0) * f, 6),
-            "z": round(safe(lambda: p.z, 0.0) * f, 6)}
-
-
 def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm") -> dict:
-    """Measure the distance or angle between two targets (read-only).
-
-    a, b: each a find_geometry handle (face/body) or an occurrence/component/body name. mode:
-    'distance' (default - the minimum gap + the two closest points, in 'units') or 'angle' (the angle
-    between them, in degrees). units: mm (default) / cm / in - applies to the distance and the points.
-    """
+    """Measure the distance or angle between two targets (read-only)."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
@@ -67,7 +40,7 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
     m = (mode or "distance").strip().lower()
     if m not in _MODES:
         return error(f"Unknown mode '{mode}'. Use 'distance' or 'angle'.")
-    f = _CM_TO_UNIT.get((units or "mm").strip().lower())
+    f = _common.CM_TO_UNIT.get((units or "mm").strip().lower())
     if f is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
@@ -99,8 +72,8 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
             "b": f"{kind_b} '{safe(lambda: ent_b.name) or b}'",
             "units": units,
             "distance": round(safe(lambda: mr.value, 0.0) * f, 6),
-            "closest_point_on_a": _ptxyz(safe(lambda: mr.positionOne), f),
-            "closest_point_on_b": _ptxyz(safe(lambda: mr.positionTwo), f),
+            "closest_point_on_a": _common.ptxyz(safe(lambda: mr.positionOne), f),
+            "closest_point_on_b": _common.ptxyz(safe(lambda: mr.positionTwo), f),
             "note": "Minimum gap between the two targets (0 = touching/overlapping). closest_point_on_a/b "
                     "are the nearest points; their separation IS the distance.",
         })

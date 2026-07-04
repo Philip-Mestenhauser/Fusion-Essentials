@@ -1,29 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: delete a timeline feature from the active parametric design.
-
-  design_delete_feature -> remove ONE timeline object (a feature/sketch/pattern/mirror/joint/etc.) by
-                    name, deleting its associated entity. WRITES (destructive).
-
-Why this exists: it is the other half of the occurrence-delete gap. A pattern/mirror CHILD occurrence
-cannot be deleted on its own - design_delete_occurrence correctly refuses it and points at "delete the
-owning feature instead", but until now there was no tool to do that, so recovering from a botched
-pattern still meant rebuilding the document. This closes that loop.
-
-GUARDS (honest failure over silent corruption):
-  - matches the target by timeline-object name; an ambiguous name (several objects share it) is
-    REFUSED, listing the candidates with their indices, rather than guessing one;
-  - refuses a TIMELINE GROUP (it has no deletable entity - ungroup or delete its members instead);
-  - turns a deleteMe() == False result (Fusion declined the delete) into an explicit error;
-  - reports the timeline health before/after, so a delete that breaks a DOWNSTREAM feature (one that
-    consumed this feature's geometry) is surfaced, not swallowed.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Design.timeline (Timeline): .count, .item(i)
-  - TimelineObject: .name, .index, .isGroup, .entity, .healthState
-  - <Feature>.deleteMe() -> bool ("Deletes the feature. Works for parametric and non-parametric.")
-Handler runs on the main thread; WRITES (destructive).
+"""Deletes ONE timeline object (a feature/sketch/pattern/mirror/joint/etc.) by name, deleting its
+associated entity - the way to undo a botched pattern/mirror without rebuilding the document. An
+ambiguous name or a timeline GROUP is refused; timeline health is reported before/after so a delete
+that breaks a downstream feature is surfaced. WRITES (destructive).
 """
 
 import adsk.core

@@ -1,30 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: edit a CAM SETUP - its parameters AND its model/fixture/stock bodies.
-
-  cam_edit_setup(setup=..., parameters={...}, models=[...], fixtures=[...], stock=[...])
-
-The setup-level companion to cam_edit_operation. A Setup carries ~287 named parameters (WCS
-orientation/origin, stock dimensions, job options, ...) PLUS three editable body collections (the parts
-to machine, the fixtures, the solid stock). This one tool covers the broad setup surface:
-
-  - 'parameters' {name: expression}  - set ANY setup parameter. This is how the WCS is configured
-    (wcs_orientation_mode, wcs_origin_mode, wcs_origin_boxPoint, wcs_orientation_axisZ/flipZ, ...) and
-    how stock is sized (stockXLow/High, stockZHigh, ...). The WCS matrix itself is read-only; you steer
-    it through these parameters.
-  - 'models' / 'fixtures' / 'stock'  - REPLACE that collection with the given bodies (find_geometry
-    handles or names, resolved strictly through _inputs BodyRefList). Pass to set; omit to leave alone.
-
-Parameters are validated ALL-before-applying-ANY (same as cam_edit_operation), so a typo can't leave a
-half-edited setup. Setting any of these makes existing toolpaths out of date - regenerate with cam_generate.
-
-Grounded in adsk.cam (every setter verified live):
-  - Setup.parameters (CAMParameters): .itemByName(name) -> CAMParameter(.expression get/set)
-  - Setup.models / .fixtures / .stockSolids  - get/SET an ObjectCollection of Occurrence/BRepBody/MeshBody
-  - Setup.workCoordinateSystem is READ-ONLY (a Matrix3D) - drive it via the wcs_* parameters above
-Handler runs on the main thread; WRITES CAM data.
-"""
+"""Edit a CAM setup: any named parameter (WCS orientation/origin, stock size, ...) and/or its
+model/fixture/stock body collections. Parameters are validated before any is applied, so a typo
+can't half-edit the setup."""
 
 import adsk.core
 import adsk.cam
@@ -33,6 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 from . import _inputs
 # Reuse the operation editor's parameter-parsing engine (single source of truth for {name:expr} / string).
 from .cam_edit_operation import _parse_parameters
@@ -48,19 +28,6 @@ _BODY_COLLECTIONS = {
 
 # strict body-list input kind (handles or names; solid/mesh/surface aware) - reused for all three.
 _BODIES = _inputs.BodyRefList("bodies", required=False)
-
-
-# ── seams (patched in tests) ─────────────────────────────────────────────────
-
-def _get_cam():
-    """The CAM product for the active document, or (None, reason)."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data. Create a setup first (cam_create_setup)."
-    return cam, None
 
 
 def _object_collection():
@@ -111,7 +78,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         return error("Nothing to do. Provide 'parameters' {name: expression} and/or "
                      "'models'/'fixtures'/'stock' body lists.")
 
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if cerr:
         return error(cerr)
     target = _find_setup(cam, setup)

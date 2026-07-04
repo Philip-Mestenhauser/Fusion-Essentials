@@ -49,3 +49,18 @@ class TestParseViews:
         views, err = cv._parse_views(" , , ")
         assert err is None
         assert views == ["front", "top", "right", "iso-top-right"]
+
+    def test_list_input(self):
+        # the schema's native shape (a JSON array), not just the back-compat comma string.
+        views, err = cv._parse_views(["front", "top"])
+        assert err is None and views == ["front", "top"]
+
+    def test_list_input_all_keyword_expands(self):
+        views, err = cv._parse_views(["all"])
+        assert err is None
+        assert views == ["front", "back", "left", "right", "top", "bottom"]
+
+    def test_empty_list_falls_back_to_default(self):
+        views, err = cv._parse_views([])
+        assert err is None
+        assert views == ["front", "top", "right", "iso-top-right"]

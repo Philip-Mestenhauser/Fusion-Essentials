@@ -367,7 +367,7 @@ class TestBaseFeature:
         start = _payload(dm.base_feature_handler(action="start"))
         bf = des.rootComponent.features.baseFeatures.added[-1]
         assert bf.editing is True
-        # while open the API hides it: count drops, itemByName is None (the trap the old finish fell in)
+        # while open the API hides it: count drops, itemByName is None - re-finding by name cannot work
         assert des.rootComponent.features.baseFeatures.count == 0
         assert des.rootComponent.features.baseFeatures.itemByName(bf.name) is None
         out = _payload(dm.base_feature_handler(action="finish"))
@@ -550,8 +550,9 @@ class TestRunInBaseFeature:
 # ── design_activate_component (the missing 're-activate an existing component' primitive) ────────
 
 class _FakeOcc:
-    def __init__(self, name, comp_name, activate_returns=True):
+    def __init__(self, name, comp_name, activate_returns=True, full_path=None):
         self.name = name
+        self.fullPathName = full_path or name
         self.component = type("C", (), {"name": comp_name})()
         self.isActive = False
         self._activate_returns = activate_returns
@@ -578,6 +579,9 @@ class _OccColl:
 
     def item(self, i):
         return self._occs[i] if 0 <= i < len(self._occs) else None
+
+    def __iter__(self):
+        return iter(self._occs)
 
 
 class _ActivateDesign:
@@ -635,6 +639,18 @@ class TestActivateComponent:
         res = dm.activate_component_handler(occurrence="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"] and "Wheel:1" in res["message"]
 
+    def test_ambiguous_name_refused_not_first_match(self):
+        # two instances share local name "Bolt:1" under different sub-assemblies — a bare "Bolt"
+        # substring must ERROR (naming both fullPathNames), NOT silently activate the first.
+        a = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-B:1+Bolt:1")
+        _install_activate(_ActivateDesign([a, b]))
+        res = dm.activate_component_handler(occurrence="Bolt")
+        assert res["isError"] is True
+        assert "ambiguous" in res["message"].lower()
+        assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
+        assert a.isActive is False and b.isActive is False
+
     def test_activate_root_via_empty(self):
         occ = _FakeOcc("Chassis:1", "Chassis")
         occ.isActive = True
@@ -661,3 +677,16 @@ class TestActivateComponent:
         _install_activate(_ActivateDesign([occ]))
         res = dm.activate_component_handler(occurrence="Chassis:1")
         assert res["isError"] is True and "returned false" in res["message"]
+
+    def test_deactivate_raises_surfaces_as_error(self):
+        # A deactivate() failure must propagate as an error - reporting ok("root") when the
+        # deactivate call failed would be a false success.
+        class _RaisingOcc(_FakeOcc):
+            def deactivate(self):
+                raise RuntimeError("deactivate blew up")
+        occ = _RaisingOcc("Chassis:1", "Chassis")
+        occ.isActive = True
+        _install_activate(_ActivateDesign([occ]))    # no root_activate -> falls to deactivate()
+        import pytest
+        with pytest.raises(RuntimeError, match="deactivate blew up"):
+            dm.activate_component_handler(occurrence="root")

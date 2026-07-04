@@ -1,32 +1,13 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for DESIGN MODE - the suite's eyes on parametric vs direct, and base features.
-
-A large fraction of adsk.* mutation methods are valid in ONLY ONE of Fusion's two design modes
-(parametric vs direct), and several geometry ops are valid ONLY inside an OPEN base-feature edit
-scope in a parametric design. These three tools give an agent the missing mode awareness:
-
-  get_mode_handler() -> "what mode am I in, what can I do?" - designType + timeline/base-feature
-                        presence + a capability `can{}` map. The mode read consumed by design_get's
-                        'mode' slice (design_get(include=['mode'])); not a standalone tool here.
-  design_set_mode    -> convert parametric<->direct. Parametric->Direct DESTROYS the timeline and all
-                        history (irreversible) so it REFUSES without confirm_history_loss=true.
-                        Direct->Parametric is free. WRITES (destructive one-way).
-  model_base_feature -> manage a base-feature edit scope (BaseFeatures.add()/startEdit()/finishEdit()).
-                        The wrapper form ALWAYS finishEdit()s in a finally - a leaked open scope
-                        corrupts every later tool call in the session. WRITES.
-
-Single source of truth: every mode read here goes through _inputs.current_design_type(design) and
-every mode gate through _inputs.ModeGuard, so the capability report and the runtime guards can never
-drift, and the guard's remedy text is DERIVED from the requirement - it structurally cannot point the
-wrong way.
-
-Grounded in adsk.fusion:
-  - Design.designType (read/WRITE) ; adsk.fusion.DesignTypes.{Parametric,Direct}DesignType
-  - Design.timeline (present only in parametric)
-  - Component.features.baseFeatures.add() -> BaseFeature ; BaseFeature.startEdit()/finishEdit() -> bool
-Handlers run on the main thread; design_set_mode / model_base_feature WRITE.
+"""MCP building blocks for DESIGN MODE awareness - many adsk.* mutation methods are valid in only ONE
+of Fusion's two design modes (parametric/direct), or only inside an OPEN base-feature edit scope.
+get_mode_handler() reports designType + a capability `can{}` map (consumed by design_get's 'mode'
+slice); design_set_mode converts parametric<->direct (destroys the timeline going to direct, so it
+refuses without confirm_history_loss=true); model_base_feature opens/closes a base-feature edit scope,
+always finishEdit()ing in a finally so a leaked scope can't corrupt later calls. Every mode read/gate
+goes through _inputs.current_design_type / _inputs.ModeGuard (single source of truth).
 """
 
 import adsk.core
@@ -295,14 +276,12 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
 
     # act == "finish".
     #
-    # THE FIX (live-verified): an OPEN base-feature scope is invisible to enumeration -
-    # baseFeatures.count reads 0 and itemByName returns None WHILE the scope is open - so the old
-    # "sweep every base feature and finishEdit each" strategy closed NOTHING (it could not see the
-    # open one) and leaked the scope, wedging the session. The ONLY reliable handle to an open scope
-    # is the BaseFeature object add() returned, which 'start' stashed in _OPEN_BASE_FEATURES. So
-    # finish closes THOSE captured objects directly. finishEdit() returns the design to parametric and
-    # makes the feature enumerable again (verified). No mode gate - finish must work while the design
-    # READS direct (that read IS the open scope).
+    # An OPEN base-feature scope is invisible to enumeration - baseFeatures.count
+    # reads 0 and itemByName returns None WHILE the scope is open. The ONLY reliable handle to an
+    # open scope is the BaseFeature object add() returned, which 'start' stashed in
+    # _OPEN_BASE_FEATURES, so finish closes THOSE captured objects directly. finishEdit() returns the
+    # design to parametric and makes the feature enumerable again. No mode gate - finish must work
+    # while the design READS direct (that read IS the open scope).
     nm = (base_feature or "").strip()
 
     # 1) Close every captured open scope (LIFO). This is the path that actually un-wedges a session.
@@ -344,48 +323,16 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
 
 # ── design_activate_component (WRITES - changes the active edit target) ──────
 
-def _find_occurrence(design, name):
-    """Find a component OCCURRENCE by occurrence name (e.g. 'Chassis:1') or by component name
-    ('Chassis' -> its first occurrence). Returns the Occurrence or None."""
-    nm = (name or "").strip()
-    if not nm:
-        return None
-    root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrences) if root else None
-    n = safe(lambda: occs.count, 0) if occs else 0
-    # 1) exact occurrence name
-    for i in range(n):
-        o = safe(lambda i=i: occs.item(i))
-        if o is not None and safe(lambda o=o: o.name) == nm:
-            return o
-    # 2) exact owning-component name (first occurrence of that component)
-    for i in range(n):
-        o = safe(lambda i=i: occs.item(i))
-        cname = safe(lambda o=o: o.component.name)
-        if cname == nm:
-            return o
-    # 3) case-insensitive component-name fallback
-    low = nm.lower()
-    for i in range(n):
-        o = safe(lambda i=i: occs.item(i))
-        cname = safe(lambda o=o: o.component.name)
-        if cname and cname.lower() == low:
-            return o
-    return None
+_OCCURRENCE = _inputs.OccurrenceRef("occurrence",
+        description="Occurrence to activate. '' or 'root' returns to the root component.")
 
 
 def activate_component_handler(occurrence: str = "") -> dict:
     """Make an EXISTING component the active edit target (or return to the root component).
 
-    This is the missing counterpart to model_create_component(activate=true): there was NO way to
-    re-activate an already-created component, so once you moved on from a sub-component you could not go
-    back to build/dimension into it - the by-name sketch tools (which resolve the ACTIVE component
-    first) and the modelling tools then could not target it. Activating an occurrence via
-    Occurrence.activate() sets it as the edit target so subsequent sketch_create / extrude / dimension
-    land there.
-
-    occurrence: the occurrence to activate ('Chassis:1') or the component name ('Chassis' -> its first
-    occurrence). Pass '' (or 'root') to deactivate back to the ROOT component. WRITES (UI edit target).
+    occurrence: the occurrence to activate, by fullPathName (from design_get(include=['tree'])) or
+    name (ambiguous names refused). Pass '' (or 'root') to deactivate back to the ROOT component.
+    WRITES (UI edit target).
     """
     design = _common.design()
     if not design:
@@ -403,7 +350,7 @@ def activate_component_handler(occurrence: str = "") -> dict:
         if did is None:
             active_occ = safe(lambda: _active_occurrence(design))
             if active_occ is not None:
-                safe(lambda: active_occ.deactivate())
+                active_occ.deactivate()
         now = safe(lambda: design.activeComponent.name)
         return ok({
         "activated": "root",
@@ -411,14 +358,9 @@ def activate_component_handler(occurrence: str = "") -> dict:
         "note": "Root component is the active edit target - new geometry builds at the root.",
         })
 
-    occ = _find_occurrence(design, want)
-    if occ is None:
-        sample = [safe(lambda o=o: o.name) for o in (
-            [safe(lambda i=i: design.rootComponent.allOccurrences.item(i))
-             for i in range(safe(lambda: design.rootComponent.allOccurrences.count, 0))])][:25]
-        return error(f"No occurrence/component matched '{occurrence}'. Open occurrences: "
-                     + (", ".join(n for n in sample if n) or "(none)")
-                     + ". Use design_get(include=['tree']) to list them.")
+    occ, occ_err = _OCCURRENCE.resolve(want)
+    if occ_err:
+        return error(occ_err)
 
     did = bool(safe(lambda: occ.activate(), False))
     if not did:
@@ -447,8 +389,7 @@ def _active_occurrence(design):
 def base_feature_run_wrapper(open_scope, inner_op):
     """Run an inner operation inside a fresh base-feature scope, ALWAYS finishing in a finally.
 
-    This is the leak-proof core the Option-B wrapper (and any future base-feature-requiring op) builds
-    on: open_scope() must return (base_feature, error_result_or_None). If it errors we surface that and
+    open_scope() must return (base_feature, error_result_or_None). If it errors we surface that and
     never open a scope. Otherwise we startEdit-check, run inner_op(base_feature), and finishEdit() in a
     finally so the scope can NEVER leak - even when inner_op raises. The inner error is re-raised after
     the scope is closed (callers wrap this however they report errors).
@@ -577,12 +518,9 @@ _activate_component_tool = (
             "component you created earlier so subsequent sketch_create / model_extrude / "
             "sketch_dimension / sketch_constrain build into it (the modelling tools and the "
             "by-name sketch tools target the ACTIVE component). 'occurrence' is the occurrence "
-            "name ('Chassis:1') or a component name ('Chassis' -> its first occurrence); pass "
-            "'' or 'root' to return to the root component. WRITES (changes the edit target, "
-            "not geometry)."))
-    .add_input_property("occurrence", {"type": "string",
-            "description": "Occurrence name ('Chassis:1') or component name "
-            "('Chassis'); '' or 'root' returns to the root component."})
+            "to activate; pass '' or 'root' to return to the root component. WRITES (changes "
+            "the edit target, not geometry)."))
+    .add_input_property(*_OCCURRENCE.as_property())
     .strict_schema()
 )
 activate_component_item = Item.create_tool_item(

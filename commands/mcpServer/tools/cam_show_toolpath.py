@@ -1,33 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: control which CAM toolpaths are DISPLAYED (the blue paths).
-
-  cam_show_toolpath(action=...) - show / hide individual generated toolpaths so an agent can look at
-  one operation's path at a time (the CAM analog of view_inspect's visibility verbs, but for operations rather than
-  component occurrences). Toolpaths only render in the Manufacture (CAM) workspace.
-
-    show         -> turn ON one operation's toolpath (by name).
-    hide         -> turn OFF one operation's toolpath.
-    isolate      -> show ONLY the named operation's toolpath (hide all others).
-    show_folder  -> show every operation in a named folder/setup; hide the rest.
-    hide_all     -> hide every toolpath.
-    list         -> list operations with their toolpath/visibility state.
-
-  Optional 'fit' (with show/isolate): aim+fit the camera to that operation's TOOLPATH bounding box
-  (which is bigger than the part - it includes approach/retract moves; focusing on the part clips
-  it). Pair with view_screenshot to capture.
-
-SAFE BY DESIGN: this toggles Operation.isLightBulbOn (a clean data-model property). It does NOT
-touch the simulation / in-process-stock UI commands (Iron*/Simulation*), which enter a modal
-contextual environment and are NOT safe to drive from here.
-
-Grounded in adsk.cam:
-  - CAM.setups -> Setup; Setup/Folder.allOperations; Operation(.name, .isLightBulbOn settable,
-    .hasToolpath, .isToolpathValid, .isSuppressed)
-  - Operation toolpath extents via app.measureManager bounding box of the operation (where exposed)
-Handlers run on the main thread.
-"""
+"""Control which CAM toolpaths are displayed (show/hide/isolate one operation's path, or a whole
+folder), so an agent can study one at a time. Toggles Operation.isLightBulbOn - a plain data
+property, unlike the modal simulation/in-process-stock UI commands, which this does not touch.
+Toolpaths only render in the Manufacture workspace."""
 
 import adsk.core
 import adsk.cam
@@ -36,20 +13,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
-
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "Active document has no CAM data (open a document with Manufacture setups)."
-    return cam, None
 
 
 def _all_operations(cam):
@@ -106,35 +74,29 @@ def _find_folder_ops(cam, folder_name):
 
 
 def _set_bulb(o, on):
-    return safe(lambda: setattr(o, "isLightBulbOn", bool(on)))
+    o.isLightBulbOn = bool(on)
 
 
-def _fit_operation(o):
-    """Fit the camera to an operation's TOOLPATH bounding box (bigger than the part). Best-effort:
-    if the toolpath bbox is unavailable, fall back to a plain fit."""
+def _fit_operation():
+    """Fit the camera (plain fit-to-all). Any API refusal raises into the handler's error path."""
     vp = app.activeViewport
-    bb = safe(lambda: app.measureManager.getOrientedBoundingBox(
-        o, adsk.core.Vector3D.create(1, 0, 0), adsk.core.Vector3D.create(0, 1, 0))) \
-        if hasattr(app, "measureManager") else None
     cam = vp.camera
     cam.isFitView = True
     vp.camera = cam
     vp.refresh()
-    return bb is not None
 
 
 def handler(action: str = "", operation: str = "", folder: str = "", fit: bool = False) -> dict:
     """Show/hide CAM toolpaths so you can study one operation's path at a time.
 
     action: show | hide | isolate | show_folder | hide_all | list. operation: op name (show/hide/
-    isolate). folder: folder or setup name (show_folder). fit: fit the camera to the op's toolpath
-    extents (show/isolate). Toolpaths render only in the Manufacture workspace. Pair with
-    view_screenshot.
+    isolate). folder: folder or setup name (show_folder). fit: fit the camera after showing
+    (show/isolate). Toolpaths render only in the Manufacture workspace. Pair with view_screenshot.
     """
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
-    cam, err = _get_cam()
+    cam, err = get_cam()
     if err:
         return error(err)
 
@@ -206,7 +168,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     fitted = False
     if fit:
-        fitted = bool(_fit_operation(o))
+        _fit_operation()   # raises on an API refusal, so reaching the payload means it applied
+        fitted = True
     app.activeViewport.refresh()
     return ok({"action": action, "operation": name, "fit": fitted,
         "note": "Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
@@ -218,10 +181,10 @@ TOOL_DESCRIPTION = (
     "operation's path at a time. 'action': "
     "'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
-    "+ state). 'fit' fits the camera to the operation's TOOLPATH extents (bigger than the part - "
-    "includes approach/retract moves). Toolpaths render only in the MANUFACTURE workspace; pair "
-    "with view_screenshot. Toggles Operation.isLightBulbOn - does NOT touch simulation/in-process-"
-    "stock commands (those are unsafe to drive from here)."
+    "+ state). 'fit' fits the camera to the scene after showing (show/isolate). Toolpaths render "
+    "only in the MANUFACTURE workspace; pair with view_screenshot. Toggles "
+    "Operation.isLightBulbOn - does NOT touch simulation/in-process-stock commands (those are "
+    "unsafe to drive from here)."
 )
 
 tool = (
@@ -236,7 +199,7 @@ tool = (
     .add_input_property("folder", {"type": "string",
             "description": "Folder or setup name (show_folder)."})
     .add_input_property("fit", {"type": "boolean",
-            "description": "Fit the camera to the operation's toolpath extents (show/isolate)."})
+            "description": "Fit the camera after showing the toolpath (show/isolate)."})
     .strict_schema()
 )
 

@@ -1,39 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: generate CAM toolpaths without blocking the agent, then poll.
-
-  cam_generate   -> launch (re)generation of toolpaths for the whole document, a setup,
-                          a folder, or one operation. Returns IMMEDIATELY with a handle - it does
-                          NOT wait for the (potentially very long) compute to finish.
-  cam_get_status -> poll a launched generation by handle (or "latest"): how many of its
-                          operations have completed, whether it is done, and - once done - each
-                          operation's state and any warnings/errors.
-
-Why two tools (fire-and-poll): toolpath generation can take minutes. Blocking an MCP call that
-long wastes the agent's time and risks timeouts. So cam_generate starts the work and returns
-a handle; the agent goes off and does other work, then calls cam_get_status whenever it
-likes. The live GenerateToolpathFuture is held in a module-level registry that survives between
-calls (module globals persist for the add-in session).
-
-Selective regeneration: pass skip_valid=true (default) so only OUT-OF-DATE operations regenerate -
-valid, up-to-date toolpaths are left alone (this is generateAllToolpaths(skipValid) /
-generateToolpath on a stale target). Read which ops are stale first with cam_get(include=['operations'])
-(each op reports state / is_out_of_date / has_warning).
-
-CONTEXT GOTCHA: operation valid/out-of-date state is only re-evaluated once the MANUFACTURE
-workspace has been entered. After swapping a part into a copied template, the carried-over
-toolpaths read 'valid' from the Design workspace even though they are stale for the new geometry -
-so skip_valid=true would wrongly skip them. Enter Manufacture first, or use skip_valid=false.
-
-Grounded in adsk.cam:
-  - CAM.generateAllToolpaths(skipValid: bool) -> GenerateToolpathFuture
-  - CAM.generateToolpath(operations: Base) -> GenerateToolpathFuture   (Operation/Setup/Folder)
-  - GenerateToolpathFuture: .numberOfOperations, .numberOfCompleted, .isGenerationCompleted
-  - Operation/OperationBase: .operationState, .hasWarning, .hasError, .error, .name, .strategy
-Handlers run on the main thread. cam_generate WRITES (it mutates toolpaths); the status read
-does not mutate.
-"""
+"""Launch CAM toolpath generation asynchronously (cam_generate, returns a poll handle) and poll it
+(cam_get_status). The live GenerateToolpathFuture must stay referenced across calls - see
+_GENERATIONS - or Fusion abandons the in-progress generation."""
 
 import time
 
@@ -69,20 +39,6 @@ _HANDLE_SEQ = [0]
 _OP_STATE_NAMES = {0: "valid", 1: "invalid", 2: "suppressed", 3: "no_toolpath"}
 
 
-def _get_cam():
-    """Resolve the active document's CAM product, or an error string."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    products = safe(lambda: doc.products)
-    if not products:
-        return None, "Active document has no products."
-    cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, ("Active document has no CAM data. Open a document with Manufacture setups.")
-    return cam, None
-
-
 def _find_target(cam, target_name):
     """Resolve a target NAME to a Setup / Folder / Operation, searching all setups.
 
@@ -114,7 +70,7 @@ def _collect_op_health():
     - 'empty' is derived by matching the warning text (Fusion has no toolpath-length API on
       Operation), so empty toolpaths surface both in 'warnings' and, for convenience, in 'empty'.
       """
-    cam, err = _get_cam()
+    cam, err = _cam_common.get_cam()
     out = {"warnings": [], "errors": [], "empty": []}
     if err:
         return out
@@ -149,7 +105,7 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
     out-of-date operations; when false, regenerate everything in scope. WRITES (mutates toolpaths).
     Does NOT wait - poll with cam_get_status(handle).
     """
-    cam, err = _get_cam()
+    cam, err = _cam_common.get_cam()
     if err:
         return error(err)
 
@@ -371,9 +327,8 @@ status_tool = (
 # reports a generation's progress. The pump (adsk.doEvents() + a short capped sleep, see status_handler)
 # only advances an ALREADY-launched future on the main-thread loop - the mutation was authorized by the
 # separate write="write" cam_generate call. So from a permission/gating standpoint this is a read of
-# generation state, not a new write. (It does technically contradict CLAUDE.md's "no sleep/polling in a
-# handler"; the fire-and-pump split is the considered exception - the alternative is blocking an MCP
-# call for the full multi-minute compute. Flag for maintainer if a stricter reading of write= is wanted.)
+# generation state, not a new write. The fire-and-pump split is the deliberate exception to the
+# no-sleep/no-polling rule; the alternative is blocking an MCP call for the full multi-minute compute.
 status_item = Item.create_tool_item(tool=status_tool, write="read", handler=status_handler,
                                     run_on_main_thread=True)
 

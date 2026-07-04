@@ -1,4 +1,4 @@
-"""Unit tests for ``assembly.py`` â€” occurrence ground/move + rigid group.
+"""Unit tests for ``assembly_transform.py`` - occurrence ground/move + rigid group.
 
 Tests are written BEFORE the tool is wired further (project rule). The logic
 pinned here, no live Fusion: occurrence resolution (exact, then substring;
@@ -15,7 +15,7 @@ from conftest import load_tool
 asm = load_tool("assembly_transform")
 
 
-# â”€â”€ fakes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- fakes ---------------------------------------------------------------------
 
 class FakeVec:
     def __init__(self, x, y, z):
@@ -29,11 +29,10 @@ class FakeMatrix:
     """Models the subset of Matrix3D the move handler touches: a settable 'translation' (Vector3D),
     transformBy (compose), and setToRotation.
 
-    Records HOW each operation was applied so a test can pin the rotate+translate fix: the bug was
-    assigning `mat.translation = vec` on the SAME matrix that holds a rotation (whose pivot lives in the
-    translation column), clobbering the pivot. The fix composes the translation as its OWN matrix via
-    transformBy. So we track `direct_translation_assigned_after_rotation` (the smell) and the list of
-    matrices composed in via transformBy (the fix)."""
+    Records HOW each operation was applied: assigning `mat.translation = vec` on the SAME matrix
+    that holds a rotation clobbers the pivot (whose pivot lives in the translation column), so
+    `direct_translation_assigned_after_rotation` flags that; a translation composed as its OWN
+    matrix via transformBy is tracked in `composed` instead."""
     def __init__(self):
         self._translation = None
         self.rotation = None
@@ -155,7 +154,7 @@ def _occ(occs, name):
     return next(o for o in occs if o.name == name)
 
 
-# â”€â”€ ground â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- ground ---------------------------------------------------------------------
 
 class TestGround:
     # assembly_ground sets ONLY the stateless ground_to_parent lock; it never writes isGrounded.
@@ -227,7 +226,7 @@ class TestGround:
         assert b.isGroundToParent is True and a.isGroundToParent is False   # the RIGHT one
 
 
-# â”€â”€ assembly_move â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- assembly_move ---------------------------------------------------------------
 
 class TestMove:
     def test_translate_sets_transform(self):
@@ -277,12 +276,12 @@ class TestMove:
         res = asm.move_handler(occurrence="Block:1", rotate_deg=30, rotate_x=10)
         assert res["isError"] is True and "not both" in res["message"]
 
-    # â”€â”€ jointed-occurrence warning (posing a jointed part is allowed but transient) â”€â”€
-    # Moving a jointed occurrence poses it along its DOF (the sanctioned path â€” joint_edit redirects
+    # -- jointed-occurrence warning (posing a jointed part is allowed but transient) --
+    # Moving a jointed occurrence poses it along its DOF (the sanctioned path - joint_edit redirects
     # here), but the pose is transient and a move that fights the joints over-constrains the solve. So
     # the move PROCEEDS and warns to capture_position + probe.
     # (NOT a refusal: refusing would dead-end the only safe pose path, since driving
-    # jointMotion.rotationValue crashes the connection â€” see joint.py.)
+    # jointMotion.rotationValue crashes the connection - see joint_create_edit.py.)
 
     def test_move_jointed_occurrence_proceeds_with_warning(self):
         _, occs, _ = _install(["Block:1"])
@@ -339,9 +338,9 @@ class TestMove:
         assert out["rotate_axis"] == "edge"
 
     def test_combined_rotate_and_translate_preserves_pivot(self):
-        # PR-review #5: a SINGLE call doing rotation-about-a-pivot AND translation must not assign
+        # A SINGLE call doing rotation-about-a-pivot AND translation must not assign
         # `mat.translation = vec` on the rotation matrix (that overwrites the pivot column, so the part
-        # rotates about the WORLD origin). The fix composes the translation as its OWN matrix. Use the
+        # rotates about the WORLD origin). The translation is composed as its OWN matrix. Use the
         # edge-rotate path (a real non-origin pivot at (5,0,0)) + a translation in the same call.
         import adsk.core, adsk.fusion
         adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
@@ -353,7 +352,7 @@ class TestMove:
         edge = _Edge()
         h = "/v" + "E" * 70
         _, occs, _ = _install(["Block:1"])
-        # capture every Matrix3D created â€” AFTER _install (which re-binds Matrix3D.create to FakeMatrix).
+        # capture every Matrix3D created - AFTER _install (which re-binds Matrix3D.create to FakeMatrix).
         created = []
         adsk.core.Matrix3D.create = staticmethod(lambda: created.append(FakeMatrix()) or created[-1])
         real = asm.app.activeProduct
@@ -367,13 +366,13 @@ class TestMove:
         assert rot_mats, "expected a rotation matrix to be created"
         for m in rot_mats:
             assert m.direct_translation_assigned_after_rotation is False, (
-                "translation was assigned directly onto the rotation matrix â€” clobbers the pivot column")
+                "translation was assigned directly onto the rotation matrix - clobbers the pivot column")
         # and a translation was applied by COMPOSITION (transformBy), not assignment.
         assert any(getattr(c, "translation", None) is not None
                    for m in created for c in m.composed), "translation should be composed via transformBy"
 
 
-# â”€â”€ assembly_rigid_group â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- assembly_rigid_group ----------------------------------------------------------
 
 class TestRigidGroup:
     def test_groups_named_occurrences(self):

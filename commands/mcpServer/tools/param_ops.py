@@ -3,24 +3,9 @@
 
 """MCP building blocks for the active design's PARAMETERS (param_*).
 
-  param_get         -> read user (and optionally all model) parameters.
-  param_set          -> set a parameter's expression. WRITES.
-  param_add          -> add a user parameter (health-guarded). WRITES.
-  param_delete       -> delete a user parameter (refuses if referenced; health-guarded). WRITES.
-  param_set_favorite -> toggle a user parameter's favorite flag. WRITES.
-
-The read/write foundation for parameter-driven templates (driving stock size, positioning, etc.).
-add/delete are guarded by a timeline-health check (a LOCAL _timeline_health helper) so an edit that
-breaks a downstream feature is rolled back/reported rather than silently corrupting the model. The
-whole-design recompute tool (design_recompute) lives in design_ops.py (timeline health is design_get's default).
-
-Grounded in adsk.fusion:
-  - Design.userParameters (UserParameters: .add(name, ValueInput, unit, comment), .itemByName) /
-    Design.allParameters (ParameterList)
-  - Parameter: .name, .expression (settable), .value (db units), .unit, .comment, .isFavorite,
-    .deleteMe() (user params only)
-  - Design.timeline.item(i).healthState (0 healthy / 1 warning / 2 error / 3 suppressed); computeAll()
-Handlers run on the main thread.
+  param_get / param_set / param_add / param_delete / param_set_favorite - read, set, add, delete, and
+  favorite-toggle design parameters. add/delete are guarded by a timeline-health check so an edit that
+  breaks a downstream feature is rolled back and reported rather than silently corrupting the model.
 """
 
 import adsk.core
@@ -55,11 +40,7 @@ def _param_summary(p) -> dict:
 
 
 def handler(name: str = "", include_model_parameters: bool = False) -> dict:
-    """Return design parameters. By default user parameters only.
-
-    Pass 'name' to return just one parameter (user or model). Set
-    include_model_parameters=true to include feature/model parameters too.
-    """
+    """Return design parameters (user only by default; see 'name' / include_model_parameters)."""
     design = _common.design()
     if not design:
         return error("No active design (open a document with design geometry).")
@@ -134,15 +115,7 @@ def _find_parameter(design, name):
 
 def set_handler(name: str = "", expression: str = "", create: bool = False,
                 unit: str = "mm") -> dict:
-    """Set a design parameter's expression - or CREATE it if missing (create-or-update). WRITES.
-
-    'expression' is interpreted like the Parameters dialog: a numeric expression
-    ('2 in', 'StockX/2', '6.25'), a reference to other parameters, or a quoted text
-    value for text parameters ('Hello'). create=true: if no parameter named 'name' exists,
-    create it as a USER parameter with 'unit' (mm default; '' for unitless) - so a caller can
-    set-or-make in one call. Returns before/after (before is null for a created param). Works for
-    user and model parameters (model/feature params may reject the edit, which is reported).
-    """
+    """Set a design parameter's expression, or create it if missing (create=true). WRITES."""
     name = (name or "").strip()
     if not name:
         return error("Provide 'name' - the parameter to set.")
@@ -243,14 +216,7 @@ def _add_one(design, name, expression, unit, comment, favorite):
 
 def add_handler(name: str = "", expression: str = "", unit: str = "mm",
                 comment: str = "", favorite: bool = False, params: list = None) -> dict:
-    """Add ONE or MANY user parameters in a single call. WRITES.
-
-    Single: name + expression (+ unit/comment/favorite). Batch: 'params' = a list of dicts, each
-    {name, expression, unit?, comment?, favorite?}, applied in order - far fewer calls than one per
-    parameter. unit defaults to mm (or '' for unitless). Each add is health-guarded: if it leaves the
-    timeline with a NEW error it is rolled back. In a batch, the first failing entry STOPS the run
-    (earlier successes are kept) and the error names its index, so you can fix and re-run the rest.
-    """
+    """Add one (name+expression) or many ('params' list) user parameters. WRITES; health-guarded."""
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -281,11 +247,7 @@ def add_handler(name: str = "", expression: str = "", unit: str = "mm",
 
 
 def delete_handler(name: str = "") -> dict:
-    """Delete a USER parameter, GUARDED against breaking the timeline. WRITES.
-
-    name: the user parameter to delete. If another parameter or feature references it, or the delete
-    introduces a timeline error, the delete is refused/reported (deleteMe fails or health regresses).
-    """
+    """Delete a USER parameter, guarded against a referencing consumer or a timeline regression. WRITES."""
     name = (name or "").strip()
     if not name:
         return error("Provide 'name' - the parameter to delete.")

@@ -1,26 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: probe an assembly's KINEMATIC STATE as clean JSON.
-
-  assembly_probe -> for every occurrence: its world position (origin + bbox center/size), its ground
-                    flags (grounded / ground_to_parent), and the joints it participates in; plus a
-                    design-level joint list (type + the two occurrences + whether the design is fully
-                    constrained). Read-only.
-
-Why this exists: a screenshot of an assembly is often unreliable to reason from - parts overlap at
-the origin, the active component greys everything else out, and depth is ambiguous. This returns the
-STRUCTURED STATE instead, so an agent can verify "is the block grounded and the crank free?", "did
-the joint connect the right two parts?", "where is each piston?" from NUMBERS, not pixels. Pair it
-with isolated screenshots (view_inspect isolate) rather than trusting a cluttered render.
-
-Grounded in adsk.fusion:
-  - rootComponent.occurrences / allOccurrences ; Occurrence.transform2.translation, .isGrounded,
-    .isGroundToParent, .bRepBodies, .name
-  - rootComponent.joints : Joint.name, .jointMotion.jointType, .occurrenceOne/.occurrenceTwo
-  - Design.rootComponent.sketches[..] not needed; Design 'isFullyConstrained' is sketch-only, so we
-    report joint-level DOF via the joint motion types instead.
-Handler runs on the main thread; read-only.
+"""Probes the active assembly's kinematic state as clean JSON: each top-level occurrence's world
+position, ground flags, and joints, plus a design-level joint list and health rollup. Read-only.
 """
 
 import adsk.core
@@ -29,7 +11,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, scale
+from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
 
@@ -70,10 +52,7 @@ def _occ_world(occ, inv_k):
 
 
 def _health(obj):
-    """(healthy: bool, message) for an entity with a healthState. healthState enum: 0=healthy,
-    1=warning, 2=error, 3=SUPPRESSED. Only a warning/error is a compute FAILURE ('Compute Failed').
-    Suppression is intentional (the author parked it, e.g. an alternate joint in a fixture template) -
-    NOT broken, so it reports healthy=True. Only 1/2 count as broken."""
+    """(healthy: bool, message) for an entity with a healthState; suppressed (3) counts as healthy."""
     hs = safe(lambda: obj.healthState)
     if hs is None or hs == 0 or hs == 3:            # healthy, or intentionally suppressed
         return True, None
@@ -100,12 +79,14 @@ def _joint_record(j):
     return rec
 
 
-def handler(units: str = "mm", include_joints: bool = True) -> dict:
+def handler(units: str = "mm", include_joints: bool = True,
+            max_occurrences: int = 50, max_joints: int = 100) -> dict:
     """Probe the active assembly's kinematic state.
 
     units: display units for positions/sizes (mm default / cm / in). include_joints: also list every
     joint (type, DOF, the two occurrences it connects) and annotate each occurrence with its joints.
-    Read-only.
+    max_occurrences / max_joints cap the returned arrays (default 50 / 100); occurrences_truncated /
+    joints_truncated report whether the cap was hit. Read-only.
     """
     k = scale(units)
     if k is None:
@@ -133,6 +114,14 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
                     if nm:
                         occ_joints.setdefault(nm, []).append(rec["name"])
 
+    # Cap the JOINTS array reported to the caller; occ_joints (the cross-index) was built from the
+    # FULL walk above, and broken_joints/health below reads the FULL 'joints' list, so capping here
+    # only bounds the emitted array - it never hides a health problem.
+    joint_total = len(joints)
+    cap_j = max(1, int(max_joints))
+    joints_out = joints[:cap_j]
+    joints_truncated = joint_total > len(joints_out)
+
     occurrences = []
     grounded_names = []
     occs = safe(lambda: root.occurrences)
@@ -153,6 +142,13 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
         if include_joints:
             rec["joints"] = occ_joints.get(name, [])
         occurrences.append(rec)
+
+    # Cap the OCCURRENCES array reported to the caller; occurrence_count/grounded_occurrences below
+    # stay computed from the FULL walk, so capping here only bounds the emitted array.
+    occ_total = len(occurrences)
+    cap_o = max(1, int(max_occurrences))
+    occurrences_out = occurrences[:cap_o]
+    occurrences_truncated = occ_total > len(occurrences_out)
 
     # Bodies directly in the ROOT component are NOT occurrences, so the loop above misses them - yet a
     # root body can't be jointed/grounded (it isn't an occurrence). Report it so the kinematic picture
@@ -193,12 +189,14 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
     "is_healthy": is_healthy,
     "broken_joints": broken_joints,
     "timeline_problems": timeline_problems,
-    "occurrence_count": len(occurrences),
+    "occurrence_count": occ_total,
     "grounded_occurrences": grounded_names,
-    "joint_count": len(joints),
-    "occurrences": occurrences,
+    "joint_count": joint_total,
+    "occurrences": occurrences_out,
+    "occurrences_truncated": occurrences_truncated,
     "root_bodies": root_bodies,   # bodies directly in root (NOT jointable; promote to a component to joint)
-    "joints": joints if include_joints else None,
+    "joints": joints_out if include_joints else None,
+    "joints_truncated": joints_truncated,
     "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint/feature "
     "FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
     "test; a wired-but-mis-axised joint over-constrains the assembly). broken_joints / "
@@ -214,23 +212,32 @@ def handler(units: str = "mm", include_joints: bool = True) -> dict:
         out["note"] += (" NOTE: root_bodies lists geometry directly in the root component - these are "
                         "NOT occurrences and can't be jointed/grounded; promote one to a component "
                         "(model_create_component) to make it part of the kinematics.")
+    if occurrences_truncated:
+        out["note"] += (f" occurrences was capped at {cap_o} of {occ_total}; raise max_occurrences to "
+                        "see the rest.")
+    if joints_truncated:
+        out["note"] += (f" joints was capped at {cap_j} of {joint_total}; raise max_joints to see the rest.")
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
     "Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
-    "interpreting a cluttered screenshot. For every occurrence: its world position (origin + bbox "
-    "center/size in 'units'), ground flags (grounded / ground_to_parent), and the joints it "
+    "interpreting a cluttered screenshot. For every TOP-LEVEL occurrence: its world position (origin + "
+    "bbox center/size in 'units'), ground flags (grounded / ground_to_parent), and the joints it "
     "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "
     "each connects) and which occurrences are grounded. Use it to verify grounding (is the block "
     "fixed, the crank free?), joint wiring (did it connect the right parts?), and part positions "
-    "from NUMBERS. include_joints=false for just positions/grounding."
+    "from NUMBERS. include_joints=false for just positions/grounding. occurrences/joints are capped "
+    "(max_occurrences default 50, max_joints default 100); occurrences_truncated/joints_truncated flag "
+    "when the cap was hit."
 )
 
 probe_tool = (
     Tool.create_simple(name="assembly_probe", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
+    .add_input_property("max_occurrences", {"type": "integer", "description": "Cap on the 'occurrences' array returned (default 50)."})
+    .add_input_property("max_joints", {"type": "integer", "description": "Cap on the 'joints' array returned (default 100)."})
     .strict_schema()
 )
 probe_item = Item.create_tool_item(tool=probe_tool, write="read", handler=handler, run_on_main_thread=True)

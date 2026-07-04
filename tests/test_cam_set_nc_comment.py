@@ -52,9 +52,9 @@ class FakeCAM:
         self.ncPrograms = FakeNCPrograms(programs)
 
 
-def _install(programs):
+def _install(monkeypatch, programs):
     cam = FakeCAM(programs)
-    nc._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(nc, "get_cam", lambda: (cam, None))
     return cam
 
 
@@ -65,29 +65,30 @@ def _payload(res):
 # ── the guard ───────────────────────────────────────────────────────────────
 
 class TestEmptyInputGuard:
-    def test_empty_comment_and_no_set_name_is_refused(self):
-        # the wipe-everything case: previously slipped through (comment defaults to "")
-        cam = _install([FakeNCP("P1", "'keep me'")])
+    def test_empty_comment_and_no_set_name_is_refused(self, monkeypatch):
+        # the wipe-everything case: comment defaults to "", so an empty comment with no
+        # set_name must still be refused rather than blanking every program's comment.
+        cam = _install(monkeypatch, [FakeNCP("P1", "'keep me'")])
         res = nc.handler(comment="", program="", set_name="")
         assert res["isError"] is True
         # and it must NOT have touched the existing comment
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_comment").expression == "'keep me'"
 
-    def test_whitespace_only_comment_no_set_name_refused(self):
-        cam = _install([FakeNCP("P1", "'keep me'")])
+    def test_whitespace_only_comment_no_set_name_refused(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1", "'keep me'")])
         res = nc.handler(comment="   ", program="", set_name="")
         assert res["isError"] is True
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_comment").expression == "'keep me'"
 
-    def test_real_comment_goes_through(self):
-        cam = _install([FakeNCP("P1")])
+    def test_real_comment_goes_through(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1")])
         res = nc.handler(comment="Job 42", program="P1")
         assert res["isError"] is False
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_comment").expression == "'Job 42'"
 
-    def test_set_name_only_is_allowed(self):
+    def test_set_name_only_is_allowed(self, monkeypatch):
         # no comment, but renaming IS a valid intent
-        cam = _install([FakeNCP("P1")])
+        cam = _install(monkeypatch, [FakeNCP("P1")])
         res = nc.handler(comment="", program="P1", set_name="NewName")
         assert res["isError"] is False
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression == "'NewName'"
@@ -96,17 +97,17 @@ class TestEmptyInputGuard:
 # ── multi-program pre-validation (rollback concern) ─────────────────────────
 
 class TestMultiProgramPreValidation:
-    def test_uneditable_program_aborts_before_any_write(self):
+    def test_uneditable_program_aborts_before_any_write(self, monkeypatch):
         # P2's comment is locked. The loop must NOT mutate P1 and then fail on P2 —
         # it pre-checks editability so nothing is half-applied.
-        cam = _install([FakeNCP("P1", "'a'"), FakeNCP("P2", "'b'", editable=False)])
+        cam = _install(monkeypatch, [FakeNCP("P1", "'a'"), FakeNCP("P2", "'b'", editable=False)])
         res = nc.handler(comment="STAMP", program="")   # all programs
         assert res["isError"] is True
         # P1 must be untouched (no partial application)
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_comment").expression == "'a'"
 
-    def test_all_editable_applies_to_all(self):
-        cam = _install([FakeNCP("P1"), FakeNCP("P2")])
+    def test_all_editable_applies_to_all(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1"), FakeNCP("P2")])
         res = nc.handler(comment="STAMP", program="")
         p = _payload(res)
         assert res["isError"] is False
@@ -143,8 +144,8 @@ class TestQuoting:
 # ── program targeting + reporting ────────────────────────────────────────────
 
 class TestProgramTargeting:
-    def test_targets_only_named_program(self):
-        cam = _install([FakeNCP("P1", "'a'"), FakeNCP("P2", "'b'")])
+    def test_targets_only_named_program(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1", "'a'"), FakeNCP("P2", "'b'")])
         out = _payload(nc.handler(comment="NEW", program="P2"))
         assert out["programs_changed"] == 1
         assert out["programs"][0]["program"] == "P2"
@@ -152,27 +153,27 @@ class TestProgramTargeting:
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_comment").expression == "'a'"
         assert cam.ncPrograms.item(1).parameters.itemByName("nc_program_comment").expression == "'NEW'"
 
-    def test_before_after_reported_unquoted(self):
-        _install([FakeNCP("P1", "'old job'")])
+    def test_before_after_reported_unquoted(self, monkeypatch):
+        _install(monkeypatch, [FakeNCP("P1", "'old job'")])
         out = _payload(nc.handler(comment="new job", program="P1"))
         rec = out["programs"][0]
         assert rec["comment_before"] == "old job"     # unquoted in the report
         assert rec["comment_after"] == "new job"
 
-    def test_unknown_program_lists_available(self):
-        _install([FakeNCP("P1"), FakeNCP("P2")])
+    def test_unknown_program_lists_available(self, monkeypatch):
+        _install(monkeypatch, [FakeNCP("P1"), FakeNCP("P2")])
         res = nc.handler(comment="X", program="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"]
         assert "P1" in res["message"] and "P2" in res["message"]
 
-    def test_no_nc_programs_errors(self):
-        _install([])
+    def test_no_nc_programs_errors(self, monkeypatch):
+        _install(monkeypatch, [])
         res = nc.handler(comment="X")
         assert res["isError"] is True and "no nc programs" in res["message"].lower()
 
-    def test_comment_and_name_both_set(self):
-        cam = _install([FakeNCP("P1", "'oldc'")])
+    def test_comment_and_name_both_set(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1", "'oldc'")])
         out = _payload(nc.handler(comment="C", program="P1", set_name="Renamed"))
         rec = out["programs"][0]
         assert rec["comment_after"] == "C"
@@ -180,11 +181,11 @@ class TestProgramTargeting:
         assert out["set_name"] == "Renamed"
         assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression == "'Renamed'"
 
-    def test_uneditable_name_aborts_before_any_write(self):
+    def test_uneditable_name_aborts_before_any_write(self, monkeypatch):
         # set_name targets nc_program_name; if it's locked, abort before changing the comment.
         ncp = FakeNCP("P1", "'keepc'")
         ncp.parameters.itemByName("nc_program_name").isEditable = False
-        _install([ncp])
+        _install(monkeypatch, [ncp])
         res = nc.handler(comment="C", program="P1", set_name="X")
         assert res["isError"] is True
         # comment must be untouched (aborted in the pre-validation pass)

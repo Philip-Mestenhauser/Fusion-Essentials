@@ -5,12 +5,9 @@
 
 """MCP building block: capture the Fusion viewport so the agent can visually review results.
 
-Returns the image as an MCP image content block (base64 PNG). Optionally reorients
-the camera first (top/front/iso/etc.) and fits the view.
-
-Grounded in the Fusion API:
-  - app.activeViewport.saveAsImageFile(path, width, height) -> bool (re-renders)
-  - viewport.camera / camera.viewOrientation = ViewOrientations.* + viewport.fit()
+Returns the image as an MCP image content block (base64 PNG). Optionally reorients the camera first
+(top/front/iso/etc.) and fits the view; see docs/fusion-api-notes.md "Viewport / camera" for the
+underlying camera API and the exact-world-axis-vectors gotcha this relies on.
 """
 
 import base64
@@ -24,6 +21,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, safe
 from . import _inputs
+from . import _view_common
 
 app = adsk.core.Application.get()
 
@@ -44,58 +42,42 @@ _ORIENTATIONS = {
 
 _MAX_DIM = 4096
 
-
-# Exact world-axis camera vectors per named view, so an orthographic view is GUARANTEED square to
-# world (a true [+/-1,0,0]/[0,+/-1,0]/[0,0,+/-1] look direction) - NOT "rotate toward the axis from
-# whatever arbitrary pose the camera is in", which leaves a few-degree tilt and silently distorts
-# every orthographic read. Convention (Fusion default, Z up): FRONT looks along +Y, TOP looks along
-# -Z, RIGHT looks along -X. Each entry = (look_dir, up) as unit world vectors; eye = target - look_dir*d.
-# Orthographic views also force cameraType=orthographic so there is zero perspective parallax.
-_SQRT3 = 3 ** -0.5
-_VIEW_VECTORS = {
-    # name: (look_direction, up_vector)  - both world unit vectors
-    "front":  ((0, 1, 0),  (0, 0, 1)),
-    "back":   ((0, -1, 0), (0, 0, 1)),
-    "top":    ((0, 0, -1), (0, 1, 0)),
-    "bottom": ((0, 0, 1),  (0, 1, 0)),
-    "right":  ((-1, 0, 0), (0, 0, 1)),
-    "left":   ((1, 0, 0),  (0, 0, 1)),
-    "iso-top-right":    ((-_SQRT3, _SQRT3, -_SQRT3), (0, 0, 1)),
-    "iso-top-left":     ((_SQRT3, _SQRT3, -_SQRT3),  (0, 0, 1)),
-    "iso-bottom-right": ((-_SQRT3, -_SQRT3, -_SQRT3), (0, 0, 1)),
-    "iso-bottom-left":  ((_SQRT3, -_SQRT3, -_SQRT3),  (0, 0, 1)),
-}
-# The 6 true orthographic faces (force orthographic camera; the iso views may stay as configured).
-_ORTHO_FACE_VIEWS = {"front", "back", "top", "bottom", "right", "left"}
+_FIT_TO = _inputs.OccurrenceRef("fit_to",
+        description="Occurrence to frame the camera on (isolates it for the shot, then restores).")
 
 
 def _ortho_camera_vectors(view):
     """Return (look_dir, up) unit world vectors for a named view, or None for 'current'/unknown.
 
-    Used to set camera eye/target/up EXPLICITLY so the resulting view is exactly world-axis aligned
-    (the fix for the non-square 'right'/'top' views that distorted orthographic reads)."""
-    return _VIEW_VECTORS.get(view)
+    Sets camera eye/target/up EXPLICITLY so the resulting view is exactly world-axis aligned - needed
+    for the non-square 'right'/'top' orthographic views to render as a true (undistorted) read."""
+    look = _view_common.look_direction(view)
+    if look is None:
+        return None
+    return look, _view_common.up_vector(view)
 
 
 def _is_ortho_face(view):
     """True if 'view' is one of the 6 true orthographic faces (force an orthographic camera)."""
-    return view in _ORTHO_FACE_VIEWS
+    return _view_common.is_ortho_face(view)
 
 
 def _isolate_for_fit(name):
-    """Temporarily hide every other occurrence so vp.fit() frames just the named one. Returns a
-    restore() callable, or None if no occurrence matched. Best-effort + non-destructive."""
+    """Temporarily hide every other occurrence so vp.fit() frames just the named one.
+    Returns (restore_callable, error_or_None) - error is set (and restore is None) when the
+    occurrence didn't resolve (including an ambiguous name, which names the candidates).
+    Best-effort + non-destructive."""
     import adsk.fusion
     design = adsk.fusion.Design.cast(app.activeProduct)
     root = safe(lambda: design.rootComponent) if design else None
     if not root:
-        return None
+        return None, f"fit_to: no active design to resolve '{name}' against."
     occs = safe(lambda: list(root.allOccurrences)) or []
-    # Resolve via the shared OccurrenceRef logic (fullPathName-preferring, ambiguity-refusing) so an
+    # Resolve via the shared OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
     # ambiguous name doesn't silently frame the wrong instance.
-    target, _err = _inputs._resolve_occurrence("fit_to", name)
+    target, err = _FIT_TO.resolve(name)
     if target is None:
-        return None
+        return None, err
     prev = []
     for o in occs:
         if o is target:
@@ -108,7 +90,7 @@ def _isolate_for_fit(name):
     def restore():
         for o in prev:
             safe(lambda o=o: setattr(o, "isLightBulbOn", True))
-    return restore
+    return restore, None
 
 
 def _active_component_note(design):
@@ -148,9 +130,10 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     restore_fit_to = None
     want_fit = (fit_to or "").strip()
     if want_fit:
-        restore_fit_to = _isolate_for_fit(want_fit)
+        restore_fit_to, fit_err = _isolate_for_fit(want_fit)
         if restore_fit_to is None:
-            return error(f"fit_to: no occurrence matched '{want_fit}'. Use design_get(include=['tree']) to list.")
+            return error(fit_err or f"fit_to: no occurrence matched '{want_fit}'. "
+                         "Use design_get(include=['tree']) to list.")
 
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change
@@ -231,8 +214,7 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
 TOOL_DESCRIPTION = (
     "Capture a screenshot of the current Fusion viewport and return it as an image "
     "so you can visually inspect the model and verify your work. Optionally set "
-    "'view' to reorient the camera: current (default), top, bottom, front, back, "
-    "left, right, iso-top-left, iso-top-right, iso-bottom-left, iso-bottom-right. "
+    "'view' to reorient the camera (default 'current' = leave as-is). "
     "'width'/'height' set the pixel size (default 800x600, max 4096). 'zoom' scales the view after "
     "fitting (>1 zooms OUT, <1 zooms IN; default 1). 'fit_to' frames the camera on ONE occurrence "
     "by name (best-effort: it isolates that occurrence for the shot, then restores visibility). "
@@ -241,11 +223,12 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="view_screenshot", description=TOOL_DESCRIPTION)
-    .add_input_property("view", {"type": "string", "description": "Camera orientation (default 'current')."})
+    .add_input_property(*_inputs.Choice("view", list(_ORIENTATIONS), default="current",
+            description="Camera orientation.").as_property())
     .add_input_property("width", {"type": "integer", "description": "Width in px (1-4096, default 800)."})
     .add_input_property("height", {"type": "integer", "description": "Height in px (1-4096, default 600)."})
     .add_input_property("zoom", {"type": "number", "description": "Zoom factor after fitting (>1 out, <1 in; default 1)."})
-    .add_input_property("fit_to", {"type": "string", "description": "Occurrence name to frame the camera on (isolates it for the shot, then restores)."})
+    .add_input_property(*_FIT_TO.as_property())
     .strict_schema()
 )
 

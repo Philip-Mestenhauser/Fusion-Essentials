@@ -367,6 +367,26 @@ class TestMeshGet:
         assert names.count("Shared") == 1     # deduped despite being in two components
         assert out["count"] == 1
 
+    def test_under_cap_untruncated_and_unchanged(self):
+        _wire_adsk()
+        meshes = [MeshBody(f"Scan{i}") for i in range(5)]
+        comp = FakeComp("Comp", meshes=meshes)
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target=""))
+        assert out["truncated"] is False
+        assert out["count"] == 5 and len(out["meshes"]) == 5
+
+    def test_at_cap_truncates_and_flags(self):
+        _wire_adsk()
+        meshes = [MeshBody(f"Scan{i}", token=f"T{i}") for i in range(60)]
+        comp = FakeComp("Comp", meshes=meshes)
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target="", max_results=50))
+        assert out["truncated"] is True
+        assert len(out["meshes"]) == 50
+        # the full count is still honest, even though the array is capped
+        assert out["count"] == 60
+
 
 # ── mesh measurement: bbox + counts + watertight (model_inspect calls this on a mesh target) ────
 

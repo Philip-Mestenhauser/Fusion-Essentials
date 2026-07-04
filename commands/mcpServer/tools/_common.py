@@ -1,22 +1,13 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared helpers for MCP tool modules - the common substrate every tool builds on.
+"""The response/resolve substrate every tool module imports: ``ok``/``error``/``safe``, the active
+``design()``/``target_component()`` resolvers, ``resolve_sketch``, and cm-based unit ``scale``/
+``UNIT_TO_CM``. See ``tools/CLAUDE.md`` for the full helper map.
 
-The response builders / safe getter / unit scaling / component resolution live here so every tool
-holds ONE response shape, ONE error contract, and ONE unit convention by import rather than by
-discipline. A new tool that does ``from ._common import ok, error, safe`` automatically holds the bar;
-tool files keep their own domain logic, only this boilerplate lives here.
-
-Import style (in a tool module):
-    from ._common import ok, error, safe, target_component, scale, UNIT_TO_CM
-
-Names are the package's public helper API - a single spelling, no leading underscore. The active-design
-resolver ``design()`` lives here too: tool modules call ``_common.design()`` (via ``from . import
-_common``) rather than copy a local ``_design()``. Tests patch the seam on the substrate module
-(``monkeypatch.setattr(mod._common, "design", ...)``) so the handler resolves through the one shared
-object.
-"""
+Tests patch the seam on this module (``monkeypatch.setattr(mod._common, "design", ...)``); a tool that
+also resolves through ``_inputs`` needs that seam patched too (``tests/CLAUDE.md`` "the dual-seam
+trap")."""
 
 import json
 
@@ -168,10 +159,73 @@ def terse(rec: dict, noise: dict) -> dict:
 # ── unit scaling (Fusion's internal length unit is cm) ──────────────────────
 
 UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
+CM_TO_UNIT = {u: 1.0 / f for u, f in UNIT_TO_CM.items()}
 
 
 def scale(units: str):
     """cm-per-unit factor for ``units`` (mm/cm/in), or None if the unit is unknown."""
     return UNIT_TO_CM.get((units or "mm").strip().lower())
 
+
+def ptxyz(p, f):
+    """{x, y, z} for a Point3D ``p``, each scaled by ``f`` and rounded to 6 decimals; None if ``p``
+    is None."""
+    if p is None:
+        return None
+    return {"x": round(safe(lambda: p.x, 0.0) * f, 6),
+            "y": round(safe(lambda: p.y, 0.0) * f, 6),
+            "z": round(safe(lambda: p.z, 0.0) * f, 6)}
+
+
+# ── sketch entity / feature-operation resolution ────────────────────────────
+
+def target_sketch(comp, name):
+    """The sketch named ``name`` in ``comp``, or its most recently created sketch when ``name`` is
+    empty. Returns (sketch-or-None, the requested name)."""
+    coll = safe(lambda: comp.sketches)
+    nm = (name or "").strip()
+    if coll is None:
+        return None, nm
+    if nm:
+        return safe(lambda: coll.itemByName(nm)), nm
+    n = safe(lambda: coll.count, 0)
+    return (coll.item(n - 1) if n else None), nm
+
+
+def resolve_entity_ref(sketch, ref):
+    """A sketch entity from a '<type>:<index>' ref (type = line/arc/circle/point), indexing that
+    curve/point collection in creation order. Returns the entity, or None."""
+    s = (ref or "").strip().lower()
+    if ":" not in s:
+        return None
+    kind, _, idx = s.rpartition(":")
+    try:
+        i = int(idx)
+    except Exception:
+        return None
+    curves = safe(lambda: sketch.sketchCurves)
+    coll = None
+    if kind == "line":
+        coll = safe(lambda: curves.sketchLines)
+    elif kind == "arc":
+        coll = safe(lambda: curves.sketchArcs)
+    elif kind == "circle":
+        coll = safe(lambda: curves.sketchCircles)
+    elif kind == "point":
+        coll = safe(lambda: sketch.sketchPoints)
+    if coll is None:
+        return None
+    if i < 0 or i >= safe(lambda: coll.count, 0):
+        return None
+    return safe(lambda: coll.item(i))
+
+
+# Operation name -> adsk.fusion.FeatureOperations attribute (extrude/revolve/sweep/loft-style features).
+OPERATIONS = {
+    "new": "NewBodyFeatureOperation",
+    "new_body": "NewBodyFeatureOperation",
+    "join": "JoinFeatureOperation",
+    "cut": "CutFeatureOperation",
+    "intersect": "IntersectFeatureOperation",
+}
 

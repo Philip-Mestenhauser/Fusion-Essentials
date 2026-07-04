@@ -4,25 +4,16 @@
 """MCP building blocks for the DOCUMENT lifecycle: copy / save-as / new / save / close / activate,
 plus delete-file. (Reading the open-document session is doc_get.)
 
-  doc_copy        -> copy an existing cloud document into a project/folder (DataFile.copy; xrefs kept)
-  data_delete_file-> delete a cloud document by URN, guarded (matching confirm_name; refuses
-                     open/referenced files unless forced)
-  doc_save_as     -> save the ACTIVE (possibly never-saved) document into a project/folder (saveAs)
+  doc_copy        -> copy an existing cloud document into a project/folder
+  data_delete_file-> delete a cloud document by URN, guarded
+  doc_save_as     -> save the ACTIVE (possibly never-saved) document into a project/folder
   doc_new         -> create+open a new empty design document (session-only until saved)
   doc_save        -> save the active document in place (a new cloud version)
   doc_close       -> close an open document (or all), saving or discarding unsaved changes
   doc_activate    -> bring an open document to the foreground
 
-Split out of the former data_management.py (the data-model container tools live in data_model_ops.py).
-Shared helpers (_data, _find_project, path resolution, _agent_description) live in _data_common.
-Every save is tagged with the AI-agent marker via _agent_description (the single chokepoint).
-
-Grounded in adsk.core:
-  - DataFile.copy(targetFolder) -> DataFile; DataFile.childReferences / parentReferences
-  - data.findFileById(urn) -> DataFile; DataFile.deleteMe() -> bool
-  - Document.saveAs(name, folder, desc, tag) / Document.save(desc) / Document.close(saveChanges)
-  - app.documents.add(DocumentTypes.FusionDesignDocumentType) -> Document
-Handlers run on the main thread; none of them BLOCK (no polling loops).
+The data-model container tools (projects/folders/upload) live in data_ops.py; shared helpers live
+in _data_common. Every save is tagged with the AI-agent marker via _agent_description.
 """
 
 import adsk.core
@@ -46,15 +37,8 @@ _MAX_XREFS = 64
 # ---------------------------------------------------------------------------
 
 def _xref_summary(data_file):
-    """Best-effort list of a DataFile's child references (the components it pulls in).
-
-    Reported so an agent can confirm a copied document still carries its referenced
-    components. Reference targets are NOT re-copied by DataFile.copy - they remain
-    pointers to the original source files.
-
-    Grounded in adsk.core: DataFile.hasChildReferences (bool) /
-    DataFile.childReferences (DataFiles collection).
-    """
+    """Best-effort list of a DataFile's child references, so a caller can confirm a copy still
+    carries its referenced components (DataFile.copy does not re-copy reference targets)."""
     out = []
     if not safe(lambda: data_file.hasChildReferences, False):
         return out
@@ -73,14 +57,7 @@ def copy_document_handler(document_id: str = "", name: str = "",
                           source_project: str = "", source_project_id: str = "",
                           project: str = "", project_id: str = "",
                           folder: str = "", create_path: bool = False) -> dict:
-    """Copy an existing cloud document (DataFile) into a destination project/folder.
-
-    Resolves the source by 'document_id' (lineage URN, preferred) or by 'name' within
-    a source project. Copies via DataFile.copy(targetFolder), which preserves the
-    file's external references (they keep pointing at their original source files).
-    'folder' may be a nested path; create_path=true makes missing destination folders
-    (mkdir -p).
-    """
+    """Copy an existing cloud document into a destination project/folder; see TOOL_DESCRIPTION."""
     if not (document_id or name):
         return error("Provide 'document_id' (lineage URN, preferred) or 'name'.")
     if not (project or project_id):
@@ -197,10 +174,9 @@ def copy_document_handler(document_id: str = "", name: str = "",
     "external_references": xrefs,
     "external_reference_count": len(xrefs),
     "note": ("The copy preserves external references: each referenced component still "
-        "points at its ORIGINAL source file - the references are not re-copied. To "
-        "save a copy that shares "
-        "lineage for joint auto-repair, a Document.saveAs-based mode is needed "
-        "(not yet built)."),
+        "points at its ORIGINAL source file - the references are not re-copied. This tool "
+        "does not offer a Document.saveAs-based copy mode that shares lineage for joint "
+        "auto-repair."),
     }
     if rename_error:
         result["rename_warning"] = rename_error
@@ -257,12 +233,8 @@ def _file_in_folder_by_name(folder, name):
 # ---------------------------------------------------------------------------
 
 def _parent_ref_summary(data_file):
-    """List the files that REFERENCE this DataFile (its parents), bounded.
-
-    Deleting a referenced file would orphan those parents, so the tool refuses unless
-    forced. Grounded in adsk.core: DataFile.hasParentReferences /
-    DataFile.parentReferences (DataFiles collection).
-    """
+    """List the files that REFERENCE this DataFile (its parents), bounded - deleting it would
+    orphan them, so the tool refuses unless forced."""
     out = []
     if not safe(lambda: data_file.hasParentReferences, False):
         return out
@@ -298,13 +270,7 @@ def _is_document_open(file_id):
 
 def delete_document_handler(document_id: str = "", confirm_name: str = "",
                             force: bool = False) -> dict:
-    """Delete a cloud document (DataFile) by URN, guarded.
-
-    SAFETY: requires both 'document_id' (lineage URN) and 'confirm_name' that EXACTLY
-    matches the file's current name - refuses on mismatch so you cannot delete the wrong
-    file. Refuses a file that is currently open, or that is referenced by other files
-    (would orphan them) UNLESS force=true. Deletion is irreversible.
-    """
+    """Delete a cloud document by URN, guarded; see TOOL_DESCRIPTION for the confirm_name/force gates."""
     document_id = (document_id or "").strip()
     confirm_name = (confirm_name or "").strip()
     if not document_id:
@@ -372,13 +338,7 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 def save_document_as_handler(name: str = "", project: str = "", project_id: str = "",
                              folder: str = "", create_path: bool = False,
                              description: str = "") -> dict:
-    """Save the ACTIVE document into a project/folder via Document.saveAs.
-
-    This saves the live (possibly never-saved) document, unlike data_upload_file (local file)
-    or doc_copy (an existing saved cloud file). 'folder' may be a nested path;
-    create_path=true makes missing destination folders (mkdir -p). The save is async on
-    the cloud side - confirm with doc_get / data_get afterward.
-    """
+    """Save the ACTIVE (possibly never-saved) document into a project/folder via Document.saveAs."""
     name = (name or "").strip()
     if not name:
         return error("Provide 'name' for the saved document.")
@@ -462,12 +422,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
 
 
 def new_document_handler() -> dict:
-    """Create and open a new, empty Fusion design document; it becomes the active document.
-
-    The document exists only in the session (unsaved) until you save it - use
-    doc_save_as to land it in a project/folder. Pair with sketch_create to start
-    modelling.
-    """
+    """Create and open a new, empty Fusion design document; it becomes the active document."""
     try:
         doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     except Exception as e:
@@ -516,13 +471,7 @@ def _find_open_document(name):
 
 
 def save_document_handler(description: str = "") -> dict:
-    """Save the ACTIVE document in place (a new cloud version of the same file).
-
-    Unlike doc_save_as (which needs a name + folder for a never-saved doc), this is the plain
-    'Save' of an already-saved document. The version description is automatically prefixed with the
-    AI-agent marker. The active doc must already exist in the cloud (use doc_save_as first for
-    a brand-new unsaved doc). WRITES a new cloud version.
-    """
+    """Save the ACTIVE document in place - a new cloud version of the same file."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return error("No active document to save.")
@@ -545,14 +494,7 @@ def save_document_handler(description: str = "") -> dict:
 
 def close_document_handler(name: str = "", save_changes: bool = False,
                            close_all: bool = False) -> dict:
-    """Close an open document (or all), discarding or saving unsaved changes.
-
-    name: the open document to close (omit to close the ACTIVE document). close_all: close every
-    open document instead. save_changes: when true, save unsaved edits before closing; when false
-    (default) DISCARD them. NOTE: app.documents includes referenced/dependency docs that have no
-    visible tab - close_all closes those too. Fusion always keeps one document open (a blank one
-    appears if you close the last). Hard to reverse - discarded edits are gone.
-    """
+    """Close an open document (or all), discarding or saving unsaved changes; see TOOL_DESCRIPTION."""
     docs = safe(lambda: app.documents)
     if docs is None:
         return error("No documents are open.")
@@ -580,22 +522,26 @@ def close_document_handler(name: str = "", save_changes: bool = False,
                 errors.append({nm: "close returned false"})
         except Exception as e:
             errors.append({nm: str(e)[:60]})
+
+    if not closed and errors:
+        detail = "; ".join(f"{nm}: {msg}" for e in errors for nm, msg in e.items())
+        return error(f"Close failed: {detail}. No document was closed.")
+
+    note = ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
+            ". Fusion keeps at least one document open.")
+    if errors:
+        note += f" {len(errors)} of {len(targets)} target(s) failed to close - see 'errors'."
     return ok({
     "closed": closed, "closed_count": len(closed),
     "errors": errors,
     "save_changes": bool(save_changes),
     "remaining_open": safe(lambda: app.documents.count),
-    "note": ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
-            ". Fusion keeps at least one document open."),
+    "note": note,
     })
 
 
 def activate_document_handler(name: str = "") -> dict:
-    """Bring an open document to the foreground (make it the active document).
-
-    name: the open document to activate. Use doc_get to see what is open. Read-ish -
-    only changes which document is active/foregrounded.
-    """
+    """Bring an open document to the foreground (make it the active document)."""
     if not name.strip():
         return error("Provide 'name' - the open document to activate.")
     d, names = _find_open_document(name)

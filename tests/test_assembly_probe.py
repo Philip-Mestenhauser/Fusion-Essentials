@@ -294,3 +294,50 @@ class TestHealth:
         out = _payload(ap.handler())
         err = out["joints"][0]["error"]
         assert "Compute Failed" not in err and "Can't resolve positions" in err
+
+
+# ── BOUNDED READS: occurrences/joints arrays cap + report truncated (CLAUDE.md "Bound it") ──────
+
+class TestCaps:
+    def test_occurrences_under_cap_untruncated_and_unchanged(self):
+        occs = [FakeOcc(f"O{i}:1", f"C{i}") for i in range(5)]
+        _install(occs, [])
+        out = _payload(ap.handler())
+        assert out["occurrences_truncated"] is False
+        assert len(out["occurrences"]) == 5
+        assert out["occurrence_count"] == 5
+
+    def test_occurrences_at_cap_truncates_and_flags(self):
+        occs = [FakeOcc(f"O{i}:1", f"C{i}") for i in range(60)]
+        _install(occs, [])
+        out = _payload(ap.handler(max_occurrences=50))
+        assert out["occurrences_truncated"] is True
+        assert len(out["occurrences"]) == 50
+        # the full count is still honest, even though the array is capped
+        assert out["occurrence_count"] == 60
+
+    def test_joints_under_cap_untruncated_and_unchanged(self):
+        joints = [FakeJoint(f"J{i}", 1, "A:1", "B:1") for i in range(5)]
+        _install([], joints)
+        out = _payload(ap.handler())
+        assert out["joints_truncated"] is False
+        assert len(out["joints"]) == 5
+        assert out["joint_count"] == 5
+
+    def test_joints_at_cap_truncates_and_flags(self):
+        joints = [FakeJoint(f"J{i}", 1, "A:1", "B:1") for i in range(120)]
+        _install([], joints)
+        out = _payload(ap.handler(max_joints=100))
+        assert out["joints_truncated"] is True
+        assert len(out["joints"]) == 100
+        # the full count (and health rollup) still sees every joint, even beyond the cap
+        assert out["joint_count"] == 120
+
+    def test_default_caps_are_generous_enough_for_a_normal_model(self):
+        # the DEFAULT caps (50 occurrences / 100 joints) must not bite a normal small model.
+        occs = [FakeOcc(f"O{i}:1", f"C{i}") for i in range(10)]
+        joints = [FakeJoint(f"J{i}", 1, "A:1", "B:1") for i in range(10)]
+        _install(occs, joints)
+        out = _payload(ap.handler())
+        assert out["occurrences_truncated"] is False
+        assert out["joints_truncated"] is False

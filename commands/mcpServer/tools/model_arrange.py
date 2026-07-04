@@ -3,23 +3,12 @@
 
 """MCP building block: ARRANGE (nest/pack) component occurrences within a sketch-profile boundary.
 
-  arrange -> create an Arrange feature that packs the given component occurrences inside a 2D
-             envelope defined by a sketch profile (your boundary shape). True-shape nesting fits the
-             actual outlines; rectangular nests bounding boxes. WRITES.
+  arrange -> create an Arrange feature that packs the given occurrences inside a 2D envelope
+             defined by a sketch profile. True-shape nesting fits actual outlines; rectangular
+             nests bounding boxes. WRITES.
 
-This is the API equivalent of the Manufacture/Design "Arrange" command (nesting). Give it a boundary
-(a named sketch whose profile is the envelope) and the occurrences to lay out; Fusion solves the
-placement. General-purpose - it just nests whatever occurrences you pass.
-
-NOTE: the advanced true-shape nesting can require a Fusion extension on some accounts; this catches
-the gate and reports it instead of failing opaquely (rectangular is the lighter fallback).
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Component.features.arrangeFeatures.createInput(ArrangeSolverTypes.*) -> ArrangeFeatureInput
-  - input.setProfileOrFaceEnvelope([profile|planarFace,...]) -> Arrange2DProfileOrFaceEnvelopeInput
-      (.objectSpacing = clearance between parts, cm)
-  - input.arrangeComponents.add(occurrence) per shape ; arrangeFeatures.add(input) -> ArrangeFeature
-Handler runs on the main thread; WRITES.
+The API equivalent of the Manufacture/Design Arrange command. Signatures: docs/fusion-api-notes.md
+"Model feature signatures".
 """
 
 import adsk.core
@@ -42,6 +31,9 @@ _SOLVERS = {
 "rect": "Arrange2DRectangularSolverType",
 }
 
+_SOLVER = _inputs.Choice("solver", list(_SOLVERS), default="true_shape",
+                        description="true_shape nests actual outlines (tightest); rectangular nests bounding boxes.")
+
 
 def _find_sketch(design, name):
     # Whole-design resolve (active component first) so the boundary sketch can live in an activated
@@ -49,34 +41,15 @@ def _find_sketch(design, name):
     return resolve_sketch(design, (name or "").strip())
 
 
-def _find_occurrences(design, shapes):
-    """Resolve a comma-string (or list) of occurrence names/fullPathNames via the shared OccurrenceRef
-    logic (fullPathName-preferring, ambiguity-refusing - no silent wrong-instance grab).
-    Returns (occurrences, resolved_names, errors)."""
-    if isinstance(shapes, str):
-        wanted = [s.strip() for s in shapes.split(",") if s.strip()]
-    else:
-        wanted = [str(s).strip() for s in (shapes or []) if str(s).strip()]
-    found, resolved, errors = [], [], []
-    for want in wanted:
-        occ, err = _inputs._resolve_occurrence(want, want)
-        if occ is not None:
-            found.append(occ)
-            resolved.append(safe(lambda o=occ: o.name))
-        else:
-            errors.append(err)
-    return found, resolved, errors
+# Occurrences to arrange, via the shared OccurrenceRefList kind (fullPathName-preferring,
+# ambiguity-refusing - no silent wrong-instance grab).
+_SHAPES = _inputs.OccurrenceRefList("shapes", required=False,
+                              description="Occurrence(s) to arrange within the boundary.")
 
 
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
             spacing: float = 0.0, units: str = "mm") -> dict:
-    """Arrange (nest) component occurrences within a sketch-profile boundary.
-
-    boundary_sketch: name of the sketch whose (first) profile defines the envelope to pack into.
-    shapes: occurrence name(s) to arrange (comma-separated). solver: true_shape (fit actual
-    outlines) | rectangular (fit bounding boxes). spacing: minimum clearance between parts (in
-    'units'). WRITES an Arrange feature.
-    """
+    """Arrange (nest) component occurrences within a sketch-profile boundary."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -99,11 +72,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 
     if not (shapes or "").strip() if isinstance(shapes, str) else not shapes:
         return error("Provide 'shapes' - the occurrence name(s) to arrange (comma-separated).")
-    occs, resolved, errors = _find_occurrences(design, shapes)
-    if errors:
-        return error("; ".join(errors))
+    occs, shapes_err = _SHAPES.resolve(shapes)
+    if shapes_err:
+        return error(shapes_err)
     if not occs:
         return error("Provide 'shapes' - at least one occurrence to arrange.")
+    resolved = [safe(lambda o=o: o.name) for o in occs]
 
     af = safe(lambda: design.rootComponent.features.arrangeFeatures)
     if af is None:
@@ -118,8 +92,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         if env is None:
             return error("Could not set the boundary envelope from the sketch profile.")
         if spacing:
-            safe(lambda: setattr(env, "objectSpacing",
-                                  adsk.core.ValueInput.createByReal(float(spacing) * k)))
+            env.objectSpacing = adsk.core.ValueInput.createByReal(float(spacing) * k)
         for o in occs:
             inp.arrangeComponents.add(o)
         feature = af.add(inp)
@@ -148,21 +121,18 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 TOOL_DESCRIPTION = (
 "ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - "
 "the Arrange command. 'boundary_sketch' = the sketch whose closed profile is the envelope to "
-"pack into; 'shapes' = the occurrence name(s) to lay out (comma-separated). 'solver': "
-"'true_shape' (nest the actual part outlines, tightest) or 'rectangular' (nest bounding boxes). "
+"pack into; 'shapes' = the occurrence name(s) to lay out (comma-separated). "
 "'spacing' = minimum clearance between parts (in 'units'). WRITES an Arrange feature. Note: "
 "true-shape nesting can need a Fusion extension on some accounts (the tool reports that and you "
-"can fall back to 'rectangular'). Pair with view_screenshot (top view) to see the layout."
+"can fall back to a rectangular solver). Pair with view_screenshot (top view) to see the layout."
 )
 
 tool = (
     Tool.create_simple(name="model_arrange", description=TOOL_DESCRIPTION)
     .add_input_property("boundary_sketch", {"type": "string",
             "description": "Name of the sketch whose profile is the boundary envelope."})
-    .add_input_property("shapes", {"type": "string",
-            "description": "Occurrence name(s) to arrange (comma-separated)."})
-    .add_input_property("solver", {"type": "string",
-            "description": "true_shape (actual outlines) | rectangular (bounding boxes). Default true_shape."})
+    .add_input_property(*_SHAPES.as_property())
+    .add_input_property(*_SOLVER.as_property())
     .add_input_property("spacing", {"type": "number",
             "description": "Minimum clearance between parts, in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())

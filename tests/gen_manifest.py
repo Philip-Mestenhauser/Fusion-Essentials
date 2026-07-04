@@ -56,7 +56,7 @@ def _first_sentence(text: str, limit: int = 160) -> str:
     if not text:
         return ""
     s = text.split(". ")[0].strip()
-    return s[:limit] + ("…" if len(s) > limit else "")
+    return s[:limit] + ("..." if len(s) > limit else "")
 
 
 def _write_status(item) -> str:
@@ -155,7 +155,8 @@ def _collect_kinds():
 # explicitly (not by globbing tools/_*.py) so a NEW helper is a deliberate one-line add here AND a
 # MAP_BLURB on the module — the same self-disclosing pattern as a kind's MAP_HINT. (test conftest's
 # load_tool is the importer; _data_common etc. import cleanly under mocked adsk.)
-_HELPER_MODULES = ("_common", "_inputs", "_outputs", "_holder", "_data_common")
+_HELPER_MODULES = ("_common", "_inputs", "_outputs", "_holder", "_data_common", "_cam_common", "_export",
+                   "_joints", "_view_common")
 
 
 def _collect_helpers():

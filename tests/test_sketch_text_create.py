@@ -1,8 +1,8 @@
-"""Unit tests for ``set_sketch_text.py`` CREATE path — make new sketch text from scratch.
+"""Unit tests for ``sketch_set_text.py`` CREATE path - make new sketch text from scratch.
 
-The edit path is covered via test_quoting (the quote helpers); these pin the new create=true branch:
+The edit path is covered via test_quoting (the quote helpers); these pin the create=true branch:
 target-sketch resolution, height/units scaling, and the guards (no sketch_name, bad height).
-No live Fusion — fakes mimic Sketch.sketchTexts.createInput2 / add.
+No live Fusion - fakes mimic Sketch.sketchTexts.createInput2 / add.
 """
 
 import json

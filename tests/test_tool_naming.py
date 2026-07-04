@@ -45,6 +45,16 @@ _EDIT_KIND_VERBS = _EDIT                             # these MUST NOT be read-on
 # Tools intentionally exempt from the domain_verb shape (single-token discovery/meta tools).
 _SHAPE_EXEMPT = {"workspace_orient"}
 
+# Tools with a read-style verb whose action set still mutates or deletes persistent state, so a
+# readOnlyHint client must not auto-approve them. Each reason is the observed behavior that makes
+# read-only wrong for this tool - not every read-verb tool qualifies, only these three.
+_WRITE_VERB_EXEMPT = {
+    "view_inspect": "save_view persists a Named View (and deletes/overwrites any existing view of "
+                    "the same name); other actions mutate camera/visibility state.",
+    "view_section": "its clear action deletes user-created section analyses.",
+    "sys_request_selection": "it clears the user's current Fusion selection.",
+}
+
 
 def _all_items():
     names = [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
@@ -114,7 +124,7 @@ class TestToolNaming:
             if name in _SHAPE_EXEMPT:
                 continue
             v = _verb_of(name)
-            if v in _READ_KIND_VERBS and not readonly:
+            if v in _READ_KIND_VERBS and not readonly and name not in _WRITE_VERB_EXEMPT:
                 mismatches.append(f"{name}: read-verb '{v}' but write!=read")
             if v in _EDIT_KIND_VERBS and readonly:
                 mismatches.append(f"{name}: edit-verb '{v}' but write=read (mislabeled read?)")

@@ -3,19 +3,9 @@
 
 """MCP building block: capture SEVERAL views of the model in one call (multi-view "eyes").
 
-  view_screenshot_multi -> orient the camera to each requested view, capture each as a separate image, and
-                  return them all (interleaved with text labels) in one response. A single isometric
-                  is easy to misread; seeing front/top/right/iso together lets the agent reliably
-                  judge geometry, position, and proportion.
-
-Each view is captured by re-orienting + fit + saveAsImageFile (the same mechanism as
-view_screenshot, which captures only ONE viewport per call). The user's camera is saved once and
-restored at the end, so this is a non-destructive read.
-
-Grounded in the Fusion API:
-  - app.activeViewport.camera.viewOrientation = ViewOrientations.* ; viewport.fit()
-  - viewport.saveAsImageFile(path, w, h) -> bool
-Handler runs on the main thread; read-only (restores the camera).
+Re-orients + fits + saveAsImageFile per requested view (the same mechanism view_screenshot uses for
+one viewport per call), restoring the user's camera at the end. Read-only. See
+docs/fusion-api-notes.md "Viewport / camera" for the camera API this shares with view_screenshot.
 """
 
 import base64
@@ -46,21 +36,25 @@ _MAX_DIM = 4096
 _MAX_VIEWS = 8
 
 
-def _parse_views(views: str):
+def _parse_views(views):
     """Resolve the 'views' argument to an ordered, de-duplicated list of known view names.
 
-    "" -> a sensible default multi-view set; "all" -> the six orthographic views; otherwise a
-    comma-separated list. Returns (list, None) or (None, error_message)."""
-    s = (views or "").strip().lower()
-    if not s:
+    Accepts a JSON list of view names (the schema shape), or - back-compat - a comma-separated
+    string. "" / [] -> a sensible default multi-view set; "all" (alone) -> the six orthographic
+    views. Returns (list, None) or (None, error_message)."""
+    if isinstance(views, (list, tuple)):
+        tokens = [str(v).strip().lower() for v in views if str(v).strip()]
+    else:
+        s = (views or "").strip().lower()
+        if s == "all":
+            return list(_ALL_ORTHOS), None
+        tokens = [tok.strip() for tok in s.split(",") if tok.strip()]
+    if not tokens:
         return list(_DEFAULT_VIEWS), None
-    if s == "all":
+    if len(tokens) == 1 and tokens[0] == "all":
         return list(_ALL_ORTHOS), None
     out, seen = [], set()
-    for tok in s.split(","):
-        name = tok.strip()
-        if not name:
-            continue
+    for name in tokens:
         if name not in _ORIENTATIONS:
             return None, (f"Unknown view '{name}'. Valid: {', '.join(_ORIENTATIONS)} "
     "(or 'all' for the six orthographic views).")
@@ -72,13 +66,8 @@ def _parse_views(views: str):
     return out, None
 
 
-def handler(views: str = "", width: int = 600, height: int = 500) -> dict:
-    """Capture several views of the model in one call.
-
-    views: comma-separated view names (front/back/left/right/top/bottom/iso-top-right/...), or 'all'
-    for the six orthographic views; omit for a default front/top/right/iso set. width/height: pixel
-    size of EACH image. Returns one labelled image per view; the camera is restored afterward.
-    """
+def handler(views=None, width: int = 600, height: int = 500) -> dict:
+    """Capture several views of the model in one call; the camera is restored afterward."""
     names, err = _parse_views(views)
     if err:
         return error(err)
@@ -157,17 +146,17 @@ def handler(views: str = "", width: int = 600, height: int = 500) -> dict:
 TOOL_DESCRIPTION = (
     "Capture SEVERAL views of the model in ONE call - front/top/right/iso etc. as separate labelled "
     "images - so you can read geometry/position reliably instead of guessing from a single "
-    "isometric. 'views' = comma-separated view names (front, back, left, right, top, bottom, "
-    "iso-top-right, iso-top-left, iso-bottom-right, iso-bottom-left), or 'all' for the six "
-    "orthographic views; omit for a default front/top/right/iso set. 'width'/'height' size each "
+    "isometric. 'views' is a list of view names, or ['all'] for the six orthographic views; omit "
+    "for a default front/top/right/iso set. 'width'/'height' size each "
     "image. The camera is restored afterward (read-only). Prefer this over view_screenshot when "
     "judging a 3D layout."
 )
 
 tool = (
     Tool.create_simple(name="view_screenshot_multi", description=TOOL_DESCRIPTION)
-    .add_input_property("views", {"type": "string",
-            "description": "Comma-separated views, or 'all'; omit for front/top/right/iso default."})
+    .add_input_property("views", {"type": "array",
+            "items": {"type": "string", "enum": list(_ORIENTATIONS) + ["all"]},
+            "description": "Views to capture, in order; ['all'] for the six orthographic views; omit for a front/top/right/iso default."})
     .add_input_property("width", {"type": "integer", "description": "Width of each image in px (default 600)."})
     .add_input_property("height", {"type": "integer", "description": "Height of each image in px (default 500)."})
     .strict_schema()

@@ -547,6 +547,72 @@ class TestDeleteHelpers:
 # new_document_handler  (app.documents.add)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _CloseableDoc:
+    def __init__(self, name, close_ok=True):
+        self.name = name
+        self._close_ok = close_ok
+        self.close_called_with = None
+
+    def close(self, save_changes):
+        self.close_called_with = save_changes
+        return self._close_ok
+
+
+class _CloseableDocs:
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    @property
+    def count(self):
+        return len(self._docs)
+
+    def item(self, i):
+        return self._docs[i]
+
+
+class TestCloseDocument:
+    def test_close_active_document_success(self):
+        d = _CloseableDoc("PartA")
+        class _App:
+            documents = _CloseableDocs([d])
+            activeDocument = d
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.close_document_handler())
+        assert out["closed"] == ["PartA"] and out["closed_count"] == 1
+        assert out["errors"] == []
+
+    def test_close_returning_false_is_now_an_error(self):
+        # A single-target close failure must surface as isError, not a false ok() success.
+        d = _CloseableDoc("PartA", close_ok=False)
+        class _App:
+            documents = _CloseableDocs([d])
+            activeDocument = d
+        _doc_lifecycle.app = _App()
+        res = _doc_lifecycle.close_document_handler()
+        assert res["isError"] is True
+        assert "PartA" in res["message"] and "close returned false" in res["message"]
+
+    def test_close_all_partial_failure_reports_ok_with_errors(self):
+        # a MIXED result (one closed, one failed) is a partial success - report both, don't error.
+        good = _CloseableDoc("Good")
+        bad = _CloseableDoc("Bad", close_ok=False)
+        class _App:
+            documents = _CloseableDocs([good, bad])
+            activeDocument = good
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == ["Good"] and out["closed_count"] == 1
+        assert out["errors"] == [{"Bad": "close returned false"}]
+        assert "1 of 2" in out["note"]
+
+    def test_no_open_documents_errors(self):
+        class _App:
+            documents = None
+        _doc_lifecycle.app = _App()
+        res = _doc_lifecycle.close_document_handler()
+        assert res["isError"] is True
+
+
 class TestNewDocument:
     def test_creates_and_reports_active(self):
         class _NewDoc:

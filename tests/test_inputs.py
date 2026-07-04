@@ -438,6 +438,19 @@ class TestAxisRef:
         val, err = k.resolve("E")
         assert err is None and val == ("edge", e)
 
+    def test_sketch_line_handle_axis(self):
+        # a SketchLine is straight by construction - no curveType check needed, unlike a BRepEdge.
+        import adsk.fusion
+
+        class _FakeSketchLine:
+            pass
+        adsk.fusion.SketchLine = _FakeSketchLine
+        ln = _FakeSketchLine()
+        _install_axis(handle_map={"L": ln})
+        k = inp.AxisRef("axis")
+        val, err = k.resolve("L")
+        assert err is None and val == ("edge", ln)
+
     def test_curved_edge_rejected(self):
         a = _FakeArcEdge()
         _install_axis(handle_map={"A": a})
@@ -654,8 +667,8 @@ def _install_kind_bodies(brep_named=None, mesh_named=None, handle_map=None):
             return self._m.get(n)
 
     class _MeshColl:
-        """meshBodies-style: REALISTIC — the live MeshBodies has NO itemByName, only count + item(i).
-        Mesh-by-name must iterate (Bug A)."""
+        """meshBodies-style: REALISTIC - the live MeshBodies has NO itemByName, only count + item(i).
+        Mesh-by-name must iterate."""
         def __init__(self, m):
             self._list = list(m.values())
         @property
@@ -757,7 +770,7 @@ class TestBodyKind:
                 return self._d.get(n)
 
         class _MeshColl:
-            """meshBodies-style: REALISTIC — no itemByName, only count + item(i) (Bug A)."""
+            """meshBodies-style: REALISTIC - no itemByName, only count + item(i)."""
             def __init__(self, d):
                 self._list = list(d.values())
             @property
@@ -1215,3 +1228,14 @@ class TestTargetRef:
         _install_target()
         res, err = inp.TargetRef("target").resolve("Ghost")
         assert res is None and "Ghost" in err
+
+    def test_ambiguous_occurrence_name_errors_with_candidates(self):
+        # An ambiguous occurrence match must propagate _resolve_occurrence's ambiguity error
+        # (with the candidate fullPathNames), not fall through to a generic "did not resolve" miss.
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        _install_target(occurrences=[a, b])
+        res, err = inp.TargetRef("target").resolve("Bolt")
+        assert res is None
+        assert "ambiguous" in err.lower()
+        assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err

@@ -3,30 +3,11 @@
 
 """MCP tool: reload the Fusion-Essentials add-in (developer / self-iteration loop).
 
-This is the building block that lets an AI agent edit a Fusion-Essentials command, then
-reload the add-in to pick up the change - without the user manually toggling it
-in the Scripts and Add-Ins dialog.
-
-THE HARD PART - the tool's own server is part of the add-in it reloads.
-A naive reload calls Script.stop() on ourselves, tearing down the MCP server and
-TaskManager *while we are mid-request*, so the in-flight HTTP response would never
-be sent. To avoid that, the reload is DEFERRED:
-
-  1. The handler does NOT reload. It schedules the reload (a dedicated custom event
-     fired from a short-lived timer thread) and returns success immediately.
-  2. The handler returns -> the worker thread flushes the HTTP 200 to the client ->
-     the client gets a clean acknowledgment.
-  3. A moment later the scheduled event fires on the main thread, OUTSIDE any MCP
-     call, and performs Script.stop(), PURGES this add-in's modules from sys.modules,
-     then Script.run() via a fresh app.scripts lookup.
-
-The sys.modules purge in step 3 is essential: Fusion's Script.run() re-executes the
-entry point but does NOT clear Python's import cache, so without the purge it would
-re-import the STALE cached modules and edits to already-imported files would never
-load (only brand-new files would). With the purge, a reload picks up ALL edits -
-including changes to existing tools and their MCP schemas.
-
-The client should expect the connection to drop during reload and reconnect.
+Lets an agent edit a command file, then reload the add-in to pick up the change without the user
+manually toggling it in the Scripts and Add-Ins dialog. The reload is DEFERRED (a timer thread fires a
+custom event on the main thread after this call returns) because the tool's own server is part of the
+add-in it reloads - see docs/fusion-api-notes.md "Add-in reload" for why that matters and how the
+module-cache purge works. The client should expect the connection to drop and reconnect.
 """
 
 import os
@@ -93,21 +74,12 @@ def _find_self_script():
 
 def _purge_addin_modules() -> int:
     """Delete this add-in's already-imported modules from sys.modules so the next
-    Script.run() re-imports them FRESH from disk.
+    Script.run() re-imports them FRESH from disk (see docs/fusion-api-notes.md "Add-in reload").
 
-    THE BUG THIS FIXES: Fusion's Script.run() re-executes the add-in entry point, but
-    Python's import system returns the CACHED module objects from sys.modules - so
-    `from . import tools`, `import ...surface_create`, etc. hand back the OLD code and
-    edits to already-imported files never take effect (only brand-new files load).
-    A soft reload that doesn't bust the cache silently runs stale code.
-
-    We purge any loaded module whose source file lives under this add-in's root folder.
-    That captures BOTH import namespaces Fusion uses (the package `commands.mcpServer.*`
-    AND the `__main__<encoded-path>...` script namespace) while never touching `adsk.*`,
-    the stdlib, or other add-ins (their __file__ is elsewhere). Modules without a
-    __file__ (built-ins, namespace packages) are left alone.
-
-    Returns the count purged (logged for diagnosis).
+    Purges any loaded module whose source file lives under this add-in's root folder - both import
+    namespaces Fusion uses (the package `commands.mcpServer.*` and the `__main__<encoded-path>...`
+    script namespace) - while never touching `adsk.*`, the stdlib, or other add-ins. Modules without a
+    __file__ (built-ins, namespace packages) are left alone. Returns the count purged.
     """
     root = _addin_root_folder()
     root_cmp = os.path.normcase(root)
@@ -123,11 +95,10 @@ def _purge_addin_modules() -> int:
                 doomed.append(name)
         except Exception:
             continue
-    # NOTE: do NOT delete THIS module (sys_reload_addin) mid-execution - we're running
-    # inside its notify(). Removing its sys.modules entry is harmless (the live frame
-    # keeps running), and a fresh copy loads on run(); but keep it for safety/clarity:
-    # the next run() reimports it regardless, and leaving it avoids any surprise if a
-    # later line in this function references a module global.
+    # NOTE: this module (sys_reload_addin) purges ITSELF too - its own __file__ is under
+    # root_cmp like every other add-in module, so its name lands in `doomed` and gets
+    # deleted below. That is harmless: we are running inside its notify(), so the live
+    # frame keeps executing to completion, and the next run() re-imports a fresh copy.
     for name in doomed:
         try:
             del sys.modules[name]

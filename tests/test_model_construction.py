@@ -173,7 +173,7 @@ class TestConstruction:
         assert "kaboom-unexpected" in res["message"]
 
 
-# ── the direct-edit-only constraint (the audit's confirmed bug) ─────────────────────────────────
+# ── the direct-edit-only constraint ─────────────────────────────────────────────────────────────
 #
 # setByPoint(Point3D)/setByLine(InfiniteLine3D) FAIL in parametric mode (live API docstrings). The
 # old tool called them anyway then told the user to switch the WRONG way. These pin the corrected

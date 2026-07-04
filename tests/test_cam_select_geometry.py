@@ -169,8 +169,8 @@ def _bore_op(name="Bore1", **kw):
     return _Op(name, {"circularFaces": _Param(_HoleParamValue())}, **kw)
 
 
-def _install(cam, entities):
-    cg._get_cam = lambda: (cam, None)
+def _install(monkeypatch, cam, entities):
+    monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
     # patch the geometry-handle resolver to hand back fake entities (resolver has its own tests)
     cg._inputs.GeometryHandleList.resolve = lambda self, raw: (entities, None)
     # make doEvents a no-op
@@ -186,24 +186,24 @@ def _payload(result):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_bad_selection(self):
+    def test_bad_selection(self, monkeypatch):
         res = cg.handler(operation="X", selection="nonsense", handles=["h"])
         assert res["isError"] is True and "selection" in res["message"].lower()
 
-    def test_no_cam(self):
-        cg._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(cg, "get_cam", lambda: (None, "no CAM data"))
         res = cg.handler(operation="X", selection="chain", handles=["h"])
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_op_not_found(self):
+    def test_op_not_found(self, monkeypatch):
         cam = _CAM([_Setup([_curve_op("A")])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="Ghost", selection="chain", handles=["h"])
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_handle_resolve_error_propagates(self):
+    def test_handle_resolve_error_propagates(self, monkeypatch):
         cam = _CAM([_Setup([_curve_op()])])
-        cg._get_cam = lambda: (cam, None)
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         cg._inputs.GeometryHandleList.resolve = lambda self, raw: (None, "bad handle")
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"])
         assert res["isError"] is True and "bad handle" in res["message"]
@@ -212,10 +212,10 @@ class TestGuards:
 # ── curve family (chain/pocket/...) ──────────────────────────────────────────
 
 class TestCurveSelection:
-    def test_chain_applies_and_sets_knobs(self):
+    def test_chain_applies_and_sets_knobs(self, monkeypatch):
         op = _curve_op()
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge(), _Edge(), _Edge(), _Edge()])
+        _install(monkeypatch, cam, [_Edge(), _Edge(), _Edge(), _Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain",
                                   handles=["a", "b", "c", "d"], is_open=True, reverted=True,
                                   generate=False))
@@ -226,24 +226,24 @@ class TestCurveSelection:
         assert sel.isOpen is True and sel.isReverted is True
         assert pv.applied == 1 and out["selections"] == 1
 
-    def test_pocket_uses_pocket_builder_and_ignores_chain_knobs(self):
+    def test_pocket_uses_pocket_builder_and_ignores_chain_knobs(self, monkeypatch):
         op = _curve_op(name="2D Pocket1")
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Face()])
+        _install(monkeypatch, cam, [_Face()])
         cg.handler(operation="2D Pocket1", selection="pocket", handles=["f"], is_open=True,
                    generate=False)
         sel = op.parameters.itemByName("contours").value.getCurveSelections().item(0)
         assert sel.kind == "pocket"
         assert sel.isOpen is None        # chain-only knob NOT applied to a pocket selection
 
-    def test_zero_selections_is_error(self):
+    def test_zero_selections_is_error(self, monkeypatch):
         # applyCurveSelections leaves count 0 -> geometry rejected -> hard error
         op = _curve_op()
         pv = op.parameters.itemByName("contours").value
         # make applyCurveSelections drop everything
         pv.applyCurveSelections = lambda cs: setattr(pv, "_cs", _CurveSelections())
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"], generate=False)
         assert res["isError"] is True and "0 selection" in res["message"]
 
@@ -251,58 +251,58 @@ class TestCurveSelection:
 # ── holes family + diameter filter ───────────────────────────────────────────
 
 class TestHoles:
-    def test_holes_sets_holefaces_directly(self):
+    def test_holes_sets_holefaces_directly(self, monkeypatch):
         op = _drill_op()
         cam = _CAM([_Setup([op])])
         faces = [_Face(0.3), _Face(0.3), _Face(0.5)]   # Ø6,Ø6,Ø10 (cm radius)
-        _install(cam, faces)
+        _install(monkeypatch, cam, faces)
         out = _payload(cg.handler(operation="Drill1", selection="holes", handles=["a","b","c"],
                                   generate=False))
         assert op.parameters.itemByName("holeFaces").value.value == faces
         assert out["selections"] == 3
 
-    def test_diameter_filter_keeps_in_range(self):
+    def test_diameter_filter_keeps_in_range(self, monkeypatch):
         op = _drill_op()
         cam = _CAM([_Setup([op])])
         faces = [_Face(0.3), _Face(0.3), _Face(0.3), _Face(0.3), _Face(0.5), _Face(0.5)]  # 4×Ø6, 2×Ø10
-        _install(cam, faces)
+        _install(monkeypatch, cam, faces)
         out = _payload(cg.handler(operation="Drill1", selection="holes", handles=["a"]*6,
                                   min_diameter=5.5, max_diameter=6.5, generate=False))
         assert len(op.parameters.itemByName("holeFaces").value.value) == 4   # only the Ø6
         assert out["selections"] == 4 and "diameter_filter" in out
 
-    def test_diameter_filter_empty_is_error(self):
+    def test_diameter_filter_empty_is_error(self, monkeypatch):
         op = _drill_op()
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Face(0.5), _Face(0.5)])    # both Ø10, filter for Ø6 -> none
+        _install(monkeypatch, cam, [_Face(0.5), _Face(0.5)])    # both Ø10, filter for Ø6 -> none
         res = cg.handler(operation="Drill1", selection="holes", handles=["a","b"],
                          min_diameter=5.5, max_diameter=6.5, generate=False)
         assert res["isError"] is True and "diameter filter" in res["message"].lower()
 
-    def test_holes_on_nonhole_op_errors(self):
+    def test_holes_on_nonhole_op_errors(self, monkeypatch):
         op = _curve_op()                # neither holeFaces nor circularFaces
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Face(0.3)])
+        _install(monkeypatch, cam, [_Face(0.3)])
         res = cg.handler(operation="2D Contour1", selection="holes", handles=["a"], generate=False)
         assert res["isError"] is True
         assert "holeFaces" in res["message"] and "circularFaces" in res["message"]
 
-    def test_holes_on_bore_uses_circularFaces(self):
+    def test_holes_on_bore_uses_circularFaces(self, monkeypatch):
         # bore/circular have 'circularFaces' (no 'holeFaces') — the holes mode must drive it
         op = _bore_op()
         cam = _CAM([_Setup([op])])
         faces = [_Face(0.6), _Face(0.6)]
-        _install(cam, faces)
+        _install(monkeypatch, cam, faces)
         out = _payload(cg.handler(operation="Bore1", selection="holes", handles=["a", "b"],
                                   generate=False))
         assert op.parameters.itemByName("circularFaces").value.value == faces
         assert out["selections"] == 2
 
-    def test_holes_prefers_holeFaces_when_both_absent_irrelevant(self):
+    def test_holes_prefers_holeFaces_when_both_absent_irrelevant(self, monkeypatch):
         # a drill op (only holeFaces) still works — holeFaces is probed first
         op = _drill_op()
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Face(0.4)])
+        _install(monkeypatch, cam, [_Face(0.4)])
         out = _payload(cg.handler(operation="Drill1", selection="holes", handles=["a"], generate=False))
         assert len(op.parameters.itemByName("holeFaces").value.value) == 1 and out["selections"] == 1
 
@@ -310,17 +310,17 @@ class TestHoles:
 # ── heights ──────────────────────────────────────────────────────────────────
 
 class TestHeights:
-    def test_sets_mode_and_offset(self):
+    def test_sets_mode_and_offset(self, monkeypatch):
         op = _curve_op()
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                                   bottom_mode="from contour", bottom_offset="-10 mm", generate=False))
         assert op.parameters.itemByName("bottomHeight_mode").expression == "from contour"
         assert op.parameters.itemByName("bottomHeight_offset").expression == "-10 mm"
         assert any("bottomHeight" in s for s in out["heights_set"])
 
-    def test_heights_set_before_selection(self):
+    def test_heights_set_before_selection(self, monkeypatch):
         # ordering matters live: a height _mode's valid enum is context-dependent and applying the
         # selection can transiently invalidate it. So heights must be set BEFORE the selection applies.
         order = []
@@ -341,16 +341,16 @@ class TestHeights:
                 order.append("height"); self._p.expression = v
         op.parameters._d["bottomHeight_mode"] = _Tracking(mode_param)
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                    bottom_mode="from contour", generate=False)
         assert order.index("height") < order.index("selection")
 
-    def test_missing_height_param_errors(self):
+    def test_missing_height_param_errors(self, monkeypatch):
         op = _curve_op()
         del op.parameters._d["topHeight_offset"]      # simulate an op without that height
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                          top_offset="0 mm", generate=False)
         assert res["isError"] is True and "topHeight_offset" in res["message"]
@@ -359,37 +359,37 @@ class TestHeights:
 # ── generation: future-gated + zero-depth diagnostic ─────────────────────────
 
 class TestGenerate:
-    def test_generate_waits_on_future_and_reports_valid(self):
+    def test_generate_waits_on_future_and_reports_valid(self, monkeypatch):
         op = _curve_op(has_tp=True, valid=True)
         cam = _CAM([_Setup([op])], future=_Future(True))
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
         assert cam.generated == [op]
         assert out["generated"] is True and out["toolpath_valid"] is True
 
-    def test_empty_no_warning_reports_observed_state_and_causes(self):
+    def test_empty_no_warning_reports_observed_state_and_causes(self, monkeypatch):
         # has_toolpath False + silent warning channel -> report the OBSERVED empty + candidate causes
         # (verified live: a zero-depth contour generates with no warning), not a single asserted cause.
         op = _curve_op(has_tp=False, valid=False, warning="")
         cam = _CAM([_Setup([op])], future=_Future(True))
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
         assert out["toolpath_valid"] is False
         assert out["has_toolpath"] is False
         note = out["note"].lower()
         assert "has_toolpath" in note and "zero" in note and "selection" in note  # observed + causes
 
-    def test_warning_is_surfaced(self):
+    def test_warning_is_surfaced(self, monkeypatch):
         op = _curve_op(has_tp=False, valid=False, warning="missing selection")
         cam = _CAM([_Setup([op])], future=_Future(True))
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
         assert out.get("warning") == "missing selection"
 
-    def test_generate_false_skips(self):
+    def test_generate_false_skips(self, monkeypatch):
         op = _curve_op()
         cam = _CAM([_Setup([op])])
-        _install(cam, [_Edge()])
+        _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                                   generate=False))
         assert "generated" not in out and cam.generated == []

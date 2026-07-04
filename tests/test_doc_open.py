@@ -63,12 +63,10 @@ class TestUrnCandidates:
 
 # ── CAM-template open guard + declare-intent default (refuse the silent crash) ──────────────────
 #
-# VERIFIED LIVE (three crashes): a freshly-copied multi-reference CAM doc cannot be opened OR even
-# reference-inspected via the API without crashing Fusion. CAM-ness CANNOT be auto-detected
-# (inspecting the file IS the crash), so the safe-vs-unsafe call MUST come from the caller. The
-# third crash happened because is_cam_template defaulted false and a BARE doc_open silently took the
-# API path. The fix removes that silent default: doc_open now REFUSES any open that hasn't DECLARED
-# INTENT — either is_cam_template=true (UI open) or force_api_open=true (explicit API open). A bare
+# A freshly-copied multi-reference CAM doc cannot be opened OR even reference-inspected via the API
+# without crashing Fusion. CAM-ness CANNOT be auto-detected (inspecting the file IS the crash), so
+# the safe-vs-unsafe call MUST come from the caller: doc_open REFUSES any open that hasn't DECLARED
+# INTENT - either is_cam_template=true (UI open) or force_api_open=true (explicit API open). A bare
 # call resolves/opens NOTHING. These pin that contract.
 
 import json

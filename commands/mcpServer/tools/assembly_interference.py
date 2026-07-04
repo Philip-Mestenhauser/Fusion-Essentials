@@ -1,28 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: check an assembly for INTERFERENCE (parts overlapping in space).
-
-  assembly_interference -> analyze the design's occurrences for solid overlap and report each
-                           interfering PAIR (by occurrence name) with its overlap volume. Read-only.
-
-Why this exists: the "did I position/joint the parts correctly?" check. assembly_probe verifies the
-KINEMATIC wiring (joints, grounding, positions); this verifies the PHYSICAL fit - that nothing clips
-through anything it shouldn't (a shaft too long, a wheel mis-centered into a fork leg, a boss buried
-in a wall). It's the design-review companion: run it after assembling and before calling a model done.
-
-Maps each interfering body back to its owning OCCURRENCE so the report is actionable ("Wheel:1
-overlaps Fork:1, 7.7 cm^3") rather than "Body1  intersect  Body1". Coincident faces (parts touching flush) are
-EXCLUDED by default - those are usually intended mates, not interference; set
-include_coincident_faces=true to include them.
-
-Grounded in adsk.fusion:
-  - Design.createInterferenceInput(ObjectCollection of occurrences) -> InterferenceInput
-  - InterferenceInput.areCoincidentFacesIncluded (bool)
-  - Design.analyzeInterference(input) -> InterferenceResults
-  - InterferenceResult.entityOne / .entityTwo (BRepBody) ; .interferenceBody (BRepBody, .volume cm^3)
-Handler runs on the main thread; read-only (analysis only - it does NOT create interference bodies
-unless you ask, which this tool never does).
+"""Analyzes the active assembly's occurrences for solid overlap (interference), reporting each
+interfering pair by occurrence name with its overlap volume. Coincident/flush faces are excluded by
+default. Read-only.
 """
 
 import adsk.core
@@ -38,11 +19,7 @@ app = adsk.core.Application.get()
 
 
 def _owning_occurrence_name(body):
-    """The name of the part that owns this body, for an actionable report (not just 'Body1').
-
-    LIVE-VALIDATED ORDER: interference-result bodies expose the owning COMPONENT via
-    `parentComponent.name` (their `assemblyContext` is None - verified on a real assembly). So prefer
-    parentComponent.name, then an occurrence assemblyContext if present, then the bare body name."""
+    """The name of the part that owns this body, for an actionable report (not just 'Body1')."""
     pc = safe(lambda: body.parentComponent)
     if pc is not None:
         nm = safe(lambda: pc.name)
@@ -83,10 +60,7 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
     try:
         inp = design.createInterferenceInput(occs)
-        try:
-            inp.areCoincidentFacesIncluded = bool(include_coincident_faces)
-        except Exception:
-            pass
+        inp.areCoincidentFacesIncluded = bool(include_coincident_faces)
         results = design.analyzeInterference(inp)
     except Exception as e:
         return error(f"Interference analysis failed: {e}")

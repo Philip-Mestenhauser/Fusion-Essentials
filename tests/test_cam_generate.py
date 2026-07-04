@@ -53,25 +53,25 @@ class TestFindTarget:
         op = SimpleNamespace(name="Face1")
         cam = _FakeCAM([_setup("S", [op])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: None)        # not a folder
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)           # is an operation
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))   # not a folder
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))      # is an operation
         tgt, kind = gen._find_target(cam, "face1")
         assert kind == "operation" and tgt is op
 
-    def test_matches_folder(self):
+    def test_matches_folder(self, monkeypatch):
         folder = SimpleNamespace(name="Drilling")
         cam = _FakeCAM([_setup("S", [folder])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: x)          # IS a folder
-        adsk.cam.Operation.cast = staticmethod(lambda x: None)
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: x))      # IS a folder
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: None))
         tgt, kind = gen._find_target(cam, "drilling")
         assert kind == "folder"
 
-    def test_unknown_name_returns_none(self):
+    def test_unknown_name_returns_none(self, monkeypatch):
         cam = _FakeCAM([_setup("S", [SimpleNamespace(name="Face1")])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: None)
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         assert gen._find_target(cam, "Ghost") == (None, None)
 
     def test_empty_name_returns_none(self):
@@ -95,31 +95,31 @@ def _cam_with_ops(ops):
 
 
 class TestCollectOpHealth:
-    def _wire_cast(self):
+    def _wire_cast(self, monkeypatch):
         import adsk.cam
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
 
     def test_warnings_and_errors_separated(self, monkeypatch):
-        self._wire_cast()
+        self._wire_cast(monkeypatch)
         ops = [_op("a", warning="Spindle too fast"), _op("b", error="bad geometry"), _op("c")]
-        monkeypatch.setattr(gen, "_get_cam", lambda: (_cam_with_ops(ops), None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
         out = gen._collect_op_health()
         assert out["warnings"] == [{"name": "a", "warning": "Spindle too fast"}]
         assert out["errors"] == [{"name": "b", "error": "bad geometry"}]
 
     def test_empty_toolpath_derived_from_warning_text(self, monkeypatch):
-        self._wire_cast()
+        self._wire_cast(monkeypatch)
         ops = [_op("face", warning="The toolpath is empty.")]
-        monkeypatch.setattr(gen, "_get_cam", lambda: (_cam_with_ops(ops), None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
         out = gen._collect_op_health()
         # surfaces in BOTH warnings and the convenience 'empty' list
         assert out["empty"] == ["face"]
         assert out["warnings"][0]["name"] == "face"
 
     def test_warning_text_stripped(self, monkeypatch):
-        self._wire_cast()
+        self._wire_cast(monkeypatch)
         ops = [_op("a", warning="  padded  ")]
-        monkeypatch.setattr(gen, "_get_cam", lambda: (_cam_with_ops(ops), None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (_cam_with_ops(ops), None))
         out = gen._collect_op_health()
         assert out["warnings"][0]["warning"] == "padded"
 
@@ -129,7 +129,7 @@ class TestCollectOpHealth:
 class TestGenerateHandler:
     def test_whole_document_calls_generate_all(self, monkeypatch):
         cam = _FakeCAM([_setup("S")])
-        monkeypatch.setattr(gen, "_get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(gen.generate_handler(target=""))
         assert out["launched"] is True
         assert cam.generate_calls[0][0] == "all"
@@ -137,9 +137,9 @@ class TestGenerateHandler:
     def test_target_not_found_errors(self, monkeypatch):
         cam = _FakeCAM([_setup("S", [SimpleNamespace(name="Face1")])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: None)
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)
-        monkeypatch.setattr(gen, "_get_cam", lambda: (cam, None))
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         res = gen.generate_handler(target="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
@@ -147,9 +147,9 @@ class TestGenerateHandler:
         op = SimpleNamespace(name="Face1", operationState=0)   # 0 = valid/up-to-date
         cam = _FakeCAM([_setup("S", [op])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: None)
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)
-        monkeypatch.setattr(gen, "_get_cam", lambda: (cam, None))
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(gen.generate_handler(target="Face1", skip_valid=True))
         assert out["launched"] is False and out["skipped"] is True
         assert cam.generate_calls == []          # never launched a generation
@@ -158,9 +158,9 @@ class TestGenerateHandler:
         op = SimpleNamespace(name="Face1", operationState=0)
         cam = _FakeCAM([_setup("S", [op])])
         import adsk.cam
-        adsk.cam.CAMFolder.cast = staticmethod(lambda x: None)
-        adsk.cam.Operation.cast = staticmethod(lambda x: x)
-        monkeypatch.setattr(gen, "_get_cam", lambda: (cam, None))
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(gen.generate_handler(target="Face1", skip_valid=False))
         assert out["launched"] is True
         assert cam.generate_calls[0][0] == "target"

@@ -119,37 +119,37 @@ def _two_line_sketch():
 class TestResolveEntity:
     def test_line_index(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "line:1").name == "L1"
+        assert sc._common.resolve_entity_ref(s, "line:1").name == "L1"
 
     def test_arc_circle_point(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "arc:0").name == "A0"
-        assert sc._resolve_entity(s, "circle:0").name == "C0"
-        assert sc._resolve_entity(s, "point:2").name == "P2"
+        assert sc._common.resolve_entity_ref(s, "arc:0").name == "A0"
+        assert sc._common.resolve_entity_ref(s, "circle:0").name == "C0"
+        assert sc._common.resolve_entity_ref(s, "point:2").name == "P2"
 
     def test_bad_type(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "spline:0") is None
+        assert sc._common.resolve_entity_ref(s, "spline:0") is None
 
     def test_out_of_range(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "line:9") is None
+        assert sc._common.resolve_entity_ref(s, "line:9") is None
 
     def test_malformed(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "line") is None
+        assert sc._common.resolve_entity_ref(s, "line") is None
 
     def test_noninteger_index(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "line:abc") is None
+        assert sc._common.resolve_entity_ref(s, "line:abc") is None
 
     def test_negative_index(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "line:-1") is None
+        assert sc._common.resolve_entity_ref(s, "line:-1") is None
 
     def test_empty_ref(self):
         s = _two_line_sketch()
-        assert sc._resolve_entity(s, "") is None
+        assert sc._common.resolve_entity_ref(s, "") is None
 
 
 # ── dispatch: two-curve constraints ─────────────────────────────────────────

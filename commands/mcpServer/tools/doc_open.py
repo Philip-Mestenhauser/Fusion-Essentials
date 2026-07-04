@@ -1,27 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: open a Fusion document from a data-model identifier.
-
-Pairs with the data-model tools - the agent gets an identifier from one of them and
-opens the document here. It accepts any of the id forms those tools emit:
-  - a lineage URN (`urn:adsk.wipprod:dm.lineage:...`)        - data_get 'id', source_id
-  - a versioned URN                                          - data_get 'versionId'
-  - a Fusion web URL (`https://...autodesk360.com/.../data/...`)   - fusionWebURL / source_url
-The web URL embeds the lineage URN as a base64url segment, which we decode and resolve.
-
-Mutates session state (switches the active document), so it runs on the main thread.
-
-Grounded in the Fusion Data API:
-  - app.data.findFileById(id) -> DataFile   (lineage id opens latest; versioned id opens that version)
-  - app.documents.openUsingContext(dataFile, FileOpenContext.create(), visible=True) -> Document
-    (this opens BOTH normal AND configured designs; plain documents.open() raises
-    InternalValidationError on configured designs, so we prefer openUsingContext and only
-    fall back to open() if it is unavailable)
+"""MCP building block: open a Fusion document from a data-model identifier (a lineage/versioned
+URN or a Fusion web URL). See docs/fusion-api-notes.md "Configured designs" for the
+openUsingContext/open() split, and "Data model" for the CAM-template crash risk this guards against.
 """
-
-import base64
-import re
 
 import adsk.core
 
@@ -29,84 +12,18 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._data_common import _b64url_decode, _urn_candidates, _resolve_data_file
 
 app = adsk.core.Application.get()
 
 
-def _b64url_decode(segment: str):
-    """Decode a base64url path segment to text, or None if it isn't valid base64url."""
-    s = segment.replace('-', '+').replace('_', '/')
-    s += '=' * (-len(s) % 4)  # restore padding
-    try:
-        return base64.b64decode(s).decode('utf-8', 'strict')
-    except Exception:
-        return None
-
-
-def _urn_candidates(raw: str):
-    """Yield URN candidates from a raw identifier (a URN, or a Fusion web URL).
-
-    For a web URL, the lineage URN is one of the path segments, base64url-encoded
-    (e.g. '.../data/<folderURN_b64>/<fileURN_b64>'). We decode each segment and keep any
-    that decode to a 'urn:adsk...' string. The raw value itself is always tried first.
-    """
-    raw = raw.strip()
-    seen = []
-
-    def add(c):
-        if c and c not in seen:
-            seen.append(c)
-
-    # 1) The value as given (covers a plain URN, possibly with a ?version=... suffix).
-    add(raw)
-
-    # 2) If it's a URL, decode each path segment and keep decoded 'urn:adsk...' strings.
-    if '://' in raw or raw.lower().startswith('http'):
-        # split on URL separators; query/fragment too
-        for seg in re.split(r'[/?#&=]+', raw):
-            if len(seg) < 16:
-                continue
-            decoded = _b64url_decode(seg)
-            if decoded and decoded.startswith('urn:adsk'):
-                add(decoded)
-
-    # 3) As a last resort, pull any inline 'urn:adsk...' substring out of the raw text.
-    for m in re.findall(r'urn:adsk[\w\.\:\-]+', raw):
-        add(m)
-
-    return seen
-
-
-def _resolve_data_file(raw: str):
-    """Resolve a raw identifier to (DataFile, resolved_urn, candidates_tried)."""
-    candidates = _urn_candidates(raw)
-    for cand in candidates:
-        df = safe(lambda c=cand: app.data.findFileById(c))
-        if df:
-            return df, cand, candidates
-    return None, None, candidates
-
-
-# CRASH NOTE (verified live 2026-06, two crashes): a freshly DataFile.copy'd CAM/Manufacture
-# document with several external references (RFA model container + cloud part/machine refs) CANNOT
-# be safely touched from the API. BOTH of these crash the session (socket drops, server dies):
-#   * app.documents.openUsingContext(dataFile, ...)            - opening it
-#   * resolving/walking its reference graph to "pre-warm" it    - the earlier (wrong) "safe" path
-# The hazard is the heavy synchronous cloud reference-resolution, not one specific call - so there
-# is NO API path that safely opens or even inspects such a doc. We therefore do NOT touch the
-# reference graph here at all, and when the caller declares the doc is a multi-reference CAM
-# template (is_cam_template=true) we REFUSE the API open and instruct a UI open (the only stable
-# path). Detection cannot be automatic: inspecting the DataFile to detect CAM-ness is itself the
-# crash, so the signal must come from the caller.
+# A multi-reference CAM template can crash Fusion via the API (see fusion-api-notes.md "Data
+# model") - do not resolve/touch its reference graph here even to inspect it.
 
 
 def _open_document(data_file):
-    """Open a DataFile, returning (doc, method, error).
-
-    Prefer openUsingContext - it opens normal AND configured designs. Fall back to the
-    plain open() only if openUsingContext is unavailable (older API). Configured designs
-    fail under plain open(), so the fallback is genuinely a last resort.
-    """
+    """Open a DataFile, returning (doc, method, error); prefers openUsingContext, falling back to
+    open() only if it is unavailable."""
     # Preferred path: openUsingContext with a default context.
     try:
         ctx = adsk.core.FileOpenContext.create()
@@ -128,21 +45,7 @@ def _open_document(data_file):
 
 def handler(file_id: str = "", is_cam_template: bool = False,
             force_api_open: bool = False) -> dict:
-    """Open the document identified by file_id.
-
-    file_id may be a lineage URN, a versioned URN, or a Fusion web URL (any of the id
-    forms the data-model tools emit: 'id', 'versionId', 'fusionWebURL', 'source_id',
-    'source_url'). Switches the active document. Opens configured designs too.
-
-    DECLARE-INTENT (the crash-safety contract): the caller MUST declare how to open, because a
-    multi-reference CAM template CANNOT be auto-detected (inspecting the file is itself the crash):
-      - is_cam_template=true  -> it's a multi-ref CAM/Manufacture doc; the tool REFUSES the API open
-        (which crashes Fusion for these) WITHOUT touching the file, and instructs a UI open.
-      - force_api_open=true   -> it's a normal doc; do the API open (resolve + openUsingContext).
-      - NEITHER               -> REFUSE and ask the caller to declare intent, so a bare doc_open can't
-        take the crashing API path by default.
-    If BOTH are set, is_cam_template wins (you cannot force-crash through the CAM guard).
-    """
+    """Open the document identified by file_id; see TOOL_DESCRIPTION for the declare-intent contract."""
     raw = (file_id or "").strip()
     if not raw:
         return error("Provide 'file_id' - a DataFile id or URL from the data-model tools: "

@@ -3,25 +3,11 @@
 
 """MCP building block: list the user's Autodesk data hubs and SWITCH the active one.
 
-  data_switch_hub(action="list")                 -> every hub (name, id, is_active)
-  data_switch_hub(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort; the API
-                                               exposes activeHub getter-only - verified, may refuse)
+  data_switch_hub(action="list")                  -> every hub (name, id, is_active)
+  data_switch_hub(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort)
 
-Templates, parts and fixtures often live on DIFFERENT TeamHubs (a shop hub, a personal hub, a team
-hub). 'list' enumerates them reliably. 'switch' attempts to change the active hub, BUT:
-
-API LIMITATION (confirmed live): Data.activeHub is documented GETTER-ONLY ("Gets the active
-DataHub") - there is no public setter. So a programmatic hub switch is NOT reliably supported. The
-'switch' action attempts the assignment, then VERIFIES the active hub actually changed; if it didn't,
-it returns an honest error telling the user to switch from the Fusion data-panel hub dropdown. (This
-is the known data_set_active_hub gap - kept as a best-effort that won't lie about success.)
-
-IMPORTANT - when a switch DOES take effect it CLOSES the open documents (Fusion reloads the data
-context). Treat it like closing everything: save first, re-resolve URNs afterward (URNs are
-hub-scoped). The tool reports this in its note.
-
-Grounded in adsk.core: app.data.dataHubs (DataHubs: .count/.item -> DataHub(.name, .id)); the active
-hub is app.data.activeHub (GETTER per the live API). Read for 'list'; 'switch' is best-effort + verified.
+See docs/fusion-api-notes.md ("Data model") for why 'switch' is best-effort (Data.activeHub is
+getter-only) and what a successful switch does to open documents.
 """
 
 import adsk.core
@@ -30,6 +16,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _inputs
 
 app = adsk.core.Application.get()
 
@@ -48,12 +35,7 @@ def _all_hubs(data):
 
 
 def handler(action: str = "list", hub: str = "") -> dict:
-    """List data hubs, or switch the active one.
-
-    action='list' (default): report every hub with its name, id, and is_active flag.
-    action='switch': set the active hub to 'hub' (matched by id, else case-insensitive name).
-    NOTE: switching CLOSES open documents - save first; URNs are hub-scoped, re-resolve after.
-    """
+    """List data hubs, or switch the active one; see TOOL_DESCRIPTION."""
     act = (action or "list").strip().lower()
     if act not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use: list, switch.")
@@ -128,7 +110,7 @@ def handler(action: str = "list", hub: str = "") -> dict:
         "switched": True,
     "already_active": False,
     "active_hub": {"name": safe(lambda: new_active.name) or tname, "id": new_id or tid},
-    "note": ("Active hub switched. This CLOSES the previously open documents (Fusion reloads the "
+    "note": ("Active hub switched. This CLOSES documents open before the switch (Fusion reloads the "
             "data context). Re-list projects with data_get, and re-resolve any URNs - "
             "they are hub-scoped. Reopen the document you need on the new hub."),
     })
@@ -145,7 +127,8 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="data_switch_hub", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "description": "switch (default here) | list. To list, prefer data_get(include=['hubs'])."})
+    .add_input_property(*_inputs.Choice("action", list(_ACTIONS), default="list",
+            description="To list, prefer data_get(include=['hubs']).").as_property())
     .add_input_property("hub", {"type": "string", "description": "The hub name (case-insensitive) or id to activate."})
     .strict_schema()
 )

@@ -25,13 +25,15 @@ class FakeJoint:
 
 
 class FakeJoints:
-    def __init__(self, names):
-        self._j = [FakeJoint(n) for n in names]
+    def __init__(self, joints):
+        self._j = list(joints)
     @property
     def count(self):
         return len(self._j)
     def item(self, i):
         return self._j[i]
+    def itemByName(self, name):
+        return next((j for j in self._j if j.name == name), None)
 
 
 class FakeMotionLink:
@@ -62,18 +64,20 @@ class FakeMotionLinks:
 
 
 class FakeRoot:
-    def __init__(self, names):
-        self.joints = FakeJoints(names)
+    def __init__(self, names, asbuilt=()):
+        self.joints = FakeJoints(FakeJoint(n) for n in names)
+        self.asBuiltJoints = FakeJoints(FakeJoint(n) for n in asbuilt)
         self.motionLinks = FakeMotionLinks()
 
 
 class FakeDesign:
-    def __init__(self, names):
-        self.rootComponent = FakeRoot(names)
+    def __init__(self, names, asbuilt=()):
+        self.rootComponent = FakeRoot(names, asbuilt)
+        self.allComponents = []
 
 
-def _install(joint_names):
-    des = FakeDesign(joint_names)
+def _install(joint_names, asbuilt=()):
+    des = FakeDesign(joint_names, asbuilt)
     jml.app = type("A", (), {"activeProduct": des})()
     jml._common.app = jml.app
     import adsk.fusion, adsk.core
@@ -84,12 +88,21 @@ def _install(joint_names):
 
 
 class TestFindJoint:
-    def test_exact_then_case_insensitive(self):
+    def test_finds_root_joint_by_exact_name(self):
         des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
-        root = des.rootComponent
-        j, names = jml._find_joint(root, "wheel_spin")
+        j = jml.find_joint(des, "Wheel_Spin")
         assert j.name == "Wheel_Spin"
-        assert "Crank1_to_Wheel" in names
+
+    def test_finds_as_built_joint(self):
+        # asBuiltJoints is a SEPARATE collection from joints - a joint living only there must still
+        # resolve (this is why joint_motion_link no longer forks its own root-only lookup).
+        des = _install(["Wheel_Spin"], asbuilt=["Spin_Link"])
+        j = jml.find_joint(des, "Spin_Link")
+        assert j is not None and j.name == "Spin_Link"
+
+    def test_unknown_name_returns_none(self):
+        des = _install(["Wheel_Spin"])
+        assert jml.find_joint(des, "Ghost") is None
 
 
 class TestHandlerGuards:
@@ -119,16 +132,16 @@ class TestHandlerGuards:
 
 class TestLinkCreation:
     def test_createInput_gets_two_joints_not_a_collection(self):
-        # REGRESSION: the old code called createInput(ObjectCollection) — the real API is
-        # createInput(jointOne, jointTwo). Assert the two joints arrive as separate args.
+        # The real API is createInput(jointOne, jointTwo), not createInput(ObjectCollection).
+        # Assert the two joints arrive as separate args.
         des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
         _payload(jml.handler(joint_one="Wheel_Spin", joint_two="Crank1_to_Wheel", ratio=2.0))
         j1, j2 = des.rootComponent.motionLinks.created_with
         assert j1.name == "Wheel_Spin" and j2.name == "Crank1_to_Wheel"
 
     def test_ratio_flows_through_setMotionData(self):
-        # REGRESSION: the old code set inp.ratios (nonexistent, swallowed) so every link was 1:1.
-        # The ratio must reach MotionLink.setMotionData as valueOne=1, valueTwo=|ratio|.
+        # The ratio must reach MotionLink.setMotionData as valueOne=1, valueTwo=|ratio| - writing
+        # a nonexistent property like inp.ratios is silently swallowed and leaves every link 1:1.
         des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
         out = _payload(jml.handler(joint_one="Wheel_Spin", joint_two="Crank1_to_Wheel", ratio=2.0))
         md = des.rootComponent.motionLinks.last_link.motion_data

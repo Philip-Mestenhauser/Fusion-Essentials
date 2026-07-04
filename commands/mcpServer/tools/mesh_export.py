@@ -1,35 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for MESH export / tessellation - the mesh-aware siblings of design_export
-and the inverse of mesh_to_brep.
-
-  mesh_export(format=obj|3mf|stl, file_path=..., target=...) -> write a mesh file to local disk.
-  save_as_mesh(body=..., quality=...) -> tessellate a BRep solid/surface into a MeshBody IN the design.
-
-design_export already covers STEP/IGES/SAT/STL-of-a-solid; mesh_export adds the dedicated mesh
-formats (OBJ / 3MF / STL) and a BROAD target (a BRepBody, a MeshBody, an Occurrence, or a Component -
-or the whole design). It only WRITES A FILE - it never touches the design.
-
-save_as_mesh is the OTHER direction: it tessellates a BRep body into a persistent MeshBody added to
-the design (the inverse of mesh_to_brep). That is a WRITE that creates a MeshBody, so in a PARAMETRIC
-design it MUST run inside a BaseFeature edit scope - routed through the shared, leak-proof
-run_in_base_feature(design, comp, inner_op) from design_mode.py (direct mode: runs inner directly;
-parametric: an atomic open->op->finishEdit scope). The read-only calculate() runs OUTSIDE the scope.
-
-Grounded in adsk.fusion (signatures confirmed against the live API):
-  - design.exportManager.createOBJExportOptions(geometry, filename) -> options
-  - design.exportManager.createC3MFExportOptions(geometry, filename) -> options
-  - design.exportManager.createSTLExportOptions(geometry, filename) -> options  (geom, then path)
-  - exportManager.execute(options) -> bool ; geometry = BRepBody / MeshBody / Occurrence / Component
-  - brep_body.meshManager.createMeshCalculator() -> MeshCalculator
-      .setQuality(adsk.fusion.TriangleMeshQualityOptions.<Low|Normal|High|VeryHigh>QualityTriangleMesh)
-      .calculate() -> TriangleMesh
-        (.nodeCoordinatesAsDouble / .nodeIndices / .normalVectorsAsDouble / .normalIndices,
-         .triangleCount / .nodeCount)
-  - comp.meshBodies.addByTriangleMeshData(coordinates, coordinateIndexList, normalVectors,
-      normalIndexList) -> MeshBody
-Handlers run on the MAIN thread (30s cap). mesh_export WRITES a file; save_as_mesh WRITES a MeshBody.
+"""MCP building blocks for MESH export/tessellation - mesh_export (write a mesh file to local disk;
+never touches the design) and save_as_mesh (tessellate a BRep body into a persistent MeshBody - the
+inverse of mesh_to_brep). save_as_mesh's write runs through run_in_base_feature (design_mode.py) for
+the parametric base-feature scope requirement; its read-only tessellation step runs outside that
+scope. See docs/fusion-api-notes.md ("Mesh bodies") for the underlying adsk.fusion signatures.
 """
 
 import os
@@ -42,6 +18,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _export
 from . import _inputs
 from .design_mode import run_in_base_feature
 
@@ -87,13 +64,6 @@ _SAVE_QUALITY = _inputs.Choice("quality", options=list(_QUALITIES), default="nor
 
 # ── mesh_export target resolution (broad: body handle/name, component/occurrence, whole design) ──
 
-def _component_by_name(design, name):
-    for c in (safe(lambda: design.allComponents) or []):
-        if (safe(lambda c=c: c.name) or "") == name:
-            return c
-    return None
-
-
 def _resolve_export_target(design, target):
     """Resolve 'target' -> (geometry, description, redirected_from_mesh) for export. Empty -> root
     component (whole design).
@@ -103,7 +73,7 @@ def _resolve_export_target(design, target):
     a component, then an occurrence, then a body. Returns (None, None, None) if a given name matches
     nothing.
 
-    MESH-TARGET REDIRECT (Bug A, live-confirmed): ExportManager.execute() on a bare MeshBody geometry
+    MESH-TARGET REDIRECT (live-confirmed): ExportManager.execute() on a bare MeshBody geometry
     returns True but writes NO FILE (a mesh-in -> file is a no-op - the API only tessellates a BRep to
     a file). So a MeshBody target is REDIRECTED to its parentComponent, which DOES write a file (the
     file then contains that component's mesh bodies). The third return value records that redirect so
@@ -128,7 +98,7 @@ def _resolve_export_target(design, target):
         return body, f"body '{safe(lambda: body.name) or name}'", False
 
     # Component by name (export the whole component).
-    comp = safe(lambda: _component_by_name(design, name))
+    comp = safe(lambda: _export.component_by_name(design, name))
     if comp:
         return comp, f"component '{name}'", False
 
@@ -156,16 +126,9 @@ def _apply_refinement(opts, refine_key):
     return refine_key if safe(lambda: opts.meshRefinement) == val else None
 
 
-def _sanitize(name):
-    """Make an occurrence name safe for a filename (drop ':1' instance suffix, swap illegal chars)."""
-    base = (name or "part").split(":")[0]
-    out = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in base)
-    return out or "part"
-
-
 def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
     """Create options, apply refinement, execute, and VERIFY a non-empty file landed (execute() can
-    return True while writing nothing - Bug A). Returns (size_or_None, applied_refinement, error_str)."""
+    return True while writing nothing). Returns (size_or_None, applied_refinement, error_str)."""
     factory = safe(lambda: getattr(em, factory_name))
     if factory is None:
         return None, None, f"this build's ExportManager has no {factory_name}"
@@ -180,10 +143,9 @@ def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
         return None, applied, f"{fmt.upper()} export failed: {e}"
     if not did:
         return None, applied, f"{fmt.upper()} export returned false"
-    exists = bool(safe(lambda: os.path.isfile(path), False))
-    size = safe(lambda: os.path.getsize(path), 0) if exists else 0
-    if not exists or not size:
-        return None, applied, f"{fmt.upper()} reported success but wrote no file"
+    size, verr = _export.verify_written(path)
+    if verr:
+        return None, applied, f"{fmt.upper()} {verr}"
     return size, applied, None
 
 
@@ -221,25 +183,16 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             os.makedirs(out_dir, exist_ok=True)
         except Exception as e:
             return error(f"Could not create output directory '{out_dir}': {e}")
-        root = safe(lambda: design.rootComponent)
-        n_occ = safe(lambda: root.occurrences.count, 0) or 0
-        if not n_occ:
+        occs = _export.top_level_occurrences(design)
+        if not occs:
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
-        files, errors, used = [], [], {}
-        for i in range(n_occ):
-            occ = root.occurrences.item(i)
-            stem = _sanitize(safe(lambda occ=occ: occ.name))
-            used[stem] = used.get(stem, 0) + 1
-            if used[stem] > 1:
-                stem = f"{stem}_{used[stem]}"
-            fpath = os.path.join(out_dir, stem + ext)
+
+        def _write_one(occ, fpath):
             size, _, eerr = _write_mesh_file(em, factory_name, fmt, occ, fpath, ref)
-            if eerr:
-                errors.append({"occurrence": safe(lambda occ=occ: occ.name), "error": eerr})
-            else:
-                files.append({"occurrence": safe(lambda occ=occ: occ.name), "file_path": fpath,
-                              "size_bytes": size})
+            return size, eerr
+
+        files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
         out = {
             "exported": len(files) > 0,
             "format": fmt,
@@ -294,11 +247,10 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         return error(f"{fmt.upper()} export returned false - nothing was written.")
 
     # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT proof a
-    # file was written (Bug A: a MeshBody target makes execute() return True while writing nothing).
+    # file was written (a MeshBody target makes execute() return True while writing nothing).
     # file_exists + size>0 is the SOURCE OF TRUTH for success; never report exported:true otherwise.
-    exists = bool(safe(lambda: os.path.isfile(path), False))
-    size = safe(lambda: os.path.getsize(path), 0) if exists else 0
-    if not exists or not size:
+    size, verr = _export.verify_written(path)
+    if verr:
         if redirected_from_mesh:
             return error(
                 f"{fmt.upper()} export wrote no file for this MESH target. Exporting an existing MESH "
@@ -308,10 +260,9 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
                 f"geometry). To get the mesh on disk, convert it first (mesh_to_brep) and export the "
                 f"resulting solid, or place it in a component that exports.")
         return error(
-            f"{fmt.upper()} export reported success but NO file was written to '{path}' "
-            f"(file_exists={exists}, size_bytes={size}). execute() returned True but produced nothing "
-            f"- treating this as a FAILURE, not a false success. Check the target geometry and the "
-            f"output path are valid.")
+            f"{fmt.upper()} export reported success but {verr}. execute() returned True but produced "
+            f"nothing - treating this as a FAILURE, not a false success. Check the target geometry "
+            f"and the output path are valid.")
 
     note = ("Exported a MESH file to local disk (the design was not modified). To round-trip it "
             "into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use "
@@ -327,7 +278,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         "redirected_from_mesh": redirected_from_mesh,
         "refinement": applied_refinement or ref,
         "file_path": path,
-        "file_exists": exists,
+        "file_exists": True,
         "size_bytes": size,
         "note": note,
     })

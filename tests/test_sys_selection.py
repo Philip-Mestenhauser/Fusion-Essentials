@@ -158,6 +158,49 @@ class TestRequireFlag:
         assert result["isError"] is True
 
 
+# ── BOUNDED READS: the selection echo is capped (CLAUDE.md "Bound it") ──────────────────────────
+
+class TestSelectionCap:
+    def _fake_ui_with(self, entities):
+        class _Sel:
+            def __init__(self, e):
+                self.entity = e
+                self.point = FakePoint(0, 0, 0)
+
+        class _Sels:
+            def __init__(self, es):
+                self._es = [_Sel(e) for e in es]
+
+            @property
+            def count(self):
+                return len(self._es)
+
+            def item(self, i):
+                return self._es[i]
+
+        class _UI:
+            activeSelections = _Sels(entities)
+
+        return _UI()
+
+    def test_under_cap_untruncated_and_unchanged(self, monkeypatch):
+        entities = [BRepFace(Plane(FakeVector3D(0, 0, 1))) for _ in range(5)]
+        monkeypatch.setattr(sel, "_ui", lambda: self._fake_ui_with(entities))
+        out = _payload(sel.get_user_selection_handler())
+        assert out["truncated"] is False
+        assert len(out["selections"]) == 5
+        assert out["selection_count"] == 5
+
+    def test_at_cap_truncates_and_flags(self, monkeypatch):
+        entities = [BRepFace(Plane(FakeVector3D(0, 0, 1))) for _ in range(60)]
+        monkeypatch.setattr(sel, "_ui", lambda: self._fake_ui_with(entities))
+        out = _payload(sel.get_user_selection_handler(max_results=50))
+        assert out["truncated"] is True
+        assert len(out["selections"]) == 50
+        # the full count is still honest, even though the array is capped
+        assert out["selection_count"] == 60
+
+
 def _payload(result):
     import json
     return json.loads(result["content"][0]["text"])

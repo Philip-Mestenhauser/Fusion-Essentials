@@ -1,27 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: set the comment (or name) on a document's NC programs.
-
-  cam_set_nc_comment -> set the COMMENT field of one named NC program, or all of them.
-                            Optionally set the NC program NAME too. WRITES to the CAM data.
-
-The NC program's Comment is what most posts emit near the top of the G-code, so stamping a
-part/job identifier there is a common pre-post step. General-purpose: it just edits the field.
-
-HOW (grounded live): the comment is a CAM parameter named `nc_program_comment` on
-`NCProgram.parameters` (NOT `postParameters` - which is why cam_get(include=['nc_programs']) does not report it).
-It is an editable string parameter whose `.expression` is a QUOTED string (e.g. `'Job 1234'`).
-Setting `parameters.itemByName('nc_program_comment').expression = "'text'"` updates it. The NC
-program NAME is the sibling parameter `nc_program_name` (same quoting).
-
-Grounded in adsk.cam:
-  - active doc -> products.itemByProductType('CAMProductType') -> CAM
-  - CAM.ncPrograms (NCPrograms): .count / .item(i) / NCProgram.name
-  - NCProgram.parameters (CAMParameters).itemByName('nc_program_comment' | 'nc_program_name')
-    -> CAMParameter(.expression settable [quoted string], .isEditable)
-Works without switching to the Manufacture workspace. Handler runs on the main thread; WRITES.
-"""
+"""Set the comment (and/or name) field on the active document's NC programs, one or all of them."""
 
 import adsk.core
 import adsk.cam
@@ -32,22 +12,10 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 _COMMENT_PARAM = "nc_program_comment"
 _NAME_PARAM = "nc_program_name"
-
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    try:
-        cam = adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType'))
-    except Exception as e:
-        return None, f"Could not access CAM product: {e}"
-    if not cam:
-        return None, ("This document has no CAM (Manufacture) data - no NC programs to edit.")
-    return cam, None
 
 
 def _unquote(expr):
@@ -85,10 +53,9 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     program to edit (omit to edit ALL programs). set_name: optional - also set the NC program's
     Name field to this. WRITES to the CAM data; reports before/after per program.
     """
-    # Guard against the silent wipe-all: comment defaults to "" (never None), so the old
-    # `comment is None` check was DEAD CODE. Refuse when there's genuinely nothing to write -
-    # an empty/whitespace comment AND no set_name. (An empty comment WITH a set_name is fine:
-    # the caller is renaming, not clearing comments; an explicit non-empty comment is fine.)
+    # Guard against the silent wipe-all: refuse when there's genuinely nothing to write - an
+    # empty/whitespace comment AND no set_name. (An empty comment WITH a set_name is fine: the
+    # caller is renaming, not clearing comments; an explicit non-empty comment is fine.)
     write_comment = bool((comment or "").strip())
     write_name = bool((set_name or "").strip())
     if not write_comment and not write_name:
@@ -96,7 +63,7 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
     "Refusing: an empty comment with no name would blank the comment on every "
     "matched NC program.")
 
-    cam, err = _get_cam()
+    cam, err = get_cam()
     if err:
         return error(err)
 

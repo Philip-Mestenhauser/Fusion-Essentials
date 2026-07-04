@@ -5,30 +5,11 @@
 
   model_construction -> create a construction POINT at x/y/z, a construction AXIS through a point
                         along an axis direction, or an offset construction PLANE parallel to an
-                        origin plane. Construction geometry are the reference datums you snap joints,
-                        sketches, and other features to. WRITES.
+                        origin plane. Coordinates are in 'units' (mm default), in the active
+                        component's space. WRITES.
 
-Why this exists: joints and oriented features often need a datum at a SPECIFIC location (e.g. a
-crank-pin center) that no existing vertex sits on. This places that datum. Coordinates are in
-'units' (mm default), in the ACTIVE component's space.
-
-HARD API CONSTRAINT (confirmed live via sys_get_api_doc):
-  - ConstructionPointInput.setByPoint(Point3D) and ConstructionAxisInput.setByLine(InfiniteLine3D)
-    are DIRECT-EDIT-ONLY: the API docstrings state they "will fail" in PARAMETRIC modeling mode.
-    There is NO parametric method that places a point/axis at a RAW COORDINATE - every parametric
-    constructor needs EXISTING geometry (a vertex, edge, sketch point, or planar face).
-  So coordinate-based kind=point / kind=axis only work when the design is DirectDesignType. In a
-  parametric design this tool returns an actionable error (sketch a point, or switch to Direct) before
-  calling a method that would fail.
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - design.designType : DirectDesignType (0) | ParametricDesignType (1)
-  - Component.constructionPoints.add(input); input.setByPoint(Point3D)   [direct-only]
-  - Component.constructionAxes.add(input); input.setByLine(InfiniteLine3D) [direct-only],
-    input.setByEdge(edge)  [parametric-legal - use for the edge-handle path]
-  - Component.constructionPlanes.add(input); input.setByOffset(planarEntity, ValueInput)
-    [parametric-legal - offset from an origin/construction plane works in BOTH modes]
-Handler runs on the main thread; WRITES.
+A coordinate point or world-axis needs DIRECT modeling mode (direct-edit-only API); an edge-based
+axis and an offset plane work in both modes. See docs/fusion-api-notes.md "Construction geometry".
 """
 
 import adsk.core
@@ -37,7 +18,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, scale, target_component
+from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
 
@@ -56,11 +37,6 @@ _DIRECT_GUARD = _inputs.ModeGuard(
 
 app = adsk.core.Application.get()
 
-_PLANES = {"xy": "xYConstructionPlane", "xz": "xZConstructionPlane", "yz": "yZConstructionPlane"}
-_AXIS_VEC = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
-
-
-
 _PARAMETRIC_COORD_MSG = (
 "kind={k} at a raw coordinate needs DIRECT-modeling mode - the parametric construction API has "
 "no way to place a {k} at a bare x/y/z (setByPoint/setByLine are direct-edit-only and fail in "
@@ -72,13 +48,9 @@ _PARAMETRIC_COORD_MSG = (
 
 
 def _direct_only_block(design, k):
-    """If a coordinate point/world-axis (setByPoint/setByLine = direct-edit-only) is NOT allowed in
-    the current mode, return a ready-to-send error; else None.
-
-    The PRECONDITION is decided by ModeGuard(MODE_DIRECT).check() - so the DIRECTION of the verdict
-    is derived from MODE_DIRECT and structurally cannot invert. On a block we return the richer
-    _PARAMETRIC_COORD_MSG (it lists the sketch / edge-handle / switch-mode fix paths) rather than the
-    guard's generic line, but the guard is what GATES the mutation."""
+    """If a coordinate point/world-axis (direct-edit-only) is not allowed in the current mode,
+    return a ready-to-send error; else None. Returns the richer _PARAMETRIC_COORD_MSG (lists the
+    sketch / edge-handle / switch-mode fixes) instead of the guard's generic message."""
     ok_mode, _ = _DIRECT_GUARD.check(design)
     if ok_mode:
         return None
@@ -86,10 +58,8 @@ def _direct_only_block(design, k):
 
 
 def _env_error(e):
-    """Fallback for an unexpected mode/environment rejection that slips PAST the ModeGuard (the guard
-    gates coordinate point/axis up front, so this is a backstop). DESCRIPTIVE, not directional: it
-    states which datum kinds need DIRECT vs Parametric rather than telling the agent to switch one
-    way - so it can't reintroduce the inverted-remedy bug."""
+    """Backstop for an environment/mode rejection that slips past the ModeGuard. States which datum
+    kinds need Direct vs Parametric rather than prescribing a fix direction."""
     msg = str(e)
     if "Environment is not supported" in msg or "parametric" in msg.lower():
         return error("Could not add construction geometry: this datum kind isn't supported in the "
@@ -101,12 +71,7 @@ def _env_error(e):
 def handler(kind: str = "point", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             axis: str = "z", plane: str = "xy", offset: float = 0.0,
             units: str = "mm", name: str = "") -> dict:
-    """Add construction geometry in the active component.
-
-    kind: point (at x/y/z) | axis (through x/y/z along 'axis' x/y/z) | plane (offset 'offset' from
-    origin 'plane' xy/xz/yz). x/y/z and offset are in 'units' (mm default). 'name' optionally names
-    it. WRITES.
-    """
+    """Add construction geometry in the active component."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")

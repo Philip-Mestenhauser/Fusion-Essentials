@@ -14,7 +14,8 @@ import json
 
 from conftest import load_tool
 
-st = load_tool("show_toolpath")
+st = load_tool("cam_show_toolpath")
+cc = load_tool("_cam_common")   # the shared get_cam seam st.get_cam is imported from
 
 
 # ── fakes mimicking adsk.cam ───────────────────────────────────────────────
@@ -73,7 +74,17 @@ class FakeCamera:
 
 class FakeViewport:
     def __init__(self):
-        self.camera = FakeCamera()
+        self._camera = FakeCamera()
+        self.camera_assignments = 0
+
+    @property
+    def camera(self):
+        return self._camera
+
+    @camera.setter
+    def camera(self, value):
+        self._camera = value
+        self.camera_assignments += 1
 
     def refresh(self):
         pass
@@ -92,23 +103,17 @@ class FakeDoc:
         self.products = FakeProducts(cam)
 
 
-class FakeMeasureManager:
-    def getOrientedBoundingBox(self, entity, vx, vy):
-        # A non-None bbox -> _fit_operation reports fit succeeded.
-        return object()
-
-
 class FakeApp:
     def __init__(self, cam):
         self.activeDocument = FakeDoc(cam)
         self.activeViewport = FakeViewport()
-        self.measureManager = FakeMeasureManager()
 
 
 def _install(setups):
     cam = FakeCAM(setups)
     fake_app = FakeApp(cam)
     st.app = fake_app
+    cc.app = fake_app        # get_cam (in _cam_common) reads its own module's app
     # CAM.cast is a Mock on adsk.cam; make it return our fake CAM.
     import adsk.cam
     adsk.cam.CAM.cast = lambda x: x if isinstance(x, FakeCAM) else None
@@ -141,6 +146,7 @@ class TestGuards:
 
     def test_no_active_document(self):
         st.app = type("A", (), {"activeDocument": None})()
+        cc.app = st.app
         res = st.handler(action="list")
         assert res["isError"] is True
         assert "No active document" in res["message"]
@@ -166,7 +172,7 @@ class TestIsolate:
         out = _payload(st.handler(action="isolate", operation="Rough Top"))
         assert out["operation"] == "Rough Top"
         assert op1.isLightBulbOn is True
-        assert op3.isLightBulbOn is False   # the previously-shown op was turned off
+        assert op3.isLightBulbOn is False   # op3 starts shown; isolate turns every other op off
 
     def test_substring_match_when_no_exact(self):
         op1, _, _ = _simple_world()
@@ -284,13 +290,34 @@ class TestShowFolder:
 # ── fit camera path ──────────────────────────────────────────────────────────
 
 class TestFit:
-    def test_show_with_fit_reports_fitted(self):
+    def test_show_with_fit_applies_the_fit_to_the_camera(self):
         op1, _, _ = _simple_world()
         out = _payload(st.handler(action="show", operation="Rough Top", fit=True))
-        assert out["fit"] is True                  # _fit_operation succeeded (measureManager present)
+        assert out["fit"] is True
         assert op1.isLightBulbOn is True
+        vp = st.app.activeViewport
+        assert vp.camera.isFitView is True     # the fit reached the camera...
+        assert vp.camera_assignments == 1      # ...and the camera was written back to the viewport
 
-    def test_show_without_fit_does_not_fit(self):
+    def test_show_without_fit_leaves_the_camera_alone(self):
         _simple_world()
         out = _payload(st.handler(action="show", operation="Rough Top"))
         assert out["fit"] is False
+        vp = st.app.activeViewport
+        assert vp.camera.isFitView is False
+        assert vp.camera_assignments == 0
+
+    def test_fit_api_refusal_raises_not_false_success(self):
+        import pytest
+
+        _simple_world()
+
+        class _RefusingCamera(FakeCamera):
+            def __setattr__(self, key, value):
+                if key == "isFitView":
+                    raise RuntimeError("fit refused")
+                super().__setattr__(key, value)
+
+        st.app.activeViewport._camera = _RefusingCamera()
+        with pytest.raises(RuntimeError, match="fit refused"):
+            st.handler(action="show", operation="Rough Top", fit=True)

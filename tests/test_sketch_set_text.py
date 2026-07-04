@@ -215,6 +215,13 @@ class TestEditHandler:
         design = _install([FakeComp("Root", [sk])])
         out = _payload(st.handler(text="X"))
         assert out["changed_count"] == st._MAX
+        # Hitting the cap must be reported, not silently truncated
+        assert out["truncated"] is True
+
+    def test_truncated_is_false_when_under_the_cap(self):
+        design = _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'"), FakeText("'b'")])])])
+        out = _payload(st.handler(text="X"))
+        assert out["truncated"] is False
 
     def test_none_text_errors(self):
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])

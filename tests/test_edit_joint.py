@@ -1,20 +1,20 @@
-"""Unit tests for ``joint_edit`` — edit an EXISTING joint in place (no remaking).
+"""Unit tests for ``joint_edit`` - edit an EXISTING joint in place (no remaking).
 
-Tests written BEFORE the handler is wired (project rule). The behaviour pinned,
-no live Fusion:
+The behaviour pinned, no live Fusion:
 
   - find the joint by name; error if absent.
   - the API requires the timeline marker be rolled to BEFORE the joint
     (joint.timelineObject.rollTo(True)) before any property edit, and rolled back
-    after — the handler must do this around every edit.
+    after - the handler must do this around every edit.
   - selective edits: re-select snap inputs (geometryOrOriginOne/Two via the same
-    resolver the joint tool uses), change motion type/axis (setAs<Type>JointMotion),
-    toggle isFlipped, set rotationValue (degrees -> radians) for revolute.
+    resolver joint_create uses), change motion type/axis (setAs<Type>JointMotion),
+    toggle isFlipped, set rotation/linear limits; a rotation_deg drive request is
+    refused with a redirect to joint_drive.
   - a no-op call (nothing to change) is reported as an error, not a silent rollTo.
 
-The snap-input resolution is shared with joint.py and exercised live; here the
-fakes accept opaque tokens so we pin the orchestration (rollTo, which setters
-fire, value conversion) deterministically.
+The snap-input resolution lives in joint_create_edit.py; here the fakes accept
+opaque tokens so we pin the orchestration (rollTo, which setters fire, value
+conversion) deterministically.
 """
 
 import json
@@ -361,16 +361,16 @@ class TestWorldAxis:
         assert res["isError"] is True and "Unknown world_axis" in res["message"]
 
 
-# ── rotation drive is refused (unsafe: closes the server connection) ────────
+# ── rotation drive is redirected to joint_drive ────────────────────────────
 
-class TestRotationDriveRefused:
-    def test_rotation_deg_is_refused_with_redirect(self):
-        # Driving jointMotion.rotationValue from this context drops the connection
-        # (reproduced live). The tool must refuse and redirect, not attempt it.
+class TestRotationDriveRedirect:
+    def test_rotation_deg_redirects_to_joint_drive(self):
+        # Posing a joint to a value is joint_drive's job; joint_edit only changes the joint
+        # definition, so it redirects instead of driving.
         _, joint = _install(["BoomPivot"])
         res = jt.edit_handler(joint_name="BoomPivot", rotation_deg=90)
         assert res["isError"] is True
-        assert "assembly_move" in res["message"]
+        assert "joint_drive" in res["message"]
         # and it must NOT have driven the value
         assert joint.jointMotion.rotationValue == 0.0
 

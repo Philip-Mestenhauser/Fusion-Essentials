@@ -106,8 +106,8 @@ class FakeBodyColl:
 
 
 class FakeMeshBodyColl:
-    """A meshBodies-style collection — REALISTIC: the live adsk.fusion.MeshBodies has NO itemByName,
-    only count + item(i). So mesh-by-name resolution MUST iterate (Bug A). Deliberately no itemByName."""
+    """A meshBodies-style collection - REALISTIC: the live adsk.fusion.MeshBodies has NO itemByName,
+    only count + item(i). So mesh-by-name resolution MUST iterate. Deliberately no itemByName."""
     def __init__(self, bodies):
         self._list = list(bodies)
 
@@ -207,7 +207,7 @@ class FakeExportManager:
 
     def execute(self, opts):
         self.executed = opts
-        # REALISTIC live divergence (Bug A): execute() always returns True, but only writes a file when
+        # REALISTIC live divergence: execute() always returns True, but only writes a file when
         # the geometry is a BRep body / component / occurrence. A BARE MeshBody geometry writes NOTHING
         # (the file is a no-op) even though the return is truthy.
         if not isinstance(opts.geom, MeshBody):
@@ -343,7 +343,7 @@ class TestExportTarget:
         assert "Widget" in out["target"]
 
     def test_mesh_body_by_handle_redirects_to_its_component(self, tmp_path):
-        # Bug A: a bare MeshBody can't be export-written (execute()->True but no file). The tool
+        # A bare MeshBody can't be export-written (execute()->True but no file). The tool
         # REDIRECTS to the mesh's parentComponent (which DOES write a file) and flags the redirect.
         _wire_adsk()
         comp = FakeComp("Root")
@@ -359,7 +359,7 @@ class TestExportTarget:
         assert "mesh" in out["note"].lower()
 
     def test_mesh_body_by_name_redirects_to_its_component(self, tmp_path):
-        # Bug A: a mesh resolves by NAME via count/item iteration (meshBodies has NO itemByName), then
+        # A mesh resolves by NAME via count/item iteration (meshBodies has NO itemByName), then
         # redirects to its parentComponent for the actual file write.
         _wire_adsk()
         comp = FakeComp("Root")
@@ -374,7 +374,7 @@ class TestExportTarget:
         assert out["file_exists"] is True
 
     def test_false_success_when_no_file_written_is_error(self, tmp_path):
-        # Bug A core: execute() returns True but NO file lands -> tool must ERROR, not report
+        # execute() returns True but NO file lands -> tool must ERROR, not report
         # exported:true. Force the no-write by exporting a BARE mesh whose parent ALSO writes nothing
         # (the FakeExportManager skips the write for any MeshBody geometry).
         _wire_adsk()

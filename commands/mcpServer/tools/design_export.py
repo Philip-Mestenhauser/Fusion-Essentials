@@ -1,26 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: export a body / component / the whole design to a neutral CAD file.
-
-  design_export(format=..., file_path=..., target=...) -> write a STEP / IGES / SAT / STL file
-  to the local filesystem.
-
-This closes the export half of a neutral-format round-trip: pair it with data_upload_file to push
-the exported file back into the cloud (where STEP/IGES are translated to a Fusion design). Without
-this, an agent had no tool to get a body out to STEP.
-
-'target' is a BodyRef (a find_geometry HANDLE - precise, since bodies are auto-named - or a body
-NAME), or a component/occurrence name, or omitted for the WHOLE design. 'format' is one of
-step/iges/sat/stl. 'file_path' is the local output path (the format extension is appended if missing).
-
-Grounded in adsk.fusion ExportManager (signatures confirmed live):
-  - design.exportManager.createSTEPExportOptions(fullPath, geometry) -> options
-  - createIGESExportOptions(fullPath, geometry) / createSATExportOptions(fullPath, geometry)
-  - createSTLExportOptions(geometry, fullPath) -> options   (note: STL arg order is (geom, path))
-  - exportManager.execute(options) -> bool
-  geometry may be a Component (whole-design = root component), an Occurrence, or a BRepBody.
-Handler runs on the main thread; WRITES a file to disk (does not modify the design).
+"""Exports a body/component/occurrence, or the whole design (target omitted), to a neutral CAD file
+(STEP/IGES/SAT/STL) on local disk. Pair with data_upload_file to round-trip the file back into the
+cloud. WRITES a file to disk (does not modify the design).
 """
 
 import os
@@ -33,6 +16,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _export
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -74,7 +58,7 @@ def _resolve_target(design, target):
         return None, None
 
     # Component by name (export the whole component).
-    comp = safe(lambda: _component_by_name(design, name))
+    comp = safe(lambda: _export.component_by_name(design, name))
     if comp:
         return comp, f"component '{name}'"
 
@@ -96,21 +80,6 @@ def _resolve_target(design, target):
             return b, f"body '{name}' in '{safe(lambda o=o: o.name)}'"
 
     return None, None
-
-
-def _component_by_name(design, name):
-    for c in (safe(lambda: design.allComponents) or []):
-        if (safe(lambda c=c: c.name) or "") == name:
-            return c
-    return None
-
-
-def _sanitize(name):
-    """Make an occurrence name safe for a filename (drop the ':1' instance suffix, swap path/illegal
-    chars for '_')."""
-    base = (name or "part").split(":")[0]
-    out = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in base)
-    return out or "part"
 
 
 def _export_one(em, factory_name, is_stl, geom, path):
@@ -157,26 +126,23 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             os.makedirs(out_dir, exist_ok=True)
         except Exception as e:
             return error(f"Could not create output directory '{out_dir}': {e}")
-        root = design.rootComponent
-        occs = list(safe(lambda: root.occurrences) and
-                    [root.occurrences.item(i) for i in range(root.occurrences.count)] or [])
+        occs = _export.top_level_occurrences(design)
         if not occs:
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
-        files, errors, used = [], [], {}
-        for occ in occs:
-            stem = _sanitize(safe(lambda occ=occ: occ.name))
-            # de-dup identical stems (e.g. two instances of the same component)
-            used[stem] = used.get(stem, 0) + 1
-            if used[stem] > 1:
-                stem = f"{stem}_{used[stem]}"
-            fpath = os.path.join(out_dir, stem + ext)
+
+        def _write_one(occ, fpath):
             okk, eerr = _export_one(em, factory_name, is_stl, occ, fpath)
-            if okk:
-                files.append({"occurrence": safe(lambda occ=occ: occ.name), "file_path": fpath,
-                              "size_bytes": safe(lambda: os.path.getsize(fpath), 0)})
-            else:
-                errors.append({"occurrence": safe(lambda occ=occ: occ.name), "error": eerr})
+            if not okk:
+                return None, eerr
+            # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT
+            # proof a file was written.
+            size, verr = _export.verify_written(fpath)
+            if verr:
+                return None, f"{fmt.upper()} export reported success but {verr}"
+            return size, None
+
+        files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
         out = {
             "exported": len(files) > 0,
             "format": fmt,
@@ -213,14 +179,21 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     if not okk:
         return error(f"{fmt.upper()} export failed: {eerr}")
 
-    exists = safe(lambda: os.path.isfile(path), False)
-    size = safe(lambda: os.path.getsize(path), 0) if exists else 0
+    # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT proof a
+    # file was written. file_exists + size>0 is the SOURCE OF TRUTH for success.
+    size, verr = _export.verify_written(path)
+    if verr:
+        return error(
+            f"{fmt.upper()} export reported success but {verr}. execute() returned true but produced "
+            f"nothing - treating this as a failure, not a false success. Check the target geometry "
+            f"and the output path are valid.")
+
     return ok({
         "exported": True,
         "format": fmt,
         "target": desc,
     "file_path": path,
-    "file_exists": bool(exists),
+    "file_exists": True,
     "size_bytes": size,
     "note": ("Exported to local disk. To round-trip into the cloud, upload it with "
             "data_upload_file (STEP/IGES are translated to a Fusion design on the cloud)."),

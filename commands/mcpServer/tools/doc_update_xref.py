@@ -3,22 +3,8 @@
 
 """MCP building block: refresh out-of-date external references in the active document.
 
-  doc_update_xref -> bring the active document's external references (X-refs) up to their latest
-                 cloud version - one by name, or all that are out of date. Reports what changed.
-
-When an inserted/referenced component points at an OLDER version of its source file, the
-reference is "out of date" and the host shows stale geometry (and, importantly, missing newer
-features like a joint origin added after the reference was made). This refreshes them.
-
-General-purpose: this is the API equivalent of "Get Latest" on a referenced component. Common
-in a CAD->CAM template flow (a part edited after insertion needs its reference refreshed so the
-new geometry/joint origins appear), but the tool is agnostic about why.
-
-Grounded in adsk.core:
-  - app.activeDocument.documentReferences (DocumentReferences): iterable; .count / .item(i)
-  - DocumentReference: .isOutOfDate (bool), .getLatestVersion() (bool), .version (int),
-    .dataFile (.name / .id)
-Handler runs on the main thread; WRITES to the design (updates references).
+The API equivalent of "Get Latest" on a referenced component - one by name, or all that are out
+of date. See docs/fusion-api-notes.md ("Data model") for the documentReferences signatures.
 """
 
 import json
@@ -38,12 +24,7 @@ def _ref_name(ref):
 
 
 def handler(name: str = "", only_out_of_date: bool = True) -> dict:
-    """Refresh external references to their latest version.
-
-    name: refresh only the reference whose source document has this name (omit to consider ALL
-    references). only_out_of_date: when true (default) only refresh references flagged out of
-    date; when false, attempt getLatestVersion on every matched reference. WRITES to the design.
-    """
+    """Refresh external references to their latest version; see TOOL_DESCRIPTION."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return error("No active document.")
@@ -69,7 +50,7 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
             skipped.append({"name": rname, "reason": "already up to date"})
             continue
         before_v = safe(lambda ref=ref: ref.version)
-        did = safe(lambda ref=ref: ref.getLatestVersion(), False)
+        did = ref.getLatestVersion()
         if not did:
             errors.append({"name": rname, "error": "getLatestVersion returned false"})
             continue
@@ -102,7 +83,7 @@ TOOL_DESCRIPTION = (
     "reference that is OUT OF DATE; pass 'name' to target one reference by its source document "
     "name, or only_out_of_date=false to force-refresh matched references regardless. Reports each "
     "reference's version before/after. WRITES to the design. Use this when a referenced part was "
-    "edited after it was inserted and the host still shows the old version (or is missing a "
+    "edited after it was inserted and the host still shows an outdated version (or is missing a "
     "feature like a joint origin added after insertion)."
 )
 

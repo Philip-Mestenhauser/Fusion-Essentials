@@ -181,8 +181,8 @@ class TestGuards:
         assert res["isError"] is True and "out of range" in res["message"]
 
     def test_no_profile_in_sketch(self):
-        # No closed profile AND no curves -> still an error, but now points at the surface path
-        # (the old flat "no closed profile" dead-end gained an open-path escape hatch).
+        # No closed profile AND no curves -> an error that points at the surface path, not a
+        # flat "no closed profile" dead-end.
         _install([FakeSketch("S", profile_count=0)])
         res = ex.handler(sketch_name="S", distance=5)
         assert res["isError"] is True and "no curves" in res["message"]
@@ -357,7 +357,7 @@ class TestAsSurface:
         assert "SURFACE" in out["note"]
 
     def test_open_path_auto_surface_when_no_closed_profile(self):
-        # No closed profile but open curves exist -> auto surface (the old dead-end is gone).
+        # No closed profile but open curves exist -> auto surface, not a dead-end error.
         ef = _install([FakeSketch("S", profile_count=0, curve_count=2)])
         out = _payload(ex.handler(sketch_name="S", distance=5))
         assert out["as_surface"] is True
@@ -386,12 +386,10 @@ class _FakeBody:
 def _install_geom(faces=None, bodies=None):
     """Install + wire the _common seam so to_object faces / target_bodies resolve.
 
-    Since the handler now resolves its design via _common.design() (the SAME seam _inputs uses for
-    handle/body resolution), there must be ONE design fake serving both. So we take _install's rich
-    FakeDesign (it has features/sketches the handler needs) and EXTEND its root with findEntityByToken
-    + a body-by-name lookup, then point both _common.design and _inputs._common.design at it.
-    (Previously the handler read a separate ex.app design from the _inputs one — the migration unified
-    them.)"""
+    The handler resolves its design via _common.design() - the SAME seam _inputs uses for handle/body
+    resolution - so there must be ONE design fake serving both. So we take _install's rich FakeDesign
+    (it has features/sketches the handler needs) and EXTEND its root with findEntityByToken + a
+    body-by-name lookup, then point both _common.design and _inputs._common.design at it."""
     ef = _install([FakeSketch("S")])
     import adsk.fusion
     adsk.fusion.BRepFace = _FakeFaceEnt

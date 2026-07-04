@@ -1,26 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Typed OUTPUT KINDS - the producer-side mirror of ``_inputs.InputKind``.
-
-When tool A mints a stable id (a find_geometry ``handle`` entityToken, a data-model URN, an exact
-occurrence/setup/operation name, a measured value) that tool B consumes by name, that relationship was
-stated TWICE in English: once in A's "returns X" prose and again in B's "needs an X from A" input note.
-``_inputs.py`` already made the CONSUMER side declarative (schema+resolve+validate+contract in one
-place); there was no symmetric mechanism for the PRODUCER side, and nothing asserted that A actually
-returns a field named ``handle`` - so renaming it would silently break every consumer's note with no
-test catching it (the architecture section 10 "convention, not enforced" gap).
-
-An ``OutputKind`` declares ONE field a tool RETURNS: the payload key it lands under, a human label, the
-tools that consume it, and whether the value is a stable/round-trippable id. From that one declaration:
-  * ``produces_block(spec)`` generates the tool's "PRODUCES:" description line (mirrors
-    ``_inputs.contract_block``) - the producer prose is generated, not hand-typed-then-paraphrased.
-  * ``OutputKind.assert_present(payload)`` is a TEST HOOK: it fails if the handler's ``ok()`` payload
-    doesn't actually carry the declared key (top-level OR inside a list of items, like
-    ``find_geometry.matches[].handle``). A renamed field fails the suite instead of lying to 18 consumers.
-
-Tools declare ``RETURNS = [ _outputs.ReturnsHandle(...), ... ]`` the way they declare an inputs spec.
-"""
+"""Typed OUTPUT KINDS: the producer-side mirror of ``_inputs.InputKind``. A tool declares
+``RETURNS = [_outputs.ReturnsHandle(...), ...]`` for each stable id/value it mints;
+``assert_present(payload)`` is a test hook that fails if the handler's ``ok()`` payload doesn't
+actually carry the declared key, so a renamed field breaks the suite instead of silently lying to
+every consumer that reads it. See ``tools/CLAUDE.md`` and ``CONTRIBUTING.md`` ("Return the IDs the
+next call needs") for the full rationale."""
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = "RETURNS kinds (ReturnsHandle/Urn/Name/Value) - declare a tool's stable outputs once"

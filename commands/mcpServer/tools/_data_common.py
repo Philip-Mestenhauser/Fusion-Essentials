@@ -1,22 +1,21 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared helpers for the cloud data-model tools (split out of the former data_management.py).
-
-data_management.py grew to ~1400 lines holding ~14 tools. It was split into two cohesive modules -
-data_model_ops.py (projects / folders / upload / delete-folder) and doc_lifecycle.py (new / save /
-save_as / copy / close / activate / list-open / delete-file). The helpers BOTH groups use live here so
-neither module owns them and there's no duplication.
-
-Grounded in adsk.core: app.data (DataHub) -> dataProjects / DataProject.rootFolder / DataFolder tree.
+"""Shared helpers for the cloud data-model tools: hub/project/folder resolution, path splitting,
+and URN/web-URL identifier decoding. Used by data_ops.py, doc_lifecycle.py, _data_read.py,
+doc_open.py, and doc_insert_occurrence.py. See docs/fusion-api-notes.md ("Data model") for the
+URN/URL decoding rule.
 """
+
+import base64
+import re
 
 import adsk.core
 
 from ._common import safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "cloud data-model helpers shared by data_model_ops + doc_lifecycle (hub/project/folder/URN)"
+MAP_BLURB = "cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN)"
 
 app = adsk.core.Application.get()
 
@@ -72,7 +71,7 @@ def _split_path(path):
 
 def _child_folder_by_name(folder, name):
     """Return the immediate child folder matching name (case-insensitive), or None."""
-    want = name.strip().lower()
+    want = (name or "").strip().lower()
     try:
         for f in folder.dataFolders.asArray():
             if (safe(lambda: f.name) or "").lower() == want:
@@ -129,3 +128,56 @@ def _folder_path_string(folder):
     except Exception:
         pass
     return "/".join(reversed(parts))
+
+
+def _b64url_decode(segment):
+    """Decode a base64url path segment to text, or None if it isn't valid base64url."""
+    s = segment.replace('-', '+').replace('_', '/')
+    s += '=' * (-len(s) % 4)  # restore padding
+    try:
+        return base64.b64decode(s).decode('utf-8', 'strict')
+    except Exception:
+        return None
+
+
+def _urn_candidates(raw):
+    """List URN candidates to try for a raw identifier (a URN, or a Fusion web URL).
+
+    For a web URL, the lineage URN is one of the path segments, base64url-encoded
+    (e.g. '.../data/<folderURN_b64>/<fileURN_b64>'). Each segment is decoded and any that
+    decode to a 'urn:adsk...' string are kept. The raw value itself is always tried first.
+    """
+    raw = (raw or "").strip()
+    seen = []
+
+    def add(c):
+        if c and c not in seen:
+            seen.append(c)
+
+    # 1) The value as given (covers a plain URN, possibly with a ?version=... suffix).
+    add(raw)
+
+    # 2) If it's a URL, decode each path segment and keep decoded 'urn:adsk...' strings.
+    if '://' in raw or raw.lower().startswith('http'):
+        for seg in re.split(r'[/?#&=]+', raw):
+            if len(seg) < 16:
+                continue
+            decoded = _b64url_decode(seg)
+            if decoded and decoded.startswith('urn:adsk'):
+                add(decoded)
+
+    # 3) As a last resort, pull any inline 'urn:adsk...' substring out of the raw text.
+    for m in re.findall(r'urn:adsk[\w\.\:\-]+', raw):
+        add(m)
+
+    return seen
+
+
+def _resolve_data_file(raw):
+    """Resolve a raw identifier (URN or web URL) to (DataFile, resolved_urn, candidates_tried)."""
+    candidates = _urn_candidates(raw)
+    for cand in candidates:
+        df = safe(lambda c=cand: app.data.findFileById(c))
+        if df:
+            return df, cand, candidates
+    return None, None, candidates

@@ -83,14 +83,14 @@ class FakeCAM:
         self.setups = FakeSetups([FakeSetup(ops)])
 
 
-def _install(op_name="Adaptive1", params=None):
+def _install(monkeypatch, op_name="Adaptive1", params=None):
     params = params if params is not None else {
         "tool_feedCutting": "5210.23", "tool_spindleSpeed": "14006.",
         "maximumStepdown": "2.0483", "tool_stepover": "2.",
     }
     op = FakeOp(op_name, params)
     cam = FakeCAM([op])
-    ce._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
     return op
 
 
@@ -100,8 +100,8 @@ def _payload(res):
 
 
 class TestEditOperation:
-    def test_sets_param_dict(self):
-        op = _install()
+    def test_sets_param_dict(self, monkeypatch):
+        op = _install(monkeypatch)
         out = _payload(ce.handler(operation="Adaptive1",
                                   parameters={"tool_feedCutting": "3000", "maximumStepdown": "1.5"}))
         assert op.parameters.itemByName("tool_feedCutting").expression == "3000"
@@ -112,45 +112,45 @@ class TestEditOperation:
         assert changed["tool_feedCutting"]["before"] == "5210.23"
         assert changed["tool_feedCutting"]["after"] == "3000"
 
-    def test_accepts_name_equals_value_strings(self):
-        op = _install()
+    def test_accepts_name_equals_value_strings(self, monkeypatch):
+        op = _install(monkeypatch)
         out = _payload(ce.handler(operation="Adaptive1",
                                   parameters="tool_spindleSpeed=12000, tool_stepover=1.5"))
         assert op.parameters.itemByName("tool_spindleSpeed").expression == "12000"
         assert op.parameters.itemByName("tool_stepover").expression == "1.5"
         assert out["updated_count"] == 2
 
-    def test_unknown_param_reported(self):
-        _install()
+    def test_unknown_param_reported(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="Adaptive1", parameters={"nope_param": "5"})
         assert res["isError"] is True and "nope_param" in res["message"]
 
-    def test_unknown_operation(self):
-        _install()
+    def test_unknown_operation(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="Ghost", parameters={"tool_stepover": "1"})
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_invalid_value_reports_and_does_not_partially_apply(self):
-        op = _install()
+    def test_invalid_value_reports_and_does_not_partially_apply(self, monkeypatch):
+        op = _install(monkeypatch)
         # second param raises on set; the tool should report the failure
         res = ce.handler(operation="Adaptive1",
                          parameters={"tool_stepover": "1.0", "maximumStepdown": "BOOM"})
         assert res["isError"] is True and "maximumStepdown" in res["message"]
 
-    def test_no_parameters_errors(self):
-        _install()
+    def test_no_parameters_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="Adaptive1", parameters={})
         assert res["isError"] is True and "parameters" in res["message"]
 
-    def test_no_operation_name_errors(self):
-        _install()
+    def test_no_operation_name_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="   ", parameters={"tool_stepover": "1"})
         assert res["isError"] is True and "operation" in res["message"]
 
-    def test_changed_records_evaluated_value(self):
+    def test_changed_records_evaluated_value(self, monkeypatch):
         # changed[].value is the EVALUATED number (FakeParam.value parses the expr),
         # distinct from the .after expression string.
-        _install()
+        _install(monkeypatch)
         out = _payload(ce.handler(operation="Adaptive1",
                                   parameters={"tool_feedCutting": "3000"}))
         c = out["changed"][0]
@@ -159,42 +159,65 @@ class TestEditOperation:
 
 
 class TestParseParameters:
-    def test_string_without_equals_errors(self):
-        _install()
+    def test_string_without_equals_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="Adaptive1", parameters="tool_stepover 1.5")
         assert res["isError"] is True
         assert "name=value" in res["message"]
 
-    def test_string_skips_blank_chunks(self):
+    def test_string_skips_blank_chunks(self, monkeypatch):
         # trailing/double commas produce empty chunks that must be ignored, not errored.
-        op = _install()
+        op = _install(monkeypatch)
         out = _payload(ce.handler(operation="Adaptive1",
                                   parameters="tool_stepover=1.5, , tool_feedCutting=900,"))
         assert out["updated_count"] == 2
         assert op.parameters.itemByName("tool_stepover").expression == "1.5"
 
-    def test_non_dict_non_string_errors(self):
-        _install()
+    def test_non_dict_non_string_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = ce.handler(operation="Adaptive1", parameters=42)
         assert res["isError"] is True
         assert "object" in res["message"] or "name=value" in res["message"]
 
 
 class TestFindOperation:
-    def test_falls_back_to_allOperations_when_operations_missing(self):
+    def test_falls_back_to_allOperations_when_operations_missing(self, monkeypatch):
         # A setup that exposes only allOperations (operations is None) must still resolve.
         op = FakeOp("OnlyAll", {"tool_stepover": "2."})
         setup = FakeSetup([op])
         setup.operations = None                 # force the `or allOperations` fallback
         cam = FakeCAM([])
         cam.setups = FakeSetups([setup])
-        ce._get_cam = lambda: (cam, None)
+        monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
         out = _payload(ce.handler(operation="OnlyAll", parameters={"tool_stepover": "1"}))
         assert out["operation"] == "OnlyAll"
         assert op.parameters.itemByName("tool_stepover").expression == "1"
 
-    def test_unknown_operation_lists_available_names(self):
-        _install(op_name="RealOp")
+    def test_unknown_operation_lists_available_names(self, monkeypatch):
+        _install(monkeypatch, op_name="RealOp")
         res = ce.handler(operation="Ghost", parameters={"tool_stepover": "1"})
         assert res["isError"] is True
         assert "RealOp" in res["message"]      # available names surfaced
+
+    def test_operation_nested_in_a_folder_resolves(self, monkeypatch):
+        # a folder-nested operation must resolve too - .operations only lists what's directly in
+        # the setup, so the lookup must recurse into .folders (and .patterns) to reach it.
+        nested_op = FakeOp("Drill1", {"tool_stepover": "2."})
+
+        class FakeFolder:
+            def __init__(self, name, ops):
+                self.name = name
+                self.operations = FakeOps(ops)
+                self.folders = FakeOps([])
+                self.patterns = FakeOps([])
+
+        folder = FakeFolder("Holes", [nested_op])
+        setup = FakeSetup([])
+        setup.folders = FakeOps([folder])
+        setup.patterns = FakeOps([])
+        cam = FakeCAM([])
+        cam.setups = FakeSetups([setup])
+        monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
+        out = _payload(ce.handler(operation="Drill1", parameters={"tool_stepover": "1"}))
+        assert out["operation"] == "Drill1"
+        assert nested_op.parameters.itemByName("tool_stepover").expression == "1"

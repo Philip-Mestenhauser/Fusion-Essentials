@@ -113,8 +113,10 @@ class TestHandler:
         assert out["segment_count"] == 1
         assert out["segments_mm"][0]["height"] == 20.0
         assert out["holder_json"]["type"] == "holder"
-        # READ-ONLY contract: nothing about a library write in the result
-        assert "library" not in json.dumps(out).lower() or "library tool family" in out["note"].lower()
+        # READ-ONLY contract: nothing about a library write outside the explanatory note
+        fields_except_note = {k: v for k, v in out.items() if k != "note"}
+        assert "library" not in json.dumps(fields_except_note).lower()
+        assert "does not write to a tool library" in out["note"].lower()
 
     def test_name_defaults_to_active_document(self):
         _install_design()

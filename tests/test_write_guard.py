@@ -80,6 +80,19 @@ class TestExpectDocumentGuard:
         out = _decode(h())                                       # no expect_document -> unchanged behavior
         assert out["created"] is True and out["acted_on"]["name"] == "Whatever"
 
+    def test_doc_switching_write_reports_the_new_doc(self):
+        # doc_new/doc_open/doc_activate make a DIFFERENT document active as their own effect.
+        # acted_on must stamp the document active AFTER the handler ran, not the one active before it.
+        calls = {"n": 0}
+
+        def _identity():
+            calls["n"] += 1
+            return ("OldDoc", "urn:old") if calls["n"] == 1 else ("NewDoc", "urn:new")
+        wg._active_identity = _identity
+        h = wg.wrap(lambda **kw: _ok({"opened": True}))
+        out = _decode(h())
+        assert out["acted_on"] == {"name": "NewDoc", "document_id": "urn:new"}
+
 
 class TestIntegrationThroughItem:
     def test_write_tool_gains_expect_document_read_does_not(self):

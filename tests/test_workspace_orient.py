@@ -289,8 +289,8 @@ class TestOrientation:
         out = _payload(wo.handler())
         assert out["health"]["broken_joints"] == ["PistonSlide"]
         assert out["health"]["is_healthy"] is False
-        # the note LEADS with the FINDINGS (not a laundered "UNHEALTHY" verdict) so a skimming agent
-        # sees the fact but isn't told a deliberate config is broken.
+        # the note leads with the facts (not an "unhealthy" verdict) so a skimming agent sees what
+        # was found without being told a deliberate config is broken.
         assert out["note"].startswith("Attention")
         assert "failed to compute" in out["note"]
 
@@ -399,7 +399,7 @@ class TestExternalReferences:
         assert "fix_references" in out["pointers"]
         assert "doc_update_xref" in out["pointers"]["fix_references"]
         assert "StalePart" in out["pointers"]["fix_references"]
-        # findings-first framing (not a laundered verdict), and it flags the fact may be intentional
+        # the note states the facts and flags that they may be intentional, rather than a bare verdict
         assert out["note"].startswith("Attention")
         assert "out-of-date reference" in out["note"]
         assert "intentional" in out["note"]                      # tells the agent to confirm, not assume

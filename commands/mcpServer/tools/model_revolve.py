@@ -5,20 +5,10 @@
 
   model_revolve -> spin a closed sketch profile around an axis to make a solid of revolution
                    (shafts, pistons, pulleys, bottles, anything turned). Choose the feature
-                   operation (new body / join / cut / intersect), the angle (full 360 or partial),
-                   and whether it is symmetric about the profile plane. WRITES to the design.
+                   operation, the angle (full 360 or partial), and symmetry. WRITES.
 
-The companion to model_extrude: where extrude gives a profile straight-line depth, revolve sweeps it
-around an axis. General-purpose - it just revolves a profile about an axis; it says nothing about
-WHY. The axis is the sketch's own X/Y/Z origin axis, or a straight sketch LINE in the profile's
-sketch (so you can revolve about an arbitrary axis you drew).
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - Component.features.revolveFeatures.createInput(profile, axis, FeatureOperations) -> input
-  - RevolveFeatureInput.setAngleExtent(isSymmetric: bool, angle: ValueInput[radians or 'deg'])
-  - axis: a ConstructionAxis (component.xConstructionAxis...) or a straight SketchLine
-  - RevolveFeatures.add(input) -> RevolveFeature (.bodies)
-Handler runs on the main thread; WRITES.
+The companion to model_extrude - revolve sweeps a profile around an axis instead of extruding it
+straight. Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import math
@@ -35,15 +25,6 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-# Operation name -> adsk.fusion.FeatureOperations attribute.
-_OPERATIONS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"join": "JoinFeatureOperation",
-"cut": "CutFeatureOperation",
-"intersect": "IntersectFeatureOperation",
-}
-
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 _PROFILE = _inputs.ProfileRef("profile_index")
 
@@ -53,50 +34,47 @@ _AXES = {
 "y": "yConstructionAxis",
 "z": "zConstructionAxis",
 }
+_VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
+
+# axis: world x/y/z, or a straight-edge/sketch-line 'handle' - resolved via the shared AxisRef kind.
+_AXIS = _inputs.AxisRef("axis", default="z")
 
 
-def _target_sketch(comp, sketch_name):
-    coll = safe(lambda: comp.sketches)
-    name = (sketch_name or "").strip()
-    if coll is None:
-        return None, name
-    if name:
-        return safe(lambda: coll.itemByName(name)), name
-    n = safe(lambda: coll.count, 0)
-    return (coll.item(n - 1) if n else None), name
-
-
-def _resolve_axis(comp, sketch, axis):
-    """Resolve the revolve axis to an entity: an origin axis (x/y/z), or a sketch line ref
-    'line:<index>' within the profile's sketch. Returns (axis_entity, label) or (None, None)."""
+def _axis_entity(comp, sketch, axis):
+    """Resolve the revolve axis to an entity: world x/y/z -> that origin ConstructionAxis; a
+    find_geometry/sketch 'handle' -> the resolved straight edge/sketch-line (via the shared AxisRef
+    kind); or 'line:<index>' -> a line by position in the profile's OWN sketch - the one selector
+    AxisRef can't express generically, since it has no notion of "this profile's sketch".
+    Returns (axis_entity, label) on success, or (None, error_detail) on failure."""
     a = (axis or "z").strip().lower()
-    if a in _AXES:
-        return safe(lambda: getattr(comp, _AXES[a])), f"{a}-axis"
     if a.startswith("line:"):
         try:
             idx = int(a.split(":", 1)[1])
         except Exception:
-            return None, None
+            return None, f"'{axis}' is not a valid line selector (want 'line:<index>')."
         lines = safe(lambda: sketch.sketchCurves.sketchLines)
-        if lines and 0 <= idx < safe(lambda: lines.count, 0):
-            return safe(lambda: lines.item(idx)), f"sketch {a}"
-    return None, None
+        n = safe(lambda: lines.count, 0) if lines else 0
+        if lines is None or not (0 <= idx < n):
+            return None, f"line index {idx} out of range - sketch has {n} line(s)."
+        return safe(lambda: lines.item(idx)), f"sketch {a}"
+
+    tagged, err = _AXIS.resolve(axis)
+    if err:
+        return None, err
+    kind, val = tagged
+    if kind == "world":
+        key = _VEC_TO_KEY.get(val)
+        ent = safe(lambda: getattr(comp, _AXES[key])) if key else None
+        return ent, f"{key}-axis"
+    return val, "edge handle"          # kind == "edge": a straight BRepEdge or sketch line
 
 
 def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             angle_deg: float = 360.0, operation: str = "new", symmetric: bool = False,
             second_angle_deg: float = 0.0) -> dict:
-    """Revolve a sketch profile about an axis into a solid.
-
-    sketch_name: the sketch holding the profile (omit = most recent). profile_index: which closed
-    profile (0-based). axis: x | y | z (the component origin axis) OR 'line:<index>' to revolve
-    about a straight line in the sketch. angle_deg: revolve angle (360 = full). second_angle_deg:
-    revolve this much the OTHER direction too (an asymmetric two-sided revolve - e.g. 90 forward +
-    30 back); ignored when symmetric. operation: new | join | cut | intersect. symmetric: split the
-    angle both ways about the profile plane. WRITES.
-    """
+    """Revolve a sketch profile about an axis into a solid."""
     op_key = (operation or "new").strip().lower()
-    if op_key not in _OPERATIONS:
+    if op_key not in _common.OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
     try:
         ang = float(angle_deg)
@@ -110,7 +88,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    sketch, requested = _target_sketch(comp, sketch_name)
+    sketch, requested = _common.target_sketch(comp, sketch_name)
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
@@ -136,12 +114,11 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             return error(f"profile_index {idx} out of range - sketch has {pcount} profile(s).")
         profile = profiles.item(idx)
 
-    axis_entity, axis_label = _resolve_axis(comp, sketch, axis)
+    axis_entity, axis_label = _axis_entity(comp, sketch, axis)
     if not axis_entity:
-        return error(f"Could not resolve axis '{axis}'. Use x | y | z, or 'line:<index>' for a "
-    "straight sketch line to revolve about.")
+        return error(f"Could not resolve axis '{axis}': {axis_label or 'use x | y | z, a straight-edge/sketch handle, or line:<index>.'}")
 
-    op = getattr(adsk.fusion.FeatureOperations, _OPERATIONS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         rev_input = comp.features.revolveFeatures.createInput(profile, axis_entity, op)
     except Exception as e:
@@ -152,9 +129,8 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     try:
         second = float(second_angle_deg or 0.0)
         if second and not symmetric:
-            # asymmetric two-sided revolve: 'ang' one way, 'second' the other.
-            # API is setTwoSideAngleExtent(angleOne, angleTwo) - confirmed live; the prior
-            # setTwoSidesExtent name does NOT exist and raised AttributeError on every call.
+            # asymmetric two-sided revolve: 'ang' one way, 'second' the other. Use
+            # setTwoSideAngleExtent, not setTwoSidesExtent (see fusion-api-notes.md).
             second_val = adsk.core.ValueInput.createByReal(math.radians(second))
             rev_input.setTwoSideAngleExtent(angle_val, second_val)
         else:
@@ -196,8 +172,9 @@ TOOL_DESCRIPTION = (
 "piston, pulley, bottle). The companion to model_extrude. 'sketch_name' selects the sketch "
 "(omit = most recent); 'profile_index' picks the region (0-based index, OR a profile 'handle' from "
 "sketch_get to target one region of a multi-profile sketch). 'axis' is x | y | z "
-"(the component origin axis) OR 'line:<index>' to revolve about a straight line you drew in the "
-"sketch. 'angle_deg' is the sweep (360 = full revolve). 'operation': new | join | cut | "
+"(the component origin axis), a straight-edge 'handle' from find_geometry, OR 'line:<index>' to "
+"revolve about a straight line you drew in the sketch. 'angle_deg' is the sweep (360 = full "
+"revolve). 'operation': new | join | cut | "
 "intersect. 'symmetric' splits the angle both ways about the profile plane. WRITES; returns the "
 "resulting body names."
 )
@@ -209,7 +186,8 @@ revolve_tool = (
     .add_input_property("profile_index", {"type": ["integer", "string"],
             "description": "Which region to revolve: a 0-based index (default 0), OR a profile 'handle' from sketch_get (targets one region of a multi-profile sketch)."})
     .add_input_property("axis", {"type": "string",
-            "description": "x | y | z (component origin axis) or 'line:<index>' (a straight sketch line). Default z."})
+            "description": _AXIS.schema()["description"] + " Or 'line:<index>' for a straight line "
+            "in the profile's own sketch."})
     .add_input_property("angle_deg", {"type": "number",
             "description": "Revolve angle in degrees (360 = full revolve, default)."})
     .add_input_property("second_angle_deg", {"type": "number",

@@ -1,13 +1,13 @@
-"""Unit tests for the matured ``joint.py`` autonomous geometry-snap resolver.
+"""Unit tests for ``joint_create_edit.py``'s autonomous geometry-snap resolver.
 
-The MVP joint tool resolved inputs by joint-origin NAME only. The maturation adds
-an AUTONOMOUS (no human selection) geometry snap: an input may instead be
-'<occurrence>:<snap>' where snap is origin | center | top | bottom | cylinder,
-and the tool finds that geometry in the occurrence, builds the matching
-JointGeometry, and proxies it into the occurrence's assembly context.
+Besides resolving inputs by joint-origin NAME, a joint input may be an AUTONOMOUS
+(no human selection) geometry snap: '<occurrence>:<snap>' where snap is origin |
+center | top | bottom | cylinder. The tool finds that geometry in the occurrence,
+builds the matching JointGeometry, and proxies it into the occurrence's assembly
+context.
 
-These tests pin the PURE parts — snap-spec parsing (_parse_snap) and the
-top/bottom/largest-face selection (_pick_face) — without a live Fusion. The
+These tests pin the PURE parts - snap-spec parsing (_parse_snap) and the
+top/bottom/largest-face selection (_pick_face) - without a live Fusion. The
 JointGeometry factory calls + createForAssemblyContext proxying are live-only and
 exercised against the running session separately.
 """

@@ -3,34 +3,10 @@
 
 """MCP building block: find geometry on a part and return stable HANDLES to it.
 
-  find_geometry -> query the faces / edges / vertices of an occurrence (or body) and return a list
-                   of matches, each with a stable HANDLE (entityToken), its kind, world position,
-                   and shape data (a cylinder's radius+axis, an edge's length, a face's area).
-                   Filter by 'kind' (cylinder_face / planar_face / circular_edge / vertex / ...),
-                   by 'radius', and/or 'nearest_to' a world point. Read-only.
-
-WHY THIS EXISTS (the design point): joints, datums, and many features need a SPECIFIC piece of
-geometry - a crank-pin's cylindrical face, a bore, a hole edge. Selecting it by a magic snap-string
-('<occ>:cylinder') is ambiguous when a part has many such faces, and a raw script must re-derive it
-every time. Instead, this returns each candidate as a HANDLE you can pass to other tools
-(joint_at_geometry, ...) - geometry as a first-class VALUE that flows between tool calls.
-
-HANDLE LIFETIME (important - do not overstate stability): the handle is the entity's `entityToken`.
-Fusion does NOT guarantee a stable token per entity: querying the SAME edge/face twice can return
-DIFFERENT tokens, and an older token can fail `findEntityByToken` even with NO model edit in between.
-Treat a handle as SHORT-LIVED: use it promptly, in the calls right after the find_geometry that minted
-it. If a handle fails to resolve ("stale"), re-run find_geometry (same target/kind/nearest_to) for a
-fresh one - don't assume the geometry changed. Prefer to find + consume in adjacent calls rather than
-hoarding a batch of handles to use later.
-
-Grounded in adsk.fusion:
-  - Occurrence.bRepBodies / body.faces / body.edges / body.vertices (proxied into assembly context)
-  - BRepFace.geometry.surfaceType (Cylinder/Plane/Cone/Sphere/...), .area, .centroid; cylinder
-    .geometry.radius + .origin + .axis
-  - BRepEdge.geometry.curveType (Circle3D/Line3D/Arc3D/...), .length, edge circle .center+.radius
-  - entity.entityToken (the HANDLE) ; Design.findEntityByToken(token) resolves it back WHEN the token
-    is still live (see HANDLE LIFETIME above - not guaranteed stable across separate queries)
-Handler runs on the main thread; read-only.
+Scans faces/edges/vertices and returns each match's kind, world position, and shape data with a
+HANDLE (entityToken) other tools consume (joint_at_geometry, model_extrude, ...). Handles are
+SHORT-LIVED - Fusion does not guarantee a stable entityToken across separate queries, so use one
+promptly and re-run find_geometry if it is rejected as stale (see docs/fusion-api-notes.md).
 """
 
 import adsk.core
@@ -39,7 +15,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, scale
+from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
 from . import _outputs
@@ -64,6 +40,14 @@ _EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "
 def _resolve_target(design, target):
     """Resolve 'target' (occurrence name/fullPathName, or component name, or body name, or
     '' = whole design) to a list of (occurrence_or_None, body) to scan.
+
+    DELIBERATE AGGREGATION (unlike OccurrenceRef, which refuses an ambiguous name): a 'target' that
+    matches MULTIPLE occurrences - e.g. a component name shared by every instance of a pattern, like
+    'Bolt' matching Bolt:1..Bolt:6 - scans ALL of them and returns geometry from every match, not just
+    the first. This is a READ tool whose whole job is to hand back a list of candidate handles (each
+    individually addressable), not to single out ONE instance to act on - so "every matching instance"
+    is the useful default, not a wrong-instance risk. Use a body/occurrence fullPathName in 'target'
+    to scan exactly one instance instead.
 
     Scans root.allOccurrences (the flattened, RECURSIVE list - so a NESTED occurrence is reachable by
     its fullPathName, the same key design_get(include=['tree'])/assembly_probe emit) plus root-level bodies. This
@@ -148,15 +132,7 @@ def _edge_record(edge, inv_k):
 
 def handler(target: str = "", kind: str = "", radius: float = None,
             nearest_to=None, units: str = "mm", max_results: int = 20) -> dict:
-    """Find geometry on a part and return stable handles.
-
-    target: occurrence/component name, or a body name, or '' for the whole design. kind: filter to
-    cylinder_face / planar_face / cone_face / sphere_face / torus_face / circular_edge / line_edge /
-    arc_edge / vertex (omit = faces+edges). radius: keep only cylinder faces / circular edges whose
-    radius matches (in 'units', tolerance 5%). nearest_to: [x,y,z] world point (in 'units') to sort
-    matches by distance to. max_results caps the list. Read-only - returns handles to pass to
-    joint_at_geometry etc.
-    """
+    """Find geometry on a part and return stable handles. Read-only."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -229,9 +205,12 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, "
     "world position, and shape data (cylinder radius+axis, edge radius, face area). 'target' = "
-    "occurrence/component/body name ('' = whole design). 'kind' filters by geometry type; 'radius' keeps "
-    "matching round geometry; 'nearest_to'=[x,y,z] sorts by distance. Handles are SHORT-LIVED - use them "
-    "in the next call(s); if one is rejected as stale, re-run find_geometry for a fresh one.\n"
+    "occurrence/component/body name ('' = whole design); a name matching several occurrences (e.g. "
+    "every instance of a patterned component) scans ALL of them and returns candidates from each - by "
+    "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. 'kind' "
+    "filters by geometry type; 'radius' keeps matching round geometry; 'nearest_to'=[x,y,z] sorts by "
+    "distance. Handles are SHORT-LIVED - use them in the next call(s); if one is rejected as stale, "
+    "re-run find_geometry for a fresh one.\n"
     + _outputs.produces_block(RETURNS)
 )
 

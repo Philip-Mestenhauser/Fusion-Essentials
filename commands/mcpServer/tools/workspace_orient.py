@@ -3,32 +3,11 @@
 
 """MCP building block: the COLD-BOOT orientation call - one cheap read that situates the agent.
 
-  workspace_orient -> a single structured situational report of the OPEN document: what it is (doc +
-                      units + mode), what it CONTAINS (component/body/sketch/joint counts + a depth-1
-                      browser digest), its HEALTH (timeline errors, broken joints, grounding), whether
-                      CAM data exists (without switching to Manufacture), and - the key part -
-                      budget-aware POINTERS telling the agent which targeted tool to use to refine each
-                      area, especially when the design is too large to dump wholesale. Read-only.
-
-WHY THIS EXISTS (the progressive-disclosure posture): an agent arrives at an open document BLIND. The
-old habit was to fish - design_get(include=['tree']), then assembly_probe, then cam_get, then
-design_get, then screenshots - each a round trip, each a guess about what's even
-relevant, and on a large assembly that cost is unbounded. This call inverts that: ONE cheap broad read
-hands over the key variables + a map of what's here + pointers to the narrow tools, so every SUBSEQUENT
-call is a targeted, lighter-weight refinement instead of an exploratory probe. Orient cheaply first;
-drill on demand. It composes signals the deeper tools expose (CAM detection a la cam_get, timeline
-health a la design_ops, joint/ground rollup a la assembly_probe) into one digest - it does not replace
-them; it points at them.
-
-Grounded in adsk.* (all reads, defensive):
-  - app.activeDocument / .activeProduct.productType ; userInterface.activeWorkspace
-  - Design.cast(activeProduct) ; design.designType ; unitsManager.defaultLengthUnits
-  - rootComponent.occurrences (top-level digest) / .allOccurrences.count / .bRepBodies / .sketches /
-    .joints (count + healthState + occurrence wiring) / .isGrounded
-  - design.timeline.item(i).healthState (0 healthy / 1 warning / 2 error / 3 suppressed)
-  - document.documentReferences.item(i).isOutOfDate -> stale external-component status (any doc)
-  - document.products.itemByProductType('CAMProductType') -> CAM exists? + setups/op counts
-Read-only; runs on the main thread.
+Returns one structured report of the open document: what it is (doc + units + mode), what it CONTAINS
+(component/body/sketch/joint counts + a depth-1 browser digest), its HEALTH (timeline errors, broken
+joints, stale references), whether CAM data exists (without switching to Manufacture), and
+budget-aware POINTERS naming the targeted tool to refine each area. Call this first on an open
+document; drill down with the pointers rather than dumping the whole design. Read-only.
 """
 
 import adsk.core
@@ -67,10 +46,7 @@ def _data_identity(doc):
     An UNSAVED document has no DataFile yet, so the cloud identity is null and saved=false - surfaced
     plainly rather than guessed. Every read is defensive: a missing/erroring folder or project field
     just stays null (cloud reads fail in surprising ways) and never breaks the orient.
-
-    Grounded in adsk.core: Document.dataFile -> DataFile(.id/.versionNumber/.latestVersionNumber/
-    .fusionWebURL, .parentFolder, .parentProject); DataFolder(.name/.id); DataProject(.name/.id,
-    .parentHub); DataHub(.name)."""
+    """
     ident = {
         "saved_to_cloud": False,
         "document_id": None,          # lineage URN - the id doc_open / doc_copy / data_delete_file use
@@ -109,10 +85,7 @@ def _data_identity(doc):
 def _overall_bbox(root, design):
     """The whole-design world-aligned bounding box: size (x/y/z) + center, in the design's display
     units - the 'how big is this thing, and where is it relative to the origin' read every modelling
-    decision needs. None when there's no solid geometry yet (an empty/sketch-only design).
-
-    Grounded in adsk.fusion: Component.boundingBox -> BoundingBox3D(.minPoint/.maxPoint) in cm; we
-    scale to the design's defaultLengthUnits so the numbers match everything else the agent sees."""
+    decision needs. None when there's no solid geometry yet (an empty/sketch-only design)."""
     bb = safe(lambda: root.boundingBox)
     mn = safe(lambda: bb.minPoint) if bb is not None else None
     mx = safe(lambda: bb.maxPoint) if bb is not None else None
@@ -137,11 +110,7 @@ def _overall_bbox(root, design):
 def _view_state():
     """What the CAMERA is currently showing - so a screenshot-driven agent knows whether it needs to
     reframe before its first view_screenshot. Returns projection (perspective/orthographic) + the eye
-    and target world points (rounded), or None if no viewport.
-
-    Grounded in adsk.core: app.activeViewport.camera -> Camera(.cameraType, .eye, .target). cameraType
-    is an enum; 0 == OrthographicCameraType, 1 == PerspectiveCameraType (PerspectiveWithOrthoFacesCameraType
-    also perspective) - we map defensively and fall back to the raw value."""
+    and target world points (rounded), or None if no viewport."""
     vp = safe(lambda: app.activeViewport)
     cam = safe(lambda: vp.camera) if vp is not None else None
     if cam is None:
@@ -165,10 +134,7 @@ def _selection_echo():
     """A COMPACT echo of what the user currently has selected in Fusion - the cheapest bridge from the
     human's intent to an actionable handle. One short record per selection (kind + name/owner); for the
     full geometry detail + direction vectors the agent calls sys_get_selection. Returns (count, list).
-
-    Grounded in adsk.core: ui.activeSelections (.count/.item(i)); Selection.entity. Kept deliberately
-    shallow (no areas/centroids/handles) so the cold-boot read stays cheap - sys_get_selection is the
-    deep version this points at."""
+    Kept deliberately shallow (no areas/centroids/handles) so the cold-boot read stays cheap."""
     ui = safe(lambda: app.userInterface)
     sels = safe(lambda: ui.activeSelections) if ui is not None else None
     count = safe(lambda: sels.count, 0) if sels is not None else 0
@@ -314,14 +280,7 @@ def _cam_summary(doc):
 
 
 def handler() -> dict:
-    """Cold-boot orientation: one read that situates the agent in the open document. Read-only.
-
-    Returns the document identity + units + modelling mode, content counts (components/bodies/sketches/
-    joints) with a depth-1 browser digest, a health rollup (timeline errors/warnings, broken joints,
-    grounded count), whether CAM data exists (+ setup/operation counts), and a POINTERS block naming
-    the targeted tool to refine each area - steering away from whole-design dumps when the design is
-    large. Call this FIRST on an open document; use the pointers to drill down cheaply.
-    """
+    """Cold-boot orientation: one read that situates the agent in the open document. Read-only."""
     out = {
     "fusion_version": safe(lambda: app.version),
     "document": None,
@@ -451,10 +410,10 @@ def handler() -> dict:
                               if cam and cam.get("ungenerated_operations") else "toolpaths look generated."))
     out["pointers"] = pointers
 
-    # Lead the note with the FINDINGS (facts an agent should see first), not a laundered "UNHEALTHY"
+    # State the facts (what was found) and point at the check, rather than emitting an "unhealthy"
     # verdict. is_healthy is a conservative OR; on a deliberately-configured doc (a fixture/CAM template
-    # with parked joints or intentionally-pinned references) these can be BY DESIGN. State what was
-    # found + point at the check; let the agent judge whether it's a problem here.
+    # with parked joints or pinned references) these conditions can be by design, so let the agent
+    # judge whether it's a problem here.
     if errors or broken_joints or out_of_date:
         bits = []
         if errors:

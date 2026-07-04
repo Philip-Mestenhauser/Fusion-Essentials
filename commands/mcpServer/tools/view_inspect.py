@@ -1,40 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: the agent's "eyes" - move the camera, isolate/show/hide, toggle
-wireframe, and RESTORE the prior visual state when done.
+"""MCP building block: the agent's "eyes" - move the camera, isolate/show/hide, toggle wireframe, and
+RESTORE the prior visual state when done. View-state only; pair with view_screenshot to capture.
 
-  view_inspect(action=...) - a set of composable view verbs so an agent can intuit a design
-  by looking at it from different angles and in different states, WITHOUT permanently
-  disturbing what the user had on screen:
-
-    snapshot          -> save the CURRENT camera + visual style + every occurrence's
-                         visibility/isolation to a saved-state stack. Call this ONCE before
-                         exploring so you can put everything back.
-    orient            -> aim the camera: 'orientation' (front/back/top/bottom/left/right/
-                         iso-top-right/...) and/or 'focus' (fit to a named occurrence). Always
-                         fits the view for reliable framing unless fit=false.
-    isolate|show|hide|clear_isolation
-                      -> visibility verbs (show only / bulb on/off /
-                         un-isolate). 'target' is an occurrence name or full path.
-    style             -> set the visual style: 'shaded' (default look) or 'wireframe'
-                         (and the hidden/visible-edge variants).
-    restore           -> pop the last snapshot and put camera + style + ALL occurrence
-                         visibility back exactly as they were.
-
-Pair with view_screenshot to actually capture what you've aimed at. Typical flow:
-  view_inspect(snapshot) -> view_inspect(orient, orientation='front', focus='<OccurrenceName>:1')
-  -> view_screenshot -> view_inspect(style, style='wireframe') -> view_screenshot
-  -> view_inspect(restore)
-
-This is VIEW state only - no geometry changes. Generic: it's a general set of eyes (orient,
-isolate, wireframe, restore) usable for CAM evaluation, assembly review, or anything visual.
-
-Grounded in adsk.core / adsk.fusion:
-  - Viewport.camera (Camera: eye/target/upVector/viewOrientation/isFitView), .visualStyle
-    (VisualStyles enum), .fit(), .refresh()
-  - Occurrence.isLightBulbOn / .isIsolated / .isVisible / .name / .fullPathName
-The snapshot stack is module-level so it survives between MCP calls (one session).
+Camera orientation is set via explicit eye/target/upVector rather than camera.viewOrientation, which
+does not reliably move the eye/target in this API flow (see docs/fusion-api-notes.md "Viewport /
+camera"). The snapshot stack is module-level so it survives between MCP calls (one session).
 """
 
 import adsk.core
@@ -45,6 +17,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _inputs
+from . import _view_common
 
 app = adsk.core.Application.get()
 
@@ -52,27 +26,20 @@ _ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation",
     "style", "restore", "save_view", "apply_view", "list_views")
 _MAX_OCC = 1000  # cap occurrence snapshot/restore for huge assemblies
 
+_TARGET = _inputs.OccurrenceRefList("target",
+        description="Occurrence(s) to isolate/show/hide - a fullPathName/name, or a list of them.")
+_FOCUS = _inputs.OccurrenceRef("focus",
+        description="Occurrence to fit the view to (orient).")
+
 # Saved-state stack, keyed by active document name so snapshots don't cross documents.
 # Each entry: {"camera": <Camera copy>, "visualStyle": int, "occ": {fullPath: (bulb, isolated)}}
 _SNAPSHOTS = {}
 
-# Explicit (view_direction, up_vector) per orientation. view_direction = (eye - target), i.e. the
-# direction FROM the model TO the camera. We set eye/target/up directly rather than relying on
-# camera.viewOrientation - setting that property does NOT reliably move the camera's eye/target in
-# this API flow (verified: a 'front' viewOrientation left the eye on the previous iso vector), which
-# made focused orthographic views come out tilted. Fusion is Z-up.
-_ORIENTATIONS = {
-    "front": ((0, -1, 0), (0, 0, 1)),
-    "back": ((0, 1, 0), (0, 0, 1)),
-    "top": ((0, 0, 1), (0, 1, 0)),
-    "bottom": ((0, 0, -1), (0, 1, 0)),
-    "right": ((1, 0, 0), (0, 0, 1)),
-    "left": ((-1, 0, 0), (0, 0, 1)),
-    "iso-top-right": ((1, -1, 1), (0, 0, 1)),
-    "iso-top-left": ((-1, -1, 1), (0, 0, 1)),
-    "iso-bottom-right": ((1, 1, 1), (0, 0, 1)),
-    "iso-bottom-left": ((-1, 1, 1), (0, 0, 1)),
-}
+# The named-orientation table (view_direction = eye - target, i.e. the direction FROM the model TO
+# the camera; see docs/fusion-api-notes.md for why we set eye/target/up directly instead of
+# camera.viewOrientation) lives in _view_common, shared with view_screenshot (which applies the
+# negated look_direction) and view_section (which aims a cut at the same directions).
+_ORIENTATIONS = _view_common.VIEW_DIRECTIONS
 _STYLES = {
 "shaded": "ShadedVisualStyle",
 "shaded-hidden-edges": "ShadedWithHiddenEdgesVisualStyle",
@@ -84,7 +51,18 @@ _STYLES = {
 
 
 def _doc_key():
-    return safe(lambda: app.activeDocument.name) or "<active>"
+    """A key that identifies the active document across snapshot/restore calls. Prefers the cloud
+    data-file id (stable, unique) so two open documents that happen to share a NAME (e.g. two
+    unsaved "Untitled") don't collide; falls back to the name when there's no data file (unsaved doc)."""
+    doc = safe(lambda: app.activeDocument)
+    if doc is None:
+        return "<active>"
+    df = safe(lambda: doc.dataFile)
+    if df is not None:
+        did = safe(lambda: df.id)
+        if did:
+            return did
+    return safe(lambda: doc.name) or "<active>"
 
 
 def _all_occurrences(design):
@@ -114,22 +92,6 @@ def _show_with_ancestors(occ):
         cur = safe(lambda cur=cur: cur.assemblyContext)  # parent occurrence; None at root
         guard += 1
     return lit
-
-
-def _find_occurrences(design, target):
-    """Resolve target -> occurrences by exact name/path, else substring. Returns (matches, sample)."""
-    target = (target or "").strip()
-    exact, contains, names = [], [], []
-    for o in _all_occurrences(design):
-        nm = safe(lambda o=o: o.name) or ""
-        fp = safe(lambda o=o: o.fullPathName) or ""
-        if len(names) < 60:
-            names.append(nm)
-        if nm == target or fp == target:
-            exact.append(o)
-        elif target.lower() in nm.lower() or target.lower() in fp.lower():
-            contains.append(o)
-    return (exact or contains), names
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +129,9 @@ def _do_orient(design, orientation, focus, fit):
     # Target: the focus occurrence's bbox center if given, else keep the current target.
     target = cam.target
     if focus:
-        matches, names = _find_occurrences(design, focus)
-        if not matches:
-            return error(f"No occurrence matched focus '{focus}'. Some: "
-                          f"{', '.join(sorted(set(n for n in names if n))[:25])}.")
-        o = matches[0]
+        o, focus_err = _FOCUS.resolve(focus)
+        if focus_err:
+            return error(focus_err)
         bb = safe(lambda: o.boundingBox)
         if bb:
             target = adsk.core.Point3D.create((bb.minPoint.x + bb.maxPoint.x) / 2,
@@ -186,7 +146,8 @@ def _do_orient(design, orientation, focus, fit):
         key = orientation.strip().lower()
         if key not in _ORIENTATIONS:
             return error(f"Unknown orientation '{orientation}'. Valid: {', '.join(_ORIENTATIONS)}.")
-        (dx, dy, dz), (ux, uy, uz) = _ORIENTATIONS[key]
+        dx, dy, dz = _ORIENTATIONS[key]
+        ux, uy, uz = _view_common.up_vector(key)
         import math
         dmag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
         # distance from current camera (so we don't zoom wildly before the fit)
@@ -227,10 +188,9 @@ def _do_visibility(design, action, target):
         return ok({"action": action, "cleared_count": cleared})
     if not target:
         return error(f"Provide 'target' for {action}.")
-    matches, names = _find_occurrences(design, target)
-    if not matches:
-        return error(f"No occurrence matched '{target}'. Some: "
-                      f"{', '.join(sorted(set(n for n in names if n))[:25])}.")
+    matches, target_err = _TARGET.resolve(target)
+    if target_err:
+        return error(target_err)
     if action == "isolate" and len(matches) > 1:
         return error(f"'{target}' matched {len(matches)} occurrences; isolate needs exactly one. "
                       "Use a fuller name/path.")
@@ -382,16 +342,9 @@ def _do_list_views(design):
     return ok({"action": "list_views", "count": len(views), "named_views": views})
 
 
-def handler(action: str = "", target: str = "", orientation: str = "", focus: str = "",
+def handler(action: str = "", target=None, orientation: str = "", focus: str = "",
             style: str = "", fit: bool = True, view_name: str = "") -> dict:
-    """The agent's eyes: aim the camera, isolate/show/hide, toggle wireframe, and restore.
-
-    action: snapshot | orient | isolate | show | hide | clear_isolation | style | restore |
-    save_view | apply_view | list_views. target: occurrence name/path (isolate/show/hide).
-    orientation: front/back/top/bottom/left/right/iso-top-right/... (orient). focus: occurrence to
-    fit the view to (orient). style: shaded/wireframe/... (style). view_name: name for save_view /
-    apply_view. fit: fit the view when orienting (default true). VIEW state only.
-    """
+    """The agent's eyes: aim the camera, isolate/show/hide, toggle wireframe, and restore. VIEW state only."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
@@ -422,38 +375,34 @@ def handler(action: str = "", target: str = "", orientation: str = "", focus: st
 
 TOOL_DESCRIPTION = (
     "View-state verbs to inspect the model from different angles, then restore - no geometry changes. "
-    "'action': 'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
-    "them back to the last snapshot) | 'orient' ('orientation'=front/back/top/bottom/left/right/iso-*; "
-    "and/or 'focus'=fit to a named occurrence) | 'isolate'/'show'/'hide'/'clear_isolation' "
-    "('target'=occurrence; 'show' lights the whole ancestor chain) | 'style' ('style'=shaded/wireframe/"
-    "shaded-edges/...) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent Named View, "
-    "camera only). snapshot/restore is in-memory (cleared on reload). Pair with view_screenshot; for "
-    "section views use view_section (a named view won't restore a cut)."
+    "'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
+    "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=fit to a named "
+    "occurrence) | 'isolate'/'show'/'hide'/'clear_isolation' "
+    "('target'=occurrence(s), ambiguous names refused; 'show' lights the whole ancestor chain) | "
+    "'style' (visual style) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent "
+    "Named View, camera only). snapshot/restore is in-memory (cleared on reload). Pair with "
+    "view_screenshot; for section views use view_section (a named view won't restore a cut)."
 )
 
 tool = (
-    Tool.create_with_string_input(
-        name="view_inspect",
-        description=TOOL_DESCRIPTION,
-        input_param_name="action",
-        input_param_description="snapshot | orient | isolate | show | hide | clear_isolation | style | restore | save_view | apply_view | list_views.",
-    )
-    .add_input_property("target", {"type": "string",
-            "description": "Occurrence name or full path (isolate/show/hide)."})
+    Tool.create_simple(name="view_inspect", description=TOOL_DESCRIPTION)
+    .add_input_property(*_inputs.Choice("action", _ACTIONS, required=True,
+            description="The view verb to perform.").as_property())
+    .add_required_input("action")
+    .add_input_property(*_TARGET.as_property())
     .add_input_property("view_name", {"type": "string",
             "description": "Name for save_view / apply_view (a persistent document Named View)."})
-    .add_input_property("orientation", {"type": "string",
-            "description": "Camera preset for 'orient': front/back/top/bottom/left/right/iso-top-right/iso-top-left/iso-bottom-right/iso-bottom-left."})
-    .add_input_property("focus", {"type": "string",
-            "description": "Occurrence to fit the view to (orient)."})
-    .add_input_property("style", {"type": "string",
-            "description": "Visual style for 'style': shaded/shaded-edges/shaded-hidden-edges/wireframe/wireframe-edges/wireframe-hidden-edges."})
+    .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),
+            description="Camera preset for 'orient'.").as_property())
+    .add_input_property(*_FOCUS.as_property())
+    .add_input_property(*_inputs.Choice("style", list(_STYLES),
+            description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",
             "description": "Fit the view when orienting (default true)."})
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

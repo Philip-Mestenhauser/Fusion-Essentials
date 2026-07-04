@@ -1,33 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: delete a component occurrence from the active design.
-
-  design_delete_occurrence -> remove ONE occurrence (a component instance) from the assembly. The
-                     counterpart to model_create_component. WRITES (destructive).
-
-Why this exists: there was no way to remove a stray/duplicate occurrence (e.g. a botched
-assembly pattern that scattered extra instances) without throwing away the whole document and
-rebuilding. This closes that gap with a single guarded verb.
-
-GUARDS (honest failure over silent corruption):
-  - resolves the target via the shared OccurrenceRef logic (fullPathName-preferring, ambiguity-
-    refusing - never deletes the wrong instance on a bare substring);
-  - a pattern/mirror CHILD cannot be deleted on its own: Occurrence.deleteMe returns FALSE (no
-    exception) for a feature-owned instance, which we turn into a precise error pointing at the owning
-    feature (there is no Occurrence-level "is a pattern child" flag in the API to pre-check, so this is
-    detected from the deleteMe result rather than guessed);
-  - WARNS (in the result) which joints the delete removed, since deleting an occurrence silently
-    drops the joints it participates in;
-  - reports the timeline health before/after so a delete that breaks a downstream feature is surfaced,
-    not swallowed.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Occurrence.deleteMe() -> bool ("Deletes the occurrence... If this is the last occurrence
-    referencing a specific Component, the component is also deleted.")
-  - Occurrence.joints (joints affecting this occurrence) / .isGrounded / .nativeObject
-  - Design.timeline.item(i).healthState (0 healthy / 1 warning / 2 error / 3 suppressed)
-Handler runs on the main thread; WRITES (destructive).
+"""Deletes ONE occurrence (component instance) from the active design - the counterpart to
+model_create_component. Resolves the target via the shared OccurrenceRef logic (ambiguity-refusing);
+names any joints the delete removed; reports timeline health before/after. A pattern/mirror child
+can't be deleted on its own (see docs/fusion-api-notes.md "Occurrence delete"). WRITES (destructive).
 """
 
 import adsk.core

@@ -72,9 +72,9 @@ class TestFindTemplateByName:
 
 # ── _as_cam_template: normalise createFromOperations' contradictory return ──────────────────────
 #
-# The live API annotation is list[Operation] but the docstring claims a CAMTemplate. The old save
-# code assumed a single CAMTemplate and set .name on it / passed it to importTemplate — which breaks
-# if the binding actually returns a list. These pin the normalisation for BOTH shapes so the save
+# The live API annotation is list[Operation] but the docstring claims a CAMTemplate. Save code
+# that assumes a single CAMTemplate and sets .name on it / passes it to importTemplate breaks if
+# the binding actually returns a list. These pin the normalisation for BOTH shapes so the save
 # path is correct whichever the installed Fusion returns. (CAMTemplate.cast is the discriminator.)
 
 class _FakeTemplate:
@@ -204,7 +204,7 @@ class _SaveCAM:
 
 
 def _wire_save(monkeypatch, cam):
-    monkeypatch.setattr(ct, "_get_cam", lambda: (cam, None))
+    monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
     monkeypatch.setattr(ct, "_template_library", lambda: (SimpleNamespace(), None))
     import adsk.cam
     adsk.cam.Operation.cast = staticmethod(lambda x: x)
@@ -232,3 +232,52 @@ class TestSaveOperationsValidation:
         assert res["isError"] is True
         assert "Ghost" in res["message"] and "AlsoGone" in res["message"]
         assert "Face1" not in res["message"].split("Available")[0]   # Face1 was found, not missing
+
+
+class _RaiseOnName:
+    """A template whose .name setter raises - simulates a read-only or locked property."""
+    isValidTemplate = True
+    description = ""
+
+    def __getattribute__(self, item):
+        if item == "name":
+            return "original"
+        return super().__getattribute__(item)
+
+    def __setattr__(self, key, value):
+        if key == "name":
+            raise AttributeError("name is read-only")
+        super().__setattr__(key, value)
+
+
+class TestSaveTemplateRename:
+    """Rename/description mutations must raise rather than silently save under the original name."""
+
+    def _wire_full_save(self, monkeypatch, template_obj):
+        cam = _SaveCAM([_SaveSetup("S", ["Face1"])])
+        monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
+        lib = SimpleNamespace(urlByLocation=lambda loc: "root://", childFolderURLs=lambda u: [],
+                              importTemplate=lambda t, d: _Url("root://T1.f3dhsm-template"))
+        monkeypatch.setattr(ct, "_template_library", lambda: (lib, None))
+        import adsk.cam
+        adsk.cam.Operation.cast = staticmethod(lambda x: x)
+        adsk.cam.CAMTemplate.createFromOperations = staticmethod(lambda ops: template_obj)
+        adsk.cam.CAMTemplate.cast = staticmethod(
+            lambda x: x if isinstance(x, _FakeTemplate) or isinstance(x, _RaiseOnName) else None)
+
+    def test_rename_failure_propagates(self, monkeypatch):
+        # A read-only .name assignment must raise and propagate out of the handler - a silent
+        # no-op would save under the wrong name while reporting saved=True.
+        import pytest
+        t = _RaiseOnName()
+        self._wire_full_save(monkeypatch, t)
+        with pytest.raises(AttributeError, match="name is read-only"):
+            ct.save_operations_as_template_handler(
+                template_name="My Template", operations="Face1", setup="S")
+
+    def test_rename_succeeds_reports_correct_name(self, monkeypatch):
+        t = _FakeTemplate("old")
+        self._wire_full_save(monkeypatch, t)
+        out = _payload(ct.save_operations_as_template_handler(
+            template_name="New Name", operations="Face1", setup="S"))
+        assert out["saved"] is True and t.name == "New Name"

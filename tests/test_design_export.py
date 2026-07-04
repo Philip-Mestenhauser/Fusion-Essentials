@@ -173,9 +173,8 @@ class TestTargetResolution:
         assert em.calls[-1]["geom"].name == "FromHandle"
 
     def test_long_body_name_not_mistaken_for_handle(self, tmp_path):
-        # PR-review #7: a 60+ char body NAME used to fall into the handle path (len>60 heuristic) and
-        # fail to resolve. Resolution now tries _resolve_token_entity first (None for a non-token) and
-        # falls through to the name lookup — so a long body name exports by NAME.
+        # A long body NAME is not a handle: _resolve_token_entity returns None for a non-token, so
+        # resolution falls through to the name lookup and a long body name exports by NAME.
         long_name = "Left-Outrigger-Pivot-Bracket-Weldment-Subassembly-Body-Number-Seven"
         assert len(long_name) > 60
         _, em, _ = _install(bodies=[FakeBody(long_name)])
@@ -267,26 +266,23 @@ class TestSplitByComponent:
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["exported"] is False and out["file_count"] == 0
 
+    def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path):
+        # execute() lying (True, but nothing landed on disk) must land the occurrence in 'failed',
+        # not 'files' - the split path is gated on file existence the same as the single-target path.
+        _, em, _ = _install(occurrences=[FakeOcc("Ghost:1")])
 
-# ── _sanitize (filename safety) ───────────────────────────────────────────────
+        def lying_execute(opts):
+            em.executed = opts
+            return True   # lies: writes nothing
 
-class TestSanitize:
-    def test_drops_instance_suffix(self):
-        assert dx._sanitize("Loader Arm:1") == "Loader_Arm"
-
-    def test_keeps_safe_chars(self):
-        assert dx._sanitize("Part-A_1.v2") == "Part-A_1.v2"
-
-    def test_swaps_illegal_chars(self):
-        assert dx._sanitize("A/B\\C:1") == "A_B_C"
-
-    def test_empty_becomes_part(self):
-        assert dx._sanitize("") == "part"
-        assert dx._sanitize(None) == "part"
-
-    def test_all_illegal_becomes_part(self):
-        # base reduces to all-underscore (still non-empty), so it stays underscores, not "part"
-        assert dx._sanitize("***") == "___"
+        em.execute = lying_execute
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        assert out["exported"] is False
+        assert out["file_count"] == 0
+        assert out["files"] == []
+        assert "failed" in out
+        assert out["failed"][0]["occurrence"] == "Ghost:1"
+        assert "no file was written" in out["failed"][0]["error"].lower()
 
 
 # ── _export_one (per-file write result) ───────────────────────────────────────
@@ -317,6 +313,39 @@ class TestExportOne:
         em.createSTEPExportOptions = boom
         okk, err = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
         assert okk is False and "disk full" in err
+
+
+# ── file-existence gate (single-target export) ────────────────────────────────
+
+class TestFileExistenceGate:
+    def test_execute_true_but_no_file_written_is_a_failure(self, tmp_path):
+        # execute() returning true is NOT proof a file landed on disk - success is gated on
+        # os.path.isfile + a non-zero size.
+        _, em, _ = _install()
+
+        def lying_execute(opts):
+            em.executed = opts
+            return True   # lies: writes nothing
+
+        em.execute = lying_execute
+        res = dx.handler(format="step", file_path=str(tmp_path / "p.step"))
+        assert res["isError"] is True
+        assert "no file was written" in res["message"].lower()
+
+    def test_empty_file_is_also_a_failure(self, tmp_path):
+        # a zero-byte file on disk is not a real export either.
+        _, em, _ = _install()
+        target = str(tmp_path / "p.step")
+
+        def empty_execute(opts):
+            em.executed = opts
+            open(opts["path"], "w").close()   # writes an empty file
+            return True
+
+        em.execute = empty_execute
+        res = dx.handler(format="step", file_path=target)
+        assert res["isError"] is True
+        assert "no file was written" in res["message"].lower()
 
 
 # ── _resolve_target ordering ──────────────────────────────────────────────────

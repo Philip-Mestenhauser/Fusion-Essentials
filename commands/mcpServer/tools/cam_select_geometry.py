@@ -1,32 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: SELECT the machining geometry on a CAM operation (+ optionally its heights).
-
-  cam_select_geometry -> tell an operation WHICH geometry to machine, using find_geometry handles:
-      - chain      : seed BRepEdges/SketchLines into a CurveSelection chain (contour/pocket/3D
-                     machiningBoundarySel). Fusion walks the connected chain. isOpen / reverted.
-      - pocket     : seed the pocket-FLOOR BRepFace into a PocketSelection (2D pocket).
-      - face       : seed faces into a FaceContourSelection.
-      - silhouette : seed a body/face into a SilhouetteSelection.
-      - holes      : set drill holeFaces directly to cylinder faces (object-list), optionally filtered
-                     to a diameter range (min_diameter/max_diameter, mm).
-    Plus optional top/bottom HEIGHT control (mode + offset, the from-geometry pattern the pros use).
-
-This is the gap that made earlier ops generate EMPTY: cam_create_operation makes an op but couldn't
-target geometry. Two API mechanisms (researched live + in pro sample docs, see
-docs/fusion-api-notes.md "Operation geometry selections"):
-  (A) CURVE selections - param.value.getCurveSelections() -> createNew*Selection() ->
-      sel.inputGeometry=[...] -> param.value.applyCurveSelections(cs).  contours/pockets/machiningBoundarySel.
-  (B) DIRECT object-list - param.value.value = [faces].  drill holeFaces.
-
-Heights are a 4-part group (_mode/_offset/_value/_ref): SET _mode + _offset; never _value.
-Generation is ASYNC - we gate on GenerateToolpathFuture.isGenerationCompleted, NOT op.isGenerating
-(the flag clears early -> a false empty/invalid read). EMPTY is reported by op.hasToolpath/
-isToolpathValid == False, and it can be SILENT on hasWarning/hasError (verified live: a zero-depth
-contour generates with no warning). So we report the observed has_toolpath=False + the candidate causes
-(zero depth, no bounding geometry, generation not finished) rather than asserting one.
-"""
+"""Set the machining geometry (and optional heights) on a CAM operation via find_geometry handles.
+The two selection mechanisms (curve chains vs. direct object-lists) and the height-parameter group
+are documented in docs/fusion-api-notes.md ("Operation geometry selections")."""
 
 import time
 
@@ -37,6 +14,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -68,17 +46,6 @@ _HEIGHTS = ("top", "bottom")
 
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    for i in range(safe(lambda: doc.products.count, 0) or 0):
-        p = safe(lambda i=i: doc.products.item(i))
-        if p is not None and safe(lambda p=p: p.productType) == "CAMProductType":
-            return adsk.cam.CAM.cast(p), None
-    return None, "No CAM data in this document. Create a setup/operation first."
-
 
 def _find_operation(cam, name):
     """Find an Operation by name across all setups/folders/patterns (recursive)."""
@@ -254,7 +221,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if selection not in _SELECTIONS:
         return error(f"selection must be one of {', '.join(_SELECTIONS)}; got '{selection}'.")
 
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if cerr:
         return error(cerr)
     op, oerr = _find_operation(cam, operation)

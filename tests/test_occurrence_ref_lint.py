@@ -1,8 +1,8 @@
 """Lint: single-occurrence resolution must go through the shared OccurrenceRef resolver.
 
-Backlog #3 (the wrong-instance epidemic): an occurrence's `name` is only LOCALLY unique, so a tool that
-resolves a SINGLE target by "exact name, else substring-match name" silently grabs the first of several
-same-named instances. The fix routed every such tool through `_inputs._resolve_occurrence` (prefers the
+An occurrence's `name` is only LOCALLY unique, so a tool that resolves a SINGLE target by "exact
+name, else substring-match name" silently grabs the first of several same-named instances instead of
+refusing the ambiguity. Every such tool routes through `_inputs._resolve_occurrence` (prefers the
 unambiguous `fullPathName`; refuses an ambiguous substring instead of guessing).
 
 This lint locks that in two ways:
@@ -11,10 +11,13 @@ This lint locks that in two ways:
   2. The canonical resolver must exist and behave (fullPathName beats a same-named instance; an
      ambiguous bare name errors). A behavioural anchor so the helper can't be gutted.
 
+Delegating means calling `_inputs._resolve_occurrence` directly, OR going through the typed
+`OccurrenceRef`/`OccurrenceRefList` kind (which calls it internally) - both count.
+
 Deliberately NOT flagged (justified substring matches, different shape/domain):
   - view_inspect: MULTI-match isolate/show/hide ("hide all bolts") — returns a
     LIST of every match, not one guessed instance.
-  - show_toolpath: matches CAM operations (not occurrences).
+  - cam_show_toolpath: matches CAM operations (not occurrences).
   - doc_lifecycle: matches documents by name (not occurrences).
 """
 
@@ -54,15 +57,18 @@ class TestRoutedToolsStayOnSharedResolver:
         )
 
     def test_routed_tools_reference_the_shared_resolver(self):
-        # Positive check: each fixed tool actually calls the shared resolver (so the negative test above
-        # can't pass merely because the tool stopped resolving occurrences at all).
+        # Positive check: each fixed tool actually calls the shared resolver - either directly
+        # (`_resolve_occurrence`) or via the typed kind that wraps it (`OccurrenceRef`/
+        # `OccurrenceRefList`, which call `_resolve_occurrence` internally) - so the negative test
+        # above can't pass merely because the tool stopped resolving occurrences at all.
         missing = []
         for name in _ROUTED_TOOLS:
             src = open(os.path.join(TOOLS_DIR, f"{name}.py"), encoding="utf-8").read()
-            if "_resolve_occurrence" not in src:
+            if "_resolve_occurrence" not in src and "OccurrenceRef" not in src:
                 missing.append(name)
         assert not missing, (
-            "expected these to call _inputs._resolve_occurrence: " + ", ".join(missing))
+            "expected these to call _inputs._resolve_occurrence (directly or via "
+            "OccurrenceRef/OccurrenceRefList): " + ", ".join(missing))
 
 
 class TestSharedResolverBehaviour:

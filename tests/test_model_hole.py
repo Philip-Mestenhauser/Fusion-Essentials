@@ -11,6 +11,8 @@ The HoleFeatureInput fake RECORDS the calls so we can assert the exact builder p
 
 import json
 
+import pytest
+
 from conftest import load_tool
 
 mh = load_tool("model_hole")
@@ -363,6 +365,25 @@ class TestClearanceFastener:
         res = mh.handler(hole_type="simple", face="h", points=[[2, 3, 0]], extent="through",
                          fastener="M6 Socket Head Cap Screw", fit="snug")
         assert res["isError"] is True and "fit" in res["message"].lower()
+
+    def test_set_to_clearance_hole_failure_propagates(self):
+        # setToClearanceHole must raise on rejection, not swallow it under safe() and still report the
+        # hole as TAGGED for the fastener. The handler has no local try/except around this mutation,
+        # matching holes.add's own raise-and-abort style, so the MCP server's top-level handler wraps
+        # it into a tool-execution error.
+        _install()
+        orig = FakeHoleInput.setToClearanceHole
+
+        def _boom(self, chi):
+            raise RuntimeError("setToClearanceHole rejected by the API")
+
+        FakeHoleInput.setToClearanceHole = _boom
+        try:
+            with pytest.raises(RuntimeError, match="setToClearanceHole rejected"):
+                mh.handler(hole_type="simple", face="h", points=[[2, 3, 0]], extent="through",
+                           fastener="M6 Socket Head Cap Screw", fit="normal")
+        finally:
+            FakeHoleInput.setToClearanceHole = orig
 
     def test_counterbore_with_fastener_keeps_counterbore(self):
         # a counterbore clearance hole: through-diameter from the table, cbore dims still honored

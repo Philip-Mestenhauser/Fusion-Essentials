@@ -1,4 +1,4 @@
-"""Unit tests for ``joints_advanced.py`` — assembly_capture_position, joint_create_as_built, assembly_constrain.
+"""Unit tests for ``assembly_joints_advanced.py`` - assembly_capture_position, joint_create_as_built, assembly_constrain.
 
 Tests written BEFORE further wiring (project rule). The nuances pinned, no live
 Fusion:
@@ -202,8 +202,8 @@ class TestAsBuiltJoint:
         assert res["isError"] is True and "two distinct" in res["message"].lower()
 
     def test_same_local_name_different_path_is_allowed(self):
-        # PR-review #8: two DISTINCT instances of the same component share a local .name ("Bolt:1") but
-        # differ by fullPathName. The distinctness check must compare fullPathName, not .name — else it
+        # Two DISTINCT instances of the same component share a local .name ("Bolt:1") but
+        # differ by fullPathName. The distinctness check must compare fullPathName, not .name - else it
         # false-positives and rejects a legitimate pair. Address each by its unambiguous fullPathName.
         snaps = FakeSnapshots(pending=False, items=())
         abj, ac = FakeAsBuiltJoints(), FakeAssemblyConstraints()
@@ -284,8 +284,8 @@ class TestAssemblyConstraintSnaps:
 
 
 class TestMultiRelationshipConstraint:
-    """ONE constraint with MULTIPLE relationships solved together (Fusion's actual model) — the fix
-    for the over-determined single-relationship skew."""
+    """ONE constraint with MULTIPLE relationships solved together (Fusion's actual model) - avoids the
+    over-determined skew a single-relationship-at-a-time constraint would produce."""
 
     def _stub(self, monkeypatch, design):
         def fake_resolve(d, occ, snap):
@@ -367,6 +367,15 @@ class TestConstraintValueEncoding:
         ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top", offset=2, units="in")
         value = ac.last_input.geometricRelationships.added[0][3]
         assert value[0] == "real" and abs(value[1] - 5.08) < 1e-9   # 2 in -> 5.08 cm
+
+    def test_unknown_units_errors_not_silently_treated_as_mm(self, monkeypatch):
+        # An unrecognized unit must be REFUSED, not silently treated as mm, like joint_create errors
+        # on the same bad input.
+        self._stub(monkeypatch)
+        res = ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top",
+                                             offset=10, units="furlong")
+        assert res["isError"] is True
+        assert "furlong" in res["message"]
 
     def test_angle_uses_deg_string_not_offset(self, monkeypatch):
         ac = self._stub(monkeypatch)

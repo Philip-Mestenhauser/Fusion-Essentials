@@ -187,9 +187,9 @@ def _payload(result):
 
 
 class _SubComponentDesign:
-    """A design whose sketch lives in an ACTIVATED SUB-COMPONENT, with the root component EMPTY — the
-    normal assembly workflow (model_create_component(activate=true) + sketch_create). This is the shape
-    the old rootComponent.sketches lookup could not resolve (bug #3); resolve_sketch must find it."""
+    """A design whose sketch lives in an ACTIVATED SUB-COMPONENT, with the root component EMPTY - the
+    normal assembly workflow (model_create_component(activate=true) + sketch_create). A lookup that
+    only checks rootComponent.sketches cannot resolve this shape; resolve_sketch must find it."""
     def __init__(self, sub_sketch):
         self.rootComponent = type("Root", (), {"sketches": FakeSketches([])})()
         self._sub = type("Sub", (), {"sketches": FakeSketches([sub_sketch])})()
@@ -207,8 +207,8 @@ def _install_subcomponent(sketch):
 
 
 class TestSubComponentResolution:
-    """Regression for bug #3: a by-name sketch lookup must find a sketch in an ACTIVE sub-component,
-    not only one in the root component (the old rootComponent.sketches.itemByName returned None)."""
+    """A by-name sketch lookup must find a sketch in an ACTIVE sub-component, not only one in the
+    root component (rootComponent.sketches.itemByName returns None for a sub-component sketch)."""
 
     def test_finds_sketch_in_active_sub_component(self):
         _install_subcomponent(_rich_sketch())
@@ -545,3 +545,44 @@ class TestProgressiveDisclosure:
         out = _payload(sd.handler(sketch_name="OnFace", include_entities=True))
         assert "entities" in out and "constraints" in out and "dimensions" in out
         assert "profiles" in out                              # the light layer still comes along
+
+
+# ── BOUNDED READS: the opt-in X-ray caps entities/constraints/dimensions (CLAUDE.md "Bound it") ──
+
+class TestXrayCaps:
+    def test_under_cap_untruncated_and_unchanged(self):
+        lines = [FakeLine(f"l{i}", 0, 0, 1, 1) for i in range(5)]
+        s = FakeSketch("Small", lines=lines)
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Small", include_entities=True))
+        assert out["truncated"] is False
+        assert len(out["entities"]) == 5
+
+    def test_entities_at_cap_truncates_and_flags(self):
+        lines = [FakeLine(f"l{i}", 0, 0, 1, 1) for i in range(sd._XRAY_CAP + 20)]
+        s = FakeSketch("Dense", lines=lines)
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Dense", include_entities=True))
+        assert out["truncated"] is True
+        assert len(out["entities"]) == sd._XRAY_CAP
+        # the counts summary stays honest (uncapped) even though the array is capped
+        assert out["counts"]["lines"] == sd._XRAY_CAP + 20
+
+    def test_constraints_at_cap_truncates_and_flags(self):
+        lines = [FakeLine(f"l{i}", 0, 0, 1, 1) for i in range(2)]
+        cons = [HorizontalConstraint(lines[0]) for _ in range(sd._XRAY_CAP + 10)]
+        s = FakeSketch("DenseConstraints", lines=lines, constraints=cons)
+        _install(s)
+        out = _payload(sd.handler(sketch_name="DenseConstraints", include_entities=True))
+        assert out["truncated"] is True
+        assert len(out["constraints"]) == sd._XRAY_CAP
+        assert out["constraint_count"] == sd._XRAY_CAP + 10
+
+    def test_dimensions_at_cap_truncates_and_flags(self):
+        dims = [FakeDim(f"d{i}", 1.0, "1 mm") for i in range(sd._XRAY_CAP + 5)]
+        s = FakeSketch("DenseDims", dimensions=dims)
+        _install(s)
+        out = _payload(sd.handler(sketch_name="DenseDims", include_entities=True))
+        assert out["truncated"] is True
+        assert len(out["dimensions"]) == sd._XRAY_CAP
+        assert out["dimension_count"] == sd._XRAY_CAP + 5

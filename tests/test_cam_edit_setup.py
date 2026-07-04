@@ -101,9 +101,9 @@ _DEFAULT_PARAMS = {
 }
 
 
-def _install(setups=("Setup1",)):
+def _install(monkeypatch, setups=("Setup1",)):
     cam = _CAM([_Setup(n, dict(_DEFAULT_PARAMS)) for n in setups])
-    ces._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
     ces._object_collection = _ObjColl.create
     # body resolver seam: name -> a fake body (the tool calls this instead of _inputs directly in tests)
     bodies = {"Stock": object(), "Vise": object(), "Plate": object()}
@@ -127,32 +127,32 @@ def _payload(result):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_no_cam(self):
-        ces._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(ces, "get_cam", lambda: (None, "no CAM data"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "1"})
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_setup_not_found(self):
-        _install(setups=("Setup1",))
+    def test_setup_not_found(self, monkeypatch):
+        _install(monkeypatch, setups=("Setup1",))
         res = ces.handler(setup="Ghost", parameters={"stockZHigh": "1"})
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_nothing_to_do(self):
-        _install()
+    def test_nothing_to_do(self, monkeypatch):
+        _install(monkeypatch)
         res = ces.handler(setup="Setup1")
         assert res["isError"] is True and ("parameters" in res["message"].lower()
                                            or "models" in res["message"].lower())
 
-    def test_unknown_parameter_fails_before_applying(self):
-        cam = _install()
+    def test_unknown_parameter_fails_before_applying(self, monkeypatch):
+        cam = _install(monkeypatch)
         res = ces.handler(setup="Setup1",
                           parameters={"stockZHigh": "5", "not_a_param": "9"})
         assert res["isError"] is True and "not_a_param" in res["message"]
         # validate-all-first: the VALID one must NOT have been applied
         assert cam.setups.item(0).parameters.itemByName("stockZHigh").expression == "0.0"
 
-    def test_bad_body_ref(self):
-        _install()
+    def test_bad_body_ref(self, monkeypatch):
+        _install(monkeypatch)
         res = ces.handler(setup="Setup1", models=["NoSuchBody"])
         assert res["isError"] is True and "NoSuchBody" in res["message"]
 
@@ -160,8 +160,8 @@ class TestGuards:
 # ── set parameters (WCS / stock / anything) ─────────────────────────────────
 
 class TestParameters:
-    def test_sets_wcs_and_stock_params(self):
-        cam = _install()
+    def test_sets_wcs_and_stock_params(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1", parameters={
             "wcs_origin_boxPoint": "'top center'", "stockZHigh": "2.5"}))
         sp = cam.setups.item(0).parameters
@@ -171,8 +171,8 @@ class TestParameters:
         names = {c["name"] for c in out["changed"]}
         assert names == {"wcs_origin_boxPoint", "stockZHigh"}
 
-    def test_parameters_accept_string_form(self):
-        cam = _install()
+    def test_parameters_accept_string_form(self, monkeypatch):
+        cam = _install(monkeypatch)
         _payload(ces.handler(setup="Setup1", parameters="stockZHigh=3, wcs_orientation_mode='axesXZ'"))
         sp = cam.setups.item(0).parameters
         assert sp.itemByName("stockZHigh").expression == "3"
@@ -182,21 +182,21 @@ class TestParameters:
 # ── set body collections (models / fixtures / stock) ────────────────────────
 
 class TestBodies:
-    def test_sets_models(self):
-        cam = _install()
+    def test_sets_models(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1", models=["Stock"]))
         assert cam.setups.item(0).models.count == 1
         assert out["models_set"] == 1
 
-    def test_sets_fixtures_and_stock(self):
-        cam = _install()
+    def test_sets_fixtures_and_stock(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1", fixtures=["Vise"], stock=["Plate"]))
         assert cam.setups.item(0).fixtures.count == 1
         assert cam.setups.item(0).stockSolids.count == 1
         assert out["fixtures_set"] == 1 and out["stock_set"] == 1
 
-    def test_params_and_bodies_together(self):
-        cam = _install()
+    def test_params_and_bodies_together(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1",
                                    parameters={"stockZHigh": "1"}, models=["Stock"]))
         assert out["updated_count"] == 1 and out["models_set"] == 1

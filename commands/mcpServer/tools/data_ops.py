@@ -5,23 +5,11 @@
 
   data_create_project -> create a new project in the active hub
   data_create_folder  -> create a folder in a project (optionally inside a parent path; mkdir -p)
-  data_upload_file    -> upload a local CAD file into a project/folder (async; neutral formats are
-                         translated into a Fusion design during cloud processing)
-  data_delete_folder  -> delete a data-model folder by id, guarded (matching confirm_name; never
-                         root; non-empty needs force + recursive_confirm)
+  data_upload_file    -> upload a local CAD file into a project/folder (async)
+  data_delete_folder  -> delete a data-model folder by id, guarded
 
-(Reading a project's folder tree is data_get(project=..., include=['folders']); list_folders_handler
-below is the core it delegates to.)
-
-Split out of the former data_management.py (the document-lifecycle tools live in doc_lifecycle.py).
-Shared helpers (_data, _find_project, path resolution) live in _data_common.
-
-Grounded in adsk.core:
-  - app.data.dataProjects.add(name, purpose, contributors) -> DataProject
-  - DataProject.rootFolder -> DataFolder; DataFolder.dataFolders.add(name) -> DataFolder
-  - DataFolder.uploadFile(fullPath) -> DataFileFuture(.uploadState, .dataFile)
-  - data.findFolderById(id) -> DataFolder; DataFolder.deleteMe() -> bool
-Handlers run on the main thread; none of them BLOCK (no polling loops).
+The document-lifecycle tools live in doc_lifecycle.py; shared helpers live in _data_common.
+See docs/fusion-api-notes.md ("Data model") for the underlying adsk.core signatures.
 """
 
 import os
@@ -70,11 +58,7 @@ def create_project_handler(name: str = "", purpose: str = "") -> dict:
 
 def create_folder_handler(folder_name: str = "", project: str = "", project_id: str = "",
                           parent_folder: str = "") -> dict:
-    """Create a folder. 'parent_folder' may be a nested path (e.g. 'Fixtures/Vises').
-
-    Missing intermediate folders along the parent path are created (mkdir -p). The
-    duplicate guard is scoped to the resolved parent, not the whole tree.
-    """
+    """Create a folder, auto-creating missing parent path segments (mkdir -p)."""
     folder_name = (folder_name or "").strip()
     if not folder_name:
         return error("Provide 'folder_name'.")
@@ -132,11 +116,7 @@ _UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
 
 def upload_file_handler(file_path: str = "", project: str = "", project_id: str = "",
                         folder: str = "", create_path: bool = False) -> dict:
-    """Upload a local CAD file. 'folder' may be a nested path (e.g. 'Imports/STEP').
-
-    By default the destination folder path must already exist; set create_path=true to
-    create missing folders along the way (mkdir -p).
-    """
+    """Upload a local CAD file; create_path=true auto-creates a missing destination folder path."""
     file_path = (file_path or "").strip().strip('"')
     if not file_path:
         return error("Provide 'file_path' - the full path to a local CAD file.")
@@ -312,15 +292,7 @@ def _subtree_counts(folder, _depth=0):
 
 def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
                           force: bool = False, recursive_confirm: str = "") -> dict:
-    """Delete a data-model folder by id, guarded.
-
-    SAFETY: requires 'folder_id' AND a 'confirm_name' that EXACTLY matches the folder's current
-    name - refuses on mismatch. Never deletes a project root. An EMPTY folder deletes directly.
-    A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and bypasses the per-file
-    xref-orphan guard), so it needs BOTH force=true AND 'recursive_confirm' set to the folder's
-    name - a deliberate second acknowledgment. Without recursive_confirm, force returns a
-    full-subtree PREVIEW (the blast radius) and refuses. Deletion is irreversible.
-    """
+    """Delete a data-model folder by id, guarded; see TOOL_DESCRIPTION for the confirm_name/force/recursive_confirm gates."""
     folder_id = (folder_id or "").strip()
     confirm_name = (confirm_name or "").strip()
     if not folder_id:

@@ -1,34 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: boolean combine of MESH bodies (adsk.fusion.MeshBody).
-
-  mesh_combine -> the MeshCombine feature: join / cut / intersect / merge one or more TOOL mesh
-                  bodies into a TARGET mesh body. join = combine by enclosing volumes; cut = remove
-                  the tools' overlap from the target; intersect = keep only the shared volume; merge =
-                  combine without altering faces. Optional algorithm (enhanced = fewer triangles,
-                  default; legacy). WRITES.
-
-This is the MESH analogue of model_combine (the BRep boolean). A MeshBody is a SEPARATE type living
-in comp.meshBodies (not comp.bRepBodies), so the BRep Combine feature can't touch it - this is the
-mesh-on-mesh boolean. Bodies are referenced by HANDLE (from find_geometry / mesh_get - precise) or by
-name, and EVERY input is validated to be a MESH body BEFORE any mutation (a BRep handle is redirected
-to the BRep tools, never silently mis-combined).
-
-CRITICAL - base-feature scope: meshCombineFeatures.add CREATES/edits mesh bodies, so in a PARAMETRIC
-design it must run inside an open BaseFeature edit scope (the same constraint MeshBodies.add carries).
-The createInput->set->add is routed through run_in_base_feature(design, comp, inner_op) (from
-design_mode.py): in DIRECT mode it runs inner_op(None) directly; in PARAMETRIC mode it opens the
-atomic add()->startEdit()->[inner]->finishEdit() scope (always finishing in a finally). We never
-hand-roll startEdit/finishEdit, and never wrap the add() mutation in safe().
-
-Grounded in adsk.fusion (signatures confirmed against the live API):
-  - Component.features.meshCombineFeatures.createInput(targetBody: MeshBody, toolBodies: list[MeshBody])
-      -> MeshCombineFeatureInput
-  - input.operation = adsk.fusion.MeshCombineOperationTypes.{Join|Cut|Intersect|Merge}...
-  - input.algorithm = adsk.fusion.MeshCombineAlgorithmTypes.{Legacy|Enhanced}...   (default Enhanced)
-  - Component.features.meshCombineFeatures.add(input) -> MeshCombineFeature (.bodies hold the result)
-Handler runs on the MAIN thread (30s cap); WRITES.
+"""MCP building block: boolean-combine MESH bodies (adsk.fusion.MeshBody) - the mesh analogue of
+model_combine. Every input is validated to be a MESH body before any mutation. The write runs
+through run_in_base_feature (design_mode.py) for the parametric base-feature scope requirement.
+WRITES. See docs/fusion-api-notes.md ("Mesh bodies") for the underlying adsk.fusion signatures.
 """
 
 import adsk.core
@@ -77,14 +53,7 @@ _ALGORITHMS = {
 
 def handler(target: str = "", tools=None, operation: str = "join",
             algorithm: str = "enhanced") -> dict:
-    """Boolean-combine MESH tool bodies into a MESH target body.
-
-    target: handle/name of the mesh body to keep/modify. tools: the mesh body handle(s)/name(s) to
-    combine into it (a list, or a comma-separated string). operation: join (combine by enclosing
-    volumes) | cut (remove the tools' overlap from the target) | intersect (keep the shared volume) |
-    merge (combine without altering faces). algorithm: enhanced (default, fewer triangles) | legacy.
-    WRITES (a MeshCombineFeature; in a parametric design it is wrapped in a BaseFeature scope).
-    """
+    """Boolean-combine MESH tool bodies into a MESH target body."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")

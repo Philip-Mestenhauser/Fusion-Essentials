@@ -1,33 +1,14 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: turn a solid holder model into a CAM TOOL HOLDER profile (the headless,
-agent-drivable form of the "Add Tool Holder" command).
+"""MCP building block: turn a solid holder model into a CAM TOOL HOLDER profile (the headless form
+of the "Add Tool Holder" command).
 
-  model_compute_holder -> reduce a body of revolution (the holder geometry) to a stack of
-                    (height, lower-diameter, upper-diameter) segments and the holder library JSON,
-                    from three find_geometry handles: the body, its axis, and an end datum on that
-                    axis. Read-only (computes + returns; does NOT write to a tool library).
+  model_compute_holder -> reduce a body of revolution to a stack of (height, lower/upper-diameter)
+                    segments + holder library JSON, from three find_geometry handles (body, axis,
+                    end datum). Read-only - computes + returns; does NOT write to a tool library.
 
-Why this exists: the create-holder geometry is the repo's signature feature, but it lived only behind
-a Fusion dialog (click body + axis + end face). This exposes the SAME extracted core (tools/_holder.py)
-to an agent, so it can batch-convert holders it uploads - geometry-as-values: pass three handles from
-find_geometry, get the profile back. The interactive command still serves one-at-a-time users; both
-call the one core.
-
-SCOPE (deliberate): this returns the computed holder JSON + segment profile. It does NOT add the
-holder to a CAM tool library - library WRITES wait for the dedicated library building-block family,
-because a tool brought into a document is a hard FORK of the library data (not a live link), and that
-semantics deserves its own correct tools. Take this tool's `holder_json` and add it to a library by
-hand (or with those tools when they land).
-
-INPUTS (geometry-as-values - all find_geometry handles, not names/coords):
-  - body: a SOLID body handle (the holder model).
-  - axis: a CYLINDRICAL/CONICAL face handle OR a straight EDGE handle - the axis of rotation.
-  - end_datum: a PLANAR face / edge / vertex handle NORMAL to the axis - fixes z=0 along the axis.
-
-Grounded in tools/_holder.py (the extracted command core) + adsk.fusion (handle entities).
-Handler runs on the main thread; read-only (builds no feature, writes no library).
+Core logic lives in tools/_holder.py, shared with the interactive Add Tool Holder command.
 """
 
 import adsk.core
@@ -56,13 +37,7 @@ _END = _inputs.GeometryHandle("end_datum", require="any", required=True,
 
 def handler(body: str = "", axis: str = "", end_datum: str = "",
             name: str = "", product_id: str = "", product_link: str = "", vendor: str = "") -> dict:
-    """Compute a CAM tool-holder profile + library JSON from three geometry handles. Read-only.
-
-    body / axis / end_datum: find_geometry handles (the holder solid, its axis face/edge, and a
-    normal end datum). name/product_id/product_link/vendor: optional metadata stamped into the holder
-    JSON (name defaults to the active document name). Returns the (height, lower/upper-diameter)
-    segments in mm and the full holder JSON to add to a tool library yourself. Does NOT write a library.
-    """
+    """Compute a CAM tool-holder profile + library JSON from three geometry handles. Read-only."""
     design = _common.design()
     if not design:
         return error("No active design. Open the holder model first (see doc_open).")
@@ -113,8 +88,8 @@ def handler(body: str = "", axis: str = "", end_datum: str = "",
         # the full library JSON (type='holder'); add it to a tool library yourself (see note)
         "holder_json": holder_json,
         "note": "Holder profile computed (segments in mm: height, lower/upper diameter). This does "
-        "NOT write to a tool library - take 'holder_json' and add it to a library (a dedicated "
-        "library tool family is coming; a holder in a document is a FORK of library data, not a link). "
+        "NOT write to a tool library - take 'holder_json' and add it to a library yourself "
+        "(a holder in a document is a FORK of library data, not a link). "
         "Pair with view_screenshot to confirm the body is the holder you meant.",
     })
 

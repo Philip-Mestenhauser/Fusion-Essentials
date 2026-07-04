@@ -249,9 +249,9 @@ class _Design:
         return self._top
 
 
-def _install(design, saved=True):
-    dc._common.design = lambda: design
-    dc._doc_is_saved = lambda: saved      # default: pretend the doc is saved
+def _install(monkeypatch, design, saved=True):
+    monkeypatch.setattr(dc._common, "design", lambda: design)
+    monkeypatch.setattr(dc, "_doc_is_saved", lambda: saved)      # default: pretend the doc is saved
     return design
 
 
@@ -263,19 +263,19 @@ def _payload(result):
 # ── guards / dispatch ────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_unknown_action(self):
-        _install(_Design())
+    def test_unknown_action(self, monkeypatch):
+        _install(monkeypatch, _Design())
         res = dc.handler(action="frobnicate")
         assert res["isError"] is True and "action" in res["message"].lower()
 
-    def test_no_active_design(self):
-        dc._common.design = lambda: None
+    def test_no_active_design(self, monkeypatch):
+        monkeypatch.setattr(dc._common, "design", lambda: None)
         res = dc.handler(action="create")
         assert res["isError"] is True and "design" in res["message"].lower()
 
-    def test_column_action_requires_configured_design(self):
+    def test_column_action_requires_configured_design(self, monkeypatch):
         # add_parameter on a non-configured design should error clearly, not crash
-        _install(_Design(configured=False, params=[_Param("plate_len")]))
+        _install(monkeypatch, _Design(configured=False, params=[_Param("plate_len")]))
         res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "50 mm"})
         assert res["isError"] is True and "configured" in res["message"].lower()
 
@@ -283,28 +283,28 @@ class TestGuards:
 # ── create ───────────────────────────────────────────────────────────────────
 
 class TestCreate:
-    def test_create_converts_design(self):
-        d = _install(_Design(configured=False))
+    def test_create_converts_design(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=False))
         out = _payload(dc.handler(action="create"))
         assert d.created is not None
         assert out["configured"] is True
 
-    def test_create_is_idempotent_when_already_configured(self):
-        d = _install(_Design(configured=True))
+    def test_create_is_idempotent_when_already_configured(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=True))
         out = _payload(dc.handler(action="create"))
         # already configured -> reports it, does NOT call createConfiguredDesign again
         assert d.created is None and out["configured"] is True
 
-    def test_create_refuses_unsaved_document(self):
+    def test_create_refuses_unsaved_document(self, monkeypatch):
         # the conversion only materializes on save+reopen; converting an unsaved doc is refused
         # (and must NOT auto-save). It must also NOT have called createConfiguredDesign.
-        d = _install(_Design(configured=False), saved=False)
+        d = _install(monkeypatch, _Design(configured=False), saved=False)
         res = dc.handler(action="create")
         assert res["isError"] is True and "save" in res["message"].lower()
         assert d.created is None      # did not mutate
 
-    def test_create_proceeds_when_saved(self):
-        d = _install(_Design(configured=False), saved=True)
+    def test_create_proceeds_when_saved(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=False), saved=True)
         out = _payload(dc.handler(action="create"))
         assert d.created is not None and out["created"] is True
         # the success note steers the user to save+reopen to see it in the UI
@@ -314,22 +314,22 @@ class TestCreate:
 # ── add_configuration (row) ─────────────────────────────────────────────────
 
 class TestAddConfiguration:
-    def test_add_row(self):
-        d = _install(_Design(configured=True))
+    def test_add_row(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=True))
         out = _payload(dc.handler(action="add_configuration", name="Large"))
         names = [d.configurationTopTable.rows.item(i).name
                  for i in range(d.configurationTopTable.rows.count)]
         assert "Large" in names and out["configuration"] == "Large"
 
-    def test_add_row_requires_name(self):
-        _install(_Design(configured=True))
+    def test_add_row_requires_name(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True))
         res = dc.handler(action="add_configuration", name="")
         assert res["isError"] is True and "name" in res["message"].lower()
 
 
 class TestRenameConfiguration:
-    def test_rename_changes_row_name(self):
-        d = _install(_Design(configured=True))
+    def test_rename_changes_row_name(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=True))
         # default row is "Default" in the fake; rename to Medium
         out = _payload(dc.handler(action="rename_configuration", name="Default", new_name="Medium"))
         names = [d.configurationTopTable.rows.item(i).name
@@ -337,18 +337,18 @@ class TestRenameConfiguration:
         assert "Medium" in names and "Default" not in names
         assert out["from"] == "Default" and out["to"] == "Medium"
 
-    def test_rename_unknown_row_errors(self):
-        _install(_Design(configured=True))
+    def test_rename_unknown_row_errors(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True))
         res = dc.handler(action="rename_configuration", name="Ghost", new_name="X")
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_rename_requires_both_names(self):
-        _install(_Design(configured=True))
+    def test_rename_requires_both_names(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True))
         res = dc.handler(action="rename_configuration", name="Default", new_name="")
         assert res["isError"] is True
 
-    def test_rename_to_existing_name_errors(self):
-        _install(_Design(configured=True))
+    def test_rename_to_existing_name_errors(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True))
         dc.handler(action="add_configuration", name="Large")
         res = dc.handler(action="rename_configuration", name="Default", new_name="Large")
         assert res["isError"] is True and "exists" in res["message"].lower()
@@ -357,8 +357,8 @@ class TestRenameConfiguration:
 # ── add_parameter ────────────────────────────────────────────────────────────
 
 class TestAddParameter:
-    def test_param_column_and_expressions_by_row_name(self):
-        d = _install(_Design(configured=True, params=[_Param("plate_len")]))
+    def test_param_column_and_expressions_by_row_name(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=True, params=[_Param("plate_len")]))
         # add two rows so the values map onto real rows
         dc.handler(action="add_configuration", name="Small")
         dc.handler(action="add_configuration", name="Large")
@@ -369,13 +369,13 @@ class TestAddParameter:
         assert col.getCellByRowName("Large").expression == "120 mm"
         assert out["parameter"] == "plate_len" and out["set"] == 2
 
-    def test_missing_parameter_errors(self):
-        _install(_Design(configured=True, params=[]))
+    def test_missing_parameter_errors(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True, params=[]))
         res = dc.handler(action="add_parameter", parameter="ghost", values={"Default": "5 mm"})
         assert res["isError"] is True and "ghost" in res["message"]
 
-    def test_value_for_unknown_row_is_reported(self):
-        _install(_Design(configured=True, params=[_Param("plate_len")]))
+    def test_value_for_unknown_row_is_reported(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True, params=[_Param("plate_len")]))
         res = dc.handler(action="add_parameter", parameter="plate_len",
                          values={"Nonexistent": "5 mm"})
         # a value naming a row that doesn't exist should surface, not silently pass
@@ -390,11 +390,11 @@ class _FakeFeature:
 
 
 class TestSuppressVisibility:
-    def test_suppress_sets_is_suppressed(self):
+    def test_suppress_sets_is_suppressed(self, monkeypatch):
         feat = _FakeFeature("Fillet1")
-        d = _install(_Design(configured=True, features={"Fillet1": feat}))
+        d = _install(monkeypatch, _Design(configured=True, features={"Fillet1": feat}))
         # patch the resolver seam the tool uses to find a timeline feature by name
-        dc._resolve_feature = lambda design, name: d._features.get(name)
+        monkeypatch.setattr(dc, "_resolve_feature", lambda design, name: d._features.get(name))
         dc.handler(action="add_configuration", name="Small")
         out = _payload(dc.handler(action="add_suppress", feature="Fillet1",
                                   suppressed_in=["Small"]))
@@ -402,10 +402,11 @@ class TestSuppressVisibility:
         assert col.getCellByRowName("Small").isSuppressed is True
         assert out["feature"] == "Fillet1"
 
-    def test_visibility_sets_is_visible(self):
+    def test_visibility_sets_is_visible(self, monkeypatch):
         body = _FakeFeature("Body1")
-        d = _install(_Design(configured=True, bodies={"Body1": body}))
-        dc._resolve_body = lambda design, name: d._bodies.get(name)
+        d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": body}))
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
+                            else (None, f"No body named '{raw}'."))
         dc.handler(action="add_configuration", name="Large")
         out = _payload(dc.handler(action="add_visibility", body="Body1",
                                   hidden_in=["Large"]))
@@ -417,12 +418,13 @@ class TestSuppressVisibility:
 # ── appearance theme (ordering + linkage) ───────────────────────────────────
 
 class TestAppearanceTheme:
-    def test_appearance_adds_column_before_rows_then_links(self):
+    def test_appearance_adds_column_before_rows_then_links(self, monkeypatch):
         body = _FakeFeature("Body1")
-        d = _install(_Design(configured=True, bodies={"Body1": body},
+        d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": body},
                              appearances={"Red": object(), "Blue": object()}))
-        dc._resolve_body = lambda design, name: d._bodies.get(name)
-        dc._resolve_appearance = lambda design, name: d._appearances.get(name)
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
+                            else (None, f"No body named '{raw}'."))
+        monkeypatch.setattr(dc, "_resolve_appearance", lambda design, name: d._appearances.get(name))
         dc.handler(action="add_configuration", name="Small")
         out = _payload(dc.handler(action="set_appearance", body="Body1",
                                   appearances={"Default": "Red", "Small": "Blue"}))
@@ -453,16 +455,16 @@ class TestAppearanceTheme:
 # ── add_insert: nested configuration (insert a configured part, map per assembly config) ─────
 
 class TestAddInsert:
-    def _setup(self):
+    def _setup(self, monkeypatch):
         # an assembly design with two configs, and a configured part DataFile resolvable by name
-        d = _install(_Design(configured=True,
+        d = _install(monkeypatch, _Design(configured=True,
                              datafiles={"Bracket": _FakeDataFile("Bracket", ["Medium", "Small", "Large"])}))
-        dc._resolve_datafile = lambda design, name: d._datafiles.get(name)
+        monkeypatch.setattr(dc, "_resolve_datafile", lambda design, name: d._datafiles.get(name))
         dc.handler(action="add_configuration", name="HeavyDuty")   # rows: Default, HeavyDuty
         return d
 
-    def test_insert_and_map_each_config_by_name(self):
-        d = self._setup()
+    def test_insert_and_map_each_config_by_name(self, monkeypatch):
+        d = self._setup(monkeypatch)
         out = _payload(dc.handler(action="add_insert", insert_part="Bracket",
                                   insert_config="Medium",
                                   insert_map={"Default": "Medium", "HeavyDuty": "Large"}))
@@ -477,29 +479,29 @@ class TestAddInsert:
         assert col.getCellByRowName("HeavyDuty").row.name == "Large"
         assert out["inserted_part"] == "Bracket" and out["mapped"] == 2
 
-    def test_unknown_part_errors(self):
-        self._setup()
+    def test_unknown_part_errors(self, monkeypatch):
+        self._setup(monkeypatch)
         res = dc.handler(action="add_insert", insert_part="Ghost",
                          insert_map={"Default": "Medium"})
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_map_to_unknown_part_config_errors(self):
-        self._setup()
+    def test_map_to_unknown_part_config_errors(self, monkeypatch):
+        self._setup(monkeypatch)
         res = dc.handler(action="add_insert", insert_part="Bracket",
                          insert_config="Medium",
                          insert_map={"Default": "Gigantic"})
         # a part config that doesn't exist must be reported, naming it
         assert res["isError"] is True and "Gigantic" in res["message"]
 
-    def test_map_to_unknown_assembly_config_errors(self):
-        self._setup()
+    def test_map_to_unknown_assembly_config_errors(self, monkeypatch):
+        self._setup(monkeypatch)
         res = dc.handler(action="add_insert", insert_part="Bracket",
                          insert_config="Medium",
                          insert_map={"Nonexistent": "Medium"})
         assert res["isError"] is True and "Nonexistent" in res["message"]
 
-    def test_insert_config_defaults_to_first_part_row(self):
-        d = self._setup()
+    def test_insert_config_defaults_to_first_part_row(self, monkeypatch):
+        d = self._setup(monkeypatch)
         _payload(dc.handler(action="add_insert", insert_part="Bracket",
                             insert_map={"Default": "Medium", "HeavyDuty": "Small"}))
         # no insert_config given -> inserts the part's first row (Medium)

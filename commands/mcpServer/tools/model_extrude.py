@@ -3,21 +3,11 @@
 
 """MCP building block: extrude a sketch profile into a solid (the back half of the modelling flow).
 
-  extrude -> turn a closed sketch profile into a 3D body by extruding it a distance. Choose the
-             feature operation (new body / join / cut / intersect), the distance, and optionally a
-             symmetric (both-sides) extrude or a taper angle. WRITES to the design.
+  extrude -> turn a closed sketch profile into a 3D body by extruding it a distance, or up to a
+             face. Choose the operation, distance/taper, and optional surface (no end caps). WRITES.
 
-This is the companion to sketch_create / sketch_add_geometry: those draw a profile, this gives it
-depth. General-purpose - it just extrudes a profile; it says nothing about WHY (a boss, a pocket, a
-plate). Targets a profile by sketch name + profile index, so an agent can pick which closed region
-of a sketch to extrude.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Component.features.extrudeFeatures.createInput(profile, FeatureOperations) -> ExtrudeFeatureInput
-  - ExtrudeFeatureInput.setDistanceExtent(isSymmetric: bool, distance: ValueInput)
-  - ExtrudeFeatureInput.setOneSideExtent(DistanceExtentDefinition, direction, taperAngle)  [taper]
-  - ExtrudeFeatures.add(input) -> ExtrudeFeature (.bodies)
-Handler runs on the main thread; WRITES.
+Companion to sketch_create / sketch_add_geometry. Signatures: docs/fusion-api-notes.md
+"Model feature signatures".
 """
 
 import adsk.core
@@ -43,28 +33,6 @@ _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
 # _inputs.is_handle distinguishes a handle from an int/list/'all' selector.
 _PROFILE = _inputs.ProfileRef("profile_index")
 _looks_like_handle = _inputs.is_handle
-
-# Operation name -> adsk.fusion.FeatureOperations attribute.
-_OPERATIONS = {
-    "new": "NewBodyFeatureOperation",
-    "new_body": "NewBodyFeatureOperation",
-    "join": "JoinFeatureOperation",
-    "cut": "CutFeatureOperation",
-    "intersect": "IntersectFeatureOperation",
-}
-
-
-def _target_sketch(design, sketch_name):
-    """Return (sketch, requested_name). With a name: that sketch; without: the most recent.
-    Looks in the ACTIVE component's sketches."""
-    coll = safe(lambda: target_component(design).sketches)
-    name = (sketch_name or "").strip()
-    if coll is None:
-        return None, name
-    if name:
-        return safe(lambda: coll.itemByName(name)), name
-    n = safe(lambda: coll.count, 0)
-    return (coll.item(n - 1) if n else None), name
 
 
 def _resolve_profile_indices(profile_index, pcount, profiles=None):
@@ -132,17 +100,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             units: str = "mm", operation: str = "new", symmetric: bool = False,
             taper_deg: float = 0.0, to_object: str = "", target_bodies=None,
             as_surface: bool = False) -> dict:
-    """Extrude a sketch profile into a solid (or, with as_surface, into a surface wall).
-
-    sketch_name: the sketch holding the profile (omit = most recent sketch). profile_index: which
-    closed profile of that sketch to extrude (0-based; default 0). distance: extrude depth in
-    'units' (mm/cm/in; negative reverses direction). to_object: extrude UP TO a face (a find_geometry
-    handle) instead of 'distance'. operation: new | join | cut | intersect. target_bodies: scope a
-    cut/join/intersect to these bodies (prevents bleed-through into other bodies). symmetric: extrude
-    both sides of the plane (default one-sided). taper_deg: optional draft angle. as_surface: build a
-    SURFACE (no end caps, isSolid=False) - forced when set, and used automatically when the sketch has
-    no closed profile but open curves exist. WRITES.
-    """
+    """Extrude a sketch profile into a solid (or, with as_surface, into a surface wall)."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -150,20 +108,20 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if distance == 0 and not use_to_object:
         return error("Provide a non-zero 'distance' to extrude, or 'to_object' to extrude up to a face.")
     op_key = (operation or "new").strip().lower()
-    if op_key not in _OPERATIONS:
+    if op_key not in _common.OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
 
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested = _target_sketch(design, sketch_name)
+    root = target_component(design)
+    sketch, requested = _common.target_sketch(root, sketch_name)
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
         return error("No sketch to extrude. Create one and draw a closed profile first.")
 
-    root = target_component(design)
     profiles = safe(lambda: sketch.profiles)
     pcount = safe(lambda: profiles.count, 0) if profiles else 0
 
@@ -212,7 +170,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                     coll.add(profiles.item(i))
                 profile_arg = coll
 
-    op = getattr(adsk.fusion.FeatureOperations, _OPERATIONS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         ext_input = root.features.extrudeFeatures.createInput(profile_arg, op)
         if open_surface:

@@ -6,18 +6,8 @@
   model_fillet  -> round edges with a constant radius (a Fillet feature).
   model_chamfer -> bevel edges with a constant distance (a Chamfer feature).
 
-Every real part needs edge breaks (deburr/round). These apply to ALL edges of a named body by
-default - the common "break all the edges" case - with an optional 'edge_filter' to limit to convex
-(outer) or concave (inner) edges. Edges are not picked individually (fragile across rebuilds);
-operate per-body. WRITES.
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - Component.features.filletFeatures.createInput() -> input
-    input.addConstantRadiusEdgeSet(ObjectCollection(edges), radius: ValueInput, isTangentChain)
-  - Component.features.chamferFeatures.createInput(ObjectCollection(edges), isTangentChain) -> input
-    input.setToEqualDistance(distance: ValueInput)
-  - body.edges -> BRepEdges ; edge.geometry / edge.isConvex (we read convexity for the filter)
-Handlers run on the main thread; WRITE.
+Target specific edges (a find_geometry edge-handle list) or all/filtered edges of a named body.
+Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -26,7 +16,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, scale, target_component
+from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
 

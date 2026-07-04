@@ -1,25 +1,15 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: rectangular & circular PATTERNS of component occurrences.
+"""MCP building blocks: rectangular & circular PATTERNS of component occurrences or bodies.
 
-  model_pattern_rectangular -> duplicate one or more component occurrences in a grid: a count + spacing
-                         along a primary axis, and optionally a second axis. WRITES.
-  model_pattern_circular    -> duplicate occurrences evenly around an axis: a count over a total angle
-                         (360 = full ring). WRITES.
+  model_pattern_rectangular -> duplicate occurrences/bodies in a grid: a count + spacing along a
+                         primary axis, and optionally a second axis. WRITES.
+  model_pattern_circular    -> duplicate occurrences/bodies evenly around an axis: a count over a
+                         total angle (360 = full ring). WRITES.
 
-These pattern OCCURRENCES (placed components), resolved by name - the common "lay out N copies of
-this part/fixture" case. Direction/axis defaults to a world construction axis (x/y/z) so no manual
-entity pick is needed; pass 'axis'/'direction' to choose. General-purpose: they just replicate the
-named occurrences; they say nothing about why.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - features.rectangularPatternFeatures.createInput(inputEntities, directionOneEntity, quantityOne,
-      distanceOne, PatternDistanceType) ; .setDirectionTwo(entity, qtyTwo, distTwo) ; .add(input)
-  - features.circularPatternFeatures.createInput(inputEntities, axis) ; .quantity / .totalAngle /
-      .isSymmetric ; .add(input)
-  - rootComponent.x/y/zConstructionAxis are the world axes used as direction/axis entities.
-Handlers run on the main thread; WRITE.
+Direction/axis defaults to a world construction axis (x/y/z); pass 'axis'/'direction' to choose.
+Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -41,30 +31,15 @@ _AXES = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstruction
 _BODIES = _inputs.BodyRefList("bodies", required=False,
                               description="Bodies to pattern (alternative to 'occurrences').")
 
-
-def _resolve_occurrences(design, names):
-    """Resolve a list (or comma string) of occurrence names/fullPathNames via the shared OccurrenceRef
-    logic (fullPathName-preferring, ambiguity-refusing - no silent wrong-instance grab).
-    Returns (object_collection, resolved_names, errors)."""
-    if isinstance(names, str):
-        wanted = [n.strip() for n in names.split(",") if n.strip()]
-    else:
-        wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
-    coll = adsk.core.ObjectCollection.create()
-    resolved, errors = [], []
-    for want in wanted:
-        o, err = _inputs._resolve_occurrence(want, want)
-        if o is not None:
-            coll.add(o)
-            resolved.append(safe(lambda o=o: o.name))
-        else:
-            errors.append(err)
-    return coll, resolved, errors
+# Occurrences to pattern, via the shared OccurrenceRefList kind (fullPathName-preferring,
+# ambiguity-refusing - no silent wrong-instance grab).
+_OCCURRENCES = _inputs.OccurrenceRefList("occurrences", required=False,
+                              description="Occurrence(s) to pattern (alternative to 'bodies').")
 
 
 def _resolve_input_entities(design, occurrences, bodies):
     """Build the ObjectCollection to pattern: 'bodies' (BodyRefList) takes precedence, else
-    'occurrences' (by name). Returns (collection, resolved_names, error)."""
+    'occurrences' (OccurrenceRefList). Returns (collection, resolved_names, error)."""
     if bodies not in (None, "", []):
         ents, berr = _BODIES.resolve(bodies)
         if berr:
@@ -76,20 +51,21 @@ def _resolve_input_entities(design, occurrences, bodies):
             return None, None, "No valid bodies resolved to pattern."
         return coll, [safe(lambda b=b: b.name) for b in ents], None
 
-    coll, resolved, errors = _resolve_occurrences(design, occurrences)
-    if errors:
-        return None, None, "; ".join(errors)
-    if coll.count == 0:
+    occs, oerr = _OCCURRENCES.resolve(occurrences)
+    if oerr:
+        return None, None, oerr
+    if not occs:
         return None, None, ("Provide 'occurrences' (occurrence name(s)) or 'bodies' (body "
                             "handles/names) to pattern.")
-    return coll, resolved, None
+    coll = adsk.core.ObjectCollection.create()
+    for o in occs:
+        coll.add(o)
+    return coll, [safe(lambda o=o: o.name) for o in occs], None
 
 
 def _axis_entity(comp, axis_key):
-    """The x/y/z construction axis OF THE GIVEN COMPONENT (not always root). A pattern's input
-    entities and its direction/axis entity must belong to the SAME component, or Fusion can't build a
-    consistent object path (the live failure: 'InternalValidationError getObjectPath' when patterning a
-    sub-component body against root's axis). So callers pass the component that OWNS the bodies."""
+    """The x/y/z construction axis of the given component (must own the pattern's input entities -
+    see docs/fusion-api-notes.md "Model feature signatures")."""
     attr = _AXES.get((axis_key or "z").strip().lower())
     if not attr:
         return None
@@ -97,10 +73,8 @@ def _axis_entity(comp, axis_key):
 
 
 def _owning_component(design, coll, bodies):
-    """The component the pattern feature must be built in: for a BODIES pattern, the parent component
-    of the (first) resolved body - its construction axes and features collection are the ones that
-    share an object path with the bodies. For an OCCURRENCES pattern the entities are root children, so
-    the root component is correct. Falls back to root if a parent can't be read."""
+    """The component the pattern feature must be built in - the bodies' parent for a body pattern,
+    else root. Falls back to root if a parent can't be read."""
     root = safe(lambda: design.rootComponent)
     if bodies not in (None, "", []):
         first = safe(lambda: coll.item(0))
@@ -115,14 +89,7 @@ def _owning_component(design, coll, bodies):
 def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 2, spacing_one: float = 10.0,
                         direction_one: str = "x", quantity_two: int = 1, spacing_two: float = 10.0,
                         direction_two: str = "y", units: str = "mm") -> dict:
-    """Pattern component occurrences OR bodies in a rectangular grid.
-
-    occurrences: occurrence name(s) to pattern (comma-separated, or one name). bodies: solid body
-    handles/names to pattern instead (takes precedence over occurrences) - the "pattern these
-    bosses/holes" case. quantity_one / spacing_one / direction_one: count, spacing (in 'units'), and
-    world axis (x/y/z) for the first direction. quantity_two / spacing_two / direction_two: optional
-    second direction (set quantity_two=1 for a single row). 'spacing' is BETWEEN instances. WRITES.
-    """
+    """Pattern component occurrences OR bodies in a rectangular grid."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -184,13 +151,7 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
 
 def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, total_angle_deg: float = 360.0,
                      axis: str = "z", symmetric: bool = False) -> dict:
-    """Pattern component occurrences OR bodies evenly around an axis.
-
-    occurrences: occurrence name(s) (comma-separated, or one). bodies: solid body handles/names to
-    pattern instead (takes precedence). quantity: number of instances (including the original).
-    total_angle_deg: angle to spread them over (360 = full ring). axis: world axis x/y/z to rotate
-    about (default z). symmetric: spread symmetrically about the original. WRITES.
-    """
+    """Pattern component occurrences OR bodies evenly around an axis."""
     if int(quantity) < 2:
         return error("quantity must be >= 2 for a circular pattern.")
     design = _common.design()
@@ -245,8 +206,7 @@ _RECT_DESC = (
 )
 rectangular_tool = (
     Tool.create_simple(name="model_pattern_rectangular", description=_RECT_DESC)
-    .add_input_property("occurrences", {"type": "string",
-            "description": "Occurrence name(s) to pattern (comma-separated, or one name)."})
+    .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity_one", {"type": "integer", "description": "Instance count in direction one (>=1)."})
     .add_input_property("spacing_one", {"type": "number", "description": "Spacing between instances in direction one (in 'units')."})
@@ -269,8 +229,7 @@ _CIRC_DESC = (
 )
 circular_tool = (
     Tool.create_simple(name="model_pattern_circular", description=_CIRC_DESC)
-    .add_input_property("occurrences", {"type": "string",
-            "description": "Occurrence name(s) to pattern (comma-separated, or one name)."})
+    .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity", {"type": "integer", "description": "Number of instances including the original (>=2)."})
     .add_input_property("total_angle_deg", {"type": "number", "description": "Total angle to spread over in degrees (360 = full ring)."})

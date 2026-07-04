@@ -3,17 +3,8 @@
 
 """MCP building block: SEARCH the server's own tools + input kinds (the anti-blindness tool).
 
-  sys_find_tool(query="profile") -> the registered tools whose name/description/inputs match, AND the
-                                    _inputs.py input-kinds that match - so an agent can ask "is there
-                                    already a way to do/reference X?" BEFORE hand-rolling it.
-
-Why this exists: the tool set + the typed input-kinds in _inputs.py have grown large enough that
-agents (and compactions) lose track of what already exists and re-invent it - a fresh
-`sketch_name+profile_index` resolver when ProfileRef already exists, a second CAM-tool reader, etc.
-A STATIC index goes stale the instant a tool is added. So this searches the LIVE registry + the live
-_inputs module every call - it can't drift.
-
-Read-only, no adsk.* - pure introspection of the registry and _inputs. Safe to run anytime.
+sys_find_tool(query=...) matches tool names/descriptions/inputs and _inputs.py kind names/docs against
+keywords, searched live off the registry each call so the results can't go stale. Read-only, no adsk.*.
 """
 
 import inspect
@@ -76,12 +67,7 @@ def _kind_matches(query_terms):
 
 
 def handler(query: str = "", include_kinds: bool = True) -> dict:
-    """Search the registered tools (and optionally the _inputs.py input-kinds) by keyword.
-
-    query: words to match against tool names/descriptions/input names and kind names/docs (e.g.
-    'profile', 'select cam geometry', 'body reference'). include_kinds: also search the typed input
-    kinds (default true) - check these BEFORE hand-rolling a name/index input. Read-only.
-    """
+    """Search the registered tools (and optionally the _inputs.py input-kinds) by keyword."""
     q = (query or "").strip().lower()
     if not q:
         return error("Provide 'query' - keywords to search tool names/descriptions/inputs (and the "

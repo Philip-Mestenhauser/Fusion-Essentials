@@ -3,19 +3,11 @@
 
 """MCP building block: mirror solid bodies across a plane.
 
-  model_mirror -> reflect one or more BODIES across an origin plane (xy / xz / yz) to make the
-                  symmetric half - the other side of a V-bank, a left/right bracket, a symmetric
-                  housing. Optionally join the mirror to the original. WRITES.
+  model_mirror -> reflect one or more BODIES across a plane to make the symmetric half - the other
+                  side of a V-bank, a left/right bracket, a symmetric housing. Optionally join the
+                  mirror to the original. WRITES.
 
-Symmetric parts are common and tedious to rebuild by hand; this makes the mirror in one call.
-Bodies are referenced BY NAME within the active component; the mirror plane is one of the
-component's origin planes. General-purpose - it just reflects geometry.
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - Component.features.mirrorFeatures.createInput(ObjectCollection(bodies), mirrorPlane) -> input
-  - MirrorFeatures.add(input) -> MirrorFeature (.bodies)
-  - mirrorPlane: a planar entity - here the component's xY/xZ/yZ ConstructionPlane
-Handler runs on the main thread; WRITES.
+Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -34,17 +26,9 @@ _BODIES = _inputs.BodyRefList("bodies", required=True, description="The bodies t
 
 app = adsk.core.Application.get()
 
-_PLANES = {"xy": "xYConstructionPlane", "xz": "xZConstructionPlane", "yz": "yZConstructionPlane"}
-
 
 def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
-    """Mirror solid bodies across a plane.
-
-    bodies: the body name(s) to mirror (a list or comma-separated string). plane: an origin alias
-    (xy/xz/yz), a construction-plane NAME, or a planar-face/plane handle from find_geometry (mirror
-    across an arbitrary/angled plane). join: combine the mirror with the original (default false).
-    WRITES.
-    """
+    """Mirror solid bodies across a plane."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -69,10 +53,7 @@ def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
     try:
         mi = comp.features.mirrorFeatures.createInput(coll, mirror_plane)
         # combine the mirror with the source when requested (default keeps them separate)
-        try:
-            mi.isCombine = bool(join)
-        except Exception:
-            pass
+        mi.isCombine = bool(join)
         feature = comp.features.mirrorFeatures.add(mi)
     except Exception as e:
         return error(f"Mirror failed: {e}.")
@@ -96,11 +77,11 @@ def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Mirror solid BODIES across an origin plane - make the symmetric half (the other side of a "
-    "V-bank, a left/right part, a symmetric housing). 'bodies' is the body name(s) to mirror (a "
-    "list or comma-separated). 'plane' is the mirror plane xy | xz | yz (active component origin "
-    "planes). 'join' combines the mirror with the original into one body (default false = separate). "
-    "WRITES; returns the resulting body names."
+    "Mirror solid BODIES across a plane - make the symmetric half (the other side of a "
+    "V-bank, a left/right part, a symmetric housing). 'bodies' is the body handle(s)/name(s) to "
+    "mirror (a list or comma-separated). 'plane' is an origin alias (xy/xz/yz), a construction-plane "
+    "name, or a planar-face/plane handle from find_geometry. 'join' combines the mirror with the "
+    "original into one body (default false = separate). WRITES; returns the resulting body names."
 )
 
 mirror_tool = (

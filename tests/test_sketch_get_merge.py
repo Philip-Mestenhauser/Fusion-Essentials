@@ -1,9 +1,8 @@
-"""Unit tests for the merged sketch_get read tool (chunk B of the refactor).
+"""Unit tests for sketch_get's routing between its two depths.
 
-sketch_get (summary list) and sketch_get (one sketch's full structure) were collapsed into
-ONE tool, sketch_get, switched by specificity: no sketch_name -> summary list; a sketch_name -> full
-detail (delegated to the _sketch_detail engine). The return is always about sketches; only the depth
-changes. These tests pin the ROUTING — that the right engine is called for each case — without
+sketch_get is ONE tool switched by specificity: no sketch_name -> summary list; a sketch_name ->
+full detail (delegated to the _sketch_detail engine). The return is always about sketches; only the
+depth changes. These tests pin the ROUTING - that the right engine is called for each case - without
 needing a full fake design for both paths.
 """
 
@@ -38,7 +37,6 @@ class TestSketchGetRouting:
 
         # the handler imports `from . import _sketch_detail` lazily; install a stub module
         import sys
-        sys.modules["mcpServer.tools._sketch_detail"] = FakeDetail
         monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail", FakeDetail)
 
         res = sketches.sketch_get_handler(sketch_name="Emblem", include_entities=True)

@@ -1,9 +1,9 @@
 """Unit tests for ``cam_create_setup.py`` — create a CAM (Manufacture) setup on a part.
 
-This closes the gap where CAM authoring tools all assumed a setup already existed: a freshly
-imported bare part had no tool-only path to a CAM job. Covers operation-type dispatch
-(milling/turning), model selection (handles / names / all-bodies default), naming, and the
-no-design / no-bodies guards. No live Fusion — fakes mimic adsk.cam.CAM.setups.
+A freshly imported bare part has no CAM job; this tool creates the first setup so the other CAM
+authoring tools have something to work in. Covers operation-type dispatch (milling/turning),
+model selection (handles / names / all-bodies default), naming, and the no-design / no-bodies
+guards. No live Fusion - fakes mimic adsk.cam.CAM.setups.
 """
 
 import json
@@ -79,7 +79,7 @@ class FakeDesign:
         return [e] if e is not None else []
 
 
-def _install(bodies=None, has_cam=True):
+def _install(monkeypatch, bodies=None, has_cam=True):
     bodies = bodies if bodies is not None else [FakeBody("Body1")]
     comp = FakeComp(bodies)
     design = FakeDesign(comp)
@@ -91,8 +91,8 @@ def _install(bodies=None, has_cam=True):
     adsk.fusion.BRepBody = FakeBody
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
 
-    # the tool reads CAM via _get_cam (active doc products) and design via _design
-    cs._get_cam = lambda: ((cam, None) if cam else (None, "no CAM"))
+    # the tool reads CAM via the shared get_cam resolver and design via _design
+    monkeypatch.setattr(cs, "get_cam", lambda: ((cam, None) if cam else (None, "no CAM")))
     cs._design = lambda: design
     # models is a BodyRefList -> resolves via _common.design()/target_component() (the app-ref seam)
     cs._inputs._common.design = lambda: design
@@ -108,19 +108,19 @@ def _payload(res):
 # ── operation type ───────────────────────────────────────────────────────────
 
 class TestOperationType:
-    def test_default_is_milling(self):
-        _, cam, _ = _install()
+    def test_default_is_milling(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler())
         assert cam.setups.added[-1].operationType == "MillingOperation"
         assert out["created"] is True
 
-    def test_turning(self):
-        _, cam, _ = _install()
+    def test_turning(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch)
         _payload(cs.handler(operation_type="turning"))
         assert cam.setups.added[-1].operationType == "TurningOperation"
 
-    def test_unknown_type_errors(self):
-        _install()
+    def test_unknown_type_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = cs.handler(operation_type="welding")
         assert res["isError"] is True and "operation_type" in res["message"]
 
@@ -128,32 +128,32 @@ class TestOperationType:
 # ── model selection ──────────────────────────────────────────────────────────
 
 class TestModelSelection:
-    def test_all_root_bodies_when_omitted(self):
-        _, cam, _ = _install(bodies=[FakeBody("A"), FakeBody("B")])
+    def test_all_root_bodies_when_omitted(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("A"), FakeBody("B")])
         _payload(cs.handler())
         models = cam.setups.added[-1].models
         assert {m.name for m in models} == {"A", "B"}
 
-    def test_named_body(self):
-        _, cam, _ = _install(bodies=[FakeBody("Widget"), FakeBody("Other")])
+    def test_named_body(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("Widget"), FakeBody("Other")])
         _payload(cs.handler(models="Widget"))
         models = cam.setups.added[-1].models
         assert [m.name for m in models] == ["Widget"]
 
-    def test_body_by_handle(self):
-        design, cam, _ = _install(bodies=[FakeBody("Body1")])
+    def test_body_by_handle(self, monkeypatch):
+        design, cam, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
         h = "/v" + "Z" * 70
         design._tokens[h] = FakeBody("FromHandle")
         _payload(cs.handler(models=h))
         assert cam.setups.added[-1].models[0].name == "FromHandle"
 
-    def test_missing_named_model_errors(self):
-        _install(bodies=[FakeBody("Body1")])
+    def test_missing_named_model_errors(self, monkeypatch):
+        _install(monkeypatch, bodies=[FakeBody("Body1")])
         res = cs.handler(models="Nope")
         assert res["isError"] is True and "Nope" in res["message"]
 
-    def test_no_bodies_at_all_errors(self):
-        _install(bodies=[])
+    def test_no_bodies_at_all_errors(self, monkeypatch):
+        _install(monkeypatch, bodies=[])
         res = cs.handler()
         assert res["isError"] is True and "body" in res["message"].lower()
 
@@ -161,22 +161,22 @@ class TestModelSelection:
 # ── naming + guards ──────────────────────────────────────────────────────────
 
 class TestNamingAndGuards:
-    def test_custom_name(self):
-        _, cam, _ = _install()
+    def test_custom_name(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler(name="Op10 Mill"))
         assert cam.setups.added[-1].name == "Op10 Mill"
         assert out["setup_name"] == "Op10 Mill"
 
-    def test_blank_name_not_assigned(self):
+    def test_blank_name_not_assigned(self, monkeypatch):
         # whitespace-only name -> inp.name left at the FakeSetupInput default (None),
         # so the setup keeps its auto-name ("Setup1"), it is NOT set to "   ".
-        _, cam, _ = _install()
+        _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler(name="   "))
         assert cam.setups.added[-1].name == "Setup1"
         assert out["setup_name"] == "Setup1"
 
-    def test_no_cam_product_errors(self):
-        _install(has_cam=False)
+    def test_no_cam_product_errors(self, monkeypatch):
+        _install(monkeypatch, has_cam=False)
         res = cs.handler()
         assert res["isError"] is True and "CAM" in res["message"]
 
@@ -184,22 +184,22 @@ class TestNamingAndGuards:
 # ── output fields ────────────────────────────────────────────────────────────
 
 class TestOutputFields:
-    def test_model_count_and_names_reported(self):
-        _install(bodies=[FakeBody("A"), FakeBody("B"), FakeBody("C")])
+    def test_model_count_and_names_reported(self, monkeypatch):
+        _install(monkeypatch, bodies=[FakeBody("A"), FakeBody("B"), FakeBody("C")])
         out = _payload(cs.handler())
         assert out["model_count"] == 3
         assert set(out["models"]) == {"A", "B", "C"}
         assert out["operation_count"] == 0          # fresh setup has no operations
         assert out["operation_type"] == "milling"
 
-    def test_single_body_model_count_one(self):
-        _install(bodies=[FakeBody("Solo")])
+    def test_single_body_model_count_one(self, monkeypatch):
+        _install(monkeypatch, bodies=[FakeBody("Solo")])
         out = _payload(cs.handler())
         assert out["model_count"] == 1
         assert out["models"] == ["Solo"]
 
-    def test_setup_creation_failure_reported(self):
-        _, cam, _ = _install()
+    def test_setup_creation_failure_reported(self, monkeypatch):
+        _, cam, _ = _install(monkeypatch)
         def boom(_inp):
             raise RuntimeError("kaboom")
         cam.setups.add = boom

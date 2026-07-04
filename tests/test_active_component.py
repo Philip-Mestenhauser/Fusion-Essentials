@@ -1,11 +1,11 @@
-"""Unit tests for the active-component targeting fix in sketch_core.py + model_extrude.py.
+"""Unit tests for active-component targeting in sketch_core.py + model_extrude.py.
 
-The bug the crane build exposed: both tools hardcoded design.rootComponent, so a
-component made active via model_create_component(activate=true) never received the new
-sketch/body — geometry leaked into root, leaving empty components. The fix routes
-through a target_component(design) helper that returns design.activeComponent
-(the current edit target) and falls back to rootComponent when none/unsupported,
-so behaviour is unchanged when nothing is activated (activeComponent == root).
+A component made active via model_create_component(activate=true) must receive new
+sketches/bodies, not the root component - hardcoding design.rootComponent would leak geometry
+into root and leave the activated component empty. Both tools route through a
+target_component(design) helper that returns design.activeComponent (the current edit target) and
+falls back to rootComponent when none/unsupported, so behaviour is unchanged when nothing is
+activated (activeComponent == root).
 """
 
 from types import SimpleNamespace

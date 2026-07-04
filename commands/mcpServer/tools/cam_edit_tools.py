@@ -1,32 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: manage CAM TOOLS across document / local / cloud / hub libraries.
-
-  cam_edit_tools(action=list|add|remove|edit|where_used, scope=document|local|cloud|hub, library=..., ...)
-
-The cohesive tool-management surface. One action-dispatched verb covers the real interaction tasks an
-agent needs:
-  - list        -> the tools in the target library (index + key specs)
-  - add         -> copy one or more tools IN by (library_url, index) reference (the cam_edit_tools
-                   handle); validates ALL refs before adding any
-  - remove      -> remove one or more tools by index (removed high-to-low so indices stay valid)
-  - edit        -> set named tool parameters by expression on one tool, then persist
-  - where_used  -> which operations use a tool (DOCUMENT scope only)
-
-Scope picks the library: 'document' = CAM.documentToolLibrary (this doc's tools, with where_used);
-'local'/'cloud'/'hub' = the shared ToolLibrary at 'library' (name or url). Writes PERSIST - document via
-DocumentToolLibrary.updateTool; shared via ToolLibraries.updateToolLibrary(url, lib). Hub is shared
-TEAM data (writes affect others) and network-slow.
-
-Grounded in adsk.cam (every path verified live):
-  - CAM.documentToolLibrary -> DocumentToolLibrary(.count/.item/.add/.remove/.updateTool(tool)/
-    .operationsByTool(tool) -> OperationVector)
-  - ToolLibraries.toolLibraryAtURL(url) -> ToolLibrary(.count/.item/.add/.remove); persist with
-    ToolLibraries.updateToolLibrary(url, lib)
-  - Tool.parameters.itemByName(name).expression set/get
-Handler runs on the main thread; WRITES CAM/library data (except list / where_used).
-"""
+"""Manage CAM tools across the document / local / cloud / hub tool libraries: list, add, remove, edit
+parameters, find where a tool is used, or create a new shared library. Hub libraries can't be created
+via the API (importToolLibrary fails there) - create those in the UI."""
 
 import adsk.core
 import adsk.cam
@@ -35,6 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
@@ -89,14 +67,6 @@ class _Target:
         return out
 
 
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
 
 
 def _tool_libraries():
@@ -130,7 +100,7 @@ def _shared_libraries(scope):
 def _resolve_target(scope, library):
     """Return (_Target, None) for the scope, or (None, error). Patched in tests."""
     if scope == "document":
-        cam, cerr = _get_cam()        # document scope needs an open CAM document
+        cam, cerr = get_cam()        # document scope needs an open CAM document
         if cerr:
             return None, cerr
         dtl = safe(lambda: cam.documentToolLibrary)
@@ -361,25 +331,29 @@ def _build_entry(ref):
     tool = safe(lambda: _tool_from_json(_json_dumps(d)))
     if tool is None:
         return None, "Could not create the tool from JSON."
-    # diameter override (after creation, on the param)
+    # diameter override (after creation, on the param). A missing parameter means the requested
+    # override cannot apply - error instead of adding the tool without it.
     if ref.get("diameter") is not None:
         p = safe(lambda: tool.parameters.itemByName("tool_diameter"))
-        if p is not None:
-            safe(lambda: setattr(p, "expression", str(ref["diameter"])))
+        if p is None:
+            return None, "The tool has no 'tool_diameter' parameter - the requested diameter override cannot apply."
+        p.expression = str(ref["diameter"])
 
-    # 4) presets
+    # 4) presets - same rule: a preset that cannot be created or populated is an error, not a skip
     for ps in (ref.get("presets") or []):
         preset = safe(lambda: tool.presets.add())
         if preset is None:
-            continue
+            return None, "Could not add a preset to the tool - the requested presets were not applied."
         if ps.get("spindle_speed") is not None:
             sp = safe(lambda: preset.parameters.itemByName("tool_spindleSpeed"))
-            if sp is not None:
-                safe(lambda v=ps["spindle_speed"]: setattr(sp, "expression", str(v)))
+            if sp is None:
+                return None, "The preset has no 'tool_spindleSpeed' parameter - the requested spindle_speed cannot apply."
+            sp.expression = str(ps["spindle_speed"])
         if ps.get("feed") is not None:
             fp = safe(lambda: preset.parameters.itemByName("tool_feedCutting"))
-            if fp is not None:
-                safe(lambda v=ps["feed"]: setattr(fp, "expression", str(v)))
+            if fp is None:
+                return None, "The preset has no 'tool_feedCutting' parameter - the requested feed cannot apply."
+            fp.expression = str(ps["feed"])
     return tool, None
 
 
@@ -592,7 +566,7 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="cam_edit_tools", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "list / add / remove / edit / where_used."})
+            "description": "list / add / remove / edit / where_used / create_library."})
     .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),
             "description": "document / local / cloud / hub."})
     .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not for document scope)."})

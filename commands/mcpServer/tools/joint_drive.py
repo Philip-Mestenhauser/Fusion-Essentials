@@ -1,26 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: DRIVE a joint to a value (the API's Drive Joints command).
-
-  joint_drive -> set a revolute / slider / cylindrical joint to a commanded value (an angle and/or a
-                 distance), moving the mechanism along that joint's DOF. The sanctioned, in-place way
-                 to POSE a jointed assembly by joint VALUE - e.g. swing a revolute to 30 deg, extend a
-                 slider 50 mm, or both on a cylindrical joint.
-
-Poses a mechanism by joint VALUE. The joint-motion value setters
-(RevoluteJointMotion.rotationValue, SliderJointMotion.slideValue, CylindricalJointMotion has both) ARE
-the Drive Joints command - setting them drives the joint directly and the kinematics follow. Only
-single-DOF-value joints are drivable: rigid has no value, ball has three coupled angles that don't
-drive cleanly (use assembly_move for those), planar/pin-slot aren't supported here.
-
-Grounded in adsk.fusion (confirmed live + API doc):
-  - Joint.jointMotion -> RevoluteJointMotion(.rotationValue rad) / SliderJointMotion(.slideValue cm) /
-    CylindricalJointMotion(.rotationValue rad + .slideValue cm). "Setting this value is the equivalent
-    of using the Drive Joints command."
-  - RevoluteJointMotion.rotationLimits / SliderJointMotion.slideLimits -> JointLimits
-    (.isMinimumValueEnabled/.minimumValue, .isMaximumValueEnabled/.maximumValue) for validation.
-Handler runs on the main thread; WRITES (drives the joint, mutating part poses - no new feature).
+"""DRIVES a revolute/slider/cylindrical joint to a commanded angle and/or distance (the API's Drive
+Joints command), moving the mechanism along that joint's DOF - e.g. swing a revolute to 30 deg, extend
+a slider 50 mm. Rigid has no value; ball/planar/pin-slot aren't drivable this way (pose those with
+assembly_move). WRITES (mutates part poses - no new timeline feature).
 """
 
 import math
@@ -35,8 +19,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, scale
 from . import _common
-# Reuse the joint resolver + motion-type detector from the create/edit tool (single source of truth).
-from .joint_create_edit import _find_joint, _current_joint_type
+from . import _inputs
+from ._joints import find_joint as _find_joint, current_joint_type as _current_joint_type
 
 # joint_type -> which value(s) it drives.
 _DRIVES_ANGLE = {"revolute", "cylindrical"}
@@ -164,7 +148,7 @@ tool = (
     .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to drive (from assembly_probe / design_get(include=['timeline']))."})
     .add_input_property("angle_deg", {"type": "number", "description": "Rotation value in DEGREES (revolute / cylindrical)."})
     .add_input_property("distance", {"type": "number", "description": "Slide value in 'units' (slider / cylindrical)."})
-    .add_input_property("units", {"type": "string", "enum": ["mm", "cm", "in"], "description": "Units for 'distance'. Default mm."})
+    .add_input_property(*_inputs.units_property(description="Units for 'distance'."))
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

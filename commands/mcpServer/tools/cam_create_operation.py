@@ -1,26 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: CREATE (and generate) a CAM milling operation.
-
-  cam_create_operation -> add a toolpath operation to a CAM setup: pick a STRATEGY (face / adaptive /
-                          pocket2d / drill / bore / contour2d / ...), a TOOL by reference
-                          (tool_library_url + tool_index - the handle cam_edit_tools / cam_get(include=['library']) hands back),
-                          add it to the setup, and (by default) generate the toolpath.
-
-The "apply an operation" half of CAM, paired with cam_edit_tools / cam_get(include=['library']) (the catalog half): read a
-library to get a tool reference, then create an operation with it. cam_create_setup makes the setup;
-this fills it with toolpaths.
-
-Grounded in adsk.cam (the full path confirmed live):
-  - Setup.operations.compatibleStrategies -> [OperationStrategy] (each .name is the strategy string)
-  - Setup.operations.createInput(strategyName) -> OperationInput
-  - OperationInput.tool = <Tool>  (a Tool from ToolLibrary.item(i) - setting it writes the tool params)
-  - Setup.operations.add(input) -> Operation
-  - CAM.generateToolpath(operation) -> GenerateToolpathFuture (async); operation then has
-    .hasToolpath / .isToolpathValid
-Handler runs on the main thread; WRITES to the document's CAM data. Be in/allow the Manufacture context.
-"""
+"""Create (and by default generate) a CAM milling operation in a setup: pick a strategy, a tool by
+(library_url, index) reference, add it, and generate the toolpath."""
 
 import adsk.core
 import adsk.cam
@@ -29,23 +11,9 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
-
-
-# ── seams (patched in tests) ─────────────────────────────────────────────────
-
-def _get_cam():
-    """The CAM product for the active document, or (None, reason)."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    for i in range(safe(lambda: doc.products.count, 0) or 0):
-        p = safe(lambda i=i: doc.products.item(i))
-        if p is not None and safe(lambda p=p: p.productType) == "CAMProductType":
-            return adsk.cam.CAM.cast(p), None
-    return None, ("No CAM data in this document. Create a setup first (cam_create_setup); switch to the "
-                  "Manufacture workspace once if needed.")
 
 
 def _doc_tool_at(cam, index):
@@ -119,7 +87,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     writes; no URL needed), OR tool_library_url + tool_index (a shared library). generate: generate the
     toolpath after creating (default True). WRITES.
     """
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if not cam:
         return error(cerr)
 

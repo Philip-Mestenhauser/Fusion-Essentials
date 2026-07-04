@@ -1,28 +1,28 @@
-"""Unit tests for the former ``data_management`` tools — pure string/tree logic + handler guards.
+"""Unit tests for the cloud data-model tools' shared string/tree logic + handler guards.
 
 These resolve user-supplied folder paths ("Parts/Fixtures/Vises") against the
 data hierarchy. Bugs here send files to the wrong folder silently, so the
 boundaries (empty path, stray slashes, mixed separators, case-insensitive
-match, missing segment) are exactly what to pin down. No live Fusion needed —
+match, missing segment) are exactly what to pin down. No live Fusion needed -
 only small fakes mimicking ``DataFolder``.
 
-data_management.py was split into _data_common (shared helpers), data_model_ops (project/folder/
-upload + delete-folder) and doc_lifecycle (document ops). These tests predate the split and address
-everything through one ``dm`` handle, so we expose a small MERGED view over the three modules: reads
-resolve from whichever module defines the name; a write (dm.app / dm._data) is applied to EVERY module
-that already has that attribute, so a patched _data lands wherever a handler captured it by value.
+The logic under test spans three modules - _data_common (shared helpers), data_ops (project/folder/
+upload + delete-folder), and doc_lifecycle (document ops). These tests address everything through one
+``dm`` handle: a small MERGED view over the three modules. Reads resolve from whichever module defines
+the name; a write (dm.app / dm._data) is applied to EVERY module that already has that attribute, so a
+patched _data lands wherever a handler captured it by value.
 """
 
 from conftest import load_tool
 
 _data_common = load_tool("_data_common")
-_data_model_ops = load_tool("data_ops")
+_data_ops = load_tool("data_ops")
 _doc_lifecycle = load_tool("doc_lifecycle")
 
 
 class _MergedTools:
     """Read across the split modules; write-through to every module exposing the attr."""
-    _MODULES = (_doc_lifecycle, _data_model_ops, _data_common)
+    _MODULES = (_doc_lifecycle, _data_ops, _data_common)
 
     def __getattr__(self, name):
         for m in self._MODULES:
@@ -265,11 +265,21 @@ class TestCloseDocument:
         res = dm.close_document_handler(name="Ghost")
         assert res["isError"] is True and "No open document matched" in res["message"]
 
-    def test_close_failure_reported_in_errors(self):
+    def test_close_failure_with_no_successful_close_is_an_error(self):
+        # the only targeted close failing must surface as isError, not a false ok().
         bad = FakeDocument("Stuck", close_ok=False)
         _install_app([bad], active=bad)
-        out = _payload(dm.close_document_handler())
-        assert out["closed"] == []
+        res = dm.close_document_handler()
+        assert res["isError"] is True
+        assert "Stuck" in res["message"]
+
+    def test_close_all_partial_failure_reports_ok_with_errors(self):
+        # a MIXED result (one closed, one failed) is a partial success - report both, don't error.
+        good = FakeDocument("Good")
+        bad = FakeDocument("Stuck", close_ok=False)
+        _install_app([good, bad], active=good)
+        out = _payload(dm.close_document_handler(close_all=True))
+        assert out["closed"] == ["Good"]
         assert out["errors"]                   # the false-return surfaced
 
 

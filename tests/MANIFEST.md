@@ -10,7 +10,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | Kind | What it references |
 |---|---|
-| `AxisRef` | A direction/axis: a world axis (x / y / z) OR a 'handle' from find_geometry pointing at a |
+| `AxisRef` | A direction/axis: a world axis (x / y / z) OR a 'handle' pointing at a straight (linear) EDGE |
 | `BodyRef` | A reference to a BODY, by a 'handle' from find_geometry (precise - bodies are auto-named |
 | `BodyRefList` | A LIST of body references (handles or names) - for tools that act on several bodies. Kind-checks |
 | `Choice` | One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are |
@@ -34,19 +34,19 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `model_arrange` | ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - the Arrange command |
-| ✎ | `model_base_feature` | Manage a BASE-FEATURE edit scope in a parametric design (a base feature is a direct-edit scope inside parametric - required for mesh inserts / imported-body edi… |
+| ✎ | `model_base_feature` | Manage a BASE-FEATURE edit scope in a parametric design (a base feature is a direct-edit scope inside parametric - required for mesh inserts / imported-body edi... |
 | ✎ | `model_chamfer` | Bevel (chamfer) edges with a constant distance - an angled edge break |
 | ✎ | `model_combine` | Boolean-combine solid BODIES - the Combine feature |
 | · | `model_compute_holder` | Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool Holder command |
 | ✎ | `model_construction` | Add construction geometry (reference datums) in the active component |
-| ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (… |
+| ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (... |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid - the back half of modelling, paired with sketch_create / sketch_add_geometry |
 | ✎ | `model_fillet` | Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs |
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
 | · | `model_inspect` | Measure a target - size, mass, or mesh stats - in one read |
-| ✎ | `model_loft` | Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order given - order is load-bearing), optionally shaped by 'rails' (guide… |
+| ✎ | `model_loft` | Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order given - order is load-bearing), optionally shaped by 'rails' (guide... |
 | · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an occurrence/component/body name |
-| ✎ | `model_mirror` | Mirror solid BODIES across an origin plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
+| ✎ | `model_mirror` | Mirror solid BODIES across a plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
 | ✎ | `model_pattern_circular` | Pattern component OCCURRENCES evenly around an axis |
 | ✎ | `model_pattern_rectangular` | Pattern component OCCURRENCES in a rectangular grid |
 | ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part: shaft, piston, pulley, bottle) |
@@ -70,9 +70,9 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `mesh_combine` | Boolean-combine MESH bodies - the MeshCombine feature (the mesh analogue of model_combine, which only sees BRep solids) |
-| ✎ | `mesh_export` | Export a body, MESH, component/occurrence, or the WHOLE design to a MESH file on local disk (OBJ / 3MF / STL) - the mesh-aware sibling of design_export (which d… |
+| ✎ | `mesh_export` | Export a body, MESH, component/occurrence, or the WHOLE design to a MESH file on local disk (OBJ / 3MF / STL) - the mesh-aware sibling of design_export (which d... |
 | ✎ | `mesh_generate_face_groups` | Segment a MESH body into planar FACE GROUPS |
-| · | `mesh_get` | List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a component or the whole design, with triangle/vertex counts and watertight (is_closed) hea… |
+| · | `mesh_get` | List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a component or the whole design, with triangle/vertex counts and watertight (is_closed) hea... |
 | ✎ | `mesh_insert` | Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active (or named) component |
 | ✎ | `mesh_plane_cut` | Cut a MESH body with a plane |
 | ✎ | `mesh_reduce` | Decimate (reduce the triangle count of) a MESH body to a target proportion (percent), face_count, or max_deviation |
@@ -99,8 +99,8 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_apply_template` | Apply a CAM toolpath template to a setup, recreating the template's operations in that setup |
 | · | `cam_compare_operations` | Compare two CAM operations (by name) and report exactly which of their parameters differ - and the value on each side |
 | ✎ | `cam_create_operation` | CREATE a CAM milling operation in a setup (the 'apply an operation' half of CAM) |
-| ✎ | `cam_create_setup` | Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since the other CAM tools (cam_apply_template, cam_generate) need a setu… |
-| ⚠ | `cam_delete` | Delete a CAM entity - a setup / operation / folder / pattern - by name (the CAM-side delete; design_delete_feature / _occurrence only act on the DESIGN timeline… |
+| ✎ | `cam_create_setup` | Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since the other CAM tools (cam_apply_template, cam_generate) need a setu... |
+| ⚠ | `cam_delete` | Delete a CAM entity - a setup / operation / folder / pattern - by name (the CAM-side delete; design_delete_feature / _occurrence only act on the DESIGN timeline... |
 | ✎ | `cam_edit_folders` | CAM FOLDERS in a setup |
 | ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP - its parameters and/or its model/fixture/stock bodies (the setup-level companion to cam_edit_operation) |
@@ -108,7 +108,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often minutes; poll cam_get_status(handle), never block) |
 | · | `cam_get` | Read the active document's CAM (Manufacture) state by zoom level |
 | · | `cam_get_status` | Poll a generation launched by cam_generate AND nudge it forward |
-| ✎ | `cam_reorder` | REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['o… |
+| ✎ | `cam_reorder` | REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['o... |
 | ✎ | `cam_save_template` | Bundle a subset of a setup's operations into a NEW toolpath template in the library |
 | ✎ | `cam_select_geometry` | SELECT the machining geometry on a CAM operation using find_geometry handles, then (optionally) regenerate |
 | ✎ | `cam_set_nc_comment` | Set the COMMENT field of the active document's NC programs (post/output jobs) - what most posts emit near the top of the G-code |
@@ -121,8 +121,8 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `assembly_capture_position` | Capture / revert / report the assembly's flexible POSITION in the timeline |
 | ✎ | `assembly_constrain` | Constrain component occurrences' geometry - Constrain Components (flush / coincident / concentric / at an angle, INFERRED from the geometry) |
 | ✎ | `assembly_ground` | Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag |
-| · | `assembly_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^… |
-| ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint/relationship created (use joint_create/assembly_constrain for a maintained relatio… |
+| · | `assembly_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^... |
+| ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint/relationship created (use joint_create/assembly_constrain for a maintained relatio... |
 | · | `assembly_probe` | Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to interpreting a cluttered screenshot |
 | ✎ | `assembly_rigid_group` | Lock two or more component occurrences together as a single rigid unit (Rigid Group) |
 
@@ -136,7 +136,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `joint_create_origin` | Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user click |
 | ✎ | `joint_drive` | DRIVE a joint to a value - the API's Drive Joints command |
 | ✎ | `joint_edit` | Edit an existing joint in place |
-| ✎ | `joint_motion_link` | Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives the other proportionally - a gear pair, belt/chain drive, or coupl… |
+| ✎ | `joint_motion_link` | Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives the other proportionally - a gear pair, belt/chain drive, or coupl... |
 
 ### design
 
@@ -157,8 +157,8 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `doc_activate` | Bring an open document to the foreground (make it the active document) |
 | ⚠ | `doc_close` | Close an open document, or all of them |
-| ✎ | `doc_copy` | Copy an existing cloud document (a saved DataFile, identified by its lineage 'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a dest… |
-| · | `doc_get` | Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id (URN, the 'document_id' doc_copy/doc_open use) - plus the list … |
+| ✎ | `doc_copy` | Copy an existing cloud document (a saved DataFile, identified by its lineage 'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a dest... |
+| · | `doc_get` | Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id (URN, the 'document_id' doc_copy/doc_open use) - plus the list ... |
 | ✎ | `doc_insert_occurrence` | Insert a SAVED cloud document into the active design as a new component occurrence - the API equivalent of Insert into Current Design |
 | ✎ | `doc_new` | Create and open a new, empty Fusion design document; it becomes the active document |
 | ✎ | `doc_open` | Open a Fusion document by data-model id |
@@ -192,18 +192,18 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | | Tool | Summary |
 |---|---|---|
-| · | `view_inspect` | View-state verbs to inspect the model from different angles, then restore - no geometry changes |
+| ✎ | `view_inspect` | View-state verbs to inspect the model from different angles, then restore - no geometry changes |
 | · | `view_list_workspaces` | List the Fusion workspaces the user can switch to (e.g |
 | · | `view_screenshot` | Capture a screenshot of the current Fusion viewport and return it as an image so you can visually inspect the model and verify your work |
 | · | `view_screenshot_multi` | Capture SEVERAL views of the model in ONE call - front/top/right/iso etc |
-| · | `view_section` | Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall thickness, how a part nests in a fixture, where a void sits - that a so… |
+| ✎ | `view_section` | Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall thickness, how a part nests in a fixture, where a void sits - that a so... |
 | ✎ | `view_switch_workspace` | Switch the active Fusion workspace |
 
 ### find
 
 | | Tool | Summary |
 |---|---|---|
-| · | `find_geometry` | Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, world position, and shape data (cylinder radius+axis, edge ra… |
+| · | `find_geometry` | Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, world position, and shape data (cylinder radius+axis, edge ra... |
 
 ### workspace
 
@@ -233,5 +233,5 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings |
 | · | `sys_get_selection` | Read the user's CURRENT selection in Fusion and describe each selected entity so you can intuit what they meant |
 | ✎ | `sys_reload_addin` | Reload the Fusion-Essentials add-in to pick up code changes (developer tool) |
-| · | `sys_request_selection` | Hand control to the USER to pick an entity in Fusion |
+| ✎ | `sys_request_selection` | Hand control to the USER to pick an entity in Fusion |
 

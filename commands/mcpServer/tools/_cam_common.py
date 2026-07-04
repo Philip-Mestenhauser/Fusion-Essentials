@@ -1,19 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared CAM substrate - the private helpers the CAM tools build on (the `_`-prefix keeps the
-auto-discovery sweep from treating it as a tool).
-
-WHY THIS EXISTS: the read layer is consolidating onto ONE rich read, cam_get (progressive disclosure:
-a light default + include=[...] for depth). cam_get is the surface; this module is the shared LOGIC it
-and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) call - so there is ONE place
-that resolves the CAM product and judges job health, not a second public `cam_read` twin computing the
-same thing. As the cam_read -> cam_get migration completes, cam_read's reusable helpers land HERE and
-cam_read is deleted.
-
-Grounded in adsk.cam: CAM.cast(products.itemByProductType('CAMProductType')); Setup/Operation/NCProgram
-all expose .hasError/.error/.hasWarning/.warning and Operation.operationState/.isGenerating (live).
-"""
+"""Shared CAM substrate: resolves the active document's CAM product and judges job health, for
+cam_get and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) to reuse."""
 
 import re
 
@@ -22,6 +11,9 @@ import adsk.cam
 import adsk.fusion
 
 from ._common import ok, error, safe
+
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = "get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)"
 
 app = adsk.core.Application.get()
 
@@ -204,17 +196,20 @@ def _machine_name(machine):
     return label or None
 
 
-def _model_names(collection) -> list:
-    """Readable names of an ObjectCollection of models (Occurrence/BRepBody/MeshBody)."""
+def _model_names(collection) -> tuple:
+    """(names, truncated) - readable names of an ObjectCollection of models (Occurrence/BRepBody/
+    MeshBody), capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
     names = []
+    truncated = False
     try:
         for i, m in enumerate(collection):
             if i >= _MAX_ITEMS:
+                truncated = True
                 break
             names.append(safe(lambda: m.name, "(unnamed)"))
     except Exception:
         pass
-    return names
+    return names, truncated
 
 def get_cam_setups_handler() -> dict:
     cam, err = get_cam()
@@ -222,19 +217,27 @@ def get_cam_setups_handler() -> dict:
         return error(err)
 
     setups = []
+    setups_truncated = False
     try:
-        for i in range(cam.setups.count):
+        setups_total = safe(lambda: cam.setups.count, 0) or 0
+        for i in range(setups_total):
             if i >= _MAX_ITEMS:
+                setups_truncated = True
                 break
             s = cam.setups.item(i)
+            models, models_trunc = _model_names(safe(lambda: s.models, []))
+            fixtures, fixtures_trunc = _model_names(safe(lambda: s.fixtures, []))
+            stock, stock_trunc = _model_names(safe(lambda: s.stockSolids, []))
             setups.append({
         "name": safe(lambda: s.name),
         "operation_type": _operation_type_name(safe(lambda: s.operationType)),
         "is_active": safe(lambda: s.isActive),
         "machine": _machine_name(safe(lambda: s.machine)),
-            "selected_models": _model_names(safe(lambda: s.models, [])),
-            "fixtures": _model_names(safe(lambda: s.fixtures, [])),
-            "stock_solids": _model_names(safe(lambda: s.stockSolids, [])),
+            "selected_models": models,
+            "fixtures": fixtures,
+            "stock_solids": stock,
+            # True only if one of the three model lists above hit the _MAX_ITEMS cap.
+            "model_lists_truncated": bool(models_trunc or fixtures_trunc or stock_trunc),
             # operation_count = the REAL total (allOperations sees ops nested in folders); a
             # folder-organized shop setup must not read as empty. folder_count is the depth breadcrumb
             # (structure exists; include=['operations'] groups by it) without the per-folder texture.
@@ -251,7 +254,7 @@ def get_cam_setups_handler() -> dict:
     except Exception as e:
         return error(f"Could not read setups: {e}")
 
-    return ok({"setup_count": len(setups), "setups": setups})
+    return ok({"setup_count": len(setups), "setups": setups, "truncated": setups_truncated})
 
 def _op_primary_state(op) -> str:
     """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once and the tally
@@ -345,11 +348,12 @@ def get_cam_operations_handler(setup: str = "") -> dict:
             available.append(s_name)
             if want and (s_name or "").lower() != want:
                 continue
-            ops = _operations_in(s)
+            ops, ops_truncated = _operations_in(s)
             result_setups.append({
             "setup": s_name,
             "summary": _operations_summary(ops),    # exception-first rollup BEFORE the full list
             "operations": ops,
+            "operations_truncated": ops_truncated,
             })
     except Exception as e:
         return error(f"Could not read operations: {e}")
@@ -388,7 +392,7 @@ def _validity_basis():
 def _operations_summary(op_records) -> dict:
     """Exception-first rollup of an operations list. states = the count
     tally; exceptions = only ACTIVE ops that block (suppressed ops never block); readiness = a factual
-    next-action string, gated by validity_basis (D1: no toolpath verdict unless Manufacture-verified)."""
+    next-action string, gated by validity_basis (no toolpath verdict unless Manufacture-verified)."""
     states = {}
     exceptions = []
     active_total = 0
@@ -421,13 +425,16 @@ def _operations_summary(op_records) -> dict:
 
 
 
-def _operations_in(setup_obj) -> list:
-    """Summarize the immediate operations of a setup (folders/patterns flattened)."""
+def _operations_in(setup_obj) -> tuple:
+    """(ops, truncated) - summarize the immediate operations of a setup (folders/patterns flattened),
+    capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
     ops = []
+    truncated = False
     try:
         coll = setup_obj.allOperations  # includes nested folders/patterns
         for i, op in enumerate(coll):
             if i >= _MAX_ITEMS:
+                truncated = True
                 break
             # Only real operations have a tool; folders/patterns are skipped by the
             # cast returning None.
@@ -437,10 +444,10 @@ def _operations_in(setup_obj) -> list:
             ops.append(_operation_summary(operation))
     except Exception:
         pass
-    return ops
+    return ops, truncated
 
 
-_OP_STATE_NAMES = {0: "valid", 1: "invalid", 2: "suppressed", 3: "no_toolpath"}
+_OP_STATE_NAMES = {0: "valid", 1: "out_of_date", 2: "suppressed", 3: "no_toolpath"}
 
 
 def _operation_summary(op) -> dict:
@@ -523,10 +530,13 @@ def get_setup_references_handler(setup: str = "") -> dict:
 
             refs = []
             seen_ids = set()
+            refs_truncated = False
             for role, coll in (("model", safe(lambda: s.models, [])),
                                ("fixture", safe(lambda: s.fixtures, [])),
                                ("stock", safe(lambda: s.stockSolids, []))):
-                for ref in _references_in(coll, role):
+                found, role_truncated = _references_in(coll, role)
+                refs_truncated = refs_truncated or role_truncated
+                for ref in found:
                     key = ref.get("source_id")
                     # De-dupe identical references that appear in multiple roles.
                     if key and key in seen_ids:
@@ -536,7 +546,7 @@ def get_setup_references_handler(setup: str = "") -> dict:
                     refs.append(ref)
 
             out_setups.append({"setup": s_name, "reference_count": len(refs),
-        "references": refs})
+        "references": refs, "references_truncated": refs_truncated})
     except Exception as e:
         return error(f"Could not read setup references: {e}")
 
@@ -547,12 +557,15 @@ def get_setup_references_handler(setup: str = "") -> dict:
     return ok({"setup_count": len(out_setups), "setups": out_setups})
 
 
-def _references_in(collection, role: str) -> list:
-    """Yield resolved external-reference info for occurrences in an ObjectCollection."""
+def _references_in(collection, role: str) -> tuple:
+    """(found, truncated) - resolved external-reference info for occurrences in an ObjectCollection,
+    capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
     found = []
+    truncated = False
     try:
         for i, item in enumerate(collection):
             if i >= _MAX_ITEMS:
+                truncated = True
                 break
             occ = adsk.fusion.Occurrence.cast(item)
             if not occ:
@@ -578,7 +591,7 @@ def _references_in(collection, role: str) -> list:
             found.append(info)
     except Exception:
         pass
-    return found
+    return found, truncated
 
 def get_tool_list_handler() -> dict:
     """Distinct cutting tools used across the document, with the ops that use each."""
@@ -645,10 +658,9 @@ def get_machining_time_handler(setup: str = "") -> dict:
         return error(err)
 
     # getMachiningTime(operations, feedScale, rapidFeed, toolChangeTime) - units confirmed live:
-    #   feedScale  is a PERCENT (100 = run at programmed feed), NOT a 0..1 fraction. The old 1.0
-    #              meant 1% feed -> machining time ~100x too long.
-    #   rapidFeed  is centimeters per SECOND, NOT cm/min. The old 1000 was ~600 m/min (absurd, so
-    #              rapids contributed ~nothing); a typical 250 in/min rapid is ~10.58 cm/s.
+    #   feedScale  is a PERCENT (100 = run at programmed feed), NOT a 0..1 fraction (a fraction
+    #              like 1.0 means 1% feed -> machining time ~100x too long).
+    #   rapidFeed  is centimeters per SECOND, NOT cm/min; a typical 250 in/min rapid is ~10.58 cm/s.
     #   toolChangeTime is seconds.
     feed_scale = 100.0          # 100% of programmed feed
     rapid_feed = 10.58          # ~250 in/min = 635 cm/min = 10.58 cm/s

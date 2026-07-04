@@ -1,26 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for sketches in the active design.
-
-  sketch_get        -> list the design's sketches (name, plane, entity/profile counts). Read-only.
-  sketch_create       -> add a new sketch on an origin plane (xy/xz/yz) or a planar face. WRITES.
-  sketch_add_geometry -> draw a line / rectangle / circle / arc / polygon on a sketch. WRITES.
-
-Together these let an agent start a sketch and lay down geometry - the front half of the
-modelling flow (a later extrude/revolve building block would consume the resulting profiles).
-
-UNITS: the Fusion API works in **centimeters** internally. These tools accept a 'units'
-argument (mm | cm | in, default mm) and convert, so callers think in human units.
-
-Grounded in adsk.fusion / adsk.core:
-  - Component.sketches.add(planarEntity) -> Sketch        (plane = xY/xZ/yZ ConstructionPlane, or a planar BRepFace)
-  - Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs}; Sketch.isComputeDeferred (batch)
-  - SketchLines.addByTwoPoints / addTwoPointRectangle / addCenterPointRectangle / addScribedPolygon
-  - SketchCircles.addByCenterRadius(center, radius_cm)
-  - SketchArcs.addByCenterStartSweep(center, start, sweepAngle_radians)
-  - adsk.core.Point3D.create(x, y, z)   (cm; z = 0 on the sketch plane)
-Handlers run on the main thread.
+"""MCP building blocks for sketches in the active design: sketch_get (list/inspect, read-only),
+sketch_create (new sketch on a plane/face), sketch_add_geometry (draw a line/rectangle/circle/arc/
+polygon/etc), sketch_add_3d_line. Together these are the front half of the modelling flow. Units
+accept mm | cm | in (default mm) and convert to the API's internal centimeters. See
+docs/fusion-api-notes.md ("Sketches") for the underlying adsk.fusion signatures.
 """
 
 import math
@@ -118,14 +103,8 @@ def get_sketches_handler() -> dict:
 
 
 def sketch_get_handler(sketch_name: str = "", include_entities: bool = False) -> dict:
-    """Read sketches at the right ZOOM LEVEL (progressive disclosure - see CLAUDE.md).
-
-    No 'sketch_name' -> a SUMMARY list of every sketch (name/plane/counts/visibility) to find what
-    exists. A 'sketch_name' -> that sketch's OVERVIEW: counts, is_fully_constrained, and the 'profiles'
-    list (each region's area/centroid/loop_count + a HANDLE for ProfileRef) - the actionable layer,
-    without the flood. Add include_entities=true for the heavy X-ray (every entity/constraint/
-    dimension) when you actually need to edit the sketch geometry.
-    """
+    """No 'sketch_name': a summary list of every sketch. With one: that sketch's overview (or the
+    full X-ray with include_entities=true) via the _sketch_detail engine."""
     if (sketch_name or "").strip():
         # delegate to the detail engine (imported lazily; no circular dependency)
         from . import _sketch_detail as sketch_detail
@@ -211,17 +190,17 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
 _KINDS = ("line", "rectangle", "center_rectangle", "circle", "ellipse", "arc", "polygon",
     "slot", "point", "spline", "polyline", "closed_path")
 
+_KIND = _inputs.Choice("kind", list(_KINDS), required=True, description="Which entity to draw.")
+
 
 def _target_sketch(design, sketch_name: str):
-    """Resolve the target sketch by name, or default to the most recently created one.
-
-    Looks in the ACTIVE component's sketches so geometry is added to the right component."""
-    coll = target_component(design).sketches
+    """Resolve the target sketch by name via the shared cross-component resolver (active component
+    first, then root, then every other component), or default to the ACTIVE component's most
+    recently created sketch when no name is given."""
     name = (sketch_name or "").strip()
     if name:
-        s = safe(lambda: coll.itemByName(name))
-        return s, name
-    # Default: the last sketch (most recently added).
+        return _common.resolve_sketch(design, name), name
+    coll = target_component(design).sketches
     if coll.count:
         return coll.item(coll.count - 1), None
     return None, None
@@ -256,8 +235,8 @@ def _draw_polyline(sketch, points, k, close):
         start_pt = safe(lambda: first.startSketchPoint)
         closing = lines.addByTwoPoints(prev_end, start_pt) if start_pt is not None else None
         if closing is not None and start_pt is not None:
-            # belt-and-suspenders: also add an explicit coincident (no-op if already shared)
-            safe(lambda: sketch.geometricConstraints.addCoincident(closing.endSketchPoint, start_pt))
+            # explicit coincident constraint on top of the shared point (belt-and-suspenders)
+            sketch.geometricConstraints.addCoincident(closing.endSketchPoint, start_pt)
     n = len(pts) - 1 + (1 if close else 0)
     return f"polyline {len(pts)} pts, {n} segments{' (closed)' if close else ''}"
 
@@ -272,7 +251,7 @@ def _mark_recent_construction(sketch, before_count):
     curves = safe(lambda: sketch.sketchCurves)
     n = safe(lambda: curves.count, 0) if curves else 0
     for i in range(before_count, n):
-        safe(lambda i=i: setattr(curves.item(i), "isConstruction", True))
+        setattr(curves.item(i), "isConstruction", True)
 
 
 def _draw(sketch, kind, p, k):
@@ -376,16 +355,7 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                                 cx: float = None, cy: float = None, radius: float = None,
                                 sweep_deg: float = None, sides: int = None, points=None,
                                 minor: float = None, is_construction: bool = False) -> dict:
-    """Draw one geometry entity on a sketch.
-
-    kind: line | rectangle | center_rectangle | circle | ellipse | arc | polygon | slot | point |
-    spline | polyline | closed_path. Most kinds use the coordinate/size params (in 'units', default
-    mm; angles in degrees) - see _REQUIRED. ellipse: 'radius'=major, 'minor' optional. center_rectangle:
-    center (cx,cy) + corner half-extents (x2,y2). slot: two centers (x1,y1)-(x2,y2) + 'radius'
-    (half-width). spline/polyline/closed_path use 'points' (a list of [x,y]). is_construction=true
-    draws it as CONSTRUCTION geometry (reference, not a profile edge). Targets the named sketch, or
-    the most recent one if 'sketch_name' is omitted.
-    """
+    """Draw one geometry entity on a sketch; required params per 'kind' are in _REQUIRED."""
     kind = (kind or "").strip().lower()
     if kind not in _KINDS:
         return error(f"Unknown kind '{kind}'. Valid: {', '.join(_KINDS)}.")
@@ -486,14 +456,7 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
                          x1: float = 0.0, y1: float = 0.0, z1: float = 0.0,
                          x2: float = None, y2: float = None, z2: float = None,
                          coincident_start_to_origin: bool = False) -> dict:
-    """Draw a line in 3D on a sketch (the end point may be OFF the sketch plane, z != 0).
-
-    Unlike sketch_add_geometry (which keeps geometry on the sketch's x-y plane), this passes
-    true 3D Point3D objects to SketchLines.addByTwoPoints, so a non-zero z places that endpoint
-    off the plane. Optionally adds a coincident constraint binding the line's START point to the
-    sketch origin point (so the start is locked to the origin). Reports each endpoint's resolved
-    coordinates so you can confirm the off-plane end. WRITES to the design.
-    """
+    """Draw a line in 3D on a sketch - the end point may be off the sketch plane (z != 0)."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
@@ -599,9 +562,8 @@ create_sketch_item = Item.create_tool_item(tool=create_sketch_tool, write="write
                                            run_on_main_thread=True)
 
 _ADD_DESC = (
-                                           "Draw one geometry entity on a sketch. 'kind' is line | rectangle | center_rectangle | circle | "
-                                           "ellipse | arc | polygon | slot | point | spline | polyline | closed_path. Provide the params "
-                                           "for that kind (coordinates/sizes in 'units' = mm "
+                                           "Draw one geometry entity on a sketch. Provide the params for the chosen 'kind' "
+                                           "(coordinates/sizes in 'units' = mm "
                                            "[default], cm, or in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
                                            "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
@@ -611,12 +573,9 @@ _ADD_DESC = (
                                            "design. Pair with view_screenshot to view it."
 )
 add_geometry_tool = (
-    Tool.create_with_string_input(
-        name="sketch_add_geometry",
-        description=_ADD_DESC,
-        input_param_name="kind",
-        input_param_description="line | rectangle | center_rectangle | circle | ellipse | arc | polygon | slot | point | spline | polyline | closed_path.",
-    )
+    Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
+    .add_input_property(*_KIND.as_property())
+    .add_required_input("kind")
     .add_input_property("points", {"type": "array",
             "description": "For polyline/closed_path/spline: list of [x,y] points (in 'units'). polyline/closed_path share endpoints (coincident) for a parametric loop; spline fits a smooth curve through them.",
             "items": {"type": "array"}})

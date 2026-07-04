@@ -1,23 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: occurrence ground/move + rigid group (assembly positioning basics).
-
-  ground        -> set an occurrence's STATELESS 'ground_to_parent' lock (true = rigid-to-parent;
-                   false frees a fresh/patterned occurrence for moving/jointing). Fix a part in
-                   space with ground_to_parent + assembly_move. WRITES.
-  assembly_move -> translate (and optionally rotate about a world axis) an occurrence by editing
-                   its transform - a free move, no joint/relationship created. WRITES.
-  assembly_rigid_group   -> lock two or more occurrences together as one rigid unit. WRITES.
-
-General-purpose assembly positioning. For RELATIONSHIPS (joints, as-built joints, assembly
-constraints) see joint / joint_create_as_built / assembly_constrain - those maintain a constraint;
-assembly_move just repositions.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Occurrence.isGroundToParent (parent lock - what ground sets) / transform (Matrix3D)
-  - rootComponent.rigidGroups.add(ObjectCollection, includeChildren) -> RigidGroup
-Handlers run on the main thread; WRITE.
+"""MCP building blocks: assembly_ground (set the stateless parent lock), assembly_move (translate/
+rotate an occurrence by editing its transform - a free move, no joint/relationship created), and
+assembly_rigid_group (lock occurrences together as one rigid unit). All WRITE. For maintained
+RELATIONSHIPS use joint_create / joint_create_as_built / assembly_constrain instead.
 """
 
 import adsk.core
@@ -35,8 +22,6 @@ _ROTATE_AXIS = _inputs.AxisRef("rotate_axis", default="z",
                                description="Axis to rotate about (for rotate_deg).")
 
 app = adsk.core.Application.get()
-
-_AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
 
 def _find_one(design, name):

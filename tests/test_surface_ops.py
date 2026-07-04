@@ -348,6 +348,18 @@ class TestStitch:
         tol = sf.last_input.tolerance
         assert tol[0] == "real" and abs(tol[1] - 0.001) < 1e-12   # 0.01 mm -> 0.001 cm
 
+    def test_default_tolerance_reported_in_caller_units_not_raw_cm(self):
+        # The default is a raw internal value (0.01 mm == 0.001 cm), not "0.01" in whatever
+        # units the caller asked for. units='cm' omitted -> must report 0.001, not the bare 0.01.
+        s1 = _FakeBRepBody("Srf1", is_solid=False)
+        s2 = _FakeBRepBody("Srf2", is_solid=False)
+        sf = _FakeStitchFeatures([_FakeBRepBody("Solid1", is_solid=True)])
+        _install(_FakeFeatures(stitch=sf), bodies_by_name={"Srf1": s1, "Srf2": s2})
+        out = _payload(so.stitch_handler(bodies=["Srf1", "Srf2"], units="cm"))
+        assert out["tolerance"] == 0.001
+        tol = sf.last_input.tolerance
+        assert tol[0] == "real" and abs(tol[1] - 0.001) < 1e-12   # same internal cm value either way
+
     def test_unknown_units_rejected(self):
         s1 = _FakeBRepBody("Srf1", is_solid=False)
         s2 = _FakeBRepBody("Srf2", is_solid=False)

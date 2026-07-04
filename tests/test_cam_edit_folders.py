@@ -94,7 +94,7 @@ class _CAM:
         self.setups = _Setups(setups)
 
 
-def _install(setup_specs=None):
+def _install(monkeypatch, setup_specs=None):
     # default: one setup with 2 loose ops and 1 folder containing 1 op
     if setup_specs is None:
         op1, op2 = _OpBase("Face1"), _OpBase("Adaptive1")
@@ -104,7 +104,7 @@ def _install(setup_specs=None):
         cam = _CAM([setup])
     else:
         cam = _CAM(setup_specs)
-    cf._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
     return cam
 
 
@@ -116,18 +116,18 @@ def _payload(result):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_no_cam(self):
-        cf._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(cf, "get_cam", lambda: (None, "no CAM data"))
         res = cf.handler(action="list", setup="Setup1")
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_unknown_action(self):
-        _install()
+    def test_unknown_action(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="teleport", setup="Setup1")
         assert res["isError"] is True and "action" in res["message"].lower()
 
-    def test_setup_not_found(self):
-        _install()
+    def test_setup_not_found(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="list", setup="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
@@ -135,8 +135,8 @@ class TestGuards:
 # ── list ─────────────────────────────────────────────────────────────────────
 
 class TestList:
-    def test_lists_folders_with_contents(self):
-        _install()
+    def test_lists_folders_with_contents(self, monkeypatch):
+        _install(monkeypatch)
         out = _payload(cf.handler(action="list", setup="Setup1"))
         assert out["folder_count"] == 1
         f = out["folders"][0]
@@ -146,14 +146,14 @@ class TestList:
 # ── create ───────────────────────────────────────────────────────────────────
 
 class TestCreate:
-    def test_create_folder(self):
-        cam = _install()
+    def test_create_folder(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cf.handler(action="create", setup="Setup1", name="Finishing"))
         assert out["folder"] == "Finishing"
         assert cam.setups.item(0).folders.itemByName("Finishing") is not None
 
-    def test_create_requires_name(self):
-        _install()
+    def test_create_requires_name(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="create", setup="Setup1")
         assert res["isError"] is True and "name" in res["message"].lower()
 
@@ -161,14 +161,14 @@ class TestCreate:
 # ── rename ───────────────────────────────────────────────────────────────────
 
 class TestRename:
-    def test_rename_folder(self):
-        cam = _install()
+    def test_rename_folder(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cf.handler(action="rename", setup="Setup1", folder="Holes", new_name="Drilling"))
         assert out["renamed"] is True and out["to"] == "Drilling"
         assert cam.setups.item(0).folders.itemByName("Drilling") is not None
 
-    def test_rename_unknown_folder(self):
-        _install()
+    def test_rename_unknown_folder(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="rename", setup="Setup1", folder="Nope", new_name="X")
         assert res["isError"] is True and "Nope" in res["message"]
 
@@ -176,8 +176,8 @@ class TestRename:
 # ── move operations into a folder ───────────────────────────────────────────
 
 class TestMove:
-    def test_move_ops_into_folder(self):
-        cam = _install()
+    def test_move_ops_into_folder(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Holes",
                                   operations=["Face1", "Adaptive1"]))
         assert out["moved"] == 2
@@ -187,12 +187,55 @@ class TestMove:
         face = setup.operations.itemByName("Face1")
         assert face.moved_into is holes
 
-    def test_move_unknown_operation(self):
-        _install()
+    def test_move_unknown_operation(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Ghost"])
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_move_requires_ops_and_folder(self):
-        _install()
+    def test_move_requires_ops_and_folder(self, monkeypatch):
+        _install(monkeypatch)
         res = cf.handler(action="move", setup="Setup1", folder="Holes")
         assert res["isError"] is True
+
+    def test_folder_into_folder_move_resolves(self, monkeypatch):
+        # allOperations (the prior lookup) omits folders entirely, so moving a FOLDER into
+        # another folder needs _find_op to walk .folders too, not just flat operations.
+        inner = _Folder("Inner")
+        outer = _Folder("Outer")
+        setup = _Setup("Setup1", ops=[], folders=[inner, outer])
+        cam = _CAM([setup])
+        monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
+        out = _payload(cf.handler(action="move", setup="Setup1", folder="Outer",
+                                  operations=["Inner"]))
+        assert out["moved"] == 1
+        assert inner.moved_into is outer
+
+
+class _RefusingOp(_OpBase):
+    """moveInto() returns False - Fusion refused the move (e.g. not allowed for this op type)."""
+    def moveInto(self, container):
+        return False
+
+
+class TestMoveRefused:
+    def test_moveinto_false_surfaces_as_an_error_not_a_silent_success(self, monkeypatch):
+        refusing = _RefusingOp("Locked1")
+        folder = _Folder("Holes")
+        setup = _Setup("Setup1", ops=[refusing], folders=[folder])
+        cam = _CAM([setup])
+        monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
+        res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Locked1"])
+        assert res["isError"] is True and "Locked1" in res["message"]
+
+    def test_moves_completed_before_a_refusal_are_reported_and_kept(self, monkeypatch):
+        moved_ok = _OpBase("Face1")
+        refusing = _RefusingOp("Locked1")
+        folder = _Folder("Holes")
+        setup = _Setup("Setup1", ops=[moved_ok, refusing], folders=[folder])
+        cam = _CAM([setup])
+        monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
+        res = cf.handler(action="move", setup="Setup1", folder="Holes",
+                         operations=["Face1", "Locked1"])
+        assert res["isError"] is True
+        assert "Face1" in res["message"]       # names what moved before the refusal
+        assert moved_ok.moved_into is folder   # that earlier move actually took

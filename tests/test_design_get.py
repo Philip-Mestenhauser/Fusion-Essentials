@@ -144,8 +144,8 @@ class TestFingerprint:
         assert fp["joints"] == 1
 
     def test_counts_user_parameters(self):
-        # parameters must appear in the fingerprint - they were previously invisible (the whole reason
-        # the param_* family had no inbound breadcrumb).
+        # parameters must appear in the fingerprint - an invisible parameter count is the whole reason
+        # the param_* family would have no inbound breadcrumb.
         fp = dg._fingerprint(self._design(params=40))
         assert fp["parameters"] == 40
 

@@ -65,7 +65,7 @@ def install_mock_adsk():
     core.Application.get.return_value = app
 
     fusion = Mock()
-    # Design.cast(product) is used to fetch the active design. Model it as a
+    # Design.cast(product) fetches the active design. Model it as a
     # pass-through: whatever the test puts on app.activeProduct comes back.
     fusion.Design = Mock()
     fusion.Design.cast = Mock(side_effect=lambda x: x)

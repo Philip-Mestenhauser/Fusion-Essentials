@@ -1,18 +1,17 @@
 """Lint + behavioural anchor: handle resolution is UNIFORM across every InputKind.
 
-PR-review bug #1: AxisRef resolved an edge handle with a raw `des.findEntityByToken(s)` instead of the
-shared `_resolve_token_entity(des, s)`. But find_geometry mints COMPOSITE handles
-('<token>|@<kind>:x,y,z'); passing one to findEntityByToken corrupts the token (the '|@locator' suffix)
-and there's no self-heal — so a fresh handle straight from find_geometry was rejected. Every other kind
-(GeometryHandle/BodyRef/PlaneRef/ProfileRef) routes through `_resolve_token_entity`, which `_split_handle`s
-off the locator and falls back to it when the token is stale.
+find_geometry mints COMPOSITE handles ('<token>|@<kind>:x,y,z'); passing one raw to
+findEntityByToken corrupts the token (the '|@locator' suffix) with no self-heal - a fresh handle
+straight from find_geometry gets rejected. Every kind (GeometryHandle/BodyRef/PlaneRef/ProfileRef/
+AxisRef) must route through `_resolve_token_entity`, which `_split_handle`s off the locator and
+falls back to it when the token is stale.
 
 This locks the invariant two ways:
-  1. SOURCE LINT — `findEntityByToken(` is CALLED in _inputs.py only inside `_resolve_token_entity`
+  1. SOURCE LINT - `findEntityByToken(` is CALLED in _inputs.py only inside `_resolve_token_entity`
      (the single sanctioned resolution path). A new kind that hand-rolls findEntityByToken trips this.
-  2. BEHAVIOUR — each handle-taking kind round-trips a COMPOSITE handle whose bare token is the only key
-     in the map. If a kind passes the whole composite string to findEntityByToken, it won't resolve and
-     the test fails. This is the check that would have caught #1.
+  2. BEHAVIOUR - each handle-taking kind round-trips a COMPOSITE handle whose bare token is the only
+     key in the map. A kind that passes the whole composite string to findEntityByToken won't resolve
+     it, and the test fails.
 """
 
 import os
@@ -47,10 +46,10 @@ class TestFindEntityByTokenIsCentralised:
             f"Offending call(s): {offenders}")
 
     def test_no_tool_guesses_handle_vs_name_by_length(self):
-        # PR-review #7: the `len(name) > 60` heuristic mis-routes a long body/component NAME into the
-        # handle path. _resolve_token_entity replaced it (ask findEntityByToken; a non-token returns
-        # nothing and the caller falls through to the name lookup). No tool may reintroduce the guess.
-        # _inputs.py is exempt: it owns the resolver and references the OLD heuristic only in prose.
+        # A `len(name) > 60` heuristic mis-routes a long body/component NAME into the handle path.
+        # The sanctioned way to tell handle from name is to ask findEntityByToken (a non-token
+        # returns nothing and the caller falls through to the name lookup) - no tool may guess by
+        # length. _inputs.py is exempt: it owns the resolver.
         length_guess = re.compile(r"len\([^)]*\)\s*>\s*60")
         offenders = []
         for fn in sorted(os.listdir(TOOLS_DIR)):

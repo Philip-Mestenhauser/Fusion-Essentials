@@ -4,20 +4,10 @@
 """MCP building block: boolean combine of solid BODIES (join / cut / intersect).
 
   model_combine -> the Combine feature: fuse, subtract, or intersect one or more TOOL bodies into a
-                   TARGET body. join = weld together; cut = subtract the tools from the target;
-                   intersect = keep only the shared volume. Optionally keep the tool bodies. WRITES.
+                   TARGET body. Optionally keep the tool bodies. WRITES.
 
-This is the body-on-body boolean that model_extrude/model_revolve's cut/join can't do (those act on
-a profile vs. existing geometry). Use it to assemble a part from primitive bodies (a boss + a base),
-to bore a hole (cut a cylinder body from the part), or to find an overlap (intersect). Bodies are
-referenced BY NAME within the active component. General-purpose - it just combines bodies.
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - Component.features.combineFeatures.createInput(targetBody, ObjectCollection(toolBodies)) -> input
-  - CombineFeatureInput.operation = FeatureOperations.{Join|Cut|Intersect}FeatureOperation
-  - CombineFeatureInput.isKeepToolBodies = bool
-  - CombineFeatures.add(input) -> CombineFeature
-Handler runs on the main thread; WRITES.
+The body-on-body boolean that model_extrude/model_revolve's cut/join can't do (those act on a
+profile, not existing geometry). Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -45,13 +35,7 @@ _OPERATIONS = {
 
 def handler(target: str = "", tools=None, operation: str = "join",
             keep_tools: bool = False, new_component: bool = False) -> dict:
-    """Boolean-combine tool bodies into a target body.
-
-    target: name of the body to keep/modify. tools: the body name(s) to combine into it (a list, or
-    a comma-separated string). operation: join (fuse) | cut (subtract tools from target) | intersect
-    (keep shared volume). keep_tools: leave the tool bodies in place (default false = consume them).
-    new_component: put the result in a NEW component instead of modifying in place. WRITES.
-    """
+    """Boolean-combine tool bodies into a target body."""
     op_key = (operation or "join").strip().lower()
     if op_key not in _OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: join, cut, intersect.")
@@ -109,8 +93,8 @@ TOOL_DESCRIPTION = (
 "join (fuse into one) | cut (subtract the tools from the target - e.g. bore a hole with a "
 "cylinder body) | intersect (keep only the shared volume). 'keep_tools' leaves the tool bodies "
 "(default false = consume them). This is the body-on-body boolean that model_extrude/"
-"model_revolve's cut/join can't do (those act on a profile). Bodies are named within the active "
-"component."
+"model_revolve's cut/join can't do (those act on a profile). Bodies are referenced by handle "
+"or name within the active component."
 )
 
 combine_tool = (

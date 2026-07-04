@@ -73,3 +73,102 @@ class TestTargetComponent:
             def activeComponent(self):
                 raise RuntimeError("none active")
         assert common.target_component(D()) is root
+
+
+class TestCmToUnit:
+    def test_is_the_inverse_of_unit_to_cm(self):
+        for u, f in common.UNIT_TO_CM.items():
+            assert common.CM_TO_UNIT[u] == 1.0 / f
+
+    def test_mm_is_ten_per_cm(self):
+        assert common.CM_TO_UNIT["mm"] == 10.0
+        assert common.CM_TO_UNIT["cm"] == 1.0
+
+
+class TestPtxyz:
+    class _Pt:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    def test_scales_and_rounds(self):
+        p = self._Pt(1.0, 2.0, 3.0)
+        assert common.ptxyz(p, 10.0) == {"x": 10.0, "y": 20.0, "z": 30.0}
+
+    def test_none_point_is_none(self):
+        assert common.ptxyz(None, 10.0) is None
+
+
+class _Coll:
+    def __init__(self, items):
+        self._items = list(items)
+    @property
+    def count(self):
+        return len(self._items)
+    def item(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+    def itemByName(self, name):
+        for it in self._items:
+            if it.name == name:
+                return it
+        return None
+
+
+class TestTargetSketch:
+    def test_named_sketch_found(self):
+        sk = type("Sk", (), {"name": "S1"})()
+        comp = type("C", (), {"sketches": _Coll([sk])})()
+        sketch, requested = common.target_sketch(comp, "S1")
+        assert sketch is sk and requested == "S1"
+
+    def test_named_sketch_not_found(self):
+        comp = type("C", (), {"sketches": _Coll([])})()
+        sketch, requested = common.target_sketch(comp, "Nope")
+        assert sketch is None and requested == "Nope"
+
+    def test_no_name_returns_most_recent(self):
+        sk0 = type("Sk", (), {"name": "S0"})()
+        sk1 = type("Sk", (), {"name": "S1"})()
+        comp = type("C", (), {"sketches": _Coll([sk0, sk1])})()
+        sketch, requested = common.target_sketch(comp, "")
+        assert sketch is sk1 and requested == ""
+
+    def test_no_name_no_sketches_is_none(self):
+        comp = type("C", (), {"sketches": _Coll([])})()
+        sketch, requested = common.target_sketch(comp, "")
+        assert sketch is None and requested == ""
+
+
+class TestResolveEntityRef:
+    class _Curves:
+        def __init__(self, lines=(), arcs=(), circles=()):
+            self.sketchLines = _Coll(list(lines))
+            self.sketchArcs = _Coll(list(arcs))
+            self.sketchCircles = _Coll(list(circles))
+
+    def _sketch(self):
+        line = type("Line", (), {"name": "L0"})()
+        return type("Sk", (), {
+            "sketchCurves": self._Curves(lines=[line]),
+            "sketchPoints": _Coll([type("Pt", (), {"name": "P0"})()]),
+        })()
+
+    def test_resolves_line_by_index(self):
+        assert common.resolve_entity_ref(self._sketch(), "line:0").name == "L0"
+
+    def test_resolves_point_by_index(self):
+        assert common.resolve_entity_ref(self._sketch(), "point:0").name == "P0"
+
+    def test_bad_type_is_none(self):
+        assert common.resolve_entity_ref(self._sketch(), "spline:0") is None
+
+    def test_out_of_range_is_none(self):
+        assert common.resolve_entity_ref(self._sketch(), "line:9") is None
+
+    def test_malformed_ref_is_none(self):
+        assert common.resolve_entity_ref(self._sketch(), "line") is None
+
+
+class TestOperations:
+    def test_maps_every_verb_to_a_feature_operation_attribute_name(self):
+        for key in ("new", "new_body", "join", "cut", "intersect"):
+            assert common.OPERATIONS[key].endswith("FeatureOperation")

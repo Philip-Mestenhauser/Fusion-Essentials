@@ -1,27 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for CAM toolpath templates.
-
-  cam_get(include=['templates']) -> navigate the template library (cloud / local / Fusion):
-                           folders and the templates they contain, by URL. Read-only (a cam_get slice).
-  cam_apply_template -> instantiate a template into a named CAM setup, recreating
-                           its operations there. WRITES to the document.
-
-Grounded in adsk.cam:
-  - adsk.cam.CAMManager.get().libraryManager.templateLibrary -> CAMTemplateLibrary
-    (the library manager is on the CAMManager SINGLETON, not the CAM product)
-  - CAMLibrary.urlByLocation(LibraryLocations.*) -> root URL per location
-    (LocalLibraryLocation=0, CloudLibraryLocation=1, Fusion360LibraryLocation=5, ...)
-  - CAMLibrary.childFolderURLs(url) / displayName(url); CAMTemplateLibrary.childTemplates(url)
-    -> CAMTemplate(.name, .description, .isValidTemplate); templateAtURL(url)
-  - Setup.createFromCAMTemplate2(CreateFromCAMTemplateInput) with .camTemplate set,
-    .mode = AutomaticGenerationModes.* (default Skip Generation)
-  - adsk.core.URL.create(str) / .toString()
-
-Handlers run on the main thread. Saving/overwriting templates back to the library
-(importTemplate / updateTemplate) is intentionally a separate, later building block.
-"""
+"""Read (cam_get(include=['templates'])) and write (cam_apply_template, cam_save_template) the CAM
+toolpath template library. cam_save_template always creates a new template; it does not overwrite
+an existing one."""
 
 import adsk.core
 import adsk.cam
@@ -30,6 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
@@ -46,23 +29,6 @@ _LOCATIONS = {
 }
 
 _MAX_NODES = 1500
-
-
-def _get_cam():
-    """Return (cam, None) or (None, reason). Works regardless of active workspace."""
-    try:
-        doc = app.activeDocument
-    except Exception:
-        doc = None
-    if not doc:
-        return None, "No active document."
-    try:
-        cam = adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType'))
-    except Exception as e:
-        return None, f"Could not access CAM product: {e}"
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
 
 
 def _template_library():
@@ -224,7 +190,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     if not (template_url.strip() or template_name.strip()):
         return error("Provide 'template_url' or 'template_name'.")
 
-    cam, err = _get_cam()
+    cam, err = get_cam()
     if err:
         return error(err)
     lib, err = _template_library()
@@ -382,7 +348,7 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     if not op_names:
         return error("Provide 'operations' - a comma-separated list of operation names to bundle.")
 
-    cam, err = _get_cam()
+    cam, err = get_cam()
     if err:
         return error(err)
     lib, err = _template_library()
@@ -447,12 +413,9 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         return error("createFromOperations did not yield a usable CAMTemplate (got "
                      f"{type(result).__name__}). The operation set may not be templatable together, "
                      "or this Fusion build's API returns an unexpected shape - please report.")
-    try:
-        template.name = template_name
-        if description.strip():
-            template.description = description.strip()
-    except Exception:
-        pass
+    template.name = template_name
+    if description.strip():
+        template.description = description.strip()
     if not safe(lambda: template.isValidTemplate, True):
         return error("The created template is not in a valid state (the operation set may "
     "not be templatable together).")
@@ -507,9 +470,6 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
             "template's asset URL). This tool always creates a NEW template; "
             "overwriting an existing one is a separate capability."),
     })
-
-
-# --- result helpers ---
 
 
 # --- tool definitions ---

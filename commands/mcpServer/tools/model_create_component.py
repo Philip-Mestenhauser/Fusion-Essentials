@@ -3,18 +3,8 @@
 
 """MCP building block: create a new empty component occurrence in the active design.
 
-  model_create_component -> add a new, empty component (and an occurrence referencing it) to the active
-                     design, optionally named, placed at a position, and activated as the edit
-                     target. WRITES.
-
-This is the prerequisite for building an ASSEMBLY: the modelling tools (sketch_create / extrude)
-build into the active component's bodies, so to make separate, independently jointable/groundable
-parts you create a component per part with this, activate it, then model into it. General-purpose -
-it just makes a component; what the part is is up to you.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - rootComponent.occurrences.addNewComponent(Matrix3D) -> Occurrence (.component, .activate())
-Handler runs on the main thread; WRITES.
+Prerequisite for building an assembly: the modelling tools build into the active component, so
+create one component per part, activate it, then model into it (sketch_create / extrude). WRITES.
 """
 
 import adsk.core
@@ -35,14 +25,7 @@ _AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", activate: bool = False,
             rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
-    """Create a new empty component occurrence.
-
-    name: optional name for the new component. x/y/z: optional placement of the occurrence (in
-    'units', mm default; omit for the origin). rotate_deg / rotate_axis: optionally ORIENT the
-    occurrence - rotate it 'rotate_deg' about world axis x/y/z (through its placement point).
-    activate: make the new component the active edit target so subsequent sketch_create / extrude
-    build into it. WRITES.
-    """
+    """Create a new empty component occurrence."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")

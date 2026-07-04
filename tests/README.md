@@ -2,7 +2,8 @@
 
 Unit tests for the MCP tools in `commands/mcpServer/tools/`. They run **outside
 Fusion** against a mocked `adsk` layer, so they're fast (~0.1s for the whole
-suite) and need no live Fusion session.
+suite) and need no live Fusion session. See [CLAUDE.md](CLAUDE.md) for the short,
+mandatory-for-new-tests version of "which pattern to copy."
 
 ```bash
 py -3 -m pytest            # run everything
@@ -33,7 +34,7 @@ in-Fusion integration layer (driven via the Fusion MCP server), not here.
 
 - **Tier 1 — test thoroughly.** Real logic: unit math, parsing, classification,
   path/name resolution, state tallies. (model_inspect, sys_selection,
-  cam_read, data_ops/doc_lifecycle, param_ops, design_configure,
+  cam_get/_cam_common, data_ops/doc_lifecycle, param_ops, design_configure,
   joint_create_edit, joint_create_origin, cam_templates, sketch_core.)
 - **Tier 2 — test the one or two real helpers.** Mostly Fusion orchestration
   with a pure helper or two worth pinning. (doc_open URN parsing, quoting
@@ -103,15 +104,23 @@ copy it" rule the tools themselves follow.)
 Pick the closest and copy its shape. Each is kept clean on purpose; a new test
 should be indistinguishable in structure from its model.
 
-- **A rich read (`<domain>_get`)** → copy **`test_design_get.py`**. A
-  `@pytest.fixture` stubs the `_slice_*` seams with `monkeypatch`; tests assert the
-  router's composition (default = orientation slice only; each `include=` adds its
-  slice; the note advertises the rest). `test_cam_get.py` is the same shape.
-- **A logic tool (geometry / resolution / state)** → copy **`test_model_inspect.py`**.
-  It uses the shared `make_design`/`MakeComp` fakes via `install`, all set up with
-  `monkeypatch` — no local `Fake*` classes, no imperative seam-poking.
+- **A rich read (`<domain>_get`, or a router with its own `_slice_*`/measurement-core helpers)** →
+  copy **`test_design_get.py`** or **`test_model_inspect.py`**. A `@pytest.fixture` stubs the
+  router's internal slice seams with `monkeypatch`; tests assert the router's composition (default =
+  orientation slice only; each `include=` adds its slice; the note advertises the rest) rather than
+  re-mocking the Fusion calls each slice delegates to. `test_cam_get.py` is the same shape.
+- **A tool needing a fuller fake object model (bodies / occurrences / components)** → copy
+  **`test_model_mirror.py`**. It builds a design with the shared `make_design`/`MakeComp` fakes and
+  wires it into the tool with `install`, all set up inside a `@pytest.fixture` — no local `Fake*`
+  classes, no imperative seam-poking.
 - **A pure function (parse / encode / convert)** → copy **`test_quoting.py`**.
   No Fusion at all; just call it and round-trip the result.
+
+Adoption today: of 108 `test_*.py` files, 62 still define their own bespoke `_install(` (the
+anti-pattern below) and 43 contain at least one raw `<var>.app = ...` poke; only `test_model_mirror.py`
+uses the shared `make_design`/`install` pair. Don't take that as license to keep writing bespoke
+tests — it means most of the suite hasn't been migrated yet, not that the bespoke shape is preferred.
+See [tests/CLAUDE.md](CLAUDE.md) for the mandatory pattern for anything new.
 
 Then:
 

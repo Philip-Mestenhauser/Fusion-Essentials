@@ -230,3 +230,24 @@ class TestSpacing:
         _install([FakeSketch("B")], ["A:1"])
         res = ar.handler(boundary_sketch="B", shapes="A:1", units="furlong")
         assert res["isError"] is True and "units" in res["message"].lower()
+
+    def test_spacing_setter_raise_surfaces_as_error(self):
+        # An objectSpacing setter failure must propagate out of the handler (as Arrange failed: ...)
+        # - swallowing it would report the spacing as applied when it wasn't.
+        class _ReadOnlyEnvelope(FakeEnvelope):
+            @property
+            def objectSpacing(self):
+                return None
+            @objectSpacing.setter
+            def objectSpacing(self, v):
+                raise AttributeError("objectSpacing is read-only on this API version")
+
+        class _RaisingInput(FakeArrangeInput):
+            def setProfileOrFaceEnvelope(self, profiles_or_faces):
+                self.envelope = _ReadOnlyEnvelope(profiles_or_faces)
+                return self.envelope
+
+        _, af = _install([FakeSketch("B")], ["A:1"])
+        af.createInput = lambda solver: _RaisingInput(solver)
+        res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
+        assert res["isError"] is True

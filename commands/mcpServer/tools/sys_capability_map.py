@@ -3,19 +3,9 @@
 
 """MCP building block: a LIVE, factual index of the server's tool FAMILIES (the breadth map).
 
-  sys_capability_map() -> every tool family (by name prefix), each with a one-line factual summary, its
-                          entry-point tool, and how many tools it has. The BREADTH counterpart to
-                          sys_find_tool's DEPTH: this answers "what CAN this server do?" so a cold agent
-                          that doesn't yet know Fusion has surface/mesh/config tooling can SEE the map,
-                          then sys_find_tool to search the branch it needs.
-
-Why this exists: sys_find_tool needs a query, which needs already suspecting the capability exists. With
-no "show me everything" tool, a cold agent is blind at breadth. This is a FACTUAL registry index - not
-advice. Families/entry-points/counts are facts about what's registered; there is NO methodology, no
-"you should", no workflow order. LIVE from the registry every call (like sys_find_tool), so it can't
-drift as tools are added or removed.
-
-Read-only, no adsk.* - pure registry introspection. Safe anytime.
+sys_capability_map() lists every tool family (by name prefix) with a one-line summary, its entry-point
+tool, and tool count - read live from the registry so it can't drift. Pair with sys_find_tool to search
+within a family. Read-only, no adsk.*.
 """
 
 from ._common import ok
@@ -33,7 +23,7 @@ _FAMILY = {
     "mesh":      ("Mesh bodies (STL/OBJ/3MF): import, edit, reduce/remesh, convert to BRep.", "mesh_insert"),
     "assembly":  ("Assembly kinematics: joints, grounding, move/capture, interference, probe.", "assembly_probe"),
     "joint":     ("Joints between components: create/edit/drive joints and joint origins.", "joint_create"),
-    "cam":       ("Manufacture (CAM): setups, operations, templates, tool libraries, generate, post.", "cam_create_setup"),
+    "cam":       ("Manufacture (CAM): setups, operations, templates, tool libraries, generate toolpaths.", "cam_create_setup"),
     "data":      ("Cloud data model: hubs, projects, folders, files (create/list/upload/delete).", "data_get"),
     "doc":       ("Document lifecycle: open/new/save/close/activate/copy + insert/update references.", "doc_get"),
     "design":    ("The active design as a whole: read structure, mode, recompute, configure, delete.", "design_get"),
@@ -54,8 +44,7 @@ def _family_of(name):
 
 
 def handler() -> dict:
-    """Read the LIVE family index: every tool family, its factual summary, entry-point tool, and tool
-    count. Breadth map - pair with sys_find_tool to search within a family. Read-only, no args."""
+    """Read the live per-family tool index."""
     families = {}
     for item in get_tools():
         prim = getattr(item, "primitive", None)

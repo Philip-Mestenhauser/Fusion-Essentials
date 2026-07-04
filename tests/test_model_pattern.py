@@ -316,12 +316,12 @@ class TestBodyTargets:
         assert res["isError"] is True and "Nope" in res["message"]
 
 
-# ── bug #4 regression: a body in a SUB-COMPONENT must pattern on THAT component ──────────────────
+# ── a body in a SUB-COMPONENT must pattern on THAT component ─────────────────────────────────────
 
 class _BodyInSub:
     """A body whose parentComponent is a distinct sub-component (its OWN axes + pattern features).
-    The old code took the axis + built the feature on ROOT, mismatching the body's object path —
-    Fusion raised 'InternalValidationError getObjectPath'. _owning_component must now resolve to the
+    Taking the axis from ROOT and building the feature there mismatches the body's object path -
+    Fusion raises 'InternalValidationError getObjectPath'. _owning_component must resolve to the
     body's parent."""
     def __init__(self, name, parent):
         self.name = name
@@ -371,7 +371,7 @@ class TestBodyOwningComponent:
         assert out["entity_kind"] == "bodies"
         # the feature was created on the SUB-component (axis from the sub, not root)
         assert sub_cf.last_input is not None and sub_cf.last_input.axis == "SUB_Y"
-        assert root_cf.last_input is None          # root was NOT used (the old bug)
+        assert root_cf.last_input is None          # root must NOT be used
 
     def test_rectangular_builds_on_bodys_parent_component(self):
         sub_rf, sub_cf, root_rf, root_cf = _install_body_in_subcomponent()

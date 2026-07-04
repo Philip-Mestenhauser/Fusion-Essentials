@@ -1,36 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: create a Joint Origin programmatically (agent-placed), at any orientation.
-
-  joint_create_origin -> place a Joint Origin in the active design at a location/orientation the
-                         AGENT specifies. WRITES to the design. Reports the resulting frame axes.
-
-This is for an AI agent to place a joint origin ITSELF - a person would use Fusion's in-product
-Joint Origin command. A Joint Origin is the reusable coordinate frame used as a WCS anchor.
-
-ORIENTATION (the important part): a joint origin's frame is NOT freely orientable from a bare
-point - anchoring on a point yields a world-aligned frame (Z = world Z). The frame's Z axis is
-driven by the GEOMETRY it is built from:
-  - createByPoint(point)        -> position only; Z = world Z (or the point's sketch-plane normal)
-  - createByCurve(curve, kp)    -> Z runs ALONG the curve  (VERIFIED: a sketch line pointing
-                                   (1,1,1) yields Z = [0.577,0.577,0.577]); X is auto-orthonormal.
-So to place an origin at an arbitrary orientation, the agent first draws a direction line with
-sketch_add_3d_line (a true 3D sketch vector), then anchors this origin on that sketch line. The blocks
-compose: sketch_add_3d_line defines the axis, joint_create_origin consumes it.
-
-anchor modes:
-  - 'coordinates' (default): position only, at x,y,z (target='at') or model origin (target='origin').
-  - 'sketch_line': orient + locate on a sketch LINE (by sketch name + line index) -> oriented frame.
-  - 'sketch_point': locate on an existing sketch POINT (by sketch name + point index) -> position only.
-
-Grounded in adsk.fusion / adsk.core:
-  - Sketch.sketchCurves.sketchLines.item(i) / Sketch.sketchPoints.item(i)
-  - JointGeometry.createByCurve(sketchLine, JointKeyPointTypes) / .createByPoint(sketchPoint)
-  - Component.jointOrigins.createInput(geom) -> JointOriginInput (.primaryAxisVector etc.) -> .add()
-  - For raw coordinates: a helper sketch point at the location (parametric-safe; a bare Point3D
-    is not a valid JointGeometry input and ConstructionPoint.setByPoint(Point3D) needs direct mode).
-Handler runs on the main thread; WRITES to the design.
+"""Creates a Joint Origin (a reusable coordinate frame / WCS anchor) at an agent-specified location or
+orientation - anchor='coordinates'|'sketch_line'|'sketch_point'|'geometry'. Only sketch_line/geometry
+anchors can orient the frame; a bare coordinate/point is world-aligned (Z = world Z). WRITES.
 """
 
 import adsk.core
@@ -44,10 +17,18 @@ from ..mcp_primitives.registry import register
 from ._common import UNIT_TO_CM, error, ok, safe, resolve_sketch
 from . import _common
 from . import _inputs
+from . import _joints
 
 _TARGETS = ("at", "origin")
 _ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry")
 _KEYPOINTS = {"start": 0, "middle": 1, "end": 2, "center": 3}
+
+_ANCHOR_CHOICE = _inputs.Choice("anchor", list(_ANCHORS), default="coordinates",
+                                description="What the joint origin is built from.")
+_TARGET_CHOICE = _inputs.Choice("target", list(_TARGETS), default="at",
+                                description="For anchor=coordinates: place at x,y,z, or at the model origin.")
+_KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start",
+                                  description="Where on the line/edge to locate the frame.")
 
 # anchor='geometry': a BRep face/edge/vertex HANDLE from find_geometry - the frame's orientation
 # comes from that real geometry (a planar face's normal, a cylinder/edge's axis, a hole edge).
@@ -87,26 +68,20 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
         ent, herr = _GEOM.resolve(geometry_handle)
         if herr:
             return None, None, herr
-        kp_val = _KEYPOINTS.get(keypoint, 1)   # middle by default for faces/edges
         # planar face -> frame Z = face normal; non-planar (cylinder/cone) -> axis via keypoint;
-        # edge/curve -> Z along the curve; vertex -> position only.
+        # edge/curve -> Z along the curve (the caller's keypoint choice); vertex -> position only.
         if isinstance(ent, adsk.fusion.BRepFace):
-            surf = safe(lambda: ent.geometry)
-            is_planar = isinstance(surf, adsk.core.Plane) if surf is not None else None
-            if is_planar:
-                g = safe(lambda: JG.createByPlanarFace(ent, None, adsk.fusion.JointKeyPointTypes.CenterKeyPoint))
-                return g, "planar face (Z = face normal)", \
-                    (None if g else "createByPlanarFace returned nothing.")
-            g = safe(lambda: JG.createByNonPlanarFace(ent, adsk.fusion.JointKeyPointTypes.MiddleKeyPoint))
-            return g, "non-planar face (axis from the face)", \
-                (None if g else "createByNonPlanarFace returned nothing (CenterKeyPoint is invalid on a cylinder - Middle is used).")
+            g, label, err = _joints.build_joint_geometry(ent)
+            desc = ("planar face (Z = face normal)" if label == "planar_face@center"
+                    else "non-planar face (axis from the face)")
+            return g, desc, err
         if isinstance(ent, adsk.fusion.BRepEdge):
-            g = safe(lambda: JG.createByCurve(ent, kp_val))
-            return g, f"edge ({_kp_name(kp_val)}) - Z runs along the edge", \
-                (None if g else "createByCurve returned nothing (try a different keypoint).")
+            kp_val = _KEYPOINTS.get(keypoint, 1)   # middle by default
+            g, _, err = _joints.build_joint_geometry(ent, edge_keypoint=kp_val)
+            return g, f"edge ({_kp_name(kp_val)}) - Z runs along the edge", err
         if isinstance(ent, adsk.fusion.BRepVertex):
-            g = safe(lambda: JG.createByPoint(ent))
-            return g, "vertex (position only)", (None if g else "createByPoint returned nothing.")
+            g, _, err = _joints.build_joint_geometry(ent)
+            return g, "vertex (position only)", err
         return None, None, "geometry handle is not a face/edge/vertex."
 
     if anchor == "coordinates":
@@ -256,8 +231,8 @@ TOOL_DESCRIPTION = (
     "click. Orientation follows the anchor:\n"
     "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
     "World-aligned (Z = world Z).\n"
-    "- anchor='sketch_line': on a sketch line (sketch_name + entity_index, 'keypoint'=start/middle/end/"
-    "center) - frame Z runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
+    "- anchor='sketch_line': on a sketch line (sketch_name + entity_index + 'keypoint') - frame Z "
+    "runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
     "- anchor='sketch_point': on a sketch point (position only).\n"
     "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
@@ -266,11 +241,9 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="joint_create_origin", description=TOOL_DESCRIPTION)
-    .add_input_property("anchor", {"type": "string",
-            "description": "coordinates (default) | sketch_line (oriented) | sketch_point | geometry (a find_geometry face/edge/vertex handle)."})
+    .add_input_property(*_ANCHOR_CHOICE.as_property())
     .add_input_property("geometry", _GEOM.schema())
-    .add_input_property("target", {"type": "string",
-            "description": "For anchor=coordinates: at (use x,y,z) | origin. Default at."})
+    .add_input_property(*_TARGET_CHOICE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("x", {"type": "number", "description": "X coordinate (anchor=coordinates, target=at)."})
     .add_input_property("y", {"type": "number", "description": "Y coordinate (anchor=coordinates, target=at)."})
@@ -279,8 +252,7 @@ tool = (
             "description": "Sketch holding the anchor line/point (anchor=sketch_line/sketch_point)."})
     .add_input_property("entity_index", {"type": "integer",
             "description": "Index of the line/point within the sketch (default 0)."})
-    .add_input_property("keypoint", {"type": "string",
-            "description": "Where on the line to locate the frame: start | middle | end | center (default start)."})
+    .add_input_property(*_KEYPOINT_CHOICE.as_property())
     .add_input_property("name", {"type": "string", "description": "Optional name for the joint origin."})
     .strict_schema()
 )

@@ -1,34 +1,15 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Typed INPUT KINDS - the meta-layer that keeps tools from re-inventing (and mis-shaping) their inputs.
+"""Typed INPUT KINDS: each kind (``GeometryHandle``, ``BodyRef``, ``PlaneRef``, ``AxisRef``,
+``Choice``, ...) bundles schema + ``resolve()`` + validation + a contract line for one tool input, so
+a tool references existing geometry/structure through a handle or typed selector instead of a
+hand-rolled ``name``/``index``. ``resolve_inputs(...)`` resolves every declared input at once. See
+``tools/CLAUDE.md`` for the kinds table and ``CONTRIBUTING.md`` ("Geometry-as-values") for why this
+exists.
 
-Early MVP tools each hand-rolled `target: str` / coordinate params, which (a) duplicated
-resolution+validation and (b) baked in happy-path assumptions - the biggest being "can't reference
-EXISTING geometry" (you can't sketch on a face, fillet specific edges, etc. because the tool only
-took a name or a coordinate).
-
-An InputKind fixes this at the source. Each kind bundles the FOUR things a tool input needs, in ONE
-place, so declaring an input also declares its resolution, validation, schema, and contract text:
-
-  1. schema()   -> the JSON-schema property dict (fed to Tool.add_input_property)
-  2. resolve()  -> turn the raw MCP arg into the real Fusion entity / scaled value
-  3. validate   -> the runtime rules (is it a PLANAR face? a known unit?) -> a clear error, not a crash
-  4. contract   -> a one-line "what this input needs" string (auto-assembled into the description)
-
-THE GUARDRAIL (why this prevents future gaps): a tool that needs "a face" uses GeometryHandle(...,
-require='planar_face'). That input can ONLY be a real find_geometry handle (never a hard-coded coord),
-it carries its own "must be planar" check, and it emits both schema and contract automatically. The
-tool author literally cannot take a bare coordinate where a face belongs - so the audit's ROOT CAUSE 1
-("tools can't consume existing geometry") becomes structurally hard to reintroduce.
-
-Resolution returns (value, error): on success error is None; on failure value is None and error is a
-ready-to-return message. Tools call `resolve_inputs(...)` to resolve all declared inputs at once.
-
-Typing an input is also what keeps a tool's exposed prose honest: if a description is explaining what
-an input's values MEAN or how it BEHAVES, that is a missing kind - convert the input so the schema
-carries the contract, rather than asserting it in prose nothing checks.
-"""
+Tests must patch the design seam on THIS module too (``_inputs._common.design``), not just
+``_common``'s - see ``tests/CLAUDE.md`` "the dual-seam trap"."""
 
 import adsk.core
 import adsk.fusion
@@ -240,10 +221,10 @@ def _resolve_token_entity(des, s, _expected=None):
     """Try to resolve `s` as an entityToken (find_geometry handle). Returns the entity if the token
     resolves to ONE, else None - so the caller falls back to a name lookup.
 
-    This replaces the old `len(s) > 60` heuristic: we no longer GUESS whether a string is a handle or
-    a name by its length (which mis-routed long names). We just ask findEntityByToken; a name that
-    isn't a real token simply returns nothing and the caller tries the name path. (_expected is unused;
-    the caller type-checks the returned entity so it can give a precise wrong-kind message.)
+    Handle-vs-name is never guessed from the string's length or shape: we just ask findEntityByToken;
+    a name that isn't a real token simply returns nothing and the caller tries the name path.
+    (_expected is unused; the caller type-checks the returned entity so it can give a precise
+    wrong-kind message.)
 
     SELF-HEALING: a find_geometry handle is a COMPOSITE - the entityToken plus a geometry locator
     ('<token>|@<kind>:<x>,<y>,<z>'), see make_handle(). entityTokens are short-lived (the same entity
@@ -463,7 +444,7 @@ def _body_by_name(comp, name):
 def _resolve_body_by_name(comp, name):
     """Find a body by name - brep first, then mesh - in the component, then root, then any occurrence.
     Returns the live body (BRepBody or MeshBody) or None. Mesh lookup mirrors the brep lookup (but via
-    iteration, since meshBodies has no itemByName) so a mesh target is no longer an invisible miss."""
+    iteration, since meshBodies has no itemByName) so a mesh target resolves like a brep one."""
     b = _body_by_name(comp, name)
     if b:
         return b
@@ -761,16 +742,17 @@ _AXIS_VECS = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
 
 class AxisRef(InputKind):
-    """A direction/axis: a world axis (x / y / z) OR a 'handle' from find_geometry pointing at a
-    straight (linear) EDGE - the axis runs ALONG that edge. Resolves to a tagged value:
-    ('world', (vx,vy,vz)) for a world axis, or ('edge', BRepEdge) for an edge. Lets construction
-    axes / patterns / joints define their axis from real geometry, not just world directions."""
+    """A direction/axis: a world axis (x / y / z) OR a 'handle' pointing at a straight (linear) EDGE
+    or a SKETCH LINE - the axis runs ALONG that entity. Resolves to a tagged value:
+    ('world', (vx,vy,vz)) for a world axis, or ('edge', BRepEdge | SketchLine) for a line entity.
+    Lets construction axes / patterns / joints / revolves define their axis from real geometry, not
+    just world directions."""
 
-    MAP_HINT = "a direction: world x/y/z OR a straight-edge handle"
+    MAP_HINT = "a direction: world x/y/z OR a straight-edge/sketch-line handle"
 
     def contract_note(self) -> str:
-        return ("A world axis x/y/z, OR a 'handle' from find_geometry pointing at a straight edge "
-                "(the axis runs along the edge).")
+        return ("A world axis x/y/z, OR a 'handle' pointing at a straight edge or sketch line "
+                "(the axis runs along it).")
 
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
@@ -800,9 +782,11 @@ class AxisRef(InputKind):
                 if ct == adsk.core.Curve3DTypes.Line3DCurveType:
                     return ("edge", ent), None
                 return None, f"'{self.name}': that edge is not straight - an axis needs a LINEAR edge."
+            if isinstance(ent, adsk.fusion.SketchLine):
+                return ("edge", ent), None      # a SketchLine is always straight by construction
             return None, f"'{self.name}': handle points at a {type(ent).__name__}, not an edge."
-        return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z) or a resolvable edge handle "
-                      "from find_geometry.")
+        return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z) or a resolvable edge/sketch "
+                      "line handle.")
 
 
 # ── distance / units (carries its own unit handling) ────────────────────────
@@ -1091,10 +1075,14 @@ class TargetRef(InputKind):
             if _is_brep(ent):
                 return self._check(ent, "body")
             return None, f"'{self.name}': handle points at a {type(ent).__name__}, not a measurable target."
-        # 2) an occurrence (fullPathName preferred, then name); first-match-wins (the prior tools' behaviour).
-        occ, _ = _resolve_occurrence(self.name, s)
+        # 2) an occurrence (fullPathName preferred, then name). An AMBIGUOUS name is a hard error here
+        # (propagate it) rather than falling through to the component/body paths, which could resolve
+        # to an unrelated entity and mask the ambiguity.
+        occ, occ_err = _resolve_occurrence(self.name, s)
         if occ is not None:
             return self._check(occ, "occurrence")
+        if occ_err and "ambiguous" in occ_err.lower():
+            return None, occ_err
         # 3) a component by name
         comp = _component_by_name(des, s)
         if comp is not None:

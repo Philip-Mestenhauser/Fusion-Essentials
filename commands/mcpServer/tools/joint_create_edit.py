@@ -1,26 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: create a Joint between two joint inputs.
-
-  joint -> create a Joint (timeline feature) between two inputs, with a chosen motion type
-           (rigid / revolute / slider / cylindrical / planar / ball / pin-slot) and optional
-           offset / angle / flip. WRITES to the design.
-
-This is the API equivalent of the Joint command. A joint is defined by TWO inputs and a motion
-type - the tool just builds the feature; it does not assume what the inputs represent or why you
-are joining them. Fusion's Joints.createInput accepts a JointGeometry OR a JointOrigin for each
-side; this block resolves each input by JOINT-ORIGIN NAME (the common, unambiguous case). Other
-input kinds (a face/edge -> JointGeometry) can be added to the same resolver later without
-changing the tool's shape.
-
-Grounded in adsk.core / adsk.fusion:
-  - Component.joints (Joints).createInput(inputOne, inputTwo) -> JointInput  (each input is a
-    JointGeometry or JointOrigin); JointInput.setAs<Type>JointMotion(...); .offset/.angle/.isFlipped
-  - Joints.add(jointInput) -> Joint
-  - JointDirections (X=0,Y=1,Z=2,Custom=3) for motion axes; ValueInput.createByReal(cm/rad)
-  - Design.rootComponent.allJoints / jointOrigins.itemByName for resolution/reporting
-Handler runs on the main thread; WRITES to the design.
+"""Creates (joint_create) and edits in place (joint_edit) a Joint between two joint inputs, with a
+chosen motion type (rigid/revolute/slider/cylindrical/planar/ball/pin-slot) and optional offset/angle/
+flip. Each input resolves by JOINT-ORIGIN NAME, a find_geometry handle, or an autonomous
+'<occurrence>:<snap>' geometry snap. WRITES to the design.
 """
 
 import math
@@ -36,8 +20,13 @@ from ..mcp_primitives.registry import register
 from ._common import UNIT_TO_CM, error, ok, safe
 from . import _common
 from . import _inputs
-
-_AXES = {"x": 0, "y": 1, "z": 2}  # JointDirections (Custom=3 not exposed here)
+from ._joints import (
+    AXES as _AXES,
+    apply_motion as _apply_motion,
+    build_joint_geometry as _jg_from_entity,
+    current_joint_type as _current_joint_type,
+    find_joint as _find_joint,
+)
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
 # since a joint can land on a face/edge/vertex/point). Not required at the kind level - a non-token spec
@@ -234,31 +223,6 @@ def _resolve_snap_input(design, occ_name, snap):
     return (g, None) if g else (None, "createByPlanarFace failed.")
 
 
-def _jg_from_entity(entity):
-    """Build a JointGeometry from a live BRep/construction entity, picking a VALID keypoint per kind
-    (CenterKeyPoint is invalid on a cylinder/cone - use MiddleKeyPoint). Returns (geometry, label,
-    error). Mirrors joint_at_geometry's resolver so a handle is a first-class joint input here too -
-    AT the real geometry, NOT collapsed to the part origin the way a ':origin' snap does."""
-    JG = adsk.fusion.JointGeometry
-    KP = adsk.fusion.JointKeyPointTypes
-    if isinstance(entity, adsk.fusion.BRepFace):
-        st = safe(lambda: entity.geometry.surfaceType)
-        if st == adsk.core.SurfaceTypes.PlaneSurfaceType:
-            g = safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
-            return g, "planar_face@center", None if g else "createByPlanarFace failed"
-        g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-        return g, "nonplanar_face@middle", None if g else "createByNonPlanarFace failed"
-    if isinstance(entity, adsk.fusion.BRepEdge):
-        ct = safe(lambda: entity.geometry.curveType)
-        kp = KP.CenterKeyPoint if ct == adsk.core.Curve3DTypes.Circle3DCurveType else KP.MiddleKeyPoint
-        g = safe(lambda: JG.createByCurve(entity, kp))
-        return g, "edge", None if g else "createByCurve failed for this edge"
-    if isinstance(entity, (adsk.fusion.BRepVertex, adsk.fusion.ConstructionPoint, adsk.fusion.SketchPoint)):
-        g = safe(lambda: JG.createByPoint(entity))
-        return g, "point", None if g else "createByPoint failed"
-    return None, None, f"entity kind {type(entity).__name__} is not a supported joint geometry"
-
-
 def _resolve_input(design, spec):
     """Resolve one joint input, in order: (1) a find_geometry 'handle' (entity token) -> a JointGeometry
     AT that real geometry; (2) a geometry snap '<occ>:<snap>'; (3) a joint-origin name; (4) an
@@ -436,44 +400,6 @@ def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
     return changed, None
 
 
-def _apply_motion(ji, jtype, axis_idx, world_axis_entity=None):
-    """Set the joint motion on the JointInput (or existing Joint). Returns (did, error_or_None).
-
-    When world_axis_entity is given, the motion axis is the CUSTOM world construction axis (true
-    world direction) instead of the frame-relative XAxis/YAxis/ZAxisJointDirection enum."""
-    JD = adsk.fusion.JointDirections
-    if world_axis_entity is not None:
-        ax = JD.CustomJointDirection
-    else:
-        ax = [JD.XAxisJointDirection, JD.YAxisJointDirection, JD.ZAxisJointDirection][axis_idx]
-    try:
-        if jtype == "rigid":
-            return bool(ji.setAsRigidJointMotion()), None
-        if jtype == "revolute":
-            if world_axis_entity is not None:
-                return bool(ji.setAsRevoluteJointMotion(ax, world_axis_entity)), None
-            return bool(ji.setAsRevoluteJointMotion(ax)), None
-        if jtype == "slider":
-            if world_axis_entity is not None:
-                return bool(ji.setAsSliderJointMotion(ax, world_axis_entity)), None
-            return bool(ji.setAsSliderJointMotion(ax)), None
-        if jtype == "cylindrical":
-            if world_axis_entity is not None:
-                return bool(ji.setAsCylindricalJointMotion(ax, world_axis_entity)), None
-            return bool(ji.setAsCylindricalJointMotion(ax)), None
-        if jtype == "planar":
-            if world_axis_entity is not None:
-                return bool(ji.setAsPlanarJointMotion(ax, world_axis_entity)), None
-            return bool(ji.setAsPlanarJointMotion(ax)), None
-        if jtype == "ball":
-            # pitch MUST be Z, yaw MUST be X (not the intuitive X/Y) - the API rejects any other pair
-            # with "Invalid parameter pitchDirection". Enforced by test_ball_uses_valid_pitch_and_yaw_directions.
-            return bool(ji.setAsBallJointMotion(JD.ZAxisJointDirection, JD.XAxisJointDirection)), None
-    except Exception as e:
-        return False, str(e)
-    return False, f"unsupported joint_type '{jtype}'"
-
-
 def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str = "rigid",
             axis: str = "z", offset: float = 0.0, angle: float = 0.0, units: str = "mm",
             flip: bool = False, name: str = "", min_deg=None, max_deg=None, rest_deg=None,
@@ -591,40 +517,6 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     })
 
 
-def _find_joint(design, name):
-    """Find a Joint or AsBuiltJoint by name. Joints between components live on the root component; a
-    joint internal to a sub-component lives there - and asBuiltJoints is a separate collection from
-    joints. Search all of them."""
-    want = (name or "").strip()
-    j = safe(lambda: design.rootComponent.joints.itemByName(want))
-    if j:
-        return j
-    j = safe(lambda: design.rootComponent.asBuiltJoints.itemByName(want))
-    if j:
-        return j
-    for c in safe(lambda: design.allComponents, []) or []:
-        cand = safe(lambda c=c: c.joints.itemByName(want))
-        if cand:
-            return cand
-        cand = safe(lambda c=c: c.asBuiltJoints.itemByName(want))
-        if cand:
-            return cand
-    return None
-
-
-_MOTION_CLASS_TO_TYPE = {
-"RigidJointMotion": "rigid", "RevoluteJointMotion": "revolute",
-"SliderJointMotion": "slider", "CylindricalJointMotion": "cylindrical",
-"PlanarJointMotion": "planar", "BallJointMotion": "ball",
-}
-
-
-def _current_joint_type(joint):
-    """Map a joint's current JointMotion subclass to our joint_type keyword (or '')."""
-    jm = safe(lambda: joint.jointMotion)
-    return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
-
-
 def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                  joint_type: str = "", axis: str = "", world_axis: str = "", flip=None,
                  offset=None, angle=None, units: str = "mm",
@@ -635,8 +527,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
     joint_name: the joint to edit. Any subset of: input_one/input_two (new snap inputs - a Joint
     Origin name OR '<occurrence>:<snap>'); joint_type (rigid/revolute/slider/cylindrical/planar/ball)
-    + axis (x/y/z) to redefine the motion; flip (true/false) to toggle direction; rotation_deg to
-    drive a revolute/slider value; min_deg/max_deg to set rotation limits. WRITES.
+    + axis (x/y/z) to redefine the motion; flip (true/false) to toggle direction; min_deg/max_deg to
+    set rotation limits. WRITES. To pose a joint to a rotation value, use joint_drive.
 
     The Fusion API requires the timeline marker be positioned just before the joint to edit its
     geometry/flip/motion, so this rolls the marker before, applies the edits, then rolls it back.
@@ -648,14 +540,12 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if not joint:
         return error(f"No joint named '{joint_name}'. Use design_get(include=['timeline']) or check the name.")
 
-    # DRIVING the rotation value (jointMotion.rotationValue = "Drive Joints") destabilizes the
-    # server connection when set from this context (reproduced: a clean revolute joint dropped the
-    # socket). Refuse it and redirect to the proven path. (See the safe edits below: re-snap inputs,
-    # motion type/axis, world_axis, flip, limits.)
+    # Posing a joint to a drive value is joint_drive's job (the Drive Joints command); joint_edit
+    # changes the joint DEFINITION (type/axis/snaps/flip/limits), not its pose. Redirect.
     if rotation_deg is not None:
-        return error("Driving a joint to a rotation value from here is unsafe (it closes the "
-    "server connection). To pose a jointed assembly, use assembly_move (rotate "
-    "the moving occurrence) + assembly_capture_position instead - that path is proven safe.")
+        return error("Posing a joint to a rotation value is joint_drive's job. Use "
+    "joint_drive(joint_name=..., angle_deg=...) to drive it; joint_edit changes the joint "
+    "definition (type/axis/snaps/limits), not its pose.")
 
     # world_axis (re-point the motion to a TRUE WORLD axis) forces a motion re-set even if the
     # joint_type isn't changing - that's the whole point (fixing a frame-relative axis).
@@ -775,8 +665,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
     # Editing a joint rolls the timeline marker, which can leave DOWNSTREAM features (patterns, later
     # joints) in a stale compute-failed state until a full recompute. Do it here so the caller gets a
-    # settled, accurate model - they no longer have to remember to call design_recompute. (Live: a
-    # joint offset edit left 4 downstream features broken until computeAll.)
+    # settled, accurate model without a separate design_recompute call.
     recompute_errors = None
     try:
         design.computeAll()
@@ -815,7 +704,7 @@ TOOL_DESCRIPTION = (
     "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
     "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
     "the part origin (zero offset) - use a handle for a real offset. 'joint_type' = rigid (default)/"
-    "revolute/slider/cylindrical/planar/ball; 'axis' = x/y/z for types needing a motion axis. "
+    "revolute/slider/cylindrical/planar/ball; 'axis' selects the motion axis for types needing one. "
     "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
 )
 
@@ -829,8 +718,8 @@ tool = (
     .add_input_property("occurrence_two", {"type": "string",
             "description": "Second input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder)."})
     .add_input_property(*_inputs.joint_motion(default="rigid").as_property())
-    .add_input_property("axis", {"type": "string",
-            "description": "Motion axis for types that need one: x | y | z (default z)."})
+    .add_input_property(*_inputs.world_axis("axis", default="z",
+            description="Motion axis for types that need one.").as_property())
     .add_input_property("offset", {"type": "number", "description": "Offset distance (in 'units'; default 0)."})
     .add_input_property("angle", {"type": "number", "description": "Angle in degrees (default 0)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -850,12 +739,12 @@ item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_m
 EDIT_DESCRIPTION = (
 "Edit an existing joint in place. 'joint_name' selects it; pass any subset to change: 'input_one'/"
 "'input_two' re-select the snap inputs (a Joint Origin name or '<occurrence>:<snap>' = origin/center/"
-"top/bottom/cylinder); 'joint_type' (rigid/revolute/slider/cylindrical/planar/ball) + 'axis' (x/y/z) "
-"redefine the motion; 'world_axis' (x/y/z) re-points rotation/slide to a TRUE world axis (fixes a "
+"top/bottom/cylinder); 'joint_type' (rigid/revolute/slider/cylindrical/planar/ball) + 'axis' "
+"redefine the motion; 'world_axis' re-points rotation/slide to a TRUE world axis (fixes a "
 "joint pivoting about the wrong axis when the snap frame isn't world-aligned); 'flip'; 'offset' "
 "('units') + 'angle' (deg); rotation limits 'min_deg'/'max_deg'/'rest_deg' (revolute/cylindrical) and "
 "linear limits 'min_mm'/'max_mm'/'rest_mm' (slider/cylindrical). To DRIVE a joint to a pose use "
-"assembly_move + assembly_capture_position, not this."
+"joint_drive, not this."
 )
 edit_tool = (
     Tool.create_simple(name="joint_edit", description=EDIT_DESCRIPTION)
@@ -865,16 +754,17 @@ edit_tool = (
     .add_input_property("input_two", {"type": "string",
             "description": "New second input: Joint Origin name OR '<occurrence>:<snap>'."})
     .add_input_property(*_inputs.joint_motion(default="rigid", description="Redefine the joint motion type.").as_property())
-    .add_input_property("axis", {"type": "string", "description": "Motion axis (x/y/z) for types that need one (FRAME-relative)."})
-    .add_input_property("world_axis", {"type": "string",
-            "description": "Re-point the motion to a TRUE WORLD axis (x/y/z) via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted."})
+    .add_input_property(*_inputs.world_axis("axis", default="z",
+            description="Motion axis for types that need one (FRAME-relative).").as_property())
+    .add_input_property(*_inputs.world_axis("world_axis", default="",
+            description="Re-point the motion to a TRUE WORLD axis via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted.").as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})
     .add_input_property("offset", {"type": "number", "description": "Set the joint offset distance (in 'units'; the offset ModelParameter)."})
     .add_input_property("angle", {"type": "number", "description": "Set the joint angle between the inputs (degrees)."})
     .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
     # rotation_deg is intentionally NOT exposed: the handler still accepts the kwarg and returns a
     # helpful redirect if passed, but advertising a parameter whose only behavior is to error wastes
-    # context. To pose a joint, use assembly_move + assembly_capture_position.
+    # context. To pose a joint, use joint_drive.
     .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees) - revolute/cylindrical."})
     .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees) - revolute/cylindrical."})
     .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees) - revolute/cylindrical."})

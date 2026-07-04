@@ -379,6 +379,15 @@ class TestFaceGroups:
         res = me.mesh_generate_face_groups_handler(mesh="H")
         assert res["isError"] is True and "Could not create the face-groups input" in res["message"]
 
+    def test_none_feature_with_zero_face_groups_is_a_failure(self):
+        # 'generated: true' must be gated on the observed face_group_count, not reported unconditionally
+        # when add() returned nothing and the mesh carries no face groups afterward - that would be a
+        # silent no-op reported as success.
+        self._setup(parametric=False, none_feature=True, face_groups=0)
+        res = me.mesh_generate_face_groups_handler(mesh="H")
+        assert res["isError"] is True
+        assert "no face groups" in res["message"].lower()
+
 
 # ── mesh_plane_cut ──────────────────────────────────────────────────────────────────────────────
 
@@ -474,7 +483,7 @@ class TestPlaneCut:
         return src, pc
 
     def test_split_body_became_split_true_when_count_increases(self):
-        # Bug B: closed mesh — split_body raises the body count 1 -> 2 -> became_split True, no note.
+        # Closed mesh: split_body raises the body count 1 -> 2 -> became_split True, no note.
         self._setup_with_count(1, 2, cut_type_grows=True)
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
         assert out["became_split"] is True
@@ -482,8 +491,8 @@ class TestPlaneCut:
         assert "did not separate" not in out["note"]
 
     def test_split_body_became_split_false_when_count_unchanged(self):
-        # Bug B: open (non-watertight) mesh — split_body applies but yields ONE body. became_split must
-        # be False and the honest note must fire. cut:true (the cut DID apply) — NOT an error.
+        # Open (non-watertight) mesh: split_body applies but yields ONE body. became_split must
+        # be False and the honest note must fire. cut:true (the cut DID apply) - NOT an error.
         self._setup_with_count(1, 1, cut_type_grows=False)
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
         assert out["cut"] is True

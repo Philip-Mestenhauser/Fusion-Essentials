@@ -1,36 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks: surface<->solid body operations - LOFT, STITCH, UNSTITCH.
-
-These are the surface-aware companions to model_extrude/model_combine. They bridge the surface and
-solid worlds:
-
-  model_loft     -> loft a body through an ORDERED list of profiles (optionally shaped by rails OR a
-                    single centerline). isSolid toggles a surface vs. a solid loft. WRITES.
-  model_stitch   -> join surface bodies into a SOLID iff they form a watertight boundary within
-                    'tolerance'. If gaps exceed tolerance the result STAYS a surface - and the tool
-                    says so honestly (became_solid=False), never faking the solid. WRITES.
-  model_unstitch -> explode a solid/surface body (or specific faces) into per-face SURFACE bodies -
-                    the inverse of stitch, so one face can be patched/trimmed then re-stitched. WRITES.
-
-Grounded in adsk.fusion (signatures confirmed live via sys_get_api_doc):
-  - Component.features.loftFeatures.createInput(FeatureOperations) -> LoftFeatureInput
-      .loftSections.add(section)  (sections added IN ORDER - order is the whole game)
-      .centerLineOrRails.addCenterLine(curve) / .addRail(curve)  (centerline XOR rails)
-      .isSolid = bool
-    LoftFeatures.add(input) -> LoftFeature (.bodies, .isSolid)
-  - Component.features.stitchFeatures.createInput(ObjectCollection, ValueInput, FeatureOperations)
-      -> StitchFeatureInput;  StitchFeatures.add(input) -> StitchFeature (.bodies)
-    BRepBody.isSolid - the KEY signal: a stitch that didn't close stays a surface.
-  - Component.features.unstitchFeatures.add(ObjectCollection, isChainSelection) -> UnstitchFeature
-      (NOTE: no createInput - add() takes the faces/bodies collection directly).
-
-Handlers run on the main thread; WRITES. (loft/stitch can be slow - the 30s main-thread cap applies.)
-
-CAVEAT (safe): _common.safe() swallows exceptions, so it must NEVER wrap the mutating add(...) call -
-a swallowed failure there would report false success. Mutations use explicit try/except -> error(...),
-exactly as model_extrude/model_combine do; the RESULT body's isSolid is read back, never assumed.
+"""MCP building blocks bridging surface and solid bodies - model_loft, model_stitch, model_unstitch -
+the surface-aware companions to model_extrude/model_combine. WRITES; mutations are never wrapped in
+safe() and the result body's isSolid is read back, never assumed. See docs/fusion-api-notes.md
+("Surfaces") for the underlying adsk.fusion signatures.
 """
 
 import adsk.core
@@ -98,14 +72,7 @@ _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=F
 
 def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                  as_surface=None) -> dict:
-    """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline.
-
-    profiles: >=2 ordered profile references (handles or {sketch, profile_index} selectors) - the loft
-    runs through them IN ORDER. rails: optional guide curves (mutually exclusive with centerline).
-    centerline: optional single centerline curve (mutually exclusive with rails). operation: new |
-    join | cut | intersect. as_surface: force a surface loft (isSolid=False); default None = leave the
-    API's default (a solid is attempted). WRITES.
-    """
+    """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
@@ -195,13 +162,7 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
 # ── STITCH ────────────────────────────────────────────────────────────────────
 
 def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> dict:
-    """Join surface bodies into a SOLID iff they form a watertight boundary within 'tolerance'.
-
-    bodies: >=2 SURFACE bodies (handles or names) - each validated to be an open surface (not a solid).
-    tolerance: gap-closing tolerance in 'units' (default ~0.01 mm). operation: only meaningful if the
-    result closes into a solid (mirrors the API; ignored otherwise). If gaps exceed tolerance the
-    result STAYS a surface and became_solid is reported FALSE - never faked. WRITES.
-    """
+    """Join surface bodies into a SOLID iff they form a watertight boundary within 'tolerance'."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
@@ -254,11 +215,15 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     # body is a closed solid; gaps>tolerance leave an open surface and we say so - never fake success.
     body_names, flags = _result_body_report(feature)
     became_solid = all(flags) if flags else False
+    # The default is a raw internal value (0.01 cm); when the caller didn't pass one, report it
+    # converted INTO the caller's 'units' - reporting the bare cm number would be false for cm/in callers.
+    reported_tolerance = (round(float(tolerance), 6) if tolerance is not None
+                          else round(tol_default_cm / k, 6))
     payload = {
     "stitched": True,
     "feature": safe(lambda: feature.name),
     "operation": op_key,
-    "tolerance": round(float(tolerance), 6) if tolerance is not None else 0.01,
+    "tolerance": reported_tolerance,
     "units": units,
     "input_body_count": len(surf_bodies),
     "result_bodies": body_names,
@@ -277,12 +242,7 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
 # ── UNSTITCH ──────────────────────────────────────────────────────────────────
 
 def unstitch_handler(target="", faces=None, chain=True) -> dict:
-    """Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of stitch.
-
-    target: a whole body to fully explode (handle or name). faces: OR specific faces to peel off
-    (find_geometry face handles). chain: include connected/adjacent faces (isChainSelection; default
-    true). WRITES. (UnstitchFeatures.add takes the faces ObjectCollection directly - no createInput.)
-    """
+    """Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of stitch."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")

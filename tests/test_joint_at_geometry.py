@@ -186,7 +186,7 @@ class TestHandler:
         assert joints.last_input.motion == ("revolute", "XD")
 
     def test_revolute_auto_axis_uses_geometry_axis(self):
-        # THE FIX: axis='auto' (default) on cylinder faces derives the axis FROM the geometry
+        # axis='auto' (default) on cylinder faces derives the axis FROM the geometry
         # (CustomJointDirection + the cylinder face as the axis entity), not a world axis.
         pin = FakeBRepFace("CYL")
         joints = _install_design({"rod": FakeBRepFace("CYL"), "pin": pin})
@@ -247,11 +247,13 @@ class TestHandler:
         assert joints.last_input.motion == ("revolute", "ZD")   # world Z, not CUSTOM
         assert out["axis"] == "auto"
 
-    def test_unknown_axis_keyword_defaults_to_world_z(self):
-        # an unrecognized axis string (not x/y/z, not auto) maps to the Z world direction.
-        joints = _install_design({"a": FakeBRepFace("PLANE"), "b": FakeBRepFace("PLANE")})
-        _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="diagonal"))
-        assert joints.last_input.motion == ("revolute", "ZD")
+    def test_unknown_axis_keyword_errors(self):
+        # An unrecognized axis string (not x/y/z, not auto) must be REFUSED, naming the offending
+        # value - not silently coerced to the world Z direction.
+        _install_design({"a": FakeBRepFace("PLANE"), "b": FakeBRepFace("PLANE")})
+        res = jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="diagonal")
+        assert res["isError"] is True
+        assert "diagonal" in res["message"]
 
     def test_circular_edge_is_an_axis_entity_for_auto(self):
         # a circular edge can define the motion axis (auto -> CustomJointDirection + the edge).

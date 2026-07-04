@@ -134,11 +134,25 @@ class _AllCurves:
         return getattr(self._s, n)
 
 
+class _GeomConstraints:
+    """sketch.geometricConstraints - records addCoincident calls; raise_on_add simulates the API
+    rejecting the call so the honesty-contract test can prove the raise propagates."""
+    def __init__(self):
+        self.raise_on_add = False
+        self.added = []
+    def addCoincident(self, a, b):
+        if self.raise_on_add:
+            raise RuntimeError("addCoincident rejected by the API")
+        self.added.append((a, b))
+        return object()
+
+
 class FakeSketch:
     def __init__(self, name="S"):
         self.name = name
         self.isComputeDeferred = False
         self.isVisible = True
+        self.geometricConstraints = _GeomConstraints()
         self.sketchLines = _Coll()
         self.sketchCircles = _Coll()
         self.sketchArcs = _Coll()
@@ -323,6 +337,56 @@ class TestParsePoints:
     def test_not_a_list(self):
         pts, err = sk._parse_points(None)
         assert pts is None and "points" in err
+
+
+class TestClosedPathConstraintHonesty:
+    """The belt-and-suspenders addCoincident() on a closed_path's closing segment must raise into the
+    handler's error path on a real API rejection, not be swallowed in safe() while 'drawn'/'(closed)'
+    still reports success."""
+
+    def test_addCoincident_failure_surfaces_as_error(self):
+        s = FakeSketch(); _install_draw(s)
+        s.geometricConstraints.raise_on_add = True
+        res = sk.add_sketch_geometry_handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]])
+        assert res["isError"] is True
+        assert "addCoincident rejected" in res["message"]
+
+    def test_addCoincident_success_still_closes_the_loop(self):
+        # unchanged happy path: removing safe() must not affect the normal, succeeding call.
+        s = FakeSketch(); _install_draw(s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="closed_path",
+                                                       points=[[0, 0], [1, 0], [1, 1]]))
+        assert "(closed)" in out["drawn"]
+        assert len(s.geometricConstraints.added) == 1
+
+
+class TestMarkConstructionHonesty:
+    """_mark_recent_construction must raise (into the handler's try/except -> error()) on a failed
+    isConstruction set, rather than swallow it in safe() and silently no-op while the caller reports
+    success (is_construction implied applied) even though the flag never took."""
+
+    def test_setattr_failure_propagates(self):
+        class _BadCurve:
+            @property
+            def isConstruction(self):
+                return False
+            @isConstruction.setter
+            def isConstruction(self, v):
+                raise RuntimeError("isConstruction is locked on this curve")
+
+        class _Curves:
+            def __init__(self):
+                self._items = [_BadCurve()]
+            @property
+            def count(self):
+                return len(self._items)
+            def item(self, i):
+                return self._items[i]
+
+        sketch = SimpleNamespace(sketchCurves=_Curves())
+        import pytest
+        with pytest.raises(RuntimeError, match="isConstruction is locked"):
+            sk._mark_recent_construction(sketch, 0)
 
 
 class TestPolyline:

@@ -3,29 +3,9 @@
 
 """MCP building block: drill HOLES with the real HoleFeatures command (not a sketch + extrude-cut).
 
-  model_hole -> add simple / counterbore / countersink holes at one or more points on a face, blind or
-                through, optionally TAPPED with a thread designation (e.g. M5x0.8). This is the
-                idiomatic hole - it carries hole/thread metadata (so downstream fastener/CAM tooling
-                recognises it), unlike a plain cut.
-
-Companion to model_extrude (which is the generic profile cut). Use THIS for actual holes - bolt
-circles, tapped holes, counterbores for cap screws - so the feature reads as a Hole in the timeline
-and tap info is attached.
-
-Grounded in adsk.fusion (every call live-verified on a plate - see docs/fusion-api-notes.md "Holes"):
-  - Component.features.holeFeatures.createSimpleInput(dia) / createCounterboreInput(dia, cbDia, cbDepth)
-    / createCountersinkInput(dia, csDia, csAngle) -> HoleFeatureInput.
-  - Placement: HoleFeatureInput.setPositionBySketchPoint(sp) / setPositionBySketchPoints(collection of
-    co-planar points). We build a sketch on the target face and add the requested points to it.
-  - Extent: setDistanceExtent(value) for blind; setAllExtent(direction) for through. THROUGH MUST use
-    PositiveExtentDirection - NegativeExtentDirection fails with "InternalValidationError:
-    logicalSelection" (the hole's natural direction is already into the body).
-  - Tap: features.threadFeatures.createThreadInfo(isInternal, threadType, threadDesignation, threadClass)
-    then HoleFeatureInput.setToTappedHole(threadInfo); isModeled=False keeps it cosmetic. The size is
-    embedded in the designation ("M5x0.8"), NOT a separate argument.
-  - holeFeatures.add(input) RAISES if placement/extent is incomplete, and a raised exception ABORTS the
-    whole script transaction - so this tool fully validates inputs and resolves the thread BEFORE add.
-Handler runs on the main thread; WRITES.
+Companion to model_extrude - use this for actual holes (bolt circles, tapped holes, counterbores)
+so the feature reads as a Hole in the timeline and carries hole/thread metadata. API gotchas:
+docs/fusion-api-notes.md "Holes".
 """
 
 import adsk.core
@@ -95,13 +75,9 @@ def _resolve_thread_info(comp, designation, internal=True):
 
 # ── clearance holes (fastener-aware) ────────────────────────────────────────
 #
-# A clearance hole is sized for a FASTENER, not a raw diameter. Two halves:
-#  1) the SEMANTIC TAG via HoleFeatureInput.setToClearanceHole(ClearanceHoleInfo) so the feature reads
-#     as a real clearance hole (validates against the live catalog, round-trips, is config-drivable via
-#     ConfigurationColumns.addClearanceTypeColumns).
-#  2) the actual DIAMETER. On this Fusion version setToClearanceHole does NOT resize the geometry and
-#     neither ClearanceHoleInfo nor ClearanceHoleDataQuery exposes the resolved diameter (verified live).
-#     So we ALSO drive the base diameter ourselves from this ISO 273 metric clearance table.
+# A clearance hole is sized for a FASTENER, not a raw diameter: setToClearanceHole tags the hole
+# semantically but does not resize it on this Fusion version, so the diameter also comes from this
+# ISO 273 metric table (see docs/fusion-api-notes.md "Fasteners & clearance holes").
 # Values are nominal clearance-hole diameters in mm: (close, normal, loose).
 _CLEARANCE_MM = {
     "M2":  (2.2, 2.4, 2.6),
@@ -186,15 +162,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             cbore_diameter: str = "", cbore_depth: str = "",
             csink_diameter: str = "", csink_angle: str = "",
             tap: str = "", fastener: str = "", fit: str = "normal") -> dict:
-    """Drill holes with the real Hole command.
-
-    hole_type: simple / counterbore / countersink. diameter: hole diameter (e.g. '8 mm'). face: a
-    find_geometry planar-face handle to drill into. points: list of [x,y,z] positions on that face.
-    extent: 'blind' (needs 'depth') or 'through'. counterbore needs cbore_diameter/cbore_depth;
-    countersink needs csink_diameter/csink_angle. tap: optional thread designation ('M5x0.8') to make
-    it a tapped hole. fastener: a clearance fastener spec like 'M6 Socket Head Cap Screw' (with 'fit'
-    close/normal/loose) - sizes + TAGS the hole for that fastener, overriding 'diameter'. WRITES.
-    """
+    """Drill holes with the real Hole command."""
     hole_type = (hole_type or "simple").strip().lower()
     if hole_type not in _TYPES:
         return error(f"Unknown hole_type '{hole_type}'. Use one of: {', '.join(_TYPES)}.")
@@ -305,9 +273,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             pass
 
     # Clearance fastener TAG: records the fastener spec on the feature (the diameter was already set from
-    # the table into the base input). setToClearanceHole returns True but does NOT resize on this version.
+    # the table into the base input). setToClearanceHole does NOT resize the geometry on this version.
     if clearance_info is not None:
-        safe(lambda: hin.setToClearanceHole(clearance_info))
+        hin.setToClearanceHole(clearance_info)
 
     feature = holes.add(hin)             # MUTATION - raises (and aborts) if anything is inconsistent
     if not feature:

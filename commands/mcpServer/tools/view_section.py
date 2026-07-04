@@ -3,25 +3,10 @@
 
 """MCP building block: cut the model with a section plane so the agent can see INSIDE.
 
-  view_section(action=...) - create / adjust / remove a Section Analysis (the live cutaway in
-  Fusion's Inspect > Section Analysis), so an agent can see internal geometry - cavities, wall
-  thickness, how a part nests in a fixture, where an internal void sits - that a solid view
-  hides.
-
-    cut       -> add a section on an origin plane ('plane' = xy / xz / yz, aliases top/front/right)
-                 or through a named occurrence's center ('through'), with an optional 'offset'
-                 (mm; +/- moves the cut along the plane normal). 'flip' cuts the other side.
-    list      -> list the active section analyses.
-    clear     -> remove all section analyses (restores the un-cut view).
-
-This is a VIEW/analysis aid - Section Analysis does not modify geometry (it's a non-destructive
-cutaway you can delete). Pair with view_inspect (orient/isolate) + view_screenshot to study the cut.
-
-Grounded in adsk.fusion:
-  - Design.analyses.sectionAnalyses.createInput(cutPlaneEntity, distance_cm) -> SectionAnalysisInput
-    (cutPlaneEntity = ConstructionPlane or planar BRepFace; distance in CM, +ve along plane normal)
-  - SectionAnalyses.add(input) -> SectionAnalysis (.flip, .isHatchShown, .name, .deleteMe())
-Handler runs on the main thread.
+view_section(action=cut|list|clear) creates/lists/removes a non-destructive Section Analysis (Inspect >
+Section Analysis) and auto-aims the camera at the exposed cut face. Pair with view_inspect
+(orient/isolate) and view_screenshot. See docs/fusion-api-notes.md "Section analysis" for the
+sectionAnalyses API and the camera-aim convention.
 """
 
 import adsk.core
@@ -33,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
 from . import _inputs
+from . import _view_common
 
 app = adsk.core.Application.get()
 
@@ -57,21 +43,20 @@ def _find_occurrence(design, name):
     return _inputs._resolve_occurrence("through", name)
 
 
-_PLANE_NORMALS = {  # world normal of each origin plane
-"xy": (0, 0, 1), "top": (0, 0, 1),
-"xz": (0, 1, 0), "front": (0, 1, 0),
-"yz": (1, 0, 0), "right": (1, 0, 0),
+# World normal of each origin plane, sourced from the shared named-view table (_view_common). The
+# xy/top and yz/right planes share the sign of their named view's camera direction; the xz/front
+# plane's construction-plane normal is the OPPOSITE sign (it points toward the front camera's eye,
+# not away from it) - so front sources the look direction, not the view direction.
+_PLANE_NORMALS = {
+"xy": _view_common.view_direction("top"), "top": _view_common.view_direction("top"),
+"xz": _view_common.look_direction("front"), "front": _view_common.look_direction("front"),
+"yz": _view_common.view_direction("right"), "right": _view_common.view_direction("right"),
 }
 
 
 def _aim_at_cut(normal, flipped):
-    """Orient the camera to look straight at the exposed cut face.
-
-    Verified rule: a section keeps the +normal half and the cut interior faces toward +normal, so
-    the REVEALING camera sits on the +normal side with view_dir (eye - target) == +normal. 'flip'
-    keeps the other half, so the revealing side reverses. Without this, cut() leaves the camera
-    wherever it was - often on the solid (wrong) side, where the model looks uncut.
-    """
+    """Orient the camera to look straight at the exposed cut face (see docs/fusion-api-notes.md
+    "Section analysis" for the +normal/revealing-side convention this follows)."""
     nx, ny, nz = normal
     if flipped:
         nx, ny, nz = -nx, -ny, -nz
@@ -94,13 +79,7 @@ def _aim_at_cut(normal, flipped):
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
             flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
-    """Cut the model with a section plane to see inside.
-
-    action: 'cut' (add a section), 'list', or 'clear' (remove all). For 'cut': 'plane' = xy/xz/yz
-    (top/front/right) OR 'through' = a named occurrence to cut through its center; 'offset' (mm,
-    +/- along the plane normal) shifts the cut; 'flip' cuts the opposite side; 'show_hatch' shows
-    the section hatch (default true). Non-destructive - 'clear' fully restores the un-cut view.
-    """
+    """Cut the model with a section plane to see inside. Non-destructive."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
@@ -242,7 +221,7 @@ tool = (
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():

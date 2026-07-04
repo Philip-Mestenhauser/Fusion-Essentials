@@ -66,6 +66,19 @@ class FakePatchInput:
         self.continuity = None
 
 
+class _ContinuityRejectingPatchInput:
+    """A patch input whose .continuity setter raises - models the API rejecting the value, so the
+    honesty fix (removing safe() around the set) must surface it as a patch failure, not a silent
+    no-op that still reports success."""
+    def __init__(self, boundary, op):
+        self.boundary = boundary
+        self.operation = op
+    def __setattr__(self, name, value):
+        if name == "continuity":
+            raise RuntimeError("continuity rejected by the API")
+        object.__setattr__(self, name, value)
+
+
 class FakeExtrudeFeatures:
     def __init__(self, result_bodies=None):
         self.last_input = None
@@ -102,6 +115,13 @@ class FakePatchFeatures:
         if not self._feature:
             return None
         return FakeFeature(name="Patch1", bodies=self._result)
+
+
+class FakePatchFeaturesRejectContinuity(FakePatchFeatures):
+    """createInput returns a patch input that raises when 'continuity' is set."""
+    def createInput(self, boundary, op):
+        self.last_input = _ContinuityRejectingPatchInput(boundary, op)
+        return self.last_input
 
 
 class FakeFeatures:
@@ -419,6 +439,17 @@ class TestSurfacePatch:
         res = sc.patch_handler(boundary="E1", continuity="silky")
         assert res["isError"] is True
         assert "connected, tangent, curvature" in res["message"]
+
+    def test_continuity_set_failure_surfaces_as_error(self):
+        # A continuity-set rejection must abort the patch and report the real failure, not be
+        # dropped under safe() while the patch still reports success.
+        e1 = FakeEdge()
+        pf = FakePatchFeaturesRejectContinuity(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1", continuity="tangent")
+        assert res["isError"] is True
+        assert "continuity rejected" in res["message"]
 
     def test_continuity_tangent_set_on_input(self):
         # continuity=tangent resolves to the TangentSurfaceContinuityType enum on the patch input

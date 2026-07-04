@@ -3,29 +3,11 @@
 
 """MCP RICH READ: model_inspect - measure a target (size, mass, mesh stats) in one read, by detail level.
 
-The "rich read" pattern (see CLAUDE.md "Reads are RICH"): a light default
-plus `include=[...]` to pull more. The 'target' is a TargetRef - a body / face / mesh / occurrence /
-component, by a find_geometry handle OR a name, or '' for the whole design - so ONE input covers
-everything you might want to measure, and the kind it resolves to picks the right measurement.
+The "rich read" pattern (CLAUDE.md "Reads are RICH"): a light default (bounding box) plus
+include=['mass'] for full physical properties. 'target' is a TargetRef (a find_geometry handle or a
+name, or '' for the whole design); a MESH target automatically reports mesh stats instead. Read-only.
 
-Detail levels:
-  default                -> bounding box: the X/Y/Z extents + center (in 'units'). "How big, where."
-  include=['mass']       -> full physical properties (mass/volume/area/CoM/inertia/principal axes).
-
-A MESH target reports mesh stats instead (triangle/vertex counts + watertight) - automatically, because
-a mesh has no B-Rep bounding box; there is no include= to ask for it.
-
-The target is resolved ONCE (via TargetRef); the measurement of that resolved entity is done by the
-measure cores below - so the kind and the numbers always agree on the same entity (no second, divergent
-lookup). Mesh stats come from mesh_ops.mesh_measure_of_body (meshes live in their own module).
-
-Grounded in adsk.core / adsk.fusion:
-  - BRepBody/Occurrence/Component.boundingBox -> BoundingBox3D(.minPoint/.maxPoint)  [world AABB]
-  - app.measureManager.getOrientedBoundingBox(geometry, lengthVec, widthVec) -> OrientedBoundingBox3D
-  - JointOrigin.secondaryAxisVector (X) / .thirdAxisVector (Y) / .primaryAxisVector (Z)  [part-space frame]
-  - Component/Occurrence/BRepBody.getPhysicalProperties(CalculationAccuracy) -> PhysicalProperties
-    (.mass kg / .volume cm^3 / .area cm^2 / .density kg/cm^3 / .centerOfMass cm; inertia getters kg*cm^2)
-Read-only. Handler runs on the main thread.
+API signatures: docs/fusion-api-notes.md "Measurement".
 """
 
 import json
@@ -46,8 +28,6 @@ _SLICES = ("mass",)   # mesh stats are automatic for a mesh target (routed by ki
 # target accepts a handle (body/face/mesh) or a name (occurrence/component/body), or '' = whole design.
 _TARGET = _inputs.TargetRef("target")
 
-# bounding box: length unit -> factor from the API's cm.
-_CM_TO_UNIT = {"mm": 10.0, "cm": 1.0, "in": 1.0 / 2.54, "inch": 1.0 / 2.54}
 # physical properties: length unit -> cm factor (the API reports cm). Volume scales f^3, area f^2.
 _LEN_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 _ACCURACY = {
@@ -73,14 +53,6 @@ def _vec(v, f=1.0):
         return None
     return [round(safe(lambda: v.x, 0.0) * f, 6), round(safe(lambda: v.y, 0.0) * f, 6),
             round(safe(lambda: v.z, 0.0) * f, 6)]
-
-
-def _ptxyz(p, f):
-    if p is None:
-        return None
-    return {"x": round(safe(lambda: p.x, 0.0) * f, 6),
-            "y": round(safe(lambda: p.y, 0.0) * f, 6),
-            "z": round(safe(lambda: p.z, 0.0) * f, 6)}
 
 
 def _measurable_geometry(entity):
@@ -141,7 +113,7 @@ def _joint_origin_axes(design, frame_name):
 
 def _bbox(design, entity, desc, frame, units):
     """The bounding box of a resolved entity - world-aligned, or oriented in a Joint Origin frame."""
-    f = _CM_TO_UNIT.get((units or "mm").strip().lower())
+    f = _common.CM_TO_UNIT.get((units or "mm").strip().lower())
     if f is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
@@ -173,7 +145,7 @@ def _bbox(design, entity, desc, frame, units):
             "x": round(safe(lambda: obb.length, 0.0) * f, 6),    # length=X, width=Y, height=Z (right-hand)
             "y": round(safe(lambda: obb.width, 0.0) * f, 6),
             "z": round(safe(lambda: obb.height, 0.0) * f, 6),
-            "center": _ptxyz(safe(lambda: obb.centerPoint), f),
+            "center": _common.ptxyz(safe(lambda: obb.centerPoint), f),
             "frame_axes": {"x_axis": _vecxyz(x_vec), "y_axis": _vecxyz(y_vec), "z_axis": _vecxyz(z_vec)},
             "note": "Measured in the joint-origin frame; x/y/z are the part-space extents. Feed "
                     "these to param_set to drive stock size.",
@@ -195,8 +167,8 @@ def _bbox(design, entity, desc, frame, units):
         "oriented": False,
         "units": units,
         "x": round(dx, 6), "y": round(dy, 6), "z": round(dz, 6),
-        "min_point": _ptxyz(mn, f),
-        "max_point": _ptxyz(mx, f),
+        "min_point": _common.ptxyz(mn, f),
+        "max_point": _common.ptxyz(mx, f),
         "center": {"x": round((safe(lambda: mx.x, 0.0) + safe(lambda: mn.x, 0.0)) / 2 * f, 6),
                    "y": round((safe(lambda: mx.y, 0.0) + safe(lambda: mn.y, 0.0)) / 2 * f, 6),
                    "z": round((safe(lambda: mx.z, 0.0) + safe(lambda: mn.z, 0.0)) / 2 * f, 6)},
@@ -319,14 +291,7 @@ def _normalize_include(include):
 
 def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "medium",
             per_body: bool = False, frame: str = "") -> dict:
-    """Measure a target at the right detail level (rich read - CLAUDE.md "Reads are RICH").
-
-    target: a find_geometry handle (body/face/mesh) OR an occurrence/component/body name, or '' for the
-    whole design. Default: the bounding box (X/Y/Z extents + center, in 'units'; 'frame' = a Joint
-    Origin name measures in that part-space frame). include=['mass'] adds full physical properties
-    ('accuracy' low|medium|high|very_high; 'per_body' = per-occurrence mass breakdown). For a MESH
-    target, mesh stats (triangle/vertex counts + watertight) are reported. Read-only.
-    """
+    """Measure a target at the right detail level (rich read)."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")

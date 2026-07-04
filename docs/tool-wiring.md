@@ -6,7 +6,7 @@ runtime **note/error** = the situational tip) names ANOTHER tool, steering the a
 Use it to engineer the wiring: close orphans (a tool nothing leads to), fix dead references,
 and factor duplicated guards into shared helpers.
 
-**Tools:** 121  |  **description breadcrumbs:** 520  |  **note/error breadcrumbs:** 110
+**Tools:** 121  |  **description breadcrumbs:** 462  |  **note/error breadcrumbs:** 108
   |  **guidance smells flagged:** 0
 ## Blindspots to engineer
 
@@ -14,11 +14,11 @@ and factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (2)** - higher concern, a check-your-work tool nothing points to:
-  `model_compute_holder`, `view_screenshot_multi`
+**Read/Acquire (3)** - higher concern, a check-your-work tool nothing points to:
+  `model_compute_holder`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (11)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_edit_setup`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `doc_update_xref`, `mesh_combine`, `model_arrange`, `model_hole`, `sketch_set_text`, `sys_reload_addin`
+**Edit (15)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_edit_setup`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_update_xref`, `joint_create_origin`, `mesh_combine`, `model_arrange`, `model_hole`, `sketch_set_text`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **27x** across 15 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -32,15 +32,15 @@ and factor duplicated guards into shared helpers.
 - `find_geometry`  <- 42  (desc 37, note 5)
 - `doc_new`  <- 35  (desc 10, note 25)
 - `view_screenshot`  <- 29  (desc 20, note 9)
-- `sys_get_api_doc`  <- 27  (desc 27, note 0)
 - `sketch_create`  <- 25  (desc 18, note 7)
 - `cam_get`  <- 22  (desc 18, note 4)
-- `data_get`  <- 22  (desc 15, note 7)
-- `design_get`  <- 21  (desc 16, note 5)
+- `data_get`  <- 21  (desc 14, note 7)
 - `model_extrude`  <- 19  (desc 18, note 1)
+- `design_get`  <- 15  (desc 11, note 4)
 - `doc_get`  <- 13  (desc 9, note 4)
 - `sketch_add_geometry`  <- 13  (desc 11, note 2)
 - `data_upload_file`  <- 12  (desc 11, note 1)
+- `mesh_to_brep`  <- 12  (desc 8, note 4)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -61,6 +61,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `assembly_constrain`
 - No active design with components.
+- '. Valid: mm, cm, in.
 - Assembly constraint creation returned nothing.
 - Components constrained with the relationship set (type inferred from geometry).
 - 'relationships' must be a list of {snap_one, snap_two, flip?, offset?}.
@@ -128,6 +129,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `cam_compare_operations`
+- differences was capped at
+- ; raise max_results to see the rest.
 - Provide both 'operation_a' and 'operation_b' (operation names).
 - Operation not found: '
 
@@ -291,8 +294,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `design_activate_component`
 - No active design. Create or open a document first (see doc_new).
-- . Use design_get(include=['tree']) to list them.
-- No occurrence/component matched '
 - Occurrence.activate() returned false for '
 - ' - could not make it the active edit target.
 - This component is now the active edit target - sketch_create / model_extrude / sketch_dimension build into it. Activate 'root' (or '') to return to the root.
@@ -316,14 +317,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Activate failed for '
 
 ### `doc_close`
-- No documents are open.
 - . Fusion keeps at least one document open.
 - discarding unsaved changes
+- No documents are open.
+- . No document was closed.
 - No open document matched '
 - No active document to close.
 
 ### `doc_copy`
-- The copy preserves external references: each referenced component still points at its ORIGINAL source file - the references are not re-copied. To save a copy that shares lineage for joint auto-repa...
+- The copy preserves external references: each referenced component still points at its ORIGINAL source file - the references are not re-copied. This tool does not offer a Document.saveAs-based copy ...
 - Provide 'document_id' (lineage URN, preferred) or 'name'.
 - Provide 'project' (name) or 'project_id' for the destination.
 - Destination project not found:
@@ -389,6 +391,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - As-built joint creation returned nothing.
 - Occurrences rigidly joined where they already are.
 - As-built joint failed:
+- '. Valid: mm, cm, in.
 - Assembly constraint creation returned nothing.
 - Components constrained with the relationship set (type inferred from geometry).
 - 'relationships' must be a list of {snap_one, snap_two, flip?, offset?}.
@@ -405,7 +408,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ) - the edit may over-constrain something.
 - Joint edited in place + full recompute (downstream features settled). view_screenshot to view.
 - '. Use design_get(include=['timeline']) or check the name.
-- Driving a joint to a rotation value from here is unsafe (it closes the server connection). To pose a jointed assembly, use assembly_move (rotate the moving occurrence) + assembly_capture_position i...
+- Posing a joint to a rotation value is joint_drive's job. Use joint_drive(joint_name=..., angle_deg=...) to drive it; joint_edit changes the joint definition (type/axis/snaps/limits), not its pose.
 - '. Valid: mm, cm, in.
 - Nothing to change. Provide at least one of: input_one/input_two, joint_type (+axis), world_axis, flip, offset (+units), angle, min_deg/max_deg/rest_deg (rotation), min_mm/max_mm/rest_mm (linear).
 - world_axis given but the joint's current motion type is not axis-based (rigid/ball have no single axis to re-point).
@@ -428,8 +431,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This build's ExportManager has no
 - export is unavailable here.
 - export returned false - nothing was written.
-- export reported success but NO file was written to '
-- ). execute() returned True but produced nothing - treating this as a FAILURE, not a false success. Check the target geometry and the output path are valid.
+- export reported success but
+- . execute() returned True but produced nothing - treating this as a FAILURE, not a false success. Check the target geometry and the output path are valid.
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - export wrote no file for this MESH target. Exporting an existing MESH body to a file via ExportManager writes nothing (a Fusion limitation - execute() returns True but no file lands), and the redir...
 - ) produced no file either (the component may hold no exportable mesh geometry). To get the mesh on disk, convert it first (mesh_to_brep) and export the resulting solid, or place it in a component t...
@@ -438,14 +441,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `mesh_generate_face_groups`
 - No active design. Open or create a document first (see doc_new).
 - This design has no meshGenerateFaceGroupsFeatures collection (generate face groups unavailable here).
+- mesh_generate_face_groups reported no error, but the mesh has no face groups afterward (add() returned nothing and face_group_count is 0). Treating this as a failure - no face groups were generated.
 - Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - prismatic convert REQUIRES face groups (it merges each flat group into one BRep face).
 - meshGenerateFaceGroupsFeatures.createInput returned nothing.
 - Could not create the face-groups input:
 - Generate face groups failed (meshGenerateFaceGroupsFeatures.add raised):
 
 ### `mesh_get`
-- No active design. Open or create a document first (see doc_new).
 - These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with mesh_to_brep. A mesh has no BRep face...
+- No active design. Open or create a document first (see doc_new).
 - No component/occurrence named '
 - '. List the tree with design_get(include=['tree']), or pass target='' to scan the whole design.
 
@@ -666,7 +670,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'height' must be > 0.
 - . Create it first with sketch_create.
 - Creating the sketch text returned nothing.
-- Sketch text created. Extrude/emboss the sketch to engrave it, or edit it later with set_sketch_text (without create).
+- Sketch text created. Extrude/emboss the sketch to engrave it, or edit it later with sketch_set_text (without create).
 - 'height' must be a number (text height in 'units').
 - Could not create sketch text in '
 
@@ -741,16 +745,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `sys_get_selection`
 - No Fusion user interface available.
+- selections was capped at
+- ; raise max_results to see the rest.
 - Nothing is selected in Fusion. Ask the user to click an entity, then call sys_get_selection again (or re-run sys_request_selection).
-- Selection does not include a '
-- . Re-prompt with sys_request_selection if you need a different kind.
 - Could not read the selection:
 
 ### `sys_request_selection`
 - No Fusion user interface available.
+- selections was capped at
+- ; raise max_results to see the rest.
 - Nothing is selected in Fusion. Ask the user to click an entity, then call sys_get_selection again (or re-run sys_request_selection).
-- Selection does not include a '
-- . Re-prompt with sys_request_selection if you need a different kind.
 - Could not read the selection:
 
 ### `view_list_workspaces`
@@ -929,16 +933,11 @@ flowchart LR
   end
 
   appearance_set --> find_geometry
-  appearance_set --> sys_get_api_doc
   appearance_set --> view_screenshot
   assembly_capture_position --> assembly_constrain
   assembly_capture_position --> joint_create_as_built
-  assembly_capture_position --> sys_get_api_doc
-  assembly_capture_position --> sys_request_selection
   assembly_constrain --> assembly_capture_position
   assembly_constrain --> joint_create_as_built
-  assembly_constrain --> sys_get_api_doc
-  assembly_constrain --> sys_request_selection
   assembly_ground --> assembly_capture_position
   assembly_ground --> assembly_constrain
   assembly_ground --> assembly_move
@@ -946,7 +945,6 @@ flowchart LR
   assembly_ground --> assembly_rigid_group
   assembly_ground --> joint_create
   assembly_ground --> joint_create_as_built
-  assembly_ground --> sys_get_api_doc
   assembly_interference --> assembly_probe
   assembly_move --> assembly_capture_position
   assembly_move --> assembly_constrain
@@ -955,8 +953,6 @@ flowchart LR
   assembly_move --> assembly_rigid_group
   assembly_move --> joint_create
   assembly_move --> joint_create_as_built
-  assembly_move --> sys_get_api_doc
-  assembly_probe --> view_inspect
   assembly_rigid_group --> assembly_capture_position
   assembly_rigid_group --> assembly_constrain
   assembly_rigid_group --> assembly_ground
@@ -964,7 +960,6 @@ flowchart LR
   assembly_rigid_group --> assembly_probe
   assembly_rigid_group --> joint_create
   assembly_rigid_group --> joint_create_as_built
-  assembly_rigid_group --> sys_get_api_doc
   cam_activate_setup --> cam_get
   cam_activate_setup --> view_screenshot
   cam_apply_template --> cam_get
@@ -976,6 +971,7 @@ flowchart LR
   cam_create_operation --> cam_get
   cam_create_operation --> cam_select_geometry
   cam_create_setup --> cam_apply_template
+  cam_create_setup --> cam_create_operation
   cam_create_setup --> cam_generate
   cam_create_setup --> find_geometry
   cam_delete --> cam_edit_folders
@@ -998,7 +994,6 @@ flowchart LR
   cam_get --> cam_save_template
   cam_get_status --> cam_generate
   cam_get_status --> cam_get
-  cam_reorder --> cam_delete
   cam_reorder --> cam_edit_folders
   cam_reorder --> cam_get
   cam_save_template --> cam_apply_template
@@ -1008,7 +1003,6 @@ flowchart LR
   cam_select_geometry --> cam_get
   cam_select_geometry --> find_geometry
   cam_set_nc_comment --> cam_get
-  cam_show_toolpath --> view_inspect
   cam_show_toolpath --> view_screenshot
   data_create_folder --> data_create_project
   data_create_folder --> data_delete_folder
@@ -1051,19 +1045,12 @@ flowchart LR
   design_activate_component --> sketch_create
   design_activate_component --> sketch_dimension
   design_configure --> design_get
-  design_configure --> view_inspect
-  design_delete_feature --> design_delete_occurrence
   design_delete_feature --> design_get
-  design_delete_feature --> sys_get_api_doc
   design_delete_occurrence --> design_delete_feature
   design_delete_occurrence --> design_get
   design_delete_occurrence --> model_create_component
-  design_delete_occurrence --> sys_get_api_doc
   design_export --> data_upload_file
-  design_export --> find_geometry
   design_get --> assembly_probe
-  design_get --> design_configure
-  design_get --> design_recompute
   design_get --> joint_drive
   design_get --> param_add
   design_get --> param_get
@@ -1131,7 +1118,6 @@ flowchart LR
   doc_new --> sketch_add_geometry
   doc_new --> sketch_create
   doc_open --> cam_get
-  doc_open --> data_get
   doc_open --> design_get
   doc_open --> workspace_orient
   doc_save --> data_delete_file
@@ -1169,29 +1155,20 @@ flowchart LR
   joint_at_geometry --> find_geometry
   joint_at_geometry --> joint_edit
   joint_at_geometry --> joint_motion_link
-  joint_create --> assembly_capture_position
-  joint_create --> assembly_move
   joint_create --> find_geometry
-  joint_create --> joint_create_origin
+  joint_create --> joint_drive
   joint_create --> joint_edit
   joint_create_as_built --> assembly_capture_position
   joint_create_as_built --> assembly_constrain
-  joint_create_as_built --> sys_get_api_doc
-  joint_create_as_built --> sys_request_selection
   joint_create_origin --> find_geometry
   joint_create_origin --> sketch_add_3d_line
   joint_drive --> assembly_move
   joint_drive --> assembly_probe
   joint_drive --> design_get
-  joint_edit --> assembly_capture_position
-  joint_edit --> assembly_move
   joint_edit --> find_geometry
   joint_edit --> joint_create
-  joint_edit --> joint_create_origin
+  joint_edit --> joint_drive
   joint_motion_link --> assembly_probe
-  joint_motion_link --> sys_get_api_doc
-  mesh_combine --> find_geometry
-  mesh_combine --> mesh_get
   mesh_combine --> model_combine
   mesh_export --> design_export
   mesh_export --> find_geometry
@@ -1205,14 +1182,12 @@ flowchart LR
   mesh_get --> mesh_remesh
   mesh_get --> mesh_to_brep
   mesh_get --> model_inspect
-  mesh_get --> sys_execute_script
   mesh_insert --> find_geometry
   mesh_insert --> mesh_get
   mesh_insert --> mesh_reduce
   mesh_insert --> mesh_remesh
   mesh_insert --> mesh_to_brep
   mesh_insert --> model_inspect
-  mesh_insert --> sys_execute_script
   mesh_plane_cut --> mesh_generate_face_groups
   mesh_plane_cut --> mesh_to_brep
   mesh_reduce --> find_geometry
@@ -1221,22 +1196,18 @@ flowchart LR
   mesh_reduce --> mesh_remesh
   mesh_reduce --> mesh_to_brep
   mesh_reduce --> model_inspect
-  mesh_reduce --> sys_execute_script
   mesh_remesh --> find_geometry
   mesh_remesh --> mesh_get
   mesh_remesh --> mesh_insert
   mesh_remesh --> mesh_reduce
   mesh_remesh --> mesh_to_brep
   mesh_remesh --> model_inspect
-  mesh_remesh --> sys_execute_script
   mesh_to_brep --> find_geometry
   mesh_to_brep --> mesh_get
   mesh_to_brep --> mesh_insert
   mesh_to_brep --> mesh_reduce
   mesh_to_brep --> mesh_remesh
   mesh_to_brep --> model_inspect
-  mesh_to_brep --> sys_execute_script
-  model_arrange --> sys_get_api_doc
   model_arrange --> view_screenshot
   model_base_feature --> design_activate_component
   model_base_feature --> design_get
@@ -1256,14 +1227,11 @@ flowchart LR
   model_construction --> design_set_mode
   model_construction --> find_geometry
   model_construction --> sketch_create
-  model_construction --> sys_get_api_doc
   model_create_component --> sketch_create
-  model_create_component --> sys_get_api_doc
   model_extrude --> find_geometry
   model_extrude --> sketch_add_geometry
   model_extrude --> sketch_create
   model_extrude --> sketch_get
-  model_extrude --> sys_get_api_doc
   model_extrude --> view_screenshot
   model_fillet --> find_geometry
   model_fillet --> model_chamfer
@@ -1276,17 +1244,15 @@ flowchart LR
   model_loft --> model_extrude
   model_loft --> model_stitch
   model_loft --> model_unstitch
-  model_loft --> sys_get_api_doc
   model_loft --> view_screenshot
-  model_measure_between --> appearance_set
   model_measure_between --> find_geometry
   model_measure_between --> model_inspect
+  model_mirror --> find_geometry
   model_pattern_circular --> model_pattern_rectangular
-  model_pattern_circular --> sys_get_api_doc
   model_pattern_circular --> view_screenshot
   model_pattern_rectangular --> model_pattern_circular
-  model_pattern_rectangular --> sys_get_api_doc
   model_pattern_rectangular --> view_screenshot
+  model_revolve --> find_geometry
   model_revolve --> model_extrude
   model_revolve --> sketch_get
   model_stitch --> find_geometry
@@ -1294,41 +1260,29 @@ flowchart LR
   model_stitch --> model_extrude
   model_stitch --> model_loft
   model_stitch --> model_unstitch
-  model_stitch --> sys_get_api_doc
   model_stitch --> view_screenshot
   model_unstitch --> find_geometry
   model_unstitch --> model_combine
   model_unstitch --> model_extrude
   model_unstitch --> model_loft
   model_unstitch --> model_stitch
-  model_unstitch --> sys_get_api_doc
   model_unstitch --> view_screenshot
-  param_add --> design_get
-  param_add --> design_recompute
   param_add --> param_delete
   param_add --> param_get
   param_add --> param_set
   param_add --> param_set_favorite
-  param_delete --> design_get
-  param_delete --> design_recompute
   param_delete --> param_add
   param_delete --> param_get
   param_delete --> param_set
   param_delete --> param_set_favorite
-  param_get --> design_get
-  param_get --> design_recompute
   param_get --> param_add
   param_get --> param_delete
   param_get --> param_set
   param_get --> param_set_favorite
-  param_set --> design_get
-  param_set --> design_recompute
   param_set --> param_add
   param_set --> param_delete
   param_set --> param_get
   param_set --> param_set_favorite
-  param_set_favorite --> design_get
-  param_set_favorite --> design_recompute
   param_set_favorite --> param_add
   param_set_favorite --> param_delete
   param_set_favorite --> param_get
@@ -1357,7 +1311,6 @@ flowchart LR
   sketch_add_geometry --> sketch_create
   sketch_add_geometry --> sketch_get
   sketch_add_geometry --> view_screenshot
-  sketch_constrain --> sys_get_api_doc
   sketch_create --> doc_new
   sketch_create --> find_geometry
   sketch_create --> model_extrude
@@ -1384,37 +1337,30 @@ flowchart LR
   surface_extend --> surface_offset
   surface_extend --> surface_thicken
   surface_extend --> surface_trim
-  surface_extend --> sys_get_api_doc
   surface_extrude --> find_geometry
   surface_extrude --> model_extrude
   surface_extrude --> model_revolve
   surface_extrude --> surface_patch
   surface_extrude --> surface_revolve
-  surface_extrude --> sys_get_api_doc
   surface_offset --> surface_extend
   surface_offset --> surface_thicken
   surface_offset --> surface_trim
-  surface_offset --> sys_get_api_doc
   surface_patch --> find_geometry
   surface_patch --> model_extrude
   surface_patch --> model_revolve
   surface_patch --> surface_extrude
   surface_patch --> surface_revolve
-  surface_patch --> sys_get_api_doc
   surface_revolve --> find_geometry
   surface_revolve --> model_extrude
   surface_revolve --> model_revolve
   surface_revolve --> surface_extrude
   surface_revolve --> surface_patch
-  surface_revolve --> sys_get_api_doc
   surface_thicken --> surface_extend
   surface_thicken --> surface_offset
   surface_thicken --> surface_trim
-  surface_thicken --> sys_get_api_doc
   surface_trim --> surface_extend
   surface_trim --> surface_offset
   surface_trim --> surface_thicken
-  surface_trim --> sys_get_api_doc
   sys_capability_map --> appearance_set
   sys_capability_map --> assembly_probe
   sys_capability_map --> cam_create_setup
@@ -1455,7 +1401,6 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph assembly
-    assembly_capture_position["assembly_capture_position"]
     assembly_ground["assembly_ground"]
     assembly_interference["assembly_interference"]
     assembly_move["assembly_move"]
@@ -1493,6 +1438,7 @@ flowchart LR
     find_geometry["find_geometry"]
   end
   subgraph joint
+    joint_drive["joint_drive"]
     joint_edit["joint_edit"]
   end
   subgraph mesh
@@ -1569,7 +1515,6 @@ flowchart LR
   data_delete_folder --> data_delete_file
   data_delete_folder --> data_get
   data_upload_file --> data_get
-  design_activate_component --> design_get
   design_activate_component --> doc_new
   design_activate_component --> model_extrude
   design_activate_component --> sketch_create
@@ -1586,9 +1531,8 @@ flowchart LR
   doc_save --> doc_save_as
   doc_save_as --> data_get
   doc_save_as --> doc_get
-  joint_edit --> assembly_capture_position
-  joint_edit --> assembly_move
   joint_edit --> design_get
+  joint_edit --> joint_drive
   joint_edit --> view_screenshot
   mesh_export --> data_upload_file
   mesh_export --> doc_new

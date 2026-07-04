@@ -1,25 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: create a CAM (Manufacture) SETUP on a part.
-
-  cam_create_setup(operation_type=..., models=..., name=...) -> a new Setup
-
-This closes the gap where every CAM authoring tool (cam_apply_template, cam_generate, ...) assumed a
-setup ALREADY existed - so a freshly imported bare part had no tool-only path to a CAM job. With a
-setup in place you can then cam_apply_template / add operations / cam_generate.
-
-'operation_type' is milling (default) | turning. 'models' selects the bodies to machine - a
-BodyRefList (find_geometry HANDLES, precise, or body NAMES; a list or comma-separated) - or omit to
-use ALL solid bodies in the root component. 'name' optionally names the setup.
-
-Grounded in adsk.cam:
-  - cam = document.products.itemByProductType('CAMProductType')   (no workspace switch needed)
-  - cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation | TurningOperation) -> SetupInput
-  - SetupInput.models = [BRepBody|Occurrence, ...] ; SetupInput.name = str
-  - cam.setups.add(SetupInput) -> Setup
-Handler runs on the main thread; WRITES (adds a setup to the document's CAM data).
-"""
+"""Create a CAM (Manufacture) setup on a part: pick an operation type and the bodies to machine (or
+default to all root-component solids), producing a new Setup ready for cam_apply_template /
+cam_create_operation."""
 
 import adsk.core
 import adsk.cam
@@ -29,6 +13,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 from . import _common
 from . import _inputs
 
@@ -41,22 +26,6 @@ _OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="mi
 # models is a list of bodies by handle (precise) or name; omitted -> all root bodies.
 _MODELS = _inputs.BodyRefList("models", required=False,
                               description="Bodies to machine (omit = all solid bodies).")
-
-
-def _get_cam():
-    """Return (cam, None) for the active document, or (None, reason)."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    products = safe(lambda: doc.products)
-    if not products:
-        return None, "Could not access document products."
-    cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, ("This document has no CAM (Manufacture) data yet. Switch to the Manufacture "
-    "workspace once (view_switch_workspace 'manufacture') so the CAM product is "
-    "created, then retry.")
-    return cam, None
 
 
 def _all_root_bodies(design):
@@ -73,7 +42,7 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
     if oerr:
         return error(oerr)
 
-    cam, cam_err = _get_cam()
+    cam, cam_err = get_cam()
     if cam_err:
         return error(cam_err)
 

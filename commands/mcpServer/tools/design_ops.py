@@ -1,19 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for whole-DESIGN operations: timeline health + recompute.
-
-  health_handler() -> feature error/warning rollup. The timeline-health read consumed by design_get
-                      (its default slice); not a standalone tool here. Read-only.
-  design_recompute -> computeAll() so downstream features rebuild. WRITES.
-
-design_recompute reports timeline health afterwards (via health_handler) so a rebuild that breaks a
-downstream feature surfaces immediately; use it after an edit whose downstream features may show stale
-geometry (e.g. changing sketch text an emboss consumes).
-
-Grounded in adsk.fusion:
-  - Design.timeline.item(i).healthState (0 healthy / 1 warning / 2 error / 3 suppressed); computeAll()
-Handlers run on the main thread.
+"""MCP building blocks for whole-DESIGN operations: health_handler() reports the timeline error/warning
+rollup (consumed by design_get's default slice; not a standalone tool here); design_recompute() forces
+computeAll() and reports health afterwards, so a rebuild that breaks a downstream feature surfaces
+immediately. WRITES (design_recompute only).
 """
 
 import adsk.core

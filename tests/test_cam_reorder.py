@@ -76,14 +76,14 @@ class _CAM:
         self.setups = _Setups(setups)
 
 
-def _install(setups=None):
+def _install(monkeypatch, setups=None):
     if setups is None:
         ops = [Operation("Face1"), Operation("Adaptive1"), Operation("Drill1")]
         fol = CAMFolder("Holes", ops=[Operation("Bore1")])
         s = Setup("Setup1", ops=ops, folders=[fol])
         setups = [s]
     cam = _CAM(setups)
-    cr._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(cr, "get_cam", lambda: (cam, None))
     return cam
 
 
@@ -110,28 +110,28 @@ def _named(cam, name):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_no_cam(self):
-        cr._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(cr, "get_cam", lambda: (None, "no CAM data"))
         res = cr.handler(entity="Face1", position="after", reference="Adaptive1")
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_bad_position(self):
-        _install()
+    def test_bad_position(self, monkeypatch):
+        _install(monkeypatch)
         res = cr.handler(entity="Face1", position="sideways", reference="Adaptive1")
         assert res["isError"] is True and "position" in res["message"].lower()
 
-    def test_entity_not_found(self):
-        _install()
+    def test_entity_not_found(self, monkeypatch):
+        _install(monkeypatch)
         res = cr.handler(entity="Ghost", position="after", reference="Adaptive1")
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_reference_not_found(self):
-        _install()
+    def test_reference_not_found(self, monkeypatch):
+        _install(monkeypatch)
         res = cr.handler(entity="Face1", position="after", reference="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_entity_equals_reference(self):
-        _install()
+    def test_entity_equals_reference(self, monkeypatch):
+        _install(monkeypatch)
         res = cr.handler(entity="Face1", position="after", reference="Face1")
         assert res["isError"] is True
 
@@ -139,29 +139,29 @@ class TestGuards:
 # ── reorder ──────────────────────────────────────────────────────────────────
 
 class TestReorder:
-    def test_move_after(self):
-        cam = _install()
+    def test_move_after(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cr.handler(entity="Face1", position="after", reference="Drill1"))
         face = _named(cam, "Face1")
         assert face.moved == ("after", _named(cam, "Drill1"))
         assert out["moved"] == "Face1" and out["position"] == "after" and out["reference"] == "Drill1"
 
-    def test_move_before(self):
-        cam = _install()
+    def test_move_before(self, monkeypatch):
+        cam = _install(monkeypatch)
         cr.handler(entity="Drill1", position="before", reference="Face1")
         assert _named(cam, "Drill1").moved[0] == "before"
 
-    def test_reorder_nested_entity(self):
+    def test_reorder_nested_entity(self, monkeypatch):
         # the moving entity can be inside a folder (Bore1) — resolved by the recursive walk
-        cam = _install()
+        cam = _install(monkeypatch)
         out = _payload(cr.handler(entity="Bore1", position="before", reference="Face1"))
         assert _named(cam, "Bore1").moved[0] == "before"
         assert out["moved"] == "Bore1"
 
-    def test_move_declined_is_error(self):
+    def test_move_declined_is_error(self, monkeypatch):
         # moveBefore/After returning False (an illegal move) must be a hard error, not a false ok
         s = Setup("Setup1", ops=[Operation("A", allow=False), Operation("B")])
-        _install([s])
+        _install(monkeypatch, [s])
         res = cr.handler(entity="A", position="after", reference="B")
         assert res["isError"] is True and ("not allowed" in res["message"].lower()
                                            or "declin" in res["message"].lower())

@@ -5,25 +5,10 @@
 
 """High-risk MCP tool: execute arbitrary Fusion API Python in the live session.
 
-This is the general "go do X" escape hatch. It is NOT registered unless the user
-has explicitly enabled it (mcpServer settings -> allow_execute_api_script, default
-False), because it lets a connected AI run any code in the user's CAD session.
-
-Safety mechanics:
-  - The script must define `def run(context):` (mirrors a Fusion script entry).
-  - Execution is wrapped in a Fusion transaction (PTransaction) so the script's changes are
-    GROUPED as a single timeline/undo step, and committed on success.
-  - CAVEAT (do not over-trust this): the script runs via `Python.Run`, a NESTED interpreter, and
-    the appended `run(None)` executes INSIDE it. An exception raised by the script is caught within
-    Python.Run and returned to us as a result STRING - it does NOT propagate as a Python exception
-    here, so the `except` branch (PTransaction.Abort) usually does NOT fire on an in-script error.
-    In other words: a failing script is typically NOT auto-rolled-back; its partial changes are
-    committed as one undo step. Treat this as "grouped, undoable" - NOT "atomic / rolls back on
-    error". Abort only covers errors that escape Python.Run itself (rare).
-  - The handler runs on Fusion's main thread (run_on_main_thread=True via Item). It is also exempt
-    from the server's 30s task timeout (see server settings) precisely because a long script that
-    timed out could not be interrupted yet would still commit - so it is allowed to run to
-    completion rather than report a false "cancelled".
+The general "go do X" escape hatch. NOT registered unless the user explicitly enables it
+(mcpServer settings -> allow_execute_api_script, default False). A script error is NOT auto-rolled-back
+- partial changes can commit as one undo step; verify state afterward. See docs/fusion-api-notes.md
+"Script execution" for the Python.Run/PTransaction mechanics this relies on.
 """
 
 import os
@@ -152,7 +137,8 @@ def _error_result(text: str) -> dict:
 
 TOOL_DESCRIPTION = (
     "Execute Fusion API Python source code in the user's live Fusion session. "
-    "This is the general way to perform actions in Fusion.\n\n"
+    "An escape hatch for actions the typed tools don't cover - prefer a typed tool when one "
+    "exists (see sys_find_tool / sys_capability_map).\n\n"
     "REQUIREMENTS:\n"
     "- The script MUST define a function `def run(context):` which is the entry point.\n"
     "- DO NOT show any modal UI (no messageBox / no input dialogs) - modal windows "

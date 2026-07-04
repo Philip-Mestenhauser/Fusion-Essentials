@@ -3,30 +3,14 @@
 
 """MCP building blocks: hand control to the USER to pick an entity, then read it back.
 
-  sys_request_selection -> clear the current selection and ask the user to click a
-                            face/edge/vertex/body/component in Fusion. Returns IMMEDIATELY
-                            (non-blocking). No Fusion dialog - the *agent* presents the
-                            confirmation (e.g. a chat button) and the user clicks it to hand
-                            control back, with one click and no typing.
-  sys_get_selection     -> read what the user has selected in Fusion (ui.activeSelections)
-                            and return structured details per entity (type, owning body /
-                            component, geometry hints, click point) for the agent to intuit.
+  sys_request_selection -> ask the user to click a face/edge/vertex/body/component; returns
+                            immediately (non-blocking, no Fusion dialog).
+  sys_get_selection     -> read ui.activeSelections back as structured per-entity detail.
 
-DESIGN - the confirmation lives in the AGENT'S UI, not Fusion. The user clicks an entity in
-Fusion, then clicks the agent's "I've selected it" control (a structured-output button in the
-chat) which returns straight to the agent; the agent then calls sys_get_selection. There is
-NO Fusion OK button and no "type ready" step. (A Fusion command dialog with an OK button was
-tried but rejected: it forces a second hand-off inside Fusion instead of in the chat.)
-
-Both handlers read ui.activeSelections - they never block (ui.selectEntity() WOULD block the
-main thread, so it is deliberately avoided).
-
-Grounded in adsk.core / adsk.fusion:
-  - ui.activeSelections (Selections): .count, .item(i), .clear(); Selection.entity / .point
-  - entity detail: BRepFace (.area/.centroid/.geometry/.body), BRepEdge (.length/.geometry/
-    .body), BRepVertex (.geometry/.body), BRepBody (.name/.volume/.isSolid/.parentComponent),
-    Occurrence (.name/.fullPathName/.component), Component.
-Handlers run on the main thread; neither blocks.
+The confirmation lives in the AGENT'S own UI (e.g. a chat button), not a Fusion dialog - the user
+clicks the entity, then clicks the agent's control, which calls sys_get_selection. Both handlers read
+ui.activeSelections and never block (ui.selectEntity() would block the main thread). See
+docs/fusion-api-notes.md "Selection" for the entity-detail API surface.
 """
 
 import adsk.core
@@ -37,6 +21,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _inputs
 
 # 'what' hint -> human phrase for the prompt.
 _KIND_HINTS = {
@@ -216,13 +201,7 @@ def _classify(entity) -> dict:
 # ----------------------------------------------------------- sys_request_selection
 
 def request_user_selection_handler(what: str = "any", clear_current: bool = True) -> dict:
-    """Ask the user to click an entity in Fusion. Returns immediately (non-blocking).
-
-    By default clears the existing selection so the user starts clean. 'what' (face/edge/
-    vertex/body/component/any) only shapes the prompt. The agent should then present its OWN
-    one-click confirmation (e.g. a chat button); when the user clicks it, call
-    sys_get_selection - there is no Fusion OK button and no need for the user to type.
-    """
+    """Ask the user to click an entity in Fusion. Returns immediately (non-blocking)."""
     ui = _ui()
     if not ui:
         return error("No Fusion user interface available.")
@@ -249,14 +228,11 @@ def request_user_selection_handler(what: str = "any", clear_current: bool = True
 
 # --------------------------------------------------------------- sys_get_selection
 
-def get_user_selection_handler(require: str = "") -> dict:
-    """Read the user's current Fusion selection and describe each selected entity.
+_SELECTION_CAP = 50   # a big multi-select (e.g. edges picked for a batch fillet) is real; still bound it
 
-    Call this when the user confirms (via the agent's one-click control) that they have
-    selected something. Returns one record per selected entity (type, owning body/component,
-    geometry hints, click point). If 'require' (face/edge/vertex/body/component) is set and the
-    selection doesn't match, it still returns the selection but flags the mismatch.
-    """
+
+def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_CAP) -> dict:
+    """Read the user's current Fusion selection and describe each selected entity."""
     ui = _ui()
     if not ui:
         return error("No Fusion user interface available.")
@@ -267,9 +243,10 @@ def get_user_selection_handler(require: str = "") -> dict:
         return error("Nothing is selected in Fusion. Ask the user to click an entity, then "
     "call sys_get_selection again (or re-run sys_request_selection).")
 
+    cap = max(1, int(max_results))
     selections = []
     try:
-        for i in range(count):
+        for i in range(min(count, cap)):
             sel = sels.item(i)
             entity = safe(lambda sel=sel: sel.entity)
             rec = _classify(entity) if entity is not None else {"object_type": None, "kind": "unknown"}
@@ -278,11 +255,15 @@ def get_user_selection_handler(require: str = "") -> dict:
     except Exception as e:
         return error(f"Could not read the selection: {e}")
 
+    truncated = count > len(selections)
     payload = {
     "selection_count": count,
     "selections": selections,
+    "truncated": truncated,
     "active_document": safe(lambda: app.activeDocument.name),
     }
+    if truncated:
+        payload["note"] = (f"selections was capped at {cap} of {count}; raise max_results to see the rest.")
 
     want = (require or "").strip().lower()
     if want:
@@ -290,13 +271,11 @@ def get_user_selection_handler(require: str = "") -> dict:
         payload["required_kind"] = want
         payload["matches_required"] = want in kinds
         if want not in kinds:
-            payload["note"] = (f"Selection does not include a '{want}'. It contains: "
-                               f"{', '.join(k for k in kinds if k)}. Re-prompt with "
-                               "sys_request_selection if you need a different kind.")
+            mismatch_note = (f"Selection does not include a '{want}'. It contains: "
+                             f"{', '.join(k for k in kinds if k)}. Re-prompt with "
+                             "sys_request_selection if you need a different kind.")
+            payload["note"] = (payload.get("note", "") + " " + mismatch_note).strip()
     return ok(payload)
-
-
-# ----------------------------------------------------------------------- helpers
 
 
 # ------------------------------------------------------------------------- tools
@@ -306,20 +285,21 @@ _REQUEST_DESC = (
     "identify a face, edge, vertex, body, or component you cannot unambiguously name. It clears "
     "the current selection (by default) and returns IMMEDIATELY - it does NOT open a Fusion "
     "dialog and does NOT block. The user simply clicks the entity in the model; YOU provide the "
-    "one-click confirmation in the chat (a structured-output button). 'what' = face | edge | "
-    "vertex | body | component | any (default any) only shapes the prompt. After the user "
-    "confirms, call sys_get_selection to read what they picked."
+    "one-click confirmation in the chat (a structured-output button). 'what' only shapes the "
+    "prompt. After the user confirms, call sys_get_selection to read what they picked."
 )
 request_tool = (
     Tool.create_simple(name="sys_request_selection", description=_REQUEST_DESC)
-    .add_input_property("what", {"type": "string",
-            "description": "Kind hint: face | edge | vertex | body | component | any (default any)."})
+    .add_input_property(*_inputs.Choice("what", list(_KIND_HINTS), default="any",
+            description="Kind hint for the prompt.").as_property())
     .add_input_property("clear_current", {"type": "boolean",
             "description": "Clear the existing selection first (default true)."})
     .strict_schema()
 )
-request_item = Item.create_tool_item(tool=request_tool, write="read", handler=request_user_selection_handler,
+request_item = Item.create_tool_item(tool=request_tool, write="write", handler=request_user_selection_handler,
                                      run_on_main_thread=True)
+
+_REQUIRE_KINDS = ("face", "edge", "vertex", "body", "component")
 
 _GET_DESC = (
                                      "Read the user's CURRENT selection in Fusion and describe each selected entity so you can "
@@ -330,13 +310,16 @@ _GET_DESC = (
     "DIRECTION unit vector where meaningful ('direction' + 'direction_kind': a planar face's "
     "normal, a cylindrical/conical face's axis, a linear edge's direction, a circular edge's "
     "axis) for defining a machining axis or joint-origin orientation, and the click point. "
-    "Optionally set 'require' (face/edge/vertex/body/component) to flag a "
-    "mismatch. If nothing is selected, returns an error telling you to re-prompt."
+    "Optionally set 'require' to flag a "
+    "mismatch. If nothing is selected, returns an error telling you to re-prompt. 'selections' is "
+    "capped (max_results, default 50); 'truncated' flags when the cap was hit."
 )
 get_tool = (
     Tool.create_simple(name="sys_get_selection", description=_GET_DESC)
-    .add_input_property("require", {"type": "string",
-            "description": "Optional expected kind to validate: face | edge | vertex | body | component."})
+    .add_input_property(*_inputs.Choice("require", list(_REQUIRE_KINDS),
+            description="Optional expected kind to validate the selection against.").as_property())
+    .add_input_property("max_results", {"type": "integer",
+            "description": "Cap on the 'selections' array returned (default 50)."})
     .strict_schema()
 )
 get_item = Item.create_tool_item(tool=get_tool, write="read", handler=get_user_selection_handler,

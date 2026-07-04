@@ -1,26 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: delete a CAM entity (setup / operation / folder / pattern) by name.
-
-  cam_delete(entity="<name>") -> remove that CAM browser item via .deleteMe().
-
-Fills a real gap: design_delete_feature / design_delete_occurrence act on the DESIGN timeline and
-occurrences - they do NOT reach CAM data (setups/operations/folders/patterns live in cam.setups, not
-the timeline). This is the CAM-side delete.
-
-Honesty contract (mirrors design_delete_feature):
-  - matches by name across all setups (the setups themselves, and operations/folders/patterns via each
-    setup's allOperations);
-  - an AMBIGUOUS name (several CAM items share it) is refused, not guessed;
-  - a deleteMe()==False result (Fusion declined) becomes an explicit error, never a false success.
-
-Grounded in adsk.cam (deleteMe verified live on an operation + a folder):
-  - CAM.setups.item(i) -> Setup(.name, .deleteMe(), .allOperations)
-  - Setup.allOperations -> every operation/folder/pattern (OperationBase) under the setup, each with
-    .name and .deleteMe()
-Handler runs on the main thread; DESTRUCTIVE (removes CAM data).
-"""
+"""Delete a CAM entity (setup/operation/folder/pattern) by name via deleteMe(). design_delete_feature
+and design_delete_occurrence only reach the design timeline, not CAM data - this is the CAM-side
+delete. An ambiguous name is refused rather than guessed; a deleteMe()==False result is reported as
+an error, never a false success."""
 
 import adsk.core
 import adsk.cam
@@ -29,18 +13,9 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
-
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
 
 
 def _walk_container(container, out):
@@ -81,7 +56,7 @@ def handler(entity: str = "") -> dict:
         return error("Provide 'entity' - the CAM item name to delete (see cam_get / "
                      "cam_get(include=['operations']) / cam_edit_folders).")
 
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if cerr:
         return error(cerr)
 

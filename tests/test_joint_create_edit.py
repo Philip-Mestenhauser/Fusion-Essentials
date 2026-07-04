@@ -1,6 +1,6 @@
-"""Unit tests for ``joint.py`` pure logic.
+"""Unit tests for ``joint_create_edit.py`` pure logic.
 
-Targets: ``_find_joint_origin`` (resolution order — root JO returned as-is,
+Targets: ``_find_joint_origin`` (resolution order - root JO returned as-is,
 empty name -> None, not-found -> None) and ``_apply_motion`` (dispatch by joint
 type, including the unsupported-type fallthrough). The assembly-context-proxy
 path for sub-component JOs is integration-only (needs a live occurrence graph),
@@ -96,6 +96,19 @@ class TestApplyMotion:
         assert ok is False
         assert "warp_drive" in err
         assert ji.called is None
+
+
+# ── edit_handler: posing is joint_drive's job ──────────────────────────────
+
+class TestEditRotationRedirect:
+    def test_rotation_deg_redirects_to_joint_drive(self, monkeypatch):
+        monkeypatch.setattr(joint._common, "design", lambda: SimpleNamespace())
+        monkeypatch.setattr(joint, "_find_joint", lambda design, name: SimpleNamespace(name="J"))
+        out = joint.edit_handler(joint_name="J", rotation_deg=45)
+        assert out["isError"] is True
+        msg = out["content"][0]["text"]
+        assert "joint_drive" in msg
+        assert "assembly_move" not in msg
 
 
 # ── _apply_limits: shared by create + edit; rotation(rad) vs linear(cm) ──────
@@ -230,8 +243,8 @@ class TestResolveInputHandle:
 
 # ── occurrence-scoped JO: '<occurrence>:<JO name>' resolves to the assembly-context proxy ────
 # The form an agent naturally writes for a JO inside an inserted part ('SculpturalTower:1:Center
-# of Model'). It must resolve to the JO PROXIED into that occurrence's context - a live run showed
-# the old resolver rejecting it, sending the agent down a raw-script path that hits Fusion's
+# of Model'). It must resolve to the JO PROXIED into that occurrence's context - a resolver that
+# rejects it sends the agent down a raw-script path that hits Fusion's live error
 # "Provided input paths for joint are not valid".
 
 class _IterableJOs:
@@ -575,10 +588,10 @@ class TestCreateHandler:
         assert out["axis"] is None
 
     def test_ball_uses_valid_pitch_and_yaw_directions(self):
-        # LIVE bug this pins: setAsBallJointMotion(pitchDirection, yawDirection) REJECTS XAxis as the
-        # pitch direction ("Invalid parameter pitchDirection"). The API requires pitch=ZAxisJointDirection
-        # and yaw=XAxisJointDirection. The old code passed (XAxis, YAxis) and failed only on a live
-        # document (the mock accepted any args). Pin the correct enums so a regression is caught here.
+        # Live API fact this pins: setAsBallJointMotion(pitchDirection, yawDirection) REJECTS XAxis
+        # as the pitch direction ("Invalid parameter pitchDirection") - it requires
+        # pitch=ZAxisJointDirection and yaw=XAxisJointDirection, and a mock accepts any args, so
+        # only pinning the enums here catches a wrong pair before a live document does.
         import adsk.fusion
         JD = adsk.fusion.JointDirections
         _, coll = _install_create()
@@ -624,7 +637,7 @@ class TestCreateHandler:
 
     def test_add_failure_on_input_paths_hints_the_proxy_fix(self):
         # Fusion's "Provided input paths for joint are not valid" = an input not in assembly
-        # context. The error must carry the fix (pass JOs by name so the tool proxies them),
+        # context. The error must carry the remedy (pass JOs by name so the tool proxies them),
         # not just echo Fusion's opaque message.
         _, coll = _install_create()
         def boom(ji):

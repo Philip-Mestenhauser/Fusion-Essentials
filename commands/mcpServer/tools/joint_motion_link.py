@@ -1,25 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: link two joints' motion so driving one drives the other (a gear/belt ratio).
-
-  joint_motion_link -> couple two existing joints with a ratio, so animating/driving one moves the
-                       other proportionally (the API equivalent of the Motion Link command). WRITES.
-
-Why this exists: assembling the kinematic topology (joints) is one thing; making a mechanism ACTUATE
-as a unit is another. A motion link ties two joint values together - e.g. a gear pair (2:1), a
-chain/belt drive, rack-and-pinion, or coupling a wheel's spin to a crank's rotation - so the
-mechanism moves coherently when you drive any one member, instead of each joint being independent.
-
-Grounded in adsk.fusion (signatures confirmed live via sys_get_api_doc):
-  - rootComponent.motionLinks : MotionLinks.createInput(jointOne, jointTwo) -> MotionLinkInput ;
-    MotionLinks.add(input) -> MotionLink   (createInput takes TWO joints, NOT an ObjectCollection)
-  - The RATIO is NOT on the input - it is set on the resulting MotionLink via
-    MotionLink.setMotionData(motionOne, valueOne, motionTwo, valueTwo, isReversed). motionOne/Two are
-    the joints' jointMotion; valueOne/Two are ValueInputs (real -> cm/radians, or a units string).
-    A k:1 ratio (joint_two moves k per unit of joint_one) is valueOne=1, valueTwo=k; a negative ratio
-    links the motions reversed (isReversed=True with abs(k)). There is NO `.ratios` property.
-Handler runs on the main thread; WRITES (adds a MotionLink feature).
+"""Links two existing joints' motion with a ratio (the Motion Link command) so driving one moves the
+other proportionally - a gear pair, belt/chain drive, or coupled rotation. WRITES (adds a MotionLink
+feature).
 """
 
 import adsk.core
@@ -30,28 +14,20 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from ._joints import find_joint
 
 app = adsk.core.Application.get()
 
 
-def _find_joint(root, name):
-    """Resolve a joint by name (exact, then case-insensitive)."""
-    want = (name or "").strip()
-    joints = safe(lambda: root.joints)
-    if not joints:
-        return None, []
+def _joint_names(design):
+    """This design's root-component joint names, for a resolve-failure error message."""
     names = []
+    joints = safe(lambda: design.rootComponent.joints)
     for i in range(safe(lambda: joints.count, 0) or 0):
-        j = safe(lambda i=i: joints.item(i))
-        nm = safe(lambda j=j: j.name) or ""
-        names.append(nm)
-        if nm == want:
-            return j, names
-    for i in range(safe(lambda: joints.count, 0) or 0):
-        j = safe(lambda i=i: joints.item(i))
-        if want and (safe(lambda j=j: j.name) or "").lower() == want.lower():
-            return j, names
-    return None, names
+        nm = safe(lambda i=i: joints.item(i).name)
+        if nm:
+            names.append(nm)
+    return names
 
 
 def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dict:
@@ -71,10 +47,11 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     if not design:
         return error("No active design.")
     root = safe(lambda: design.rootComponent)
-    j1, names = _find_joint(root, j1name)
-    j2, _ = _find_joint(root, j2name)
+    j1 = find_joint(design, j1name)
+    j2 = find_joint(design, j2name)
     if not j1 or not j2:
         missing = j1name if not j1 else j2name
+        names = _joint_names(design)
         return error(f"No joint named '{missing}'. Joints: {', '.join(n for n in names if n) or '(none)'}.")
 
     try:
@@ -88,7 +65,7 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
 
     try:
         mls = root.motionLinks
-        # createInput takes the TWO joints directly (NOT an ObjectCollection - that was the bug).
+        # createInput takes the TWO joints directly, NOT an ObjectCollection.
         inp = mls.createInput(j1, j2)
         ml = mls.add(inp)
     except Exception as e:

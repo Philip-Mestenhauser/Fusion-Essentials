@@ -107,6 +107,9 @@ def wrap(handler):
         if expect and not _matches(expect, name, urn):
             return _refusal(expect, name, urn)       # REFUSE - no handler call, no mutation
         result = handler(**kwargs)
+        # Re-read identity AFTER the handler runs: a doc-switching write (doc_new/doc_open/
+        # doc_activate) makes a DIFFERENT document active, and acted_on must report that one.
+        name, urn = _active_identity()
         return _stamp_acted_on(result, name, urn)
     guarded.__name__ = getattr(handler, "__name__", "guarded")
     guarded.__wrapped__ = handler                    # so tests/introspection can reach the original

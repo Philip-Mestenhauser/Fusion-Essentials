@@ -6,13 +6,7 @@
   view_list_workspaces  -> all selectable workspaces (id, name, productType, active)
   view_switch_workspace -> activate a workspace by id or name (e.g. Design <-> Manufacture)
 
-Grounded in adsk.core.UserInterface.workspaces / Workspace:
-  - ui.workspaces is iterable; each Workspace has .id, .name, .isActive,
-    .productType, and .activate().
-  - Common ids: 'FusionSolidEnvironment' (Design), 'CAMEnvironment' (Manufacture).
-    We match on id OR localized name so callers can use either.
-
-Switching changes UI state, so handlers run on the main thread (the default).
+See docs/fusion-api-notes.md "Workspaces" for the ui.workspaces/Workspace API facts.
 """
 
 import adsk.core
@@ -122,9 +116,6 @@ def switch_workspace_handler(workspace: str = "") -> dict:
         return ok({"switched": True, "active_workspace": match.name})
     except Exception as e:
         return error(f"Failed to switch to '{match.name}': {e}")
-
-
-# --- result helpers (shared shape across tools) ---
 
 
 # --- tool definitions ---

@@ -43,7 +43,7 @@ class _FakeFusion:
         """Defines an extrude feature's inputs."""
         @property
         def profile(self):
-            """Gets and sets the profiles used to define the extrude."""
+            """Gets and sets the profiles that define the extrude."""
             return None
 
     class ExtrudeFeatures:

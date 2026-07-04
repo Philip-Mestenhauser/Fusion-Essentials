@@ -1,36 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: create a joint at two GEOMETRY HANDLES (the consume half of geometry-as-values).
-
-  joint_at_geometry -> joint two parts AT specific geometry - a crank pin's cylindrical face to a
-                       rod's bore, a hole edge to a pin - given the two HANDLES that find_geometry
-                       returned. Motion: rigid / revolute / slider / cylindrical / ball, with an
-                       axis. The joint lands AT the real geometry (the offset pin, the bore center),
-                       NOT collapsed to the part origins. WRITES.
-
-WHY THIS EXISTS - and what it bakes in (the design point): jointing at a precise offset point used
-to require tribal knowledge an agent only learned by crashing:
-  * the '<occ>:cylinder' snap is ambiguous on a multi-cylinder part (picks the wrong face / fails);
-  * '<occ>:origin' is reliable but COLLAPSES both parts to (0,0,0) - zero offset, a degenerate
-    mechanism that won't move;
-  * a construction-point datum is REJECTED in assembly/edit-in-place context ("Environment is not
-    supported");
-  * JointGeometry.createByNonPlanarFace works on a cylinder face, BUT JointKeyPointTypes.CenterKeyPoint
-    is INVALID on a cylinder/cone face ("Key point type should not be CenterKeyPoint ...") - you must
-    use a Middle/Start keypoint instead.
-This tool encapsulates the proven path and ALL of those runtime rules: it resolves each handle,
-proxies it into its occurrence, builds the right JointGeometry for the entity kind, and picks a VALID
-keypoint by face type - so the caller passes two handles + a motion and gets a joint at the real
-geometry, with the gotchas handled internally. The runtime rule lives in the tool, not in the agent.
-
-Grounded in adsk.fusion (paths confirmed live):
-  - Design.findEntityByToken(handle) -> [entity] ; entity.assemblyContext = its occurrence
-  - JointGeometry.createByNonPlanarFace(cylFace, JointKeyPointTypes.MiddleKeyPoint)  [cyl/cone]
-    JointGeometry.createByPlanarFace(face, edge?, CenterKeyPoint)                     [planar]
-    JointGeometry.createByCurve(edge, keypoint) / createByPoint(vertex|point)
-  - Joints.createInput(g1, g2) ; input.setAs<Motion>JointMotion(JointDirections.<X/Y/Z>) ; Joints.add
-Handler runs on the main thread; WRITES.
+"""Creates a joint at two GEOMETRY HANDLES (the consume half of geometry-as-values): joint two parts
+at specific geometry - a crank pin's cylindrical face to a rod's bore, a hole edge to a pin - given the
+two handles find_geometry returned. The joint lands AT the real geometry, NOT collapsed to the part
+origins. Motion: rigid/revolute/slider/cylindrical/ball, with an axis. WRITES.
 """
 
 import adsk.core
@@ -43,6 +17,7 @@ from ._common import ok, error, safe
 from . import _common
 from . import _inputs
 from . import _outputs
+from ._joints import AXES as _AXES, apply_motion, build_joint_geometry as _joint_geometry_for
 
 app = adsk.core.Application.get()
 
@@ -54,11 +29,6 @@ RETURNS = [
 ]
 
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
-_AXIS_DIR = {
-"x": "XAxisJointDirection",
-"y": "YAxisJointDirection",
-"z": "ZAxisJointDirection",
-}
 
 
 # The two handle inputs are typed GeometryHandle kinds (require='any' - a joint can land on a face,
@@ -73,46 +43,11 @@ _HANDLE_TWO = _inputs.GeometryHandle(
     description="The SECOND (fixed) part's geometry to joint at.")
 
 
-def _joint_geometry_for(entity):
-    """Build a JointGeometry for an entity, picking a VALID keypoint for its kind. Returns
-    (geometry, label, error). This is where the runtime rules are encoded."""
-    KP = adsk.fusion.JointKeyPointTypes
-    JG = adsk.fusion.JointGeometry
-    # BRepFace
-    if isinstance(entity, adsk.fusion.BRepFace):
-        st = safe(lambda: entity.geometry.surfaceType)
-        if st == adsk.core.SurfaceTypes.PlaneSurfaceType:
-            g = safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
-            return g, "planar_face@center", None if g else "createByPlanarFace failed"
-        if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
-            # RULE: CenterKeyPoint is INVALID on a cylinder/cone - use MiddleKeyPoint (axis midpoint).
-            g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-            return g, "cylinder_face@middle", None if g else "createByNonPlanarFace failed"
-        # other non-planar (sphere/torus): try non-planar with middle keypoint
-        g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-        return g, "nonplanar_face@middle", None if g else "unsupported face geometry for a joint"
-    # BRepEdge (circular -> center; linear -> midpoint)
-    if isinstance(entity, adsk.fusion.BRepEdge):
-        ct = safe(lambda: entity.geometry.curveType)
-        kp = KP.CenterKeyPoint if ct == adsk.core.Curve3DTypes.Circle3DCurveType else KP.MiddleKeyPoint
-        g = safe(lambda: JG.createByCurve(entity, kp))
-        return g, "edge", None if g else "createByCurve failed for this edge"
-    # BRepVertex / construction point
-    if isinstance(entity, (adsk.fusion.BRepVertex, adsk.fusion.ConstructionPoint)):
-        g = safe(lambda: JG.createByPoint(entity))
-        return g, "point", None if g else "createByPoint failed"
-    # SketchPoint
-    if isinstance(entity, adsk.fusion.SketchPoint):
-        g = safe(lambda: JG.createByPoint(entity))
-        return g, "sketch_point", None if g else "createByPoint failed"
-    return None, None, f"entity kind {type(entity).__name__} is not a supported joint geometry"
-
-
 def _axis_entity(entity):
     """If 'entity' is a cylinder/cone face (or a circular edge), return it as an entity that can
-    define the joint's rotation/slide axis (its own axis). Else None. This is the FIX: a pin's
-    joint must move about the PIN'S axis, not a world axis the caller guessed - passing a world axis
-    that doesn't match the geometry over-constrains the assembly ('Compute Failed')."""
+    define the joint's rotation/slide axis (its own axis). Else None. A pin's joint must rotate about
+    the PIN'S axis, not a world axis the caller guessed - passing a world axis that doesn't match the
+    geometry over-constrains the assembly ('Compute Failed')."""
     if isinstance(entity, adsk.fusion.BRepFace):
         st = safe(lambda: entity.geometry.surfaceType)
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
@@ -121,36 +56,6 @@ def _axis_entity(entity):
         if safe(lambda: entity.geometry.curveType) == adsk.core.Curve3DTypes.Circle3DCurveType:
             return entity
     return None
-
-
-def _apply_motion(ji, motion, axis, axis_ent):
-    """Set the motion on the JointInput. If axis_ent is given (a cylinder face/circular edge) and
-    axis is 'auto', use CustomJointDirection from that entity's own axis. Returns (did, error)."""
-    JD = adsk.fusion.JointDirections
-    a = (axis or "auto").strip().lower()
-    use_custom = (a == "auto") and (axis_ent is not None)
-    direction = JD.CustomJointDirection if use_custom else getattr(
-        JD, _AXIS_DIR.get(a if a in _AXIS_DIR else "z", "ZAxisJointDirection"))
-    try:
-        if motion == "rigid":
-            return ji.setAsRigidJointMotion(), None
-        if motion == "revolute":
-            if use_custom:
-                return ji.setAsRevoluteJointMotion(direction, axis_ent), None
-            return ji.setAsRevoluteJointMotion(direction), None
-        if motion == "slider":
-            if use_custom:
-                return ji.setAsSliderJointMotion(direction, axis_ent), None
-            return ji.setAsSliderJointMotion(direction), None
-        if motion == "cylindrical":
-            if use_custom:
-                return ji.setAsCylindricalJointMotion(direction, axis_ent), None
-            return ji.setAsCylindricalJointMotion(direction), None
-        if motion == "ball":
-            return ji.setAsBallJointMotion(JD.ZAxisJointDirection, JD.XAxisJointDirection), None
-    except Exception as e:
-        return False, str(e)
-    return False, f"unknown motion '{motion}'"
 
 
 def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute",
@@ -167,6 +72,10 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     mot = (motion or "revolute").strip().lower()
     if mot not in _MOTIONS:
         return error(f"Unknown motion '{motion}'. Use: {', '.join(sorted(_MOTIONS))}.")
+
+    ax_name = (axis or "auto").strip().lower()
+    if ax_name not in ("auto",) and ax_name not in _AXES:
+        return error(f"Unknown axis '{axis}'. Valid: auto, x, y, z.")
 
     design = _common.design()
     if not design:
@@ -199,7 +108,8 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     # edge), so a pin rotates about the PIN's axis - not a guessed world axis that would over-constrain
     # the assembly. Prefer whichever input carries a usable axis.
     axis_ent = _axis_entity(e1) or _axis_entity(e2)
-    did, merr = _apply_motion(ji, mot, axis, axis_ent)
+    use_custom = (ax_name == "auto") and (axis_ent is not None)
+    did, merr = apply_motion(ji, mot, _AXES.get(ax_name, 2), axis_ent if use_custom else None)
     if merr or not did:
         return error(f"Could not set {mot} motion: {merr or 'rejected'}. "
     "(For a world axis pass axis=x/y/z; 'auto' needs a cylinder face / round edge "
@@ -228,8 +138,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "jointed": True,
     "joint_name": safe(lambda: joint.name),
     "motion": mot,
-    "axis": ("auto(geometry)" if (axis or "auto").strip().lower() == "auto" and axis_ent
-                 else (axis or "auto").strip().lower()) if mot != "rigid" else None,
+    "axis": ("auto(geometry)" if use_custom else ax_name) if mot != "rigid" else None,
     "healthy": healthy,
     "geometry_one": l1,
     "geometry_two": l2,

@@ -1,49 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building blocks for the MESH environment (adsk.fusion.MeshBody).
-
-A MeshBody is a separate type living in a separate collection (comp.meshBodies, not comp.bRepBodies),
-so the BRep tools (find_geometry / model_inspect / BodyRef) don't see it as a solid. This module adds
-the mesh family:
-
-  mesh_insert   -> import STL/OBJ/3MF from a local path as a MeshBody.            WRITES
-  mesh_get      -> list the MeshBodies in a component / the whole design.         reads
-  (mesh stats - bbox + tri/vertex counts + watertight - are reported by model_inspect on a mesh target)
-  mesh_reduce   -> decimate to a target tri/face count, proportion, or deviation. WRITES
-  mesh_remesh   -> regenerate a cleaner/uniform triangulation.                    WRITES
-  mesh_to_brep  -> convert a MeshBody to a BRep solid/surface (the bridge back).  WRITES
-
-What is / isn't in the public mesh API:
-  - Import / counts / reduce / remesh / convert: confirmed public API.
-  - A parametric mesh insert requires a base feature: MeshBodies.add forbids a bare add in a parametric
-    model - it must be wrapped in BaseFeature.startEdit()/finishEdit(). Every WRITE here routes its
-    mutation through run_in_base_feature(design, comp, inner_op) from design_mode.py - it opens the
-    atomic base-feature scope in a parametric design, runs inner_op(None) directly in a direct design,
-    and always finishEdit()s in a finally. The open scope is not re-checked (it is undetectable from the
-    public API - BaseFeature has no isEditing - so a recheck after startEdit false-negatives a write
-    that actually succeeded).
-  - Organic mesh->BRep is gated behind the Product Design Extension; mesh_to_brep refuses it with a
-    clear message rather than silently falling back to a different method.
-  - Mesh section / plane-cut and per-triangle sculpt edits are not in the public API (UI-command only).
-    There is no mesh_section / mesh_sculpt tool here - that would be a sys_execute_script follow-up,
-    and inventing a feature `add` for it would be dishonest.
-
-safe()-around-mutation hazard (per _common.safe): safe() swallows exceptions and returns a default,
-so wrapping a feature `add` / `finishEdit` in it turns a real failure into a false "ok". Every tool
-below wraps only READS in safe() and calls the actual mutation directly inside a focused try/except
-that maps the exception to error(...), then VERIFIES the post-state (body exists / count) before
-reporting success.
-
-Grounded in adsk.fusion (signatures confirmed live):
-  - Component.meshBodies.add(fullFilename, MeshUnits, baseOrFormFeature) -> MeshBodyList
-  - Component.features.baseFeatures.add() -> BaseFeature (.startEdit() / .finishEdit())
-  - MeshBody.displayMesh -> TriangleMesh (.triangleCount / .nodeCount), .mesh -> PolygonMesh
-    (.triangleCount / .polygonCount / .nodeCount), .isClosed / .isOriented / .boundingBox / .entityToken
-  - Component.features.meshReduceFeatures.createInput(mesh) -> MeshReduceFeatureInput -> .add(inp)
-  - Component.features.meshRemeshFeatures.createInput(mesh) -> .add(inp)
-  - Component.features.meshConvertFeatures.createInput([mesh]) -> .add(inp)
-Handlers run on the MAIN thread (the 30s cap applies - see the fire-and-poll note on reduce/remesh).
+"""MCP building blocks for the MESH environment (adsk.fusion.MeshBody) - mesh_insert, mesh_get,
+mesh_reduce, mesh_remesh, mesh_to_brep. A MeshBody is a separate type (comp.meshBodies, not
+comp.bRepBodies), invisible to the BRep tools. Every write routes through run_in_base_feature
+(design_mode.py) for the parametric base-feature scope requirement. See docs/fusion-api-notes.md
+("Mesh bodies") for the underlying adsk.fusion signatures.
 """
 
 import os
@@ -171,7 +133,7 @@ def _iter_meshes(comp):
 
 # ── mesh_get ────────────────────────────────────────────────────────────────────────────────────
 
-def mesh_get_handler(target: str = "") -> dict:
+def mesh_get_handler(target: str = "", max_results: int = 50) -> dict:
     """List the MeshBody objects in a component (target name) or the whole design (target='')."""
     design = _common.design()
     if not design:
@@ -216,13 +178,23 @@ def mesh_get_handler(target: str = "") -> dict:
             seen.add(key)
             meshes.append(_mesh_summary(mb))
 
-    return ok({
-    "count": len(meshes),
-    "meshes": meshes,
-    "scope": name or "(whole design)",
-    "note": ("These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh "
+    total = len(meshes)
+    cap = max(1, int(max_results))
+    meshes_out = meshes[:cap]
+    truncated = total > len(meshes_out)
+
+    note = ("These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh "
             "stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with "
-            "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it."),
+            "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it.")
+    if truncated:
+        note += f" meshes was capped at {cap} of {total}; raise max_results to see the rest."
+
+    return ok({
+    "count": total,
+    "meshes": meshes_out,
+    "truncated": truncated,
+    "scope": name or "(whole design)",
+    "note": note,
     })
 
 
@@ -608,7 +580,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         return error("This design has no meshConvertFeatures collection (mesh->BRep unavailable here).")
 
     # Prismatic convert REQUIRES face groups - if they're missing the add raises
-    # 'MESH_FAILED_BREP - Use Generate Face Groups'. Point the agent at the fix (do NOT auto-run it;
+    # 'MESH_FAILED_BREP - Use Generate Face Groups'. Point the agent at the remedy (do NOT auto-run it;
     # keep the tools composable). Appended only for the prismatic method, where this is the cause.
     _face_groups_hint = (" If the failure mentions face groups (MESH_FAILED_BREP / 'Use Generate "
                          "Face Groups'), run mesh_generate_face_groups on this mesh first, then retry "
@@ -743,8 +715,10 @@ mesh_get_tool = (
             "(is_closed) health. Meshes are a SEPARATE body type from BRep solids/surfaces, "
             "so the BRep tools (find_geometry / model_inspect) can't see them as solids - this "
             "is how you find them. reads. Inspect one with model_inspect (mesh target), edit with "
-            "mesh_reduce / mesh_remesh, convert with mesh_to_brep."))
+            "mesh_reduce / mesh_remesh, convert with mesh_to_brep. 'meshes' is capped (max_results, "
+            "default 50); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
+    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50)."})
     .strict_schema()
 )
 mesh_get_item = Item.create_tool_item(tool=mesh_get_tool, write="read", handler=mesh_get_handler, run_on_main_thread=True)

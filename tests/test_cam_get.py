@@ -22,7 +22,7 @@ def _payload(result):
 
 @pytest.fixture
 def stub_slices(monkeypatch):
-    monkeypatch.setattr(cg, "_get_cam", lambda: (object(), None))   # a CAM product
+    monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))   # a CAM product
     monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
         {"setup_count": 2, "setups": [{"name": "Setup1", "operation_count": 3}]}, None))
     monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
@@ -95,7 +95,7 @@ class TestCamPointers:
         assert "3" in p["toolpaths"]
 
     def test_router_emits_pointers_on_stale_default(self, monkeypatch):
-        monkeypatch.setattr(cg, "_get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
             {"setup_count": 1, "setups": [{"name": "S", "op_states": {"out_of_date": 6},
                                            "machine_out_of_date": True}]}, None))
@@ -111,7 +111,7 @@ class TestOrientationDedup:
 
     @pytest.fixture
     def stub_with_reasons(self, monkeypatch):
-        monkeypatch.setattr(cg, "_get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setup_count": 1, "setups": [
             {"name": "Op1", "machine": "Haas", "op_states": {"out_of_date": 2},
              "invalidation_reasons": ["Design changed: WCS origin"]}]}, None))
@@ -140,7 +140,7 @@ class TestGuards:
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
 
     def test_no_cam_data_guard(self, monkeypatch):
-        monkeypatch.setattr(cg, "_get_cam", lambda: (None, "This document has no CAM (Manufacture) data."))
+        monkeypatch.setattr(cg, "get_cam", lambda: (None, "This document has no CAM (Manufacture) data."))
         res = cg.handler()
         assert "cam" in error_message(res).lower()
 
@@ -167,7 +167,7 @@ class TestBounding:
     The slices call read handlers in _cam_common, so patch the handler on that module (a plain
     monkeypatch.setattr - auto-restored, no sys.modules swap) to return the (big) ok() payload."""
 
-    def _fake_cam_read(self, monkeypatch, **handlers):
+    def _fake_cam_common(self, monkeypatch, **handlers):
         ccom = load_tool("_cam_common")
         for name, fn in handlers.items():
             monkeypatch.setattr(ccom, name, fn)
@@ -178,7 +178,7 @@ class TestBounding:
     def test_operations_capped_and_flagged(self, monkeypatch):
         big = {"setups": [{"setup": "S", "operations": [
             {"name": f"Op{i}", "state": "valid"} for i in range(cg._OPERATIONS_CAP + 50)]}]}
-        self._fake_cam_read(monkeypatch,
+        self._fake_cam_common(monkeypatch,
                             get_cam_operations_handler=lambda setup="": self._ok(big))
         out, err = cg._slice_operations(object(), "")
         assert err is None
@@ -187,7 +187,7 @@ class TestBounding:
     def test_nc_programs_summarizes_post_parameters(self, monkeypatch):
         ncp = {"nc_programs": [{"name": "Op1", "machine": "M",
                                 "post_parameters": [{"name": f"p{i}"} for i in range(65)]}]}
-        self._fake_cam_read(monkeypatch, get_nc_programs_handler=lambda: self._ok(ncp))
+        self._fake_cam_common(monkeypatch, get_nc_programs_handler=lambda: self._ok(ncp))
         out, err = cg._slice_nc_programs(object())
         prog = out["nc_programs"][0]
         assert prog["post_parameter_count"] == 65 and "post_parameters" not in prog

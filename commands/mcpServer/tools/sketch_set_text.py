@@ -1,26 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: set the text of sketch text entities in the active design.
-
-  sketch_set_text -> set the displayed string of one or more sketch-text entities (e.g. an
-                     engraved label / nameplate). Target by sketch name, or update every sketch
-                     text in the design. WRITES to the design.
-
-General-purpose: this just edits sketch text. Common uses are stamping a part/file name onto a
-fixture or label, but the tool is agnostic about why.
-
-HOW (grounded live): a SketchText's content is NOT settable via its definition
-(`MultiLineTextDefinition` has no `.text`). The writable handle is `SketchText.textParameter`
-- a ModelParameter whose expression is the QUOTED string (e.g. `'Label Text'`). Setting
-`textParameter.expression = "'NewText'"` updates the engraving. No assembly-context proxy is
-needed for the write (verified live).
-
-Grounded in adsk.fusion:
-  - Sketch.sketchTexts (SketchTexts) - iterate; each is a SketchText
-  - SketchText.textParameter (ModelParameter) - .expression is the quoted string (settable)
-  - Design.allComponents -> Component.sketches.itemByName / iterate
-Handler runs on the main thread; WRITES to the design.
+"""MCP building block: set (or create) sketch-text entities in the active design (e.g. an engraved
+label/nameplate). WRITES. See docs/fusion-api-notes.md ("Sketches") for the SketchText.textParameter
+write path.
 """
 
 import adsk.core
@@ -31,7 +14,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, scale, resolve_sketch, all_sketch_names
+from ._common import error, ok, safe, scale, resolve_sketch, all_sketch_names
 from . import _common
 from . import _inputs
 
@@ -84,7 +67,7 @@ def _create_text(design, text, sketch_name, height, x, y, units):
     "height": round(h, 6),
     "position": {"x": x, "y": y, "units": units},
     "note": "Sketch text created. Extrude/emboss the sketch to engrave it, or edit it later with "
-    "set_sketch_text (without create).",
+    "sketch_set_text (without create).",
     })
 
 
@@ -126,13 +109,7 @@ def _iter_sketch_texts(design, sketch_name):
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
             create: bool = False, height: float = 5.0, x: float = 0.0, y: float = 0.0,
             units: str = "mm") -> dict:
-    """Set the displayed string of sketch text entities - or CREATE new text (create=true).
-
-    text: the string to display. sketch_name: the sketch to act in (for create it's REQUIRED; for
-    edit, omit to update EVERY sketch text). index: for edit, the 0-based text to update (-1 = all).
-    create=true: ADD a new sketch text at (x,y) in 'units' with 'height' (the text height in 'units')
-    in the named sketch, instead of editing. WRITES.
-    """
+    """Set the displayed string of sketch text entities - or create new text (create=true)."""
     if text is None:
         return error("Provide 'text' - the string to display.")
 
@@ -154,10 +131,12 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     want_index = int(index) if index is not None else -1
     changed = []
     skipped = 0
+    truncated = False
     # Track per-sketch running index so 'index' selects the Nth text within that sketch.
     per_sketch_counter = {}
     for comp_name, sk_name, st in targets:
         if len(changed) >= _MAX:
+            truncated = True
             break
         k = per_sketch_counter.get(sk_name, 0)
         per_sketch_counter[sk_name] = k + 1
@@ -188,15 +167,19 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     except Exception:
         recomputed = False
 
-    return ok({
+    out = {
     "set": True,
     "text": text,
     "changed_count": len(changed),
     "changed": changed,
+    "truncated": truncated,
     "recomputed": recomputed,
     "note": ("Sketch text updated" + (" and design recomputed so any engraving/emboss that "
                 "consumes it rebuilt" if recomputed else "") + ". View it with view_screenshot."),
-    })
+    }
+    if truncated:
+        out["note"] += f" Hit the {_MAX}-edit cap - not every match was updated; narrow with 'sketch_name'/'index' and call again."
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (

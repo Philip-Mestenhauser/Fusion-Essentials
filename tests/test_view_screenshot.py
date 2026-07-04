@@ -1,4 +1,4 @@
-"""Unit tests for ``get_screenshot.py`` _isolate_for_fit — the fit_to visibility helper.
+"""Unit tests for ``view_screenshot.py`` _isolate_for_fit - the fit_to visibility helper.
 
 The image capture itself needs a live viewport (integration-tested), but the fit_to helper is pure
 visibility bookkeeping: find the named occurrence, hide the others, return a restore() that turns
@@ -43,8 +43,8 @@ class TestIsolateForFit:
     def test_hides_others_and_restores(self):
         a, b, c = FakeOcc("A:1"), FakeOcc("B:1"), FakeOcc("C:1")
         _install([a, b, c])
-        restore = gs._isolate_for_fit("B:1")
-        assert restore is not None
+        restore, err = gs._isolate_for_fit("B:1")
+        assert restore is not None and err is None
         # only B stays on
         assert b.isLightBulbOn is True
         assert a.isLightBulbOn is False and c.isLightBulbOn is False
@@ -54,18 +54,30 @@ class TestIsolateForFit:
     def test_substring_match(self):
         a = FakeOcc("Bracket:1")
         _install([a, FakeOcc("Other:1")])
-        restore = gs._isolate_for_fit("bracket")
-        assert restore is not None and a.isLightBulbOn is True
+        restore, err = gs._isolate_for_fit("bracket")
+        assert restore is not None and err is None and a.isLightBulbOn is True
 
     def test_no_match_returns_none(self):
         _install([FakeOcc("A:1")])
-        assert gs._isolate_for_fit("Ghost") is None
+        restore, err = gs._isolate_for_fit("Ghost")
+        assert restore is None and err is not None
+
+    def test_ambiguous_name_refused_not_first_match(self):
+        # two instances share local name "Bolt:1" under different sub-assemblies - a bare "Bolt"
+        # substring must ERROR (naming both fullPathNames), NOT silently isolate the first.
+        a = FakeOcc("Bolt:1"); a.fullPathName = "Sub-A:1+Bolt:1"
+        b = FakeOcc("Bolt:1"); b.fullPathName = "Sub-B:1+Bolt:1"
+        _install([a, b])
+        restore, err = gs._isolate_for_fit("Bolt")
+        assert restore is None
+        assert "ambiguous" in err.lower()
+        assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
 
     def test_already_hidden_others_not_restored_on(self):
         # an occurrence that was already OFF should stay off after restore (we only flip ones we hid)
         a, b = FakeOcc("A:1", on=True), FakeOcc("B:1", on=False)
         _install([a, b])
-        restore = gs._isolate_for_fit("A:1")
+        restore, err = gs._isolate_for_fit("A:1")
         restore()
         assert b.isLightBulbOn is False      # we never turned it on
 

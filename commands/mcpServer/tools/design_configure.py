@@ -1,35 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: BUILD a Configured Design - the configured-design builder.
-
-  design_configure -> convert a design to a configured design and define its configurations: add
-                      configuration rows and the columns that vary across them (a model PARAMETER, a
-                      feature SUPPRESS, a body/feature VISIBILITY, or a per-config APPEARANCE theme).
-                      One action-dispatched verb for the whole configuration-table subsystem (mirrors
-                      the composable view_inspect pattern) so the calling agent pays for one tool, not
-                      six.
-
-Why this exists: the API to author configurations (Design.createConfiguredDesign +
-ConfigurationTopTable.columns.add*) is intricate and easy to get wrong; this bakes the live-verified
-sequence into one tool. design_get(include=['configurations']) reads the table; this BUILDS + switches.
-
-Grounded in adsk.fusion (every call below was live-verified on a parametric bracket - see
-docs/fusion-api-notes.md "Configurations"):
-  - Design.createConfiguredDesign() -> ConfigurationTopTable (one row, no columns). Idempotent here:
-    if the design is already configured we reuse its configurationTopTable.
-  - ConfigurationTopTable.rows.add(name) -> ConfigurationRow (.name/.id/.index/.activate()).
-  - columns.addParameterColumn(Parameter) -> ConfigurationParameterColumn; cell.expression = "50 mm".
-  - columns.addSuppressColumn(feature) -> ConfigurationSuppressColumn; cell.isSuppressed = True.
-  - columns.addVisibilityColumn(entity) -> ConfigurationVisibilityColumn; cell.isVisible = False.
-  - appearanceTable.columns.add(body) -> ConfigurationAppearanceColumn. ORDERING GOTCHA: adding the
-    body column auto-creates the first THEME row; add extra theme rows AFTER (adding rows first throws
-    InternalValidationError). Each config row links to a theme row via
-    appearanceTable.parentTableColumn (ConfigurationThemeColumn) .getCell(i).referencedTableRow.
-  - Every column addresses cells by getCellByRowName(name) - the robust path (no index juggling).
-  - A parameter column only changes geometry if the parameter actually DRIVES a dimension; switch with
-    ConfigurationRow.activate() then Design.computeAll() to rebuild.
-Handler runs on the main thread; WRITES (mutates the design's configuration table).
+"""BUILDS and switches a Configured Design: converts the active design and defines configuration rows
+plus the columns that vary across them (a parameter, a feature suppress, a body visibility, a
+per-config appearance theme, or a nested part insert). One action-dispatched verb for the whole
+configuration-table subsystem; see docs/fusion-api-notes.md "Configurations" for the underlying API
+sequence. design_get(include=['configurations']) reads the table; this WRITES it.
 """
 
 import adsk.core
@@ -40,8 +16,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _inputs
 
 app = adsk.core.Application.get()
+
+_BODY = _inputs.BodyRef("body",
+        description="Body whose visibility/appearance varies per configuration (add_visibility / set_appearance).")
 
 
 def _find_row(table, target):
@@ -74,17 +54,6 @@ def _resolve_feature(design, name):
         obj = safe(lambda i=i: tl.item(i).entity)
         if obj is not None and (safe(lambda o=obj: o.name) == name):
             return obj
-    return None
-
-
-def _resolve_body(design, name):
-    """A BRepBody by name across all components - for visibility / appearance columns."""
-    for comp in safe(lambda: design.allComponents, []) or []:
-        bodies = safe(lambda c=comp: c.bRepBodies)
-        for j in range(safe(lambda: bodies.count, 0) or 0):
-            b = safe(lambda j=j: bodies.item(j))
-            if b is not None and safe(lambda b=b: b.name) == name:
-                return b
     return None
 
 
@@ -134,11 +103,9 @@ def _top_table(design):
 
 
 def _doc_is_saved():
-    """True if the active document has ever been saved (has a cloud file). The configured-design
-    conversion only MATERIALIZES for the user once the document is saved - converting an unsaved
-    document leaves the table in memory but the DataFile (which carries isConfiguredDesign and what the
-    UI presents) doesn't exist yet. Verified live: dataFile.isConfiguredDesign flips True only post-save.
-    Patched in tests."""
+    """True if the active document has ever been saved (has a cloud file) - the configured-design
+    conversion only materializes for the user once saved (see docs/fusion-api-notes.md
+    "Configurations"). Patched in tests."""
     return bool(safe(lambda: app.activeDocument.isSaved, False))
 
 
@@ -292,9 +259,9 @@ def _do_add_suppress(design, table, feature, suppressed_in):
 def _do_add_visibility(design, table, body, hidden_in):
     if not body:
         return error("Provide 'body' - the body name whose visibility varies per configuration.")
-    ent = _resolve_body(design, body)
-    if not ent:
-        return error(f"No body named '{body}'.")
+    ent, body_err = _BODY.resolve(body)
+    if body_err:
+        return error(body_err)
     hidden_in = hidden_in or []
     unknown = [r for r in hidden_in if r not in set(_row_names(table))]
     if unknown:
@@ -314,9 +281,9 @@ def _do_add_visibility(design, table, body, hidden_in):
 def _do_set_appearance(design, table, body, appearances):
     if not body:
         return error("Provide 'body' - the body to color per configuration.")
-    ent = _resolve_body(design, body)
-    if not ent:
-        return error(f"No body named '{body}'.")
+    ent, body_err = _BODY.resolve(body)
+    if body_err:
+        return error(body_err)
     appearances = appearances or {}
     unknown = _validate_rows(table, appearances)
     if unknown:
@@ -501,7 +468,7 @@ tool = (
     .add_input_property("new_name", {"type": "string", "description": "New name for rename_configuration."})
     .add_input_property("parameter", {"type": "string", "description": "Model parameter name (add_parameter)."})
     .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress)."})
-    .add_input_property("body", {"type": "string", "description": "Body name (add_visibility / set_appearance)."})
+    .add_input_property(*_BODY.as_property())
     .add_input_property("values", {"type": "object", "description": "{config_name: expression} (add_parameter)."})
     .add_input_property("suppressed_in", {"type": "array", "items": {"type": "string"},
             "description": "Configurations to suppress the feature in (add_suppress)."})

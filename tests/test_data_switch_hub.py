@@ -137,7 +137,7 @@ class TestSwitch:
         assert res["isError"] is True and "action" in res["message"]
 
 
-# ── the getter-only reality (the audit's confirmed bug) ─────────────────────────────────────────
+# ── the getter-only reality ─────────────────────────────────────────────────────────────────────
 #
 # Data.activeHub is documented GETTER-ONLY. On a real Fusion the assignment either raises or silently
 # no-ops, so the active hub never actually changes. The tool must NOT report switched:True in that

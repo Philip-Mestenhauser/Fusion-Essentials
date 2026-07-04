@@ -123,3 +123,35 @@ class TestGuards:
         _install(active=None, open_docs=[])
         res = dg.handler()
         assert "no active document" in error_message(res).lower()
+
+
+class TestCaps:
+    def test_under_cap_untruncated_and_unchanged(self):
+        active = _Doc("Main", data_file=_DataFile())
+        others = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(5)]
+        _install(active, [active] + others)
+        out = _payload(dg.handler())
+        assert out["truncated"] is False
+        assert len(out["open_documents"]) == 6
+        assert out["open_count"] == 6
+
+    def test_at_cap_truncates_and_flags(self):
+        active = _Doc("Main", data_file=_DataFile())
+        others = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(60)]
+        _install(active, [active] + others)
+        out = _payload(dg.handler(max_results=50))
+        assert out["truncated"] is True
+        assert len(out["open_documents"]) == 50
+        # the full count is still honest, even though the array is capped
+        assert out["open_count"] == 61
+
+    def test_unsaved_exceptions_computed_over_the_full_list_even_when_capped(self):
+        # a doc with unsaved work beyond the cap must still show up in 'summary.exceptions'.
+        active = _Doc("Main", data_file=_DataFile())
+        clean = [_Doc(f"D{i}", data_file=_DataFile()) for i in range(60)]
+        dirty = _Doc("WIP", modified=True, data_file=_DataFile())
+        _install(active, [active] + clean + [dirty])
+        out = _payload(dg.handler(max_results=50))
+        assert out["truncated"] is True
+        names = {e["name"] for e in out["summary"]["exceptions"]}
+        assert "WIP" in names

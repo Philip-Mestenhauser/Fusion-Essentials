@@ -13,7 +13,11 @@ from ._common import ok, error, safe
 from ._cam_common import get_cam
 
 
-def compare_operations_handler(operation_a: str = "", operation_b: str = "") -> dict:
+_DIFFERENCES_CAP = 200   # two operations can differ across hundreds of CAM parameters; bound the rows
+
+
+def compare_operations_handler(operation_a: str = "", operation_b: str = "",
+                                max_results: int = _DIFFERENCES_CAP) -> dict:
     """Diff the CAM parameters of two operations (by name) to show what differs."""
     if not (operation_a or "").strip() or not (operation_b or "").strip():
         return error("Provide both 'operation_a' and 'operation_b' (operation names).")
@@ -44,15 +48,24 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "") -> 
         "operation_a": a if k in params_a else "(not present)",
         "operation_b": b if k in params_b else "(not present)"})
 
-    return ok({
+    total = len(differences)
+    cap = max(1, int(max_results))
+    differences_out = differences[:cap]
+    truncated = total > len(differences_out)
+
+    out = {
         "operation_a": safe(lambda: op_a.name),
         "operation_b": safe(lambda: op_b.name),
     "tool_a": _op_tool_desc(op_a),
     "tool_b": _op_tool_desc(op_b),
     "same_parameter_count": same_count,
-    "difference_count": len(differences),
-    "differences": differences,
-    })
+    "difference_count": total,
+    "differences": differences_out,
+    "truncated": truncated,
+    }
+    if truncated:
+        out["note"] = f"differences was capped at {cap} of {total}; raise max_results to see the rest."
+    return ok(out)
 
 
 def _find_operation_by_name(cam, name):
@@ -100,12 +113,14 @@ _compare_tool = (
             "Compare two CAM operations (by name) and report exactly which of their "
             "parameters differ - and the value on each side. Use this to understand what "
             "makes one machining strategy different from a similar one. Also reports the "
-            "tool each uses and how many parameters match."
+            "tool each uses and how many parameters match. 'differences' is capped "
+            "(max_results, default 200); 'truncated' flags when the cap was hit."
         ),
         input_param_name="operation_a",
         input_param_description="Name of the first operation.",
     )
     .add_input_property("operation_b", {"type": "string", "description": "Name of the second operation."})
+    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'differences' array returned (default 200)."})
 )
 compare_operations_item = Item.create_tool_item(
     tool=_compare_tool, write="read", handler=compare_operations_handler, run_on_main_thread=True

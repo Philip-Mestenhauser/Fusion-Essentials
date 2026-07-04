@@ -3,21 +3,9 @@
 
 """MCP building block: search the LIVE Fusion API documentation from inside the session.
 
-  sys_get_api_doc -> regex-search the Fusion Python API (classes, members, enum values) and return
-                 names, signatures, and docstrings. Read-only.
-
-Why this exists: writing Fusion automation means constantly checking exact method signatures and
-behavioural notes (e.g. "getOrientedBoundingBox auto-determines the height direction"). Rather than
-hosting or bundling a doc database that drifts from the user's installed version, this introspects
-the `adsk.*` Python wrapper modules that ship with - and are already imported into - the running
-Fusion process. So the docs ALWAYS match the installed Fusion version, need no maintenance, and add
-no disk footprint. (This is the same source the docstrings come from: adsk.core/fusion/cam/... .py
-wrappers expose __doc__ and signatures via inspect.)
-
-Grounded in: the adsk package modules (adsk.core, adsk.fusion, adsk.cam, adsk.drawing, adsk.sim)
-each expose classes whose methods/properties carry __doc__ strings and (for functions) signatures.
-Handler is read-only and touches no document, but runs on the main thread for consistency with the
-rest of the server.
+Regex-searches the adsk.core/fusion/cam/drawing/sim modules already imported into the running Fusion
+process (inspect.getmembers over each class) so results always match the installed Fusion version with
+no bundled/hosted doc database. Read-only.
 """
 
 import importlib
@@ -97,13 +85,7 @@ def _signature(member):
 
 def handler(searchPattern: str = "", apiCategory: str = "all",
             filter: str = "", max_results: int = _MAX_RESULTS) -> dict:
-    """Search the live Fusion API docs.
-
-    searchPattern: regex matched (case-insensitive) against names - and, for apiCategory in
-    {description, all}, against docstrings too. apiCategory: 'class' (class names) | 'member'
-    (property/function/enum names) | 'description' (docstring text) | 'all'. filter: optional
-    'adsk.<ns>' or 'adsk.<ns>.<Class>' to scope the search. max_results caps the hits.
-    """
+    """Search the live Fusion API docs by regex."""
     if not searchPattern:
         return error("Provide 'searchPattern' (a regex matched against API names/docs).")
     try:

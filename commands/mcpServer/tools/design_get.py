@@ -1,25 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP RICH READ: design_get - one read for the active design's structure, by zoom level.
-
-The "rich read" pattern (see CLAUDE.md "Reads are RICH"): a default
-orientation slice + `include=[...]` to pull deeper slices on demand. GraphQL-shaped - ask for exactly
-the fields you need, pay for depth only when you want it.
-
-Zoom levels:
-  default (no include)  -> ORIENTATION: design type + feature count + timeline_healthy (TIMELINE-scoped
-                           only; stale refs show as is_out_of_date on tree nodes, the doc-wide verdict is
-                           workspace_orient.is_healthy) + a CONTENT fingerprint (bodies/sketches/
-                           components/joints). Cheap, safe-blind, never floods. The note advertises include=.
-  include=['tree']      -> the component/occurrence tree (honors max_depth; truncates + flags).
-  include=['timeline']  -> the ordered parametric timeline (honors 'group'; include_suppressed).
-  include=['mode']      -> the full modelling-mode capability map (the can{} block).
-  include=['configurations'] -> the configuration table (READ only; switching configs is design_configure).
-
-The handler is a THIN ROUTER over _slice_*() helpers - one per slice, each independently testable; the
-file stays readable-whole. Tree/timeline/configs read directly here; mode/health delegate to the
-shared get_mode_handler/health_handler (which design_recompute also reports). Read-only.
+"""RICH READ: design_get - the active design's structure by zoom level (see CLAUDE.md "Reads are
+RICH"). Default: a cheap orientation slice (design type, feature count, timeline health, content
+fingerprint). include=['tree'|'timeline'|'mode'|'configurations'] pulls one deeper slice at a time via
+a thin router over _slice_*() helpers. Read-only.
 """
 
 import json
@@ -40,15 +25,13 @@ app = adsk.core.Application.get()
 _SLICES = ("mode", "tree", "timeline", "configurations")
 
 
-# ── slice helpers - each DELEGATES to the source tool's existing handler and unwraps its payload ───
+# ── slice helpers - each builds one slice's payload, independently testable ─────────────────────────
 #
-# Each slice calls the corresponding old tool's handler (which already returns the exact ok() payload)
-# and returns the decoded dict - so the fold reproduces the originals VERBATIM and CANNOT drift from
-# them while both coexist. When the source tools are deleted, their read helpers move here; until then
-# this is the safest fold (one source of truth per slice). _unwrap returns (payload, error_result).
+# mode/health delegate to the shared get_mode_handler/health_handler (design_mode.py / design_ops.py);
+# tree/timeline/configurations read directly. _unwrap decodes a handler's ok() result.
 
 def _unwrap(result):
-    """Decode a source handler's result -> (payload_dict, None) on ok, or (None, error_result) on error
+    """Decode a handler's result -> (payload_dict, None) on ok, or (None, error_result) on error
     so the caller can surface a slice's own guard (e.g. timeline raises in direct mode)."""
     if result.get("isError"):
         return None, result

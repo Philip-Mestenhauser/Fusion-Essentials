@@ -3,25 +3,9 @@
 
 """MCP building blocks: assembly_capture_position, joint_create_as_built, assembly_constrain.
 
-  assembly_capture_position    -> the timeline POSE mechanic for flexible/jointed assemblies. When you move a
-                         jointed component, the move is transient until captured. 'capture' writes
-                         the current pose into the timeline (valid only when a move is pending);
-                         'revert' discards the latest captured position; 'status' reports whether a
-                         move is pending and how many positions are captured. WRITES (capture/revert).
-  joint_create_as_built      -> joint two occurrences WHERE THEY ALREADY ARE (no joint origins needed). A
-                         rigid as-built locks them in place. WRITES.
-  assembly_constrain -> the Constrain Components relationship: constrain two occurrences' geometry
-                         (faces/edges/etc.) flush / coincident / concentric / at an angle. The
-                         relationship type is INFERRED from the selected geometry. Uses the user's
-                         current Fusion selection (two entities) - pair with sys_request_selection.
-                         WRITES.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Design.snapshots: .hasPendingSnapshot, .add() [valid only when pending], Snapshot.deleteMe()
-  - rootComponent.asBuiltJoints.createInput(occ1, occ2, geometry|None) -> add(input)
-  - rootComponent.assemblyConstraints.createInput() -> input.geometricRelationships
-      .add(entityOne, entityTwo, ...) -> add(input)  (entities must be root-proxy BRep/sketch/cons)
-Handlers run on the main thread; capture/revert + the joint/constraint creators WRITE.
+Capture/revert a jointed occurrence's transient pose into the timeline; joint two occurrences rigidly
+where they already are; or mate two occurrences' geometry via Constrain Components (flush/coincident/
+concentric/angle, inferred from the geometry). All three WRITE.
 """
 
 import adsk.core
@@ -183,7 +167,9 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         specs.append({"snap_one": snap_one, "snap_two": snap_two, "flip": bool(flipped),
         "offset": float(offset or 0.0), "angle_deg": float(angle_deg or 0.0)})
 
-    k = UNIT_TO_CM.get((units or "mm").strip().lower(), 0.1)
+    k = UNIT_TO_CM.get((units or "mm").strip().lower())
+    if k is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
     try:
         cin = design.rootComponent.assemblyConstraints.createInput()

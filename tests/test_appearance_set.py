@@ -120,9 +120,17 @@ class FakeAppearances:
 
 
 class FakeBody:
-    def __init__(self, name):
+    def __init__(self, name, fail_appearance=False):
+        self._fail_appearance = fail_appearance
         self.name = name
         self.appearance = None
+
+    def __setattr__(self, key, value):
+        # fail_appearance=True models the API rejecting an appearance assignment on THIS body, so a
+        # multi-body component loop can be tested for honest partial-success reporting.
+        if key == "appearance" and value is not None and getattr(self, "_fail_appearance", False):
+            raise RuntimeError(f"appearance rejected for {getattr(self, 'name', '?')}")
+        object.__setattr__(self, key, value)
 
 
 class FakeBodies:
@@ -263,9 +271,9 @@ class TestApply:
         assert body.appearance is apps.copied[0][2]
 
     def test_long_body_name_not_mistaken_for_handle(self):
-        # PR-review #7: the old `len(name) > 60` heuristic mis-routed a 60+ char NAME into the handle
-        # path. Resolution now tries _resolve_token_entity first (returns None for a non-token) and
-        # falls through to the name lookup — so a long body name resolves by NAME.
+        # A 60+ char body NAME must not be mis-routed into the handle path: resolution tries
+        # _resolve_token_entity first (returns None for a non-token) and falls through to the
+        # name lookup - so a long body name resolves by NAME.
         long_name = "Left-Outrigger-Pivot-Bracket-Weldment-Subassembly-Body-Number-Seven"
         assert len(long_name) > 60
         body = FakeBody(long_name)
@@ -363,6 +371,36 @@ class TestGuards:
 
         res = ap.handler(target="Body1", color="#000000")
         assert res["isError"] is True and "color property" in res["message"].lower()
+
+
+# ── partial success: one body of a component fails, others still get colored ──
+
+class TestPartialFailureComponentBodies:
+    def test_one_body_fails_others_still_colored_and_reported(self):
+        # A failure on one body must not swallow the bodies that already got colored earlier in the
+        # loop: the bodies that succeeded are reported (applied_to) alongside the ones that failed
+        # (failed), not folded into a single error() for the whole call.
+        good = FakeBody("Good")
+        bad = FakeBody("Bad", fail_appearance=True)
+        comp = FakeComponent("Multi", bodies=[good, bad])
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
+        out = _payload(ap.handler(target="Multi", color="#123456"))
+        assert out["applied_to"] == ["Good"]
+        assert out["failed"] == [{"body": "Bad", "error": "appearance rejected for Bad"}]
+        assert good.appearance is not None
+        assert bad.appearance is None
+        assert "1 of 2" in out["note"] and "failed" in out["note"]
+
+    def test_all_bodies_fail_returns_error(self):
+        bad1 = FakeBody("B1", fail_appearance=True)
+        bad2 = FakeBody("B2", fail_appearance=True)
+        comp = FakeComponent("AllBad", bodies=[bad1, bad2])
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
+        res = ap.handler(target="AllBad", color="#123456")
+        assert res["isError"] is True
+        assert "AllBad" in res["message"]
 
 
 # ── whole-design / component target applies to all bodies ─────────────────────

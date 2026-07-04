@@ -1,27 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: edit a CAM operation's PARAMETERS (feeds / speeds / stepdown / tool / ...).
-
-  cam_edit_operation(operation=..., parameters={...}) -> set named parameters by expression.
-
-This closes the 'the actual machining values are unreachable' gap: the other CAM tools list/apply/
-generate, but feeds, speeds, depths, stepover and tolerance could not be TUNED. Each CAM operation
-exposes its settings as named parameters whose .expression is settable (verified live), e.g.:
-  tool_feedCutting (cutting feed)   tool_spindleSpeed (rpm)   maximumStepdown / tool_stepdown
-  tool_stepover (radial)            tolerance                 tool_number
-After editing, regenerate the toolpath with cam_generate (the toolpath is now out of date).
-
-'parameters' is an object {name: expression} OR a 'name=value, name=value' string. Every named
-parameter must EXIST on the operation (the tool validates ALL before applying any, so a typo doesn't
-leave a half-edited op). Read current names/values with a CAM inspect first if unsure.
-
-Grounded in adsk.cam (verified live):
-  - cam = document.products.itemByProductType('CAMProductType'); cam.setups[i].operations[j]
-  - Operation.parameters (CAMParameters): .itemByName(name) -> CAMParameter(.expression set/get,
-    .value.value evaluated). Setting .expression updates the operation (toolpath goes out of date).
-Handler runs on the main thread; WRITES CAM data.
-"""
+"""Edit a CAM operation's parameters (feeds/speeds/stepdown/tool/...) by name. Every named parameter
+is validated to exist before any is applied, so a typo can't leave a half-edited operation."""
 
 import adsk.core
 import adsk.cam
@@ -30,34 +11,44 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
 
-def _get_cam():
-    """Return (cam, None) for the active document, or (None, reason)."""
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    products = safe(lambda: doc.products)
-    if not products:
-        return None, "Could not access document products."
-    cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data."
-    return cam, None
+def _walk_operations(container, out):
+    """Recursively collect (name, operation) for every OPERATION under a setup/folder/pattern.
+    `.operations` only lists what's directly in the container - folder/pattern-nested operations are
+    reached by recursing into `.folders` / `.patterns` (same walk cam_delete/cam_reorder use)."""
+    ops = safe(lambda: container.operations)
+    for i in range(safe(lambda: ops.count, 0) or 0):
+        o = safe(lambda i=i: ops.item(i))
+        if o is not None:
+            out.append((safe(lambda o=o: o.name) or "", o))
+    for coll_getter in (lambda: container.folders, lambda: container.patterns):
+        coll = safe(coll_getter)
+        for i in range(safe(lambda: coll.count, 0) or 0):
+            c = safe(lambda i=i: coll.item(i))
+            if c is not None:
+                _walk_operations(c, out)
 
 
 def _find_operation(cam, name):
-    """Find an operation by name across all setups. Returns (op, available_names)."""
+    """Find an operation by name anywhere in the CAM tree, including inside folders/patterns.
+    Returns (op, available_names)."""
     want = (name or "").strip()
     available = []
     for si in range(safe(lambda: cam.setups.count, 0) or 0):
         setup = cam.setups.item(si)
-        ops = safe(lambda: setup.operations) or safe(lambda: setup.allOperations)
-        for oi in range(safe(lambda: ops.count, 0) or 0):
-            op = ops.item(oi)
-            nm = safe(lambda op=op: op.name) or ""
+        nested = []
+        if safe(lambda: setup.operations) is not None:
+            _walk_operations(setup, nested)
+        else:
+            ops = safe(lambda: setup.allOperations)
+            for oi in range(safe(lambda: ops.count, 0) or 0):
+                op = ops.item(oi)
+                nested.append((safe(lambda op=op: op.name) or "", op))
+        for nm, op in nested:
             available.append(nm)
             if nm == want:
                 return op, available
@@ -97,7 +88,7 @@ def handler(operation: str = "", parameters=None) -> dict:
         return error("Provide 'parameters' - at least one name=value to set (e.g. "
     "{'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).")
 
-    cam, cam_err = _get_cam()
+    cam, cam_err = get_cam()
     if cam_err:
         return error(cam_err)
 

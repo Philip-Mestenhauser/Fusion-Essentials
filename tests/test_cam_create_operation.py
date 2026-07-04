@@ -2,9 +2,9 @@
 
 The adsk.cam API is mocked; what we pin is the tool's OWN logic: resolving the target setup by name,
 validating the strategy against the setup's compatibleStrategies (by .name), fetching the tool from a
-library by (library_url, index) — the reference handle cam_read_tool_library produces — assigning it to
-the OperationInput, adding the operation, and (optionally) generating the toolpath. Plus the guards
-(no CAM, setup not found, bad strategy, tool ref out of range).
+library by (library_url, index) - the reference handle cam_get(include=['library']) produces -
+assigning it to the OperationInput, adding the operation, and (optionally) generating the toolpath.
+Plus the guards (no CAM, setup not found, bad strategy, tool ref out of range).
 """
 
 import json
@@ -99,9 +99,9 @@ class _CAM:
         return object()   # GenerateToolpathFuture stand-in
 
 
-def _install(setups=("Setup1",), tools=2, doc_tools=()):
+def _install(monkeypatch, setups=("Setup1",), tools=2, doc_tools=()):
     cam = _CAM(list(setups), doc_tools=doc_tools)
-    cco._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(cco, "get_cam", lambda: (cam, None))
     # tool-by-reference resolver: (library_url, index) -> Tool, mirrors cam_edit_tools's shared handle
     lib = _ToolLib([_Tool("12mm Flat Endmill"), _Tool("6mm Ball Endmill")][:tools])
     cco._tool_at = lambda url, idx: (lib.item(idx) if 0 <= idx < lib.count else None,
@@ -118,34 +118,34 @@ def _payload(result):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_no_cam(self):
-        cco._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(cco, "get_cam", lambda: (None, "no CAM data"))
         res = cco.handler(setup="Setup1", strategy="face",
                           tool_library_url="u", tool_index=0)
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_setup_not_found(self):
-        _install(setups=("Setup1",))
+    def test_setup_not_found(self, monkeypatch):
+        _install(monkeypatch, setups=("Setup1",))
         res = cco.handler(setup="Ghost", strategy="face",
                           tool_library_url="u", tool_index=0)
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_bad_strategy(self):
-        _install()
+    def test_bad_strategy(self, monkeypatch):
+        _install(monkeypatch)
         res = cco.handler(setup="Setup1", strategy="frobnicate",
                           tool_library_url="u", tool_index=0)
         # the pre-check should name the bad strategy AND list the compatible ones (not just fail at createInput)
         assert res["isError"] is True and "frobnicate" in res["message"]
         assert "compatible" in res["message"].lower() and "face" in res["message"]
 
-    def test_tool_ref_out_of_range(self):
-        _install(tools=2)
+    def test_tool_ref_out_of_range(self, monkeypatch):
+        _install(monkeypatch, tools=2)
         res = cco.handler(setup="Setup1", strategy="face",
                           tool_library_url="u", tool_index=9)
         assert res["isError"] is True and "range" in res["message"].lower()
 
-    def test_missing_tool_ref(self):
-        _install()
+    def test_missing_tool_ref(self, monkeypatch):
+        _install(monkeypatch)
         res = cco.handler(setup="Setup1", strategy="face")
         assert res["isError"] is True and "tool" in res["message"].lower()
 
@@ -153,8 +153,8 @@ class TestGuards:
 # ── create (no generate) ─────────────────────────────────────────────────────
 
 class TestCreate:
-    def test_creates_operation_with_tool(self):
-        cam = _install()
+    def test_creates_operation_with_tool(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_library_url="u", tool_index=0, generate=False))
         op = cam.setups.item(0).operations.item(0)
@@ -165,17 +165,17 @@ class TestCreate:
         # not generated -> no toolpath yet
         assert len(cam.generated) == 0
 
-    def test_create_then_generate(self):
-        cam = _install()
+    def test_create_then_generate(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="adaptive",
                                    tool_library_url="u", tool_index=1, generate=True))
         assert out["generated"] is True
         assert out["has_toolpath"] is True and out["toolpath_valid"] is True
         assert len(cam.generated) == 1
 
-    def test_default_generates(self):
+    def test_default_generates(self, monkeypatch):
         # generate defaults to True (the useful default — an operation with no toolpath is incomplete)
-        cam = _install()
+        cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_library_url="u", tool_index=0))
         assert out["generated"] is True and len(cam.generated) == 1
@@ -184,34 +184,34 @@ class TestCreate:
 # ── document-library tool reference (the scriptless-CAM-chain fix) ───────────
 
 class TestDocumentToolScope:
-    def test_creates_op_from_document_library(self):
+    def test_creates_op_from_document_library(self, monkeypatch):
         # tool_scope='document' takes the tool from cam.documentToolLibrary by index — no url needed
-        cam = _install(doc_tools=(_Tool("Demo Face Mill"), _Tool("Demo Flat Endmill")))
+        cam = _install(monkeypatch, doc_tools=(_Tool("Demo Face Mill"), _Tool("Demo Flat Endmill")))
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_scope="document", tool_index=1, generate=False))
         op = cam.setups.item(0).operations.item(0)
         assert op.tool.desc == "Demo Flat Endmill"
         assert out["operation"] == "Op1"
 
-    def test_document_index_out_of_range(self):
-        _install(doc_tools=(_Tool("only one"),))
+    def test_document_index_out_of_range(self, monkeypatch):
+        _install(monkeypatch, doc_tools=(_Tool("only one"),))
         res = cco.handler(setup="Setup1", strategy="face", tool_scope="document", tool_index=5)
         assert res["isError"] is True and "range" in res["message"].lower()
 
-    def test_empty_document_library(self):
-        _install(doc_tools=())
+    def test_empty_document_library(self, monkeypatch):
+        _install(monkeypatch, doc_tools=())
         res = cco.handler(setup="Setup1", strategy="face", tool_scope="document", tool_index=0)
         assert res["isError"] is True and "empty" in res["message"].lower()
 
-    def test_document_scope_ignores_url(self):
+    def test_document_scope_ignores_url(self, monkeypatch):
         # with tool_scope=document, no tool_library_url is required
-        cam = _install(doc_tools=(_Tool("Demo Tool"),))
+        cam = _install(monkeypatch, doc_tools=(_Tool("Demo Tool"),))
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_scope="document", tool_index=0, generate=False))
         assert cam.setups.item(0).operations.item(0).tool.desc == "Demo Tool"
 
-    def test_no_ref_at_all_errors(self):
+    def test_no_ref_at_all_errors(self, monkeypatch):
         # neither tool_scope=document nor a url -> a clear error
-        _install()
+        _install(monkeypatch)
         res = cco.handler(setup="Setup1", strategy="face", tool_index=0)
         assert res["isError"] is True and "tool" in res["message"].lower()

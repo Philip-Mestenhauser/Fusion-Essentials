@@ -94,7 +94,7 @@ class _CAM:
         self.setups = _Setups(setups)
 
 
-def _install(setups=None):
+def _install(monkeypatch, setups=None):
     if setups is None:
         # a folder with a nested op + a nested pattern, plus two loose ops — folder/pattern are NOT in
         # allOperations, so the tool must walk .folders/.patterns to reach them.
@@ -104,7 +104,7 @@ def _install(setups=None):
         s = Setup("Setup1", ops=[Operation("Face1"), Operation("Adaptive1")], folders=[fol])
         setups = [s]
     cam = _CAM(setups)
-    cd._get_cam = lambda: (cam, None)
+    monkeypatch.setattr(cd, "get_cam", lambda: (cam, None))
     return cam
 
 
@@ -116,26 +116,26 @@ def _payload(result):
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_no_cam(self):
-        cd._get_cam = lambda: (None, "no CAM data")
+    def test_no_cam(self, monkeypatch):
+        monkeypatch.setattr(cd, "get_cam", lambda: (None, "no CAM data"))
         res = cd.handler(entity="Face1")
         assert res["isError"] is True and "cam" in res["message"].lower()
 
-    def test_requires_entity(self):
-        _install()
+    def test_requires_entity(self, monkeypatch):
+        _install(monkeypatch)
         res = cd.handler(entity="")
         assert res["isError"] is True
 
-    def test_not_found(self):
-        _install()
+    def test_not_found(self, monkeypatch):
+        _install(monkeypatch)
         res = cd.handler(entity="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_ambiguous_name(self):
+    def test_ambiguous_name(self, monkeypatch):
         # two operations named the same across setups -> refuse rather than guess
         s1 = Setup("S1", ops=[Operation("Dup")])
         s2 = Setup("S2", ops=[Operation("Dup")])
-        _install([s1, s2])
+        _install(monkeypatch, [s1, s2])
         res = cd.handler(entity="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
 
@@ -143,40 +143,40 @@ class TestGuards:
 # ── delete ───────────────────────────────────────────────────────────────────
 
 class TestDelete:
-    def test_delete_operation(self):
-        cam = _install()
+    def test_delete_operation(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Face1"))
         op = cam.setups.item(0).allOperations.item(0)
         assert op.deleted is True
         assert out["deleted"] is True and out["entity"] == "Face1"
 
-    def test_delete_folder(self):
-        cam = _install()
+    def test_delete_folder(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Holes"))
         assert out["deleted"] is True
         assert out["entity_type"] == "folder"
 
-    def test_delete_nested_pattern(self):
+    def test_delete_nested_pattern(self, monkeypatch):
         # a pattern lives inside a folder and is NOT in allOperations — the tool must walk the tree
         # (.folders -> .patterns) to find it. This was the live bug.
-        cam = _install()
+        cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Pattern1"))
         assert out["deleted"] is True and out["entity_type"] == "pattern"
 
-    def test_delete_op_nested_in_folder(self):
-        cam = _install()
+    def test_delete_op_nested_in_folder(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Drill1"))
         assert out["deleted"] is True and out["entity_type"] == "operation"
 
-    def test_delete_setup(self):
-        cam = _install()
+    def test_delete_setup(self, monkeypatch):
+        cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Setup1"))
         assert cam.setups.item(0).deleted is True
         assert out["entity_type"] == "setup"
 
-    def test_deleteme_false_is_error(self):
+    def test_deleteme_false_is_error(self, monkeypatch):
         # Fusion declining the delete (deleteMe()==False) must be a hard error, not a false ok
         s = Setup("Setup1", ops=[Operation("Stubborn", can_delete=False)])
-        _install([s])
+        _install(monkeypatch, [s])
         res = cd.handler(entity="Stubborn")
         assert res["isError"] is True and "declin" in res["message"].lower()

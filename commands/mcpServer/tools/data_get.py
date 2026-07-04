@@ -3,23 +3,9 @@
 
 """MCP RICH READ: data_get - the CLOUD data model (hub -> projects -> folders -> files) in one read.
 
-The "rich read" pattern (CLAUDE.md "Reads are RICH"): a light default, then scope/include to go deeper.
-data_get reads the CLOUD data model on Autodesk/Fusion Team - so every call is a NETWORK round-trip
-(slow, can fail offline / when not signed in / with no active hub). This is deliberately separate from
-doc_get, which reads the in-memory SESSION: folding them would hide whether a call is free or a slow
-remote query.
-
-The cloud is a hierarchy (hub -> project -> folder -> file) where each level needs its parent's id, so
-data_get drills by SCOPE PARAMETER, not by include= alone:
-  default (no project)   -> the active hub + its projects. "Where am I, what projects exist."
-  project=<name|id>      -> that project's FILES (name, lineage URN, version, openable web URL).
-    folder=<path>        -> scope the file listing to one folder ('recursive' to descend or not).
-  project + include=['folders']  -> the project's FOLDER TREE instead of files.
-  include=['hubs']       -> all hubs (the multi-hub picker; switch from the Fusion data panel).
-
-Each level is bounded (file/folder caps + a 'truncated' flag) so a huge project can't blow the budget.
-The handler delegates to the data_read/data_ops/data_switch_hub handlers, so the cloud-error guards and caps
-live in one place. Read-only.
+Every call is a NETWORK round-trip (slow, can fail offline / signed-out / with no active hub) -
+deliberately separate from doc_get, which reads the in-memory session. Delegates to the
+data_read/data_ops/data_switch_hub handlers so the cloud-error guards and caps live in one place.
 """
 
 import json
@@ -52,12 +38,7 @@ def _normalize_include(include):
 
 def handler(project: str = "", project_id: str = "", folder: str = "", recursive: bool = True,
             include=None, max_depth: int = 4) -> dict:
-    """Read the cloud data model at the right scope (rich read - networked; CLAUDE.md "Reads are RICH").
-
-    No project: the active hub + its projects. project=<name|id>: that project's files ('folder' scopes
-    to one folder; 'recursive' descends or not). include=['folders'] (with a project): the folder tree
-    instead of files. include=['hubs']: all hubs. Each level is capped (see 'truncated'). Read-only.
-    """
+    """Read the cloud data model at the scope requested (project/folder/include); see TOOL_DESCRIPTION."""
     inc = _normalize_include(include)
     bad = [s for s in inc if s not in _SLICES]
     if bad:

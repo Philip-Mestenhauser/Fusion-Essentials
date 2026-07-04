@@ -1,27 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Shared core for turning a solid model into a CAM TOOL HOLDER profile - the headless, UI-free half
-of the "Add Tool Holder" command (commands/addHolder/entry.py).
-
-The geometry is pure: given a solid body, an axis of rotation, and a point on that axis (the end
-datum), it reduces the body's rotation-coincident faces to a stack of (height, lower-diameter,
-upper-diameter) segments and emits the holder's library JSON - none of which needs the UI. Both the
-interactive command AND the MCP tool (model_compute_holder) drive this SAME code, so an agent can
-batch-convert many holders while the dialog serves one-at-a-time users.
-
-This module is deliberately import-light: only ``adsk.*`` + stdlib, NO ``futil`` / ``config`` / UI
-handlers. So it loads in the test harness like every other ``tools/`` helper
-(``load_tool("_holder")``), and the interactive command imports it without circularity. A ``_`` prefix
-keeps the tool auto-discovery sweep from treating it as a tool. The geometry routines (cylindrical-
-coordinate reduction, duplicate/occlusion filtering, chamfer-as-cone assumption) are shared verbatim
-with the interactive command.
-
-Grounded in adsk.core / adsk.cam:
-  - adsk.core.InfiniteLine3D / Plane / Cone / Cylinder / Torus / Circle3D / Arc3D (geometry casts)
-  - adsk.cam.Tool.createFromJson(jsonStr)  -> a holder Tool (type='holder')
-  - adsk.cam.CAMManager.get().libraryManager.toolLibraries (library enumeration; reads only here)
-"""
+"""Reduces a solid tool-holder body to a CAM library holder profile (height/diameter segments along
+an axis of revolution) - the headless core behind the "Add Tool Holder" command and
+model_compute_holder. Import-light (adsk.* + stdlib only) so it loads in the test harness without
+circularity."""
 
 import json
 import math

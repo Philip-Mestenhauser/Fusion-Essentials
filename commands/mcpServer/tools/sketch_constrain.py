@@ -1,25 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: apply a geometric CONSTRAINT to sketch entities (the Sketch Constrain menu).
-
-  sketch_constrain -> add a geometric constraint (perpendicular / parallel / tangent / equal /
-                       midpoint / symmetry / concentric / collinear / horizontal / vertical /
-                       coincident / fix / unfix) between sketch entities, referenced by
-                       '<type>:<index>' within a named sketch - no human selection. WRITES.
-
-This makes a sketch PARAMETRIC: constraints capture design intent (these two lines stay
-perpendicular, these arcs stay equal, this point stays at the midpoint) so the shape flexes
-correctly when dimensions/points change. General-purpose - it just adds the relationship.
-
-Entity references: '<type>:<index>' where type is line / arc / circle / point (e.g. 'line:0',
-'arc:1', 'point:2'), indexing the sketch's curve/point collections in creation order.
-
-Grounded in adsk.fusion (signatures confirmed via sys_get_api_doc):
-  - Sketch.geometricConstraints.add<Type>(...) : addPerpendicular/Parallel/Tangent/Equal/Concentric/
-    Collinear (two curves); addMidPoint/addCoincident (point + curve); addHorizontal/addVertical
-    (one line); addSymmetry(entityOne, entityTwo, symmetryLine). Fix/UnFix = SketchEntity.isFixed.
-Handler runs on the main thread; WRITES.
+"""MCP building block: apply a geometric constraint (the Sketch Constrain menu) between sketch
+entities referenced by '<type>:<index>' (e.g. 'line:0', 'arc:1', 'point:2') within a named sketch.
+WRITES. See docs/fusion-api-notes.md ("Sketches") for the underlying adsk.fusion signatures.
 """
 
 import adsk.core
@@ -30,6 +14,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names
 from . import _common
+from . import _inputs
 
 app = adsk.core.Application.get()
 
@@ -52,42 +37,9 @@ _CONSTRAINTS = {
 }
 
 
-def _resolve_entity(sketch, ref):
-    """Resolve '<type>:<index>' to a sketch entity. type = line/arc/circle/point. Returns it or None."""
-    s = (ref or "").strip().lower()
-    if ":" not in s:
-        return None
-    kind, _, idx = s.rpartition(":")
-    try:
-        i = int(idx)
-    except Exception:
-        return None
-    curves = safe(lambda: sketch.sketchCurves)
-    coll = None
-    if kind == "line":
-        coll = safe(lambda: curves.sketchLines)
-    elif kind == "arc":
-        coll = safe(lambda: curves.sketchArcs)
-    elif kind == "circle":
-        coll = safe(lambda: curves.sketchCircles)
-    elif kind == "point":
-        coll = safe(lambda: sketch.sketchPoints)
-    if coll is None:
-        return None
-    if i < 0 or i >= safe(lambda: coll.count, 0):
-        return None
-    return safe(lambda: coll.item(i))
-
-
 def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
             entity_two: str = "", symmetry_line: str = "") -> dict:
-    """Apply a geometric constraint to sketch entities (referenced '<type>:<index>').
-
-    constraint: perpendicular | parallel | tangent | equal | concentric | collinear | midpoint |
-    coincident | horizontal | vertical | symmetry | fix | unfix. sketch_name: the sketch. entity_one
-    /entity_two: entity refs like 'line:0', 'arc:1', 'point:2' (point_curve constraints want a point
-    as entity_one). symmetry_line: the axis line ref for 'symmetry'. WRITES.
-    """
+    """Apply a geometric constraint to sketch entities (referenced '<type>:<index>')."""
     cname = (constraint or "").strip().lower()
     if cname not in _CONSTRAINTS:
         return error(f"Unknown constraint '{constraint}'. Valid: {', '.join(_CONSTRAINTS)}.")
@@ -104,7 +56,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         return error(f"No sketch named '{sketch_name}'. Available: "
                      + (", ".join(n for n in names if n) or "(none)") + ". Use sketch_get.")
 
-    e1 = _resolve_entity(sketch, entity_one)
+    e1 = _common.resolve_entity_ref(sketch, entity_one)
     if not e1:
         return error(f"Could not resolve entity_one '{entity_one}' "
                      "(use '<type>:<index>', type = line/arc/circle/point).")
@@ -120,16 +72,16 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         elif kind == "one_line":
             result_obj = getattr(gc, method)(e1)
         elif kind in ("two_curve", "point_curve"):
-            e2 = _resolve_entity(sketch, entity_two)
+            e2 = _common.resolve_entity_ref(sketch, entity_two)
             if not e2:
                 return error(f"'{cname}' needs 'entity_two' (a second '<type>:<index>'). "
                               f"Got '{entity_two}'.")
             result_obj = getattr(gc, method)(e1, e2)
         elif kind == "symmetry":
-            e2 = _resolve_entity(sketch, entity_two)
+            e2 = _common.resolve_entity_ref(sketch, entity_two)
             if not e2:
                 return error(f"'symmetry' needs 'entity_two'. Got '{entity_two}'.")
-            sline = _resolve_entity(sketch, symmetry_line)
+            sline = _common.resolve_entity_ref(sketch, symmetry_line)
             if not sline:
                 return error("'symmetry' needs 'symmetry_line' - the axis line ref (e.g. 'line:0').")
             result_obj = getattr(gc, method)(e1, e2, sline)
@@ -152,19 +104,18 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 
 TOOL_DESCRIPTION = (
     "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is "
-    "parametric (captures design intent). 'constraint': perpendicular | parallel | tangent | equal | "
-    "concentric | collinear | midpoint | coincident | horizontal | vertical | symmetry | fix | "
-    "unfix. Reference entities as '<type>:<index>' within 'sketch_name', type = line/arc/circle/"
-    "point (e.g. 'line:0', 'arc:1', 'point:2'). Two-curve constraints (perpendicular/parallel/"
-    "tangent/equal/concentric/collinear) take entity_one+entity_two; midpoint/coincident take a "
-    "point as entity_one + a curve as entity_two; horizontal/vertical/fix/unfix take one entity; "
-    "symmetry takes entity_one+entity_two+symmetry_line (the axis)."
+    "parametric (captures design intent). Reference entities as '<type>:<index>' within "
+    "'sketch_name', type = line/arc/circle/point (e.g. 'line:0', 'arc:1', 'point:2'). Two-curve "
+    "constraints (perpendicular/parallel/tangent/equal/concentric/collinear) take "
+    "entity_one+entity_two; midpoint/coincident take a point as entity_one + a curve as entity_two; "
+    "horizontal/vertical/fix/unfix take one entity; symmetry takes "
+    "entity_one+entity_two+symmetry_line (the axis)."
 )
 
 tool = (
     Tool.create_simple(name="sketch_constrain", description=TOOL_DESCRIPTION)
-    .add_input_property("constraint", {"type": "string",
-            "description": "perpendicular | parallel | tangent | equal | concentric | collinear | midpoint | coincident | horizontal | vertical | symmetry | fix | unfix."})
+    .add_input_property(*_inputs.Choice("constraint", list(_CONSTRAINTS),
+            description="The relationship to apply.").as_property())
     .add_input_property("sketch_name", {"type": "string", "description": "The sketch holding the entities."})
     .add_input_property("entity_one", {"type": "string", "description": "First entity '<type>:<index>' (a point for midpoint/coincident)."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity '<type>:<index>' (for two-entity constraints)."})

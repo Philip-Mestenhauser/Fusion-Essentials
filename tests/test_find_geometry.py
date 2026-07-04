@@ -182,10 +182,10 @@ class TestFind:
         assert all(m.get("handle") for m in out["matches"])
 
 
-# ── #4: NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────
-# find_geometry used to scan only root.occurrences (top-level), so a nested occurrence that
-# design_get(tree)/assembly_probe report by fullPathName returned "could not resolve" — disagreeing with
-# the self-heal path (_refind_by_locator scans allOccurrences). Now it scans allOccurrences too.
+# ── NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────
+# find_geometry must scan allOccurrences (not just root.occurrences), so a nested occurrence that
+# design_get(tree)/assembly_probe report by fullPathName resolves here too, agreeing with the
+# self-heal path (_refind_by_locator also scans allOccurrences).
 
 class TestNestedAssembly:
     def test_nested_occurrence_resolved_by_full_path(self):

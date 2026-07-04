@@ -134,3 +134,17 @@ class TestMirror:
         mf.add = lambda inp: _Feat()
         out = _payload(mr.handler(bodies=["A"], plane="yz"))
         assert out["result_bodies"] == []
+
+    def test_iscombine_raise_surfaces_as_error(self):
+        # An isCombine setter failure must propagate through the outer try and surface as isError -
+        # swallowing it would still report "joined: True".
+        class _ReadOnlyInput(FakeMirrorInput):
+            def __setattr__(self, key, value):
+                if key == "isCombine":
+                    raise AttributeError("isCombine is read-only")
+                super().__setattr__(key, value)
+
+        mf = _install(["A"])
+        mf.createInput = lambda bodies, plane: _ReadOnlyInput(bodies, plane)
+        res = mr.handler(bodies=["A"], plane="yz", join=True)
+        assert res["isError"] is True and "Mirror failed" in res["message"]

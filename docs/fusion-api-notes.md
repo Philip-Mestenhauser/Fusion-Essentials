@@ -174,6 +174,45 @@ as **external references**. Therefore:
   UI lock and STALLS the script (looks like a timeout) though the write still lands — close the library
   tab before bulk writes. Hub reads/writes are network-backed and slow; read one Hub library at a time
   (reading all at once can time out).
+- **Document-scoped tool library:** `CAM.documentToolLibrary` -> `DocumentToolLibrary` (`.count`/`.item`/
+  `.add`/`.remove`/`.updateTool(tool)`/`.operationsByTool(tool)` -> an index/len-accessible
+  `OperationVector`, not a Python list). Distinct from the shared `ToolLibrary` family
+  (`ToolLibraries.toolLibraryAtURL`); this is the per-document tool set `cam_edit_tools(scope='document')`
+  manages.
+- **Job health flags:** `.hasError`/`.error`/`.hasWarning`/`.warning` are exposed by Setup, Operation, AND
+  NCProgram alike; `Operation.operationState` (0=valid, 1=out_of_date, 2=suppressed, 3=no_toolpath) and
+  `.isGenerating` are Operation-only. Op state/validity is only trustworthy once the **Manufacture**
+  workspace has been entered (`app.userInterface.activeWorkspace.id == 'CAMEnvironment'`) - from the
+  Design workspace these flags can read stale/valid against changed geometry.
+- **Why an op is out of date:** the reason lives in `Operation.messageLog` (NOT `.warning`/`.error`, which
+  are empty for a plain invalidation) as lines like `"<ts> I Invalidated: Design changed: Op1: WCS
+  origin"` (the category) or `"...different value for parameter '...'"` (one of many per-parameter
+  deltas). A machine-definition change logs `"External changed: machine.<field>"` instead of an
+  `Invalidated:` line.
+- `adsk.cam.Machine` has no `.name` - the human label is `.description` (e.g. "Haas with A-axis"),
+  falling back to `.vendor` + `.model` ("HAAS A-axis") when `.description` is empty.
+- **Create a new Setup:** `cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation |
+  TurningOperation)` -> `SetupInput` (`.models = [BRepBody|Occurrence, ...]`, `.name = str`);
+  `cam.setups.add(input)` -> `Setup`. No workspace switch needed.
+- **NC program Comment/Name:** the UI's Comment field is the CAM parameter `nc_program_comment` on
+  `NCProgram.parameters` (NOT `.postParameters`, which is why it isn't in the post-parameters list); the
+  Name field is the sibling parameter `nc_program_name`. Both are string parameters whose `.expression`
+  must be QUOTED (e.g. `"'Job 1234'"`).
+- **Toolpath visibility:** `Operation.isLightBulbOn` (settable bool) shows/hides one operation's
+  rendered toolpath; it only renders in the Manufacture workspace. This is a plain data property -
+  distinct from the simulation/in-process-stock UI commands (`Iron*`/`Simulation*`), which are modal and
+  unsafe to drive from a script.
+- **Generation launch + future lifetime:** `CAM.generateAllToolpaths(skipValid: bool)` ->
+  `GenerateToolpathFuture` (the whole-document counterpart to `CAM.generateToolpath(target)`); the future
+  exposes `.numberOfOperations`/`.numberOfCompleted` (both raise "Generation not started" if read on the
+  same tick as the launch - they only populate after the event loop spins once) alongside
+  `.isGenerationCompleted`. Holding a reference to the Future is not just for polling - if it is
+  garbage-collected, Fusion ABANDONS the in-progress generation, so the caller must keep it alive (a
+  module-level registry) until `isGenerationCompleted`.
+- **Walking the CAM tree:** `Setup.allOperations` / `Folder.allOperations` return ONLY `Operation`
+  objects - `CAMFolder`/`CAMPattern` are omitted. To reach everything (delete, reorder, move-into,
+  edit-by-name across nested folders), walk `.operations` and recurse into `.folders` + `.patterns`
+  explicitly.
 - **Create an operation (proven live end-to-end):** `Setup.operations.compatibleStrategies` → list of
   `OperationStrategy`; each `.name` is the strategy STRING (`face`, `adaptive`, `pocket2d`, `drill`,
   `bore`, `contour2d`, ... 53 for a milling setup). Then `Setup.operations.createInput(strategyName)`
@@ -229,6 +268,13 @@ is the human-facing field. `param_get` reads; `param_set` writes `.expression`
 (changing a driver cascades to dependents, e.g. `StockY = StockX`). Setting model/feature
 params can raise — surface the error rather than crashing.
 
+- **Add/delete are user-parameter-only, health-guarded:** `UserParameters.add(name, ValueInput, unit,
+  comment)` -> `Parameter`; `Parameter.deleteMe()` (user params only — model/feature params have no
+  `deleteMe`). `Parameter.isFavorite` is a settable bool (the favorites-list flag). `param_add`/
+  `param_delete` snapshot `Design.timeline.item(i).healthState` (0 healthy / 1 warning / 2 error / 3
+  suppressed) before and after the edit; a NEW error after an add rolls it back via `deleteMe()`, and a
+  regression after a delete is reported (the delete itself is not undone).
+
 **Fusion expression-language syntax** (matters when authoring `param_set` expressions):
 function ARGS are separated by **`;`**, not `,` — e.g. `if(cond; then; else)`, `max(a; b)`,
 `min(a; b)`. Conditionals nest: `if(StockX>=2 in; if(StockY/2>=13 mm; 10 mm; 5 mm); 5 mm)`.
@@ -237,6 +283,146 @@ carries the parameter's own unit. Round-up-to-increment idiom: `ceil(x/inc)*inc`
 take a QUOTED string expression: `'text'` (unit shows as "Text"). References can be negated
 (`-d242`). A common template idiom is a user param aliasing a computed one
 (`StockX = Calc_StockX`) so the value auto-computes but can be overtyped to break the link.
+
+## Sketches
+
+- **Creating a sketch:** `Component.sketches.add(planarEntity)` -> `Sketch` (planarEntity = an
+  xY/xZ/yZ `ConstructionPlane`, or a planar `BRepFace`). `Sketch.isComputeDeferred = True` batches
+  edits so a multi-entity add computes once. Every curve/point exposes `.isConstruction` and a
+  stable `.entityToken`.
+- **Drawing geometry:** `Sketch.sketchCurves.{sketchLines,sketchCircles,sketchArcs,sketchEllipses}`,
+  `Sketch.sketchPoints`. `SketchLines.addByTwoPoints` / `addTwoPointRectangle` /
+  `addCenterPointRectangle` / `addScribedPolygon`; `SketchCircles.addByCenterRadius(center,
+  radius_cm)`; `SketchArcs.addByCenterStartSweep(center, start, sweepAngle_radians)`;
+  `adsk.core.Point3D.create(x, y, z)` (cm; z=0 stays on the sketch plane). **`addCenterToCenterSlot`
+  is a method on the SKETCH itself, not `sketchLines`** (confirmed live), and its `width` argument
+  must be an `adsk.core.ValueInput`, not a bare float.
+- **Constraints:** `Sketch.geometricConstraints.add<Type>(...)` - `addPerpendicular`/`addParallel`/
+  `addTangent`/`addEqual`/`addConcentric`/`addCollinear` (two curves); `addMidPoint`/`addCoincident`
+  (point + curve); `addHorizontal`/`addVertical` (one line); `addSymmetry(entityOne, entityTwo,
+  symmetryLine)`. Fix/unfix is `SketchEntity.isFixed`. Each constraint exposes the entities it
+  references via typed attributes (`.line`/`.lineOne`/`.lineTwo`/`.point`/`.entity`/`.entityOne`/
+  `.entityTwo`, sometimes a vector like `PolygonConstraint.lines`) - map them back to ids via
+  `entityToken`.
+- **Dimensions:** `Sketch.sketchDimensions.addDistanceDimension(pointOne, pointTwo, orientation,
+  textPoint)` / `addRadialDimension(curve, textPoint)` / `addDiameterDimension(curve, textPoint)` /
+  `addAngularDimension(lineOne, lineTwo, textPoint)`. The returned dimension's `.parameter.expression`
+  drives its value. **For a radial/diameter dimension the text-point is NOT cosmetic** - Fusion
+  derives the radial direction from `(textPoint - center)`, so a text point AT the curve's center
+  (natural when the curve sits on the sketch origin) gives a zero-length vector and the add raises
+  "Some input argument is invalid"; offset the text point from the center first.
+- **Sketch text:** a `SketchText`'s content is NOT settable via its definition
+  (`MultiLineTextDefinition` has no `.text`). The writable handle is `SketchText.textParameter` - a
+  `ModelParameter` whose `.expression` is the QUOTED string (e.g. `"'Label Text'"`). No
+  assembly-context proxy is needed for the write (verified live). Create one via
+  `SketchTexts.createInput2(text, height_cm)` + `.setAsMultiLine(startPoint, endPoint,
+  HorizontalAlignments, VerticalAlignments, angle)` + `SketchTexts.add(input)`.
+
+## Model feature signatures
+
+Signatures confirmed live for the modelling building-block tools (model_create_component,
+model_fillet/model_chamfer, model_combine, model_mirror, model_pattern_rectangular/circular,
+model_revolve, model_extrude, model_arrange).
+
+- **Component creation:** `rootComponent.occurrences.addNewComponent(Matrix3D)` -> `Occurrence`
+  (`.component`, `.activate()`).
+- **Fillet:** `Component.features.filletFeatures.createInput()` -> input;
+  `input.addConstantRadiusEdgeSet(ObjectCollection(edges), radius: ValueInput, isTangentChain)`.
+- **Chamfer:** `Component.features.chamferFeatures.createInput(ObjectCollection(edges),
+  isTangentChain)` -> input; `input.setToEqualDistance(distance: ValueInput)`. `body.edges` ->
+  `BRepEdges`; `edge.isConvex` gives the convex/concave filter.
+- **Combine:** `Component.features.combineFeatures.createInput(targetBody,
+  ObjectCollection(toolBodies))` -> input; `.operation =
+  FeatureOperations.{Join|Cut|Intersect}FeatureOperation`; `.isKeepToolBodies = bool`;
+  `CombineFeatures.add(input)` -> `CombineFeature`.
+- **Mirror:** `Component.features.mirrorFeatures.createInput(ObjectCollection(bodies),
+  mirrorPlane)` -> input (`mirrorPlane` is a planar entity, e.g. an xY/xZ/yZ ConstructionPlane);
+  `MirrorFeatures.add(input)` -> `MirrorFeature` (`.bodies`).
+- **Pattern:** `features.rectangularPatternFeatures.createInput(inputEntities, directionOneEntity,
+  quantityOne, distanceOne, PatternDistanceType)`, `.setDirectionTwo(entity, qtyTwo, distTwo)`;
+  `features.circularPatternFeatures.createInput(inputEntities, axis)`, `.quantity` / `.totalAngle`
+  / `.isSymmetric`. `rootComponent.x/y/zConstructionAxis` are the world-axis direction/axis
+  entities. **The pattern's input entities and its direction/axis entity must belong to the SAME
+  component** - Fusion raises `InternalValidationError getObjectPath` patterning a sub-component
+  body against root's construction axis; build the axis + feature in the entities' owning
+  component.
+- **Revolve:** `Component.features.revolveFeatures.createInput(profile, axis,
+  FeatureOperations)` -> input; `RevolveFeatureInput.setAngleExtent(isSymmetric: bool, angle:
+  ValueInput)`; axis is a `ConstructionAxis` or a straight `SketchLine`. For an asymmetric
+  two-sided revolve use **`setTwoSideAngleExtent(angleOne, angleTwo)`** - there is no
+  `setTwoSidesExtent` (raises `AttributeError`).
+- **Extrude:** `Component.features.extrudeFeatures.createInput(profile, FeatureOperations)` ->
+  `ExtrudeFeatureInput`; `.setDistanceExtent(isSymmetric: bool, distance: ValueInput)`;
+  `.setOneSideExtent(DistanceExtentDefinition, direction, taperAngle)` for a taper.
+- **Arrange:** `Component.features.arrangeFeatures.createInput(ArrangeSolverTypes.*)` ->
+  `ArrangeFeatureInput`; `input.setProfileOrFaceEnvelope([profile|planarFace, ...])` ->
+  `Arrange2DProfileOrFaceEnvelopeInput` (`.objectSpacing` = clearance between parts, cm);
+  `input.arrangeComponents.add(occurrence)` per shape; `arrangeFeatures.add(input)` ->
+  `ArrangeFeature`.
+
+## Construction geometry (model_construction)
+
+`ConstructionPointInput.setByPoint(Point3D)` and `ConstructionAxisInput.setByLine(InfiniteLine3D)`
+are DIRECT-EDIT-ONLY - their API docstrings state they fail in PARAMETRIC modeling mode, and there
+is no parametric method that places a point/axis at a raw x/y/z (every parametric constructor needs
+existing geometry: a vertex, edge, sketch point, or planar face). So a coordinate point or
+world-axis only works when `design.designType == DirectDesignType`; in a parametric design, sketch
+a point first, or for an axis use `ConstructionAxisInput.setByEdge(edge)` (parametric-legal).
+`ConstructionPlaneInput.setByOffset(planarEntity, ValueInput)` is parametric-legal in both modes.
+
+## Surfaces (open, non-solid bodies)
+
+The discriminator throughout is `BRepBody.isSolid == False` - an open surface has no end caps. Never
+wrap a feature `.add()` in `safe()`: a None feature with no exception is the silent-success trap;
+assert the returned feature/body and read `isSolid` back rather than assuming it.
+
+- **Building an open profile:** `Component.createOpenProfile(curves, isChained)` /
+  `createBRepEdgeProfile(edges)` -> an OPEN profile (as opposed to a closed sketch profile).
+- **Extrude/revolve as a surface:** `ExtrudeFeatures.createInput(profile, op)` /
+  `RevolveFeatures.createInput(profile, axis, op)` with `.isSolid = False` and the usual
+  `setDistanceExtent`/`setAngleExtent`.
+- **Patch:** `PatchFeatures.createInput(boundaryCurve: Base, op)` -> `PatchFeatureInput`
+  (`.continuity`); `.add(input)` -> `PatchFeature`. Confirmed: patch may only create a NEW body or a
+  NEW component - no join/cut/intersect.
+- **Trim is a two-phase transaction:** `TrimFeatures.createInput(trimTool)` opens a partial-compute
+  transaction and populates `input.bRepCells` - you MUST either commit it via `TrimFeatures.add(input)`
+  or abort it via `TrimFeatureInput.cancel()`; leaving it open (e.g. by letting an exception escape
+  unhandled) risks a corrupted state / crash. **A SELECTED `BRepCell` (`isSelected=True`) is REMOVED**
+  by the trim, so to KEEP a cell leave it `isSelected=False`; `add()` raises "No cells are selected"
+  if none are marked for removal.
+- **Extend:** `ExtendFeatures.createInput(edges: ObjectCollection, distance, extendType,
+  isChainingEnabled=True)`.
+- **Offset (surface -> surface):** `OffsetFeatures.createInput(entities: ObjectCollection, distance,
+  op, isChainSelection=True)`.
+- **Thicken (surface -> solid):** `ThickenFeatures.createInput(inputFaces, thickness, isSymmetric, op,
+  isChainSelection=True)`.
+- **Loft:** `Component.features.loftFeatures.createInput(FeatureOperations)` -> `LoftFeatureInput`;
+  `.loftSections.add(section)` IN ORDER (the ordering is load-bearing, never sort/reorder);
+  `.centerLineOrRails.addCenterLine(curve)` XOR repeated `.addRail(curve)` (mutually exclusive);
+  `.isSolid = bool`. `LoftFeatures.add(input)` -> `LoftFeature` (`.bodies`, `.isSolid`).
+- **Stitch:** `Component.features.stitchFeatures.createInput(ObjectCollection, ValueInput,
+  FeatureOperations)` -> `StitchFeatureInput`; `StitchFeatures.add(input)` -> `StitchFeature`
+  (`.bodies`). `BRepBody.isSolid` on each result body is the ground truth for whether the stitch
+  actually closed - a gap wider than tolerance leaves the result a surface; report that honestly
+  rather than assuming the operation always produces a solid.
+- **Unstitch:** `Component.features.unstitchFeatures.add(ObjectCollection, isChainSelection)` ->
+  `UnstitchFeature` - note there is no `createInput`; `add()` takes the faces/bodies collection
+  directly.
+
+## Measurement (model_inspect / model_measure_between)
+
+- **Bounding box:** `BRepBody/Occurrence/Component.boundingBox` -> `BoundingBox3D`
+  (`.minPoint`/`.maxPoint`, world-axis-aligned). `app.measureManager.getOrientedBoundingBox(geometry,
+  lengthVec, widthVec)` -> `OrientedBoundingBox3D`, for measuring in an arbitrary (e.g. Joint
+  Origin) frame; `JointOrigin.secondaryAxisVector` (X) / `.thirdAxisVector` (Y) /
+  `.primaryAxisVector` (Z) give that frame.
+- **Physical properties:** `Component/Occurrence/BRepBody.getPhysicalProperties(CalculationAccuracy)`
+  -> `PhysicalProperties` (`.mass` kg / `.volume` cm^3 / `.area` cm^2 / `.density` kg/cm^3 /
+  `.centerOfMass` cm; inertia getters in kg*cm^2).
+- **Distance/angle:** `app.measureManager.measureMinimumDistance(entityOne, entityTwo)` and
+  `.measureAngle(entityOne, entityTwo)` -> `MeasureResults` (`.value` in cm for distance, RADIANS
+  for angle; `.positionOne`/`.positionTwo` are the closest/defining points in cm, `.positionThree` a
+  third defining point where relevant).
 
 ## Assembly positioning (move vs. parametric features)
 
@@ -259,6 +445,37 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
   occurrence transform applies on top of the world coords — the part lands at (placement + world). Pick
   one: place the component at the origin and draw at world coords, OR place the occurrence and draw at
   local (component-relative) coords. `model_inspect` on the occurrence confirms the true location.
+- **Ground / move / rigid group basics:** `Occurrence.isGroundToParent` (bool, get/set) is the
+  stateless parent lock `assembly_ground` sets; `Occurrence.transform` (Matrix3D) is the free-move
+  handle `assembly_move` edits directly. `rootComponent.rigidGroups.add(ObjectCollection,
+  includeChildren)` -> `RigidGroup` locks several occurrences together.
+
+## Assembly analysis and relationships
+
+- **Interference:** `Design.createInterferenceInput(ObjectCollection of occurrences)` ->
+  `InterferenceInput` (`.areCoincidentFacesIncluded` bool); `Design.analyzeInterference(input)` ->
+  `InterferenceResults` (`InterferenceResult.entityOne`/`.entityTwo` are `BRepBody`;
+  `.interferenceBody` is a `BRepBody` with `.volume` in cm^3). An interference-result body exposes its
+  owning part via `parentComponent.name` - its `assemblyContext` reads None even on a real assembly, so
+  prefer `parentComponent.name` over `assemblyContext` when reporting which occurrence a result belongs to.
+- **Kinematic probe:** `rootComponent.occurrences` / `.allOccurrences` -> `Occurrence.transform2.translation`,
+  `.isGrounded`, `.isGroundToParent`, `.bRepBodies`, `.name`. `rootComponent.joints` (regular joints) and
+  `.asBuiltJoints` are SEPARATE collections - read both or as-built joints are invisible.
+  `Joint.jointMotion.jointType` enum -> friendly name + DOF: 0=rigid(0), 1=revolute(1), 2=slider(1),
+  3=cylindrical(2), 4=pin_slot(2), 5=planar(3), 6=ball(3). `Design.isFullyConstrained` is SKETCH-only (not
+  a whole-assembly DOF signal) - report joint-level DOF from the motion types instead.
+- **healthState enum** (Joint/TimelineObject/etc.): 0=healthy, 1=warning, 2=error, 3=SUPPRESSED
+  (intentional - not broken). Only 1/2 indicate an actual compute failure; a suppressed entity is
+  parked on purpose (e.g. an alternate joint in a fixture template).
+- **Position capture (Design.snapshots):** `.hasPendingSnapshot` (bool), `.add()` (valid only when a
+  snapshot is pending) -> `Snapshot`, `Snapshot.deleteMe()` to revert the latest capture. A jointed
+  occurrence's pose from a free `Occurrence.transform` move is transient until captured this way.
+- **As-built joint:** `rootComponent.asBuiltJoints.createInput(occ1, occ2, geometry_or_None)` ->
+  `.add(input)` -> a rigid joint mating two occurrences where they already are (null geometry = rigid).
+- **Assembly constraint (Constrain Components):** `rootComponent.assemblyConstraints.createInput()` ->
+  `input.geometricRelationships.add(entityOne, entityTwo, isFlipped, ValueInput)` (repeatable - several
+  pairs solve TOGETHER in one constraint) -> `assemblyConstraints.add(input)`. Entities must be
+  root-proxy BRep/sketch/construction entities (assembly-context proxies, same as a joint input).
 
 ## Joints across occurrences (assembly-context proxies)
 
@@ -274,6 +491,52 @@ take a QUOTED string expression: `'text'` (unit shows as "Text"). References can
 - **Match the proxying occurrence by component NAME, not identity.** The API returns fresh wrapper
   objects for the same component, so `occ.component is owner` silently fails; compare
   `occ.component.name` (see `_find_joint_origin` in `joint_create_edit.py`).
+
+## Joint creation, driving, and linking
+
+- **Create:** `Component.joints.createInput(inputOne, inputTwo)` -> `JointInput` (each input a
+  `JointGeometry` or `JointOrigin`); `JointInput.setAs<Type>JointMotion(...)`; `.offset`/`.angle`/
+  `.isFlipped`. `Joints.add(jointInput)` -> `Joint`. `JointDirections` enum: X=0, Y=1, Z=2, Custom=3
+  (Custom pairs with a world construction axis entity so the motion is a TRUE world direction instead of
+  the joint geometry's local frame - X/Y/Z alone are relative to that local frame).
+- **Ball joint pitch/yaw:** `setAsBallJointMotion` REQUIRES `pitchDirection=ZAxisJointDirection`,
+  `yawDirection=XAxisJointDirection` - any other pair raises "Invalid parameter pitchDirection".
+- **Joint-at-geometry** (`Design.findEntityByToken`, JointGeometry factories):
+  `Design.findEntityByToken(handle)` -> `[entity]` (`entity.assemblyContext` = its occurrence).
+  `JointGeometry.createByNonPlanarFace(cylOrConeFace, JointKeyPointTypes.MiddleKeyPoint)` for a
+  cylinder/cone face - **`CenterKeyPoint` is INVALID on a cylinder/cone** ("Key point type should not be
+  CenterKeyPoint..."), Middle/Start only. `createByPlanarFace(face, edge_or_None, CenterKeyPoint)` for a
+  planar face; `createByCurve(edge, keypoint)`/`createByPoint(vertex_or_point)` for an edge/vertex. A
+  construction-point datum is REJECTED in assembly/edit-in-place context ("Environment is not
+  supported"). An `'<occ>:origin'` snap COLLAPSES both parts to (0,0,0) - zero offset, a degenerate
+  mechanism; a `'<occ>:cylinder'` snap is ambiguous on a multi-cylinder part.
+- **Joint origin orientation:** `createByPoint(point)` -> position only, Z = world Z (or the sketch
+  plane's normal). `createByCurve(curve, keypoint)` -> Z runs ALONG the curve (verified: a sketch line
+  pointing (1,1,1) yields Z = [0.577, 0.577, 0.577]); X is auto-orthonormal. So an arbitrary orientation
+  needs a direction line (`sketch_add_3d_line`) to anchor on, not a bare coordinate.
+- **Drive** (`RevoluteJointMotion`/`SliderJointMotion`/`CylindricalJointMotion`): `.rotationValue` (rad)
+  / `.slideValue` (cm) - "Setting this value is the equivalent of using the Drive Joints command."
+  Setting it poses the mechanism and is safe to call from the MCP server (a driven revolute joint keeps
+  the connection live). This is `joint_drive`'s job; `joint_edit` changes only the joint definition
+  (type/axis/snaps/limits) and redirects posing to `joint_drive`.
+  `.rotationLimits`/`.slideLimits` -> `JointLimits` (`.isMinimumValueEnabled`/`.minimumValue`,
+  `.isMaximumValueEnabled`/`.maximumValue`) to validate a commanded value against.
+- **Motion link:** `rootComponent.motionLinks.createInput(jointOne, jointTwo)` -> `MotionLinkInput`
+  (takes the TWO joints directly, NOT an `ObjectCollection`) -> `MotionLinks.add(input)` -> `MotionLink`.
+  The ratio is set AFTER add via `MotionLink.setMotionData(motionOneType, valueOne, motionTwoType,
+  valueTwo, isReversed)` - `motionOneType`/`motionTwoType` are **`JointMotionTypes` enum values**
+  (`joint.jointMotion.jointType`), NOT the `JointMotion` objects themselves (confirmed live: passing the
+  objects raises "Wrong number or type of arguments"). A k:1 ratio (joint_two moves k per unit of
+  joint_one) is `valueOne=1, valueTwo=k`; `isReversed=True` links the motions in opposite directions.
+  There is no `.ratios` property.
+
+## Timeline objects
+
+`Design.timeline` (`Timeline`): `.count`, `.item(i)` -> `TimelineObject` (`.name`, `.index`, `.isGroup`,
+`.entity`, `.healthState`). The underlying feature/sketch/joint/etc. is `TimelineObject.entity`;
+deleting it (`entity.deleteMe() -> bool`) removes the timeline object too - "Works for parametric and
+non-parametric" designs. `deleteMe()` returning False (no exception) means Fusion declined; it does not
+raise.
 
 ## Occurrence delete
 
@@ -367,13 +630,75 @@ timeline and carries hole/thread metadata (what fastener/CAM tooling recognises)
   `designType == DirectDesignType`, the base feature is HIDDEN from its collection
   (`baseFeatures.count` drops, `itemByName` returns None), and `Design.timeline` raises — so the only
   handle to an open scope is the `BaseFeature` object `add()` returned. Capture it and finish through
-  it; do not try to re-find an open scope by name. (Direct designs need no scope.)
+  it; do not try to re-find an open scope by name. (Direct designs need no scope.) The scope itself is
+  opened via `Component.features.baseFeatures.add()` -> `BaseFeature` (`.startEdit()`/`.finishEdit()`).
 - **Tessellation emits unwelded vertices.** `body.meshManager.createMeshCalculator().calculate()`
   returns one node per triangle corner — a box yields 24 nodes for 8 real vertices — so feeding its
   `nodeCoordinatesAsDouble`/`nodeIndices` straight to `addByTriangleMeshData` produces a topologically
   OPEN mesh: `MeshBody.isClosed` is False even for a watertight solid, and `mesh_to_brep` then refuses
   it. Merge coincident vertices (dedupe coordinates at a tight tolerance, remap the indices) before the
   add; the normals stay per-corner and geometry is unchanged. (`save_as_mesh` does this; see `_weld`.)
+- **An open base-feature edit scope is undetectable from the public API** - `BaseFeature` has no
+  `isEditing` property, so code cannot re-check "is the scope still open" after `startEdit()`; a
+  recheck-after-open guard gives a false negative against a write that actually succeeded. Treat the
+  open/close done via `try`/`finally` (`run_in_base_feature` in `design_mode.py`) as authoritative.
+- **Mesh import:** `Component.meshBodies.add(fullFilename, MeshUnits, baseOrFormFeature)` ->
+  `MeshBodyList`. `MeshUnits` enum members: `Millimeter`/`Centimeter`/`Meter`/`Inch`/`Foot` +
+  `MeshUnit` suffix.
+- **Mesh stats:** `MeshBody.displayMesh` -> `TriangleMesh` (`.triangleCount`/`.nodeCount`); `.mesh` ->
+  `PolygonMesh` (`.triangleCount`/`.polygonCount`/`.nodeCount`); `.isClosed`/`.isOriented`/
+  `.boundingBox`/`.entityToken`.
+- **Reduce:** `Component.features.meshReduceFeatures.createInput(mesh)` -> `MeshReduceFeatureInput`.
+  `.meshReduceTargetType` via `MeshReduceTargetTypes.{Proportion,FaceCount,MaximumDeviation}...`.
+  **`.proportion` / `.facecount` (lowercase, confirmed live) / `.maximumDeviation` each need an
+  `adsk.core.ValueInput`, not a bare float/int** - the live API rejects a raw number ("argument 2 of
+  type Ptr<ValueInput>"); wrap every one in `ValueInput.createByReal(...)`. `.meshReduceMethodType`
+  via `MeshReduceMethodTypes.{Uniform,Adaptive}...`.
+- **Remesh:** `Component.features.meshRemeshFeatures.createInput(mesh)` -> `.add(inp)` regenerates a
+  cleaner, more uniform triangulation in place.
+- **Face groups:** `Component.features.meshGenerateFaceGroupsFeatures.createInput(mesh)` ->
+  `input.method = MeshGenerateFaceGroupsMethodTypes.{Fast,Accurate}...`. Segments a mesh into planar
+  face groups - a PRISMATIC `mesh_to_brep` convert REQUIRES this first, failing otherwise with
+  `MESH_FAILED_BREP - Use Generate Face Groups`.
+- **Plane cut:** `Component.features.meshPlaneCutFeatures.createInput(mesh, cutPlane)` -> input
+  (`cutPlane` = a `core.Plane` OR a `ConstructionPlane`); `input.cutType =
+  MeshPlaneCutTypes.{Trim,SplitBody,SplitFaces}...`; `input.fillType =
+  MeshPlaneCutFillTypes.{NoFill,Minimal,Uniform}...`; `input.isFlipped = bool`. `split_body` only
+  actually separates the mesh into two bodies when it is watertight - on a non-watertight mesh the cut
+  applies but yields one body (the API does not split it).
+- **Combine:** `Component.features.meshCombineFeatures.createInput(targetBody: MeshBody,
+  toolBodies: list[MeshBody])` -> `MeshCombineFeatureInput`; `input.operation =
+  MeshCombineOperationTypes.{Join,Cut,Intersect,Merge}...`; `input.algorithm =
+  MeshCombineAlgorithmTypes.{Legacy,Enhanced}...` (default Enhanced - fewer triangles).
+- **Convert to BRep:** `Component.features.meshConvertFeatures.createInput([mesh])` -> `.add(inp)`.
+  `.meshConvertMethodType` via `MeshConvertMethodTypes.{Prismatic,Faceted,Organic}...` - Organic is
+  gated behind the Product Design Extension (probe for `MeshConvertMethodTypes.
+  OrganicMeshConvertMethodType` before offering it; refuse rather than silently falling back to
+  another method). A non-watertight mesh (`isClosed=false`) has no closed volume to convert - refuse
+  up front instead of letting `add()` fail opaquely.
+- **Every mesh-feature `add()` above "returns nothing in the case where the feature is
+  non-parametric"** (a DIRECT design OR an `add()` inside an open BaseFeature edit scope) - a `None`
+  return in those modes IS success, not failure. Verify success by re-reading the mesh's own state
+  (triangle count, face-group count, the new BRep body) rather than the feature object.
+- **Mesh export factories:** `design.exportManager.createOBJExportOptions(geometry, filename)` /
+  `createC3MFExportOptions(...)` / `createSTLExportOptions(...)` - all take `(geometry, filename)`;
+  `geometry` may be a `BRepBody`/`MeshBody`/`Occurrence`/`Component`. **Exporting a bare `MeshBody` to
+  a file: `execute()` returns True but WRITES NOTHING** (a Fusion limitation - export only tessellates
+  a BRep to a file) - redirect the export to the mesh's `parentComponent` to actually get a file.
+- **Tessellating a BRep body for export/save-as-mesh:**
+  `brep_body.meshManager.createMeshCalculator().setQuality(TriangleMeshQualityOptions.
+  <Low|Normal|High|VeryHigh>QualityTriangleMesh).calculate()` -> `TriangleMesh`
+  (`.nodeCoordinatesAsDouble`/`.nodeIndices`/`.normalVectorsAsDouble`/`.normalIndices`/
+  `.triangleCount`/`.nodeCount`). This step is read-only and needs no base-feature scope; only the
+  following `addByTriangleMeshData` write does.
+
+## Neutral CAD file export (design_export)
+
+`design.exportManager.createSTEPExportOptions(fullPath, geometry)` / `createIGESExportOptions(fullPath,
+geometry)` / `createSATExportOptions(fullPath, geometry)` all take `(path, geometry)`; **`createSTLExportOptions(geometry, fullPath)` reverses the argument order** to `(geometry, path)`. `geometry`
+may be a `Component` (whole design = root component), an `Occurrence`, or a `BRepBody`.
+`exportManager.execute(options) -> bool` - a truthy return is NOT proof a file was written; verify the
+path exists and is non-empty before reporting success.
 
 ## Workspaces
 
@@ -394,6 +719,38 @@ can legitimately fail (returns False) — e.g. with no document open — so hand
   segment (`…/data/<folderURN_b64>/<fileURN_b64>`); decode each long segment and keep the one
   that decodes to `urn:adsk…`. `doc_open` does this, so it accepts a lineage/version URN, a
   `source_id`, OR a web URL interchangeably (`_urn_candidates` / `_b64url_decode`).
+- **Creating projects/folders and uploading:** `app.data.dataProjects.add(name, purpose,
+  contributors)` -> `DataProject`; `DataProject.rootFolder.dataFolders.add(name)` -> `DataFolder`.
+  `DataFolder.uploadFile(fullPath)` -> `DataFileFuture` (`.uploadState` 0=processing/1=finished/
+  2=failed; `.dataFile` is only populated once finished) - async, do not block on it.
+- **Deleting a folder:** `data.findFolderById(id)` -> `DataFolder`; `DataFolder.deleteMe() -> bool`
+  (parallel to `DataFile.deleteMe()` above; also guarded, irreversible).
+- `DataFile` also exposes `.fileExtension`, `.versionNumber`, and `.latestVersionNumber` alongside
+  `.id` / `.versionId` / `.fusionWebURL`.
+- **Locating a file in the hub/project/folder tree from the file itself:** `DataFile.parentFolder` ->
+  `DataFolder(.name, .id)`; `DataFile.parentProject` -> `DataProject(.name, .id, .parentHub ->
+  DataHub(.name))`. Each read is defensive (a folder/project/hub field can fail on a cloud read) — an
+  unsaved document has no `DataFile` yet, so this identity is null until the doc is saved.
+- **Inserting a saved document as an occurrence:** `Component.occurrences.addByInsert(dataFile,
+  Matrix3D, isReferencedComponent)` -> `Occurrence`. `isReferencedComponent=True` (an external
+  reference) REQUIRES the source document to be in the SAME PROJECT as the host - Fusion enforces
+  this itself and raises on mismatch; embedding (`False`) has no such constraint.
+- **Hub switching:** `Data.activeHub` is documented GETTER-ONLY ("Gets the active DataHub") - there
+  is no public setter. An assignment may raise or silently no-op, so verify the id actually changed
+  before reporting success. A switch that DOES take effect closes every open document (Fusion
+  reloads the data context) and invalidates open URNs (they are hub-scoped) - re-resolve after.
+- **Document-level external references** (distinct from the per-occurrence
+  `Occurrence.documentReference` used for CAM x-ref resolution above): `app.activeDocument.
+  documentReferences` (iterable) -> `DocumentReference(.isOutOfDate, .version, .dataFile)`;
+  `.getLatestVersion() -> bool` refreshes one reference to its newest cloud version.
+- **Opening/inspecting a freshly-copied multi-reference CAM/Manufacture document via the API can
+  crash Fusion (verified live, two crashes).** A `DataFile.copy`'d doc with several external
+  references (an RFA model container + cloud part/machine refs) is unsafe to touch via
+  `app.documents.openUsingContext` OR by walking its reference graph to "pre-warm" it - both crash
+  the session (socket drops, server dies). The hazard is the heavy synchronous cloud
+  reference-resolution itself, not one specific call, and CAM-ness can't be auto-detected without
+  triggering it (inspecting the DataFile IS the crash) - the caller must declare intent so the API
+  open path can be refused in favor of a manual UI open (`doc_open`'s `is_cam_template` flag).
 
 ## Configured designs
 
@@ -474,6 +831,12 @@ The write side. All live-verified on a parametric bracket.
   .version [the Fusion APP version it was saved with, NOT a file version], .dataFile)`.
   `Document.dataFile` is the A360 `DataFile`; for a never-saved doc it is null / raises — guard
   it (`doc_get` does, and reports `has_data_file=false`).
+- **`app.documents` is a SUPERSET of the user's visible tabs:** opening an assembly loads its
+  referenced components as real `Document` objects too (`.isVisible=True` means loaded, not
+  tabbed) — walk the whole collection when closing "everything", not just the visible tabs.
+- **Creating a new document:** `app.documents.add(DocumentTypes.FusionDesignDocumentType) ->
+  Document` makes it active, but `app.activeDocument is doc` can read False immediately after
+  creation (the active reference resolves separately) — compare by `.name` instead of identity.
 - **Saving the active doc:** `Document.saveAs(name, DataFolder, description, tag) -> bool` saves
   the LIVE session — including a never-saved doc — distinct from `data_upload_file` (local file) and
   `doc_copy` (existing saved cloud file). Right after `saveAs`, `doc.dataFile.id` is a
@@ -488,7 +851,8 @@ The write side. All live-verified on a parametric bracket.
   needed for the Save-As-lineage pattern.
 - **Deleting, guarded:** `DataFile.deleteMe()` / `DataFolder.deleteMe()`. `DataFile.deleteMe`
   fails on an OPEN or REFERENCED file (Fusion's own guard); the tools add a `confirm_name`
-  exact-match check and, for files, a `parentReferences` refusal (force to override).
+  exact-match check and, for files, a refusal driven by `DataFile.hasParentReferences` (bool) /
+  `.parentReferences` (a `DataFiles` collection - force to override).
   `DataFolder.deleteMe` has NO built-in empty/root guard — `data_delete_folder` refuses a project
   root (`folder.isRoot`) and a non-empty folder unless forced. Resolve a folder by id with
   `Data.findFolderById(id)`. Deletion is irreversible.
@@ -508,6 +872,121 @@ on the rotation matrix. (`assembly_move` does this; fixed 2026-06-29.)
 > swings about the edge, not the world origin. NB: a transient move also needs
 > `assembly_capture_position` to persist past the next timeline feature — don't mistake an uncaptured
 > move for a pivot bug.
+
+## Appearance override (appearance_set)
+
+- `Design.appearances` (Appearances): `.addByCopy(appearance, name)` -> `Appearance` (a NEW editable
+  instance — you cannot edit a library appearance in place), `.itemByName`, count/item.
+- `Appearance.appearanceProperties` -> `Properties`; a `ColorProperty` has a settable `.value`
+  (`adsk.core.Color`). An appearance can expose several properties by different localized names, so set
+  every property whose runtime type is `ColorProperty` rather than looking up one by name.
+- `adsk.core.Color.create(r, g, b, opacity)` — each channel 0-255.
+- `BRepBody.appearance` / `Occurrence.appearance` are settable; assigning `None` removes the override.
+  A `Component` has no single `.appearance` — set each of its `bRepBodies` individually.
+- `Application.materialLibraries[i].appearances` is the fallback base-appearance source when the
+  design itself has none yet to copy (a fresh design has no appearances until a body exists).
+
+## Geometry handles (find_geometry / entityToken)
+
+- `Occurrence.bRepBodies` / `body.faces` / `body.edges` / `body.vertices` are proxied into assembly
+  context automatically when read off an `Occurrence`.
+- `BRepFace.geometry.surfaceType` (Cylinder/Plane/Cone/Sphere/... via `adsk.core.SurfaceTypes`), `.area`,
+  `.centroid`; a cylindrical face's geometry adds `.radius` + `.origin` + `.axis`.
+- `BRepEdge.geometry.curveType` (Circle3D/Line3D/Arc3D/... via `adsk.core.Curve3DTypes`), `.length`; a
+  circular/arc edge's geometry adds `.center` + `.radius`.
+- **`entity.entityToken` is NOT a guaranteed-stable handle.** `Design.findEntityByToken(token)` resolves
+  it back only while the token is still live — querying the SAME face/edge twice can mint a DIFFERENT
+  token, and an older token can fail to resolve even with no model edit in between. Treat a token as
+  short-lived: use it in the calls immediately after the query that minted it, and re-query rather than
+  assuming a stale-handle failure means the geometry changed. `find_geometry` also mints a composite,
+  self-healing handle (token + kind + a world-position locator) so a stale token can re-resolve to the
+  same entity by geometry — see `_inputs.make_handle` / `_inputs._refind_by_locator`.
+
+## Live API introspection (sys_get_api_doc)
+
+The `adsk.core`/`adsk.fusion`/`adsk.cam`/`adsk.drawing`/`adsk.sim` Python wrapper modules are already
+imported into the running Fusion process and each class's methods/properties carry real `__doc__`
+strings and (for callables) inspectable signatures (`inspect.signature`). Searching them live via
+`inspect.getmembers` means the docs always match the installed Fusion version with no bundled/hosted
+database to go stale.
+
+## Script execution (sys_execute_script: Python.Run / PTransaction)
+
+- The script text is written to a temp file and run via `app.executeTextCommand('Python.Run "<path>"')`
+  — a NESTED interpreter. `Python.Run` does not itself call the script's `run(context)`; the tool appends
+  `run(None)` to the script text so it executes inside that nested interpreter.
+- **An exception the script raises is caught INSIDE `Python.Run`** and comes back to the caller as a
+  result STRING, not as a propagating Python exception — so a failing script's `except`/abort branch
+  here usually does not fire. Wrapping the run in `PTransaction.Start`/`PTransaction.Commit` groups the
+  script's changes into one timeline/undo step, but `PTransaction.Abort` only covers an error that
+  escapes `Python.Run` itself (rare). Treat this as "grouped, undoable" — not "atomic, rolls back on
+  error"; a partially-failed script's changes can still commit.
+- `Python.Run`'s `RuntimeError` message on failure embeds both the add-in's own console log lines since
+  the last call and the script's inner traceback — strip the console-noise lines and keep the LAST
+  traceback block to surface just the script's own error.
+- The Windows path passed to `Python.Run` must use forward slashes inside the quoted command string —
+  backslashes are mis-handled there on both platforms, forward slashes work on Windows and macOS alike.
+
+## Add-in reload (Script.stop/run, sys.modules cache)
+
+- The add-in's own MCP server is torn down by `Script.stop()`, so calling it synchronously from inside
+  an in-flight MCP request would kill the TaskManager/HTTP server before the response for THIS call
+  could flush. The fix is a DEFERRED reload: schedule a `threading.Timer` that fires a dedicated
+  `adsk.core.CustomEventHandler` on the main thread, outside any MCP call, which then does
+  `Script.stop()` -> purge -> `Script.run()`.
+- **`Script.run()` re-executes the add-in entry point but does NOT clear Python's import cache** — a
+  bare re-run hands back the STALE cached module objects from `sys.modules`, so edits to already-loaded
+  files never take effect (only brand-new files would appear). The fix is to delete every `sys.modules`
+  entry whose `__file__` lives under the add-in's root folder before calling `Script.run()` again — this
+  covers both import namespaces Fusion uses (`commands.mcpServer.*` and the `__main__<encoded-path>...`
+  script namespace) while leaving `adsk.*`, the stdlib, and other add-ins untouched.
+- `app.scripts.itemByPath(root)` (falling back to `itemsByName(folder_basename)`) locates the add-in's
+  own `Script` object for the `stop()`/`run()` calls.
+
+## Selection (ui.activeSelections)
+
+- `ui.activeSelections` (`Selections`): `.count`, `.item(i)`, `.clear()`; `Selection.entity` / `.point`.
+  Reading it never blocks — `ui.selectEntity()` WOULD block the main thread awaiting a user pick, so a
+  selection-reading tool must poll `activeSelections` instead of calling it.
+- Per-entity detail by runtime type: `BRepFace` (`.area`/`.centroid`/`.geometry`/`.body`), `BRepEdge`
+  (`.length`/`.geometry`/`.body`), `BRepVertex` (`.geometry`/`.body`), `BRepBody`
+  (`.name`/`.volume`/`.isSolid`/`.parentComponent`), `Occurrence` (`.name`/`.fullPathName`/`.component`),
+  `Component`.
+- A face/edge's outward DIRECTION for machining-axis or joint-origin use: a planar face's `.geometry.
+  normal` (falling back to `face.evaluator.getNormalAtPoint(face.centroid)`), a cylinder/cone/torus
+  face's `.geometry.axis`, a linear edge's `endVertex - startVertex`, a circular/arc edge's
+  `.geometry.normal` (its plane normal = rotation axis). A sphere face has no single direction.
+
+## Viewport / camera (view_inspect / view_screenshot / view_screenshot_multi)
+
+- `Viewport.camera` -> `Camera(.eye, .target, .upVector, .viewOrientation, .isFitView, .cameraType)`,
+  `.visualStyle` (`VisualStyles` enum), `.fit()`, `.refresh()`. `cameraType` is an enum: 0 =
+  `OrthographicCameraType`, 1/2 = perspective variants (`PerspectiveCameraType` /
+  `PerspectiveWithOrthoFacesCameraType`). `Viewport.saveAsImageFile(path, width, height) -> bool`
+  re-renders the viewport to a PNG/etc. file at the given pixel size.
+- **Setting `camera.viewOrientation` does NOT reliably move the camera's eye/target in this API flow**
+  (confirmed live: assigning `FrontViewOrientation` left the eye sitting on the previous isometric
+  vector). The reliable path is to set `eye`/`target`/`upVector` explicitly to exact world-axis unit
+  vectors, then assign the camera back to the viewport once (a single move, not a partial one) and call
+  `.fit()`. Convention (Fusion default, Z up): FRONT looks along +Y, TOP along -Z, RIGHT along -X.
+  Force `cameraType = OrthographicCameraType` on the 6 true orthographic faces for zero perspective
+  parallax.
+- `Occurrence.isLightBulbOn` / `.isIsolated` / `.isVisible` / `.name` / `.fullPathName` drive
+  isolate/show/hide. **A nested occurrence renders hidden if ANY ancestor occurrence's light bulb is
+  off** — showing a leaf occurrence alone does nothing visible unless its whole `assemblyContext` chain
+  is also lit.
+
+## Section analysis (view_section)
+
+- `Design.analyses.sectionAnalyses.createInput(cutPlaneEntity, distance_cm)` -> `SectionAnalysisInput`
+  (`cutPlaneEntity` = a `ConstructionPlane` or a planar `BRepFace`; distance in CM, positive along the
+  plane normal). `SectionAnalyses.add(input)` -> `SectionAnalysis` (`.flip`, `.isHatchShown`, `.name`,
+  `.deleteMe()`).
+- **Camera-aim convention:** a section keeps the +normal half, with the cut's interior faces toward
+  +normal — so the REVEALING camera position sits on the +normal side (view direction `eye - target`
+  equal to +normal); `flip=true` reverses which side is kept, so the revealing side reverses too.
+  Without aiming the camera this way after a cut, it stays wherever it was — often on the solid (wrong)
+  side, where the model looks uncut.
 
 ## Verifying a new tool
 

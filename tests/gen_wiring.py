@@ -37,13 +37,8 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "docs")
 WIRING_PATH = os.path.join(DOCS_DIR, "tool-wiring.md")
 
-_FAMILY_PREFIXES = [
-    ("model_", "model"), ("surface_", "surface"), ("mesh_", "mesh"), ("sketch_", "sketch"),
-    ("cam_", "cam"), ("assembly_", "assembly"), ("joint_", "joint"), ("design_", "design"),
-    ("doc_", "doc"), ("data_", "data"), ("param_", "param"), ("view_", "view"),
-    ("find_", "find"), ("workspace_", "workspace"), ("appearance_", "appearance"),
-    ("save_", "save"), ("sys_", "sys"),
-]
+from gen_manifest import _FAMILY_PREFIXES  # noqa: E402 - single source for the family map
+
 _DOMAINS = sorted({lab for _, lab in _FAMILY_PREFIXES})
 # sys_capability_map names every family's entry tool by design - a catalog, not a workflow tip.
 _CATALOG = {"sys_capability_map", "sys_find_tool"}
@@ -128,7 +123,8 @@ def _attribute(mod_name, tool_name):
 # string so a reviewer can scan for rot instead of reading 1000 lines.
 _SMELLS = [
     ("war-story", re.compile(r"\b(used to|previously|historically|once advised|copy-pasted|epidemic|"
-                             r"war stor|legacy behaviou?r|we (?:used|had))\b", re.I)),
+                             r"war stor|legacy behaviou?r|we (?:used|had)|the old|before fix|"
+                             r"after fix)\b", re.I)),
     ("cause-guess", re.compile(r"\b(almost always|probably|might be|likely (?:owned|because)|"
                                r"is likely|presumably|i think|we think|seems)\b", re.I)),
     ("hedge", re.compile(r"\b(should (?:probably|maybe)|may or may not|not sure|possibly)\b", re.I)),

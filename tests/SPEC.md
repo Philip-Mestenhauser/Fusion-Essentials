@@ -4,7 +4,52 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 97  |  **Behaviors pinned:** 1877
+**Tools with a test file:** 108  |  **Behaviors pinned:** 2050
+
+## `_cam_common`
+
+> Unit tests for ``_cam_common.py`` -- the shared CAM read logic behind cam_get.
+
+**SetupsCap**
+- under cap untruncated and unchanged
+- at cap truncates and flags
+**ModelListsCap**
+- under cap untruncated
+- at cap truncates and flags
+**OperationsCap**
+- under cap untruncated
+- at cap truncates and flags
+**OperationSummaryStateNaming**
+- operation state 1 is named out of date
+**ReferencesCap**
+- under cap untruncated
+- at cap truncates and flags
+**InvalidationReasons**
+- design changed line is a categorical reason
+- parameter delta line is counted not added as a reason
+- machine changed line sets the flag not a reason
+- noncategorical invalidated line is dropped
+- duplicate reasons are deduped
+- reasons are capped
+- blank message log yields nothing
+**OpPrimaryState**
+- suppressed outranks error generating and state
+- error outranks generating and state
+- generating outranks operation state
+- state 3 is no toolpath
+- state 1 is out of date
+- state 0 is valid
+**Hms**
+- zero seconds
+- formats hours minutes seconds
+- rounds fractional seconds
+- non numeric input falls back to zero
+**MachiningTimeConstants**
+- feed scale is 100 percent not a 0 to 1 fraction
+- rapid feed is 10 58 centimeters per second
+- tool change time is 1 5 seconds
+- total seconds sums across setups
+- setup without a valid toolpath reports an error not a crash
 
 ## `_data_read`
 
@@ -40,6 +85,34 @@ after changing tests._
 **Truncation**
 - whole project truncates at max files
 - recursive field always true for whole project
+
+## `_export`
+
+> Unit tests for ``_export.py`` - the export-to-disk substrate shared by design_export/mesh_export: filename sanitizing, the component-by-name resolver, the file-landed verifier, and the one-file-per-top-level-occurrence split orchestration.
+
+**Sanitize**
+- drops instance suffix
+- keeps safe chars
+- swaps illegal chars
+- empty becomes part
+- all illegal becomes part
+**ComponentByName**
+- finds matching component
+- no match returns none
+- empty component list returns none
+**VerifyWritten**
+- existing nonempty file passes
+- missing file is an error
+- empty file is an error
+**TopLevelOccurrences**
+- lists every occurrence in order
+- no occurrences is empty list
+- unreadable occurrences collection is empty list
+**SplitByOccurrence**
+- one record per occurrence named and extensioned
+- duplicate stems disambiguated
+- failure lands in errors not files
+- empty occurrence list yields nothing
 
 ## `_sketch_detail`
 
@@ -92,10 +165,40 @@ after changing tests._
 - default omits the heavy entity xray
 - default points at the deeper level
 - include entities adds the xray
+**XrayCaps**
+- under cap untruncated and unchanged
+- entities at cap truncates and flags
+- constraints at cap truncates and flags
+- dimensions at cap truncates and flags
+
+## `_view_common`
+
+> Unit tests for ``_view_common.py`` - the shared camera-orientation table for the standard named views. view_screenshot and view_inspect must produce the SAME camera for a given named view even though they consume opposite sign conventions (view_screenshot's look_direction is the negation of view_inspect's view_direction); this pins that relationship so the two can't silently desync.
+
+**ViewDirection**
+- known views return unit vectors
+- unknown view returns none
+- front points toward minus y
+- top points toward plus z
+- right points toward plus x
+**LookDirection**
+- unknown view returns none
+- front looks along plus y
+- known views return unit vectors
+**SignRelationship**
+- look direction is negated view direction for every named view
+**UpVector**
+- unknown view returns none
+- top and bottom use y up
+- faces and isos otherwise use z up
+- up vector is the same for both conventions
+**OrthoFace**
+- six true faces are ortho
+- iso corners and unknown are not ortho
 
 ## `active_component`
 
-> Unit tests for the active-component targeting fix in sketch_core.py + model_extrude.py.
+> Unit tests for active-component targeting in sketch_core.py + model_extrude.py.
 
 **SketchesTargetComponent**
 - uses active component when present
@@ -137,6 +240,9 @@ after changing tests._
 - no base appearance errors
 - component with no bodies errors
 - no editable color property errors
+**PartialFailureComponentBodies**
+- one body fails others still colored and reported
+- all bodies fail returns error
 **ResolveExtra**
 - component target applies to its bodies
 - empty target is whole design
@@ -161,10 +267,11 @@ after changing tests._
 - owning name falls back when parent component name empty
 - self pair note when same occurrence overlaps
 - no design errors
+- areCoincidentFacesIncluded failure surfaces as error
 
 ## `assembly_joints_advanced`
 
-> Unit tests for ``joints_advanced.py`` — assembly_capture_position, joint_create_as_built, assembly_constrain.
+> Unit tests for ``assembly_joints_advanced.py`` - assembly_capture_position, joint_create_as_built, assembly_constrain.
 
 **CapturePosition**
 - capture when pending
@@ -195,6 +302,7 @@ after changing tests._
 **ConstraintValueEncoding**
 - offset scaled to cm
 - offset inch scaling
+- unknown units errors not silently treated as mm
 - angle uses deg string not offset
 - zero offset is real zero
 
@@ -226,10 +334,16 @@ after changing tests._
 - no stale flag when timeline also shows the error
 - timeline problem surfaced
 - health message deduped
+**Caps**
+- occurrences under cap untruncated and unchanged
+- occurrences at cap truncates and flags
+- joints under cap untruncated and unchanged
+- joints at cap truncates and flags
+- default caps are generous enough for a normal model
 
 ## `assembly_transform`
 
-> Unit tests for ``assembly.py`` â€” occurrence ground/move + rigid group.
+> Unit tests for ``assembly_transform.py`` - occurrence ground/move + rigid group.
 
 **Ground**
 - lock to parent
@@ -263,6 +377,23 @@ after changing tests._
 - list with blank entries filtered
 **MoveNote**
 - jointed move note differs from free move
+
+## `cam_compare`
+
+> Unit tests for ``cam_compare.py`` -- cam_compare_operations, the diff over two CAM operations' parameters. Covers the diff logic (same vs differing parameters, not-present-on-one-side) and the bounded-read cap on 'differences'.
+
+**Guards**
+- missing operation names refused
+- no cam data errors
+- operation not found errors
+**DiffLogic**
+- matching parameters are not differences
+- differing value reported on both sides
+- parameter only on one side reported as not present
+- reports tool descriptions
+**Caps**
+- under cap untruncated and unchanged
+- at cap truncates and flags
 
 ## `cam_create_operation`
 
@@ -345,6 +476,10 @@ after changing tests._
 - move ops into folder
 - move unknown operation
 - move requires ops and folder
+- folder into folder move resolves
+**MoveRefused**
+- moveinto false surfaces as an error not a silent success
+- moves completed before a refusal are reported and kept
 
 ## `cam_edit_operation`
 
@@ -366,6 +501,7 @@ after changing tests._
 **FindOperation**
 - falls back to allOperations when operations missing
 - unknown operation lists available names
+- operation nested in a folder resolves
 
 ## `cam_edit_setup`
 
@@ -406,6 +542,9 @@ after changing tests._
 - create from type
 - create with description override and holder
 - create with presets
+- preset add failure errors not silent skip
+- missing diameter param errors not silent drop
+- diameter setter raise propagates
 - unknown from type errors before adding
 - entry needs type or ref
 **Remove**
@@ -569,6 +708,38 @@ after changing tests._
 - comment and name both set
 - uneditable name aborts before any write
 
+## `cam_show_toolpath`
+
+> Unit tests for ``cam_show_toolpath.py`` — CAM toolpath display control.
+
+**Guards**
+- unknown action errors
+- no active document
+**List**
+- reports every op and state
+**Isolate**
+- shows only target
+- substring match when no exact
+- exact beats substring
+- unmatched operation errors
+**ShowHide**
+- show turns on
+- hide turns off
+- show on pathless op warns
+- missing operation arg errors
+**HideAll**
+- hides only ops with toolpaths
+**ShowFolder**
+- shows named setup only
+- unknown folder errors
+- missing folder arg errors
+- show folder skips pathless ops
+- show folder matches camfolder child
+**Fit**
+- show with fit applies the fit to the camera
+- show without fit leaves the camera alone
+- fit api refusal raises not false success
+
 ## `cam_templates`
 
 > Unit tests for ``cam_templates.py`` navigation logic.
@@ -594,6 +765,9 @@ after changing tests._
 - missing operations list
 - setup not found lists available
 - missing operations named in error
+**SaveTemplateRename**
+- rename failure propagates
+- rename succeeds reports correct name
 
 ## `cold_start_onboarding`
 
@@ -626,6 +800,25 @@ after changing tests._
 **TargetComponent**
 - returns active component when set
 - falls back to root when no active
+**CmToUnit**
+- is the inverse of unit to cm
+- mm is ten per cm
+**Ptxyz**
+- scales and rounds
+- none point is none
+**TargetSketch**
+- named sketch found
+- named sketch not found
+- no name returns most recent
+- no name no sketches is none
+**ResolveEntityRef**
+- resolves line by index
+- resolves point by index
+- bad type is none
+- out of range is none
+- malformed ref is none
+**Operations**
+- maps every verb to a feature operation attribute name
 
 ## `data_get`
 
@@ -643,7 +836,7 @@ after changing tests._
 
 ## `data_management`
 
-> Unit tests for the former ``data_management`` tools — pure string/tree logic + handler guards.
+> Unit tests for the cloud data-model tools' shared string/tree logic + handler guards.
 
 **SplitPath**
 - empty is no segments
@@ -672,7 +865,8 @@ after changing tests._
 - close named
 - close all
 - unmatched name errors
-- close failure reported in errors
+- close failure with no successful close is an error
+- close all partial failure reports ok with errors
 **ActivateDocument**
 - activate taken reports true
 - activate async pending reports pending not true
@@ -843,17 +1037,15 @@ after changing tests._
 - no occurrences errors
 - partial failure records failed list
 - all fail exported false
-**Sanitize**
-- drops instance suffix
-- keeps safe chars
-- swaps illegal chars
-- empty becomes part
-- all illegal becomes part
+- execute true but no file written is a split failure
 **ExportOne**
 - stl arg order is geom then path
 - non stl arg order is path then geom
 - execute false is a failure
 - exception captured as error string
+**FileExistenceGate**
+- execute true but no file written is a failure
+- empty file is also a failure
 **ResolveTargetExtra**
 - handle resolving to non body is not found
 - no active design errors
@@ -961,9 +1153,11 @@ after changing tests._
 - activate by occurrence name
 - activate by component name
 - unknown component errors and lists
+- ambiguous name refused not first match
 - activate root via empty
 - activate root falls back to deactivate
 - activate returns false errors
+- deactivate raises surfaces as error
 
 ## `design_ops`
 
@@ -995,10 +1189,14 @@ after changing tests._
 - modified dependency doc keeps its flag
 **Guards**
 - no active document errors
+**Caps**
+- under cap untruncated and unchanged
+- at cap truncates and flags
+- unsaved exceptions computed over the full list even when capped
 
 ## `doc_insert_occurrence`
 
-> Unit tests for ``insert_occurrence.py`` placement transform.
+> Unit tests for ``doc_insert_occurrence.py`` placement transform + occurrence resolution.
 
 **Placement**
 - default identity
@@ -1014,24 +1212,21 @@ after changing tests._
 **B64UrlDecode**
 - roundtrip
 - garbage returns none
-**FindComponent**
-- empty name returns root
-- root name returns root
-- match by occurrence name
-- match by component name
-- unknown returns none
-**FindChildOccurrence**
-- match by occurrence name
-- match by component name
-- no match returns none
+**IntoComponent**
+- empty uses root
+- named occurrence resolves its component
+- unknown occurrence errors
+- ambiguous into component refused not first match
+**RemoveExisting**
+- missing errors
+- removes then inserts
+- delete returns false errors
+- ambiguous remove existing refused
 **HandlerGates**
 - empty document id errors
 - no active design
 - unresolvable document errors
-- component not found errors
-- remove existing missing errors
 - addByInsert returns nothing errors
-- remove existing then insert
 
 ## `doc_lifecycle`
 
@@ -1081,6 +1276,11 @@ after changing tests._
 - parent ref summary empty when no refs
 - parent ref summary lists refs
 - xref summary empty when no children
+**CloseDocument**
+- close active document success
+- close returning false is now an error
+- close all partial failure reports ok with errors
+- no open documents errors
 **NewDocument**
 - creates and reports active
 - add returning nothing is an error
@@ -1105,9 +1305,25 @@ after changing tests._
 - bare open refuses without declaring intent
 - cam flag wins over force
 
+## `doc_update_xref`
+
+> Unit tests for ``doc_update_xref.py`` - refresh out-of-date external references.
+
+**Guards**
+- no active document
+- no refs reports zero
+- name not found lists available
+**UpdateBehavior**
+- updates out of date refs
+- skips up to date refs when flag set
+- force updates up to date when flag false
+- false return from get latest reported as error
+- get latest raises propagates
+- name filter updates only matching
+
 ## `edit_joint`
 
-> Unit tests for ``joint_edit`` — edit an EXISTING joint in place (no remaking).
+> Unit tests for ``joint_edit`` - edit an EXISTING joint in place (no remaking).
 
 **FindAndGuards**
 - unknown joint errors
@@ -1138,13 +1354,21 @@ after changing tests._
 - world axis uses custom construction axis
 - world axis without type reuses current
 - unknown world axis errors
-**RotationDriveRefused**
-- rotation deg is refused with redirect
+**RotationDriveRedirect**
+- rotation deg redirects to joint drive
 **ReselectInputs**
 - reselect joint origin name inputs
 **AutoRecompute**
 - edit runs computeAll
 - reports downstream errors after recompute
+
+## `evergreen_no_baggage`
+
+> Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history or points back at the planning document that produced it (CLAUDE.md "No historical baggage").
+
+**NoHistoricalOrPlanBaggage**
+- no file narrates history or points at a plan
+- allowlist entries still exist and still trip
 
 ## `find_geometry`
 
@@ -1164,6 +1388,13 @@ after changing tests._
 - nested also reachable by local name
 - whole design includes nested and root bodies
 
+## `generated_docs_current`
+
+> Lint: the generated docs (SPEC/MANIFEST/tool-wiring + the CLAUDE.md map) match the live tree.
+
+**GeneratedDocsAreCurrent**
+- generator check passes
+
 ## `handle_resolution_uniform`
 
 > Lint + behavioural anchor: handle resolution is UNIFORM across every InputKind.
@@ -1176,6 +1407,13 @@ after changing tests._
 - body ref
 - plane ref
 - axis ref
+
+## `helper_duplication`
+
+> Lint: a shared helper lives in exactly ONE module - its home (CLAUDE.md "Reuse before you write").
+
+**HelperDefinedOnlyInItsHomeModule**
+- denylisted symbols have exactly one definition
 
 ## `inputs`
 
@@ -1222,6 +1460,7 @@ after changing tests._
 **AxisRef**
 - world axis
 - edge handle axis
+- sketch line handle axis
 - curved edge rejected
 - unknown axis string
 - composite handle resolves via token
@@ -1311,6 +1550,7 @@ after changing tests._
 - body by name
 - allow restricts kind
 - unresolvable errors
+- ambiguous occurrence name errors with candidates
 
 ## `joint_at_geometry`
 
@@ -1336,13 +1576,13 @@ after changing tests._
 - slider forced world axis
 - cylindrical forced world axis
 - auto axis with no geometry axis falls back to world z
-- unknown axis keyword defaults to world z
+- unknown axis keyword errors
 - circular edge is an axis entity for auto
 - motion setter failure reports error
 
 ## `joint_create_edit`
 
-> Unit tests for ``joint.py`` pure logic.
+> Unit tests for ``joint_create_edit.py`` pure logic.
 
 **FindJointOrigin**
 - empty name returns none
@@ -1353,6 +1593,8 @@ after changing tests._
 - rigid
 - slider uses axis index
 - unsupported type reports error
+**EditRotationRedirect**
+- rotation deg redirects to joint drive
 **ApplyLimits**
 - rotation in radians
 - linear in cm
@@ -1411,7 +1653,7 @@ after changing tests._
 
 ## `joint_create_origin`
 
-> Unit tests for ``joint_origin.py`` pure logic.
+> Unit tests for ``joint_create_origin.py``.
 
 **Vec**
 - rounds components
@@ -1430,6 +1672,17 @@ after changing tests._
 - edge uses createByCurve
 - vertex uses createByPoint
 - bad geometry handle errors
+**HandlerGuards**
+- no active design errors
+- unknown anchor errors
+- unknown target errors
+- unknown keypoint errors
+- unknown units errors
+**HandlerCoordinateAnchor**
+- coordinates at scales by the unit factor
+- target origin ignores xyz and reports zero location
+- creates joint origin and reports frame axes
+- custom name is applied to the new joint origin
 
 ## `joint_drive`
 
@@ -1461,7 +1714,9 @@ after changing tests._
 > Unit tests for joint_motion_link — couple two joints with a ratio (the Motion Link command).
 
 **FindJoint**
-- exact then case insensitive
+- finds root joint by exact name
+- finds as built joint
+- unknown name returns none
 **HandlerGuards**
 - requires both names
 - rejects same joint
@@ -1480,7 +1735,7 @@ after changing tests._
 
 ## `joint_snaps`
 
-> Unit tests for the matured ``joint.py`` autonomous geometry-snap resolver.
+> Unit tests for ``joint_create_edit.py``'s autonomous geometry-snap resolver.
 
 **ParseSnap**
 - plain name is joint origin
@@ -1575,6 +1830,7 @@ after changing tests._
 - missing features collection errors
 - create input none errors
 - create input raise surfaces
+- none feature with zero face groups is a failure
 **PlaneCut**
 - trim with construction plane handle
 - each cut type resolves enum
@@ -1656,6 +1912,8 @@ after changing tests._
 - named component scopes to that component
 - unknown component name errors
 - dedup same mesh listed once
+- under cap untruncated and unchanged
+- at cap truncates and flags
 **MeshMeasure**
 - measures a mesh body
 - non watertight carries warning
@@ -1729,6 +1987,7 @@ after changing tests._
 - spacing inches scaled to cm
 - zero spacing not set and reported zero
 - unknown units errors
+- spacing setter raise surfaces as error
 
 ## `model_combine`
 
@@ -1925,6 +2184,7 @@ after changing tests._
 - unknown fastener size errors
 - unknown fastener type errors
 - bad fit errors
+- set to clearance hole failure propagates
 - counterbore with fastener keeps counterbore
 
 ## `model_inspect`
@@ -1975,6 +2235,7 @@ after changing tests._
 - mirror across xz
 - multiple result bodies collected
 - zero result bodies is empty list
+- iscombine raise surfaces as error
 
 ## `model_pattern`
 
@@ -2031,6 +2292,14 @@ after changing tests._
 - two sided asymmetric
 - fake rejects the nonexistent method name
 - second angle ignored when symmetric
+
+## `no_first_match_resolvers`
+
+> Lint: the substring-first-match smell is banned across EVERY tool module, not just the ones already fixed (see ``test_occurrence_ref_lint.py`` for the resolver this smell should route through instead).
+
+**NoFirstMatchResolverAnywhere**
+- no tool hand rolls a substring name match
+- allowlist entries still exist and still trip the smell
 
 ## `occurrence_ref_lint`
 
@@ -2155,37 +2424,6 @@ after changing tests._
 **RoundTrip**
 - quote then unquote recovers text
 
-## `show_toolpath`
-
-> Unit tests for ``cam_show_toolpath.py`` — CAM toolpath display control.
-
-**Guards**
-- unknown action errors
-- no active document
-**List**
-- reports every op and state
-**Isolate**
-- shows only target
-- substring match when no exact
-- exact beats substring
-- unmatched operation errors
-**ShowHide**
-- show turns on
-- hide turns off
-- show on pathless op warns
-- missing operation arg errors
-**HideAll**
-- hides only ops with toolpaths
-**ShowFolder**
-- shows named setup only
-- unknown folder errors
-- missing folder arg errors
-- show folder skips pathless ops
-- show folder matches camfolder child
-**Fit**
-- show with fit reports fitted
-- show without fit does not fit
-
 ## `sketch_constrain`
 
 > Unit tests for ``sketch_constrain.py`` — apply geometric constraints to sketch entities.
@@ -2261,6 +2499,11 @@ after changing tests._
 - too few points
 - malformed pair
 - not a list
+**ClosedPathConstraintHonesty**
+- addCoincident failure surfaces as error
+- addCoincident success still closes the loop
+**MarkConstructionHonesty**
+- setattr failure propagates
 **Polyline**
 - open polyline segment count
 - closed path adds closing segment
@@ -2307,7 +2550,7 @@ after changing tests._
 
 ## `sketch_get_merge`
 
-> Unit tests for the merged sketch_get read tool (chunk B of the refactor).
+> Unit tests for sketch_get's routing between its two depths.
 
 **SketchGetRouting**
 - no name lists summary
@@ -2342,6 +2585,7 @@ after changing tests._
 - recompute skipped in direct mode
 - set failure is reported
 - max cap limits changes
+- truncated is false when under the cap
 - none text errors
 **Create**
 - creates text with scaled height
@@ -2353,7 +2597,7 @@ after changing tests._
 
 ## `sketch_text_create`
 
-> Unit tests for ``set_sketch_text.py`` CREATE path — make new sketch text from scratch.
+> Unit tests for ``sketch_set_text.py`` CREATE path - make new sketch text from scratch.
 
 **CreateText**
 - creates text in named sketch
@@ -2390,6 +2634,7 @@ after changing tests._
 - boundaries reports per loop failure without aborting
 - neither boundary nor boundaries errors
 - unknown continuity rejected
+- continuity set failure surfaces as error
 - continuity tangent set on input
 - boundaries all fail reports zero patched
 
@@ -2449,6 +2694,7 @@ after changing tests._
 - fewer than two rejected
 - tolerance scaled to cm
 - default tolerance when omitted
+- default tolerance reported in caller units not raw cm
 - unknown units rejected
 - unknown operation rejected
 - became solid false when only some result bodies closed
@@ -2538,6 +2784,17 @@ after changing tests._
 - include kinds false omits them
 - kinds note points to convention
 
+## `sys_reload_addin`
+
+> Unit tests for ``sys_reload_addin._purge_addin_modules`` -- the sys.modules cache-bust that lets a reload re-import EDITED files instead of handing back the stale cached objects. The only pure logic here is which module names it purges vs keeps, by comparing each module's __file__ against the add-in's root folder; that decision is exercised directly against the real ``sys.modules`` dict via ``monkeypatch.setitem`` (auto-restored, so the test can't leak a fake module entry into the rest of the suite).
+
+**PurgeAddinModules**
+- purges a module whose file is under the addin root
+- keeps a module whose file is outside the addin root
+- keeps a module with no file attribute
+- skips none entries without raising
+- return value counts only the purged modules
+
 ## `sys_selection`
 
 > Unit tests for the ``sys_selection.py`` MCP tool's pure logic.
@@ -2562,6 +2819,9 @@ after changing tests._
 - require face matches a face
 - require edge flags mismatch when face selected
 - nothing selected is an error
+**SelectionCap**
+- under cap untruncated and unchanged
+- at cap truncates and flags
 
 ## `tier2_misc`
 
@@ -2621,6 +2881,7 @@ after changing tests._
 - hide turns bulb off
 - isolate sets flag
 - isolate requires single match
+- ambiguous substring refused not first match
 - exact name beats substring
 - show lights ancestor chain
 - clear isolation resets all
@@ -2648,15 +2909,17 @@ after changing tests._
 - snapshot then restore puts bulbs back
 - restore reinstates isolation
 - restore counts missing occurrences
+- same named documents do not collide
 
 ## `view_screenshot`
 
-> Unit tests for ``get_screenshot.py`` _isolate_for_fit — the fit_to visibility helper.
+> Unit tests for ``view_screenshot.py`` _isolate_for_fit - the fit_to visibility helper.
 
 **IsolateForFit**
 - hides others and restores
 - substring match
 - no match returns none
+- ambiguous name refused not first match
 - already hidden others not restored on
 **ActiveComponentNote**
 - root active no note
@@ -2683,6 +2946,9 @@ after changing tests._
 - unknown view errors
 - all keyword expands to six orthos
 - only separators falls back to default
+- list input
+- list input all keyword expands
+- empty list falls back to default
 
 ## `view_section`
 
@@ -2732,6 +2998,16 @@ after changing tests._
 **SwitchState**
 - already active does not reactivate
 - activation failure errors
+
+## `wire_ascii`
+
+> Lint: every agent-facing wire string is pure ASCII (CLAUDE.md "Tool descriptions").
+
+**ToolDescriptionsAreAscii**
+- every tool description is ascii
+- every input description is ascii
+**DescriptionConstantsAreAscii**
+- every description constant is ascii
 
 ## `workspace_orient`
 
@@ -2794,6 +3070,7 @@ after changing tests._
 - match by urn proceeds
 - mismatch refuses without calling handler
 - omitted expect document proceeds
+- doc switching write reports the new doc
 **IntegrationThroughItem**
 - write tool gains expect document read does not
 

@@ -1,28 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: CAM folders - interrogate / create / rename, and move operations into them.
-
-  cam_edit_folders(action=list|create|rename|move, setup=..., ...)
-
-Folders organise a setup's operation tree. This tool covers their lifecycle:
-  - list    -> the setup's folders, each with its operation / pattern / subfolder counts
-  - create  -> a new folder ('name') in the setup (CAMFolders.addFolder)
-  - rename  -> rename folder 'folder' to 'new_name'
-  - move    -> move named 'operations' INTO folder 'folder' (OperationBase.moveInto)
-
-Note on PATTERNS (mirror / linear / rotary): the API EXPOSES existing patterns (read + edit their
-parameters via cam_edit_operation, since a pattern has a .parameters collection) but does NOT allow
-CREATING them - operations.add() for a 'pattern' strategy raises "Strategy is not exposed to the API".
-Create patterns in the Manufacture UI; this tool is folders + moving existing operations.
-
-Grounded in adsk.cam (verified live):
-  - Setup.folders (CAMFolders): .count / .item(i) / .itemByName / .addFolder(name) -> CAMFolder
-  - CAMFolder(.name get/set, .operations, .patterns, .folders, .deleteMe())
-  - OperationBase.moveInto(container) -> bool ("works with setups, patterns and folders") - shared by
-    operations / folders / patterns
-Handler runs on the main thread; WRITES CAM data (create/rename/move). 'list' is read-only.
-"""
+"""Manage a CAM setup's folders: list, create, rename, and move operations into them, via
+CAMFolders.addFolder / OperationBase.moveInto. Patterns (mirror/linear/rotary) cannot be created via
+the API - only read and edited; create those in the Manufacture UI."""
 
 import adsk.core
 import adsk.cam
@@ -31,20 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from ._cam_common import get_cam
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("list", "create", "rename", "move")
-
-
-def _get_cam():
-    doc = safe(lambda: app.activeDocument)
-    if not doc:
-        return None, "No active document."
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
-    if not cam:
-        return None, "This document has no CAM (Manufacture) data. Create a setup first (cam_create_setup)."
-    return cam, None
 
 
 def _find_setup(cam, name):
@@ -61,12 +33,31 @@ def _setup_names(cam):
             for i in range(safe(lambda: cam.setups.count, 0) or 0)]
 
 
-def _find_op(setup, name):
-    """Find an operation/folder/pattern by name anywhere in the setup (allOperations is flat)."""
-    ops = safe(lambda: setup.allOperations) or safe(lambda: setup.operations)
+def _walk_container(container, out):
+    """Collect (name, object) for operations + folders + patterns under a container, recursively.
+    allOperations omits folders/patterns, so walk .folders/.patterns explicitly (same pattern as
+    cam_delete/cam_reorder) - a folder-into-folder move needs folders to resolve too."""
+    ops = safe(lambda: container.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
         o = safe(lambda i=i: ops.item(i))
-        if o is not None and safe(lambda o=o: o.name) == name:
+        if o is not None:
+            out.append((safe(lambda o=o: o.name) or "", o))
+    for getter in (lambda: container.folders, lambda: container.patterns):
+        coll = safe(getter)
+        for i in range(safe(lambda: coll.count, 0) or 0):
+            c = safe(lambda i=i: coll.item(i))
+            if c is not None:
+                out.append((safe(lambda c=c: c.name) or "", c))
+                _walk_container(c, out)
+
+
+def _find_op(setup, name):
+    """Find an operation/folder/pattern by name anywhere in the setup tree, including nested folders
+    (allOperations omits folders/patterns entirely, so a folder-into-folder move can't resolve through it)."""
+    named = []
+    _walk_container(setup, named)
+    for nm, o in named:
+        if nm == name:
             return o
     return None
 
@@ -158,7 +149,7 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use one of: {', '.join(_ACTIONS)}.")
 
-    cam, cerr = _get_cam()
+    cam, cerr = get_cam()
     if cerr:
         return error(cerr)
     target = _find_setup(cam, setup)
