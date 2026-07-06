@@ -52,7 +52,9 @@ INSTRUCTIONS = (
     "and workspace_orient (what's in front of you: the active document, its health, contents, and "
     "pointers to the right deep tool). Then drill with the family's tools. Searching by keyword for an "
     "existing capability/input-kind: sys_find_tool. Most reads are RICH: a <domain>_get (cam_get, "
-    "design_get, doc_get, data_get) gives a light default plus include=[...] for depth."
+    "design_get, doc_get, data_get) gives a light default plus include=[...] for depth. Every write tool "
+    "accepts expect_document (a doc name or URN from a prior read): if the active document changed since "
+    "that read, the write is REFUSED as active_document_changed - switch back with doc_activate and retry."
 )
 
 # Header names (Streamable HTTP transport).
