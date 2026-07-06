@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 131  |  **Behaviors pinned:** 2496
+**Tools with a test file:** 132  |  **Behaviors pinned:** 2499
 
 ## `_cam_common`
 
@@ -3512,6 +3512,14 @@ after changing tests._
 - every name is domain verb
 - verb is in the closed set
 - verb kind matches write status
+
+## `version`
+
+> Version story: one version source (version.py), reported on the wire and matched by the changelog.
+
+- version is semver shaped
+- changelog top entry matches version
+- server info version comes from version module
 
 ## `view_inspect`
 

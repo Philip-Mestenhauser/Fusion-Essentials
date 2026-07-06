@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 
 from ....lib import fusion360utils as futil
 from ..mcp_primitives.item import Item
+from ..version import __version__
 from .task_manager import TaskManager
 
 # The MCP path served by Fusion's built-in server; we mirror it so clients
@@ -92,7 +93,7 @@ class SimpleMCPServer:
         self.session_id = uuid.uuid4().hex
         self.tools: Dict[str, Item] = {}
         self.resources: Dict[str, Item] = {}
-        self.server_info = {"name": name, "version": "0.1.0"}
+        self.server_info = {"name": name, "version": __version__}
 
     def register(self, item: Item):
         if not isinstance(item, Item):
@@ -394,7 +395,7 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         # Convenience/diagnostic endpoints (not part of the MCP transport).
         if self.path == '/health':
-            self._send_json({"status": "healthy", "server": self.mcp_server.name})
+            self._send_json({"status": "healthy", "server": self.mcp_server.name, "version": self.mcp_server.server_info["version"]})
             return
         if self.path == '/tools':
             self._send_json(self.mcp_server._handle_tools_list(1))

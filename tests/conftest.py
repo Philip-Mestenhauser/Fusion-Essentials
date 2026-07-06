@@ -200,6 +200,8 @@ def load_mcp_server():
         src = "mcpServer.mcp_primitives" + suffix
         importlib.import_module(src)
         sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.mcp_primitives{suffix}"] = sys.modules[src]
+    importlib.import_module("mcpServer.version")
+    sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.version"] = sys.modules["mcpServer.version"]
 
     server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
     for mod_name in ("task_manager", "mcp_server"):
