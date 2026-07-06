@@ -364,3 +364,145 @@ class TestResolveTargetExtra:
         dx._common.design = lambda: None
         res = dx.handler(format="step", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "no active design" in res["message"].lower()
+
+
+# ── format=dxf (sketch / face-profile 2D export) ──────────────────────────────
+
+class FakeCount:
+    def __init__(self, n=0):
+        self.count = n
+
+
+class FakeSketchCurves:
+    def __init__(self, lines=0, arcs=0, circles=0):
+        self.sketchLines = FakeCount(lines)
+        self.sketchArcs = FakeCount(arcs)
+        self.sketchCircles = FakeCount(circles)
+
+
+class FakeSketch:
+    """Stands in for a Sketch: saveAsDXF writes a stub file (or reports false), deleteMe records
+    that the scratch sketch was removed, project2 grows the line count by 'project_adds'."""
+    def __init__(self, name="Sketch1", lines=0, arcs=0, circles=0, points=0,
+                 save_result=True, delete_result=True, project_adds=1):
+        self.name = name
+        self.sketchCurves = FakeSketchCurves(lines, arcs, circles)
+        self.sketchPoints = FakeCount(points)
+        self._save_result = save_result
+        self._delete_result = delete_result
+        self._project_adds = project_adds
+        self.deleted = False
+        self.saved_path = None
+        self.project_calls = []
+
+    def saveAsDXF(self, path):
+        self.saved_path = path
+        if self._save_result:
+            with open(path, "w") as f:
+                f.write("dxf-stub")
+        return self._save_result
+
+    def deleteMe(self):
+        self.deleted = True
+        return self._delete_result
+
+    def project2(self, entities, is_linked):
+        self.project_calls.append((entities, is_linked))
+        self.sketchCurves.sketchLines.count += self._project_adds
+        return [object()] * self._project_adds
+
+
+class FakeSketchesColl:
+    def __init__(self, sketch):
+        self._sketch = sketch
+        self.added_with = None
+
+    def add(self, face):
+        self.added_with = face
+        return self._sketch
+
+
+class FakeFaceComp:
+    def __init__(self, sketch):
+        self.sketches = FakeSketchesColl(sketch)
+
+
+class FakeFaceBody:
+    def __init__(self, comp):
+        self.parentComponent = comp
+
+
+class FakeFace:
+    def __init__(self, comp):
+        self.body = FakeFaceBody(comp)
+
+
+class TestDxfExport:
+    def test_sketch_happy_path(self, tmp_path, monkeypatch):
+        _install()
+        sk = FakeSketch(lines=2)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
+                                   file_path=str(tmp_path / "p")))
+        assert out["exported"] is True
+        assert out["format"] == "dxf"
+        assert out["file_path"].lower().endswith(".dxf")
+        assert sk.saved_path == out["file_path"]
+
+    def test_missing_sketch_and_face_errors(self, tmp_path):
+        _install()
+        res = dx.handler(format="dxf", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "dxf_sketch" in res["message"] and "dxf_face" in res["message"]
+
+    def test_both_sketch_and_face_errors(self, tmp_path):
+        _install()
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_face="H" * 40,
+                          file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "only one" in res["message"].lower()
+
+    def test_empty_sketch_errors(self, tmp_path, monkeypatch):
+        _install()
+        sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "empty" in res["message"].lower()
+
+    def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
+        _install()
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: None)
+        monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
+        res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "Nope" in res["message"]
+
+    def test_face_happy_path_cleans_up_scratch_sketch(self, tmp_path, monkeypatch):
+        _install()
+        sk = FakeSketch(lines=0, project_adds=3)
+        comp = FakeFaceComp(sk)
+        face = FakeFace(comp)
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                   file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert comp.sketches.added_with is face
+        assert sk.deleted is True
+        assert "removed" in out["note"].lower()
+
+    def test_face_no_geometry_errors_and_cleans_up(self, tmp_path, monkeypatch):
+        _install()
+        sk = FakeSketch(lines=0, project_adds=0)
+        comp = FakeFaceComp(sk)
+        face = FakeFace(comp)
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        res = dx.handler(format="dxf", dxf_face="H" * 40, file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "nothing to write" in res["message"].lower()
+        assert sk.deleted is True
+
+    def test_extension_auto_appended(self, tmp_path, monkeypatch):
+        _install()
+        sk = FakeSketch(lines=1)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
+                                   file_path=str(tmp_path / "noext")))
+        assert out["file_path"].lower().endswith(".dxf")

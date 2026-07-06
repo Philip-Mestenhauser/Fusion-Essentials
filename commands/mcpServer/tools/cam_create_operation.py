@@ -128,15 +128,21 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     except Exception as e:
         return error(f"Could not assign the tool to a '{strategy}' operation: {e}")
 
+    ops_before = safe(lambda: target.operations.count)
     op = target.operations.add(opin)        # MUTATION
     if not op:
         return error("operations.add returned no operation.")
+    ops_after = safe(lambda: target.operations.count)
+    if ops_before is not None and ops_after is not None and ops_after <= ops_before:
+        return error(f"operations.add returned '{safe(lambda: op.name)}' but the setup's operation "
+                     f"count did not increase ({ops_before} before, {ops_after} after) - the "
+                     "operation did not land.")
 
     result = {
         "operation": safe(lambda: op.name),
         "setup": setup,
         "strategy": strategy,
-        "generated": False,
+        "generation_started": False,
         "note": "Operation created. " + ("" if generate else
                 "Pass generate=true (or call cam_generate) to compute the toolpath."),
     }
@@ -147,15 +153,16 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             cam.generateToolpath(op)         # async future; the op updates in place
         except Exception as e:
             gerr = str(e)
-        result["generated"] = gerr is None
-        result["has_toolpath"] = bool(safe(lambda: op.hasToolpath, False))
-        result["toolpath_valid"] = bool(safe(lambda: op.isToolpathValid, False))
+        result["generation_started"] = gerr is None
         if gerr:
             result["generate_error"] = gerr
             result["note"] = f"Operation created but toolpath generation errored: {gerr}"
         else:
-            result["note"] = ("Operation created and toolpath generation started (async). Confirm with "
-                              "cam_get(include=['operations']) (hasToolpath / isToolpathValid).")
+            # hasToolpath/isToolpathValid read this early are STALE (the generation is async) -
+            # reporting them here would report a false negative, so they are deliberately omitted.
+            result["note"] = ("Operation created; toolpath generation started (async). Confirm with "
+                              "cam_get(include=['operations']) (hasToolpath / isToolpathValid) once "
+                              "generation completes.")
     return ok(result)
 
 

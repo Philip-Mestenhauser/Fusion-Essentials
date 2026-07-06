@@ -9,7 +9,8 @@ every consumer that reads it. See ``tools/CLAUDE.md`` and ``CONTRIBUTING.md`` ("
 next call needs") for the full rationale."""
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "RETURNS kinds (ReturnsHandle/Urn/Name/Value) - declare a tool's stable outputs once"
+MAP_BLURB = ("RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable "
+             "outputs once")
 
 
 class OutputKind:
@@ -89,6 +90,38 @@ class ReturnsValue(OutputKind):
 
     def __init__(self, key, label, **kw):
         super().__init__(key, label, stable=False, **kw)
+
+
+class ReturnsVerdict(OutputKind):
+    """The ASSERTION-READ contract: a named check that returns a boolean verdict WITH the evidence
+    that justifies it - never a bare boolean. One shape across every assertion read
+    (model_measure_relation, assembly_interference): 'relation' names the check, 'passed' is the
+    verdict, 'measured' holds the observed numbers, 'tolerance_used' what it was judged against.
+    assert_present enforces ALL FOUR keys, that 'passed' is a real bool, and - when the declaring
+    tool names its relations - that 'relation' is one of them."""
+
+    KEYS = ("relation", "passed", "measured", "tolerance_used")
+
+    def __init__(self, relations=(), **kw):
+        super().__init__(
+            "passed",
+            "the pass/fail verdict, always beside its evidence (relation / passed / measured / "
+            "tolerance_used)",
+            stable=False, **kw)
+        self.relations = tuple(relations)
+
+    def assert_present(self, payload) -> str:
+        if not isinstance(payload, dict):
+            return "verdict payload is not a dict"
+        missing = [k for k in self.KEYS if k not in payload]
+        if missing:
+            return "verdict contract keys missing: " + ", ".join(missing)
+        if not isinstance(payload["passed"], bool):
+            return f"verdict 'passed' must be a real boolean, got {type(payload['passed']).__name__}"
+        if self.relations and payload.get("relation") not in self.relations:
+            return (f"verdict 'relation' is '{payload.get('relation')}' - not one of the declared: "
+                    + ", ".join(self.relations))
+        return ""
 
 
 # ── prose generation (mirrors _inputs.contract_block) ─────────────────────────

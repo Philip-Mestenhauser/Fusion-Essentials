@@ -233,6 +233,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         return error(f"Template '{safe(lambda: template.name)}' is not in a valid state to apply.")
 
     # Build the input + apply.
+    ops_before = safe(lambda: target_setup.allOperations.count)
     try:
         ti = adsk.cam.CreateFromCAMTemplateInput.create()
         ti.camTemplate = template
@@ -243,6 +244,11 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         created = target_setup.createFromCAMTemplate2(ti)
     except Exception as e:
         return error(f"Failed to apply template: {e}")
+    ops_after = safe(lambda: target_setup.allOperations.count)
+    if ops_before is not None and ops_after is not None and ops_after <= ops_before:
+        return error(f"createFromCAMTemplate2 ran but the setup's operation count did not increase "
+                     f"({ops_before} before and after) - no operations were added. The template may "
+                     "not be compatible with this setup.")
 
     created_names = []
     try:
@@ -258,6 +264,8 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         "generation_mode": (generate or "skip"),
         "created_count": len(created_names),
         "created_operations": created_names,
+        "operations_added": ((ops_after - ops_before)
+                             if (ops_before is not None and ops_after is not None) else None),
         "note": ("Operations were added to the setup. If generation_mode was 'skip', "
             "the toolpaths are not yet generated. Use cam_get(include=['operations']) or "
             "view_screenshot to verify, and cam_compare_operations to check settings."),
@@ -456,6 +464,9 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         return error(f"Failed to save the template: {e}")
     if not new_url:
         return error("importTemplate returned no URL (save may have failed).")
+    if safe(lambda: lib.templateAtURL(new_url)) is None:
+        return error("importTemplate returned a URL but no template loads back from it - the save "
+                     "did not land.")
 
     return ok({
         "saved": True,

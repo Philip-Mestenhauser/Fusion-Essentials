@@ -274,6 +274,32 @@ class TestAlgorithm:
         assert feats.last_input.algorithm == "LEGACY"
 
 
+# ── the no-op gate: unchanged body count + unchanged target triangles = error ────────────────────
+
+class TestNoOpGate:
+    def test_unchanged_target_bites(self):
+        # add() returned (non-parametric None) but the target's triangle count AND the component's
+        # mesh body count are identical - nothing was combined, so ok would be a false success.
+        des, feats, target, tool_a, _ = _build(none_feature=True)
+        target.displayMesh = type("TM", (), {"triangleCount": 1000})()
+        res = mc.handler(target="T", tools=["A"], operation="cut")
+        assert res["isError"] is True
+        assert "unchanged" in res["message"]
+
+    def test_target_triangle_change_passes(self):
+        des, feats, target, tool_a, _ = _build(none_feature=True)
+        target.displayMesh = type("TM", (), {"triangleCount": 1000})()
+        feats_add = feats.add
+
+        def add_and_mutate(inp):
+            target.displayMesh.triangleCount = 1600     # the cut actually landed in the target
+            return feats_add(inp)
+
+        feats.add = add_and_mutate
+        out = _payload(mc.handler(target="T", tools=["A"], operation="cut"))
+        assert out["combined"] is True
+
+
 # ── the tools LIST rejects a BRep handle (redirect) BEFORE any mutation ──────────────────────────
 
 class TestMeshKindEnforcement:

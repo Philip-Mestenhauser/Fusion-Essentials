@@ -161,7 +161,7 @@ class TestCreate:
         assert op.strategy == "face"
         assert op.tool is not None and op.tool.desc == "12mm Flat Endmill"
         assert out["operation"] == "Op1" and out["strategy"] == "face"
-        assert out["generated"] is False
+        assert out["generation_started"] is False
         # not generated -> no toolpath yet
         assert len(cam.generated) == 0
 
@@ -169,8 +169,10 @@ class TestCreate:
         cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="adaptive",
                                    tool_library_url="u", tool_index=1, generate=True))
-        assert out["generated"] is True
-        assert out["has_toolpath"] is True and out["toolpath_valid"] is True
+        assert out["generation_started"] is True
+        # generation is ASYNC: hasToolpath read at launch time is stale, so the payload must NOT
+        # carry it (a false negative would send the agent chasing a phantom failure)
+        assert "has_toolpath" not in out and "toolpath_valid" not in out
         assert len(cam.generated) == 1
 
     def test_default_generates(self, monkeypatch):
@@ -178,7 +180,7 @@ class TestCreate:
         cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_library_url="u", tool_index=0))
-        assert out["generated"] is True and len(cam.generated) == 1
+        assert out["generation_started"] is True and len(cam.generated) == 1
 
 
 # ── document-library tool reference (the scriptless-CAM-chain fix) ───────────

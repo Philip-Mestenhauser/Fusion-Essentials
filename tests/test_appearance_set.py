@@ -244,6 +244,18 @@ class TestApply:
         cp = body.appearance.appearanceProperties.item(0)
         assert cp.value == ("color", 30, 142, 62, 255)
 
+    def test_stuck_appearance_bites(self):
+        # the assignment raises nothing but the body still reads a different appearance -> error
+        stuck = FakeAppearance("OldPaint")
+        body = FakeBody("Body1")
+        body.__class__ = type("StuckBody", (FakeBody,), {
+            "appearance": property(lambda self: stuck, lambda self, v: None)})
+        root = FakeRoot(bodies=[body])
+        _install(root)
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+
     def test_color_a_single_face_by_handle(self):
         # a find_geometry FACE handle colors just that one face (BRepFace.appearance), not the body
         face = FakeFace()

@@ -116,10 +116,12 @@ class TestInterferenceHandler:
         _install(monkeypatch, [FakeOcc("Wheel:1"), FakeOcc("Fork:1")],
                  [FakeResult(wheel, fork, 7.7)])
         out = _payload(ai.handler())
-        assert out["clear"] is False and out["interference_count"] == 1
-        pair = out["interferences"][0]
+        assert out["passed"] is False and out["measured"]["interference_count"] == 1
+        assert out["relation"] == "interference_free"
+        pair = out["measured"]["interferences"][0]
         assert {pair["occurrence_one"], pair["occurrence_two"]} == {"Wheel:1", "Fork:1"}
         assert pair["overlap_volume_cm3"] == 7.7
+        assert ai.RETURNS[0].assert_present(out) == ""       # the verdict contract holds
 
     def test_aggregates_volume_per_pair(self, monkeypatch):
         # two interference bodies between the SAME pair -> summed into one entry
@@ -127,18 +129,19 @@ class TestInterferenceHandler:
         _install(monkeypatch, [FakeOcc("Crank:1"), FakeOcc("Wheel:1")],
                  [FakeResult(a, b, 3.0), FakeResult(a, b, 2.0)])
         out = _payload(ai.handler())
-        assert out["interference_count"] == 1
-        assert out["interferences"][0]["overlap_volume_cm3"] == 5.0
+        assert out["measured"]["interference_count"] == 1
+        assert out["measured"]["interferences"][0]["overlap_volume_cm3"] == 5.0
 
     def test_clear_when_results_empty(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("A:1"), FakeOcc("B:1")], [])
         out = _payload(ai.handler())
-        assert out["clear"] is True and out["interference_count"] == 0
+        assert out["passed"] is True and out["measured"]["interference_count"] == 0
 
     def test_short_circuits_under_two_occurrences(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("Solo:1")], [FakeResult(FakeBody("x"), FakeBody("y"), 1.0)])
         out = _payload(ai.handler())
-        assert out["clear"] is True and "Fewer than 2" in out["note"]
+        assert out["passed"] is True and "Fewer than 2" in out["note"]
+        assert ai.RETURNS[0].assert_present(out) == ""       # the early-out keeps the contract too
 
     def test_pairs_sorted_by_descending_volume(self, monkeypatch):
         # three distinct pairs with different overlap volumes -> reported largest-overlap first.
@@ -147,20 +150,20 @@ class TestInterferenceHandler:
         _install(monkeypatch, [FakeOcc("A:1"), FakeOcc("B:1"), FakeOcc("C:1"), FakeOcc("D:1")],
                  [FakeResult(a, b, 1.0), FakeResult(c, d, 9.0), FakeResult(a, c, 4.0)])
         out = _payload(ai.handler())
-        vols = [p["overlap_volume_cm3"] for p in out["interferences"]]
+        vols = [p["overlap_volume_cm3"] for p in out["measured"]["interferences"]]
         assert vols == [9.0, 4.0, 1.0]            # strictly descending
-        assert out["interference_count"] == 3
+        assert out["measured"]["interference_count"] == 3
 
     def test_coincident_flag_echoed(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("A:1"), FakeOcc("B:1")], [])
         default = _payload(ai.handler())
-        assert default["coincident_faces_included"] is False
+        assert default["tolerance_used"]["coincident_faces_included"] is False
         incl = _payload(ai.handler(include_coincident_faces=True))
-        assert incl["coincident_faces_included"] is True
+        assert incl["tolerance_used"]["coincident_faces_included"] is True
 
     def test_occurrences_checked_count(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("A:1"), FakeOcc("B:1"), FakeOcc("C:1")], [])
-        assert _payload(ai.handler())["occurrences_checked"] == 3
+        assert _payload(ai.handler())["measured"]["occurrences_checked"] == 3
 
     def test_owning_name_falls_back_when_parent_component_name_empty(self):
         # parentComponent present but its name is falsy -> use assemblyContext, then body name.
@@ -173,7 +176,7 @@ class TestInterferenceHandler:
         a, b = FakeBody("x", "Wheel:1"), FakeBody("y", "Wheel:1")
         _install(monkeypatch, [FakeOcc("Wheel:1"), FakeOcc("Other:1")], [FakeResult(a, b, 2.0)])
         out = _payload(ai.handler())
-        pair = out["interferences"][0]
+        pair = out["measured"]["interferences"][0]
         assert pair["occurrence_one"] == "Wheel:1" and pair["occurrence_two"] == "Wheel:1"
 
     def test_no_design_errors(self, monkeypatch):

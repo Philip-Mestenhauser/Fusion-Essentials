@@ -14,8 +14,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from . import _outputs
 
 app = adsk.core.Application.get()
+
+# What this tool RETURNS: the verdict contract - relation/passed/measured/tolerance_used, enforced.
+RETURNS = [_outputs.ReturnsVerdict(relations=("interference_free",))]
 
 
 def _owning_occurrence_name(body):
@@ -54,8 +58,9 @@ def handler(include_coincident_faces: bool = False) -> dict:
         occs.add(o)
         n_occ += 1
     if n_occ < 2:
-        return ok({"clear": True, "interference_count": 0, "occurrences_checked": n_occ,
-        "interferences": [],
+        return ok({"relation": "interference_free", "passed": True,
+        "measured": {"interference_count": 0, "occurrences_checked": n_occ, "interferences": []},
+        "tolerance_used": {"coincident_faces_included": bool(include_coincident_faces)},
         "note": "Fewer than 2 occurrences - nothing to check for interference."})
 
     try:
@@ -86,11 +91,11 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
     clear = len(items) == 0
     return ok({
-        "clear": clear,
-        "interference_count": len(items),
-        "occurrences_checked": n_occ,
-        "coincident_faces_included": bool(include_coincident_faces),
-    "interferences": items,
+        "relation": "interference_free",
+        "passed": clear,
+        "measured": {"interference_count": len(items), "occurrences_checked": n_occ,
+                     "interferences": items},
+        "tolerance_used": {"coincident_faces_included": bool(include_coincident_faces)},
     "note": ("No interference - every part fits." if clear else
                  f"{len(items)} interfering pair(s) - parts overlap in space. Each lists the two "
                  "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
@@ -100,10 +105,11 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
 TOOL_DESCRIPTION = (
     "Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each "
-    "interfering PAIR by occurrence name with its overlap volume (cm^3). The physical-fit 'check my "
-    "work' tool (assembly_probe checks joint wiring; this checks that nothing clips through anything). "
-    "Coincident/flush faces are excluded by default (set include_coincident_faces=true to include "
-    "intended mates). Returns clear=true when nothing interferes."
+    "interfering PAIR by occurrence name with its overlap volume (cm^3), in measured.interferences. "
+    "The physical-fit 'check my work' tool (assembly_probe checks joint wiring; this checks that "
+    "nothing clips through anything). Coincident/flush faces are excluded by default (set "
+    "include_coincident_faces=true to include intended mates). passed=true when nothing interferes.\n"
+    + _outputs.produces_block(RETURNS)
 )
 
 interference_tool = (

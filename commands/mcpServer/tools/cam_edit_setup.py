@@ -29,9 +29,67 @@ _BODY_COLLECTIONS = {
 # strict body-list input kind (handles or names; solid/mesh/surface aware) - reused for all three.
 _BODIES = _inputs.BodyRefList("bodies", required=False)
 
+# Non-network machine library locations searched for a machine by vendor/model (Fusion360 = the
+# bundled sample machines; Local = the user's saved ones). The cloud/network locations are skipped so
+# a headless assignment never blocks on a fetch.
+_MACHINE_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
+
 
 def _object_collection():
     return adsk.core.ObjectCollection.create()
+
+
+def _machine_label(m):
+    """Readable machine label: .description, else 'vendor model'. adsk.cam.Machine has no .name."""
+    if not m:
+        return None
+    desc = safe(lambda: m.description)
+    if desc:
+        return desc
+    label = ((safe(lambda: m.vendor) or "") + " " + (safe(lambda: m.model) or "")).strip()
+    return label or "(unnamed machine)"
+
+
+def _resolve_machine(machine):
+    """Resolve a 'machine' string (vendor|model, vendor/model, or a bare model) to a single Machine
+    from the machine library. Returns (machine, label, None), or (None, None, error) when nothing
+    matches or the match is ambiguous - it refuses to guess between two machines."""
+    machine = (machine or "").strip()
+    sep = "|" if "|" in machine else ("/" if "/" in machine else "")
+    if sep:
+        vendor, model = (p.strip() for p in machine.split(sep, 1))
+    else:
+        vendor, model = "", machine
+    try:
+        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    except Exception as e:
+        return None, None, f"Could not access the machine library: {e}"
+
+    found, labels = [], []
+    for loc_name in _MACHINE_LOCATIONS:
+        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
+        if loc is None:
+            continue
+        try:
+            q = lib.createQuery(loc, vendor, model)
+            matches = q.execute() or []
+        except Exception:
+            continue
+        for m in matches:
+            lb = _machine_label(m)
+            if lb not in labels:      # dedupe identical machines that appear in more than one location
+                labels.append(lb)
+                found.append(m)
+        if found:
+            break                     # prefer the first location that yields any match
+    if not found:
+        return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') in the "
+                            "Local or Fusion360 machine libraries. Use 'vendor|model' from the machine "
+                            "you see in the Manufacture machine library.")
+    if len(found) > 1:
+        return None, None, (f"Ambiguous machine '{machine}' - {len(found)} matches: "
+                            f"{', '.join(labels[:8])}. Narrow it with 'vendor|model'.")
+    return found[0], labels[0], None
 
 
 def _resolve_bodies(names):
@@ -54,12 +112,15 @@ def _setup_names(cam):
             for i in range(safe(lambda: cam.setups.count, 0) or 0)]
 
 
-def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None) -> dict:
-    """Edit a CAM setup's parameters and/or its model/fixture/stock bodies.
+def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None,
+            machine: str = "") -> dict:
+    """Edit a CAM setup's parameters, its model/fixture/stock bodies, and/or its machine.
 
     setup: setup name (from cam_get). parameters: {name: expression} (or 'name=value,...') - set
     any setup parameter incl. the wcs_* (WCS) and stock* controls. models/fixtures/stock: lists of body
-    handles/names to REPLACE that collection with. Pass what you want to change; omit the rest. WRITES.
+    handles/names to REPLACE that collection with. machine: a machine library entry ('vendor|model')
+    to assign - the setup-level prerequisite for posting. Pass what you want to change; omit the rest.
+    WRITES.
     """
     if not (setup or "").strip():
         return error("Provide 'setup' - the CAM setup name (see cam_get).")
@@ -73,10 +134,11 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
     body_args = {k: v for k, v in (("models", models), ("fixtures", fixtures), ("stock", stock))
                  if v not in (None, "", [])}
+    want_machine = (machine or "").strip()
 
-    if not wanted and not body_args:
-        return error("Nothing to do. Provide 'parameters' {name: expression} and/or "
-                     "'models'/'fixtures'/'stock' body lists.")
+    if not wanted and not body_args and not want_machine:
+        return error("Nothing to do. Provide 'parameters' {name: expression}, "
+                     "'models'/'fixtures'/'stock' body lists, and/or a 'machine'.")
 
     cam, cerr = get_cam()
     if cerr:
@@ -105,6 +167,13 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         if berr:
             return error(f"{arg}: {berr}")
         resolved_bodies[arg] = bodies
+
+    resolved_machine = None
+    if want_machine:
+        m_obj, m_label, m_err = _resolve_machine(want_machine)
+        if m_err:
+            return error(m_err)
+        resolved_machine = (m_obj, m_label)
 
     # ── apply: parameters first, then body collections ──
     changed = []
@@ -137,6 +206,19 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                          "(Fixtures need fixtures enabled; solid stock needs stockMode='SolidStock'.)")
         result[key] = safe(lambda target=target, attr=attr: getattr(target, attr).count, len(bodies))
 
+    if resolved_machine is not None:
+        m_obj, m_label = resolved_machine
+        try:
+            target.machine = m_obj                       # Setup.machine takes a transient copy
+        except Exception as e:
+            return error(f"Could not assign machine '{want_machine}' to setup '{setup}': {e}.")
+        # Read Setup.machine back to CONFIRM the assignment took - a swallowed no-op must not report ok.
+        applied = _machine_label(safe(lambda: target.machine))
+        if not applied or applied != m_label:
+            return error(f"Machine assignment did not take on setup '{setup}': set '{m_label}' but the "
+                         f"setup now reports '{applied}'.")
+        result["machine_set"] = applied
+
     result["note"] = ("Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with "
                       "cam_generate. The WCS is steered via the wcs_* parameters (the matrix itself is "
                       "read-only).")
@@ -149,8 +231,10 @@ TOOL_DESCRIPTION = (
     "to set ANY setup parameter - this is how you configure the WCS (wcs_orientation_mode, wcs_origin_mode, "
     "wcs_origin_boxPoint, wcs_orientation_axisZ/flipZ, ...) and stock size (stockXLow/High, stockZHigh, ...); "
     "the WCS matrix itself is read-only. 'models'/'fixtures'/'stock' = body lists (find_geometry handles or "
-    "names) that REPLACE that collection. Parameters are validated all-before-any (a typo can't half-edit). "
-    "After editing, regenerate toolpaths with cam_generate. WRITES CAM data."
+    "names) that REPLACE that collection. 'machine' = a machine library entry ('vendor|model', e.g. "
+    "'Haas|VF-2') to assign to the setup - the setup-level prerequisite a job needs before posting; it is "
+    "read back to confirm the assignment took. Parameters are validated all-before-any (a typo can't "
+    "half-edit). After editing, regenerate toolpaths with cam_generate. WRITES CAM data."
 )
 
 tool = (
@@ -164,6 +248,8 @@ tool = (
             "description": "Fixture bodies (handles/names) - REPLACES the fixture set."})
     .add_input_property("stock", {"type": "array", "items": {"type": "string"},
             "description": "Solid stock bodies (handles/names) - REPLACES the stock set."})
+    .add_input_property("machine", {"type": "string",
+            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

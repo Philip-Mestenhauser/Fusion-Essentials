@@ -257,13 +257,15 @@ class TestSaveTemplateRename:
         cam = _SaveCAM([_SaveSetup("S", ["Face1"])])
         monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
         lib = SimpleNamespace(urlByLocation=lambda loc: "root://", childFolderURLs=lambda u: [],
-                              importTemplate=lambda t, d: _Url("root://T1.f3dhsm-template"))
+                              importTemplate=lambda t, d: _Url("root://T1.f3dhsm-template"),
+                              templateAtURL=lambda u: _FakeTemplate("T1"))
         monkeypatch.setattr(ct, "_template_library", lambda: (lib, None))
         import adsk.cam
         adsk.cam.Operation.cast = staticmethod(lambda x: x)
         adsk.cam.CAMTemplate.createFromOperations = staticmethod(lambda ops: template_obj)
         adsk.cam.CAMTemplate.cast = staticmethod(
             lambda x: x if isinstance(x, _FakeTemplate) or isinstance(x, _RaiseOnName) else None)
+        return lib
 
     def test_rename_failure_propagates(self, monkeypatch):
         # A read-only .name assignment must raise and propagate out of the handler - a silent
@@ -281,3 +283,13 @@ class TestSaveTemplateRename:
         out = _payload(ct.save_operations_as_template_handler(
             template_name="New Name", operations="Face1", setup="S"))
         assert out["saved"] is True and t.name == "New Name"
+
+    def test_saved_template_that_does_not_load_back_bites(self, monkeypatch):
+        # importTemplate returned a URL but nothing loads back from it -> error, not saved=True
+        t = _FakeTemplate("old")
+        lib = self._wire_full_save(monkeypatch, t)
+        lib.templateAtURL = lambda u: None
+        res = ct.save_operations_as_template_handler(
+            template_name="Ghost", operations="Face1", setup="S")
+        assert res["isError"] is True
+        assert "did not land" in res["message"]

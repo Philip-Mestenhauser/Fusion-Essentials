@@ -73,6 +73,13 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
         return error(f"Failed to create the {op_key} setup: {e}")
     if not setup:
         return error("Setup creation returned nothing.")
+    new_name = safe(lambda: setup.name)
+    if new_name:
+        landed = any(safe(lambda i=i: cam.setups.item(i).name) == new_name
+                     for i in range(safe(lambda: cam.setups.count, 0) or 0))
+        if not landed:
+            return error(f"setups.add returned '{new_name}' but it does not appear when the setups "
+                         "are re-listed - the setup did not land.")
 
     return ok({
         "created": True,

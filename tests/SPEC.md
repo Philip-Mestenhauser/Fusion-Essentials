@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 108  |  **Behaviors pinned:** 2050
+**Tools with a test file:** 126  |  **Behaviors pinned:** 2454
 
 ## `_cam_common`
 
@@ -225,6 +225,7 @@ after changing tests._
 - negative component rejected
 **Apply**
 - color a body by name
+- stuck appearance bites
 - color a single face by handle
 - body handle still colors the body
 - long body name not mistaken for handle
@@ -276,6 +277,7 @@ after changing tests._
 **CapturePosition**
 - capture when pending
 - capture with nothing pending errors
+- phantom capture bites
 - status reports pending and count
 - revert deletes latest snapshot
 - revert with no snapshots errors
@@ -291,6 +293,7 @@ after changing tests._
 - resolves both occurrences
 **AssemblyConstraintSnaps**
 - snap specs resolve and build relationship
+- compute failed constraint bites
 - snap carries offset value
 - unresolvable snap errors
 **MultiRelationshipConstraint**
@@ -326,6 +329,10 @@ after changing tests._
 - include joints false skips
 - as built joints are visible
 - broken as built joint breaks health
+**Orientation**
+- identity rotation reads axis aligned basis
+- 90deg z rotation basis
+- axes omitted when coordinate system unavailable
 **Health**
 - all healthy
 - broken joint surfaced
@@ -348,6 +355,7 @@ after changing tests._
 **Ground**
 - lock to parent
 - unground from parent releases lock
+- stuck flag bites
 - only sets ground to parent
 - no grounded param is rejected by strict schema
 - substring match
@@ -356,6 +364,7 @@ after changing tests._
 - ambiguous name refused not wrong instance
 - exact full path targets the right instance
 **Move**
+- move that does not take bites
 - translate sets transform
 - translation scaled to cm
 - missing occurrence errors
@@ -369,6 +378,7 @@ after changing tests._
 - rotate about edge handle
 - combined rotate and translate preserves pivot
 **RigidGroup**
+- group reporting fewer members bites
 - groups named occurrences
 - include children flag
 - needs at least two
@@ -377,6 +387,46 @@ after changing tests._
 - list with blank entries filtered
 **MoveNote**
 - jointed move note differs from free move
+
+## `assert_kinds`
+
+> Unit tests for ``_assert.py`` - the postcondition kernel (verify-the-effect).
+
+**WrapContract**
+- confirmed effect merges evidence
+- handler values win over evidence
+- hard reason converts ok into error
+- soft reason marks unconfirmed not error
+- error results pass through unverified
+- capture value reaches verify
+- verify crash degrades to unconfirmed never false pass
+- no postconditions returns handler unwrapped
+- wrapper exposes declaration for the lint
+**VersionAdvanced**
+- false success still modified bites
+- real save confirms
+- already current noop skips the check
+**ReferencesFresh**
+- surviving stale reference bites
+- all fresh confirms
+**DeliverablesExist**
+- every listed file is verified
+- one missing listed file bites
+- single file path shape is covered
+- claiming no deliverable at all bites
+- list entry without a path bites
+**FeatureHealthy**
+- healthy added feature confirms with count
+- compute failed feature bites with name and message
+- compute warning is evidence not failure
+- only items added by the call are gated
+- no new timeline items skips silently
+- no timeline design skips silently
+**FileLanded**
+- missing file bites
+- empty file bites
+- real file confirms and supplies size
+- missing path key is named
 
 ## `cam_compare`
 
@@ -423,6 +473,7 @@ after changing tests._
 **OperationType**
 - default is milling
 - turning
+- phantom setup that never lands bites
 - unknown type errors
 **ModelSelection**
 - all root bodies when omitted
@@ -520,6 +571,11 @@ after changing tests._
 - sets models
 - sets fixtures and stock
 - params and bodies together
+**Machine**
+- assigns machine and reads it back
+- unknown machine is error
+- assignment that does not take is error
+- machine counts as something to do
 
 ## `cam_edit_tools`
 
@@ -536,6 +592,7 @@ after changing tests._
 - list libraries when no library given
 **Add**
 - add multiple
+- persist whose url reread disagrees bites
 - add validates all refs before adding
 - add requires refs
 **AddRich**
@@ -558,6 +615,7 @@ after changing tests._
 **CreateLibrary**
 - create empty local
 - create with seeds
+- created library that does not load back bites
 - hub descends to team folder
 - refuses document scope
 - requires name
@@ -583,13 +641,20 @@ after changing tests._
 - skip valid short circuits already valid operation
 - skip valid false forces regen of valid op
 **StatusHandler**
-- no generations errors
 - unknown handle lists active
 - latest resolves to last handle
 - stall warning when nothing generating but ood remains
 - errored op surfaced while still generating
 - setup error blocks via readiness
 - pump budget is clamped
+**StatusLivePoll**
+- no handle reports inline generation
+- document completed only when nothing generating
+- live errored op flagged not generating forever
+- target by name reports that setups state
+- target by name errored op is its own bucket
+- target not found errors
+- live poll pumps then returns non blocking
 
 ## `cam_get`
 
@@ -634,6 +699,46 @@ after changing tests._
 - comma string
 - list lowercased
 - none empty
+
+## `cam_post`
+
+> Unit tests for ``cam_post`` - create-or-reuse an NC Program for the scope, then post it to disk.
+
+**Guards**
+- no cam
+- requires output folder
+- requires program name
+- post config not found
+- bad units rejected
+- refuses when no valid toolpaths
+- unknown scope is error
+**PostResolution**
+- resolves post by name in personal folder
+**CloudPostScope**
+- local scope default returns ready post configuration
+- cloud resolves post by name and posts
+- cloud post not found lists candidates
+- cloud ambiguous name refused
+**CreateOrReuse**
+- creates program when none exists
+- reuses existing program not duplicated
+- output params reach the program
+- operations collection carries the target setup
+**PostWritesFile**
+- posts document and reports written file
+- declared output is minted
+- no file written is error even when api returns true
+- created program is rolled back on failed post
+- reused program is not deleted on failed post
+- missing output folder param is error
+- program error is partial even with file
+- partial when api false but file appeared
+- post raising is error and rolls back
+**PostLog**
+- is failure marker
+- reads error and warning lines skipping information
+- no log returns empty
+- failed stub is error with the log reason not listed as a deliverable
 
 ## `cam_reorder`
 
@@ -768,6 +873,7 @@ after changing tests._
 **SaveTemplateRename**
 - rename failure propagates
 - rename succeeds reports correct name
+- saved template that does not load back bites
 
 ## `cold_start_onboarding`
 
@@ -819,6 +925,10 @@ after changing tests._
 - malformed ref is none
 **Operations**
 - maps every verb to a feature operation attribute name
+**MinDistance**
+- success returns result and no error
+- measure exception is surfaced as error
+- none result is an error not a silent none
 
 ## `data_get`
 
@@ -833,6 +943,23 @@ after changing tests._
 **Guards**
 - unknown include errors
 - cloud error propagates
+
+## `data_get_upload_status`
+
+> Unit tests for ``data_get_upload_status.py`` - the poller that reports a data_upload_file upload's real state instead of the caller re-listing files and guessing when cloud translation finished.
+
+**Guards**
+- no uploads registered errors
+- unknown handle lists active handles
+- file name no match errors listing handles
+**StateReporting**
+- uploading state when transfer still in progress
+- processing state when transfer done but cloud still working
+- complete state reports landed version and pops entry
+- failed state reported and pops entry
+- latest resolves to most recent handle
+- file name lookup finds most recent match and folder disambiguates
+- never blocks returns immediately without pumping
 
 ## `data_management`
 
@@ -858,6 +985,11 @@ after changing tests._
 - empty is just the marker
 **SaveDocument**
 - save tags description with marker
+- unmodified document is a noop
+- false success still modified is an error
+- kernel passes a real save
+- save document item declares the postcondition
+- save false return is an error
 - refuses never saved doc
 - no active document
 **CloseDocument**
@@ -1049,6 +1181,15 @@ after changing tests._
 **ResolveTargetExtra**
 - handle resolving to non body is not found
 - no active design errors
+**DxfExport**
+- sketch happy path
+- missing sketch and face errors
+- both sketch and face errors
+- empty sketch errors
+- sketch not found errors
+- face happy path cleans up scratch sketch
+- face no geometry errors and cleans up
+- extension auto appended
 
 ## `design_get`
 
@@ -1152,6 +1293,7 @@ after changing tests._
 - no active design
 - activate by occurrence name
 - activate by component name
+- activation that does not take bites
 - unknown component errors and lists
 - ambiguous name refused not first match
 - activate root via empty
@@ -1172,6 +1314,8 @@ after changing tests._
 - no active design errors
 **RecomputeHandler**
 - recomputes and reports health
+- errors surfaced by the recompute are named
+- errors present at the start are not new
 - compute failure is an error
 - no active design errors
 
@@ -1193,6 +1337,28 @@ after changing tests._
 - under cap untruncated and unchanged
 - at cap truncates and flags
 - unsaved exceptions computed over the full list even when capped
+**Versions**
+- newest first and capped
+- flags latest and open version
+- unsaved document has no history
+**XrefTree**
+- deep stale reference is found
+- all current true only when every ref fresh
+- cap truncates and blocks all current
+- unreadable reference blocks all current
+- max depth bounds walk and flags partial
+**UsedIn**
+- drawing reference appears and is typed
+- mixed parents rolled up by type
+- no references is empty not error
+- cap truncates and blocks query complete
+- unreadable parent does not read as none
+- unsaved document has no where used
+- query failure is unknown not empty
+**SliceRouter**
+- default projection omits cloud slices but advertises them
+- include adds only the requested slice
+- include used in adds where used slice
 
 ## `doc_insert_occurrence`
 
@@ -1200,6 +1366,7 @@ after changing tests._
 
 **Placement**
 - default identity
+- invalid inserted occurrence bites
 - position scales to cm
 - rotation built
 - bad units
@@ -1305,6 +1472,19 @@ after changing tests._
 - bare open refuses without declaring intent
 - cam flag wins over force
 
+## `doc_restore_version`
+
+> Tests for `doc_restore_version` - promoting a prior cloud version back to latest.
+
+**RestoreHonesty**
+- confirmed when new tip appears
+- promote false is an error not a false ok
+- pending when tip did not advance
+**Guards**
+- restoring the latest is a noop
+- unknown version errors and lists available
+- no cloud datafile is guarded
+
 ## `doc_update_xref`
 
 > Unit tests for ``doc_update_xref.py`` - refresh out-of-date external references.
@@ -1317,9 +1497,82 @@ after changing tests._
 - updates out of date refs
 - skips up to date refs when flag set
 - force updates up to date when flag false
+- still stale after true return is an error
 - false return from get latest reported as error
 - get latest raises propagates
 - name filter updates only matching
+
+## `drawing_create`
+
+> Unit tests for ``drawing_create.py`` - create a 2D drawing from the active design.
+
+**HappyPath**
+- creates and returns file id
+- uses automatic creation mode
+- declared returns are present
+- settings requested echoes config
+**Guards**
+- unsaved design refused
+- create returns null is error
+- no active design errors
+- create exception is reported not swallowed
+- missing file id on created drawing errors
+- sheet size wrong standard is refused
+- portrait on largest sheet is refused
+- unknown sheet type is refused
+- unknown standard rejected
+**InputMapping**
+- isometric toggle reaches the input
+- standard units content map to enums
+- sheet size maps to enum
+- orientation and scope map to enums
+- sheet types enables only the listed kinds
+- auto dimension off disables it
+- auto dimension strategy enables and sets strategy
+- omit fasteners and keywords reach global prefs
+- view style maps to enum on all sheet types
+
+## `drawing_export`
+
+> Unit tests for ``drawing_export.py`` - export the ACTIVE 2D drawing to PDF on local disk.
+
+**HappyPath**
+- exports pdf and verifies file
+- extension appended when missing
+- declared returns are present
+**SheetSelection**
+- sheet range is passed to options and echoed
+- no range defaults to all and sets no range
+- line weights default true and togglable
+- openpdf is forced false
+**FileLandedGate**
+- execute true but no file is a failure
+- execute false is a failure
+- export exception is reported
+**Guards**
+- active doc not a drawing errors
+- missing path errors
+- dxf format rejected
+
+## `drawing_update`
+
+> Unit tests for ``drawing_update.py`` - refresh the active drawing's out-of-date references.
+
+**HappyPath**
+- stale reference is refreshed and version advances
+- gates on references not the lying isuptodate
+- declared returns are present
+**NoOp**
+- current references do not refresh
+- zero references is a no op
+**HonestyGate**
+- still stale after refresh is an error
+- kernel confirms a clean refresh
+- item declares references fresh
+- update exception is reported
+- unreadable references refuse to refresh blind
+**Guards**
+- active doc not a drawing errors
 
 ## `edit_joint`
 
@@ -1387,6 +1640,12 @@ after changing tests._
 - nested occurrence resolved by full path
 - nested also reachable by local name
 - whole design includes nested and root bodies
+**Perception**
+- planar face reports outward normal
+- normal omitted when evaluator raises
+- normal omitted when face has no evaluator
+- linear edge reports unit direction
+- diagonal edge direction is normalized
 
 ## `generated_docs_current`
 
@@ -1465,6 +1724,11 @@ after changing tests._
 - unknown axis string
 - composite handle resolves via token
 - non string raw does not crash
+**AxisRefFace**
+- planar face gives the normal as direction
+- cylinder face gives its axis normalized
+- composite face handle resolves via token
+- world axis still resolves with face types wired
 **DistanceUnits**
 - distance scaled by units
 - distance nonzero guard
@@ -1505,6 +1769,15 @@ after changing tests._
 - list kind checks every element before returning
 - list all correct kind resolves in order
 - surface list alias
+**BodyBrepKind**
+- brep resolves a solid
+- brep resolves a surface
+- brep rejects a mesh with redirect
+**BodyNameAmbiguity**
+- ambiguous name is refused with candidates
+- a single named body still resolves
+- one body reached by two paths is not falsely ambiguous
+- a handle is never ambiguous even when name is duplicated
 **ModeGuard**
 - current design type reads parametric
 - current design type reads direct
@@ -1551,6 +1824,12 @@ after changing tests._
 - allow restricts kind
 - unresolvable errors
 - ambiguous occurrence name errors with candidates
+**TargetRefEdgeAndConstruction**
+- edge handle resolves when allowed
+- edge handle refused under default allow
+- construction axis resolves when allowed
+- construction plane resolves when allowed
+- original body kind unaffected by the extension
 
 ## `joint_at_geometry`
 
@@ -1593,6 +1872,21 @@ after changing tests._
 - rigid
 - slider uses axis index
 - unsupported type reports error
+**ApplyMotionPinSlot**
+- default slide is next frame axis
+- explicit slide axis used
+- slide equal to rotation refused
+- custom entity repoints rotation slide stays frame
+**SlideAxisHelpers**
+- blank defaults to none
+- valid distinct axis
+- same as rotation errors
+- unknown axis errors
+- slide name default is perpendicular
+**CreatePinSlot**
+- create pin slot reports default slide axis
+- create pin slot explicit slide axis
+- create pin slot slide equal axis refused before build
 **EditRotationRedirect**
 - rotation deg redirects to joint drive
 **ApplyLimits**
@@ -1683,6 +1977,22 @@ after changing tests._
 - target origin ignores xyz and reports zero location
 - creates joint origin and reports frame axes
 - custom name is applied to the new joint origin
+**BboxCenterGeometry**
+- center is the bbox midpoint
+- z line runs along requested world axis
+- flip reverses the oriented axis
+**OrientAxisFromFace**
+- planar face handle aligns z to the face normal
+**FaceCenterGeometry**
+- planar face builds via planar factory
+- non planar face is rejected
+- non face handle is rejected
+**BboxCenterHandler**
+- reports computed anchor and readback in display units
+- wrong landing point errors and rolls back
+- missing target errors
+**BboxCenterAmbiguousTarget**
+- ambiguous name is refused
 
 ## `joint_drive`
 
@@ -1790,6 +2100,9 @@ after changing tests._
 **Algorithm**
 - default enhanced
 - legacy
+**NoOpGate**
+- unchanged target bites
+- target triangle change passes
 **MeshKindEnforcement**
 - brep in tools list redirected no mutation
 - brep target redirected
@@ -1890,6 +2203,8 @@ after changing tests._
 **SaveAsMesh**
 - direct tessellates adds mesh no scope
 - parametric routes through base feature scope
+- phantom body that never lands bites
+- landed body grows the count and passes
 - quality passed to calculator
 - optional name renames the mesh
 - bad quality rejected
@@ -1943,9 +2258,12 @@ after changing tests._
 - slow note for large source mesh
 - no slow note for small mesh
 - none feature is success in place
+- unreduced count is an error not success
+- proportion 100 keep everything is not gated
 - parametric routes through base feature scope
 **MeshRemesh**
 - remesh reports before after
+- unchanged count is flagged not asserted
 - missing remesh features collection errors
 - none feature is success in place
 - parametric routes through base feature scope
@@ -2076,6 +2394,27 @@ after changing tests._
 - position scaled inches
 - unknown rotate axis errors
 - no active design errors
+
+## `model_draft`
+
+> Unit tests for ``model_draft.py`` - taper faces to a pull direction (the Draft feature).
+
+**Guards**
+- angle not a number
+- zero angle rejected
+- angle out of range rejected
+- no active design
+- face resolution error propagates
+- pull direction error propagates
+**Draft**
+- happy path reports read back count
+- createinput gets faces and plane
+- symmetric flows into set single angle
+- default not symmetric
+- flip sets direction flipped
+- health error reported not false ok
+- add returns none is error
+- declared outputs present
 
 ## `model_extrude`
 
@@ -2219,6 +2558,58 @@ after changing tests._
 - unresolvable a errors
 - measure failure surfaced
 
+## `model_measure_relation`
+
+> Tests for `model_measure_relation` - named geometric predicates over two entities.
+
+**Coaxial**
+- same axis line passes
+- parallel but offset axes FAIL
+- non parallel axes fail
+- offset exactly at tolerance passes
+- offset just over tolerance fails
+- wrong kind planar faces refused
+- units invariant verdict mm vs in
+**Parallel**
+- parallel axes pass
+- anti parallel still parallel
+- perpendicular axes not parallel
+- boundary at one degree
+- two planar faces parallel
+**Perpendicular**
+- ninety degrees passes
+- parallel is not perpendicular
+- boundary half degree off
+**Flush**
+- coplanar faces pass
+- parallel but stepped fails
+- tilted faces fail
+- offset boundary
+- cylinder face refused
+**Clearance**
+- clears passes
+- too close fails
+- boundary at required gap
+- measure failure surfaced
+**Touching**
+- within gap passes
+- far apart fails
+- zero distance flags overlap
+**Concentric**
+- coincident centers pass
+- offset centers fail and point at coaxial
+- boundary exactly at tolerance
+- an arc edge also supplies a center
+- cylindrical faces use their axis base point
+- straight edge is refused as non circular
+**Guards**
+- unknown relation errors
+- bad units errors
+- negative tolerance deg errors
+- no active design errors
+- unresolvable entity surfaced
+- passed is a declared output
+
 ## `model_mirror`
 
 > Unit tests for ``mirror.py`` — mirror solid bodies across an origin plane.
@@ -2293,6 +2684,110 @@ after changing tests._
 - fake rejects the nonexistent method name
 - second angle ignored when symmetric
 
+## `model_set_material`
+
+> Unit tests for ``model_set_material.py`` - assign a PHYSICAL material to bodies/component.
+
+**HappyPath**
+- assigns and reads back density in kg per m3
+- case insensitive exact match
+- declared outputs present
+**SearchGuards**
+- no match lists nearest candidates
+- ambiguous across libraries is refused
+- document material wins over ambiguous libraries
+- empty material name errors
+- no catalog reports no materials
+**PartialSuccess**
+- partial success surfaced
+- all bodies fail is error
+**DesignGuard**
+- no active design
+
+## `model_shell`
+
+> Unit tests for ``model_shell.py`` - hollow a solid body into a thin-walled shell.
+
+**ClosedShell**
+- hollows most recent body into closed shell
+- reports volume removed and face delta
+- targets named solid body
+**OpenShell**
+- removes given faces and derives body
+**Direction**
+- inside sets inside thickness only
+- outside sets outside thickness only
+- both sets both thicknesses
+- cm units scale thickness
+**Guards**
+- no active design
+- bad units
+- zero thickness rejected
+- negative thickness rejected
+- missing named body reports name
+- wrong kind body redirects
+**Honesty**
+- unchanged body reports error not ok
+- no feature returned is error
+- add raising surfaces as error
+**OutputContract**
+- feature output is minted
+
+## `model_split`
+
+> Unit tests for ``model_split.py`` - SplitBody / SplitFace dispatched by 'split'.
+
+**CutterGuard**
+- no cutter is error
+- both cutters is error
+- bad split kind is error
+- no active design
+**SplitBody**
+- two bodies is ok
+- single body is error not silent ok
+- target resolution error propagates
+- cutter via tool body
+- health error reported
+- declared outputs present
+**SplitFace**
+- face delta reported
+- no new faces is error
+- missing faces is error
+- faces reach createinput as collection
+
+## `model_sweep`
+
+> Unit tests for ``model_sweep.py`` - sweep a profile along a path into a solid/surface.
+
+**Solid**
+- solid sweep along path sketch
+- path sketch seeds createpath with chain
+- multiple result bodies collected
+**Surface**
+- open profile falls back to surface
+- as surface forces surface off closed profile
+**EdgePath**
+- single edge path chains from seed
+- bad edge handle errors
+**Options**
+- operation echoed
+- orientation parallel applied
+- target bodies rejected on new
+- target bodies unresolved errors on cut
+**Guards**
+- missing profile
+- unknown sketch profile
+- unknown path sketch
+- bad operation
+- bad orientation
+- no active design
+**Honesty**
+- no body created is error
+- add returning none is error
+- createinput failure surfaces
+- add failure surfaces
+- declared returns present in payload
+
 ## `no_first_match_resolvers`
 
 > Lint: the substring-first-match smell is banned across EVERY tool module, not just the ones already fixed (see ``test_occurrence_ref_lint.py`` for the resolver this smell should route through instead).
@@ -2336,6 +2831,12 @@ after changing tests._
 - present returns empty
 - missing returns error naming key
 - null value counts as missing
+**ReturnsVerdict**
+- full verdict shape passes
+- missing contract key is named
+- non boolean passed rejected
+- undeclared relation rejected
+- produces note names the contract keys
 **AssertPresentInList**
 - handle inside a matches list is found
 - in list but no item has the key errors
@@ -2370,6 +2871,8 @@ after changing tests._
 - single param path still works
 **SetCreateOrUpdate**
 - set existing updates
+- silent no op assignment bites
+- setting the current expression is already current
 - set missing without create errors
 - set missing with create makes user param
 **DeleteHandler**
@@ -2405,6 +2908,15 @@ after changing tests._
 - consecutive segments share endpoint
 - close welds last to first
 - needs at least two points
+
+## `postconditions_declared`
+
+> Lint: every WRITE/DESTRUCTIVE tool declares postconditions - or carries a reasoned exemption.
+
+**PostconditionsDeclared**
+- every write tool declares or is exempt
+- exemptions only name real undeclared write tools
+- declared postconditions are postcondition kinds
 
 ## `quoting`
 
@@ -2557,6 +3069,28 @@ after changing tests._
 - name delegates to detail engine
 - whitespace name treated as no name
 
+## `sketch_project`
+
+> Unit tests for ``sketch_project.py`` - project existing model geometry into a sketch (Fusion's Project command, via Sketch.project2(entities, isLinked)).
+
+**Project**
+- projects and reports created count
+- link true flows to project2
+- link false flows to project2
+- refs are type index from count delta
+- refs offset by preexisting entities
+- projected entities passed through
+- note flags non addressable curves
+**Honesty**
+- zero created is error not false ok
+**Guards**
+- no sketch is error
+- named missing sketch is error
+- entity resolve error is surfaced
+- no active design
+**ReturnsContract**
+- declared entity refs present in payload
+
 ## `sketch_set_text`
 
 > Unit tests for ``sketch_set_text.py`` — set/create sketch-text strings.
@@ -2594,6 +3128,11 @@ after changing tests._
 - create unknown units
 - create nonpositive height
 - create missing sketch
+- create reports verified count delta
+- create count delta from nonzero base
+- create silent noop is error not false ok
+- create add returns none is error
+- create uses sketch plane not world coordinates
 
 ## `sketch_text_create`
 
@@ -2612,6 +3151,7 @@ after changing tests._
 **SurfaceExtrude**
 - sets isSolid false and reports it
 - reports result is solid read back
+- solid result contradicts the sheet note
 - zero distance guard
 - unknown operation rejected
 - from edge curves uses edge profile
@@ -2638,6 +3178,18 @@ after changing tests._
 - continuity tangent set on input
 - boundaries all fail reports zero patched
 
+## `surface_delete_face`
+
+> Unit tests for surface_delete_face - delete faces, optionally healing, with a face-count read-back.
+
+- plain delete reports face count delta
+- heal routes to deleteFaceFeatures
+- consumed body is reported
+- heal failure is error pointing to no heal
+- heal null feature is error
+- faces from two bodies tracked
+- missing faces rejected
+
 ## `surface_edit`
 
 > Unit tests for surface_edit.py — EDIT open surface bodies (trim/extend/offset/thicken).
@@ -2645,6 +3197,8 @@ after changing tests._
 **SurfaceTrim**
 - commits via add on success
 - trim selects a cell before add
+- trim that removes no area bites
+- trim that shrinks area passes
 - keep smaller keeps smallest cell
 - keep by index keeps that cell
 - keep list of indices
@@ -2665,6 +3219,7 @@ after changing tests._
 **OffsetThickenKind**
 - offset produces a surface
 - thicken produces a solid
+- thicken that stays a surface bites
 - thicken symmetric passed
 - thicken zero thickness guard
 - offset unknown operation rejected
@@ -2703,6 +3258,30 @@ after changing tests._
 - peel faces
 - needs target or faces
 - target and faces both rejected
+- null feature is error
+
+## `surface_reverse_normal`
+
+> Unit tests for surface_reverse_normal - flip open-surface normals with an isParamReversed read-back.
+
+- confirms flip via isparamreversed readback
+- noop reported honestly not confirmed
+- all input bodies handed to add
+- solid body rejected
+- missing bodies rejected
+- null feature is error
+
+## `surface_untrim`
+
+> Unit tests for surface_untrim - restore a trimmed surface face to its natural extent.
+
+- extent grew true when area increases
+- no growth reported honestly
+- loop type maps to enum
+- extension scaled to cm
+- solid face rejected
+- unknown loop type rejected
+- missing faces rejected
 - null feature is error
 
 ## `sys_api_doc`

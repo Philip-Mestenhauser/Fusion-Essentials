@@ -17,7 +17,20 @@ This locks the invariant two ways:
 import os
 import re
 
+import pytest
+
 from conftest import load_tool, TOOLS_DIR
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_enum_attrs():
+    # SurfaceTypes/Curve3DTypes live on the SHARED adsk mock; _wire()'s raw string-sentinel
+    # assignments leak into other test modules' tools under random ordering - restore after each test.
+    import adsk.core
+    st, ct = adsk.core.SurfaceTypes, adsk.core.Curve3DTypes
+    saved = (st.PlaneSurfaceType, ct.Line3DCurveType)
+    yield
+    st.PlaneSurfaceType, ct.Line3DCurveType = saved
 
 inp = load_tool("_inputs")
 

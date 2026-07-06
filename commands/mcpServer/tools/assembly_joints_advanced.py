@@ -17,6 +17,7 @@ from ..mcp_primitives.registry import register
 from ._common import UNIT_TO_CM, error, ok, safe
 from . import _common
 from . import _inputs
+from . import _assert
 # Reuse the joint tool's autonomous geometry resolver so assembly_constrain can snap to geometry
 # (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection - same '<occurrence>:<snap>' grammar.
 from .joint_create_edit import _resolve_snap_entity, _parse_snap
@@ -68,8 +69,14 @@ def capture_position_handler(action: str = "status") -> dict:
             snap = snaps.add()
         except Exception as e:
             return error(f"Capture failed: {e}")
+        if not snap:
+            return error("snapshots.add() returned nothing - the position was not captured.")
+        count_after = safe(lambda: snaps.count)
+        if count_after is not None and count_after <= count:
+            return error(f"Capture reported success but the snapshot count did not advance "
+                         f"({count} before, {count_after} after) - the position was not captured.")
         return ok({"captured": True, "snapshot": safe(lambda: snap.name),
-        "snapshot_count": safe(lambda: snaps.count, count + 1),
+        "snapshot_count": count_after if count_after is not None else count + 1,
         "note": "Current position captured into the timeline."})
 
     # revert
@@ -229,6 +236,14 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         return error(f"Assembly constraint failed: {e}")
     if not constraint:
         return error("Assembly constraint creation returned nothing.")
+    # A constraint can be ADDED yet fail to SOLVE (over-constrained/unsatisfiable) - the same
+    # platform behavior joint_at_geometry guards. healthState 2 = error (suppressed counts healthy).
+    hs = safe(lambda: constraint.healthState)
+    if hs == 2:
+        msg = safe(lambda: constraint.errorOrWarningMessage) or ""
+        return error((f"Constraint '{safe(lambda: constraint.name)}' was created but FAILED to "
+                      "solve. " + msg).strip() + " It remains in the design - relax or remove one "
+                      "of its relationships.")
     return ok({"created": True, "constraint": safe(lambda: constraint.name),
         "relationship_count": safe(lambda: constraint.geometricRelationships.count, len(specs) or 1),
         "occurrences": sorted(n for n in names if n),
@@ -265,7 +280,8 @@ asbuilt_tool = (
     .strict_schema()
 )
 asbuilt_item = Item.create_tool_item(tool=asbuilt_tool, write="write", handler=as_built_joint_handler,
-                                     run_on_main_thread=True)
+                                     run_on_main_thread=True,
+                                     postconditions=[_assert.FeatureHealthy()])
 
 _CONSTRAINT_DESC = (
                                      "Constrain component occurrences' geometry - Constrain Components (flush / coincident / "

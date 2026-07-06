@@ -352,6 +352,10 @@ def activate_component_handler(occurrence: str = "") -> dict:
             if active_occ is not None:
                 active_occ.deactivate()
         now = safe(lambda: design.activeComponent.name)
+        root_name = safe(lambda: root.name)
+        if now is not None and root_name is not None and now != root_name:
+            return error(f"Activation was accepted but the active component still reads '{now}' - "
+                         "the edit target did not return to root.")
         return ok({
         "activated": "root",
         "active_component": now,
@@ -366,6 +370,11 @@ def activate_component_handler(occurrence: str = "") -> dict:
     if not did:
         return error(f"Occurrence.activate() returned false for '{occurrence}' - could not make it the "
                      "active edit target.")
+    now = safe(lambda: design.activeComponent.name)
+    want_comp = safe(lambda: occ.component.name)
+    if now is not None and want_comp is not None and now != want_comp:
+        return error(f"activate() returned true but the active component still reads '{now}' "
+                     f"(expected '{want_comp}') - the activation did not take.")
     return ok({
     "activated": safe(lambda: occ.name),
     "component": safe(lambda: occ.component.name),

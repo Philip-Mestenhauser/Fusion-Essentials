@@ -48,12 +48,14 @@ class TestKpName:
 
 def _call(anchor="coordinates", target="at", x=0, y=0, z=0,
           sketch_name="", entity_index=0, keypoint=None, design=None, comp=None,
-          geometry_handle=None):
+          geometry_handle=None, bbox_target=None, orient_axis="z", flip=False, meta=None):
     # Signature: (design, comp, anchor, target, x_cm, y_cm, z_cm,
-    #             sketch_name, entity_index, keypoint, geometry_handle)
+    #             sketch_name, entity_index, keypoint, geometry_handle,
+    #             bbox_target, orient_axis, flip, meta)
     return jo._geometry_from_args(
         design or SimpleNamespace(), comp or SimpleNamespace(),
         anchor, target, x, y, z, sketch_name, entity_index, keypoint, geometry_handle,
+        bbox_target, orient_axis, flip, meta,
     )
 
 
@@ -298,3 +300,279 @@ class TestHandlerCoordinateAnchor:
         _install_handler(monkeypatch)
         out = _payload(jo.handler(anchor="coordinates", name="Anchor1"))
         assert out["joint_origin_name"] == "Anchor1"
+
+
+# ── anchor='bbox_center': computed center + oriented Z (geometry-building level) ─────────────────
+
+class _FakeBBox:
+    def __init__(self, mn, mx):
+        self.minPoint = SimpleNamespace(x=mn[0], y=mn[1], z=mn[2])
+        self.maxPoint = SimpleNamespace(x=mx[0], y=mx[1], z=mx[2])
+
+
+class _FakeBody:
+    def __init__(self, mn, mx, name="Body1"):
+        self.boundingBox = _FakeBBox(mn, mx)
+        self.name = name
+
+
+class _CapLines:
+    def __init__(self, store):
+        self.store = store
+
+    def addByTwoPoints(self, p1, p2):
+        self.store.append((p1, p2))
+        return SimpleNamespace(kind="line")
+
+
+class _CapSketch:
+    def __init__(self, store):
+        self.name = None
+        self.isVisible = True
+        self.sketchCurves = SimpleNamespace(sketchLines=_CapLines(store))
+
+
+class _CapSketches:
+    def __init__(self, store):
+        self.store = store
+
+    def add(self, plane):
+        return _CapSketch(self.store)
+
+
+def _cap_comp(store):
+    return SimpleNamespace(name="Comp1", sketches=_CapSketches(store), xYConstructionPlane=object())
+
+
+def _install_bbox_target(monkeypatch, body):
+    """Wire the adsk types + a design whose findEntityByToken resolves the bbox_target handle to `body`,
+    and record every Point3D.create call so a test can read the orientation line's endpoints."""
+    import adsk.core
+    import adsk.fusion
+    # Distinct class identities so TargetRef classifies `body` as a BODY (not a face/mesh).
+    monkeypatch.setattr(adsk.fusion, "BRepFace", type("F", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
+
+    class _D:
+        def findEntityByToken(self, t):
+            return [body]
+
+    d = _D()
+    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
+    monkeypatch.setattr(jo._common, "design", lambda: d)
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
+    monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
+                        staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
+    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
+
+
+class TestBboxCenterGeometry:
+    def test_center_is_the_bbox_midpoint(self, monkeypatch):
+        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        _install_bbox_target(monkeypatch, body)
+        store, meta = [], {}
+        g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
+                             bbox_target="BODYH", orient_axis="z", meta=meta)
+        assert err is None and g is not None
+        # The orientation line STARTS at the bbox center (5,10,15) - that is the frame origin.
+        start = store[0][0]
+        assert (start.x, start.y, start.z) == (5.0, 10.0, 15.0)
+        assert meta["anchor_cm"] == (5.0, 10.0, 15.0)
+
+    def test_z_line_runs_along_requested_world_axis(self, monkeypatch):
+        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        _install_bbox_target(monkeypatch, body)
+        store = []
+        _call(anchor="bbox_center", comp=_cap_comp(store), bbox_target="BODYH", orient_axis="x")
+        start, end = store[0]
+        d = (end.x - start.x, end.y - start.y, end.z - start.z)
+        assert d == (1.0, 0.0, 0.0)          # Z aligned to world X
+
+    def test_flip_reverses_the_oriented_axis(self, monkeypatch):
+        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        _install_bbox_target(monkeypatch, body)
+        store = []
+        _call(anchor="bbox_center", comp=_cap_comp(store), bbox_target="BODYH",
+              orient_axis="z", flip=True)
+        start, end = store[0]
+        assert (end.x - start.x, end.y - start.y, end.z - start.z) == (0.0, 0.0, -1.0)
+
+
+# ── orient_axis from a PLANAR-FACE handle: AxisRef now sources a direction from a face ───────────
+# Once AxisRef accepts a planar-face handle (returning its NORMAL as a ('world', vec) direction),
+# orient_axis takes a face with NO code change in joint_create_origin - the frame's Z aligns to that
+# normal. This proves the one-call parity insert-into-template's Phase 2 relies on.
+
+class _FakeOrientFace:
+    def __init__(self, normal):
+        self.geometry = SimpleNamespace(surfaceType="PLANE",
+                                        normal=SimpleNamespace(x=normal[0], y=normal[1], z=normal[2]))
+
+
+def _install_face_orient(monkeypatch, body, face):
+    """Wire the adsk types + a design whose findEntityByToken resolves BODYH -> body and FACEH -> face,
+    so bbox_target resolves a body and orient_axis (AxisRef) resolves a planar face to its normal.
+    Real (non-Mock) BRepEdge/SketchLine classes so AxisRef's isinstance ladder reaches the face branch."""
+    import adsk.core
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "BRepFace", _FakeOrientFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", type("E", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
+    st = adsk.core.SurfaceTypes
+    monkeypatch.setattr(st, "PlaneSurfaceType", "PLANE", raising=False)
+    monkeypatch.setattr(st, "CylinderSurfaceType", "CYL", raising=False)
+    monkeypatch.setattr(st, "ConeSurfaceType", "CONE", raising=False)
+    handles = {"BODYH": body, "FACEH": face}
+
+    class _D:
+        def findEntityByToken(self, t):
+            e = handles.get(t)
+            return [e] if e is not None else []
+    d = _D()
+    monkeypatch.setattr(jo._common, "design", lambda: d)
+    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
+    monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
+                        staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
+    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
+
+
+class TestOrientAxisFromFace:
+    def test_planar_face_handle_aligns_z_to_the_face_normal(self, monkeypatch):
+        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        face = _FakeOrientFace((0, 1, 0))                 # normal along world +Y
+        _install_face_orient(monkeypatch, body, face)
+        store = []
+        g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
+                             bbox_target="BODYH", orient_axis="FACEH", meta={})
+        assert err is None and g is not None
+        start, end = store[0]
+        # The orientation line (the frame's Z) runs along the face normal (0,1,0), from the bbox center.
+        assert (end.x - start.x, end.y - start.y, end.z - start.z) == (0.0, 1.0, 0.0)
+        assert (start.x, start.y, start.z) == (5.0, 10.0, 15.0)
+
+
+# ── anchor='face_center': planar face guard + normal orientation ────────────────────────────────
+
+class TestFaceCenterGeometry:
+    def test_planar_face_builds_via_planar_factory(self):
+        calls = _install_geom({"F": _FakeFace(planar=True)})
+        g, desc, err = _call(anchor="face_center", geometry_handle="F")
+        assert err is None and g is not None
+        assert calls["kind"] == "planar_face"
+        assert "normal" in desc
+
+    def test_non_planar_face_is_rejected(self):
+        _install_geom({"C": _FakeFace(planar=False)})
+        g, desc, err = _call(anchor="face_center", geometry_handle="C")
+        assert g is None
+        assert "PLANAR" in err
+
+    def test_non_face_handle_is_rejected(self):
+        _install_geom({"E": _FakeEdge()})
+        g, desc, err = _call(anchor="face_center", geometry_handle="E")
+        assert g is None
+        assert "not a face" in err
+
+
+# ── handler(): bbox_center guards + honesty read-back ───────────────────────────────────────────
+
+class _JOInputBbox:
+    primaryAxisVector = SimpleNamespace(x=0.0, y=0.0, z=1.0)
+    secondaryAxisVector = SimpleNamespace(x=1.0, y=0.0, z=0.0)
+    thirdAxisVector = SimpleNamespace(x=0.0, y=1.0, z=0.0)
+
+
+class _JOWithOrigin:
+    def __init__(self, origin_cm):
+        self.name = "JointOrigin1"
+        self.geometry = SimpleNamespace(
+            origin=SimpleNamespace(x=origin_cm[0], y=origin_cm[1], z=origin_cm[2]))
+        self.deleted = False
+
+    def deleteMe(self):
+        self.deleted = True
+        return True
+
+
+class _JointOriginsBbox:
+    def __init__(self, jo_obj):
+        self.count = 0
+        self._jo = jo_obj
+
+    def createInput(self, geom):
+        return _JOInputBbox()
+
+    def add(self, ji):
+        self.count += 1
+        return self._jo
+
+
+def _install_bbox_handler(monkeypatch, origin_cm, bbox=((0, 0, 0), (10, 20, 30))):
+    """Full handler wiring for anchor='bbox_center': a body at `bbox`, and a created joint origin whose
+    geometry.origin reads back at `origin_cm` (cm) so a test can exercise the landing-point check."""
+    import adsk.core
+    import adsk.fusion
+    body = _FakeBody(bbox[0], bbox[1])
+    jo_obj = _JOWithOrigin(origin_cm)
+    store = []
+    comp = SimpleNamespace(name="Comp1", sketches=_CapSketches(store), xYConstructionPlane=object(),
+                           jointOrigins=_JointOriginsBbox(jo_obj))
+    design = SimpleNamespace(rootComponent=comp)
+    design.findEntityByToken = lambda t: [body]
+    monkeypatch.setattr(adsk.fusion, "BRepFace", type("F", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
+    monkeypatch.setattr(jo._common, "design", lambda: design)
+    monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
+    monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
+                        staticmethod(lambda curve, kp: SimpleNamespace(curve=curve, kp=kp)))
+    monkeypatch.setattr(adsk.fusion.JointKeyPointTypes, "StartKeyPoint", 0, raising=False)
+    return jo_obj
+
+
+class TestBboxCenterHandler:
+    def test_reports_computed_anchor_and_readback_in_display_units(self, monkeypatch):
+        # JO lands on the computed center (5,10,15) cm -> 50,100,150 mm.
+        _install_bbox_handler(monkeypatch, origin_cm=(5.0, 10.0, 15.0))
+        out = _payload(jo.handler(anchor="bbox_center", bbox_target="BODYH",
+                                  orient_axis="z", units="mm"))
+        assert out["computed_anchor"]["x"] == 50.0
+        assert out["computed_anchor"]["y"] == 100.0
+        assert out["computed_anchor"]["z"] == 150.0
+        assert out["origin_readback"]["z"] == 150.0
+        assert out["frame_axes"]["primary_axis_Z"] == [0.0, 0.0, 1.0]
+
+    def test_wrong_landing_point_errors_and_rolls_back(self, monkeypatch):
+        # JO lands far from the computed center -> honesty failure: error + deleteMe().
+        jo_obj = _install_bbox_handler(monkeypatch, origin_cm=(99.0, 99.0, 99.0))
+        res = jo.handler(anchor="bbox_center", bbox_target="BODYH", units="mm")
+        assert res["isError"] is True
+        assert "computed anchor" in res["message"]
+        assert jo_obj.deleted is True
+
+    def test_missing_target_errors(self, monkeypatch):
+        _install_bbox_handler(monkeypatch, origin_cm=(5.0, 10.0, 15.0))
+        res = jo.handler(anchor="bbox_center", bbox_target="")
+        assert res["isError"] is True
+        assert "bbox_target" in res["message"]
+
+
+class TestBboxCenterAmbiguousTarget:
+    def test_ambiguous_name_is_refused(self, monkeypatch):
+        occ1 = SimpleNamespace(fullPathName="root+Bolt:1", name="Bolt:1")
+        occ2 = SimpleNamespace(fullPathName="root+Bolt:2", name="Bolt:2")
+        root = SimpleNamespace(allOccurrences=[occ1, occ2])
+        design = SimpleNamespace(rootComponent=root, findEntityByToken=lambda t: [])
+        monkeypatch.setattr(jo._common, "design", lambda: design)
+        monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+        res = jo.handler(anchor="bbox_center", bbox_target="Bolt")
+        assert res["isError"] is True
+        assert "ambiguous" in res["message"].lower()

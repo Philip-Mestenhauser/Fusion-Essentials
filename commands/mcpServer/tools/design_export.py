@@ -2,8 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Exports a body/component/occurrence, or the whole design (target omitted), to a neutral CAD file
-(STEP/IGES/SAT/STL) on local disk. Pair with data_upload_file to round-trip the file back into the
-cloud. WRITES a file to disk (does not modify the design).
+(STEP/IGES/SAT/STL) on local disk. format=dxf is a separate 2D shape: a sketch (dxf_sketch) or a
+planar face's projected outline (dxf_face) via Sketch.saveAsDXF. Pair with data_upload_file to
+round-trip the file back into the cloud. WRITES a file to disk (does not modify the design).
 """
 
 import os
@@ -15,25 +16,34 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _assert
 from . import _common
 from . import _export
 from . import _inputs
 
 app = adsk.core.Application.get()
 
-# format -> (file extension, ExportManager factory name, stl?)
+# format -> (file extension, ExportManager factory name, stl?). "dxf" is a 2D SKETCH/face-profile
+# export handled separately (_export_dxf) - its tuple entry exists only so Choice validates the name.
 _FORMATS = {
     "step": (".step", "createSTEPExportOptions", False),
     "iges": (".igs", "createIGESExportOptions", False),
     "sat": (".sat", "createSATExportOptions", False),
                           "stl": (".stl", "createSTLExportOptions", True),
+    "dxf": (".dxf", None, False),
 }
 
 # target is a body by handle (precise) or name; component/occurrence names + whole-design handled too.
 _TARGET = _inputs.BodyRef("target", required=False,
                           description="What to export (omit = the whole design).")
 _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
-                         description="Neutral CAD format to write.")
+                         description="Neutral CAD format to write (dxf = a 2D sketch/face export).")
+
+# format=dxf inputs: a whole SKETCH by name, or a planar FACE's projected outline (find_geometry
+# handle). Exactly one of these is required when format=dxf; both are ignored otherwise.
+_DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=False,
+    description="format=dxf only: a find_geometry PLANAR-FACE handle - its outline is projected "
+                "into a scratch sketch, written to DXF, then the scratch sketch is removed.")
 
 
 def _resolve_target(design, target):
@@ -96,16 +106,170 @@ def _export_one(em, factory_name, is_stl, geom, path):
     return True, None
 
 
+def _export_dxf(dxf_sketch, dxf_face, file_path):
+    """format=dxf: write a whole SKETCH (Sketch.saveAsDXF), or a planar FACE's outline projected into
+    a scratch sketch that is removed again afterward (the design is left unchanged either way).
+    Exactly one of dxf_sketch/dxf_face must be given.
+    """
+    path = (file_path or "").strip().strip('"')
+    if not path:
+        return error("Provide 'file_path' - the local .dxf output path.")
+    if not path.lower().endswith(".dxf"):
+        path = path + ".dxf"
+
+    design = _common.design()
+    if not design:
+        return error("No active design to export. Open or create a document first (see doc_new).")
+
+    sketch_name = (dxf_sketch or "").strip()
+    has_face = bool((dxf_face or "").strip()) if isinstance(dxf_face, str) else bool(dxf_face)
+    if sketch_name and has_face:
+        return error("Pass only one of 'dxf_sketch' or 'dxf_face' for format=dxf, not both.")
+    if not sketch_name and not has_face:
+        return error("format=dxf needs either 'dxf_sketch' (a sketch NAME) or 'dxf_face' (a "
+                     "find_geometry planar-face handle) to know what 2D geometry to write.")
+
+    out_dir = os.path.dirname(path)
+    if out_dir and not os.path.isdir(out_dir):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            return error(f"Could not create output directory '{out_dir}': {e}")
+
+    if sketch_name:
+        return _export_dxf_sketch(design, sketch_name, path)
+    return _export_dxf_face(design, dxf_face, path)
+
+
+def _export_dxf_sketch(design, sketch_name, path):
+    sk = _common.resolve_sketch(design, sketch_name)
+    if not sk:
+        names = _common.all_sketch_names(design)
+        return error(f"No sketch named '{sketch_name}'. Available: "
+                     + (", ".join(n for n in names if n) or "(none)")
+                     + ". Create one with sketch_create, or pass 'dxf_face' instead.")
+    has_geom = (safe(lambda: sk.sketchCurves.sketchLines.count, 0)
+                or safe(lambda: sk.sketchCurves.sketchArcs.count, 0)
+                or safe(lambda: sk.sketchCurves.sketchCircles.count, 0)
+                or safe(lambda: sk.sketchPoints.count, 0))
+    if not has_geom:
+        return error(f"Sketch '{sketch_name}' is empty - nothing to write to DXF.")
+    try:
+        did = sk.saveAsDXF(path)
+    except Exception as e:
+        return error(f"DXF export failed: {e}")
+    if not did:
+        return error("DXF export returned false - nothing was written.")
+    size, verr = _export.verify_written(path)
+    if verr:
+        return error(f"DXF export reported success but {verr}.")
+    return ok({
+        "exported": True,
+        "format": "dxf",
+        "source": f"sketch '{sketch_name}'",
+        "file_path": path,
+        "file_exists": True,
+        "size_bytes": size,
+        "note": "Sketch written to DXF - the standard laser/waterjet/sheet-metal handoff format.",
+    })
+
+
+def _export_dxf_face(design, dxf_face, path):
+    face, ferr = _DXF_FACE.resolve(dxf_face)
+    if ferr:
+        return error(ferr)
+
+    comp = safe(lambda: face.body.parentComponent) or safe(lambda: design.rootComponent)
+    if comp is None:
+        return error("Could not resolve a component to build the projection sketch in.")
+    try:
+        sk = comp.sketches.add(face)
+    except Exception as e:
+        return error(f"Could not create a projection sketch on the face: {e}")
+    if not sk:
+        return error("Could not create a projection sketch on the face (sketches.add returned nothing).")
+    sk_name = safe(lambda: sk.name) or "scratch sketch"
+
+    def _cleanup():
+        return bool(safe(lambda: sk.deleteMe(), False))
+
+    try:
+        sk.project2([face], False)
+    except Exception as e:
+        cleaned = _cleanup()
+        msg = f"Could not project the face's edges into a sketch for DXF: {e}"
+        if not cleaned:
+            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+        return error(msg)
+
+    has_geom = (safe(lambda: sk.sketchCurves.sketchLines.count, 0)
+                or safe(lambda: sk.sketchCurves.sketchArcs.count, 0)
+                or safe(lambda: sk.sketchCurves.sketchCircles.count, 0))
+    if not has_geom:
+        cleaned = _cleanup()
+        msg = "Face projection produced no sketch geometry - nothing to write to DXF."
+        if not cleaned:
+            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+        return error(msg)
+
+    try:
+        did = sk.saveAsDXF(path)
+    except Exception as e:
+        cleaned = _cleanup()
+        msg = f"DXF export failed: {e}"
+        if not cleaned:
+            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+        return error(msg)
+
+    cleaned = _cleanup()
+    if not did:
+        msg = "DXF export returned false - nothing was written."
+        if not cleaned:
+            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+        return error(msg)
+
+    size, verr = _export.verify_written(path)
+    if verr:
+        msg = f"DXF export reported success but {verr}."
+        if not cleaned:
+            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+        return error(msg)
+
+    note = ("Face outline projected into a scratch sketch, written to DXF, and the scratch sketch "
+            "removed - the design is unchanged.")
+    if not cleaned:
+        note = (f"DXF written, but the scratch projection sketch '{sk_name}' could not be removed - "
+                "it remains in the design; delete it manually.")
+
+    return ok({
+        "exported": True,
+        "format": "dxf",
+        "source": "face profile (projected)",
+        "file_path": path,
+        "file_exists": True,
+        "size_bytes": size,
+        "note": note,
+    })
+
+
 def handler(format: str = "step", file_path: str = "", target: str = "",
-            split_by_component: bool = False) -> dict:
+            split_by_component: bool = False, dxf_sketch: str = "", dxf_face: str = "") -> dict:
     """Export 'target' (body/component/occurrence, or whole design) to 'file_path' in 'format'.
 
     split_by_component=true exports EACH top-level occurrence to its own file (one per part - what 3D
     printing wants) into the directory 'file_path', named '<part><ext>'; 'target' is ignored in that mode.
+
+    format=dxf is a different shape: a 2D export of a SKETCH ('dxf_sketch', by name) or a planar
+    FACE's projected outline ('dxf_face', a find_geometry handle) - not a body. 'target' and
+    'split_by_component' are ignored in that mode.
     """
     fmt, ferr = _FORMAT.resolve(format)
     if ferr:
         return error(ferr)
+
+    if fmt == "dxf":
+        return _export_dxf(dxf_sketch, dxf_face, file_path)
+
     ext, factory_name, is_stl = _FORMATS[fmt]
 
     path = (file_path or "").strip().strip('"')
@@ -204,9 +368,12 @@ TOOL_DESCRIPTION = (
     "Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file on "
     "local disk - STEP / IGES / SAT / STL. split_by_component=true exports EACH top-level occurrence to "
     "its own file (one per part - what 3D printing wants) into the DIRECTORY 'file_path' ('target' is "
-    "ignored in that mode). Pair with data_upload_file to round-trip the file back into the cloud "
-    "(STEP/IGES are translated to a Fusion design there). WRITES a file to disk (does not modify the "
-    "design)."
+    "ignored in that mode). format=dxf is a different shape - a 2D laser/waterjet/sheet-metal export of "
+    "a SKETCH ('dxf_sketch', by name) or a planar FACE's projected outline ('dxf_face', a find_geometry "
+    "handle); pass exactly one of the two ('target'/'split_by_component' are ignored in this mode; the "
+    "face path uses a scratch sketch that is removed afterward, leaving the design unchanged). Pair "
+    "with data_upload_file to round-trip the file back into the cloud (STEP/IGES are translated to a "
+    "Fusion design there). WRITES a file to disk (does not modify the design)."
 )
 
 tool = (
@@ -217,10 +384,16 @@ tool = (
     .add_input_property(_TARGET.name, _TARGET.schema())
     .add_input_property("split_by_component", {"type": "boolean",
             "description": "Export each top-level occurrence to its own file in directory 'file_path' (default false)."})
+    .add_input_property("dxf_sketch", {"type": "string",
+            "description": "format=dxf only: the NAME of the sketch to write whole. Use this OR 'dxf_face', not both."})
+    .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .strict_schema()
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+# DeliverablesExist re-stats every claimed deliverable (single file_path or split-mode files[]) - a
+# redundant gate over the handler's per-path inline verification, which stays (it builds the payload).
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.DeliverablesExist()])
 
 
 def register_tool():

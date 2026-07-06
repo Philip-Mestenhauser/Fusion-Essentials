@@ -73,9 +73,13 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
         occ.isGroundToParent = bool(ground_to_parent)
     except Exception as e:
         return error(f"Could not set ground_to_parent on '{safe(lambda: occ.name)}': {e}")
+    now = safe(lambda: occ.isGroundToParent)
+    if now is not None and bool(now) != bool(ground_to_parent):
+        return error(f"Assignment was accepted but '{safe(lambda: occ.name)}' still reads "
+                     f"isGroundToParent={bool(now)} - the flag did not take.")
     return ok({
         "occurrence": safe(lambda: occ.name),
-        "isGroundToParent": bool(ground_to_parent),
+        "isGroundToParent": bool(now) if now is not None else bool(ground_to_parent),
         "note": "ground_to_parent set (the stateless parent lock). true = locked rigidly to parent; "
                 "false = freed to move/joint. To fix a part in space, keep it ground_to_parent=true "
                 "and position it with assembly_move.",
@@ -151,12 +155,10 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
             if aerr:
                 return error(aerr)
             if ax[0] == "edge":
-                edge = ax[1]
-                line = safe(lambda: edge.geometry)               # InfiniteLine3D / Line3D
-                axis_dir = safe(lambda: line.direction) or safe(lambda: edge.startVertex and None)
-                pt = safe(lambda: line.origin) or safe(lambda: edge.startVertex.geometry)
-                if not axis_dir or not pt:
-                    return error("Could not read the edge's axis direction/point for rotate_axis.")
+                pair, aerr = _inputs.axis_line_of("rotate_axis", ax[1])
+                if aerr:
+                    return error(aerr)
+                pt, axis_dir = pair
                 mat.setToRotation(math.radians(float(rotate_deg)), axis_dir, pt)
                 axis_desc = "edge"
             else:
@@ -189,16 +191,31 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
             mat.transformBy(tmat)
         # compose onto the existing transform
         base = safe(lambda: occ.transform) or adsk.core.Matrix3D.create()
+        before_arr = safe(lambda: tuple(base.asArray()))
         base.transformBy(mat)
         occ.transform = base
     except Exception as e:
         return error(f"Could not move '{safe(lambda: occ.name)}': {e}")
+
+    # Read the pose back off the occurrence - the assignment can be accepted yet not take (a
+    # grounded/jointed occurrence snaps back), and the payload must report the ACTUAL pose.
+    after = safe(lambda: occ.transform)
+    after_arr = safe(lambda: tuple(after.asArray())) if after is not None else None
+    if (bool(dx or dy or dz or rotate_deg or multi)
+            and before_arr and after_arr and after_arr == before_arr):
+        return error(f"Move was accepted but '{safe(lambda: occ.name)}' reads an unchanged "
+                     "transform - it did not move. A grounded/jointed occurrence can snap back: "
+                     "free it (assembly_ground false) or pose it through its joint (joint_drive).")
+    position_mm = safe(lambda: {"x": round(after.translation.x * 10, 4),
+                                "y": round(after.translation.y * 10, 4),
+                                "z": round(after.translation.z * 10, 4)}) if after is not None else None
 
     note = ("Occurrence repositioned (free move, no joint). Pair with view_screenshot to view, and "
             "assembly_interference to check the new position doesn't clash with other parts.")
     result = {
     "moved": True,
     "occurrence": safe(lambda: occ.name),
+    "position_mm": position_mm,
     "translation_mm": {"x": dx, "y": dy, "z": dz},
     "rotate_deg": float(rotate_deg or 0.0),
     "rotate_axis": axis_desc if (rotate_deg or multi) else None,
@@ -239,8 +256,13 @@ def rigid_group_handler(occurrences: str = "", include_children: bool = False) -
         return error(f"Could not create rigid group: {e}")
     if not rg:
         return error("Rigid group creation returned nothing.")
+    member_count = safe(lambda: rg.occurrences.count)
+    if member_count is not None and member_count < coll.count:
+        return error(f"Rigid group '{safe(lambda: rg.name)}' was created but reports only "
+                     f"{member_count} member(s) of the {coll.count} requested.")
     return ok({
     "assembly_rigid_group": safe(lambda: rg.name),
+    "member_count": member_count,
     "grouped": resolved,
     "include_children": bool(include_children),
     "note": "Occurrences locked together as a rigid group.",
@@ -269,7 +291,10 @@ _MOVE_DESC = (
 "in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) optionally rotate about a world "
 "axis through the current position. The occurrence must be free to move (see assembly_ground: "
 "ground_to_parent=false). Moving a JOINTED occurrence POSES it (allowed) but the pose is transient "
-"- the result warns to assembly_capture_position it + assembly_probe its health."
+"- the result warns to assembly_capture_position it + assembly_probe its health. A pattern/mirror "
+"FEATURE re-derives its instances' placement on every timeline recompute, silently overwriting a "
+"free move of a patterned/mirrored occurrence - position those parts through their geometry or the "
+"owning feature instead."
 )
 move_tool = (
     Tool.create_simple(name="assembly_move", description=_MOVE_DESC)

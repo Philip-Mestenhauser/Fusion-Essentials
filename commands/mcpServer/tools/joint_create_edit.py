@@ -20,6 +20,7 @@ from ..mcp_primitives.registry import register
 from ._common import UNIT_TO_CM, error, ok, safe
 from . import _common
 from . import _inputs
+from . import _assert
 from ._joints import (
     AXES as _AXES,
     apply_motion as _apply_motion,
@@ -33,7 +34,9 @@ from ._joints import (
 # (a JO name or a '<occ>:<snap>') just fails to resolve as a handle and falls through in _resolve_input.
 _HANDLE = _inputs.GeometryHandle("input", require="any")
 
-# joint_type -> (label, needs_axis). The setter is dispatched in _apply_motion.
+# joint_type -> (label, needs_axis). The setter is dispatched in _apply_motion. pin_slot needs_axis is
+# True for its ROTATION axis; its perpendicular SLIDE direction comes from 'slide_axis' (defaulting to
+# the next frame axis).
 _JOINT_TYPES = {
 "rigid": ("rigid", False),
 "revolute": ("revolute", True),
@@ -41,7 +44,12 @@ _JOINT_TYPES = {
 "cylindrical": ("cylindrical", True),
 "planar": ("planar", True),
 "ball": ("ball", False),
+"pin_slot": ("pin_slot", True),
 }
+
+# The motion Choice offered by joint_create/joint_edit = the shared six + pin_slot (this pair is the
+# write side for pin_slot; other joint tools stay on the shared JOINT_MOTIONS subset).
+_MOTIONS = list(_inputs.JOINT_MOTIONS) + ["pin_slot"]
 
 
 def _fmt_num(v):
@@ -400,17 +408,39 @@ def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
     return changed, None
 
 
+def _slide_index(slide_axis, ax_name):
+    """Resolve the pin_slot SLIDE direction index. Blank -> the next frame axis after the rotation
+    axis (guaranteed distinct). Returns (slide_idx_or_None, error_or_None); slide_idx None means 'use
+    the default in _apply_motion'."""
+    s = (slide_axis or "").strip().lower()
+    if not s:
+        return None, None
+    if s not in _AXES:
+        return None, f"Unknown slide_axis '{slide_axis}'. Valid: x, y, z."
+    if _AXES[s] == _AXES[ax_name]:
+        return None, "For pin_slot, 'slide_axis' must differ from 'axis' (the rotation axis)."
+    return _AXES[s], None
+
+
+def _slide_name(slide_idx, ax_name):
+    """Human name of the effective pin_slot slide axis for the response."""
+    idx = slide_idx if slide_idx is not None else (_AXES[ax_name] + 1) % 3
+    return ("x", "y", "z")[idx]
+
+
 def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str = "rigid",
-            axis: str = "z", offset: float = 0.0, angle: float = 0.0, units: str = "mm",
-            flip: bool = False, name: str = "", min_deg=None, max_deg=None, rest_deg=None,
-            min_mm=None, max_mm=None, rest_mm=None) -> dict:
+            axis: str = "z", slide_axis: str = "", offset: float = 0.0, angle: float = 0.0,
+            units: str = "mm", flip: bool = False, name: str = "", min_deg=None, max_deg=None,
+            rest_deg=None, min_mm=None, max_mm=None, rest_mm=None) -> dict:
     """Create a joint between two joint inputs (resolved by joint-origin name).
 
     occurrence_one / occurrence_two: the two joint inputs - names of Joint Origins to join.
-    joint_type: rigid (default) | revolute | slider | cylindrical | planar | ball. axis (x/y/z):
-    the motion axis for types that need one. offset (in 'units') and angle (degrees) position the
-    joint; flip reverses it. min_deg/max_deg/rest_deg set rotation limits (revolute/cylindrical);
-    min_mm/max_mm/rest_mm set linear/slide limits (slider/cylindrical, in 'units'). WRITES.
+    joint_type: rigid (default) | revolute | slider | cylindrical | planar | ball | pin_slot. axis
+    (x/y/z): the motion axis for types that need one (for pin_slot it is the ROTATION axis). slide_axis
+    (x/y/z): the pin_slot SLIDE direction (default = the next frame axis; must differ from axis).
+    offset (in 'units') and angle (degrees) position the joint; flip reverses it. min_deg/max_deg/
+    rest_deg set rotation limits (revolute/cylindrical); min_mm/max_mm/rest_mm set linear/slide limits
+    (slider/cylindrical, in 'units'). WRITES.
     """
     design = _common.design()
     if not design:
@@ -423,6 +453,12 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     ax_name = (axis or "z").strip().lower()
     if ax_name not in _AXES:
         return error(f"Unknown axis '{axis}'. Valid: x, y, z.")
+
+    slide_idx = None
+    if jtype == "pin_slot":
+        slide_idx, slide_err = _slide_index(slide_axis, ax_name)
+        if slide_err:
+            return error(slide_err)
 
     scale = UNIT_TO_CM.get((units or "mm").strip().lower())
     if scale is None:
@@ -450,7 +486,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     if not ji:
         return error("createInput returned nothing for these inputs.")
 
-    did, err = _apply_motion(ji, jtype, _AXES[ax_name])
+    did, err = _apply_motion(ji, jtype, _AXES[ax_name], slide_axis_idx=slide_idx)
     if not did:
         return error(f"Could not set {jtype} motion: {err or 'setter returned false'}.")
 
@@ -509,6 +545,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         "input_one": label1,
         "input_two": label2,
         "axis": (ax_name if _JOINT_TYPES[jtype][1] else None),
+        "slide_axis": (_slide_name(slide_idx, ax_name) if jtype == "pin_slot" else None),
         "offset": offset if offset else None,
         "angle_deg": angle if angle else None,
         "flipped": bool(flip),
@@ -518,8 +555,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
 
 
 def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
-                 joint_type: str = "", axis: str = "", world_axis: str = "", flip=None,
-                 offset=None, angle=None, units: str = "mm",
+                 joint_type: str = "", axis: str = "", slide_axis: str = "", world_axis: str = "",
+                 flip=None, offset=None, angle=None, units: str = "mm",
                  rotation_deg=None, min_deg=None, max_deg=None, rest_deg=None,
                  min_mm=None, max_mm=None, rest_mm=None) -> dict:
     """Edit an EXISTING joint in place - no remaking. Re-select snap inputs, change motion type/axis,
@@ -584,6 +621,13 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if want_motion and not wa_name and _JOINT_TYPES[jtype][1] and ax_name not in _AXES:
         return error(f"Unknown axis '{axis}'. Valid: x, y, z.")
 
+    # pin_slot slide direction (validated up front, before touching the timeline).
+    slide_idx = None
+    if jtype == "pin_slot":
+        slide_idx, slide_err = _slide_index(slide_axis, ax_name if ax_name in _AXES else "z")
+        if slide_err:
+            return error(slide_err)
+
     # Resolve new snap inputs (before rolling, so a bad input fails cleanly).
     new1 = new2 = None
     label1 = label2 = None
@@ -612,7 +656,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
         if want_motion:
             wa_entity = _world_axis_entity(design, _AXES[wa_name]) if wa_name else None
-            did, err = _apply_motion(joint, jtype, _AXES.get(ax_name, 2), wa_entity)
+            did, err = _apply_motion(joint, jtype, _AXES.get(ax_name, 2), wa_entity,
+                                     slide_axis_idx=slide_idx)
             if not did:
                 return error(f"Could not set {jtype} motion: {err or 'setter returned false'}.")
             changed["joint_type"] = jtype
@@ -620,6 +665,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 changed["world_axis"] = wa_name
             elif _JOINT_TYPES[jtype][1]:
                 changed["axis"] = ax_name
+            if jtype == "pin_slot":
+                changed["slide_axis"] = _slide_name(slide_idx, ax_name if ax_name in _AXES else "z")
 
         if want_flip:
             joint.isFlipped = bool(flip)
@@ -681,7 +728,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
     out = {"edited": True, "joint_name": safe(lambda: joint.name), "changes": changed}
     # surface the most-asked fields at top level for convenience
-    for key in ("input_one", "input_two", "joint_type", "axis", "world_axis", "flipped",
+    for key in ("input_one", "input_two", "joint_type", "axis", "slide_axis", "world_axis", "flipped",
                        "offset", "angle", "min_deg", "max_deg", "rest_deg", "min_mm", "max_mm", "rest_mm"):
         if key in changed:
             out[key] = changed[key]
@@ -704,8 +751,9 @@ TOOL_DESCRIPTION = (
     "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
     "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
     "the part origin (zero offset) - use a handle for a real offset. 'joint_type' = rigid (default)/"
-    "revolute/slider/cylindrical/planar/ball; 'axis' selects the motion axis for types needing one. "
-    "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
+    "revolute/slider/cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing "
+    "one (for pin_slot it is the rotation axis, and 'slide_axis' sets the perpendicular slide "
+    "direction). Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
 )
 
 tool = (
@@ -717,9 +765,11 @@ tool = (
     )
     .add_input_property("occurrence_two", {"type": "string",
             "description": "Second input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder)."})
-    .add_input_property(*_inputs.joint_motion(default="rigid").as_property())
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
     .add_input_property(*_inputs.world_axis("axis", default="z",
-            description="Motion axis for types that need one.").as_property())
+            description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())
+    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
     .add_input_property("offset", {"type": "number", "description": "Offset distance (in 'units'; default 0)."})
     .add_input_property("angle", {"type": "number", "description": "Angle in degrees (default 0)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -733,14 +783,15 @@ tool = (
     .add_input_property("rest_mm", {"type": "number", "description": "Linear/slide rest value (in 'units') - slider/cylindrical."})
 )
 
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.FeatureHealthy()])
 
 
 EDIT_DESCRIPTION = (
 "Edit an existing joint in place. 'joint_name' selects it; pass any subset to change: 'input_one'/"
 "'input_two' re-select the snap inputs (a Joint Origin name or '<occurrence>:<snap>' = origin/center/"
-"top/bottom/cylinder); 'joint_type' (rigid/revolute/slider/cylindrical/planar/ball) + 'axis' "
-"redefine the motion; 'world_axis' re-points rotation/slide to a TRUE world axis (fixes a "
+"top/bottom/cylinder); 'joint_type' (rigid/revolute/slider/cylindrical/planar/ball/pin_slot) + 'axis' "
+"(+ 'slide_axis' for pin_slot) redefine the motion; 'world_axis' re-points rotation/slide to a TRUE world axis (fixes a "
 "joint pivoting about the wrong axis when the snap frame isn't world-aligned); 'flip'; 'offset' "
 "('units') + 'angle' (deg); rotation limits 'min_deg'/'max_deg'/'rest_deg' (revolute/cylindrical) and "
 "linear limits 'min_mm'/'max_mm'/'rest_mm' (slider/cylindrical). To DRIVE a joint to a pose use "
@@ -753,9 +804,11 @@ edit_tool = (
             "description": "New first input: Joint Origin name OR '<occurrence>:<snap>'."})
     .add_input_property("input_two", {"type": "string",
             "description": "New second input: Joint Origin name OR '<occurrence>:<snap>'."})
-    .add_input_property(*_inputs.joint_motion(default="rigid", description="Redefine the joint motion type.").as_property())
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS, description="Redefine the joint motion type.").as_property())
     .add_input_property(*_inputs.world_axis("axis", default="z",
-            description="Motion axis for types that need one (FRAME-relative).").as_property())
+            description="Motion axis for types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
     .add_input_property(*_inputs.world_axis("world_axis", default="",
             description="Re-point the motion to a TRUE WORLD axis via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted.").as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})

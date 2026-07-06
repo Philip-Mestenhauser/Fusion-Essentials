@@ -74,7 +74,10 @@ def _find_folder_ops(cam, folder_name):
 
 
 def _set_bulb(o, on):
+    """Set the lightbulb and confirm it took. False = the re-read contradicts the set."""
     o.isLightBulbOn = bool(on)
+    now = safe(lambda: o.isLightBulbOn)
+    return now is None or bool(now) == bool(on)
 
 
 def _fit_operation():
@@ -112,12 +115,19 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     if action == "hide_all":
         n = 0
+        failed = 0
         for _, o in _all_operations(cam):
             if safe(lambda o=o: o.hasToolpath):
-                _set_bulb(o, False)
-                n += 1
+                if _set_bulb(o, False):
+                    n += 1
+                else:
+                    failed += 1
         app.activeViewport.refresh()
-        return ok({"action": "hide_all", "hidden_count": n})
+        out = {"action": "hide_all", "hidden_count": n}
+        if failed:
+            out["toggle_failures"] = failed
+            out["note"] = f"{failed} operation(s) still read isLightBulbOn=true after the hide."
+        return ok(out)
 
     if action == "show_folder":
         if not folder.strip():
@@ -129,14 +139,22 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         for _, o in _all_operations(cam):
             _set_bulb(o, False)
         shown = []
+        failed = []
         for o in ops:
             if safe(lambda o=o: o.hasToolpath):
-                _set_bulb(o, True)
-                shown.append(safe(lambda o=o: o.name))
+                if _set_bulb(o, True):
+                    shown.append(safe(lambda o=o: o.name))
+                else:
+                    failed.append(safe(lambda o=o: o.name))
         app.activeViewport.refresh()
-        return ok({"action": "show_folder", "folder": matched, "shown": shown,
+        out = {"action": "show_folder", "folder": matched, "shown": shown,
         "shown_count": len(shown),
-        "note": "Only this folder's generated toolpaths are shown."})
+        "note": "Only this folder's generated toolpaths are shown."}
+        if failed:
+            out["toggle_failures"] = failed
+            out["note"] = (f"{len(failed)} operation(s) still read isLightBulbOn=false after the "
+                           "show - see toggle_failures. " + out["note"])
+        return ok(out)
 
     # show / hide / isolate a single operation
     if not operation.strip():
@@ -148,16 +166,17 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     name = safe(lambda: o.name)
 
     if action == "hide":
-        _set_bulb(o, False)
+        if not _set_bulb(o, False):
+            return error(f"isLightBulbOn did not take for '{name}' - it still reads shown.")
         app.activeViewport.refresh()
         return ok({"action": "hide", "operation": name})
 
     if action == "isolate":
         for _, other in _all_operations(cam):
             _set_bulb(other, False)
-        _set_bulb(o, True)
+        took = _set_bulb(o, True)
     else:  # show
-        _set_bulb(o, True)
+        took = _set_bulb(o, True)
 
     if not safe(lambda: o.hasToolpath):
         app.activeViewport.refresh()
@@ -165,6 +184,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         "warning": "This operation has no generated toolpath yet - nothing to display. "
         "Generate it first (cam_generate).",
         "has_toolpath": False})
+    if not took:
+        return error(f"isLightBulbOn did not take for '{name}' - it still reads hidden.")
 
     fitted = False
     if fit:

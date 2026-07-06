@@ -28,12 +28,27 @@ class _Trans:
         self.x = x; self.y = y; self.z = z
 
 
+class _Matrix:
+    """Stands in for the occurrence's transform2 Matrix3D. getAsCoordinateSystem returns
+    (origin, xAxis, yAxis, zAxis) - the Python shape of the void-return + 4-output-param API. With no
+    basis configured it raises, mimicking a matrix whose coordinate system can't be read (axes omitted)."""
+    def __init__(self, origin, basis=None):
+        self.translation = _Trans(*origin)
+        self._basis = basis
+
+    def getAsCoordinateSystem(self):
+        if self._basis is None:
+            raise RuntimeError("no coordinate system available")
+        x, y, z = self._basis
+        return (_Trans(0, 0, 0), _Trans(*x), _Trans(*y), _Trans(*z))
+
+
 class FakeOcc:
     def __init__(self, name, comp, origin=(0, 0, 0), bbox=None,
-                 grounded=False, ground_to_parent=False, body_count=1):
+                 grounded=False, ground_to_parent=False, body_count=1, basis=None):
         self.name = name
         self.component = type("C", (), {"name": comp})()
-        self.transform2 = type("T", (), {"translation": _Trans(*origin)})()
+        self.transform2 = _Matrix(origin, basis)
         self.boundingBox = _BBox(*bbox) if bbox else None
         self.isGrounded = grounded
         self.isGroundToParent = ground_to_parent
@@ -216,6 +231,40 @@ class TestProbe:
         _install([], [], asbuilt=[FakeJoint("AB", 1, "A:1", "B:1", health_state=1, message="conflict")])
         out = _payload(ap.handler())
         assert out["is_healthy"] is False and out["broken_joints"] == ["AB"]
+
+
+# ── ORIENTATION: the occurrence's rotation as three world basis axes ────────────────────────────
+# The per-occurrence record reports rotation as x_axis/y_axis/z_axis unit vectors read from transform2
+# via getAsCoordinateSystem. An unrotated occurrence reads identity; axes are omitted (never faked)
+# when the coordinate system can't be read.
+
+class TestOrientation:
+    def test_identity_rotation_reads_axis_aligned_basis(self):
+        occ = FakeOcc("Block:1", "Block",
+                      basis=((1, 0, 0), (0, 1, 0), (0, 0, 1)))
+        _install([occ], [])
+        o = _payload(ap.handler())["occurrences"][0]
+        assert o["x_axis"] == [1.0, 0.0, 0.0]
+        assert o["y_axis"] == [0.0, 1.0, 0.0]
+        assert o["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_90deg_z_rotation_basis(self):
+        # a +90 deg rotation about Z: x->+Y, y->-X, z unchanged.
+        occ = FakeOcc("Crank:1", "Crank",
+                      basis=((0, 1, 0), (-1, 0, 0), (0, 0, 1)))
+        _install([occ], [])
+        o = _payload(ap.handler())["occurrences"][0]
+        assert o["x_axis"] == [0.0, 1.0, 0.0]
+        assert o["y_axis"] == [-1.0, 0.0, 0.0]
+        assert o["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_axes_omitted_when_coordinate_system_unavailable(self):
+        # no basis configured -> getAsCoordinateSystem raises -> axes omitted, origin still reported.
+        occ = FakeOcc("Plain:1", "Plain", origin=(1.0, 0.0, 0.0))
+        _install([occ], [])
+        o = _payload(ap.handler(units="cm"))["occurrences"][0]
+        assert "x_axis" not in o and "y_axis" not in o and "z_axis" not in o
+        assert o["origin"] == [1.0, 0.0, 0.0]
 
 
 # ── HEALTH: the thing a user sees FIRST (Compute Failed), which the probe was blind to ──────────

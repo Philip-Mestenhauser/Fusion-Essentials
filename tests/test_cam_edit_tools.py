@@ -85,12 +85,20 @@ class _SrcLib:
 #   .tools (list), .add(tool), .remove(index), .update_tool(tool), .persist(), .operations_by_tool(tool),
 #   .is_document (where_used only valid here)
 class _Target:
-    def __init__(self, tools=(), is_document=False, ops_by_desc=None):
+    def __init__(self, tools=(), is_document=False, ops_by_desc=None, persisted_count_value="mirror"):
         self.tools = list(tools)
         self.is_document = is_document
         self.persisted = 0
         self.updated = []
         self._ops_by_desc = ops_by_desc or {}
+        # 'mirror' = the url re-read agrees with the in-memory tools (a landing persist);
+        # a NUMBER simulates a persist whose url re-read disagrees (the platform lie).
+        self._persisted_count_value = persisted_count_value
+
+    def persisted_count(self):
+        if self._persisted_count_value == "mirror":
+            return len(self.tools)
+        return self._persisted_count_value
     def add(self, tool):
         self.tools.append(tool)
     def remove(self, index):
@@ -195,6 +203,16 @@ class TestAdd:
                                              {"library_url": _SRC_URL, "index": 2}]))
         assert len(tgt.tools) == 4 and out["added"] == 2
         assert tgt.persisted == 1          # shared scope persists once after the batch
+
+    def test_persist_whose_url_reread_disagrees_bites(self, monkeypatch):
+        # updateToolLibrary reports success but the library re-read fresh from its url holds the
+        # wrong tool count (fusion-api-notes: True is NOT proof) -> error, not ok
+        tgt = _Target(tools=[_Tool("12mm Flat")], persisted_count_value=1)
+        _install(monkeypatch, target=tgt)
+        res = ct.handler(action="add", scope="cloud", library="MyLib",
+                         add_tools=[{"library_url": _SRC_URL, "index": 0}])
+        assert res["isError"] is True
+        assert "did not land" in res["message"]
 
     def test_add_validates_all_refs_before_adding(self, monkeypatch):
         tgt = _install(monkeypatch)
@@ -392,8 +410,9 @@ class _NewLib:
 
 class _CreateLibs:
     """Stand-in for ToolLibraries' create path."""
-    def __init__(self):
+    def __init__(self, loads_back=True):
         self.imported = []
+        self._loads_back = loads_back     # False = the created url re-reads to nothing (the lie)
     def urlByLocation(self, loc):
         return _URL_C({"Local": "toollibraryroot://Local", "Cloud": "cloud://",
                        "Hub": "hub://"}[loc])
@@ -404,6 +423,8 @@ class _CreateLibs:
             raise RuntimeError("read-only")
         self.imported.append((lib, dest, name))
         return _URL_C(dest.toString().rstrip("/") + "/" + name)
+    def toolLibraryAtURL(self, url):
+        return self.imported[-1][0] if (self._loads_back and self.imported) else None
 
 
 class _URL_C:
@@ -446,6 +467,14 @@ class TestCreateLibrary:
                                              {"library_url": "u", "index": 1}]))
         lib, _, _ = libs.imported[0]
         assert lib.count == 2 and out["tool_count"] == 2
+
+    def test_created_library_that_does_not_load_back_bites(self, monkeypatch):
+        # importToolLibrary returned a URL but nothing loads back from it -> error, not created
+        libs = _install_create(monkeypatch)
+        libs._loads_back = False
+        res = ct.handler(action="create_library", scope="local", library="Ghost Lib")
+        assert res["isError"] is True
+        assert "did not land" in res["message"]
 
     def test_hub_descends_to_team_folder(self, monkeypatch):
         libs = _install_create(monkeypatch)

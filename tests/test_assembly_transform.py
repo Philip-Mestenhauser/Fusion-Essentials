@@ -10,7 +10,20 @@ attributes the handlers set so we can assert on them.
 
 import json
 
+import pytest
+
 from conftest import load_tool
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_enum_attrs():
+    # Curve3DTypes lives on the SHARED adsk mock; a raw string-sentinel assignment leaks into other
+    # test modules' tools under random ordering - save and restore it around every test here.
+    import adsk.core
+    ct = adsk.core.Curve3DTypes
+    saved = ct.Line3DCurveType
+    yield
+    ct.Line3DCurveType = saved
 
 asm = load_tool("assembly_transform")
 
@@ -23,6 +36,37 @@ class FakeVec:
 
     def asPoint(self):
         return ("pt", self.x, self.y, self.z)
+
+
+class _Vec:
+    """Vector3D subset for edge-axis derivation: length + normalize."""
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+    @property
+    def length(self):
+        return (self.x ** 2 + self.y ** 2 + self.z ** 2) ** 0.5
+
+    def normalize(self):
+        n = self.length
+        self.x, self.y, self.z = self.x / n, self.y / n, self.z / n
+        return True
+
+
+class _Pt:
+    """Point3D subset: vectorTo, for deriving a direction from two points."""
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+    def vectorTo(self, other):
+        return _Vec(other.x - self.x, other.y - self.y, other.z - self.z)
+
+
+def _line3d(sp, ep):
+    """The LIVE shape of a bounded edge's geometry: a Line3D with startPoint/endPoint ONLY
+    (no .direction/.origin - those belong to InfiniteLine3D)."""
+    return type("Line3D", (), {"curveType": "LINE",
+                               "startPoint": _Pt(*sp), "endPoint": _Pt(*ep)})()
 
 
 class FakeMatrix:
@@ -170,6 +214,24 @@ class TestGround:
         assert _occ(occs, "Block:1").isGroundToParent is False
         assert out["isGroundToParent"] is False
 
+    def test_stuck_flag_bites(self):
+        # the assignment is accepted but the flag still reads its prior value -> error, not ok
+        _, occs, _ = _install(["Block:1"])
+
+        class StuckOcc(FakeOcc):
+            @property
+            def isGroundToParent(self):
+                return True
+
+            @isGroundToParent.setter
+            def isGroundToParent(self, v):
+                pass
+
+        occs[0].__class__ = StuckOcc
+        res = asm.ground_handler(occurrence="Block:1", ground_to_parent=False)
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+
     def test_only_sets_ground_to_parent(self):
         # The tool sets ONLY isGroundToParent; it must never write isGrounded.
         _, occs, _ = _install(["Block:1"])
@@ -229,6 +291,19 @@ class TestGround:
 # -- assembly_move ---------------------------------------------------------------
 
 class TestMove:
+    def test_move_that_does_not_take_bites(self):
+        # the transform assignment is accepted but the pose reads unchanged -> error, not ok
+        _, occs, _ = _install(["Block:1"])
+
+        class FrozenMatrix(FakeMatrix):
+            def asArray(self):
+                return (1.0,) * 16          # constant pose: the assignment never takes
+
+        occs[0].transform = FrozenMatrix()
+        res = asm.move_handler(occurrence="Block:1", dx=10)
+        assert res["isError"] is True
+        assert "did not move" in res["message"]
+
     def test_translate_sets_transform(self):
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.move_handler(occurrence="Block:1", dx=10, dy=0, dz=5, units="mm"))
@@ -314,12 +389,10 @@ class TestMove:
         import adsk.fusion, adsk.core
         ct = adsk.core.Curve3DTypes
         ct.Line3DCurveType = "LINE"
-        class _LineGeom:
-            curveType = "LINE"
-            direction = ("vec", 1, 0, 0)
-            origin = ("pt", 5, 0, 0)
         class _Edge:
-            geometry = _LineGeom()
+            # LIVE shape: a bounded edge's geometry is a Line3D - startPoint/endPoint ONLY
+            # (no .direction/.origin; those are InfiniteLine3D's) - the direction is DERIVED.
+            geometry = _line3d((5, 0, 0), (9, 0, 0))
         adsk.fusion.BRepEdge = _Edge
         edge = _Edge()
         h = "/v" + "E" * 70
@@ -331,11 +404,58 @@ class TestMove:
         asm._inputs._common.design = lambda: real
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=45, rotate_axis=h))
         o = _occ(occs, "Block:1")
-        # rotation set about the edge's direction + a point ON the edge (5,0,0), not the occ origin
+        # rotation set about the edge's derived unit direction + a point ON the edge (5,0,0),
+        # not the occ origin
         angle, axis, origin = o.transform.rotation
-        assert axis == ("vec", 1, 0, 0)
-        assert origin == ("pt", 5, 0, 0)
+        assert (axis.x, axis.y, axis.z) == (1.0, 0.0, 0.0)
+        assert (origin.x, origin.y, origin.z) == (5, 0, 0)
         assert out["rotate_axis"] == "edge"
+
+    def test_rotate_about_construction_axis_infinite_line(self):
+        # An InfiniteLine3D-shaped geometry (a construction axis) carries origin/direction
+        # directly - the fallback read path, no derivation.
+        design, occs, _ = _install(["Block:1"])
+        import adsk.fusion, adsk.core
+        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
+        class _InfGeom:
+            curveType = "LINE"
+            direction = _Vec(0, 0, 1)
+            origin = _Pt(2, 2, 0)
+        class _Edge:
+            geometry = _InfGeom()
+        adsk.fusion.BRepEdge = _Edge
+        edge = _Edge()
+        h = "/v" + "E" * 70
+        real = asm.app.activeProduct
+        real.findEntityByToken = lambda t, e=edge, hh=h: ([e] if t == hh else [])
+        asm._common.design = lambda: real
+        asm._inputs._common.design = lambda: real
+        out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=30, rotate_axis=h))
+        angle, axis, origin = _occ(occs, "Block:1").transform.rotation
+        assert (axis.x, axis.y, axis.z) == (0, 0, 1)
+        assert (origin.x, origin.y, origin.z) == (2, 2, 0)
+        assert out["rotate_axis"] == "edge"
+
+    def test_unreadable_edge_geometry_errors(self):
+        # An edge whose line geometry exposes neither start/end points nor origin/direction
+        # must error, never rotate about a guessed axis.
+        design, occs, _ = _install(["Block:1"])
+        import adsk.fusion, adsk.core
+        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
+        class _BareGeom:
+            curveType = "LINE"
+        class _Edge:
+            geometry = _BareGeom()
+        adsk.fusion.BRepEdge = _Edge
+        edge = _Edge()
+        h = "/v" + "E" * 70
+        real = asm.app.activeProduct
+        real.findEntityByToken = lambda t, e=edge, hh=h: ([e] if t == hh else [])
+        asm._common.design = lambda: real
+        asm._inputs._common.design = lambda: real
+        res = asm.move_handler(occurrence="Block:1", rotate_deg=45, rotate_axis=h)
+        assert res["isError"] is True
+        assert "line geometry" in res["message"]
 
     def test_combined_rotate_and_translate_preserves_pivot(self):
         # A SINGLE call doing rotation-about-a-pivot AND translation must not assign
@@ -344,10 +464,8 @@ class TestMove:
         # edge-rotate path (a real non-origin pivot at (5,0,0)) + a translation in the same call.
         import adsk.core, adsk.fusion
         adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
-        class _LineGeom:
-            curveType = "LINE"; direction = ("vec", 1, 0, 0); origin = ("pt", 5, 0, 0)
         class _Edge:
-            geometry = _LineGeom()
+            geometry = _line3d((5, 0, 0), (9, 0, 0))
         adsk.fusion.BRepEdge = _Edge
         edge = _Edge()
         h = "/v" + "E" * 70
@@ -375,6 +493,19 @@ class TestMove:
 # -- assembly_rigid_group ----------------------------------------------------------
 
 class TestRigidGroup:
+    def test_group_reporting_fewer_members_bites(self):
+        # the group was created but reads fewer members than were requested -> error, not ok
+        _, occs, rg = _install(["A:1", "B:1"])
+
+        class ThinGroup:
+            name = "RigidGroup1"
+            occurrences = type("C", (), {"count": 1})()
+
+        rg.add = lambda coll, inc: ThinGroup()
+        res = asm.rigid_group_handler(occurrences="A:1, B:1")
+        assert res["isError"] is True
+        assert "1 member(s)" in res["message"]
+
     def test_groups_named_occurrences(self):
         _, occs, rg = _install(["A:1", "B:1", "C:1"])
         out = _payload(asm.rigid_group_handler(occurrences="A:1, B:1"))

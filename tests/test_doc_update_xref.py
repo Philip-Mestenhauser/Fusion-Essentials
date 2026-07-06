@@ -18,17 +18,21 @@ def _payload(result):
 
 class FakeRef:
     def __init__(self, name, is_out_of_date=True, version=1, latest_returns=True,
-                 latest_raises=None):
+                 latest_raises=None, stays_stale=False):
         self._name = name
         self.isOutOfDate = is_out_of_date
         self.version = version
         self._latest_returns = latest_returns
         self._latest_raises = latest_raises
+        self._stays_stale = stays_stale       # the platform lie: True returned, ref still stale
         self.dataFile = type("DF", (), {"name": name})()
 
     def getLatestVersion(self):
         if self._latest_raises:
             raise RuntimeError(self._latest_raises)
+        if self._latest_returns and not self._stays_stale:
+            self.isOutOfDate = False
+            self.version += 1
         return self._latest_returns
 
 
@@ -95,6 +99,14 @@ class TestUpdateBehavior:
         _install([ref])
         out = _payload(xr.handler(only_out_of_date=False))
         assert out["updated_count"] == 1
+
+    def test_still_stale_after_true_return_is_an_error(self):
+        # the platform lie: getLatestVersion returns true but the ref still reads out of date
+        ref = FakeRef("PartA", is_out_of_date=True, latest_returns=True, stays_stale=True)
+        _install([ref])
+        res = xr.handler()
+        assert res["isError"] is True
+        assert "still out of date" in res["message"]
 
     def test_false_return_from_get_latest_reported_as_error(self):
         ref = FakeRef("PartA", is_out_of_date=True, latest_returns=False)

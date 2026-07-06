@@ -283,6 +283,32 @@ class TestSetCreateOrUpdate:
         out = _payload(params.set_handler(name="PartX", expression="20 mm"))
         assert out["set"] is True and out["created"] is False
 
+    def test_silent_no_op_assignment_bites(self, monkeypatch):
+        # the assignment raises nothing but the parameter still reads the same expression -> error
+
+        class StuckParam(FakeParam):
+            @property
+            def expression(self):
+                return "10 mm"
+
+            @expression.setter
+            def expression(self, v):
+                pass                                     # silently ignores the assignment
+
+        up = FakeUserParams([StuckParam("PartX")])
+        design = FakeParamsDesign(up, FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        res = params.set_handler(name="PartX", expression="20 mm")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+
+    def test_setting_the_current_expression_is_already_current(self, monkeypatch):
+        up = FakeUserParams([FakeParam("PartX", "10 mm")])
+        design = FakeParamsDesign(up, FakeTimeline([]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.set_handler(name="PartX", expression="10 mm"))
+        assert out["set"] is True and out["already_current"] is True
+
     def test_set_missing_without_create_errors(self, monkeypatch):
         design = FakeParamsDesign(FakeUserParams([]), FakeTimeline([]))
         _stub_design(monkeypatch, design)

@@ -88,6 +88,29 @@ class TestRecomputeHandler:
         out = _payload(dops.recompute_handler())
         assert out["recomputed"] is True and d.computed is True
 
+    def test_errors_surfaced_by_the_recompute_are_named(self, monkeypatch):
+        # an error absent at the start of the call and present after computeAll lands in new_errors
+
+        class BreakingDesign(FakeDesign):
+            def computeAll(self):
+                super().computeAll()
+                self.timeline._items.append(FakeTimelineItem("StaleEmboss", 2))
+
+        d = BreakingDesign(FakeTimeline([FakeTimelineItem("A", 0)]))
+        _stub(monkeypatch, d)
+        out = _payload(dops.recompute_handler())
+        assert out["recomputed"] is True
+        assert out["new_errors"] == ["StaleEmboss"]
+        assert "StaleEmboss" in out["note"]
+
+    def test_errors_present_at_the_start_are_not_new(self, monkeypatch):
+        d = FakeDesign(FakeTimeline([FakeTimelineItem("Boom", 2)]))
+        _stub(monkeypatch, d)
+        out = _payload(dops.recompute_handler())
+        assert out["recomputed"] is True
+        assert "new_errors" not in out
+        assert out["errors"] == ["Boom"]
+
     def test_compute_failure_is_an_error(self, monkeypatch):
         _stub(monkeypatch, FakeDesign(FakeTimeline([]), compute_raises=True))
         res = dops.recompute_handler()

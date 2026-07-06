@@ -387,10 +387,12 @@ def _is_mesh(b) -> bool:
 
 
 # kind -> (human label, predicate(body) -> bool). The predicates read isSolid LIVE each call (so a
-# test only needs the body's isSolid flag to be right). 'any' accepts solids, surfaces, and meshes.
+# test only needs the body's isSolid flag to be right). 'any' accepts solids, surfaces, and meshes;
+# 'brep' accepts a SOLID or an OPEN SURFACE (any BRepBody) but EXCLUDES a mesh.
 _BODY_KINDS = {
     "solid":   ("a SOLID body",          lambda b: _is_brep(b) and bool(_common.safe(lambda: b.isSolid))),
     "surface": ("an OPEN SURFACE body",  lambda b: _is_brep(b) and not bool(_common.safe(lambda: b.isSolid))),
+    "brep":    ("a SOLID or SURFACE (BRep, non-mesh) body", lambda b: _is_brep(b)),
     "mesh":    ("a MESH body",           lambda b: _is_mesh(b)),
     # 'any' accepts whatever _resolve_any_body returned (it's already a body - handle-resolved to a
     # BRep/Mesh, or name-resolved out of a body collection). No type re-check, so a name-resolved body
@@ -402,6 +404,7 @@ _BODY_KINDS = {
 _BODY_REDIRECTS = {
     "solid":   "Use the solid-modelling tools, or convert it (a surface -> thicken/stitch; a mesh -> mesh_to_brep).",
     "surface": "Use the surface_* tools. A solid has no open surface to act on; a mesh isn't a BRep surface.",
+    "brep":    "A mesh is not a BRep body - convert it with mesh_to_brep, or use the mesh_* tools.",
     "mesh":    "Use the mesh_* tools. A BRep solid/surface isn't a mesh - convert with brep_to_mesh if you need one.",
     "any":     "",
 }
@@ -432,33 +435,60 @@ def _mesh_by_name(coll, name):
     return None
 
 
-def _body_by_name(comp, name):
-    """Find a body named `name` in one component scope - brep via itemByName (it has it), mesh via
-    iteration (meshBodies does NOT have itemByName). Returns the body or None."""
+def _bodies_named_in(comp, name):
+    """Every body named `name` in ONE component/occurrence scope (brep AND mesh), as a list - brep via
+    itemByName (it has it), mesh via iteration (meshBodies does NOT have itemByName)."""
+    out = []
     brep = _common.safe(lambda: getattr(comp, "bRepBodies").itemByName(name))
-    if brep:
-        return brep
-    return _mesh_by_name(_common.safe(lambda: getattr(comp, "meshBodies")), name)
+    if brep is not None:
+        out.append(brep)
+    mesh = _mesh_by_name(_common.safe(lambda: getattr(comp, "meshBodies")), name)
+    if mesh is not None:
+        out.append(mesh)
+    return out
 
 
-def _resolve_body_by_name(comp, name):
-    """Find a body by name - brep first, then mesh - in the component, then root, then any occurrence.
-    Returns the live body (BRepBody or MeshBody) or None. Mesh lookup mirrors the brep lookup (but via
-    iteration, since meshBodies has no itemByName) so a mesh target resolves like a brep one."""
-    b = _body_by_name(comp, name)
-    if b:
-        return b
-    des = _common.design()
+def _body_context(b):
+    """A human 'where this body lives' string for an ambiguity candidate list: its occurrence
+    fullPathName (an assembly proxy) or its owning component's name."""
+    occ = _common.safe(lambda: b.assemblyContext)
+    if occ is not None:
+        fp = _common.safe(lambda: occ.fullPathName)
+        if fp:
+            return fp
+    return _common.safe(lambda: b.parentComponent.name) or "?"
+
+
+def _collect_bodies_by_name(des, comp, name):
+    """Every DISTINCT body named `name` across the design (active component, root, and each occurrence's
+    proxies), de-duplicated by entityToken, as (body, context) pairs. A body name is only LOCALLY unique
+    (like an occurrence's), so the caller can refuse an ambiguous name with its candidate list instead of
+    grabbing the first - mirroring _resolve_occurrence's house pattern.
+
+    De-dup is by entityToken, NOT Python identity: one physical body is reachable through several
+    collection paths (active component, root, an occurrence proxy) and the API hands back a FRESH
+    wrapper object each time, so id()-based de-dup would count the same body once per path and report a
+    spurious ambiguity. The token is stable across wrappers of the same entity."""
+    seen, out = set(), []
+
+    def add(b):
+        if b is None:
+            return
+        key = _common.safe(lambda: b.entityToken) or id(b)   # token is stable; id() a last resort
+        if key not in seen:
+            seen.add(key)
+            out.append((b, _body_context(b)))
+
     root = _common.safe(lambda: des.rootComponent) if des else None
-    if root:
-        b = _body_by_name(root, name)
-        if b:
-            return b
+    for scope in (comp, root):
+        if scope is not None:
+            for b in _bodies_named_in(scope, name):
+                add(b)
+    if root is not None:
         for o in (_common.safe(lambda: root.allOccurrences) or []):
-            b = _body_by_name(o, name)
-            if b:
-                return b
-    return None
+            for b in _bodies_named_in(o, name):
+                add(b)
+    return out
 
 
 def _resolve_any_body(name, raw):
@@ -471,16 +501,24 @@ def _resolve_any_body(name, raw):
     des = _common.design()
     if not des:
         return None, "No active design to resolve the body against."
-    # Resolve by what RESOLVES, not by string length: try the entity token first (the precise path),
-    # then fall back to a name lookup. So a long body NAME is never mistaken for a handle.
+    # Resolve by what RESOLVES, not by string length: try the entity token first (the precise path,
+    # and never ambiguous), then fall back to a name lookup. So a long body NAME is never mistaken for
+    # a handle.
     ent = _resolve_token_entity(des, s)
     if ent is not None:
         if _is_brep(ent) or _is_mesh(ent):
             return ent, None
         return None, f"'{name}': handle points at a {type(ent).__name__}, not a body."
-    b = _resolve_body_by_name(_common.target_component(des), s)
-    if b:
-        return b, None
+    # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the candidate list rather
+    # than grabbing the first - a find_geometry handle disambiguates. One match resolves as before.
+    matches = _collect_bodies_by_name(des, _common.target_component(des), s)
+    if len(matches) == 1:
+        return matches[0][0], None
+    if len(matches) > 1:
+        cands = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}' in {ctx}"
+                          for b, ctx in matches[:8])
+        return None, (f"'{name}': '{s}' is ambiguous - it names {len(matches)} bodies ({cands}). "
+                      "Pass a find_geometry 'handle' to pick the exact one.")
     return None, (f"'{name}': no body named '{s}'. Pass a body handle from find_geometry, or "
                   "a valid body name (see design_get(include=['tree']) / model_extrude output).")
 
@@ -741,18 +779,66 @@ class PlaneRef(InputKind):
 _AXIS_VECS = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
 
-class AxisRef(InputKind):
-    """A direction/axis: a world axis (x / y / z) OR a 'handle' pointing at a straight (linear) EDGE
-    or a SKETCH LINE - the axis runs ALONG that entity. Resolves to a tagged value:
-    ('world', (vx,vy,vz)) for a world axis, or ('edge', BRepEdge | SketchLine) for a line entity.
-    Lets construction axes / patterns / joints / revolves define their axis from real geometry, not
-    just world directions."""
+def _axis_from_face(name, face):
+    """A DIRECTION for a face used as an axis SOURCE: a PLANAR face -> its normal; a CYLINDRICAL or
+    CONICAL face -> its axis. Returned tagged ('world', unit_vec) - the SAME shape a world axis uses,
+    so every AxisRef consumer that handles a world direction handles a face-derived one with no change
+    ('world' here means 'a fixed direction vector', not necessarily a world axis). Returns (tagged, err).
+    ConstructionAxis/Cone/Plane geometry per docs/fusion-api-notes.md 'Face normals ...'."""
+    st = _common.safe(lambda: face.geometry.surfaceType)
+    g = _common.safe(lambda: face.geometry)
+    ST = adsk.core.SurfaceTypes
+    vec = None
+    if st == _common.safe(lambda: ST.PlaneSurfaceType):
+        vec = _common.safe(lambda: g.normal)
+    elif st in (_common.safe(lambda: ST.CylinderSurfaceType), _common.safe(lambda: ST.ConeSurfaceType)):
+        vec = _common.safe(lambda: g.axis)
+    if vec is None:
+        return None, (f"'{name}': that face is neither planar (a normal) nor cylindrical/conical (an "
+                      "axis), so it has no single axis direction.")
+    d = (_common.safe(lambda: vec.x, 0.0), _common.safe(lambda: vec.y, 0.0), _common.safe(lambda: vec.z, 0.0))
+    n = (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
+    if n <= 1e-12:
+        return None, f"'{name}': the face's direction is degenerate (zero-length)."
+    return ("world", (d[0] / n, d[1] / n, d[2] / n)), None
 
-    MAP_HINT = "a direction: world x/y/z OR a straight-edge/sketch-line handle"
+
+def axis_line_of(name, ent):
+    """The world line a straight entity runs along: ((Point3D on the line, unit Vector3D), err).
+
+    For a consumer that needs a NUMERIC axis (a rotation pivot) from the ('edge', entity) value an
+    AxisRef resolves to. A bounded edge / sketch line's geometry is a Line3D, which carries only
+    startPoint/endPoint - the direction must be DERIVED from them; only an InfiniteLine3D (e.g. a
+    construction axis) carries .origin/.direction directly. Both shapes are accepted."""
+    line = _common.safe(lambda: ent.worldGeometry) or _common.safe(lambda: ent.geometry)
+    sp = _common.safe(lambda: line.startPoint) if line is not None else None
+    ep = _common.safe(lambda: line.endPoint) if line is not None else None
+    if sp is not None and ep is not None:
+        vec = _common.safe(lambda: sp.vectorTo(ep))
+        if vec is None or _common.safe(lambda: vec.length, 0.0) <= 1e-12:
+            return None, f"'{name}': that edge/sketch line is degenerate (zero length) - no axis direction."
+        _common.safe(lambda: vec.normalize())
+        return (sp, vec), None
+    origin = _common.safe(lambda: line.origin) if line is not None else None
+    direction = _common.safe(lambda: line.direction) if line is not None else None
+    if origin is not None and direction is not None:
+        return (origin, direction), None
+    return None, f"'{name}': could not read the line geometry off that edge/sketch line."
+
+
+class AxisRef(InputKind):
+    """A direction/axis: a world axis (x / y / z), a 'handle' pointing at a straight (linear) EDGE or a
+    SKETCH LINE (the axis runs ALONG that entity), OR a FACE handle used as a direction source (a planar
+    face -> its NORMAL, a cylindrical/conical face -> its AXIS). Resolves to a tagged value:
+    ('world', (vx,vy,vz)) for a world axis OR a face-derived direction (a fixed direction vector), or
+    ('edge', BRepEdge | SketchLine) for a line entity. Lets construction axes / patterns / joints /
+    revolves define their axis from real geometry, not just world directions."""
+
+    MAP_HINT = "a direction: world x/y/z, a straight-edge/sketch-line handle, OR a face normal/axis"
 
     def contract_note(self) -> str:
-        return ("A world axis x/y/z, OR a 'handle' pointing at a straight edge or sketch line "
-                "(the axis runs along it).")
+        return ("A world axis x/y/z, a 'handle' at a straight edge or sketch line (axis runs along it), "
+                "or a planar-face handle (axis = its normal) / cylindrical-face handle (axis = its axis).")
 
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
@@ -784,9 +870,12 @@ class AxisRef(InputKind):
                 return None, f"'{self.name}': that edge is not straight - an axis needs a LINEAR edge."
             if isinstance(ent, adsk.fusion.SketchLine):
                 return ("edge", ent), None      # a SketchLine is always straight by construction
-            return None, f"'{self.name}': handle points at a {type(ent).__name__}, not an edge."
+            if _isinstance(ent, adsk.fusion.BRepFace):
+                return _axis_from_face(self.name, ent)   # planar normal / cylinder-cone axis
+            return None, (f"'{self.name}': handle points at a {type(ent).__name__}, not an edge, "
+                          "sketch line, or face.")
         return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z) or a resolvable edge/sketch "
-                      "line handle.")
+                      "line / face handle.")
 
 
 # ── distance / units (carries its own unit handling) ────────────────────────
@@ -1036,16 +1125,24 @@ class TargetRef(InputKind):
     a mesh-only tool). The single resolver for model_inspect and appearance_set (they pass the resolved
     entity to their own logic, so resolution lives in ONE place)."""
 
+    # The DEFAULT accepted set (what a caller passing no allow= gets) - the six original kinds, so a
+    # default-allow caller (model_inspect / appearance_set / model_set_material) is unaffected. The
+    # extended kinds (an edge, a construction axis/plane) resolve too, but a caller must OPT IN by
+    # listing them in allow= - otherwise _check refuses them, exactly as it refuses any out-of-allow kind.
     _ALL_KINDS = ("body", "face", "mesh", "occurrence", "component", "design")
-    MAP_HINT = "a thing to measure/colour: handle (body/face/mesh) OR occurrence/component/body name; ''=whole design"
+    MAP_HINT = "a thing to measure/colour: handle (body/face/mesh; edge+construction when allowed) OR occurrence/component/body name; ''=whole design"
 
     def __init__(self, name, allow=None, **kw):
         super().__init__(name, **kw)
         self.allow = tuple(allow) if allow else self._ALL_KINDS
 
     def contract_note(self) -> str:
-        return ("A target: a find_geometry 'handle' (body/face/mesh), an occurrence fullPathName or "
-                "name, a component name, or a body name; '' = the whole design.")
+        edge = ", edge" if "edge" in self.allow else ""
+        base = (f"A target: a find_geometry 'handle' (body/face/mesh{edge}), an occurrence fullPathName "
+                "or name, a component name, or a body name; '' = the whole design.")
+        if "construction_axis" in self.allow or "construction_plane" in self.allow:
+            base += " Also accepts a construction axis/plane handle."
+        return base
 
     def _check(self, ent, kind):
         if kind not in self.allow:
@@ -1065,11 +1162,20 @@ class TargetRef(InputKind):
             return (_common.safe(lambda: des.rootComponent), "design"), None
         if not isinstance(s, str):
             return None, f"'{self.name}': expected a handle or a name string, got {type(raw).__name__}."
-        # 1) a handle (entityToken) -> body / face / mesh, by the entity type it resolves to.
+        # 1) a handle (entityToken) -> body / face / edge / mesh / construction datum, by the entity
+        # type it resolves to. Edge + construction kinds resolve here but are gated by allow= (see
+        # _ALL_KINDS) - a default-allow caller refuses them via _check. _isinstance degrades to False
+        # when a type isn't modelled (e.g. an un-set adsk.fusion mock under test) instead of crashing.
         ent = _resolve_token_entity(des, s)
         if ent is not None:
-            if isinstance(ent, adsk.fusion.BRepFace):
+            if _isinstance(ent, adsk.fusion.BRepFace):
                 return self._check(ent, "face")
+            if _isinstance(ent, adsk.fusion.BRepEdge):
+                return self._check(ent, "edge")
+            if _isinstance(ent, adsk.fusion.ConstructionAxis):
+                return self._check(ent, "construction_axis")
+            if _isinstance(ent, adsk.fusion.ConstructionPlane):
+                return self._check(ent, "construction_plane")
             if _is_mesh(ent):
                 return self._check(ent, "mesh")
             if _is_brep(ent):
@@ -1087,10 +1193,13 @@ class TargetRef(InputKind):
         comp = _component_by_name(des, s)
         if comp is not None:
             return self._check(comp, "component")
-        # 4) a body by name (brep or mesh)
-        body, _ = _resolve_any_body(self.name, s)
+        # 4) a body by name (brep or mesh). An AMBIGUOUS body name is a hard error (propagate it with
+        # its candidate list) rather than a generic miss, mirroring the occurrence path above.
+        body, body_err = _resolve_any_body(self.name, s)
         if body is not None:
             return self._check(body, "mesh" if _is_mesh(body) else "body")
+        if body_err and "ambiguous" in body_err.lower():
+            return None, body_err
         return None, (f"'{self.name}': '{s}' did not resolve to a body handle, an occurrence/component/"
                       "body name, or '' (whole design). See design_get(include=['tree']) / find_geometry.")
 

@@ -172,3 +172,32 @@ class TestOperations:
     def test_maps_every_verb_to_a_feature_operation_attribute_name(self):
         for key in ("new", "new_body", "join", "cut", "intersect"):
             assert common.OPERATIONS[key].endswith("FeatureOperation")
+
+
+class TestMinDistance:
+    """The one measureMinimumDistance core both measure tools share - a READ, so a failure is an
+    error result, never a swallowed None."""
+
+    def _install_mgr(self, monkeypatch, result=None, raises=False):
+        class _Mgr:
+            def measureMinimumDistance(self, a, b):
+                if raises:
+                    raise RuntimeError("boom")
+                return result
+        monkeypatch.setattr(common.app, "measureManager", _Mgr())
+
+    def test_success_returns_result_and_no_error(self, monkeypatch):
+        res = type("R", (), {"value": 1.0})()
+        self._install_mgr(monkeypatch, result=res)
+        mr, err = common.min_distance(object(), object())
+        assert err is None and mr is res
+
+    def test_measure_exception_is_surfaced_as_error(self, monkeypatch):
+        self._install_mgr(monkeypatch, raises=True)
+        mr, err = common.min_distance(object(), object())
+        assert mr is None and err["isError"] is True and "failed" in err["message"].lower()
+
+    def test_none_result_is_an_error_not_a_silent_none(self, monkeypatch):
+        self._install_mgr(monkeypatch, result=None)
+        mr, err = common.min_distance(object(), object())
+        assert mr is None and err["isError"] is True

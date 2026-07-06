@@ -27,12 +27,19 @@ _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLoca
 class _Target:
     """Uniform interface the handler drives, hiding document-vs-shared differences.
     persist() commits a shared library; document edits commit per-tool via update_tool()."""
-    def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None):
+    def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None,
+                 refetch_count_fn=None):
         self._lib = lib
         self.is_document = is_document
         self._persist_fn = persist_fn
         self._update_tool_fn = update_tool_fn
         self._ops_fn = ops_fn
+        self._refetch_count_fn = refetch_count_fn
+
+    def persisted_count(self):
+        """The tool count re-read FRESH from the persisted url (None when unavailable) - the proof
+        a persist() actually landed; updateToolLibrary returning true is not."""
+        return self._refetch_count_fn() if self._refetch_count_fn else None
 
     @property
     def tools(self):
@@ -139,7 +146,8 @@ def _resolve_target(scope, library):
     if not lib:
         return None, f"Could not load {scope} library '{target}'."
     return _Target(lib, is_document=False,
-                   persist_fn=lambda: libs.updateToolLibrary(lib_url, lib)), None
+                   persist_fn=lambda: libs.updateToolLibrary(lib_url, lib),
+                   refetch_count_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url).count)), None
 
 
 def _source_tool(library_url, index):
@@ -373,6 +381,10 @@ def _do_add(target, add_tools):
         target.add(t)
     if not target.is_document:
         target.persist()
+        got = target.persisted_count()
+        if got is not None and got != len(target.tools):
+            return error(f"updateToolLibrary reported success but the library re-read from its url "
+                         f"holds {got} tool(s), not {len(target.tools)} - the persist did not land.")
     return ok({"added": len(built), "tool_count": len(target.tools),
                "note": "Tools added and persisted." if not target.is_document
                        else "Tools added to the document library."})
@@ -390,6 +402,10 @@ def _do_remove(target, indices):
         target.remove(i)
     if not target.is_document:
         target.persist()
+        got = target.persisted_count()
+        if got is not None and got != len(target.tools):
+            return error(f"updateToolLibrary reported success but the library re-read from its url "
+                         f"holds {got} tool(s), not {len(target.tools)} - the persist did not land.")
     return ok({"removed": len(set(indices)), "tool_count": len(target.tools)})
 
 
@@ -495,6 +511,9 @@ def _do_create_library(scope, name, seed_tools):
         return error(f"Creating library '{name}' at {scope} failed: {e}.{hint}")
     if not new_url:
         return error(f"Creating library '{name}' at {scope} returned no URL.")
+    if safe(lambda: libs.toolLibraryAtURL(new_url)) is None:
+        return error(f"importToolLibrary returned a URL but no library loads back from it - the "
+                     "create did not land.")
     return ok({"created_library": name, "scope": scope, "url": safe(lambda: new_url.toString()),
                "tool_count": safe(lambda: lib.count, len(resolved)),
                "note": "Library created and persisted. List it with action='list'. (Local=disk, "

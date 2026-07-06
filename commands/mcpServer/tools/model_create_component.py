@@ -89,7 +89,9 @@ TOOL_DESCRIPTION = (
 "assembly of separate, independently jointable/groundable parts (the modelling tools build into "
 "the active component, so make one component per part). 'name' names it; 'x'/'y'/'z' optionally "
 "place the occurrence (in 'units', mm default; omit for origin); 'activate' makes it the active "
-"edit target so subsequent sketch_create / extrude build into it."
+"edit target so subsequent sketch_create / extrude build into it. Placement COMPOSES with sketch "
+"coordinates: after placing at x/y/z, sketch in component-local coords - or place at the origin "
+"and sketch at world coords. Doing both lands geometry at placement + world (double-offset)."
 )
 
 tool = (

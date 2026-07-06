@@ -156,6 +156,14 @@ class TestCapturePosition:
         assert res["isError"] is True
         assert "no pending" in res["message"].lower()
 
+    def test_phantom_capture_bites(self):
+        # add() returns a snapshot object but the count never advances -> error, not ok
+        _, snaps, _, _ = _install([], pending=True)
+        snaps.add = lambda: FakeSnapshot("Phantom")
+        res = ja.capture_position_handler(action="capture")
+        assert res["isError"] is True
+        assert "did not advance" in res["message"]
+
     def test_status_reports_pending_and_count(self):
         _install([], pending=True, snapshot_items=[FakeSnapshot()])
         out = _payload(ja.capture_position_handler(action="status"))
@@ -264,6 +272,18 @@ class TestAssemblyConstraintSnaps:
         e1, e2 = rels[0][0], rels[0][1]
         assert e1 == "ENT[TrussMast:1:top]" and e2 == "ENT[Boom:1:bottom]"
         assert out["created"] is True
+
+    def test_compute_failed_constraint_bites(self, monkeypatch):
+        # the constraint is ADDED but reads healthState 2 (failed to solve) -> error, not ok
+        design, ac = self._install_with_snaps(monkeypatch)
+        ac.add = lambda inp: type("C", (), {
+            "name": "Constraint1", "healthState": 2,
+            "errorOrWarningMessage": "over-constrained",
+            "geometricRelationships": type("R", (), {"count": 1})()})()
+        res = ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:bottom")
+        assert res["isError"] is True
+        assert "FAILED to solve" in res["message"]
+        assert "over-constrained" in res["message"]
 
     def test_snap_carries_offset_value(self, monkeypatch):
         design, ac = self._install_with_snaps(monkeypatch)

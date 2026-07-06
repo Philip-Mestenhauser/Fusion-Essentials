@@ -170,12 +170,13 @@ class TestAgentDescription:
 
 class FakeDocument:
     def __init__(self, name, is_saved=True, is_modified=False, is_visible=True,
-                 save_ok=True, close_ok=True, activate_ok=True):
+                 save_ok=True, save_persists=True, close_ok=True, activate_ok=True):
         self.name = name
         self.isSaved = is_saved
         self.isModified = is_modified
         self.isVisible = is_visible
         self._save_ok = save_ok
+        self._save_persists = save_persists   # False models Fusion's false-success (returns True, no version)
         self._close_ok = close_ok
         self._activate_ok = activate_ok
         self.saved_with = None
@@ -184,6 +185,8 @@ class FakeDocument:
 
     def save(self, description):
         self.saved_with = description
+        if self._save_ok and self._save_persists:
+            self.isModified = False           # a real save clears the dirty flag
         return self._save_ok
 
     def close(self, save_changes):
@@ -219,11 +222,59 @@ def _install_app(documents, active=None):
 
 class TestSaveDocument:
     def test_save_tags_description_with_marker(self):
-        doc = FakeDocument("PartA", is_saved=True)
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True)
         _install_app([doc], active=doc)
         out = _payload(dm.save_document_handler(description="resize"))
         assert out["saved"] is True
         assert doc.saved_with == "[AI agent] resize"
+
+    def test_unmodified_document_is_a_noop(self):
+        # a clean doc has nothing to version - save() must NOT be called, reported as already current.
+        doc = FakeDocument("PartA", is_saved=True, is_modified=False)
+        _install_app([doc], active=doc)
+        out = _payload(dm.save_document_handler())
+        assert out["saved"] is True and out["already_current"] is True
+        assert doc.saved_with is None
+
+    def test_false_success_still_modified_is_an_error(self, monkeypatch):
+        # Document.save() returns True but the doc stays modified (Fusion silently declined to version,
+        # e.g. dirty child references) - the VersionAdvanced postcondition on the Item catches this;
+        # the handler itself no longer re-checks (the kernel owns verify-the-effect).
+        kernel = load_tool("_assert")
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True, save_persists=False)
+        _install_app([doc], active=doc)
+        monkeypatch.setattr(kernel, "app", dm.app)     # kernel reads the same fake app
+        wrapped = kernel.wrap(dm.save_document_handler, [kernel.VersionAdvanced()])
+        res = wrapped()
+        assert res["isError"] is True
+        assert "still modified" in res["message"].lower()
+
+    def test_kernel_passes_a_real_save(self, monkeypatch):
+        # the persisted save clears isModified - the postcondition confirms instead of biting.
+        kernel = load_tool("_assert")
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True)
+        _install_app([doc], active=doc)
+        monkeypatch.setattr(kernel, "app", dm.app)
+        out = _payload(kernel.wrap(dm.save_document_handler, [kernel.VersionAdvanced()])())
+        assert out["saved"] is True and out["version_confirmed"] is True
+
+    def test_save_document_item_declares_the_postcondition(self):
+        # the wiring is the contract: the registered Item carries VersionAdvanced (walk the guard chain).
+        kernel = load_tool("_assert")
+        h = dm.save_document_item.handler
+        posts = getattr(h, "__assert_postconditions__", None)
+        while posts is None and getattr(h, "__wrapped__", None) is not None:
+            h = h.__wrapped__
+            posts = getattr(h, "__assert_postconditions__", None)
+        assert posts and any(isinstance(p, kernel.VersionAdvanced().__class__) or
+                             p.name == "version_advanced" for p in posts)
+
+    def test_save_false_return_is_an_error(self):
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True, save_ok=False)
+        _install_app([doc], active=doc)
+        res = dm.save_document_handler()
+        assert res["isError"] is True
+        assert "declined to save" in res["message"].lower()
 
     def test_refuses_never_saved_doc(self):
         doc = FakeDocument("Untitled", is_saved=False)

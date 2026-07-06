@@ -267,6 +267,30 @@ class TestSurfaceTrim:
         out = _payload(se.trim_handler(surface="S", trim_tool="T"))
         assert out["trimmed"] is True   # passes only because a cell is now selected before add()
 
+    def test_trim_that_removes_no_area_bites(self):
+        # committed, cells were marked removed, but the surface area is identical -> error, not ok
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 12.0
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 12.0                                    # area unchanged by the commit
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(3.0, 9.0, 1.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        res = se.trim_handler(surface="S", trim_tool="T")
+        assert res["isError"] is True
+        assert "did not decrease" in res["message"]
+
+    def test_trim_that_shrinks_area_passes(self):
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 12.0
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 9.0                                     # the removed cells' area is gone
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(3.0, 9.0, 1.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["trimmed"] is True
+
     def test_keep_smaller_keeps_smallest_cell(self):
         surf = FakeBRepBody("Surf1", is_solid=False)
         tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
@@ -454,6 +478,16 @@ class TestOffsetThickenKind:
         assert out["is_solid"] is True            # thicken makes a solid wall
         assert tf.last_input.thick[0] == "real" and abs(tf.last_input.thick[1] - 0.3) < 1e-9
         assert tf.last_input.op == "NewBodyFeatureOperation"
+
+    def test_thicken_that_stays_a_surface_bites(self):
+        # the wall did not close into a solid: no result body reads isSolid=true -> error, not ok
+        f1 = FakeFace()
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        res = se.thicken_handler(faces=["F1"], thickness=3)
+        assert res["isError"] is True
+        assert "did not close into a solid" in res["message"]
 
     def test_thicken_symmetric_passed(self):
         f1 = FakeFace()

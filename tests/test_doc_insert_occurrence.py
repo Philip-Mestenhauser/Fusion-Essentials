@@ -95,6 +95,15 @@ class TestPlacement:
         _payload(io.handler(document_id="urn:x"))
         assert root_comp.occurrences.last_transform.translation is None
 
+    def test_invalid_inserted_occurrence_bites(self, monkeypatch):
+        # addByInsert returns an occurrence object that reads isValid=false -> error, not ok
+        design, root_comp = _install(monkeypatch)
+        root_comp.occurrences.insert_result = type(
+            "BadOcc", (), {"name": "Part:1", "isValid": False})()
+        res = io.handler(document_id="urn:x")
+        assert res["isError"] is True
+        assert "isValid=false" in res["message"]
+
     def test_position_scales_to_cm(self, monkeypatch):
         design, root_comp = _install(monkeypatch)
         out = _payload(io.handler(document_id="urn:x", x=10, y=0, z=5, units="mm"))

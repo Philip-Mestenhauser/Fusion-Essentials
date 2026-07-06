@@ -152,6 +152,12 @@ def set_handler(name: str = "", expression: str = "", create: bool = False,
     "expression; text parameters need quotes, e.g. \"'text'\".)")
 
     after = _param_summary(param)
+    if after == before:
+        if (expression or "").strip() == (before.get("expression") or ""):
+            return ok({"set": True, "created": False, "name": name, "already_current": True,
+                       "before": before, "after": after})
+        return error(f"Assignment raised no error but '{name}' still reads expression "
+                     f"'{before.get('expression')}' - setting '{expression}' did not take.")
     return ok({"set": True, "created": False, "name": name, "before": before, "after": after})
 
 
@@ -327,6 +333,8 @@ _SET_DESCRIPTION = (
 "geometry, stock, and suppression downstream. 'expression' is interpreted like the "
 "Parameters dialog: a number/expression ('2 in', '6.25', 'StockX/2', a reference to "
 "other parameters), or a quoted text value for text parameters (\"'Roughing'\"). "
+"Function ARGUMENTS separate with ';' not ',' - if(StockX>=2 in; 10 mm; 5 mm), max(a; b) "
+"- conditionals nest and units mix freely within one expression. "
 "Returns the before/after so you can confirm the change. Works for user and model "
 "parameters; model/feature parameters may reject the edit (reported as an error). Use "
 "param_get to discover names first."
@@ -363,7 +371,7 @@ _add_tool = (
         input_param_description="New parameter name (single add; omit when using 'params').",
     )
     .add_input_property("expression", {"type": "string",
-            "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"."})
+            "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';' - max(a; b)."})
     .add_input_property("unit", {"type": "string",
             "description": "Unit: mm/cm/in/deg or '' for unitless (default mm)."})
     .add_input_property("comment", {"type": "string", "description": "Optional comment."})

@@ -64,7 +64,8 @@ class Item:
 
     @classmethod
     def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True,
-                         enforce_timeout: bool = True, write: str = None) -> 'Item':
+                         enforce_timeout: bool = True, write: str = None,
+                         postconditions: list = None) -> 'Item':
         """Build a tool Item. ``write`` declares the tool's write-status, applied to the tool's
         annotations (readOnlyHint / destructiveHint) so the server reports it as structured data:
           'read'        -> read-only (does not modify state)
@@ -85,9 +86,19 @@ class Item:
         # (REFUSE on mismatch) and stamps acted_on on the result. One seam covers all write tools; read
         # tools are untouched. (Lazy import: item.py is a primitive; the guard lives in tools/.)
         if write in ("write", "destructive"):
+            # POSTCONDITION KERNEL (verify-the-effect): wrapped INSIDE the write guard so the guard
+            # stamps acted_on on the verified result. Runs capture -> handler -> verify and converts a
+            # success whose declared effect did not take into an error (see tools/_assert.py). A read
+            # tool never verifies (nothing mutated); postconditions on a read are a wiring mistake.
+            if postconditions:
+                from ..tools import _assert
+                handler = _assert.wrap(handler, postconditions)
             from ..tools import _write_guard
             handler = _write_guard.wrap(handler)
             tool.add_input_property(*_write_guard.EXPECT_DOCUMENT_PROP)
+        elif postconditions:
+            raise ValueError(f"postconditions declared on a non-write tool '{tool.name}' - a read "
+                             "mutates nothing to verify")
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
                    enforce_timeout=enforce_timeout)
 

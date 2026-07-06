@@ -57,21 +57,39 @@ def build_joint_geometry(entity, edge_keypoint=None):
     return None, None, f"entity kind {type(entity).__name__} is not a supported joint geometry"
 
 
-def apply_motion(ji, jtype, axis_idx, custom_entity=None):
-    """Set rigid/revolute/slider/cylindrical/planar/ball motion on a JointInput (or an existing Joint
-    being redefined). axis_idx (0/1/2 = x/y/z) selects the FRAME-relative axis unless custom_entity is
-    given, in which case JointDirections.CustomJointDirection pairs with that entity for a TRUE
-    direction instead of the joint geometry's local frame - either a world construction axis (an
-    explicit world-axis override) or a cylinder/cone face's or circular edge's own axis (deriving the
-    motion axis from the geometry itself). Returns (did, error_or_None)."""
+def apply_motion(ji, jtype, axis_idx, custom_entity=None, slide_axis_idx=None):
+    """Set rigid/revolute/slider/cylindrical/planar/ball/pin_slot motion on a JointInput (or an
+    existing Joint being redefined). axis_idx (0/1/2 = x/y/z) selects the FRAME-relative axis unless
+    custom_entity is given, in which case JointDirections.CustomJointDirection pairs with that entity
+    for a TRUE direction instead of the joint geometry's local frame - either a world construction axis
+    (an explicit world-axis override) or a cylinder/cone face's or circular edge's own axis (deriving
+    the motion axis from the geometry itself).
+
+    pin_slot alone takes TWO frame-relative directions: axis_idx is the ROTATION axis and slide_axis_idx
+    (0/1/2, default = the next frame axis so it is guaranteed distinct) is the perpendicular SLIDE
+    direction; the two must differ. custom_entity, when given with pin_slot, re-points the ROTATION axis
+    to a true direction while the slide stays frame-relative. Returns (did, error_or_None)."""
     JD = adsk.fusion.JointDirections
+    dirs = [JD.XAxisJointDirection, JD.YAxisJointDirection, JD.ZAxisJointDirection]
     if custom_entity is not None:
         ax = JD.CustomJointDirection
     else:
-        ax = [JD.XAxisJointDirection, JD.YAxisJointDirection, JD.ZAxisJointDirection][axis_idx]
+        ax = dirs[axis_idx]
     try:
         if jtype == "rigid":
             return bool(ji.setAsRigidJointMotion()), None
+        if jtype == "pin_slot":
+            # setAsPinSlotJointMotion(rotationAxis, slideDirection[, customRotationAxisEntity,
+            # customSlideDirectionEntity]). Rotation = ax (custom or frame); slide = a distinct frame
+            # axis. Passing custom_entity positionally fills customRotationAxisEntity (pairs with
+            # ax == CustomJointDirection); the slide direction stays frame-relative.
+            s_idx = slide_axis_idx if slide_axis_idx is not None else (axis_idx + 1) % 3
+            if s_idx == axis_idx:
+                return False, "pin_slot rotation axis and slide direction must differ."
+            slide_dir = dirs[s_idx]
+            if custom_entity is not None:
+                return bool(ji.setAsPinSlotJointMotion(ax, slide_dir, custom_entity)), None
+            return bool(ji.setAsPinSlotJointMotion(ax, slide_dir)), None
         if jtype == "revolute":
             if custom_entity is not None:
                 return bool(ji.setAsRevoluteJointMotion(ax, custom_entity)), None
@@ -101,6 +119,7 @@ _MOTION_CLASS_TO_TYPE = {
 "RigidJointMotion": "rigid", "RevoluteJointMotion": "revolute",
 "SliderJointMotion": "slider", "CylindricalJointMotion": "cylindrical",
 "PlanarJointMotion": "planar", "BallJointMotion": "ball",
+"PinSlotJointMotion": "pin_slot",
 }
 
 

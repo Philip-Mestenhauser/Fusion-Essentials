@@ -58,14 +58,21 @@ def recompute_handler() -> dict:
     design = _common.design()
     if not design:
         return error("No active design.")
+    errors_before, _wb, _ = _timeline_health(design)
     try:
         design.computeAll()
     except Exception as e:
         return error(f"computeAll failed: {e}")
     errors, warnings, _ = _timeline_health(design)
-    return ok({"recomputed": True, "error_count": len(errors),
+    new_errors = [n for n in errors if n not in errors_before]
+    out = {"recomputed": True, "error_count": len(errors),
         "warnings": warnings, "errors": errors,
-        "note": "Full recompute done; downstream features rebuilt."})
+        "note": "Full recompute done; downstream features rebuilt."}
+    if new_errors:
+        out["new_errors"] = new_errors
+        out["note"] = (f"Recompute ran and surfaced {len(new_errors)} feature error(s) not present "
+                       "when it started: " + ", ".join(new_errors) + ". Inspect with design_get.")
+    return ok(out)
 
 
 # health_handler() is the timeline-health rollup consumed by design_get (the default slice + the

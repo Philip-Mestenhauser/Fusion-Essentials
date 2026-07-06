@@ -71,7 +71,7 @@ between the markers):
 <!-- BEGIN GENERATED MAP (py -3 tests/gen_manifest.py) -->
 | Kind | References (use this — don't hand-roll a name/index) |
 |---|---|
-| `AxisRef` | a direction: world x/y/z OR a straight-edge/sketch-line handle |
+| `AxisRef` | a direction: world x/y/z, a straight-edge/sketch-line handle, OR a face normal/axis |
 | `BodyRef` | a body by handle (precise) or name; kind=solid/surface/mesh |
 | `BodyRefList` | several bodies (handles or names) |
 | `Choice` | one of a fixed set -> JSON enum |
@@ -85,12 +85,12 @@ between the markers):
 | `PlaneRef` | a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle |
 | `ProfileRef` | a sketch profile by stable handle, not sketch_name+profile_index |
 | `ProfileRefList` | an ORDERED list of profiles (loft - order is load-bearing) |
-| `TargetRef` | a thing to measure/colour: handle (body/face/mesh) OR occurrence/component/body name; ''=whole design |
+| `TargetRef` | a thing to measure/colour: handle (body/face/mesh; edge+construction when allowed) OR occurrence/component/body name; ''=whole design |
 | `UnitField` | the 'units' selector (mm/cm/in enum) for a Distance |
 
-**Tool families** (121 tools — `sys_find_tool <kw>` to search, `tests/MANIFEST.md` for the full list): `model`(19) `surface`(7) `mesh`(9) `sketch`(7) `cam`(18) `assembly`(7) `joint`(7) `design`(8) `doc`(10) `data`(7) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
+**Tool families** (137 tools — `sys_find_tool <kw>` to search, `tests/MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(8) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(11) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
 
-**Shared helpers** (reuse/extend — grep before writing a resolver): `_common` (ok/error/safe, design/target_component, resolve_sketch, scale - the response+resolve substrate); `_inputs` (the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool); `_outputs` (RETURNS kinds (ReturnsHandle/Urn/Name/Value) - declare a tool's stable outputs once); `_holder` (holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries); `_data_common` (cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN)); `_cam_common` (get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)); `_export` (sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export); `_joints` (build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + find_joint (walks joints AND asBuiltJoints, root and every sub-component)); `_view_common` (camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set)
+**Shared helpers** (reuse/extend — grep before writing a resolver): `_common` (ok/error/safe, design/target_component, resolve_sketch, scale - the response+resolve substrate); `_inputs` (the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool); `_outputs` (RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once); `_holder` (holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries); `_data_common` (cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN)); `_cam_common` (get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)); `_export` (sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export); `_joints` (build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + find_joint (walks joints AND asBuiltJoints, root and every sub-component)); `_view_common` (camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set)
 <!-- END GENERATED MAP -->
 
 Wire a kind with `tool.add_input_property(*kind.as_property())`; resolve via `_inputs.resolve_inputs(...)`.

@@ -1,6 +1,8 @@
 {
   "//": "Fusion-Essentials team permission defaults. Every MCP tool call prompts for approval by default. Claude Code settings are STRICT JSON (no // comments), so enable a toggle by ADDING its line to permissions.allow below - not by uncommenting. TOGGLE 1 - auto-approve ALL Fusion-Essentials MCP tools: add \"mcp__fusion-essentials\" . TOGGLE 2 - ALSO auto-approve the arbitrary-script tool (sys_execute_script runs Fusion API Python): add \"mcp__fusion-essentials__sys_execute_script\" .",
   "permissions": {
-    "allow": []
+    "allow": [
+      "mcp__fusion-essentials"
+    ]
   }
 }

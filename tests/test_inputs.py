@@ -482,6 +482,67 @@ class TestAxisRef:
         assert val is None and err is not None      # no crash; a clean rejection
 
 
+# ── AxisRef face-as-direction: a planar face -> its normal, a cylinder/cone face -> its axis ──────
+# A face handle can source a DIRECTION (joint orient_axis / revolve axis). It comes back tagged
+# ('world', unit_vec) - the SAME shape a world axis uses - so every AxisRef consumer that handles a
+# world direction handles a face-derived one with NO code change (this is why joint_create_origin needs
+# none). The existing world-axis / straight-edge / sketch-line paths must keep working (tested above).
+
+class _FakePlanarAxisFace:
+    def __init__(self, normal):
+        self.geometry = type("G", (), {"surfaceType": "PLANE", "normal": _Pt(*normal)})()
+
+
+class _FakeCylAxisFace:
+    def __init__(self, axis):
+        self.geometry = type("G", (), {"surfaceType": "CYL", "axis": _Pt(*axis)})()
+
+
+def _install_axis_face(handle_map):
+    """AxisRef reaches the face branch only after the edge/sketch-line isinstance checks, so wire real
+    (non-Mock) BRepEdge + SketchLine classes so those checks return False cleanly, plus BRepFace and the
+    SurfaceTypes enum the face branch reads."""
+    import adsk.fusion, adsk.core
+    st = adsk.core.SurfaceTypes
+    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"; st.ConeSurfaceType = "CONE"
+    adsk.fusion.BRepFace = (_FakePlanarAxisFace, _FakeCylAxisFace)
+    adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
+    adsk.fusion.SketchLine = type("SL", (), {})
+
+    class FakeDesign:
+        def findEntityByToken(self, h):
+            e = handle_map.get(h)
+            return [e] if e is not None else []
+    inp._common.design = lambda: FakeDesign()
+
+
+class TestAxisRefFace:
+    def test_planar_face_gives_the_normal_as_direction(self):
+        f = _FakePlanarAxisFace((0, 0, 1))
+        _install_axis_face({"F": f})
+        val, err = inp.AxisRef("axis").resolve("F")
+        assert err is None and val == ("world", (0.0, 0.0, 1.0))
+
+    def test_cylinder_face_gives_its_axis_normalized(self):
+        f = _FakeCylAxisFace((0, 0, 2))          # non-unit input -> returned as a UNIT vector
+        _install_axis_face({"C": f})
+        val, err = inp.AxisRef("axis").resolve("C")
+        assert err is None and val == ("world", (0.0, 0.0, 1.0))
+
+    def test_composite_face_handle_resolves_via_token(self):
+        f = _FakePlanarAxisFace((1, 0, 0))
+        _install_axis_face({"FT": f})
+        handle = f"FT{inp._HANDLE_SEP}planar_face:0.0,0.0,0.0"
+        val, err = inp.AxisRef("axis").resolve(handle)
+        assert err is None and val == ("world", (1.0, 0.0, 0.0))
+
+    def test_world_axis_still_resolves_with_face_types_wired(self):
+        # backward-compat: adding the face branch must not disturb the world-axis path
+        _install_axis_face({})
+        val, err = inp.AxisRef("axis").resolve("y")
+        assert err is None and val == ("world", (0, 1, 0))
+
+
 # ── Distance + UnitField scaling chain ──────────────────────────────────────
 
 class TestDistanceUnits:
@@ -637,10 +698,13 @@ class TestGeneration:
 # returns a REDIRECTING error (the high-value part) instead of a silent miss / misleading downstream.
 
 class FakeBRep:
-    """Stands in for adsk.fusion.BRepBody. isSolid distinguishes solid vs open-surface."""
-    def __init__(self, name="Body1", is_solid=True):
+    """Stands in for adsk.fusion.BRepBody. isSolid distinguishes solid vs open-surface. entity_token
+    stands in for the stable entityToken - two wrappers of the SAME physical body share one token."""
+    def __init__(self, name="Body1", is_solid=True, entity_token=None):
         self.name = name
         self.isSolid = is_solid
+        if entity_token is not None:
+            self.entityToken = entity_token
 
 
 class FakeMesh:
@@ -825,6 +889,109 @@ class TestBodyKind:
         _install_kind_bodies(handle_map={"U1": u1, "U2": u2})
         val, err = inp.SurfaceBodyRefList("bodies").resolve(["U1", "U2"])
         assert err is None and val == [u1, u2]
+
+
+# ── BodyRef kind='brep': a SOLID or SURFACE BRep body, but NOT a mesh (model_split's target/cutter) ──
+
+class TestBodyBrepKind:
+    def test_brep_resolves_a_solid(self):
+        s = FakeBRep("S", is_solid=True)
+        _install_kind_bodies(handle_map={"H": s})
+        val, err = inp.BodyRef("body", kind="brep").resolve("H")
+        assert err is None and val is s
+
+    def test_brep_resolves_a_surface(self):
+        surf = FakeBRep("Surf", is_solid=False)
+        _install_kind_bodies(handle_map={"H": surf})
+        val, err = inp.BodyRef("body", kind="brep").resolve("H")
+        assert err is None and val is surf
+
+    def test_brep_rejects_a_mesh_with_redirect(self):
+        # 'brep' = solid OR surface but EXCLUDES a mesh -> a mesh is redirected, not accepted
+        m = FakeMesh("M")
+        _install_kind_bodies(handle_map={"H": m})
+        val, err = inp.BodyRef("target", kind="brep").resolve("H")
+        assert val is None
+        assert "must be a SOLID or SURFACE" in err and "MESH body" in err and "mesh_to_brep" in err
+
+
+# ── BodyRef by-NAME ambiguity refusal: a name matching 2+ bodies is refused, not first-matched ───
+# A body's name is only LOCALLY unique (like an occurrence's). Two same-named bodies (e.g. a part
+# instanced twice) must ERROR with the candidate list, not silently grab the first. A precise handle is
+# never ambiguous. This mirrors OccurrenceRef's _resolve_occurrence house pattern.
+
+def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
+    """Wire a design whose ROOT has empty bRepBodies but whose OCCURRENCES each carry a body, so a name
+    can match several distinct proxies. `occ_bodies` = list of (name -> body) dicts, one per occurrence.
+    handle_map feeds the precise-handle path."""
+    import adsk.fusion
+    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.MeshBody = FakeMesh
+    handle_map = handle_map or {}
+
+    class _BColl:
+        def __init__(self, m): self._m = m
+        def itemByName(self, n): return self._m.get(n)
+
+    class _Occ:
+        def __init__(self, m): self.bRepBodies = _BColl(m)
+
+    occs = [_Occ(m) for m in occ_bodies]
+
+    class _Root:
+        bRepBodies = _BColl({})
+        allOccurrences = occs
+
+    class FakeDesign:
+        rootComponent = _Root()
+        def findEntityByToken(self, h):
+            e = handle_map.get(h)
+            return [e] if e is not None else []
+    root = _Root()
+    inp._common.design = lambda: FakeDesign()
+    inp._common.target_component = lambda d=None: root
+    return root
+
+
+class TestBodyNameAmbiguity:
+    def test_ambiguous_name_is_refused_with_candidates(self):
+        pin_a = FakeBRep("Pin", is_solid=True)
+        pin_b = FakeBRep("Pin", is_solid=True)
+        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None
+        assert "ambiguous" in err.lower()
+        assert "Sub-A:1" in err and "Sub-B:1" in err        # both candidate contexts listed
+
+    def test_a_single_named_body_still_resolves(self):
+        only = FakeBRep("Pin", is_solid=True)
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": only}])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert err is None and val is only
+
+    def test_one_body_reached_by_two_paths_is_not_falsely_ambiguous(self):
+        # One physical body is reachable through several collection paths (active component, root, an
+        # occurrence proxy) and the API returns a FRESH wrapper object each time. De-dup MUST key on
+        # the stable entityToken, not id() - or the same body counts once per path and reports a
+        # spurious ambiguity. Two distinct wrappers, one shared token -> resolves as ONE.
+        wrap_a = FakeBRep("Pin", is_solid=True, entity_token="TOK-PIN")
+        wrap_b = FakeBRep("Pin", is_solid=True, entity_token="TOK-PIN")
+        assert wrap_a is not wrap_b                          # genuinely different objects...
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": wrap_a}, {"Pin": wrap_b}])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert err is None and val is not None              # ...but the same body -> not ambiguous
+
+    def test_a_handle_is_never_ambiguous_even_when_name_is_duplicated(self):
+        # the precise path: two 'Pin' bodies exist by name, but a HANDLE resolves ONE directly
+        pin_a = FakeBRep("Pin", is_solid=True)
+        pin_b = FakeBRep("Pin", is_solid=True)
+        target = FakeBRep("Pin", is_solid=True)
+        _install_ambiguous_bodies(handle_map={"HANDLE": target},
+                                  occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        val, err = inp.BodyRef("body").resolve("HANDLE")
+        assert err is None and val is target
 
 
 # ── ModeGuard: declarative precondition, error DERIVED from the requirement (non-invertible) ─────
@@ -1239,3 +1406,79 @@ class TestTargetRef:
         assert res is None
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
+
+
+# ── TargetRef edge + construction geometry (gated by allow=) ─────────────────────────────────────
+# TargetRef ALSO resolves a BRepEdge and a ConstructionAxis/ConstructionPlane handle - but ONLY when
+# the caller opts in via allow=. A default-allow caller (its allow is the six original kinds) refuses
+# them exactly as it refuses any out-of-allow kind, so model_inspect / appearance_set / model_set_material
+# are UNAFFECTED. model_measure_relation's concentric relation opts in with allow=(...,'edge').
+
+class _FakeConsAxis:
+    pass
+
+
+class _FakeConsPlane:
+    pass
+
+
+def _install_target_ext(handle_map):
+    """A design wired for the EXTENDED TargetRef paths: findEntityByToken plus the BRepEdge /
+    ConstructionAxis / ConstructionPlane types the new isinstance branches check."""
+    import adsk.fusion
+    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.MeshBody = FakeMesh
+    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
+    adsk.fusion.BRepEdge = FakeEdge
+    adsk.fusion.ConstructionAxis = _FakeConsAxis
+    adsk.fusion.ConstructionPlane = _FakeConsPlane
+
+    class _Root:
+        name = "Root"
+        allOccurrences = []
+
+        @property
+        def allComponents(self):
+            return []
+
+    class FakeDesign:
+        rootComponent = _Root()
+        def findEntityByToken(self, h):
+            e = handle_map.get(h)
+            return [e] if e is not None else []
+    inp._common.design = lambda: FakeDesign()
+    inp._common.target_component = lambda d=None: FakeDesign().rootComponent
+
+
+class TestTargetRefEdgeAndConstruction:
+    def test_edge_handle_resolves_when_allowed(self):
+        e = FakeEdge()
+        _install_target_ext({"H": e})
+        (ent, kind), err = inp.TargetRef("t", allow=("edge",)).resolve("H")
+        assert err is None and kind == "edge" and ent is e
+
+    def test_edge_handle_refused_under_default_allow(self):
+        # the backward-compat guarantee: a default-allow TargetRef does NOT accept an edge
+        e = FakeEdge()
+        _install_target_ext({"H": e})
+        res, err = inp.TargetRef("t").resolve("H")
+        assert res is None and "edge" in err.lower()
+
+    def test_construction_axis_resolves_when_allowed(self):
+        ax = _FakeConsAxis()
+        _install_target_ext({"H": ax})
+        (ent, kind), err = inp.TargetRef("t", allow=("construction_axis",)).resolve("H")
+        assert err is None and kind == "construction_axis" and ent is ax
+
+    def test_construction_plane_resolves_when_allowed(self):
+        pl = _FakeConsPlane()
+        _install_target_ext({"H": pl})
+        (ent, kind), err = inp.TargetRef("t", allow=("construction_plane",)).resolve("H")
+        assert err is None and kind == "construction_plane" and ent is pl
+
+    def test_original_body_kind_unaffected_by_the_extension(self):
+        # body/face/mesh/occurrence/component/design must resolve EXACTLY as before
+        b = FakeBRep("B", is_solid=True)
+        _install_target_ext({"H": b})
+        (ent, kind), err = inp.TargetRef("t").resolve("H")
+        assert err is None and kind == "body" and ent is b

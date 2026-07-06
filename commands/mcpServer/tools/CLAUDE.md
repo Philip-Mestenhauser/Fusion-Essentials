@@ -35,6 +35,27 @@ input kinds); this file is the how-to that sits under it. See
 | `_joints` | `build_joint_geometry` (keypoint factory per entity kind), `apply_motion` (motion-type dispatch, frame-relative or a custom direction entity), `current_joint_type`, `find_joint` (walks joints AND asBuiltJoints, root and every sub-component) — shared by `joint_create_edit`, `joint_at_geometry`, `joint_create_origin`, `joint_motion_link`, `joint_drive`. |
 | `_view_common` | The camera-orientation table for the standard named views: `view_direction`/`look_direction` (opposite-sign consumers) + `up_vector` + `is_ortho_face` — shared by `view_screenshot`, `view_inspect`, `view_section`. |
 
+## Postconditions — an Edit tool declares verify-the-effect (the third kind system)
+
+`_inputs` types what a tool is GIVEN, `_outputs` what it RETURNS, `_assert` what it DID. A WRITE tool
+passes `postconditions=[...]` to `Item.create_tool_item` — the kernel runs capture -> handler ->
+verify and converts a success whose declared effect did not take into an error (the platform DOES
+return success while changing nothing: `Document.save()` versioning nothing and
+`updateAllReferences()` leaving a stale ref were both observed live). Rules:
+
+- Reuse a kind from `_assert` (`VersionAdvanced`, `ReferencesFresh`, `FileLanded`, ...) before writing
+  one; a new kind must capture/verify through `safe()` reads and NEVER mutate.
+- Evidence a postcondition reads (size_bytes, stale counts) is folded into the payload via setdefault —
+  declare such keys in RETURNS and let the kernel supply them instead of computing them twice.
+- A write tool with NO postconditions needs an entry in `tests/test_postconditions_declared.py`'s
+  `_EXEMPT` table with a one-line audited reason, prefixed by its class: `inline:` (the verify
+  constructs payload fields or error text, so it stays in the handler), `effect:` (the payload's
+  claim IS a live read-back of the mutated state), or `gap:` (no effective read-back exists - a
+  named defect awaiting a fix, not an accepted state). The table only shrinks; a silent omission
+  is not an option.
+- Verify-the-effect logic that is intrinsically entangled with payload assembly, per-file loops, or
+  compensation/rollback may stay in the handler — name that in the exemption reason.
+
 ## Named exemplars — copy the nearest one before inventing a new shape
 
 - **Rich read** (one `<domain>_get` per domain, light default + `include=`): `design_get`, `data_get`,

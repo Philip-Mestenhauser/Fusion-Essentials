@@ -44,6 +44,9 @@ def activate_setup_handler(setup: str = "") -> dict:
         target.activate()
     except Exception as e:
         return error(f"Failed to activate '{want}': {e}")
+    if safe(lambda: target.isActive) is False:
+        return error(f"activate() ran but '{want}' still reads isActive=false - the setup did not "
+                     "become active.")
     # Fit the view so a subsequent view_screenshot frames the setup.
     try:
         vp = app.activeViewport

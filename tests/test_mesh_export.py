@@ -597,6 +597,41 @@ class TestSaveAsMesh:
         assert bf.started is True and bf.finished is True
         assert mb_coll.add_args is not None
 
+    def test_phantom_body_that_never_lands_bites(self):
+        # a returned body object is not proof it joined the component - the count is
+        _wire_adsk()
+
+        class PhantomMeshBodies(FakeMeshBodies):
+            count = 3                                    # static: the add never actually lands
+
+        mb_coll = PhantomMeshBodies(result=MeshBody("Phantom"))
+        comp = FakeComp("Comp", mesh_bodies=mb_coll)
+        src = _mesh_source("SolidA", parent_comp=comp)
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        res = mx.save_as_mesh_handler(body="H")
+        assert res["isError"] is True
+        assert "did not increase" in res["message"]
+
+    def test_landed_body_grows_the_count_and_passes(self):
+        _wire_adsk()
+
+        class LandingMeshBodies(FakeMeshBodies):
+            def __init__(self, result=None):
+                super().__init__(result)
+                self.count = 3
+
+            def addByTriangleMeshData(self, *a):
+                out = super().addByTriangleMeshData(*a)
+                self.count += 1
+                return out
+
+        mb_coll = LandingMeshBodies(result=MeshBody("SavedMesh"))
+        comp = FakeComp("Comp", mesh_bodies=mb_coll)
+        src = _mesh_source("SolidA", parent_comp=comp)
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        out = _payload(mx.save_as_mesh_handler(body="H"))
+        assert out["saved_as_mesh"] is True
+
     def test_quality_passed_to_calculator(self):
         _wire_adsk()
         comp = FakeComp("Comp")

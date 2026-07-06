@@ -634,6 +634,15 @@ class TestActivateComponent:
         out = _payload(dm.activate_component_handler(occurrence="Chassis"))   # component name
         assert occ.isActive is True and out["activated"] == "Chassis:1"
 
+    def test_activation_that_does_not_take_bites(self):
+        # activate() returns true but the active component still reads root -> error, not ok
+        occ = _FakeOcc("Chassis:1", "Chassis")
+        occ.activate = lambda: True                    # true returned, isActive never flips
+        _install_activate(_ActivateDesign([occ]))
+        res = dm.activate_component_handler(occurrence="Chassis:1")
+        assert res["isError"] is True
+        assert "did not take" in res["message"]
+
     def test_unknown_component_errors_and_lists(self):
         _install_activate(_ActivateDesign([_FakeOcc("Wheel:1", "Wheel")]))
         res = dm.activate_component_handler(occurrence="Ghost")

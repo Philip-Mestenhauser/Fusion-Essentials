@@ -57,6 +57,11 @@ class FakeSetup:
 class FakeSetups:
     def __init__(self):
         self.added = []
+    @property
+    def count(self):
+        return len(self.added)
+    def item(self, i):
+        return self.added[i]
     def createInput(self, op_type):
         return FakeSetupInput(op_type)
     def add(self, inp):
@@ -118,6 +123,14 @@ class TestOperationType:
         _, cam, _ = _install(monkeypatch)
         _payload(cs.handler(operation_type="turning"))
         assert cam.setups.added[-1].operationType == "TurningOperation"
+
+    def test_phantom_setup_that_never_lands_bites(self, monkeypatch):
+        # add() returns a setup object but it never appears in the re-listed collection -> error
+        _, cam, _ = _install(monkeypatch)
+        cam.setups.add = lambda inp: FakeSetup(inp)     # returned, never appended
+        res = cs.handler()
+        assert res["isError"] is True
+        assert "did not land" in res["message"]
 
     def test_unknown_type_errors(self, monkeypatch):
         _install(monkeypatch)

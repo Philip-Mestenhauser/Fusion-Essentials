@@ -4,8 +4,9 @@
 logic (no live Fusion): ``_find_target`` (setup/folder/operation classification + not-found),
 ``_collect_op_health`` (warning/error collection and the EMPTY-toolpath text derivation), and the two
 handlers' branching — generate's skip-valid short-circuit and target-not-found, and status's
-handle/'latest' resolution, the no-generations and unknown-handle guards, the pump-budget clamp, and
-the "nothing generating but out-of-date remain" stall warning.
+handle/'latest' resolution, the unknown-handle guard, the pump-budget clamp, the "nothing generating
+but out-of-date remain" stall warning, and the NO-HANDLE live-poll path (document + by-name target)
+that reports an inline/UI generation with no cam_generate handle.
 """
 
 import json
@@ -173,10 +174,6 @@ class TestStatusHandler:
         gen._GENERATIONS.clear()
         gen._HANDLE_SEQ[0] = 0
 
-    def test_no_generations_errors(self):
-        res = gen.status_handler()
-        assert res["isError"] is True and "No generations" in res["message"]
-
     def test_unknown_handle_lists_active(self):
         gen._GENERATIONS["gen1"] = {"future": SimpleNamespace(isGenerationCompleted=True),
                                     "target": "t", "started_at": 0, "total": 1}
@@ -190,11 +187,15 @@ class TestStatusHandler:
 
     # status_handler now DELEGATES CAM health to _cam_common.live_readiness (the single source) - tests
     # patch that seam (gen._cam_common.live_readiness -> (signal, None)) instead of a local tally.
-    def _readiness(self, **kw):
+    def _states(self, **kw):
         base = {"valid": 0, "out_of_date": 0, "errored": 0, "generating": 0, "suppressed": 0,
                 "total": 0, "active": None, "setups_errored": 0, "programs_errored": 0,
                 "readiness": "", "samples": {"op": None, "setup": None, "program": None}}
         base.update(kw)
+        return base
+
+    def _readiness(self, **kw):
+        base = self._states(**kw)
         return lambda: (base, None)
 
     def test_latest_resolves_to_last_handle(self, monkeypatch):
@@ -271,3 +272,110 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1", pump_seconds=9999))
         # completed already -> no pumping loop entered, pumped stays 0
         assert out["pumped_seconds"] == 0.0
+
+
+# ── status_handler live-poll path: NO cam_generate handle (inline / UI generation) ──────────────────
+
+def _live_op(name, state=0, generating=False, error=False):
+    return SimpleNamespace(name=name, operationState=state, isGenerating=generating,
+                           hasError=error, error="broken" if error else "")
+
+
+class TestStatusLivePoll:
+    def setup_method(self):
+        gen._GENERATIONS.clear()
+        gen._HANDLE_SEQ[0] = 0
+
+    def _states(self, **kw):
+        return TestStatusHandler._states(TestStatusHandler(), **kw)
+
+    def _readiness(self, **kw):
+        return TestStatusHandler._readiness(TestStatusHandler(), **kw)
+
+    # An op generated INLINE (cam_create_operation(generate=true), cam_select_geometry, or the UI) has
+    # no cam_generate handle. Polling with NO handle must report its live generation state, not refuse
+    # for lack of a launched generation.
+    def test_no_handle_reports_inline_generation(self, monkeypatch):
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(generating=1, out_of_date=1, total=2,
+                                            readiness="0 of 2 active ops valid - run cam_generate to finish the rest."))
+        out = _payload(gen.status_handler(pump_seconds=0))     # no handle, no generations registered
+        assert out["handle"] is None                            # no self-minted handle
+        assert out["target"] == "document"
+        assert out["completed"] is False
+        assert out["live_states"]["generating"] == 1
+
+    def test_document_completed_only_when_nothing_generating(self, monkeypatch):
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=3, generating=0, total=3,
+                                            readiness="3 of 3 active ops valid - ready to post."))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda: {"warnings": [], "errors": [], "empty": []})
+        out = _payload(gen.status_handler(pump_seconds=0))
+        assert out["completed"] is True and out["handle"] is None
+
+    def test_live_errored_op_flagged_not_generating_forever(self, monkeypatch):
+        # an errored op will NEVER finish - a still-generating live poll must flag the BLOCKER now, not
+        # report it as generating forever.
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(errored=1, generating=1, total=2,
+                                            readiness="BLOCKER: 1 operation(s) have errors - the job will not post until fixed.",
+                                            samples={"op": {"name": "Bad Op", "error": "broken"},
+                                                     "setup": None, "program": None}))
+        out = _payload(gen.status_handler(pump_seconds=0))
+        assert out["completed"] is False
+        assert "BLOCKER" in out["note"] and "will NOT complete" in out["note"]
+        assert "Bad Op" in out["note"]
+
+    def test_target_by_name_reports_that_setups_state(self, monkeypatch):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = _setup("Roughing", [_live_op("Op1", state=0),
+                                    _live_op("Op2", state=1, generating=True)])
+        cam = _FakeCAM([setup])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.status_handler(target="Roughing", pump_seconds=0))
+        assert "Roughing" in out["target"]
+        assert out["live_states"]["valid"] == 1
+        assert out["live_states"]["generating"] == 1
+        assert out["completed"] is False                        # Op2 still generating
+
+    def test_target_by_name_errored_op_is_its_own_bucket(self, monkeypatch):
+        # an errored op in a scoped walk is counted as errored (never out_of_date/generating).
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = _setup("Finish", [_live_op("Bad", error=True), _live_op("Good", state=0)])
+        cam = _FakeCAM([setup])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.status_handler(target="Finish", pump_seconds=0))
+        assert out["live_states"]["errored"] == 1
+        assert out["live_states"]["valid"] == 1
+        assert out["completed"] is True                         # nothing generating (errored != generating)
+        assert "BLOCKER" in out["note"]
+
+    def test_target_not_found_errors(self, monkeypatch):
+        cam = _FakeCAM([_setup("Roughing")])
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        res = gen.status_handler(target="Ghost")
+        assert res["isError"] is True and "Ghost" in res["message"]
+
+    def test_live_poll_pumps_then_returns_non_blocking(self, monkeypatch):
+        # pumps a bounded burst (calls adsk.doEvents) and RETURNS the moment nothing is generating -
+        # never sleeps to completion. Stub _scope_state so the first read is generating, the next is done.
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda: {"warnings": [], "errors": [], "empty": []})
+        pumps = {"n": 0}
+        monkeypatch.setattr(gen.adsk, "doEvents", lambda: pumps.__setitem__("n", pumps["n"] + 1),
+                            raising=False)
+        monkeypatch.setattr(gen.time, "sleep", lambda s: None)
+        seq = iter([self._states(generating=1, total=1),
+                    self._states(valid=1, generating=0, total=1,
+                                 readiness="1 of 1 active ops valid - ready to post.")])
+        monkeypatch.setattr(gen, "_scope_state", lambda cam, target: (next(seq), "document", None))
+        out = _payload(gen.status_handler(pump_seconds=5))
+        assert pumps["n"] >= 1                                   # it pumped the main-thread loop
+        assert out["completed"] is True                         # broke out as soon as generating hit 0

@@ -37,7 +37,8 @@ _EDIT = {"create", "edit", "delete", "set", "add", "remove", "move", "apply", "g
          "hole", "pattern", "base", "construction", "reorder", "save", "open", "close", "new", "copy",
          "insert", "update", "upload", "configure", "reload", "execute", "capture", "rigid", "motion",
          "at", "extend", "offset", "patch", "thicken", "trim", "plane", "reduce", "remesh", "to",
-         "dimension", "switch", "select"}
+         "dimension", "switch", "select", "shell", "sweep", "draft", "split", "project", "reverse",
+         "untrim", "post", "restore"}
 
 _READ_KIND_VERBS = _ORIENT | _READ | _ACQUIRE       # these MUST be read-only
 _EDIT_KIND_VERBS = _EDIT                             # these MUST NOT be read-only

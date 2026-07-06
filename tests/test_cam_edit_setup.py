@@ -51,13 +51,30 @@ class _ObjColl:
         return cls()
 
 
+class _Machine:
+    def __init__(self, description):
+        self.description = description
+        self.vendor = ""
+        self.model = ""
+
+
 class _Setup:
-    def __init__(self, name, params):
+    def __init__(self, name, params, machine_sticks=True):
         self.name = name
         self.parameters = _Params(params)
         self._models = _ObjColl()
         self._fixtures = _ObjColl()
         self._stock = _ObjColl()
+        self._machine = None
+        self.machine_sticks = machine_sticks   # False models an assignment that silently doesn't take
+    # Setup.machine takes a transient copy; the tool reads it back to confirm.
+    @property
+    def machine(self):
+        return self._machine
+    @machine.setter
+    def machine(self, m):
+        if self.machine_sticks:
+            self._machine = m
     # models / fixtures / stockSolids are get/set ObjectCollections
     @property
     def models(self):
@@ -116,6 +133,15 @@ def _install(monkeypatch, setups=("Setup1",)):
         return out, None
     ces._resolve_bodies = _resolve_bodies
     cam._bodies = bodies
+    # machine resolver seam: a known 'vendor|model' -> a fake Machine, anything else -> a refusal.
+    known = {"Haas|VF-2": _Machine("Haas VF-2")}
+    def _resolve_machine(name):
+        m = known.get(name)
+        if not m:
+            return None, None, "no machine '%s'" % name
+        return m, m.description, None
+    ces._resolve_machine = _resolve_machine
+    cam._machines = known
     return cam
 
 
@@ -200,3 +226,33 @@ class TestBodies:
         out = _payload(ces.handler(setup="Setup1",
                                    parameters={"stockZHigh": "1"}, models=["Stock"]))
         assert out["updated_count"] == 1 and out["models_set"] == 1
+
+
+# ── assign a machine (the setup-level prerequisite for posting) ─────────────
+
+class TestMachine:
+    def test_assigns_machine_and_reads_it_back(self, monkeypatch):
+        cam = _install(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", machine="Haas|VF-2"))
+        assert out["machine_set"] == "Haas VF-2"
+        assert cam.setups.item(0).machine.description == "Haas VF-2"
+
+    def test_unknown_machine_is_error(self, monkeypatch):
+        _install(monkeypatch)
+        res = ces.handler(setup="Setup1", machine="Acme|Nonesuch")
+        assert res["isError"] is True and "Nonesuch" in res["message"]
+
+    def test_assignment_that_does_not_take_is_error(self, monkeypatch):
+        # Setup.machine setter silently drops the value -> the read-back must turn that into a hard error,
+        # never a false ok.
+        cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS), machine_sticks=False)])
+        monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
+        ces._resolve_machine = lambda name: (_Machine("Haas VF-2"), "Haas VF-2", None)
+        res = ces.handler(setup="Setup1", machine="Haas|VF-2")
+        assert res["isError"] is True and "did not take" in res["message"].lower()
+
+    def test_machine_counts_as_something_to_do(self, monkeypatch):
+        _install(monkeypatch)
+        # machine-only edit is NOT 'nothing to do'
+        out = _payload(ces.handler(setup="Setup1", machine="Haas|VF-2"))
+        assert out["machine_set"] == "Haas VF-2"

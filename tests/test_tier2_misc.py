@@ -47,6 +47,7 @@ class _XRef:
     def getLatestVersion(self):
         if self._latest_returns:
             self.version = self._after
+            self.isOutOfDate = False
         return self._latest_returns
 
 

@@ -28,6 +28,9 @@ class FakeText:
 class FakeTexts:
     def __init__(self):
         self.added = []
+    @property
+    def count(self):
+        return len(self.added)
     def createInput2(self, text, height):
         return FakeTextInput(text, height)
     def add(self, inp):

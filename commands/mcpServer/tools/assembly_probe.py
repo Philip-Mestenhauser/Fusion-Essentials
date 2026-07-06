@@ -30,14 +30,36 @@ _MOTION = {
 
 
 
+def _axis_vec(v):
+    """A basis axis Vector3D as a [x,y,z] unit vector (4dp), or None. Directions are dimensionless."""
+    x = safe(lambda: v.x); y = safe(lambda: v.y); z = safe(lambda: v.z)
+    if x is None or y is None or z is None:
+        return None
+    return [round(x, 4), round(y, 4), round(z, 4)]
+
+
 def _occ_world(occ, inv_k):
-    """World origin (translation) + bbox center/size of an occurrence, in display units."""
+    """World origin (translation) + rotation basis axes + bbox center/size, in display units.
+
+    x_axis/y_axis/z_axis are the occurrence transform's basis vectors (its ROTATION): an unrotated
+    occurrence reads x=[1,0,0], y=[0,1,0], z=[0,0,1]. Directions are dimensionless, so - unlike origin
+    - they are NOT unit-scaled.
+    """
     out = {}
-    t = safe(lambda: occ.transform2.translation)
+    m = safe(lambda: occ.transform2)
+    t = safe(lambda: m.translation) if m is not None else None
     if t is not None:
         out["origin"] = [round(safe(lambda: t.x, 0.0) * inv_k, 3),
                          round(safe(lambda: t.y, 0.0) * inv_k, 3),
                          round(safe(lambda: t.z, 0.0) * inv_k, 3)]
+    if m is not None:
+        # getAsCoordinateSystem returns (origin, xAxis, yAxis, zAxis) in Python.
+        cs = safe(lambda: m.getAsCoordinateSystem())
+        if isinstance(cs, (list, tuple)) and len(cs) == 4:
+            for key, vec in (("x_axis", cs[1]), ("y_axis", cs[2]), ("z_axis", cs[3])):
+                av = _axis_vec(vec)
+                if av is not None:
+                    out[key] = av
     bb = safe(lambda: occ.boundingBox)
     if bb is not None:
         mn = safe(lambda: bb.minPoint); mx = safe(lambda: bb.maxPoint)
@@ -223,7 +245,8 @@ def handler(units: str = "mm", include_joints: bool = True,
 TOOL_DESCRIPTION = (
     "Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
     "interpreting a cluttered screenshot. For every TOP-LEVEL occurrence: its world position (origin + "
-    "bbox center/size in 'units'), ground flags (grounded / ground_to_parent), and the joints it "
+    "bbox center/size in 'units'), its rotation as three basis axes (x_axis / y_axis / z_axis unit "
+    "vectors), ground flags (grounded / ground_to_parent), and the joints it "
     "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "
     "each connects) and which occurrences are grounded. Use it to verify grounding (is the block "
     "fixed, the crank free?), joint wiring (did it connect the right parts?), and part positions "

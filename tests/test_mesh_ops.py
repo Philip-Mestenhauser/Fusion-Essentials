@@ -692,6 +692,19 @@ class TestMeshReduce:
         assert out["before"]["triangle_count"] == 1000
         assert out["after"]["triangle_count"] == 250
 
+    def test_unreduced_count_is_an_error_not_success(self):
+        # the honesty gate: add() succeeded but the triangle count did not decrease -> error, not ok
+        src, feats = self._setup(before_tri=1000, after_tri=1000)
+        res = mo.mesh_reduce_handler(mesh="H", target="proportion", value=30)
+        assert res["isError"] is True
+        assert "did not decrease" in res["message"]
+
+    def test_proportion_100_keep_everything_is_not_gated(self):
+        # proportion=100 asks to keep every triangle - an unchanged count is the requested outcome
+        src, feats = self._setup(before_tri=1000, after_tri=1000)
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="proportion", value=100))
+        assert out["reduced"] is True
+
     def test_parametric_routes_through_base_feature_scope(self):
         # REGRESSION: in PARAMETRIC the createInput->set->add runs INSIDE the helper's base-feature
         # scope (opened AND finished). The feature add must not be defeated by an undetectable-scope
@@ -720,8 +733,22 @@ class TestMeshRemesh:
         _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
         out = _payload(mo.mesh_remesh_handler(mesh="H"))
         assert out["remeshed"] is True
+        assert out["changed"] is True
         assert out["before"]["triangle_count"] == 2000
         assert out["after"]["triangle_count"] == 1500
+
+    def test_unchanged_count_is_flagged_not_asserted(self):
+        # count identical after the remesh -> the payload says so instead of implying a fresh mesh
+        _wire_adsk()
+        src = MeshBody("Scan", tri=2000)
+        result = MeshBody("Scan", tri=2000)
+        feats = _MeshFeatures([result])
+        comp = FakeComp("Comp", features=_Features(remesh=feats))
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        out = _payload(mo.mesh_remesh_handler(mesh="H"))
+        assert out["changed"] is False
+        assert "unchanged" in out["note"]
 
     def test_missing_remesh_features_collection_errors(self):
         _wire_adsk()

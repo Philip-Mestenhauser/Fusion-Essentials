@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails CI if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 121  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 137  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -10,7 +10,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | Kind | What it references |
 |---|---|
-| `AxisRef` | A direction/axis: a world axis (x / y / z) OR a 'handle' pointing at a straight (linear) EDGE |
+| `AxisRef` | A direction/axis: a world axis (x / y / z), a 'handle' pointing at a straight (linear) EDGE or a |
 | `BodyRef` | A reference to a BODY, by a 'handle' from find_geometry (precise - bodies are auto-named |
 | `BodyRefList` | A LIST of body references (handles or names) - for tools that act on several bodies. Kind-checks |
 | `Choice` | One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are |
@@ -40,30 +40,39 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `model_compute_holder` | Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool Holder command |
 | ✎ | `model_construction` | Add construction geometry (reference datums) in the active component |
 | ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (... |
+| ✎ | `model_draft` | Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part needs so it releases from its tooling |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid - the back half of modelling, paired with sketch_create / sketch_add_geometry |
 | ✎ | `model_fillet` | Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs |
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
 | · | `model_inspect` | Measure a target - size, mass, or mesh stats - in one read |
 | ✎ | `model_loft` | Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order given - order is load-bearing), optionally shaped by 'rails' (guide... |
 | · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an occurrence/component/body name |
+| · | `model_measure_relation` | Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the measured angle / axis offset / min distance and the tolerance i... |
 | ✎ | `model_mirror` | Mirror solid BODIES across a plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
 | ✎ | `model_pattern_circular` | Pattern component OCCURRENCES evenly around an axis |
 | ✎ | `model_pattern_rectangular` | Pattern component OCCURRENCES in a rectangular grid |
 | ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part: shaft, piston, pulley, bottle) |
+| ✎ | `model_set_material` | Assign a PHYSICAL material (density-bearing) to a body, occurrence, component (all its bodies), or the whole design (empty target), so model_inspect's mass/dens... |
+| ✎ | `model_shell` | Hollow a solid body into a thin-walled shell (Fusion's Shell feature) |
+| ✎ | `model_split` | Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / SplitFace feature |
 | ✎ | `model_stitch` | Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance' |
+| ✎ | `model_sweep` | Sweep a sketch profile along a path into a 3D solid - a cross-section driven along a curve (pipes, handrails, cables, moulding, path-following extrusions) |
 | ✎ | `model_unstitch` | Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of model_stitch, so one face can be patched/trimmed/offset then re-stitched |
 
 ### surface
 
 | | Tool | Summary |
 |---|---|---|
+| ✎ | `surface_delete_face` | Delete faces from their bodies, optionally HEALING the opening |
 | ✎ | `surface_extend` | Extend an OPEN surface outward from its OUTER open edges |
 | ✎ | `surface_extrude` | Extrude an OPEN sketch profile (or B-Rep/sketch 'curves' handles) into a SHEET (surface) body - isSolid == false, the entry point to surface modelling |
 | ✎ | `surface_offset` | Offset faces by a distance into ANOTHER surface (positive = along the face normal) |
 | ✎ | `surface_patch` | Fill CLOSED loop(s) of edges with surface face(s) - 'cap the hole(s)' / 'bridge the gap(s)' |
+| ✎ | `surface_reverse_normal` | Reverse the normal direction of OPEN surface bodies - for a stitch/thicken/offset that solidified toward the wrong side |
 | ✎ | `surface_revolve` | Revolve an OPEN profile (sketch open chain, or 'curves' handles) about an x/y/z axis into a SHEET (surface) body - isSolid == false |
 | ✎ | `surface_thicken` | Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes a wall, stitch closes a watertight surface set) |
 | ✎ | `surface_trim` | Trim an OPEN surface body against a tool that intersects it - remove the unwanted cell(s) |
+| ✎ | `surface_untrim` | Untrim surface faces - restore a trimmed face to its underlying (natural) extent, or remove an internal hole loop |
 
 ### mesh
 
@@ -89,6 +98,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `sketch_create` | Create a new sketch on a plane OR on an existing planar face |
 | ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of parametric sketching (sketch_constrain does the geometric half) |
 | · | `sketch_get` | Read sketches by zoom level |
+| ✎ | `sketch_project` | Project existing model geometry into a sketch - Fusion's Project command - creating sketch curves/points from edges, faces (all of their edges), or vertices |
 | ✎ | `sketch_set_text` | Set the displayed string of sketch text entities (e.g |
 
 ### cam
@@ -107,7 +117,8 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools (each action's inputs are documented on the properties below) |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often minutes; poll cam_get_status(handle), never block) |
 | · | `cam_get` | Read the active document's CAM (Manufacture) state by zoom level |
-| · | `cam_get_status` | Poll a generation launched by cam_generate AND nudge it forward |
+| · | `cam_get_status` | Poll toolpath generation AND nudge it forward |
+| ✎ | `cam_post` | Create (or reuse) an NC Program for the chosen toolpaths, then post it to a G-code / NC file on disk - the final CAM step that turns generated toolpaths into a ... |
 | ✎ | `cam_reorder` | REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['o... |
 | ✎ | `cam_save_template` | Bundle a subset of a setup's operations into a NEW toolpath template in the library |
 | ✎ | `cam_select_geometry` | SELECT the machining geometry on a CAM operation using find_geometry handles, then (optionally) regenerate |
@@ -162,6 +173,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `doc_insert_occurrence` | Insert a SAVED cloud document into the active design as a new component occurrence - the API equivalent of Insert into Current Design |
 | ✎ | `doc_new` | Create and open a new, empty Fusion design document; it becomes the active document |
 | ✎ | `doc_open` | Open a Fusion document by data-model id |
+| ✎ | `doc_restore_version` | Roll the ACTIVE cloud document back to a prior version |
 | ✎ | `doc_save` | Save the ACTIVE document in place - a new cloud version of the same file (the plain 'Save', vs doc_save_as which needs a name+folder for a never-saved doc) |
 | ✎ | `doc_save_as` | Save the ACTIVE Fusion document into a project/folder under a given 'name', via Document.saveAs |
 | ✎ | `doc_update_xref` | Refresh the active document's external references (X-refs) to their latest cloud version - the API equivalent of 'Get Latest' on a referenced component |
@@ -175,8 +187,17 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ⚠ | `data_delete_file` | Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN |
 | ⚠ | `data_delete_folder` | Delete a data-model folder by its 'folder_id' (from data_get(include=['folders'])) |
 | · | `data_get` | Read the CLOUD data model (Autodesk/Fusion Team) in one call, by scope |
+| · | `data_get_upload_status` | Poll a data_upload_file upload for its ACTUAL state - never guess from re-listing data_get |
 | ✎ | `data_switch_hub` | Attempt to SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])) |
 | ✎ | `data_upload_file` | Upload a local CAD file from the user's filesystem into a project, optionally into a nested 'folder' path (e.g |
+
+### drawing
+
+| | Tool | Summary |
+|---|---|---|
+| ✎ | `drawing_create` | Create a 2D DRAWING document from the active design - automatic drawing creation (the only mode the API supports) |
+| ✎ | `drawing_export` | Export the ACTIVE 2D DRAWING document to a PDF on local disk |
+| ✎ | `drawing_update` | Refresh the ACTIVE 2D DRAWING's out-of-date references to the latest source design - the API equivalent of the 'Refresh' button, regenerating the drawing's view... |
 
 ### param
 

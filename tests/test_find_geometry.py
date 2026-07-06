@@ -31,12 +31,42 @@ class _PlaneGeo:
     surfaceType = "PLANE"
 
 
+class _Eval:
+    """Stands in for a BRepFace SurfaceEvaluator. getNormalAtPoint returns (success, normal) - the
+    Python shape of a bool-return + output-normal API. raises=True mimics an off-surface sample point."""
+    def __init__(self, normal=None, raises=False):
+        self._normal = normal
+        self._raises = raises
+
+    def getNormalAtPoint(self, point):
+        if self._raises:
+            raise RuntimeError("point is off the face surface")
+        return (True, _Pt(*self._normal))
+
+
+class _LineGeo:
+    def __init__(self, start, end):
+        self.curveType = "LINE"
+        self.startPoint = _Pt(*start)
+        self.endPoint = _Pt(*end)
+
+
+class FakeEdge:
+    def __init__(self, token, geo, point_on_edge, length=5.0):
+        self.entityToken = token
+        self.geometry = geo
+        self.pointOnEdge = _Pt(*point_on_edge)
+        self.length = length
+
+
 class FakeFace:
-    def __init__(self, token, geo, centroid, area=10.0):
+    def __init__(self, token, geo, centroid, area=10.0, evaluator=None):
         self.entityToken = token
         self.geometry = geo
         self.centroid = _Pt(*centroid)
         self.area = area
+        # None => _face_normal degrades to no 'normal' field (same as a face lacking an evaluator).
+        self.evaluator = evaluator
 
 
 class FakeBody:
@@ -93,19 +123,32 @@ class FakeDesign:
         self.rootComponent = FakeRoot(occs, root_bodies, all_occs)
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enum_sentinels(monkeypatch):
+    # SurfaceTypes/Curve3DTypes live on the SHARED adsk mock that other test modules' tools also
+    # read - monkeypatch scopes the string sentinels to this file so they restore after each test.
+    import adsk.core
+    st = adsk.core.SurfaceTypes
+    monkeypatch.setattr(st, "CylinderSurfaceType", "CYL", raising=False)
+    monkeypatch.setattr(st, "PlaneSurfaceType", "PLANE", raising=False)
+    monkeypatch.setattr(st, "ConeSurfaceType", "CONE", raising=False)
+    monkeypatch.setattr(st, "SphereSurfaceType", "SPHERE", raising=False)
+    monkeypatch.setattr(st, "TorusSurfaceType", "TORUS", raising=False)
+    ct = adsk.core.Curve3DTypes
+    monkeypatch.setattr(ct, "Circle3DCurveType", "CIRCLE", raising=False)
+    monkeypatch.setattr(ct, "Line3DCurveType", "LINE", raising=False)
+    monkeypatch.setattr(ct, "Arc3DCurveType", "ARC", raising=False)
+
+
 def _install(occs, root_bodies=(), all_occs=None):
     design = FakeDesign(occs, root_bodies, all_occs)
     fg.app = type("A", (), {"activeProduct": design})()
     fg._common.app = fg.app
-    import adsk.fusion, adsk.core
+    import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # surfaceType enum: map our string sentinels onto the SurfaceTypes attrs the code reads
-    st = adsk.core.SurfaceTypes
-    st.CylinderSurfaceType = "CYL"
-    st.PlaneSurfaceType = "PLANE"
-    st.ConeSurfaceType = "CONE"
-    st.SphereSurfaceType = "SPHERE"
-    st.TorusSurfaceType = "TORUS"
 
 
 def _payload(result):
@@ -224,3 +267,46 @@ class TestNestedAssembly:
         out = _payload(fg.handler())
         handles = {m["handle"].split("|@")[0] for m in out["matches"]}
         assert "ROOT_FACE" in handles and "NESTED" in handles
+
+
+# ── PERCEPTION FIELDS: face outward normal + linear-edge direction ──────────────────────────────
+# A face record carries the outward unit normal at its reported position; a straight edge carries its
+# unit direction. Both degrade to an omitted field (never a fabricated value) when unevaluable.
+
+class TestPerception:
+    def test_planar_face_reports_outward_normal(self):
+        # a planar top face at z=5mm with a +Z evaluator normal -> normal [0,0,1]
+        face = FakeFace("TOP", _PlaneGeo(), (0, 0, 0.5), evaluator=_Eval(normal=(0, 0, 1)))
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[face])])])
+        out = _payload(fg.handler(target="X:1"))
+        assert out["matches"][0]["normal"] == [0.0, 0.0, 1.0]
+
+    def test_normal_omitted_when_evaluator_raises(self):
+        # off-surface sample point -> getNormalAtPoint raises -> safe() degrades to NO 'normal' field.
+        face = FakeFace("CURVED", _CylGeo(0.8), (0, 0, 0), evaluator=_Eval(raises=True))
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[face])])])
+        out = _payload(fg.handler(target="X:1", kind="cylinder_face"))
+        assert "normal" not in out["matches"][0]
+
+    def test_normal_omitted_when_face_has_no_evaluator(self):
+        # a face lacking an evaluator (evaluator=None) yields no normal, not a crash.
+        face = FakeFace("PL", _PlaneGeo(), (0, 0, 0))
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[face])])])
+        out = _payload(fg.handler(target="X:1"))
+        assert "normal" not in out["matches"][0]
+
+    def test_linear_edge_reports_unit_direction(self):
+        # a line edge from (0,0,0) to (3,0,0)cm -> normalized direction [1,0,0]
+        edge = FakeEdge("LN", _LineGeo((0, 0, 0), (3, 0, 0)), (1.5, 0, 0), length=3.0)
+        _install([FakeOcc("X:1", "X", [FakeBody(edges=[edge])])])
+        out = _payload(fg.handler(target="X:1", kind="line_edge"))
+        m = out["matches"][0]
+        assert m["kind"] == "line_edge"
+        assert m["direction"] == [1.0, 0.0, 0.0]
+
+    def test_diagonal_edge_direction_is_normalized(self):
+        # a 3-4-0 edge -> unit direction [0.6, 0.8, 0]
+        edge = FakeEdge("DIAG", _LineGeo((0, 0, 0), (3, 4, 0)), (1.5, 2, 0), length=5.0)
+        _install([FakeOcc("X:1", "X", [FakeBody(edges=[edge])])])
+        out = _payload(fg.handler(target="X:1", kind="line_edge"))
+        assert out["matches"][0]["direction"] == [0.6, 0.8, 0.0]

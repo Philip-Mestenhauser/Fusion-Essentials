@@ -58,6 +58,45 @@ class TestAssertPresentTopLevel:
         assert k.assert_present({"document_id": None}) != ""
 
 
+class TestReturnsVerdict:
+    """The assertion-read contract: relation/passed/measured/tolerance_used, a REAL boolean verdict."""
+
+    def _good(self):
+        return {"relation": "coaxial", "passed": True,
+                "measured": {"angle_deg": 0.1}, "tolerance_used": {"tolerance_deg": 0.5},
+                "note": "PASS"}
+
+    def test_full_verdict_shape_passes(self):
+        k = out.ReturnsVerdict(relations=("coaxial", "parallel"))
+        assert k.assert_present(self._good()) == ""
+
+    def test_missing_contract_key_is_named(self):
+        k = out.ReturnsVerdict()
+        p = self._good()
+        del p["tolerance_used"]
+        err = k.assert_present(p)
+        assert "tolerance_used" in err
+
+    def test_non_boolean_passed_rejected(self):
+        # a truthy string/int verdict is exactly the bare-boolean sloppiness the kind exists to ban
+        k = out.ReturnsVerdict()
+        p = self._good()
+        p["passed"] = "yes"
+        err = k.assert_present(p)
+        assert "boolean" in err
+
+    def test_undeclared_relation_rejected(self):
+        k = out.ReturnsVerdict(relations=("coaxial",))
+        p = self._good()
+        p["relation"] = "frobnicated"
+        err = k.assert_present(p)
+        assert "frobnicated" in err
+
+    def test_produces_note_names_the_contract_keys(self):
+        note = out.ReturnsVerdict().produces_note()
+        assert "passed" in note and "measured" in note and "tolerance_used" in note
+
+
 class TestAssertPresentInList:
     def test_handle_inside_a_matches_list_is_found(self):
         # find_geometry shape: the handle lives inside each item of a list, not at the top level.

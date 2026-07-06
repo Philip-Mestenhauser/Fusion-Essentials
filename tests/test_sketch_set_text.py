@@ -9,6 +9,8 @@ guards. The actual engraving is a live side-effect.
 
 import json
 
+import pytest
+
 from conftest import load_tool
 
 st = load_tool("sketch_set_text")
@@ -241,19 +243,31 @@ class FakeTextInput:
 
 
 class FakeSketchTexts:
-    def __init__(self):
+    """createInput2/add that model a real SketchTexts collection: add() APPENDS so `count` rises -
+    unless `materialize=False`, which returns a truthy text object while the collection stays flat
+    (the on-face silent-no-op the honesty read-back must catch)."""
+    def __init__(self, initial=0, materialize=True, add_returns=True):
         self.last_input = None
+        self._texts = [type("T", (), {"name": f"T{i}"})() for i in range(initial)]
+        self.materialize = materialize
+        self.add_returns = add_returns
+    @property
+    def count(self):
+        return len(self._texts)
     def createInput2(self, text, height):
         self.last_input = FakeTextInput(text, height)
         return self.last_input
     def add(self, ipt):
-        return type("T", (), {"name": "Text1"})()
+        st = type("T", (), {"name": "Text1"})()
+        if self.materialize:
+            self._texts.append(st)
+        return st if self.add_returns else None
 
 
 class FakeSketchForCreate:
-    def __init__(self, name):
+    def __init__(self, name, texts=None):
         self.name = name
-        self.sketchTexts = FakeSketchTexts()
+        self.sketchTexts = texts if texts is not None else FakeSketchTexts()
 
 
 class _NamedColl(_Coll):
@@ -264,8 +278,8 @@ class _NamedColl(_Coll):
         return None
 
 
-def _install_create(sketch_name="Plate"):
-    sk = FakeSketchForCreate(sketch_name)
+def _install_create(sketch_name="Plate", texts=None):
+    sk = FakeSketchForCreate(sketch_name, texts=texts)
     comp = type("C", (), {"name": "Root", "sketches": _NamedColl([sk])})()
     design = _install([comp])
     import adsk.core
@@ -311,3 +325,45 @@ class TestCreate:
         _install_create()
         res = st.handler(text="A", create=True, sketch_name="NoSuch")
         assert res["isError"] is True and "NoSuch" in res["message"]
+
+    # ── honesty read-back: verify the text actually materialized ──────────────
+
+    def test_create_reports_verified_count_delta(self):
+        # count must be read back off the collection and reported (0 -> 1 here)
+        design, sk = _install_create(texts=FakeSketchTexts(initial=0))
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate"))
+        assert out["created"] is True
+        assert out["sketch_text_count"] == 1
+
+    def test_create_count_delta_from_nonzero_base(self):
+        design, sk = _install_create(texts=FakeSketchTexts(initial=3))
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate"))
+        assert out["sketch_text_count"] == 4
+
+    def test_create_silent_noop_is_error_not_false_ok(self):
+        # add() returns a truthy text object but the collection count does NOT rise: nothing
+        # materialized. Reporting created:true here would be a false ok - the cardinal sin.
+        sk_texts = FakeSketchTexts(initial=0, materialize=False, add_returns=True)
+        design, sk = _install_create(texts=sk_texts)
+        res = st.handler(text="LBL", create=True, sketch_name="Plate", x=0, y=0, height=5)
+        assert res["isError"] is True
+        assert "did not materialize" in res["message"]
+        # and it names the coordinate-space fix (sketch-plane coords / frame)
+        assert "SKETCH-plane" in res["message"] or "frame" in res["message"]
+
+    def test_create_add_returns_none_is_error(self):
+        sk_texts = FakeSketchTexts(initial=0, materialize=False, add_returns=False)
+        design, sk = _install_create(texts=sk_texts)
+        res = st.handler(text="LBL", create=True, sketch_name="Plate")
+        assert res["isError"] is True and "did not materialize" in res["message"]
+
+    def test_create_uses_sketch_plane_not_world_coordinates(self):
+        # the corner point handed to setAsMultiLine is the raw (x,y) in SKETCH space (scaled to cm),
+        # with no world/model transform applied - on-face coordinate handling.
+        design, sk = _install_create()
+        _payload(st.handler(text="AB", create=True, sketch_name="Plate", x=12, y=8, units="mm"))
+        corner, diagonal = sk.sketchTexts.last_input.multiline[0], sk.sketchTexts.last_input.multiline[1]
+        assert corner[0] == "pt" and corner[3] == 0
+        assert corner[1] == pytest.approx(1.2) and corner[2] == pytest.approx(0.8)   # 12mm,8mm -> cm
+        # diagonal is strictly offset in BOTH axes so the text box is never degenerate
+        assert diagonal[1] > corner[1] and diagonal[2] > corner[2]

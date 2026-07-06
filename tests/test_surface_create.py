@@ -267,6 +267,17 @@ class TestSurfaceExtrude:
         out = _payload(sc.extrude_handler(sketch_name="S", distance=5))
         assert out["created"] is True and out["is_solid"] is False
 
+    def test_solid_result_contradicts_the_sheet_note(self):
+        # a result that reads back SOLID must not carry the open-surface note - the note reports
+        # the observed body, not the intent
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Body1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5))
+        assert out["is_solid"] is True
+        assert "SOLID" in out["note"]
+        assert "Open surface body created" not in out["note"]
+
     def test_zero_distance_guard(self):
         comp = FakeComp(FakeFeatures(ef=FakeExtrudeFeatures()), sketches=[FakeSketch("S")])
         _install(comp)

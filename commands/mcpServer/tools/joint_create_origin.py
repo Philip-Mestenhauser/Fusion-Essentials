@@ -1,9 +1,13 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Creates a Joint Origin (a reusable coordinate frame / WCS anchor) at an agent-specified location or
-orientation - anchor='coordinates'|'sketch_line'|'sketch_point'|'geometry'. Only sketch_line/geometry
-anchors can orient the frame; a bare coordinate/point is world-aligned (Z = world Z). WRITES.
+"""Creates a Joint Origin (a reusable coordinate frame / WCS anchor) at an agent-specified or COMPUTED
+anchor - anchor='coordinates'|'sketch_line'|'sketch_point'|'geometry'|'bbox_center'|'face_center'.
+bbox_center places the frame at a body/occurrence's world bounding-box CENTER, oriented so Z aligns to
+orient_axis (world x/y/z or an edge/line handle); face_center sits at a planar face's centroid with
+Z = the face normal. sketch_line/geometry/bbox_center/face_center orient the frame; a bare
+coordinate/point is world-aligned (Z = world Z). A computed anchor is read back and reported so the
+caller can verify the point it landed on. WRITES.
 """
 
 import adsk.core
@@ -20,7 +24,7 @@ from . import _inputs
 from . import _joints
 
 _TARGETS = ("at", "origin")
-_ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry")
+_ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry", "bbox_center", "face_center")
 _KEYPOINTS = {"start": 0, "middle": 1, "end": 2, "center": 3}
 
 _ANCHOR_CHOICE = _inputs.Choice("anchor", list(_ANCHORS), default="coordinates",
@@ -32,8 +36,19 @@ _KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start",
 
 # anchor='geometry': a BRep face/edge/vertex HANDLE from find_geometry - the frame's orientation
 # comes from that real geometry (a planar face's normal, a cylinder/edge's axis, a hole edge).
+# anchor='face_center' reuses this same 'geometry' handle, requiring a PLANAR face.
 _GEOM = _inputs.GeometryHandle("geometry", require="any",
-                               description="A find_geometry handle to anchor the joint origin on (face/edge/vertex).")
+                               description="A find_geometry handle to anchor on (anchor=geometry: face/edge/vertex; anchor=face_center: a PLANAR face).")
+
+# anchor='bbox_center': the thing whose WORLD bounding-box center becomes the origin. TargetRef resolves
+# a body (handle or name), an occurrence (fullPathName), or a component - and refuses an ambiguous name.
+_BBOX_TARGET = _inputs.TargetRef("bbox_target", allow=("body", "occurrence", "component"),
+                                 description="anchor='bbox_center': the body/occurrence/component whose world bounding-box CENTER becomes the origin.")
+
+# anchor='bbox_center': the axis the frame's Z is aligned to (world x/y/z, or a straight-edge/sketch-line
+# handle the axis runs along). 'flip' reverses it 180 deg.
+_ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z",
+                               description="anchor='bbox_center': the axis the frame's Z aligns to.")
 
 
 def _vec(v):
@@ -41,6 +56,69 @@ def _vec(v):
         return None
     return [round(safe(lambda: v.x, 0.0), 6), round(safe(lambda: v.y, 0.0), 6),
             round(safe(lambda: v.z, 0.0), 6)]
+
+
+def _bbox_center_cm(entity):
+    """World bounding-box CENTER (cm) of a body/occurrence/component, or None if it has no box.
+    BoundingBox3D is world-axis-aligned, so its center is the geometric center in world space."""
+    bb = safe(lambda: entity.boundingBox)
+    if bb is None:
+        return None
+    mn = safe(lambda: bb.minPoint)
+    mx = safe(lambda: bb.maxPoint)
+    if mn is None or mx is None:
+        return None
+    return ((safe(lambda: mn.x, 0.0) + safe(lambda: mx.x, 0.0)) / 2.0,
+            (safe(lambda: mn.y, 0.0) + safe(lambda: mx.y, 0.0)) / 2.0,
+            (safe(lambda: mn.z, 0.0) + safe(lambda: mx.z, 0.0)) / 2.0)
+
+
+def _axis_direction(raw_axis, flip):
+    """Resolve orient_axis (world x/y/z, or a straight-edge/sketch-line handle the axis runs along) to a
+    UNIT direction (dx,dy,dz), optionally flipped 180 deg. Returns (dir, error)."""
+    val, err = _ORIENT_AXIS.resolve(raw_axis)
+    if err:
+        return None, err
+    tag, payload = val
+    if tag == "world":
+        d = [float(payload[0]), float(payload[1]), float(payload[2])]
+    else:  # ('edge', BRepEdge | SketchLine) - the axis runs ALONG the line
+        ent = payload
+        line = safe(lambda: ent.worldGeometry) or safe(lambda: ent.geometry)
+        sp = safe(lambda: line.startPoint)
+        ep = safe(lambda: line.endPoint)
+        if sp is None or ep is None:
+            return None, "orient_axis: could not read a direction from that edge/line handle."
+        d = [safe(lambda: ep.x, 0.0) - safe(lambda: sp.x, 0.0),
+             safe(lambda: ep.y, 0.0) - safe(lambda: sp.y, 0.0),
+             safe(lambda: ep.z, 0.0) - safe(lambda: sp.z, 0.0)]
+    n = (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
+    if n <= 1e-9:
+        return None, "orient_axis: the direction is zero-length."
+    d = [c / n for c in d]
+    if flip:
+        d = [-c for c in d]
+    return d, None
+
+
+def _anchor_direction_line(comp, center_cm, dir_vec, length=1.0):
+    """Draw a hidden helper sketch line from center_cm (cm) along dir_vec; the JO anchors on its START,
+    so the frame sits AT center_cm with Z running along the line. Returns the SketchLine."""
+    sketch = comp.sketches.add(comp.xYConstructionPlane)
+    try:
+        sketch.name = "JointOriginAnchor"
+    except Exception:
+        pass
+    cx, cy, cz = center_cm
+    dx, dy, dz = dir_vec
+    P = adsk.core.Point3D.create
+    line = sketch.sketchCurves.sketchLines.addByTwoPoints(
+        P(cx, cy, cz), P(cx + dx * length, cy + dy * length, cz + dz * length))
+    try:
+        sketch.isVisible = False
+    except Exception:
+        pass
+    return line
 
 
 def _anchor_sketch_point(comp, x_cm, y_cm, z_cm):
@@ -60,9 +138,53 @@ def _find_sketch(design, name):
 
 
 def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
-                        sketch_name, entity_index, keypoint, geometry_handle=None):
-    """Build the JointGeometry + a human description. Returns (geometry, desc, err)."""
+                        sketch_name, entity_index, keypoint, geometry_handle=None,
+                        bbox_target=None, orient_axis="z", flip=False, meta=None):
+    """Build the JointGeometry + a human description. Returns (geometry, desc, err). For a COMPUTED
+    anchor (bbox_center/face_center), populates meta['anchor_cm'] with the world point used, so the
+    handler can read it back against the created origin."""
     JG = adsk.fusion.JointGeometry
+
+    if anchor == "bbox_center":
+        resolved, terr = _BBOX_TARGET.resolve(bbox_target)
+        if terr:
+            return None, None, terr
+        tent, tkind = resolved
+        center = _bbox_center_cm(tent)
+        if center is None:
+            return None, None, ("bbox_center: could not read a bounding box for the target "
+                                f"({safe(lambda: tent.name) or tkind}).")
+        dvec, derr = _axis_direction(orient_axis, flip)
+        if derr:
+            return None, None, derr
+        try:
+            line = _anchor_direction_line(comp, center, dvec)
+        except Exception as e:
+            return None, None, f"bbox_center: could not build the orientation line: {e}"
+        g = safe(lambda: JG.createByCurve(line, adsk.fusion.JointKeyPointTypes.StartKeyPoint))
+        if meta is not None:
+            meta["anchor_cm"] = center
+            meta["anchor_source"] = f"bbox center of {safe(lambda: tent.name) or tkind}"
+        return g, f"bbox center of {safe(lambda: tent.name) or tkind} (Z along orient_axis)", \
+            (None if g else "bbox_center: createByCurve returned nothing for the orientation line.")
+
+    if anchor == "face_center":
+        ent, herr = _GEOM.resolve(geometry_handle)
+        if herr:
+            return None, None, herr
+        if not isinstance(ent, adsk.fusion.BRepFace):
+            return None, None, "face_center: the 'geometry' handle is not a face. Pass a PLANAR face handle."
+        st = safe(lambda: ent.geometry.surfaceType)
+        if st != adsk.core.SurfaceTypes.PlaneSurfaceType:
+            return None, None, ("face_center needs a PLANAR face; that face is curved. Use "
+                                "anchor='geometry' to anchor on a cylinder/cone axis.")
+        g, _, err = _joints.build_joint_geometry(ent)
+        if meta is not None:
+            c = safe(lambda: ent.centroid)
+            if c is not None:
+                meta["anchor_cm"] = (safe(lambda: c.x, 0.0), safe(lambda: c.y, 0.0), safe(lambda: c.z, 0.0))
+            meta["anchor_source"] = "face centroid"
+        return g, "planar face center (Z = face normal)", err
 
     if anchor == "geometry":
         ent, herr = _GEOM.resolve(geometry_handle)
@@ -137,13 +259,17 @@ def _kp_name(kp_value):
 def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             x: float = 0.0, y: float = 0.0, z: float = 0.0,
             sketch_name: str = "", entity_index: int = 0, keypoint: str = "start",
-            geometry: str = "", name: str = "") -> dict:
+            geometry: str = "", name: str = "",
+            bbox_target: str = "", orient_axis: str = "z", flip: bool = False) -> dict:
     """Create a joint origin, position-only or oriented.
 
     anchor='coordinates' (default): at x,y,z (target='at') or the model origin (target='origin') -
     world-aligned frame. anchor='sketch_line': anchor on a sketch line (sketch_name + entity_index,
     'keypoint' = start/middle/end/center) so Z runs ALONG the line - use sketch_add_3d_line first to set
-    the direction. anchor='sketch_point': anchor on an existing sketch point. 'name' names the origin.
+    the direction. anchor='sketch_point': anchor on an existing sketch point. anchor='bbox_center': at
+    the world bounding-box center of 'bbox_target' (a body/occurrence), frame Z aligned to 'orient_axis'
+    ('flip' reverses it). anchor='face_center': at a planar 'geometry' face's centroid, Z = its normal.
+    'name' names the origin.
     """
     design = _common.design()
     if not design:
@@ -152,6 +278,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     anchor = (anchor or "coordinates").strip().lower()
     if anchor not in _ANCHORS:
         return error(f"Unknown anchor '{anchor}'. Valid: {', '.join(_ANCHORS)}.")
+    orient_axis = (orient_axis or "z").strip() or "z"
 
     target = (target or "at").strip().lower()
     if anchor == "coordinates" and target not in _TARGETS:
@@ -172,8 +299,10 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
     comp = design.rootComponent
 
+    meta = {}
     geom, desc, err = _geometry_from_args(
-        design, comp, anchor, target, x_cm, y_cm, z_cm, sketch_name, entity_index, kp, geometry)
+        design, comp, anchor, target, x_cm, y_cm, z_cm, sketch_name, entity_index, kp, geometry,
+        bbox_target, orient_axis, flip, meta)
     if err:
         return error(err)
     if not geom:
@@ -207,6 +336,30 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         except Exception:
             pass
 
+    # For a COMPUTED anchor, read the created origin back and prove it landed on the point we computed.
+    # A wrong landing is a failure, not a false success - roll the origin back and error.
+    computed = None
+    readback = None
+    if anchor in ("bbox_center", "face_center") and meta.get("anchor_cm"):
+        inv = (1.0 / scale) if scale else 1.0
+        cx, cy, cz = meta["anchor_cm"]
+        computed = {"x": round(cx * inv, 6), "y": round(cy * inv, 6), "z": round(cz * inv, 6),
+                    "units": units, "source": meta.get("anchor_source", "")}
+        actual = safe(lambda: joint_origin.geometry.origin)
+        if actual is not None:
+            ox = safe(lambda: actual.x)
+            oy = safe(lambda: actual.y)
+            oz = safe(lambda: actual.z)
+            if None not in (ox, oy, oz):
+                readback = {"x": round(ox * inv, 6), "y": round(oy * inv, 6),
+                            "z": round(oz * inv, 6), "units": units}
+                dist = ((ox - cx) ** 2 + (oy - cy) ** 2 + (oz - cz) ** 2) ** 0.5
+                if dist > 1e-3:   # > 0.001 cm (0.01 mm): the origin did NOT land on the computed anchor
+                    safe(lambda: joint_origin.deleteMe())
+                    return error(
+                        f"Joint origin landed at {readback} but the computed anchor was {computed} "
+                        f"(off by {round(dist, 4)} cm). Rolled the origin back; nothing changed.")
+
     payload = {
     "created": True,
     "joint_origin_name": safe(lambda: joint_origin.name),
@@ -215,14 +368,19 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "frame_axes": axes,
     "component": safe(lambda: comp.name),
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
-    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions - for an "
-        "oriented frame, anchor on a sketch line (draw it with sketch_add_3d_line first); a "
-        "point-anchored origin is world-aligned. View with view_screenshot."),
+    "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented "
+        "frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch "
+        "line (draw it with sketch_add_3d_line). A point-anchored origin is world-aligned. A computed "
+        "anchor reports computed_anchor + origin_readback to verify. View with view_screenshot."),
     }
     if anchor == "coordinates":
         payload["location"] = {"x": (0.0 if target == "origin" else x),
     "y": (0.0 if target == "origin" else y),
     "z": (0.0 if target == "origin" else z), "units": units}
+    if computed is not None:
+        payload["computed_anchor"] = computed
+        if readback is not None:
+            payload["origin_readback"] = readback
     return ok(payload)
 
 
@@ -236,6 +394,10 @@ TOOL_DESCRIPTION = (
     "- anchor='sketch_point': on a sketch point (position only).\n"
     "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
+    "- anchor='bbox_center': at the world bbox CENTER of 'bbox_target' (a body/occurrence/component), "
+    "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it). The "
+    "measured center and the created origin are reported back to verify.\n"
+    "- anchor='face_center': at a planar FACE's centroid (the 'geometry' handle), Z = the face normal.\n"
     "Optional 'name'. WRITES. The result's 'frame_axes' reports the Z/X/Y vectors to confirm orientation."
 )
 
@@ -253,6 +415,10 @@ tool = (
     .add_input_property("entity_index", {"type": "integer",
             "description": "Index of the line/point within the sketch (default 0)."})
     .add_input_property(*_KEYPOINT_CHOICE.as_property())
+    .add_input_property(*_BBOX_TARGET.as_property())
+    .add_input_property(*_ORIENT_AXIS.as_property())
+    .add_input_property("flip", {"type": "boolean",
+            "description": "Flip the oriented Z axis 180 deg (anchor=bbox_center)."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the joint origin."})
     .strict_schema()
 )

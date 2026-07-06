@@ -76,6 +76,10 @@ class _JointInput:
     def setAsBallJointMotion(self, a, b):
         self.called = "ball"; return True
 
+    def setAsPinSlotJointMotion(self, rot, slide, *rest):
+        # rest = (customRotationAxisEntity[, customSlideDirectionEntity]) when a custom axis is used.
+        self.called = ("pin_slot", rot, slide, rest); return True
+
 
 class TestApplyMotion:
     def test_rigid(self):
@@ -96,6 +100,118 @@ class TestApplyMotion:
         assert ok is False
         assert "warp_drive" in err
         assert ji.called is None
+
+
+# ── _apply_motion: pin_slot dispatch (rotation axis + distinct slide direction) ─────────────────────
+
+import adsk.fusion as _adsk_fusion
+
+_JD = _adsk_fusion.JointDirections
+
+
+class TestApplyMotionPinSlot:
+    def test_default_slide_is_next_frame_axis(self):
+        ji = _JointInput()
+        ok, err = joint._apply_motion(ji, "pin_slot", 2)   # rotation = z
+        assert ok is True and err is None
+        kind, rot, slide, rest = ji.called
+        assert kind == "pin_slot"
+        assert rot is _JD.ZAxisJointDirection               # rotation = axis_idx 2
+        assert slide is _JD.XAxisJointDirection             # slide default = (2+1)%3 = 0 -> x
+        assert rest == ()                                   # no custom entity
+
+    def test_explicit_slide_axis_used(self):
+        ji = _JointInput()
+        ok, err = joint._apply_motion(ji, "pin_slot", 0, slide_axis_idx=2)   # rot x, slide z
+        assert ok is True and err is None
+        kind, rot, slide, rest = ji.called
+        assert rot is _JD.XAxisJointDirection and slide is _JD.ZAxisJointDirection
+
+    def test_slide_equal_to_rotation_refused(self):
+        ji = _JointInput()
+        ok, err = joint._apply_motion(ji, "pin_slot", 1, slide_axis_idx=1)
+        assert ok is False
+        assert "differ" in err
+        assert ji.called is None                            # setter never reached
+
+    def test_custom_entity_repoints_rotation_slide_stays_frame(self):
+        ji = _JointInput()
+        sentinel = object()
+        ok, err = joint._apply_motion(ji, "pin_slot", 2, custom_entity=sentinel)
+        assert ok is True and err is None
+        kind, rot, slide, rest = ji.called
+        assert rot is _JD.CustomJointDirection              # rotation re-pointed to the custom axis
+        assert slide is _JD.XAxisJointDirection             # slide still frame-relative
+        assert rest == (sentinel,)
+
+
+# ── _slide_index / _slide_name: pin_slot slide-axis resolution ──────────────────────────────────────
+
+class TestSlideAxisHelpers:
+    def test_blank_defaults_to_none(self):
+        assert joint._slide_index("", "z") == (None, None)
+
+    def test_valid_distinct_axis(self):
+        assert joint._slide_index("x", "z") == (0, None)
+
+    def test_same_as_rotation_errors(self):
+        idx, err = joint._slide_index("z", "z")
+        assert idx is None and "differ" in err
+
+    def test_unknown_axis_errors(self):
+        idx, err = joint._slide_index("w", "z")
+        assert idx is None and "Unknown slide_axis" in err
+
+    def test_slide_name_default_is_perpendicular(self):
+        assert joint._slide_name(None, "z") == "x"
+        assert joint._slide_name(None, "x") == "y"
+        assert joint._slide_name(2, "x") == "z"
+
+
+# ── handler: pin_slot flows through create and reports the effective slide axis ─────────────────────
+
+from conftest import payload as _payload
+
+
+def _fake_design_for_create(ji, joint_obj):
+    joints = SimpleNamespace(createInput=lambda a, b: ji, add=lambda inp: joint_obj)
+    return SimpleNamespace(rootComponent=SimpleNamespace(joints=joints))
+
+
+class TestCreatePinSlot:
+    def _wire(self, monkeypatch, ji, joint_obj):
+        design = _fake_design_for_create(ji, joint_obj)
+        monkeypatch.setattr(joint._common, "design", lambda: design)
+        monkeypatch.setattr(joint, "_resolve_input",
+                            lambda d, spec: (SimpleNamespace(name=spec), spec, None))
+        return design
+
+    def test_create_pin_slot_reports_default_slide_axis(self, monkeypatch):
+        ji = _JointInput()
+        self._wire(monkeypatch, ji, SimpleNamespace(name="Joint1"))
+        out = _payload(joint.handler(occurrence_one="A", occurrence_two="B",
+                                     joint_type="pin_slot", axis="z"))
+        assert out["created"] is True
+        assert out["joint_type"] == "pin_slot"
+        assert out["axis"] == "z"
+        assert out["slide_axis"] == "x"                     # default perpendicular, surfaced
+        assert ji.called[0] == "pin_slot"
+
+    def test_create_pin_slot_explicit_slide_axis(self, monkeypatch):
+        ji = _JointInput()
+        self._wire(monkeypatch, ji, SimpleNamespace(name="Joint1"))
+        out = _payload(joint.handler(occurrence_one="A", occurrence_two="B",
+                                     joint_type="pin_slot", axis="x", slide_axis="y"))
+        assert out["slide_axis"] == "y"
+
+    def test_create_pin_slot_slide_equal_axis_refused_before_build(self, monkeypatch):
+        ji = _JointInput()
+        self._wire(monkeypatch, ji, SimpleNamespace(name="Joint1"))
+        res = joint.handler(occurrence_one="A", occurrence_two="B",
+                            joint_type="pin_slot", axis="z", slide_axis="z")
+        assert res["isError"] is True
+        assert "differ" in res["message"]
+        assert ji.called is None                            # never reached the motion setter
 
 
 # ── edit_handler: posing is joint_drive's job ──────────────────────────────

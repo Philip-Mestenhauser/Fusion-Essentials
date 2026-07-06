@@ -22,6 +22,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _assert
 from ._data_common import (
     _data, _agent_description, _find_project, _split_path,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
@@ -478,17 +479,31 @@ def save_document_handler(description: str = "") -> dict:
     if not safe(lambda: doc.isSaved, False):
         return error("The active document has never been saved (no cloud file yet). Use "
     "doc_save_as to give it a name and folder first.")
+
+    # Nothing to version if the document is clean - Document.save would no-op and return True.
+    if not safe(lambda: doc.isModified, True):
+        return ok({
+            "saved": True,
+            "already_current": True,
+            "document_name": safe(lambda: doc.name),
+            "note": "Document had no unsaved changes - nothing to version.",
+        })
+
     try:
         did = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
     except Exception as e:
         return error(f"Save failed for '{safe(lambda: doc.name)}': {e}")
     if not did:
         return error(f"Fusion declined to save '{safe(lambda: doc.name)}'.")
+
+    # Document.save() returning True is NOT proof a version was created (observed live: a document
+    # open as another document's reference saves nothing). The VersionAdvanced postcondition on this
+    # tool's Item re-reads isModified and fails the call if the save didn't persist.
     return ok({
     "saved": True,
     "document_name": safe(lambda: doc.name),
     "description": _agent_description(description),
-    "note": "Active document saved as a new cloud version (description tagged as AI-agent).",
+    "note": "Active document saved as a new cloud version (verified: no longer modified).",
     })
 
 
@@ -686,7 +701,8 @@ _save_document_tool = (
     .strict_schema()
 )
 save_document_item = Item.create_tool_item(
-    tool=_save_document_tool, write="write", handler=save_document_handler, run_on_main_thread=True)
+    tool=_save_document_tool, write="write", handler=save_document_handler, run_on_main_thread=True,
+    postconditions=[_assert.VersionAdvanced()])
 
 _close_document_tool = (
     Tool.create_simple(

@@ -177,6 +177,29 @@ def ptxyz(p, f):
             "z": round(safe(lambda: p.z, 0.0) * f, 6)}
 
 
+# ── measurement (the one measureMinimumDistance core both measure tools share) ────────────────────
+
+def min_distance(entity_a, entity_b):
+    """The minimum distance between two entities via ``app.measureManager.measureMinimumDistance``,
+    with the shared failure handling ``model_measure_between`` and ``model_measure_relation`` both need.
+    Returns ``(MeasureResults, None)`` on success or ``(None, error_result)`` on any failure - the
+    measurement is a READ, so a failure is surfaced, never swallowed. The result's ``.value`` is in cm;
+    ``.positionOne``/``.positionTwo`` are the closest points (cm). Signature:
+    docs/fusion-api-notes.md 'Measurement'."""
+    mgr = safe(lambda: app.measureManager)
+    if not mgr:
+        return None, error("MeasureManager unavailable.")
+    try:
+        mr = mgr.measureMinimumDistance(entity_a, entity_b)
+    except Exception as e:
+        return None, error(f"Distance measurement failed: {e}. (Target a specific body/face - an "
+                           "occurrence whose bodies are proxies can be rejected; a find_geometry "
+                           "face/body handle is the precise input.)")
+    if not mr:
+        return None, error("measureMinimumDistance returned nothing for these two targets.")
+    return mr, None
+
+
 # ── sketch entity / feature-operation resolution ────────────────────────────
 
 def target_sketch(comp, name):

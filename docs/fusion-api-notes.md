@@ -995,3 +995,206 @@ database to go stale.
    including the error paths. Run with Fusion's bundled Python (path in CONTRIBUTING.md).
 2. **Live:** `sys_reload_addin` to load it, then drive it via a POST to `127.0.0.1:27182/mcp`
    (`tools/call`). Confirm against a real document.
+
+## Shell, sweep, draft, split (feature inputs)
+
+- `ShellFeatures.createInput(inputEntities: ObjectCollection, isTangentChain=True)`. The collection
+  holds the faces to REMOVE **or** the bodies to hollow - never a face plus its owning body ("Fails
+  if any faces are input, and the owning bodies of the faces are also input"). There is no direction
+  enum: which of `insideThickness`/`outsideThickness` you set (ValueInput) IS the direction; set the
+  unused side to zero. `ShellTypes`: Sharp (default) / RoundedOffsetShellType. Result reads:
+  `insideThickness`/`outsideThickness` are ModelParameters (`.value` in cm).
+- `Features.sweepFeatures.createInput(profile, path, operation)`; also `createInputForSolid(body,
+  path, op)`. `profile` = a Profile, planar face, or co-planar ObjectCollection. `.isSolid` False =
+  open surface. `.orientation` = `SweepOrientationTypes` (exactly two members: Perpendicular /
+  Parallel). `taperAngle`/`twistAngle` are NOT settable on the input - they exist only as read-only
+  ModelParameters on the created feature. Path builders: `Features.createPath(curve, isChain=True)`
+  (one seed curve, auto-chains) vs static `Path.create(curves, ChainedCurveOptions)` (curves used
+  exactly; must connect). `Component.createOpenProfile(curves, chainCurves=True)` builds the open
+  profile for a surface sweep.
+- `DraftFeatures.createInput(inputFaces: list[BRepFace], plane, isTangentChain=True)` - the pull
+  direction is `plane`: a planar BRepFace OR a ConstructionPlane (its normal), NOT an axis.
+  `inputFaces` is a plain Python list (no ObjectCollection). `setSingleAngle(isSymmetric,
+  ValueInput)` - the angle ValueInput is in RADIANS. Read the drafted count from
+  `DraftFeature.inputFaces` - `.faces` lists only faces the draft CREATED (often none).
+- `SplitBodyFeatures.createInput(splitBodies, splittingTool, isSplittingToolExtended)` -
+  `splittingTool` is ONE entity (solid/open body, construction plane, profile, or face).
+  `SplitFaceFeatures.createInput(facesToSplit, splittingTool, ...)` - `facesToSplit` MUST be an
+  ObjectCollection (unlike Draft's plain list); the tool may be a single entity or a collection and
+  may include sketch curves. Both results expose `.bodies` / `.faces`.
+
+## Sketch projection and sketch text placement
+
+- `Sketch.project2(entities: list, isLinked: bool) -> list[SketchEntity]` is the modern Project;
+  `isLinked` is the associative-vs-static toggle. `Sketch.project(entity)` is deprecated (no link
+  control). `Sketch.include()` is in-place Include (not projected-to-plane); `projectToSurface` /
+  `projectCutEdges` are different operations.
+- `SketchTexts.createInput2(formattedText, height_cm)` still works (docs mark it retired in favor of
+  `createInput3(expression, height: ValueInput)`). `SketchTextInput.setAsMultiLine(corner, diagonal,
+  hAlign, vAlign, charSpacing)`: both points are SKETCH-plane coordinates (Z ignored) and the
+  diagonal must not be axis-aligned with the corner. `height` is retired -> `height2` (ValueInput).
+- An on-face sketch's frame comes from the face: the frame can be FLIPPED relative to world (e.g. a
+  box's bottom face reads `frame.x_world = [-1,0,0]`), so text anchored at sketch (0,0) extending
+  +X/+Y can land off the physical face. Place text using the `frame` that sketch_create reports.
+
+## Surface normal reversal, untrim, delete face
+
+- `ReverseNormalFeatures.add(surfaces: ObjectCollection)` takes whole OPEN surface BODIES (never
+  individual faces) and flips ALL their faces; no createInput, no per-face option. The verifiable
+  signal is `BRepFace.isParamReversed` toggling on every face; read it off the FEATURE's result
+  bodies - input body references can go invalid after the parametric rebuild.
+- `UntrimFeatures.createInputFromFaces(faces: list[BRepFace], untrimLoopType, extensionDistance)` and
+  `createInputFromLoops(loops, extensionDistance)`. `UntrimLoopTypes`: All / External / Internal /
+  Manual (Manual needs loops). `extensionDistance` applies to All/External only. Only loops whose
+  edges are owned by a single face can be untrimmed, and only on surface bodies (isSolid false).
+- Two distinct delete-face features: `DeleteFaceFeatures.add(faces)` deletes AND heals (a solid
+  stays solid; fails if the body cannot be healed); `SurfaceDeleteFaceFeatures.add(faces)` deletes
+  without healing (a solid becomes a surface). Both accept a single BRepFace or an ObjectCollection.
+
+## Pin-slot joint motion
+
+- `JointInput.setAsPinSlotJointMotion(rotationAxis, slideDirection[, customRotationAxisEntity,
+  customSlideDirectionEntity]) -> bool`. Both directions are `JointDirections` enums; a
+  `CustomJointDirection` value pairs positionally with its custom entity argument. `Joint` /
+  `AsBuiltJoint(Input)` carry the same method (the Joint/AsBuiltJoint variants need the timeline
+  marker rolled before the joint and take an optional geometry arg).
+  `PinSlotJointMotion.rotationAxisVector`/`slideDirectionVector` read null off a JointInput.
+
+## Physical materials and density
+
+- Assignment seams: `BRepBody.material` (get/set) and `Component.material`. `Design.materials` is
+  the document's material collection (`itemByName`/`itemById`/`addByCopy`);
+  `Application.materialLibraries` -> `MaterialLibrary` (`.name`, `.isNative`, `.materials`).
+  Assigning a library Material to `body.material` imports a document copy of the same name.
+- Density is NOT a direct `Material` property. The reliable read-back is
+  `physicalProperties.density` on the body/component, documented as kg per CUBIC CENTIMETER
+  (multiply by 1e6 for kg/m^3; steel reads ~7.85e-3 kg/cm^3 = ~7850 kg/m^3).
+
+## Face normals, occurrence orientation, and frame reads
+
+- `BRepFace.evaluator` -> a `SurfaceEvaluator` BOUNDED by the face's topology (differs from
+  `face.geometry.evaluator`, the unbounded underlying surface).
+  `SurfaceEvaluator.getNormalAtPoint(point)` returns `(success: bool, normal: Vector3D)` in Python;
+  the point should lie on the surface ( `BRepFace.pointOnFace` is a guaranteed-on-face sample).
+- `Matrix3D.getAsCoordinateSystem()` returns `(origin, xAxis, yAxis, zAxis)` in Python - the basis
+  vectors ARE the rotation. `Matrix3D` exposes no quaternion accessor. `Occurrence.transform2` is
+  the world matrix.
+- `adsk.core.Cylinder`: `.axis`/`.origin`/`.radius`. `adsk.core.Cone`: `.axis` (center axis along the
+  length, = its normal direction) / `.origin` (base center) / `.radius` / `.halfAngle`. `adsk.core.Plane`:
+  `.normal`/`.origin`. `Line3D` has `startPoint`/`endPoint` only (derive direction); `InfiniteLine3D` has
+  `.origin`/`.direction`; `ConstructionAxis.geometry` -> InfiniteLine3D, `ConstructionPlane.geometry`
+  -> Plane (assembly context).
+- **Circular edge geometry:** `BRepEdge.geometry` -> a curve whose `.curveType` (`adsk.core.Curve3DTypes`:
+  `Line3DCurveType`/`Circle3DCurveType`/`Arc3DCurveType`/...) says what it is. `adsk.core.Circle3D` and
+  `adsk.core.Arc3D` both expose `.center`/`.normal`/`.radius` (all confirmed live) - so a circular/arc
+  edge yields a CENTER POINT (used by `model_measure_relation`'s `concentric`), distinct from a
+  cylinder's infinite axis LINE (used by `coaxial`). `AxisRef` uses a planar face's `.normal` or a
+  cylinder/cone face's `.axis` as a direction source; `TargetRef` resolves a `BRepEdge`/`ConstructionAxis`/
+  `ConstructionPlane` handle when the caller's `allow=` opts in.
+- `Occurrence.boundingBox` / `BRepFace.boundingBox` are world-axis-aligned (`BoundingBox3D`
+  min/maxPoint midpoint = world center). `BRepFace.centroid` is the geometric center.
+  `JointOrigin.geometry.origin` is the CALCULATED origin point (the honest read-back after creating
+  a JO); `JointGeometry.createByCurve(line, StartKeyPoint)` yields a frame whose Z runs along the
+  curve.
+
+## Post-processing and machine assignment (cam_post, cam_edit_setup)
+
+Post through a persistent **NC Program** (the browser artifact `cam_get(include=['nc_programs'])`
+reads, `cam_set_nc_comment` edits, and `live_readiness.programs_errored` health-checks) - NOT the
+ad-hoc `CAM.postProcess(ops, PostProcessInput)` direct path, which creates no program.
+
+- **NC Program create/reuse:** `CAM.ncPrograms` -> `NCPrograms`: `.createInput() -> NCProgramInput`,
+  `.add(input) -> NCProgram`, `.itemByName(name)` (matches the browser name == `NCProgram.name`).
+  Reuse-by-name: `ncPrograms.itemByName(program_name)`; if found, UPDATE in place (`.operations`,
+  `.postConfiguration`, output params are all settable) - keeps identity, never orphans. If not found,
+  create. Roll back (`NCProgram.deleteMe()`) only a JUST-CREATED program on a failed post, never a
+  reused one.
+- **`NCProgramInput.operations` is a `vector<OperationBase>` setter - assign a plain Python LIST**
+  `[setup/folder/operation, ...]`, NOT an `adsk.core.ObjectCollection` (a collection fails the SWIG
+  marshal with "argument 2 of type std::vector<OperationBase>"). Setups/folders expand their children.
+- **`NCProgramInput` has NO postConfiguration** - set it on the created `NCProgram`:
+  `program.postConfiguration = adsk.cam.PostConfiguration.createFromContent(cps_text)` (read the `.cps`
+  file's TEXT and pass the content; returns a `PostConfiguration`). (Cloud/team posts yield a
+  `PostConfiguration` directly - see below - so no file round-trip there.)
+- **Output settings are `nc_program_*` CAMParameters** on `input.parameters` / `program.parameters`,
+  set via `param.expression = "'quoted'"` (mirrors `cam_set_nc_comment`). **Confirmed live:**
+  `nc_program_name`, `nc_program_comment`, `nc_program_output_folder`, `nc_program_openInEditor`
+  (bool). `nc_program_unit` exists (a unit index) but isn't touched when `units="document"`.
+- **Post:** `program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()) -> bool`. Default
+  `postProcessExecutionBehavior = OmitInvalidAndEmptyOperations` (only valid ops post). Posting works
+  WITHOUT a setup machine.
+- **Honesty - the bool lies:** `postProcess` returning True is NOT proof. On failure Fusion writes a
+  **`<program>.nc.failed` STUB** (54-ish bytes, "See log for details") to the output folder - it is a
+  failure marker, not a deliverable; exclude `.failed` from the reported files. `NCProgram.hasError`
+  (the `programs_errored` flag) + `.error` give a SUMMARY ("Invalid NC Program"). The **actionable**
+  error is in a LOG at `<TEMP>/Fusion360CAM/<session>/<n>/<program>.log` (e.g. a bad program name ->
+  "Program number 'NaN' is out of range. Please enter a program number between 1 and 99999" from the
+  post's `onOpen()`) - NOT in the output folder. Read the newest `<program>.log` under that tree
+  (touched since the post started) and surface its Error/Warning lines. **Haas posts require a NUMERIC
+  program name/number (1-99999)** - a non-numeric name posts a `.failed` stub.
+- **Machine assignment (cam_edit_setup):** `CAMManager.get().libraryManager.machineLibrary.createQuery(
+  location, vendor, model).execute()` -> `list[Machine]`. `Setup.machine` GET returns a TRANSIENT COPY
+  - SET the Machine back to apply, then re-read to confirm. `Machine` has no `.name`; label is
+  `.description` (fallback `.vendor`+`.model`). A setup with no machine reports `blocked_by:
+  ['no_machine_selected']` but STILL posts (the post config carries the machine assumptions).
+
+## Post library - local vs cloud/team (cam_post post resolution)
+
+- Posts resolve as a full `.cps` path or a bare name found in `CAM.personalPostFolder` /
+  `CAM.genericPostFolder` (the local cache). Only DOWNLOADED posts are cached locally - a team post
+  deployed to the cloud library generally is NOT (this device is intentionally thin).
+- **Cloud/team post library API (parallel to tool libraries, not yet wired into cam_post):**
+  `CAMManager.get().libraryManager.postLibrary` -> `PostLibrary`. `.urlByLocation(LibraryLocations
+  .CloudLibraryLocation / .HubLibraryLocation)` -> root URL; recurse `.childFolderURLs(url)` (Cloud/Hub
+  posts are NESTED in folders - a flat listing is empty, same gotcha as tool libraries). **Match posts
+  by name via `.childAssetURLs(url) -> list[URL]`** - each URL exposes `.leafName` (the post name) and
+  `.toString()` (full url), exactly like the tool-library resolver. Then `.postConfigurationAtURL(url)`
+  -> a `PostConfiguration` directly (the type `NCProgram.postConfiguration` accepts - no
+  `createFromContent` round-trip for cloud posts). NOTE: `.childPostConfigurations(url)` and
+  `PostConfigurationQuery.execute()` return `PostConfiguration` objects that have NO `.name`/`.url`
+  (members: capability/description/extension/isValid/keywords/mimetype/vendor/version), so they CANNOT
+  drive a by-name match - use `childAssetURLs`. Cloud/Hub reads are network-slow.
+
+## Drawings (drawing_create, drawing_export)
+
+- **Create:** `adsk.drawing.DrawingManager.get().createDrawingInput(design: DataFile, creationMode)`
+  -> `.createDrawing(input)` -> a `DataFile`. Source is a SAVED CLOUD design (a DataFile), not a
+  Design/component. `ManualDrawingCreationMode` is NOT SUPPORTED ("Use AutomaticDrawingCreationMode
+  instead") - so per-view orientation/scale/placement is impossible; Automatic lays out standard
+  orthographic + optional isometric views. `CreateDrawingInput`: `.standard` (ISO/ASME), `.units`,
+  `.content`, `.sheetSize`, `.orientationType`, `.automationPreferences...sheetViewPreferences.
+  isIsometricViewAdded`/`isOrthogonalViewAdded`.
+- **Honesty gate:** `DrawingDocument.drawing.sheets.count` (views per sheet are NOT enumerable - a
+  Sheet exposes only `customTables` - so gate on SHEET count).
+- **Export:** `DrawingDocument.drawing.exportManager.createPDFExportOptions(filename).execute()` ->
+  bool. **PDF is the ONLY drawing export format** - DXF is absent from the entire `adsk.drawing` API.
+  (For a flat DXF, use `design_export format=dxf`, which is a Sketch/face export - see below.)
+
+## DXF export of a sketch or face (design_export format=dxf)
+
+- `Sketch.saveAsDXF(fullFilename)` -> bool - the whole-sketch DXF path (single arg, no options).
+  For a face outline: `Sketches.add(planarFace)` (accepts a planar face directly), `sk.project2([face],
+  False)` to project the face's edges, `saveAsDXF`, then always `sk.deleteMe()` (leave the design
+  unchanged). Gate on the `.dxf` existing on disk.
+
+## Data model versions, restore, upload status
+
+- **Versions:** `DataFile.versions` is the collection of the OTHER versions (EXCLUDES the current
+  DataFile - merge `df` itself in and dedupe for a full list). Per-version fields: `versionNumber`,
+  `versionId` (the per-version id), `dateCreated` (UNIX epoch seconds), `description`,
+  `latestVersionNumber`. `DataFile.id` is the LINEAGE URN (identical across all versions), NOT a
+  per-version id. Native order is undocumented - sort by `versionNumber` for newest-first.
+- **Restore:** `DataFile.promote()` -> bool ("Promotes this version to be the latest") is SYNCHRONOUS
+  and headless (no DataFileFuture). History is preserved (promote creates a new tip). Confirm by
+  re-reading a fresh DataFile via `app.data.findFileById(lineage)` and comparing `latestVersionNumber`
+  before/after; if promote returned true but the tip didn't move, that is pending, not success.
+- **Xref freshness:** `Occurrence.isReferencedComponent` + `.documentReference` -> `DocumentReference`
+  with `.dataFile`/`.version`/`.isOutOfDate` (the authoritative freshness signal) / `.getLatestVersion()`.
+  Recurse via `Occurrence.childOccurrences` (depth-first, reflects the IN-SESSION assembly) rather than
+  flat `allOccurrences`. (`DataFile.hasOutofDateChildReferences`/`childReferences` is the alternative
+  cloud-side walk - last-saved state, not in-session.)
+- **Upload status:** `DataFolder.uploadFile(path)` -> `DataFileFuture`. `.uploadState` is `UploadStates`
+  (0=UploadProcessing bytes transferring, 1=UploadFinished, 2=UploadFailed); `.dataFile` is populated
+  only once Finished. `DataFile.isComplete` is a SEPARATE signal - true when cloud TRANSLATION (e.g.
+  STEP -> Fusion design) is done - distinct from the transfer finishing. So "uploading" (bytes) vs
+  "processing" (transferred, isComplete False) vs "complete" (isComplete True) are three distinct states.

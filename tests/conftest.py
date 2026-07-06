@@ -78,15 +78,22 @@ def install_mock_adsk():
     # real None) flows through unchanged.
     cam.Operation.cast = Mock(side_effect=lambda x: x)
 
+    # adsk.drawing is needed by the drawing tools (drawing_create, drawing_export), which do
+    # `import adsk.drawing` at module top - without it their import fails and the registry-wide
+    # lints can't collect. A bare Mock covers the DrawingManager/DrawingExportManager surface.
+    drawing = Mock()
+
     adsk = types.ModuleType("adsk")
     adsk.core = core
     adsk.fusion = fusion
     adsk.cam = cam
+    adsk.drawing = drawing
 
     sys.modules["adsk"] = adsk
     sys.modules["adsk.core"] = core
     sys.modules["adsk.fusion"] = fusion
     sys.modules["adsk.cam"] = cam
+    sys.modules["adsk.drawing"] = drawing
     return adsk, core, fusion
 
 

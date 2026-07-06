@@ -18,11 +18,24 @@ Pinned (the DoD):
 
 import json
 
+import pytest
+
 from conftest import load_tool
 
 me = load_tool("mesh_edit")
 mo = load_tool("mesh_ops")
 inp = me._inputs
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_enum_attrs():
+    # SurfaceTypes lives on the SHARED adsk mock; the raw string-sentinel assignment in the
+    # plane-cut test leaks into other test modules' tools under random ordering - restore it.
+    import adsk.core
+    st = adsk.core.SurfaceTypes
+    saved = st.PlaneSurfaceType
+    yield
+    st.PlaneSurfaceType = saved
 
 
 # ── fakes (named to match the Fusion type names the kind discrimination reads) ──────────────────
