@@ -150,14 +150,7 @@ class SimpleMCPServer:
         }
 
     def _handle_tools_list(self, request_id: Any) -> Dict[str, Any]:
-        tools = [
-            {
-                "name": name,
-                "description": item.primitive.description,
-                "inputSchema": item.primitive.input_schema,
-            }
-            for name, item in self.tools.items()
-        ]
+        tools = [item.primitive.to_dict() for item in self.tools.values()]
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
 
     async def _handle_tools_call(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:

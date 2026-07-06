@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 129  |  **Behaviors pinned:** 2474
+**Tools with a test file:** 130  |  **Behaviors pinned:** 2484
 
 ## `_cam_common`
 
@@ -3629,6 +3629,22 @@ after changing tests._
 - every input description is ascii
 **DescriptionConstantsAreAscii**
 - every description constant is ascii
+
+## `wire_shape`
+
+> Wire format: the JSON-RPC tools/list response includes annotations and strict schemas.
+
+**ToolsListWireFormat**
+- tools list sends annotations on the wire
+- all entries have required keys
+- read only tools have correct annotations
+- write tools have correct annotations
+- no audience priority lastmodified in annotations
+- strict schema tool has additional properties false
+- destructive tools marked on the wire
+- all descriptions non empty
+- read only hint is bool
+- destructive hint when present is bool
 
 ## `workspace_orient`
 

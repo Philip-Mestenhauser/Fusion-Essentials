@@ -155,6 +155,62 @@ def load_tool(module_name):
     return module
 
 
+# Synthetic package root under which the REAL server modules are importable in tests.
+_SERVER_PKG_ROOT = "feaddin"
+
+
+def load_mcp_server():
+    """Import the REAL server/mcp_server.py (plus task_manager) for wire-level tests.
+
+    mcp_server.py lives four packages deep in the add-in (``<addin>.commands.mcpServer.server``)
+    and imports ``....lib.fusion360utils`` relatively, so it cannot be imported through the flat
+    ``mcpServer`` package load_tool uses. This builds a synthetic package chain, stubs futil
+    (the server only calls log/handle_error), and aliases the ALREADY-LOADED canonical
+    ``mcpServer.mcp_primitives`` modules into the chain - the SAME module objects, so
+    ``isinstance(item, Item)`` checks inside the server hold for Items built by tool modules.
+    Idempotent: returns the cached module on repeat calls.
+    """
+    full_name = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.mcp_server"
+    if full_name in sys.modules:
+        return sys.modules[full_name]
+
+    install_mock_adsk()
+    if COMMANDS_DIR not in sys.path:
+        sys.path.insert(0, COMMANDS_DIR)
+    importlib.import_module("mcpServer.mcp_primitives")
+
+    def _pkg(name):
+        mod = types.ModuleType(name)
+        mod.__path__ = []
+        sys.modules[name] = mod
+        return mod
+
+    _pkg(_SERVER_PKG_ROOT)
+    lib_pkg = _pkg(f"{_SERVER_PKG_ROOT}.lib")
+    futil_stub = types.ModuleType(f"{_SERVER_PKG_ROOT}.lib.fusion360utils")
+    futil_stub.log = lambda *a, **k: None
+    futil_stub.handle_error = lambda *a, **k: None
+    lib_pkg.fusion360utils = futil_stub
+    sys.modules[futil_stub.__name__] = futil_stub
+    _pkg(f"{_SERVER_PKG_ROOT}.commands")
+    _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer")
+    _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer.server")
+
+    for suffix in ("", ".item", ".tool", ".resource", ".prompt", ".annotations", ".registry"):
+        src = "mcpServer.mcp_primitives" + suffix
+        importlib.import_module(src)
+        sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.mcp_primitives{suffix}"] = sys.modules[src]
+
+    server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
+    for mod_name in ("task_manager", "mcp_server"):
+        fq = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.{mod_name}"
+        spec = importlib.util.spec_from_file_location(fq, os.path.join(server_dir, f"{mod_name}.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[fq] = module
+        spec.loader.exec_module(module)
+    return sys.modules[full_name]
+
+
 # Pristine seam per tool module, captured ONCE the first time the module is seen — before any test
 # patches it — so the autouse fixture can restore to it.
 #
