@@ -346,6 +346,7 @@ class TestRenameConfiguration:
         _install(monkeypatch, _Design(configured=True))
         res = dc.handler(action="rename_configuration", name="Default", new_name="")
         assert res["isError"] is True
+        assert "'new_name'" in res["message"]
 
     def test_rename_to_existing_name_errors(self, monkeypatch):
         _install(monkeypatch, _Design(configured=True))

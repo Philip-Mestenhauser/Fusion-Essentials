@@ -4,7 +4,7 @@
 """MCP building block: boolean-combine MESH bodies (adsk.fusion.MeshBody) - the mesh analogue of
 model_combine. Every input is validated to be a MESH body before any mutation. The write runs
 through run_in_base_feature (design_mode.py) for the parametric base-feature scope requirement.
-WRITES. See docs/fusion-api-notes.md ("Mesh bodies") for the underlying adsk.fusion signatures.
+WRITES.
 """
 
 import adsk.core
@@ -18,6 +18,7 @@ from . import _common
 from ._common import target_component as _target_component
 from . import _inputs
 from .design_mode import run_in_base_feature
+from .mesh_ops import _result_mesh_of, _tri_count
 
 app = adsk.core.Application.get()
 
@@ -88,10 +89,10 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error("This design has no meshCombineFeatures collection (mesh combine unavailable "
     "here).")
 
-    # createInput(target, list[MeshBody]) -> set operation + algorithm -> add(). This whole sequence
+    # createInput(target, list[MeshBody]) -> set operation + algorithm -> add. This whole sequence
     # CREATES/edits mesh bodies, so it runs INSIDE run_in_base_feature: direct mode calls inner_op(None)
-    # directly; parametric mode wraps it in an atomic base-feature scope that always finishEdit()s in a
-    # finally. The add() mutation is NOT wrapped in safe() - a real failure must surface.
+    # directly; parametric mode wraps it in an atomic base-feature scope that always finishEdits in a
+    # finally. The add mutation is NOT wrapped in safe - a real failure must surface.
     def inner_op(_base_feature):
         try:
             inp = feats.createInput(tgt, list(tool_bodies))
@@ -112,8 +113,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
         # Snapshot the target's mesh body set BEFORE the add (inside inner_op so it is valid in both
         # direct and base-feature modes) so a non-parametric None return can still be reported.
         before_mesh_count = safe(lambda: comp.meshBodies.count)
+        before_tri = _tri_count(tgt)
 
-        # A falsy return is NOT a failure: this add() method "Return nothing in the case where the
+        # A falsy return is NOT a failure: this add method "Return nothing in the case where the
         # feature is non-parametric" (DIRECT design OR an add inside the BaseFeature scope). SUCCESS is
         # the resulting mesh body (the target), not the (None) feature object.
         try:
@@ -122,17 +124,28 @@ def handler(target: str = "", tools=None, operation: str = "join",
             return error(f"Mesh combine failed (meshCombineFeatures.add raised): {e}. (For cut / "
     "intersect the meshes must overlap; all must be MESH bodies.)")
         return {"feature": feature, "before_mesh_count": before_mesh_count,
+    "before_tri": before_tri,
     "after_mesh_count": safe(lambda: comp.meshBodies.count)}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
         return scope_err
-    # inner_op may itself return a ready _common.error() dict (a configure/add failure) - surface it.
+    # inner_op may itself return a ready _common.error dict (a configure/add failure) - surface it.
     if isinstance(result, dict) and result.get("isError") is True:
         return result
 
     feature = result["feature"]
     after_mesh_count = result["after_mesh_count"]
+
+    # No-op catch: body count AND the target's triangle count both unchanged = nothing was combined,
+    # whatever the API returned.
+    before_tri = result["before_tri"]
+    after_tri = _tri_count(_result_mesh_of(feature, tgt) if feature else tgt)
+    if (after_mesh_count is not None and after_mesh_count == result["before_mesh_count"]
+            and before_tri and after_tri == before_tri):
+        return error(f"Combine reported success but the target mesh is unchanged ({before_tri} "
+                     f"triangles, {after_mesh_count} mesh bodies before and after) - the tool "
+                     "meshes may not overlap the target.")
 
     result_bodies = []
     # Parametric: the feature carries the result .bodies.

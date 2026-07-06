@@ -3,21 +3,12 @@
 
 """Write-document binding: the shared guard wrapped around every WRITE tool's handler.
 
-This server's state is concurrently mutable by a LIVE human - the active document can move between an
-agent's READ and its WRITE (an async doc_open that didn't stick, a human clicking another tab). So an
-agent can build a correct model of document X and write to document Y. This closes that TARGETING gap:
-
-  expect_document (optional)  -> if the agent passes the doc it MEANT (name or lineage URN) and the
-                                 active doc no longer matches, the write is REFUSED (no mutation) with a
-                                 structured blocked_by:['active_document_changed'] + expected/actual +
-                                 requires:{doc_activate}. The agent switches explicitly; we never
-                                 auto-switch (that would just move the race).
-  acted_on (always)           -> every write result is stamped with the document it actually hit
-                                 {name, document_id}, so an agent can detect after the fact which doc
-                                 was mutated even when it didn't pass expect_document.
-
-Applied generically at registration (Item.create_tool_item) for write/destructive tools - one seam, so
-every write tool is covered without editing 90+ handlers. Read tools are untouched.
+The active document can change between an agent's read and its write (an async open, a human
+clicking another tab), so a write can hit the wrong document. Two contract pieces close that gap:
+'expect_document' (optional input) REFUSES the write with blocked_by:['active_document_changed']
+when the active document no longer matches the one the agent meant, and 'acted_on' stamps every
+write result with the document actually mutated {name, document_id}. Applied generically at
+registration (Item.create_tool_item) for write/destructive tools; read tools are untouched.
 """
 
 import json

@@ -125,6 +125,7 @@ class TestGuards:
         _install(monkeypatch)
         res = cd.handler(entity="")
         assert res["isError"] is True
+        assert "Provide 'entity'" in res["message"]
 
     def test_not_found(self, monkeypatch):
         _install(monkeypatch)

@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from conftest import load_tool
 
 uxref = load_tool("doc_update_xref")
-gtp = load_tool("cam_generate")
 # NB: _cam_common is loaded LAZILY inside each TestLiveReadiness test (not at module top). test_cam_get
 # swaps the cam modules for a stub via monkeypatch.setitem; pre-caching the real module here
 # would change that swap's timing and leak the real handler into test_cam_get. Lazy load avoids it.

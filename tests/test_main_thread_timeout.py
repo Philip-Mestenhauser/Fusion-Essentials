@@ -26,30 +26,6 @@ import pytest
 from conftest import COMMANDS_DIR
 
 
-def _load_server_module(rel_path, full_name):
-    """Spec-load a module under commands/mcpServer that imports the add-in's lib package, stubbing
-    that lib so the deep relative import resolves without Fusion."""
-    if COMMANDS_DIR not in sys.path:
-        sys.path.insert(0, COMMANDS_DIR)
-    # stub the 'lib.fusion360utils' that task_manager imports as `from ....lib import ...`
-    if "lib" not in sys.modules:
-        lib = types.ModuleType("lib")
-        lib.__path__ = []
-        sys.modules["lib"] = lib
-    if "lib.fusion360utils" not in sys.modules:
-        f = types.ModuleType("lib.fusion360utils")
-        f.log = lambda *a, **k: None
-        f.handle_error = lambda *a, **k: None
-        sys.modules["lib.fusion360utils"] = f
-        sys.modules["lib"].fusion360utils = f
-    spec = importlib.util.spec_from_file_location(
-        full_name, os.path.join(COMMANDS_DIR, "mcpServer", *rel_path.split("/")))
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[full_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
 # task_manager imports `from ....lib import fusion360utils` (4 dots = up to the add-in root). Give
 # it a package chain so the relative import resolves to our stub.
 @pytest.fixture(scope="module")

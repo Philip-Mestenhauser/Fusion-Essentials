@@ -7,8 +7,7 @@
 
 The general "go do X" escape hatch. NOT registered unless the user explicitly enables it
 (mcpServer settings -> allow_execute_api_script, default False). A script error is NOT auto-rolled-back
-- partial changes can commit as one undo step; verify state afterward. See docs/fusion-api-notes.md
-"Script execution" for the Python.Run/PTransaction mechanics this relies on.
+- partial changes can commit as one undo step; verify state afterward.
 """
 
 import os

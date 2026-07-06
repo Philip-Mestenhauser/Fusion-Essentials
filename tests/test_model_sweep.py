@@ -178,6 +178,7 @@ class TestEdgePath:
         _install(tokens={})
         res = sw.handler(profile={"sketch": "Prof"}, path=["NOPE"])
         assert res["isError"] is True
+        assert "handle did not resolve" in error_message(res)
 
 
 # ── operation + orientation + target_bodies ─────────────────────────────────

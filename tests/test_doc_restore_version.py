@@ -8,8 +8,6 @@ verify-after-write re-reads the fresh DataFile to confirm the new tip actually a
 
 import json
 
-import pytest
-
 from conftest import load_tool, error_message
 
 drv = load_tool("doc_restore_version")

@@ -7,9 +7,6 @@ ambiguous name or a timeline GROUP is refused; timeline health is reported befor
 that breaks a downstream feature is surfaced. WRITES (destructive).
 """
 
-import adsk.core
-import adsk.fusion
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -22,22 +19,8 @@ def _timeline(design):
     return safe(lambda: design.timeline)
 
 
-def _health(timeline):
-    """(errors, warnings, total) over the timeline by healthState (2=error, 1=warning) - the same
-    before/after guard param_delete / design_delete_occurrence use, so a delete that breaks a
-    downstream feature is reported instead of silently corrupting the model."""
-    errors, warnings, total = [], [], 0
-    if timeline is None:
-        return errors, warnings, total
-    for i in range(safe(lambda: timeline.count, 0) or 0):
-        it = timeline.item(i)
-        total += 1
-        hs = safe(lambda it=it: it.healthState)
-        if hs == 2:
-            errors.append(safe(lambda it=it: it.name) or f"#{i}")
-        elif hs == 1:
-            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
-    return errors, warnings, total
+# the shared timeline-health walk (before/after edit guard) - one home in _common
+from ._common import timeline_health as _timeline_health
 
 
 def _find_objects_by_name(timeline, want):
@@ -99,7 +82,7 @@ def handler(feature: str = "") -> dict:
                      "unsupported timeline object).")
     entity_type = safe(lambda: type(entity).__name__)
 
-    err_before, _, _ = _health(timeline)
+    err_before, _, _ = _timeline_health(design)
     try:
         did = entity.deleteMe()
     except Exception as e:
@@ -108,7 +91,7 @@ def handler(feature: str = "") -> dict:
         return error(f"Fusion declined to delete '{name}' (deleteMe returned false). It may be "
                      "depended on in a way that blocks deletion.")
 
-    err_after, warn_after, _ = _health(timeline)
+    err_after, warn_after, _ = _timeline_health(design)
 
     out = {
         "deleted": True,

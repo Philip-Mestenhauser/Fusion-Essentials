@@ -10,8 +10,6 @@ import json
 import sys
 import types
 
-import pytest
-
 import adsk  # the mock package conftest installed at import time
 from conftest import load_tool
 

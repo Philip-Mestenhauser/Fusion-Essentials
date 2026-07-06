@@ -7,7 +7,7 @@
                    TARGET body. Optionally keep the tool bodies. WRITES.
 
 The body-on-body boolean that model_extrude/model_revolve's cut/join can't do (those act on a
-profile, not existing geometry). Signatures: docs/fusion-api-notes.md "Model feature signatures".
+profile, not existing geometry).
 """
 
 import adsk.core
@@ -19,6 +19,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 # BodyRef inputs: target body + tool bodies, each by handle (precise) or name.
 _TARGET = _inputs.BodyRef("target", required=True, description="The target body (kept/modified).")
@@ -108,7 +109,8 @@ combine_tool = (
             "description": "Put the combined result in a NEW component instead of modifying in place (default false)."})
     .strict_schema()
 )
-combine_item = Item.create_tool_item(tool=combine_tool, write="write", handler=handler, run_on_main_thread=True)
+combine_item = Item.create_tool_item(tool=combine_tool, write="write", handler=handler, run_on_main_thread=True,
+                                     postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

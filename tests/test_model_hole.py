@@ -359,6 +359,7 @@ class TestClearanceFastener:
         res = mh.handler(hole_type="simple", face="h", points=[[2, 3, 0]], extent="through",
                          fastener="M6 Banana Bolt", fit="normal")
         assert res["isError"] is True
+        assert "Unknown fastener type 'Banana Bolt'" in res["message"]
 
     def test_bad_fit_errors(self):
         _install()

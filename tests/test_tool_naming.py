@@ -14,8 +14,6 @@ So a name declares its KIND, and readOnlyHint (from write=) must match: a read-v
 read-only; an edit-verb tool must not be. This is what makes the name an honest type, not a label.
 """
 
-import re
-
 from conftest import load_tool, TOOLS_DIR
 import os
 

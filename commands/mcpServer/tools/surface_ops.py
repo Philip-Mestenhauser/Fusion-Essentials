@@ -3,8 +3,7 @@
 
 """MCP building blocks bridging surface and solid bodies - model_loft, model_stitch, model_unstitch -
 the surface-aware companions to model_extrude/model_combine. WRITES; mutations are never wrapped in
-safe() and the result body's isSolid is read back, never assumed. See docs/fusion-api-notes.md
-("Surfaces") for the underlying adsk.fusion signatures.
+safe() and the result body's isSolid is read back, never assumed.
 """
 
 import adsk.core
@@ -16,6 +15,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -314,7 +314,8 @@ loft_tool = (
     .add_required_input("profiles")
     .strict_schema()
 )
-loft_item = Item.create_tool_item(tool=loft_tool, write="write", handler=loft_handler, run_on_main_thread=True)
+loft_item = Item.create_tool_item(tool=loft_tool, write="write", handler=loft_handler, run_on_main_thread=True,
+                                  postconditions=[_assert.FeatureHealthy()])
 
 
 STITCH_DESCRIPTION = (
@@ -354,7 +355,8 @@ unstitch_tool = (
             "description": "Include connected/adjacent faces (isChainSelection; default true)."})
     .strict_schema()
 )
-unstitch_item = Item.create_tool_item(tool=unstitch_tool, write="write", handler=unstitch_handler, run_on_main_thread=True)
+unstitch_item = Item.create_tool_item(tool=unstitch_tool, write="write", handler=unstitch_handler, run_on_main_thread=True,
+                                      postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

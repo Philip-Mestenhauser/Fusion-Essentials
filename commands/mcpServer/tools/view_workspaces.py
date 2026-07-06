@@ -6,7 +6,6 @@
   view_list_workspaces  -> all selectable workspaces (id, name, productType, active)
   view_switch_workspace -> activate a workspace by id or name (e.g. Design <-> Manufacture)
 
-See docs/fusion-api-notes.md "Workspaces" for the ui.workspaces/Workspace API facts.
 """
 
 import adsk.core

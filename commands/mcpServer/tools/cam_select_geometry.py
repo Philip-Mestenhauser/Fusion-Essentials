@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Set the machining geometry (and optional heights) on a CAM operation via find_geometry handles.
-The two selection mechanisms (curve chains vs. direct object-lists) and the height-parameter group
-are documented in docs/fusion-api-notes.md ("Operation geometry selections")."""
+Two selection mechanisms exist: curve chains (contours/pockets/boundaries) and direct
+object-lists (drill hole faces); heights are a mode+offset parameter group."""
 
 import time
 
@@ -41,9 +41,6 @@ _CURVE_BUILDER = {
     _FACE: "createNewFaceContourSelection",
     _SILHOUETTE: "createNewSilhouetteSelection",
 }
-
-_HEIGHTS = ("top", "bottom")
-
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
 

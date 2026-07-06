@@ -10,7 +10,7 @@ The actual BRep projection is a live side-effect covered by the post-reload veri
 
 import pytest
 
-from conftest import load_tool, make_design, install, payload as _payload, error_message
+from conftest import load_tool, make_design, install, payload as _payload
 
 sp = load_tool("sketch_project")
 

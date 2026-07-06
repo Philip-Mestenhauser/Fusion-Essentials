@@ -25,6 +25,7 @@ _DENYLIST = {
     "verify_written": ("_export", "def"),
     "ptxyz": ("_common", "def"),
     "target_sketch": ("_common", "def"),
+    "timeline_health": ("_common", "def"),
     "resolve_entity_ref": ("_common", "def"),
     "CM_TO_UNIT": ("_common", "assign"),
     "OPERATIONS": ("_common", "assign"),

@@ -131,7 +131,7 @@ class FakeDataFile:
     """A saved doc's data-model identity: URN + version + web URL + parent folder/project/hub chain."""
     def __init__(self, urn="urn:adsk:lineage:abc", version=3, latest=3,
                  url="https://x/g/data", folder="Parts", folder_id="fld.1",
-                 project="MCP Test Project", project_id="a.123", hub="Mechio"):
+                 project="MCP Test Project", project_id="a.123", hub="Test Hub"):
         self.id = urn
         self.versionNumber = version
         self.latestVersionNumber = latest
@@ -465,13 +465,13 @@ class TestDataModel:
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
         df = FakeDataFile(urn="urn:adsk:lineage:xyz", version=4, latest=5,
-                          folder="Rovers", project="MCP Test Project", project_id="a.999", hub="Mechio")
+                          folder="Rovers", project="MCP Test Project", project_id="a.999", hub="Test Hub")
         _install(active_product=des, doc=FakeDoc(design=des, data_file=df))
         dm = _payload(wo.handler())["document"]["data_model"]
         assert dm["saved_to_cloud"] is True
         assert dm["document_id"] == "urn:adsk:lineage:xyz"
         assert dm["version_number"] == 4 and dm["latest_version_number"] == 5
-        assert dm["hub"] == "Mechio"
+        assert dm["hub"] == "Test Hub"
         assert dm["project"] == "MCP Test Project" and dm["project_id"] == "a.999"
         assert dm["folder"] == "Rovers"
 

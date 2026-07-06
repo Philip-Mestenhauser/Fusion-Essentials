@@ -5,7 +5,7 @@
 
 Copies a base appearance (Appearances.addByCopy) so the tool owns an editable instance, sets its
 ColorProperty, then assigns it to the resolved target - a component (or the whole design) colors all
-its bodies. See docs/fusion-api-notes.md "Appearance override" for the underlying API calls.
+its bodies.
 """
 
 import adsk.core
@@ -144,9 +144,14 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
             name = safe(lambda b=b: b.name)
             try:
                 b.appearance = appr
-                applied_to.append(name)
             except Exception as e:
                 failed.append({"body": name, "error": str(e)})
+                continue
+            got = safe(lambda b=b: b.appearance.name)
+            if got is not None and got != safe(lambda: appr.name):
+                failed.append({"body": name, "error": f"appearance still reads '{got}' after the set"})
+            else:
+                applied_to.append(name)
         if not applied_to:
             return error(f"Could not apply appearance to any body of {desc}: "
                          f"{failed[0]['error'] if failed else 'unknown error'}.")
@@ -156,6 +161,10 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
             entity.appearance = appr
         except Exception as e:
             return error(f"Could not apply appearance to {desc}: {e}")
+        got = safe(lambda: entity.appearance.name)
+        if got is not None and got != safe(lambda: appr.name):
+            return error(f"Assignment was accepted but {desc} still reads appearance '{got}' - "
+                         "the override did not take.")
         # a BRepFace has no .name; fall back to the target description
         applied_to.append(safe(lambda: entity.name) or desc)
 

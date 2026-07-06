@@ -13,28 +13,14 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error
 from . import _common
 
 app = adsk.core.Application.get()
 
 
-def _timeline_health(design):
-    """Return (errors, warnings, total) for the parametric timeline. errors/warnings are lists of
-    feature names with healthState 2/1. Empty errors == nothing broken."""
-    errors, warnings, total = [], [], 0
-    tl = safe(lambda: design.timeline)
-    if tl is None:
-        return errors, warnings, total
-    for i in range(safe(lambda: tl.count, 0)):
-        it = tl.item(i)
-        total += 1
-        hs = safe(lambda it=it: it.healthState)
-        if hs == 2:
-            errors.append(safe(lambda it=it: it.name) or f"#{i}")
-        elif hs == 1:
-            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
-    return errors, warnings, total
+# the shared timeline-health walk (before/after edit guard) - one home in _common
+from ._common import timeline_health as _timeline_health
 
 
 def health_handler() -> dict:

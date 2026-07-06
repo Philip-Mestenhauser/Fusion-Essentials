@@ -196,6 +196,7 @@ class TestMove:
         _install(monkeypatch)
         res = cf.handler(action="move", setup="Setup1", folder="Holes")
         assert res["isError"] is True
+        assert "'operations' (names to move into it)" in res["message"]
 
     def test_folder_into_folder_move_resolves(self, monkeypatch):
         # allOperations (the prior lookup) omits folders entirely, so moving a FOLDER into

@@ -5,8 +5,8 @@
 RESTORE the prior visual state when done. View-state only; pair with view_screenshot to capture.
 
 Camera orientation is set via explicit eye/target/upVector rather than camera.viewOrientation, which
-does not reliably move the eye/target in this API flow (see docs/fusion-api-notes.md "Viewport /
-camera"). The snapshot stack is module-level so it survives between MCP calls (one session).
+does not reliably move the eye/target in this API flow. The snapshot stack is module-level so it
+survives between MCP calls (one session).
 """
 
 import adsk.core
@@ -36,9 +36,9 @@ _FOCUS = _inputs.OccurrenceRef("focus",
 _SNAPSHOTS = {}
 
 # The named-orientation table (view_direction = eye - target, i.e. the direction FROM the model TO
-# the camera; see docs/fusion-api-notes.md for why we set eye/target/up directly instead of
-# camera.viewOrientation) lives in _view_common, shared with view_screenshot (which applies the
-# negated look_direction) and view_section (which aims a cut at the same directions).
+# the camera; eye/target/up are set directly because assigning camera.viewOrientation is
+# unreliable) lives in _view_common, shared with view_screenshot (which applies the negated
+# look_direction) and view_section (which aims a cut at the same directions).
 _ORIENTATIONS = _view_common.VIEW_DIRECTIONS
 _STYLES = {
 "shaded": "ShadedVisualStyle",

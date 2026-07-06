@@ -9,7 +9,7 @@
                         component's space. WRITES.
 
 A coordinate point or world-axis needs DIRECT modeling mode (direct-edit-only API); an edge-based
-axis and an offset plane work in both modes. See docs/fusion-api-notes.md "Construction geometry".
+axis and an offset plane work in both modes.
 """
 
 import adsk.core

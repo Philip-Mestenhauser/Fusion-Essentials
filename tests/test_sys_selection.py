@@ -156,6 +156,7 @@ class TestRequireFlag:
         monkeypatch.setattr(sel, "_ui", lambda: self._fake_ui_with([]))
         result = sel.get_user_selection_handler()
         assert result["isError"] is True
+        assert "Nothing is selected in Fusion" in result["message"]
 
 
 # ── BOUNDED READS: the selection echo is capped (CLAUDE.md "Bound it") ──────────────────────────

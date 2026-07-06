@@ -17,8 +17,9 @@ input kinds); this file is the how-to that sits under it. See
 - Run on the main thread (the default) — anything touching `adsk.*` off the main thread can crash
   Fusion. Never block: no `sleep`, polling, or synchronous network in a handler.
 - Confirm signatures/properties against the live API (`sys_get_api_doc`) **before** writing them. Do
-  not guess a property exists — verify it. Record non-obvious API facts in
-  [docs/fusion-api-notes.md](../../../docs/fusion-api-notes.md), not in a tool description.
+  not guess a property exists — verify it. A non-obvious API fact lives where it is load-bearing: a
+  typed kind or guard when it constrains an input, the tool description when the calling agent needs
+  it, or a short comment at the point of use. `sys_get_api_doc` is the reference for raw signatures.
 
 ## Helper map (grep the module before writing a resolver)
 
@@ -26,7 +27,7 @@ input kinds); this file is the how-to that sits under it. See
 |---|---|
 | `_common` | `ok`/`error`/`safe`, `design()`/`target_component()`, `resolve_sketch`, unit `scale`/`UNIT_TO_CM` — the response+resolve substrate every tool imports. |
 | `_inputs` | The typed input kinds (`GeometryHandle`, `BodyRef`, `OccurrenceRef`, `PlaneRef`, `AxisRef`, `Choice`, …) and `resolve_inputs(...)` — schema + resolve + validate + contract line for one declared input. |
-| `_outputs` | The typed output kinds (`ReturnsHandle`/`ReturnsUrn`/`ReturnsName`/`ReturnsValue`) — a tool declares `RETURNS = [...]` once and a test asserts the id is actually minted. |
+| `_outputs` | The typed output kinds (`ReturnsHandle`/`ReturnsUrn`/`ReturnsName`/`ReturnsValue`/`ReturnsVerdict`) — a tool declares `RETURNS = [...]` once and a test asserts the id is actually minted. |
 | `_cam_common` | `get_cam()` — the one CAM-product resolver every CAM tool calls — plus the shared job-health/readiness signal. |
 | `_data_common` | Cloud data-model helpers shared by `data_ops`, `doc_lifecycle`, `_data_read`, `doc_open`, `doc_insert_occurrence`: hub/project/folder resolution, URN/web-URL decoding, the `[AI agent]` save-description marker. |
 | `_data_read` | The cloud READ cores behind `data_get` (project list, a project's file listing) — depth/count-capped folder recursion in one place. |
@@ -78,10 +79,10 @@ return success while changing nothing: `Document.save()` versioning nothing and
 
 A tool module may carry a docstring of at most a few lines: what the tool(s) do, plus at most one
 load-bearing API gotcha. That is the ceiling — no design-history, migration, or review narrative
-anywhere (a lint enforces this), and no before/after essays. Verified API-grounding facts (confirmed
-signatures/behaviors) belong in [docs/fusion-api-notes.md](../../../docs/fusion-api-notes.md), not in
-a module docstring. A handler docstring that only restates the wire `description` should be one line
-or omitted. Add a SHORT `#` comment only for a non-obvious constraint the code can't show on its own.
+anywhere (a lint enforces this), and no before/after essays. API facts beyond that one gotcha live
+in the code that uses them (a guard, a typed kind, a point-of-use comment); `sys_get_api_doc` is the
+always-current reference for raw signatures. A handler docstring that only restates the wire
+`description` should be one line or omitted. Add a SHORT `#` comment only for a non-obvious constraint the code can't show on its own.
 A hard-won lesson belongs in your own memory, not the repo.
 
 ## One tool per file — and the grandfathered exceptions

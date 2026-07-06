@@ -134,6 +134,7 @@ class TestGuards:
         _install(monkeypatch)
         res = cr.handler(entity="Face1", position="after", reference="Face1")
         assert res["isError"] is True
+        assert "nothing to reorder" in res["message"]
 
 
 # ── reorder ──────────────────────────────────────────────────────────────────

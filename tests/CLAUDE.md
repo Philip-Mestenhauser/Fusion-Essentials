@@ -42,13 +42,11 @@ active design, missing/ambiguous target) alongside the happy path.
 
 Most of the suite predates the shared fakes: a test file defines its own local `_install(...)`
 function that pokes module-level seams imperatively (`mod.app = FakeApp()`), plus its own `Fake*`
-class hierarchy. As of this writing, **62 of 108** `test_*.py` files define a bespoke `_install(`,
-and **43** contain at least one raw `<var>.app = ...`-style poke; only **one** file
-(`test_model_mirror.py`) imports and uses the shared `make_design(...)`/`install(mod, ...)` pair the
-way a new test needing a fuller fake object model should. This is why `conftest.py` carries a large
-snapshot/restore autouse fixture — it
-compensates for state the bespoke pattern leaves behind, which is also why the suite still passes
-under `-p randomly` despite the leak surface.
+class hierarchy. Most test files still carry that bespoke shape; a growing minority (the newest
+test files) use the shared `make_design(...)`/`install(mod, ...)` pair the way a new test needing a
+fuller fake object model should. This is why `conftest.py` carries a large snapshot/restore autouse
+fixture — it compensates for state the bespoke pattern leaves behind, which is also why the suite
+still passes under `-p randomly` despite the leak surface.
 
 **Do not copy the bespoke pattern for a new test.** When you touch an existing test file for an
 unrelated reason, migrating it to `monkeypatch`/the shared fakes is welcome opportunistically — there

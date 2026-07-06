@@ -4,8 +4,7 @@
 """MCP building blocks for sketches in the active design: sketch_get (list/inspect, read-only),
 sketch_create (new sketch on a plane/face), sketch_add_geometry (draw a line/rectangle/circle/arc/
 polygon/etc), sketch_add_3d_line. Together these are the front half of the modelling flow. Units
-accept mm | cm | in (default mm) and convert to the API's internal centimeters. See
-docs/fusion-api-notes.md ("Sketches") for the underlying adsk.fusion signatures.
+accept mm | cm | in (default mm) and convert to the API's internal centimeters.
 """
 
 import math

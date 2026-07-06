@@ -4,8 +4,7 @@
 """MCP building blocks that EDIT open (non-solid) surface bodies - surface_trim, surface_extend,
 surface_offset, surface_thicken (the surface->solid bridge). WRITES. TrimFeatures.createInput opens a
 partial-compute transaction that must be committed via add() or aborted via
-TrimFeatureInput.cancel() - never let an exception leak it open. See docs/fusion-api-notes.md
-("Surfaces") for the underlying adsk.fusion signatures.
+TrimFeatureInput.cancel() - never let an exception leak it open.
 """
 
 import adsk.core
@@ -17,6 +16,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -148,11 +148,12 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
     tool, terr = _TRIM_TOOL.resolve(trim_tool)
     if terr:
         return error(terr)
+    area_before = safe(lambda: surf.area)
 
-    # CRITICAL: createInput opens a transaction. Commit via add() or abort via cancel() - explicitly,
-    # NOT under safe(). On any exception (or a null feature) cancel() the input before returning.
+    # CRITICAL: createInput opens a transaction. Commit via add or abort via cancel - explicitly,
+    # NOT under safe. On any exception (or a null feature) cancel the input before returning.
     # createInput partial-computes and populates input.bRepCells; you MUST set isSelected on the cells
-    # to remove BEFORE add() (selected == removed) or add() raises "No cells are selected".
+    # to remove BEFORE add (selected == removed) or add raises "No cells are selected".
     trim_input = None
     cell_info = None
     try:
@@ -172,13 +173,24 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
             safe(lambda: trim_input.cancel())
         return error(f"Trim failed: {e}. (The trim tool must INTERSECT the surface and divide it.)")
     if not feature:
-        # add() returned nothing but didn't raise - still must abort the transaction we opened
+        # add returned nothing but didn't raise - still must abort the transaction we opened
         if trim_input is not None:
             safe(lambda: trim_input.cancel())
         return error("Trim returned no feature (the tool may not intersect the surface). "
     "The open transaction was cancelled.")
 
     names, any_solid = _result_bodies(feature)
+    # Commit proof: removing cells must shrink the surface's area; unchanged area = no cell removed.
+    area_after = None
+    fb = safe(lambda: feature.bodies)
+    if fb is not None:
+        vals = [safe(lambda i=i: fb.item(i).area) for i in range(safe(lambda: fb.count, 0) or 0)]
+        vals = [v for v in vals if v]
+        area_after = sum(vals) if vals else None
+    if (cell_info and cell_info["cells_removed"] and area_before and area_after is not None
+            and area_after >= area_before * (1 - 1e-6)):
+        return error(f"Trim committed but the surface area did not decrease "
+                     f"({round(area_before, 4)} cm2 before and after) - no cell was actually removed.")
     payload = {
     "trimmed": True,
     "feature": safe(lambda: feature.name),
@@ -329,6 +341,10 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         return error("Thicken returned no feature.")
 
     names, any_solid = _result_bodies(feature)
+    if names and not any_solid:
+        return error("Thicken reported success but no result body reads isSolid=true - the wall "
+                     "did not close into a solid. The feature remains in the timeline; inspect it "
+                     "with model_inspect or remove it with design_delete_feature.")
     return ok({
         "thickened": True,
         "feature": safe(lambda: feature.name),
@@ -361,7 +377,8 @@ surface_trim_tool = (
     .strict_schema()
 )
 surface_trim_item = Item.create_tool_item(tool=surface_trim_tool, write="write", handler=trim_handler,
-                                          run_on_main_thread=True)
+                                          run_on_main_thread=True,
+                                          postconditions=[_assert.FeatureHealthy()])
 
 _EXTEND_DESC = (
                                           "Extend an OPEN surface outward from its OUTER open edges. 'edges' are the outer edges of ONE "
@@ -382,7 +399,8 @@ surface_extend_tool = (
     .strict_schema()
 )
 surface_extend_item = Item.create_tool_item(tool=surface_extend_tool, write="write", handler=extend_handler,
-                                            run_on_main_thread=True)
+                                            run_on_main_thread=True,
+                                            postconditions=[_assert.FeatureHealthy()])
 
 _OFFSET_DESC = (
                                             "Offset faces by a distance into ANOTHER surface (positive = along the face normal). 'faces' need "
@@ -401,7 +419,8 @@ surface_offset_tool = (
     .strict_schema()
 )
 surface_offset_item = Item.create_tool_item(tool=surface_offset_tool, write="write", handler=offset_handler,
-                                            run_on_main_thread=True)
+                                            run_on_main_thread=True,
+                                            postconditions=[_assert.FeatureHealthy()])
 
 _THICKEN_DESC = (
                                             "Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes "
@@ -423,7 +442,8 @@ surface_thicken_tool = (
     .strict_schema()
 )
 surface_thicken_item = Item.create_tool_item(tool=surface_thicken_tool, write="write", handler=thicken_handler,
-                                             run_on_main_thread=True)
+                                             run_on_main_thread=True,
+                                             postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

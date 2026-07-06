@@ -3,7 +3,7 @@
 
 """MCP building block: apply a geometric constraint (the Sketch Constrain menu) between sketch
 entities referenced by '<type>:<index>' (e.g. 'line:0', 'arc:1', 'point:2') within a named sketch.
-WRITES. See docs/fusion-api-notes.md ("Sketches") for the underlying adsk.fusion signatures.
+WRITES.
 """
 
 import adsk.core

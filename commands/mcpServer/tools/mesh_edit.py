@@ -5,7 +5,6 @@
 mesh_plane_cut - the write-half sibling of mesh_ops.py. A PRISMATIC mesh->BRep conversion REQUIRES
 face groups first (mesh_to_brep's error path points here rather than auto-running it). Both writes
 route through run_in_base_feature (design_mode.py) for the parametric base-feature scope requirement.
-See docs/fusion-api-notes.md ("Mesh bodies") for the underlying adsk.fusion signatures.
 """
 
 import adsk.core

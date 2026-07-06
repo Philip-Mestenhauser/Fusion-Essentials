@@ -4,8 +4,7 @@
 """MCP building blocks for the MESH environment (adsk.fusion.MeshBody) - mesh_insert, mesh_get,
 mesh_reduce, mesh_remesh, mesh_to_brep. A MeshBody is a separate type (comp.meshBodies, not
 comp.bRepBodies), invisible to the BRep tools. Every write routes through run_in_base_feature
-(design_mode.py) for the parametric base-feature scope requirement. See docs/fusion-api-notes.md
-("Mesh bodies") for the underlying adsk.fusion signatures.
+(design_mode.py) for the parametric base-feature scope requirement.
 """
 
 import os
@@ -61,7 +60,7 @@ def _mesh_units(units):
     return val, u
 
 
-# ── mesh introspection (all READS - safe() everywhere) ──────────────────────────────────────────
+# ── mesh introspection (all READS - safe everywhere) ──────────────────────────────────────────
 
 def _tri_count(mb):
     """The TRUE all-triangle count from displayMesh (TriangleMesh), the count to report."""
@@ -231,7 +230,7 @@ def _insert_meshes(comp, design, full_path, mesh_units):
     error, not a silent false-ok. We verify the returned list is non-empty before declaring success."""
 
     def inner_op(base_feature):
-        # The import itself - direct call, no safe() around the mutation. base_feature is the open
+        # The import itself - direct call, no safe around the mutation. base_feature is the open
         # BaseFeature (parametric) or None (direct); meshBodies.add accepts None in direct mode.
         try:
             mesh_list = comp.meshBodies.add(full_path, mesh_units, base_feature)
@@ -244,7 +243,7 @@ def _insert_meshes(comp, design, full_path, mesh_units):
     if scope_err:
         return None, None, scope_err
     if isinstance(result, dict) and result.get("isError") is True:
-        return None, None, result   # inner_op returned a _common.error() (meshBodies.add raised)
+        return None, None, result # inner_op returned a _common.error (meshBodies.add raised)
 
     return result["mesh_list"], result["base_feature_name"], None
 
@@ -405,7 +404,7 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         except Exception as e:
             return error(f"Could not configure the mesh-reduce input: {e}")
 
-        # Mutation - direct call (no safe() around it). A falsy return is NOT a failure: these add()
+        # Mutation - direct call (no safe around it). A falsy return is NOT a failure: these add
         # methods "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
         # an add inside the BaseFeature edit scope run_in_base_feature opens). mesh_reduce modifies the
         # mesh IN PLACE, so SUCCESS is observed by re-reading the mesh's (updated) triangle count.
@@ -418,10 +417,17 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
     if scope_err:
         return scope_err
     if isinstance(feat, dict) and feat.get("isError") is True:
-        return feat   # inner_op returned a _common.error()
+        return feat # inner_op returned a _common.error
 
     result_mesh = _result_mesh_of(feat, mb) if feat else mb
     after_tri = _tri_count(result_mesh)
+    # A reduce that leaves the count where it was reduced nothing - report that, not success.
+    # (proportion 100 is the one legitimate keep-everything request.)
+    if (before_tri and after_tri is not None and after_tri >= before_tri
+            and not (tgt == "proportion" and v >= 100)):
+        return error(f"Reduce reported success but the triangle count did not decrease "
+                     f"({before_tri} -> {after_tri}). The mesh may already be at/below the "
+                     "target; treat it as unreduced.")
     out = {
     "reduced": True,
     "name": safe(lambda: result_mesh.name),
@@ -429,7 +435,7 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
     "before": {"triangle_count": before_tri},
     "after": {"triangle_count": after_tri},
     "feature": safe(lambda: feat.name) if feat else None,
-    "non_parametric": feat is None,   # add() returned nothing -> non-parametric mode = success
+    "non_parametric": feat is None, # add returned nothing -> non-parametric mode = success
     "target": tgt,
     }
     if before_tri and after_tri is not None and before_tri > 0:
@@ -503,12 +509,13 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
     if scope_err:
         return scope_err
     if isinstance(feat, dict) and feat.get("isError") is True:
-        return feat   # inner_op returned a _common.error()
+        return feat # inner_op returned a _common.error
 
     result_mesh = _result_mesh_of(feat, mb) if feat else mb
     after_tri = _tri_count(result_mesh)
     out = {
     "remeshed": True,
+    "changed": (after_tri != before_tri) if (before_tri and after_tri is not None) else None,
     "name": safe(lambda: result_mesh.name),
     "handle": safe(lambda: result_mesh.entityToken),
     "before": {"triangle_count": before_tri},
@@ -516,9 +523,12 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
     "feature": safe(lambda: feat.name) if feat else None,
     "non_parametric": feat is None,
     }
+    if out["changed"] is False:
+        out["note"] = (f"Triangle count is unchanged ({before_tri}) - an identical retriangulation "
+                       "is unlikely; verify the mesh with model_inspect before trusting the remesh.")
     note = _slow_note(before_tri)
     if note:
-        out["note"] = note
+        out["note"] = (out.get("note", "") + " " + note).strip()
     return ok(out)
 
 
@@ -588,10 +598,10 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
                          if meth == "prismatic" else "")
 
     # SUCCESS is observed by a NEW BRep body appearing on the component, NOT by the feature object:
-    # these add() methods "Return nothing in the case where the feature is non-parametric" (a DIRECT
+    # these add methods "Return nothing in the case where the feature is non-parametric" (a DIRECT
     # design OR an add inside a BaseFeature edit scope), so a None return is success in exactly the
     # modes this tool runs in. Snapshot the BRep bodies BEFORE the add so the before/after comparison
-    # is valid whether add() returns a feature (parametric) or None (non-parametric).
+    # is valid whether add returns a feature (parametric) or None (non-parametric).
     def _brep_snapshot():
         coll = safe(lambda: comp.bRepBodies)
         if coll is None:
@@ -650,7 +660,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
 
         before_tokens = {t for (t, _n, _b) in _brep_snapshot() if t is not None}
 
-        # Mutation - direct call, no safe(). Only an EXCEPTION is a hard failure.
+        # Mutation - direct call, no safe. Only an EXCEPTION is a hard failure.
         try:
             feat = feats.add(inp)
         except Exception as e:
@@ -662,7 +672,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     if scope_err:
         return scope_err
     if isinstance(result, dict) and result.get("isError") is True:
-        return result   # inner_op returned a _common.error()
+        return result # inner_op returned a _common.error
 
     feat = result["feat"]
     before_tokens = result["before_tokens"]

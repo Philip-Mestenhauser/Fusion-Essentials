@@ -7,8 +7,6 @@ no-active-doc guard. The adsk Document fakes capture the read so a regression to
 
 import json
 
-import pytest
-
 from conftest import load_tool, error_message
 
 dg = load_tool("doc_get")

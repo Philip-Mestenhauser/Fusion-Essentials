@@ -5,7 +5,7 @@
 never touches the design) and save_as_mesh (tessellate a BRep body into a persistent MeshBody - the
 inverse of mesh_to_brep). save_as_mesh's write runs through run_in_base_feature (design_mode.py) for
 the parametric base-feature scope requirement; its read-only tessellation step runs outside that
-scope. See docs/fusion-api-notes.md ("Mesh bodies") for the underlying adsk.fusion signatures.
+scope.
 """
 
 import os
@@ -17,6 +17,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _assert
 from . import _common
 from . import _export
 from . import _inputs
@@ -233,7 +234,7 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         return error(f"This build's ExportManager has no {factory_name} - {fmt.upper()} export "
     "is unavailable here.")
 
-    # All three mesh factories take (geometry, filename). Mutation (execute) is NOT wrapped in safe().
+    # All three mesh factories take (geometry, filename). Mutation (execute) is NOT wrapped in safe.
     try:
         opts = factory(geom, path)
     except Exception as e:
@@ -246,8 +247,8 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     if not did:
         return error(f"{fmt.upper()} export returned false - nothing was written.")
 
-    # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT proof a
-    # file was written (a MeshBody target makes execute() return True while writing nothing).
+    # VERIFY the file is actually on disk and non-empty - execute returning truthy is NOT proof a
+    # file was written (a MeshBody target makes execute return True while writing nothing).
     # file_exists + size>0 is the SOURCE OF TRUTH for success; never report exported:true otherwise.
     size, verr = _export.verify_written(path)
     if verr:
@@ -301,7 +302,7 @@ def _tessellate(body, quality_key):
     if qual is not None:
         safe(lambda: calc.setQuality(qual))
 
-    # calculate() is a real computation that can raise on a degenerate body - surface it, don't swallow.
+    # calculate is a real computation that can raise on a degenerate body - surface it, don't swallow.
     try:
         tm = calc.calculate()
     except Exception as e:
@@ -370,7 +371,7 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
     if comp is None:
         return error("Could not resolve a component to add the mesh body into.")
 
-    # 1) calculate() - READ-ONLY, runs OUTSIDE the base-feature scope.
+    # 1) calculate - READ-ONLY, runs OUTSIDE the base-feature scope.
     tm, terr = _tessellate(src, qual)
     if terr:
         return terr
@@ -392,16 +393,24 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
 
     # 2) addByTriangleMeshData - the WRITE. In PARAMETRIC it MUST be inside a base-feature scope; the
     #    shared run_in_base_feature opens/closes that atomically (direct mode runs inner directly). The
-    #    add itself is a direct call (no safe() around the mutation) so a real failure surfaces.
+    # add itself is a direct call (no safe around the mutation) so a real failure surfaces.
     def _add(_base_feature):
         return comp.meshBodies.addByTriangleMeshData(coords, coord_idx, normals or [], normal_idx or [])
 
+    before_mb_count = safe(lambda: comp.meshBodies.count)
     result, scope_err = run_in_base_feature(design, comp, _add)
     if scope_err:
         return scope_err
     mb = result
     if mb is None:
         return error("meshBodies.addByTriangleMeshData returned nothing - no mesh body was created.")
+    # A returned body object is not proof it joined the component - the count is.
+    after_mb_count = safe(lambda: comp.meshBodies.count)
+    if (before_mb_count is not None and after_mb_count is not None
+            and after_mb_count <= before_mb_count):
+        return error("addByTriangleMeshData returned a mesh body but the component's mesh body "
+                     f"count did not increase ({before_mb_count} before, {after_mb_count} after) - "
+                     "the mesh body did not actually land.")
 
     rename = (name or "").strip()
     if rename:
@@ -452,8 +461,11 @@ mesh_export_tool = (
             "description": "Export each top-level occurrence to its own file in directory 'file_path' (default false)."})
     .strict_schema()
 )
+# DeliverablesExist re-stats every claimed deliverable (single file_path or split-mode files[]) - a
+# redundant gate; the handler's factored _write_mesh_file verification stays (it builds the payload).
 mesh_export_item = Item.create_tool_item(tool=mesh_export_tool, write="write", handler=export_handler,
-                                         run_on_main_thread=True)
+                                         run_on_main_thread=True,
+                                         postconditions=[_assert.DeliverablesExist()])
 
 _SAVE_SPEC = [_SAVE_BODY, _SAVE_QUALITY]
 save_as_mesh_tool = (

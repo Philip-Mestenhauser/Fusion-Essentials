@@ -9,10 +9,10 @@
   data_delete_folder  -> delete a data-model folder by id, guarded
 
 The document-lifecycle tools live in doc_lifecycle.py; shared helpers live in _data_common.
-See docs/fusion-api-notes.md ("Data model") for the underlying adsk.core signatures.
 """
 
 import os
+import time
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -22,6 +22,14 @@ from ._data_common import (
     _data, _find_project, _split_path, _child_folder_by_name,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
 )
+from . import _outputs
+
+# What data_upload_file RETURNS: a poll handle so data_get_upload_status can report the upload's
+# real uploading/processing/complete/failed state instead of the caller re-listing files and guessing.
+RETURNS = [
+    _outputs.ReturnsValue("upload_handle", "an upload poll handle - poll data_get_upload_status(handle) "
+                          "until state='complete'", consumers=["data_get_upload_status"]),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +56,10 @@ def create_project_handler(name: str = "", purpose: str = "") -> dict:
         return error(f"Failed to create project '{name}': {e}")
     if not proj:
         return error(f"Project creation returned nothing for '{name}'.")
+    landed, _ = _find_project(data, name=name)
+    if landed is None:
+        return error(f"dataProjects.add returned a project but '{name}' does not appear when the "
+                     "projects are re-listed - the creation did not land.")
     return ok({"created": True, "name": safe(lambda: proj.name),
         "id": safe(lambda: proj.id)})
 
@@ -100,6 +112,10 @@ def create_folder_handler(folder_name: str = "", project: str = "", project_id: 
         return error(f"Failed to create folder '{folder_name}': {e}")
     if not folder:
         return error(f"Folder creation returned nothing for '{folder_name}'.")
+    if _child_folder_by_name(container, folder_name) is None:
+        return error(f"dataFolders.add returned a folder but '{folder_name}' does not appear when "
+                     f"'{_folder_path_string(container) or '(project root)'}' is re-listed - the "
+                     "creation did not land.")
     return ok({"created": True, "name": safe(lambda: folder.name),
         "id": safe(lambda: folder.id),
         "project": safe(lambda: proj.name),
@@ -112,6 +128,13 @@ def create_folder_handler(folder_name: str = "", project: str = "", project_id: 
 # ---------------------------------------------------------------------------
 
 _UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
+
+# FLAGGED ADDITION: this registry is what makes an upload POLLABLE. It keeps the live DataFileFuture
+# referenced (mirrors _GENERATIONS in cam_generate.py) so a data_get_upload_status call issued after
+# this handler returns can still read the upload/cloud-translation state. Session-scoped; an entry is
+# popped once its terminal state (complete/failed) has been reported once.
+_UPLOADS = {}
+_UPLOAD_HANDLE_SEQ = [0]
 
 
 def upload_file_handler(file_path: str = "", project: str = "", project_id: str = "",
@@ -175,6 +198,9 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
         return error("Upload returned no future object.")
 
     state = safe(lambda: future.uploadState)
+    if state == 2:
+        return error(f"Upload of '{os.path.basename(file_path)}' reports FAILED immediately - "
+                     "the file was not accepted. Check the format and the destination folder.")
     new_name = None
     new_id = None
     try:
@@ -185,8 +211,20 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
     except Exception:
         pass
 
+    # Keep the future referenced + mint a poll handle - see the _UPLOADS comment above.
+    _UPLOAD_HANDLE_SEQ[0] += 1
+    upload_handle = f"up{_UPLOAD_HANDLE_SEQ[0]}"
+    _UPLOADS[upload_handle] = {
+        "future": future,
+        "source_file": os.path.basename(file_path),
+        "destination_project": safe(lambda: proj.name),
+        "destination_folder": (_folder_path_string(target) or "(project root)"),
+        "started_at": time.time(),
+    }
+
     return ok({
         "upload_started": True,
+        "upload_handle": upload_handle,
         "source_file": os.path.basename(file_path),
         "destination_project": safe(lambda: proj.name),
         "destination_folder": (_folder_path_string(target) or "(project root)"),
@@ -195,8 +233,9 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
         "uploaded_name": new_name,
         "uploaded_id": new_id,
         "note": ("Upload is asynchronous and processes on the cloud (neutral formats like "
-            "STEP are translated into a Fusion design). Use data_get on the "
-            "destination project after a short wait to confirm the file appears."),
+            "STEP are translated into a Fusion design). Poll data_get_upload_status("
+            "handle=upload_handle) for the actual uploading/processing/complete/failed state - "
+            "do not guess from a re-listed data_get."),
     })
 
 
@@ -415,10 +454,12 @@ _upload_tool = (
         "Upload a local CAD file from the user's filesystem into a project, optionally "
         "into a nested 'folder' path (e.g. 'Imports/STEP'). Neutral formats (STEP, IGES, "
         "SAT, etc.) are translated into a Fusion design (.f3d) during cloud processing. "
-        "The upload is ASYNCHRONOUS: this returns once it has started; confirm completion "
-        "with data_get after a short wait. The destination folder path must "
+        "The upload is ASYNCHRONOUS: this returns once it has started. Poll "
+        "data_get_upload_status(handle=upload_handle) for the real uploading/processing/complete/"
+        "failed state - do not guess from re-listing data_get. The destination folder path must "
         "exist unless create_path=true (then missing folders are created). Use "
-        "data_get(include=['folders']) to see the structure. WRITES to the cloud data model."
+        "data_get(include=['folders']) to see the structure. WRITES to the cloud data model.\n"
+        + _outputs.produces_block(RETURNS)
         ),
         input_param_name="file_path",
         input_param_description="Full path to the local CAD file to upload.",

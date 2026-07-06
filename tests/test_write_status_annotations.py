@@ -7,9 +7,6 @@ This test fails listing any tool that hasn't declared one.
 """
 
 import os
-import importlib.util
-
-import pytest
 
 from conftest import load_tool, TOOLS_DIR
 

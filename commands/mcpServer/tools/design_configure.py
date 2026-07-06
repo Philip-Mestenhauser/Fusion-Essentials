@@ -4,8 +4,7 @@
 """BUILDS and switches a Configured Design: converts the active design and defines configuration rows
 plus the columns that vary across them (a parameter, a feature suppress, a body visibility, a
 per-config appearance theme, or a nested part insert). One action-dispatched verb for the whole
-configuration-table subsystem; see docs/fusion-api-notes.md "Configurations" for the underlying API
-sequence. design_get(include=['configurations']) reads the table; this WRITES it.
+configuration-table subsystem; design_get(include=['configurations']) reads the table; this WRITES it.
 """
 
 import adsk.core
@@ -104,8 +103,7 @@ def _top_table(design):
 
 def _doc_is_saved():
     """True if the active document has ever been saved (has a cloud file) - the configured-design
-    conversion only materializes for the user once saved (see docs/fusion-api-notes.md
-    "Configurations"). Patched in tests."""
+    conversion only materializes for the user once saved. Patched in tests."""
     return bool(safe(lambda: app.activeDocument.isSaved, False))
 
 
@@ -154,9 +152,14 @@ def _do_activate(design, table, name):
     before = safe(lambda: table.activeRow.name)
     if not safe(lambda: row.activate(), False):
         return error(f"Activating configuration '{target}' failed (activate() returned false).")
-    safe(lambda: design.computeAll())            # rebuild so the switched geometry shows
+    safe(lambda: design.computeAll()) # rebuild so the switched geometry shows
+    now = safe(lambda: table.activeRow.name)
+    want_row = safe(lambda: row.name)
+    if now is not None and want_row is not None and now != want_row:
+        return error(f"activate() returned true but the active configuration still reads '{now}' "
+                     f"(expected '{want_row}') - the switch did not take.")
     return ok({"activated": True, "requested": target, "previous": before,
-               "now_active": safe(lambda: table.activeRow.name),
+               "now_active": now,
                "note": "Configuration switched + rebuilt. Pair with view_screenshot to view it, or "
                        "design_get(include=['timeline']) / param_get to see what changed."})
 
@@ -225,7 +228,11 @@ def _do_add_parameter(design, table, parameter, values):
         cell = safe(lambda rname=rname: col.getCellByRowName(rname))
         if cell is None:
             return error(f"No cell for configuration '{rname}' in the '{parameter}' column.")
-        cell.expression = str(expr)              # MUTATION
+        cell.expression = str(expr) # MUTATION
+        got = safe(lambda cell=cell: cell.expression)
+        if got is not None and got != str(expr):
+            return error(f"Cell '{rname}' of the '{parameter}' column still reads '{got}' after "
+                         f"the set - the expression '{expr}' did not take.")
         n += 1
     return ok({"parameter": parameter, "column_id": safe(lambda: col.id), "set": n,
                "note": "Parameter column added and per-configuration expressions set. Switch with "
@@ -250,7 +257,10 @@ def _do_add_suppress(design, table, feature, suppressed_in):
         cell = safe(lambda rname=rname: col.getCellByRowName(rname))
         if cell is None:
             return error(f"No suppress cell for configuration '{rname}'.")
-        cell.isSuppressed = True                 # MUTATION
+        cell.isSuppressed = True # MUTATION
+        if safe(lambda cell=cell: cell.isSuppressed) is False:
+            return error(f"Suppress cell '{rname}' still reads unsuppressed after the set - the "
+                         "suppression did not take.")
     return ok({"feature": feature, "suppressed_in": suppressed_in,
                "note": "Suppress column added; the feature is suppressed in the listed configurations "
                        "(present in the others)."})
@@ -273,7 +283,10 @@ def _do_add_visibility(design, table, body, hidden_in):
         cell = safe(lambda rname=rname: col.getCellByRowName(rname))
         if cell is None:
             return error(f"No visibility cell for configuration '{rname}'.")
-        cell.isVisible = False                    # MUTATION
+        cell.isVisible = False # MUTATION
+        if safe(lambda cell=cell: cell.isVisible) is True:
+            return error(f"Visibility cell '{rname}' still reads visible after the set - the hide "
+                         "did not take.")
     return ok({"body": body, "hidden_in": hidden_in,
                "note": "Visibility column added; the body is hidden in the listed configurations."})
 
@@ -319,14 +332,22 @@ def _do_set_appearance(design, table, body, appearances):
         cell = safe(lambda theme_idx=theme_idx: col.getCell(theme_idx))
         if cell is None or theme_row is None:
             return error(f"No appearance cell/row at theme index {theme_idx}.")
-        cell.appearance = appearance              # MUTATION (assign appearance to this theme row)
+        cell.appearance = appearance # MUTATION (assign appearance to this theme row)
+        got = safe(lambda cell=cell: cell.appearance.name)
+        if got is not None and got != safe(lambda: appearance.name):
+            return error(f"Appearance cell at theme index {theme_idx} still reads '{got}' after "
+                         "the set - the assignment did not take.")
         # Link the configuration row to this theme row. CRITICAL: the theme column's getCell(index)
         # does NOT share top.rows ordering - addressing by positional index links the WRONG config
         # (live-caught: Small got Large's theme). Address the theme cell by the CONFIG ROW NAME.
         tcell = safe(lambda rname=rname: theme_col.getCellByRowName(rname))
         if tcell is None:
             return error(f"No theme cell for configuration '{rname}'.")
-        tcell.referencedTableRow = theme_row      # MUTATION
+        tcell.referencedTableRow = theme_row # MUTATION
+        got_row = safe(lambda tcell=tcell: tcell.referencedTableRow.name)
+        if got_row is not None and got_row != safe(lambda theme_row=theme_row: theme_row.name):
+            return error(f"Configuration '{rname}' still links theme '{got_row}' after the set - "
+                         "the theme link did not take.")
         set_count += 1
     return ok({"body": body, "themes": set_count,
                "note": "Appearance theme column added and configurations linked to theme rows. Switch "
@@ -385,7 +406,11 @@ def _do_add_insert(design, table, insert_part, insert_config, insert_map):
         cell = safe(lambda acfg=acfg: col.getCellByRowName(acfg))
         if cell is None:
             return error(f"No insert cell for assembly configuration '{acfg}'.")
-        cell.row = part_rows[pcfg]               # MUTATION (by-name part row - see appearance lesson)
+        cell.row = part_rows[pcfg] # MUTATION (by-name part row - see appearance lesson)
+        got_cfg = safe(lambda cell=cell: cell.row.name)
+        if got_cfg is not None and got_cfg != safe(lambda pcfg=pcfg: part_rows[pcfg].name):
+            return error(f"Insert cell '{acfg}' still selects part configuration '{got_cfg}' after "
+                         "the set - the mapping did not take.")
         mapped += 1
     return ok({"inserted_part": insert_part, "inserted_config": init_name, "mapped": mapped,
                "occurrence": safe(lambda: occ.name),

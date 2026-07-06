@@ -91,10 +91,9 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 - For syntax/AST checks, use Fusion's bundled Python:
   `C:\Users\<user>\AppData\Local\Autodesk\webdeploy\production\<hash>\Python\python.exe`
   (the path varies by Fusion build).
-- The MCP server work (`commands/mcpServer/`) is intended to merge upstream into
-  `Kings-Mountain-Labs/Fusion-Essentials`. Keep it modular under `commands/mcpServer/`,
-  dual-license new files (MIT/Apache headers), follow the existing conventions below, and
-  keep the security posture defensible.
+- Keep the MCP server modular under `commands/mcpServer/`, dual-license new files
+  (MIT/Apache headers), follow the existing conventions below, and keep the security
+  posture defensible.
 
 ## Add-in command convention (how features are structured)
 
@@ -117,8 +116,9 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 - `server/mcp_server.py` — HTTP + JSON-RPC server, **Streamable HTTP** transport (2025-03-26).
 - `server/task_manager.py` — marshals work onto Fusion's **main thread** via a custom event.
 - `mcp_primitives/` — Tool / Resource / Item schema classes plus the registry.
-- `tools/` — one file per tool ("building block"), named `<family>_<verb>.py`. Each has a
-  `handler(...)` (the logic; its parameters are the tool inputs), a `TOOL_DESCRIPTION`, a
+- `tools/` — one module per tool family slice, named `<family>_<verb>.py` (a few grandfathered
+  modules register several verbs; `tests/MANIFEST.md` is the authoritative per-tool list). Each
+  has a `handler(...)` (the logic; its parameters are the tool inputs), a `TOOL_DESCRIPTION`, a
   `tool = Tool.create_...`, an `item = Item.create_tool_item(...)`, and a `register_tool()`.
   Modules are **auto-discovered** by a `pkgutil` sweep — drop the file in, no registry edits.
   `_`-prefixed modules (`_common`, `_inputs`, `_outputs`, `_data_common`) are shared helpers.
@@ -187,10 +187,33 @@ Diagnostics: `GET /health`, `GET /tools`.
 2. Resolve any input that refers to existing geometry/occurrences/bodies through a typed kind in
    `tools/_inputs.py` (`GeometryHandle`/`BodyRef`/`OccurrenceRef`/`PlaneRef`/`AxisRef`/`Choice`/…)
    rather than a hand-rolled `name: str` — the kinds refuse ambiguity and self-heal stale handles.
-3. Ground every `adsk.*` call in the Fusion API reference rather than guessing signatures —
-   the Fusion API is niche and easy to get wrong. See [docs/fusion-api-notes.md](docs/fusion-api-notes.md)
-   for hard-won API facts that are not obvious from the reference alone.
+3. Ground every `adsk.*` call in the live API before writing it — the Fusion API is niche and
+   easy to get wrong. `sys_get_api_doc` searches the installed version's real signatures and
+   docstrings, so the reference can never go stale.
 4. Write its test (see **Testing a tool** below), then `sys_reload_addin` and smoke-test live.
+
+### Auditing for dead code
+
+Unreferenced symbols and unused imports are enforced continuously by `tests/test_dead_code.py`
+(name-based, so a dead symbol masked by a live same-named one elsewhere is not flagged - unique
+names are what make deadness statically provable). UNREACHABLE BRANCHES need runtime evidence
+instead: generate candidates with branch coverage over the suite -
+
+```bash
+py -3 -m pip install pytest-cov
+py -3 -m pytest -q --cov=commands.mcpServer --cov-branch --cov-report=html
+```
+
+then review never-executed branches in `htmlcov/`. An uncovered branch is either dead code or a
+missing test; both deserve action. This is a periodic audit, not CI - coverage of live-API
+wrapper paths is legitimately partial. The agent-facing surface has its own generated deadness
+audit: the "Blindspots" section of [docs/tool-wiring.md](docs/tool-wiring.md) (orphan tools,
+guidance pointing at tools that do not exist).
+
+For CAN'T-FAIL tests (assertions no code change would ever flip), the periodic detector is
+mutation testing: `py -3 -m pip install mutmut`, point it at one tool module at a time, and
+treat every surviving mutant as a missing assertion. Too slow for CI; the continuous floor is
+`tests/test_assert_strength.py` (a test may not rely on a bare isError flag alone).
 
 ### Testing a tool
 

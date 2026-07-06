@@ -6,8 +6,8 @@
   data_switch_hub(action="list")                  -> every hub (name, id, is_active)
   data_switch_hub(action="switch", hub=<name|id>) -> attempt to set the active hub (best-effort)
 
-See docs/fusion-api-notes.md ("Data model") for why 'switch' is best-effort (Data.activeHub is
-getter-only) and what a successful switch does to open documents.
+'switch' is best-effort: Data.activeHub is getter-only, so the assignment is verified by
+re-reading it, and a switch that takes closes every open document.
 """
 
 import adsk.core

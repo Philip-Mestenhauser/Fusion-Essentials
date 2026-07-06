@@ -165,25 +165,10 @@ def set_handler(name: str = "", expression: str = "", create: bool = False,
 # Timeline health + parameter add/delete/favorite (with a health guard) + recompute
 # ---------------------------------------------------------------------------
 
-_HEALTH_NAMES = {0: "healthy", 1: "warning", 2: "error", 3: "suppressed", 4: "rolled_back"}
 
 
-def _timeline_health(design):
-    """Return (errors, warnings, total) for the parametric timeline - used by the add/delete health
-    guard below. (design_recompute lives in design_ops.py; timeline health is in design_get's default slice.)"""
-    errors, warnings, total = [], [], 0
-    tl = safe(lambda: design.timeline)
-    if tl is None:
-        return errors, warnings, total
-    for i in range(safe(lambda: tl.count, 0)):
-        it = tl.item(i)
-        total += 1
-        hs = safe(lambda it=it: it.healthState)
-        if hs == 2:
-            errors.append(safe(lambda it=it: it.name) or f"#{i}")
-        elif hs == 1:
-            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
-    return errors, warnings, total
+# the shared timeline-health walk (before/after edit guard) - one home in _common
+from ._common import timeline_health as _timeline_health
 
 
 def _add_one(design, name, expression, unit, comment, favorite):

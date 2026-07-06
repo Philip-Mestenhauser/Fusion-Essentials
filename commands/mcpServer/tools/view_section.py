@@ -5,8 +5,7 @@
 
 view_section(action=cut|list|clear) creates/lists/removes a non-destructive Section Analysis (Inspect >
 Section Analysis) and auto-aims the camera at the exposed cut face. Pair with view_inspect
-(orient/isolate) and view_screenshot. See docs/fusion-api-notes.md "Section analysis" for the
-sectionAnalyses API and the camera-aim convention.
+(orient/isolate) and view_screenshot.
 """
 
 import adsk.core
@@ -55,8 +54,8 @@ _PLANE_NORMALS = {
 
 
 def _aim_at_cut(normal, flipped):
-    """Orient the camera to look straight at the exposed cut face (see docs/fusion-api-notes.md
-    "Section analysis" for the +normal/revealing-side convention this follows)."""
+    """Orient the camera to look straight at the exposed cut face (a section keeps the +normal
+    half, so the revealing side sits along +normal; flip reverses it)."""
     nx, ny, nz = normal
     if flipped:
         nx, ny, nz = -nx, -ny, -nz

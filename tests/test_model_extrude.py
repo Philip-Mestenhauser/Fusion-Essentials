@@ -429,6 +429,7 @@ class TestToObject:
         _install_geom(faces={})
         res = ex.handler(sketch_name="S", to_object="missing")
         assert res["isError"] is True
+        assert "handle did not resolve" in res["message"]
 
 
 # ── target_bodies cut scoping (prevents bleed-through) ──────────────────────

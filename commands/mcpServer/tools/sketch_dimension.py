@@ -3,8 +3,7 @@
 
 """MCP building block: add a dimensional constraint (distance/radius/diameter/angle) to a sketch and
 drive its value - the sizing half of parametric sketching (sketch_constrain is the geometric half).
-Entity references are '<type>:<index>', the same scheme as sketch_constrain. WRITES. See
-docs/fusion-api-notes.md ("Sketches") for the underlying adsk.fusion signatures.
+Entity references are '<type>:<index>', the same scheme as sketch_constrain. WRITES.
 """
 
 import adsk.core
@@ -126,7 +125,8 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     "dim_type": dt,
     "sketch": safe(lambda: sketch.name),
     "parameter": safe(lambda: dim.parameter.name),
-    "value": (set_value if set_value is not None else safe(lambda: dim.parameter.expression)),
+    # the value is READ BACK off the parameter - what Fusion holds, not an echo of the request
+    "value": safe(lambda: dim.parameter.expression),
     "driven": set_value is not None,
     "note": "Dimensional constraint added. Drive it later by name via param_set.",
     })

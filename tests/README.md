@@ -1,8 +1,8 @@
 # Tests
 
 Unit tests for the MCP tools in `commands/mcpServer/tools/`. They run **outside
-Fusion** against a mocked `adsk` layer, so they're fast (~0.1s for the whole
-suite) and need no live Fusion session. See [CLAUDE.md](CLAUDE.md) for the short,
+Fusion** against a mocked `adsk` layer, so the whole suite finishes in seconds
+and needs no live Fusion session. See [CLAUDE.md](CLAUDE.md) for the short,
 mandatory-for-new-tests version of "which pattern to copy."
 
 ```bash
@@ -86,7 +86,7 @@ attribute) rather than in each test.
 build a design, and `install(mod, design)` wires it into a tool. Smaller classes
 named to match Fusion's runtime type names (tools branch on `type(x).__name__`):
 `BRepFace`, `BRepEdge`, `Plane`, `Cylinder`, `Line3D`, `Circle3D`, `BRepBody`,
-`Component`, `FakeVector3D`, `FakePoint`. They implement only the interface a tool
+`FakeVector3D`, `FakePoint`. They implement only the interface a tool
 actually reads.
 
 **When `MakeComp`/`MakeDesign` lack a surface your tool needs, extend the shared
@@ -116,11 +116,11 @@ should be indistinguishable in structure from its model.
 - **A pure function (parse / encode / convert)** → copy **`test_quoting.py`**.
   No Fusion at all; just call it and round-trip the result.
 
-Adoption today: of 108 `test_*.py` files, 62 still define their own bespoke `_install(` (the
-anti-pattern below) and 43 contain at least one raw `<var>.app = ...` poke; only `test_model_mirror.py`
-uses the shared `make_design`/`install` pair. Don't take that as license to keep writing bespoke
-tests — it means most of the suite hasn't been migrated yet, not that the bespoke shape is preferred.
-See [tests/CLAUDE.md](CLAUDE.md) for the mandatory pattern for anything new.
+Most of the suite still carries the bespoke `_install(` shape (the anti-pattern below); the newest
+test files use the shared `make_design`/`install` pair. Don't take the bespoke majority as license
+to keep writing bespoke tests — it means most of the suite predates the shared fakes, not that the
+bespoke shape is preferred. See [tests/CLAUDE.md](CLAUDE.md) for the mandatory pattern for anything
+new.
 
 Then:
 

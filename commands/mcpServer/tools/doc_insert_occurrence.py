@@ -2,9 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: insert a saved cloud document into the active design as a new component
-occurrence - the API equivalent of Insert > Insert Derive / Insert into Current Design. See
-docs/fusion-api-notes.md ("Data model") for the addByInsert same-project constraint on external
-references.
+occurrence - the API equivalent of Insert > Insert Derive / Insert into Current Design. An
+external reference (isReferencedComponent=True) requires source and host in the SAME project -
+Fusion enforces it.
 """
 
 import adsk.core
@@ -97,6 +97,9 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
         return error(f"Insert failed: {e}. {hint}")
     if not new_occ:
         return error("addByInsert returned nothing (the insert did not produce an occurrence).")
+    if safe(lambda: new_occ.isValid) is False:
+        return error("addByInsert returned an occurrence but it reads isValid=false - the insert "
+                     "did not land.")
 
     return ok({
         "inserted": True,

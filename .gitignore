@@ -152,5 +152,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Claude Code machine-local settings (permission grants, etc.) — never commit
+# Claude Code: machine-local and session scaffolding never ship. The exemplar skill and the shared
+# settings.json (a worked example of scoping agent tool-call approvals) are deliberately tracked.
+# Plans are stand-up-the-work scaffolding: useful while a refactor is in flight, removed once it ships.
 .claude/settings.local.json
+.claude/plans/

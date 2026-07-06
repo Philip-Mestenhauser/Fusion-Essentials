@@ -16,7 +16,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, target_component, all_components
+from ._common import ok, error, safe, target_component
 from . import _common
 from . import _inputs
 

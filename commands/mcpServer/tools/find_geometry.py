@@ -6,7 +6,7 @@
 Scans faces/edges/vertices and returns each match's kind, world position, and shape data with a
 HANDLE (entityToken) other tools consume (joint_at_geometry, model_extrude, ...). Handles are
 SHORT-LIVED - Fusion does not guarantee a stable entityToken across separate queries, so use one
-promptly and re-run find_geometry if it is rejected as stale (see docs/fusion-api-notes.md).
+promptly and re-run find_geometry if it is rejected as stale.
 """
 
 import adsk.core
@@ -86,6 +86,46 @@ def _dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _face_normal(face, point):
+    """Outward unit normal at 'point' on the face, as [x,y,z] (4dp), or None if not evaluable.
+
+    A planar face has a CONSTANT normal; a curved face (cylinder/cone/sphere/torus) gets the normal
+    SAMPLED at 'point' (the reported centroid), so it varies across the surface. getNormalAtPoint needs
+    a point ON the surface - a curved face whose centroid lies off the surface yields no normal (None),
+    which safe() degrades to an omitted field rather than a fabricated value. Normals are directions,
+    so they are NOT unit-scaled like positions."""
+    if point is None:
+        return None
+    ev = safe(lambda: face.evaluator)
+    if ev is None:
+        return None
+    # The bool-return + output-normal signature comes back as (success, normal) in Python.
+    res = safe(lambda: ev.getNormalAtPoint(point))
+    if not (isinstance(res, (list, tuple)) and len(res) == 2):
+        return None
+    okflag, nrm = res
+    if not okflag or nrm is None:
+        return None
+    nx = safe(lambda: nrm.x); ny = safe(lambda: nrm.y); nz = safe(lambda: nrm.z)
+    if nx is None or ny is None or nz is None:
+        return None
+    return [round(nx, 4), round(ny, 4), round(nz, 4)]
+
+
+def _line_direction(g):
+    """Unit direction [x,y,z] (4dp) of a straight edge from its Line3D end-start, or None. Dimensionless."""
+    sp = safe(lambda: g.startPoint); ep = safe(lambda: g.endPoint)
+    if sp is None or ep is None:
+        return None
+    dx = safe(lambda: ep.x - sp.x); dy = safe(lambda: ep.y - sp.y); dz = safe(lambda: ep.z - sp.z)
+    if dx is None or dy is None or dz is None:
+        return None
+    n = (dx * dx + dy * dy + dz * dz) ** 0.5
+    if n <= 1e-12:
+        return None
+    return [round(dx / n, 4), round(dy / n, 4), round(dz / n, 4)]
+
+
 def _face_record(face, inv_k):
     g = safe(lambda: face.geometry)
     st = safe(lambda: g.surfaceType)
@@ -101,6 +141,10 @@ def _face_record(face, inv_k):
     rec = {"handle": handle, "kind": kind,
             "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
             "area": round(safe(lambda: face.area, 0) * inv_k * inv_k, 3)}
+    # Outward normal at the reported position (constant for planar, sampled at that point for curved).
+    nrm = _face_normal(face, c)
+    if nrm is not None:
+        rec["normal"] = nrm
     if kind == "cylinder_face":
         rec["radius"] = round(safe(lambda: g.radius, 0) * inv_k, 3)
         ax = safe(lambda: g.axis)
@@ -127,6 +171,10 @@ def _edge_record(edge, inv_k):
         ctr = safe(lambda: g.center)
         if ctr:
             rec["position"] = [round(ctr.x * inv_k, 3), round(ctr.y * inv_k, 3), round(ctr.z * inv_k, 3)]
+    if kind == "line_edge":
+        d = _line_direction(g)
+        if d is not None:
+            rec["direction"] = d
     return rec
 
 
@@ -204,7 +252,8 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
 TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, "
-    "world position, and shape data (cylinder radius+axis, edge radius, face area). 'target' = "
+    "world position, and shape data (cylinder radius+axis, edge radius, face area, face outward "
+    "normal, linear-edge direction). 'target' = "
     "occurrence/component/body name ('' = whole design); a name matching several occurrences (e.g. "
     "every instance of a patterned component) scans ALL of them and returns candidates from each - by "
     "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. 'kind' "

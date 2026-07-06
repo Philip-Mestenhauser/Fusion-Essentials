@@ -306,6 +306,7 @@ class TestSurfaceExtrude:
         _install(comp)
         res = sc.extrude_handler(distance=5)
         assert res["isError"] is True
+        assert "No sketch or 'curves' to extrude" in res["message"]
 
     def test_unknown_units_rejected(self):
         comp = FakeComp(FakeFeatures(ef=FakeExtrudeFeatures()), sketches=[FakeSketch("S")])

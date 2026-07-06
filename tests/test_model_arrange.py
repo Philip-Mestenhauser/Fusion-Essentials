@@ -251,3 +251,4 @@ class TestSpacing:
         af.createInput = lambda solver: _RaisingInput(solver)
         res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
         assert res["isError"] is True
+        assert "Arrange failed: objectSpacing is read-only" in res["message"]

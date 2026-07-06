@@ -8,7 +8,7 @@
                    operation, the angle (full 360 or partial), and symmetry. WRITES.
 
 The companion to model_extrude - revolve sweeps a profile around an axis instead of extruding it
-straight. Signatures: docs/fusion-api-notes.md "Model feature signatures".
+straight.
 """
 
 import math
@@ -22,6 +22,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component, root_body_advisory
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -130,7 +131,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         second = float(second_angle_deg or 0.0)
         if second and not symmetric:
             # asymmetric two-sided revolve: 'ang' one way, 'second' the other. Use
-            # setTwoSideAngleExtent, not setTwoSidesExtent (see fusion-api-notes.md).
+            # setTwoSideAngleExtent, not setTwoSidesExtent .
             second_val = adsk.core.ValueInput.createByReal(math.radians(second))
             rev_input.setTwoSideAngleExtent(angle_val, second_val)
         else:
@@ -197,7 +198,8 @@ revolve_tool = (
             "description": "Split the angle both ways about the profile plane (default false)."})
     .strict_schema()
 )
-revolve_item = Item.create_tool_item(tool=revolve_tool, write="write", handler=handler, run_on_main_thread=True)
+revolve_item = Item.create_tool_item(tool=revolve_tool, write="write", handler=handler, run_on_main_thread=True,
+                                     postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

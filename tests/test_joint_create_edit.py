@@ -663,8 +663,12 @@ def _payload2(result):
 class TestCreateHandler:
     def test_requires_both_inputs(self):
         _install_create()
-        assert joint.handler(occurrence_one="JO_A")["isError"] is True
-        assert joint.handler(occurrence_two="JO_B")["isError"] is True
+        res1 = joint.handler(occurrence_one="JO_A")
+        assert res1["isError"] is True
+        assert "Provide 'occurrence_one' and 'occurrence_two'" in res1["message"]
+        res2 = joint.handler(occurrence_two="JO_B")
+        assert res2["isError"] is True
+        assert "Provide 'occurrence_one' and 'occurrence_two'" in res2["message"]
 
     def test_unknown_joint_type_errors(self):
         _install_create()

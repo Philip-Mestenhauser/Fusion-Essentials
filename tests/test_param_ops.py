@@ -86,10 +86,14 @@ class TestFindParameter:
 
 class TestSetValidation:
     def test_empty_name_is_error(self):
-        assert params.set_handler(name="", expression="5")["isError"] is True
+        res = params.set_handler(name="", expression="5")
+        assert res["isError"] is True
+        assert "Provide 'name'" in res["message"]
 
     def test_empty_expression_is_error(self):
-        assert params.set_handler(name="StockX", expression="")["isError"] is True
+        res = params.set_handler(name="StockX", expression="")
+        assert res["isError"] is True
+        assert "Provide 'expression'" in res["message"]
 
     def test_zero_expression_passes_the_empty_guard(self, monkeypatch):
         # "0" is a legitimate value and must NOT trip the empty-expression guard
@@ -234,8 +238,12 @@ class TestAddHandler:
     def test_add_requires_name_and_expression(self, monkeypatch):
         design = FakeParamsDesign(FakeUserParams(), FakeTimeline([]))
         _stub_design(monkeypatch, design)
-        assert params.add_handler(name="", expression="5")["isError"] is True
-        assert params.add_handler(name="X", expression="")["isError"] is True
+        res1 = params.add_handler(name="", expression="5")
+        assert res1["isError"] is True
+        assert "Missing 'name'" in res1["message"]
+        res2 = params.add_handler(name="X", expression="")
+        assert res2["isError"] is True
+        assert "missing 'expression'" in res2["message"]
 
 
 class TestAddBatch:
@@ -389,6 +397,7 @@ class TestFavoriteHandler:
         _stub_design(monkeypatch, design)
         res = params.favorite_handler(name="")
         assert res["isError"] is True
+        assert "Provide 'name'" in res["message"]
 
 
 # ── param_get handler (read path) ──────────────────────────────────────────
@@ -511,6 +520,7 @@ class TestDeleteHandlerExtra:
         _stub_design(monkeypatch, design)
         res = params.delete_handler(name="")
         assert res["isError"] is True
+        assert "Provide 'name'" in res["message"]
 
 
 # ── _add_one favorite flag read-back ───────────────────────────────────────

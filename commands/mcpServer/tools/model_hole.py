@@ -4,8 +4,7 @@
 """MCP building block: drill HOLES with the real HoleFeatures command (not a sketch + extrude-cut).
 
 Companion to model_extrude - use this for actual holes (bolt circles, tapped holes, counterbores)
-so the feature reads as a Hole in the timeline and carries hole/thread metadata. API gotchas:
-docs/fusion-api-notes.md "Holes".
+so the feature reads as a Hole in the timeline and carries hole/thread metadata.
 """
 
 import adsk.core
@@ -17,6 +16,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -77,7 +77,7 @@ def _resolve_thread_info(comp, designation, internal=True):
 #
 # A clearance hole is sized for a FASTENER, not a raw diameter: setToClearanceHole tags the hole
 # semantically but does not resize it on this Fusion version, so the diameter also comes from this
-# ISO 273 metric table (see docs/fusion-api-notes.md "Fasteners & clearance holes").
+# ISO 273 metric table .
 # Values are nominal clearance-hole diameters in mm: (close, normal, loose).
 _CLEARANCE_MM = {
     "M2":  (2.2, 2.4, 2.6),
@@ -230,7 +230,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if berr:
         return error(berr)
 
-    # Build the placement sketch on the face. Surface the real exception (no safe() swallowing it) so a
+    # Build the placement sketch on the face. Surface the real exception (no safe swallowing it) so a
     # genuine API failure is reported as itself, not misattributed to a stale handle.
     try:
         sketch = comp.sketches.add(face_ent)
@@ -333,7 +333,8 @@ tool = (
     .add_input_property("fit", {"type": "string", "enum": list(_FITS), "description": "Clearance fit for 'fastener': close/normal/loose (default normal)."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

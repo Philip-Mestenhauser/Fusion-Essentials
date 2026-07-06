@@ -2,8 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: open a Fusion document from a data-model identifier (a lineage/versioned
-URN or a Fusion web URL). See docs/fusion-api-notes.md "Configured designs" for the
-openUsingContext/open() split, and "Data model" for the CAM-template crash risk this guards against.
+URN or a Fusion web URL). openUsingContext handles both normal and configured designs (open()
+rejects a configured design); the is_cam_template flag guards the crash-prone API open of a
+multi-reference CAM template.
 """
 
 import adsk.core
@@ -17,8 +18,8 @@ from ._data_common import _b64url_decode, _urn_candidates, _resolve_data_file
 app = adsk.core.Application.get()
 
 
-# A multi-reference CAM template can crash Fusion via the API (see fusion-api-notes.md "Data
-# model") - do not resolve/touch its reference graph here even to inspect it.
+# A multi-reference CAM template can crash Fusion via the API open path - do not resolve/touch
+# its reference graph here even to inspect it.
 
 
 def _open_document(data_file):

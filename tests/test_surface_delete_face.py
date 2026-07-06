@@ -159,3 +159,4 @@ def test_missing_faces_rejected():
     _wire({}, surface_delete=_DelFeatures(_Feature()))
     res = sdf.delete_face_handler(faces=None)
     assert res["isError"] is True
+    assert "needs a list of geometry handles" in res["message"]

@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: set (or create) sketch-text entities in the active design (e.g. an engraved
-label/nameplate). WRITES. See docs/fusion-api-notes.md ("Sketches") for the SketchText.textParameter
-write path.
+label/nameplate). WRITES. The writable handle is SketchText.textParameter - a ModelParameter
+whose expression is the QUOTED string.
 """
 
 import adsk.core
@@ -48,7 +48,11 @@ def _create_text(design, text, sketch_name, height, x, y, units):
 
     try:
         texts = sk.sketchTexts
-        ipt = texts.createInput2(text, h * k)              # text + height (cm)
+        before = safe(lambda: texts.count, 0) or 0
+        ipt = texts.createInput2(text, h * k) # text + height (cm)
+        # setAsMultiLine takes SKETCH-plane coordinates (the text lies on the sketch x-y plane, NOT in
+        # world/model space); the corner->diagonal box must not be axis-aligned, so both offsets are
+        # strictly non-zero (len>=1, h>0).
         ipt.setAsMultiLine(
             adsk.core.Point3D.create(x * k, y * k, 0),
             adsk.core.Point3D.create(x * k + max(len(text), 1) * h * k, y * k + h * k, 0),
@@ -57,17 +61,29 @@ def _create_text(design, text, sketch_name, height, x, y, units):
         st = texts.add(ipt)
     except Exception as e:
         return error(f"Could not create sketch text in '{sketch_name}': {e}.")
-    if not st:
-        return error("Creating the sketch text returned nothing.")
+    after = safe(lambda: texts.count, 0) or 0
+
+    # Honesty read-back: trust the sketchTexts COUNT, not add's return value. On an on-face sketch
+    # the API can hand back a text object while the collection stays empty (nothing materialized) -
+    # that false ok is the cardinal sin, so confirm the count actually rose before claiming success.
+    if not st or after <= before:
+        return error(
+            f"Sketch text did not materialize in '{safe(lambda: sk.name)}': sketchTexts count stayed "
+            f"at {before} after add(). Nothing was created. On a sketch built on a FACE, (x,y) are "
+            "SKETCH-plane coordinates (not world) - place the text using the 'frame' from "
+            "sketch_create (where sketch (0,0) sits and where +X/+Y point) so it lands on the face.")
 
     return ok({
     "created": True,
     "sketch": safe(lambda: sk.name),
+    "sketch_text_count": after,
     "text": text,
     "height": round(h, 6),
     "position": {"x": x, "y": y, "units": units},
-    "note": "Sketch text created. Extrude/emboss the sketch to engrave it, or edit it later with "
-    "sketch_set_text (without create).",
+    "note": (f"Sketch text created (verified: sketchTexts {before} -> {after}). (x,y) are SKETCH-plane "
+             "coordinates - on an on-face sketch use the 'frame' from sketch_create to keep the text "
+             "on the face. Extrude/emboss the sketch to engrave it, or edit it later with "
+             "sketch_set_text (without create)."),
     })
 
 
@@ -157,7 +173,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     # Force a recompute so DOWNSTREAM features rebuild against the new text. Changing
     # textParameter.expression updates the sketch, but a feature that consumes the text (e.g. an
     # Emboss/extrude that engraves it) can show STALE geometry until the design recomputes - which
-    # is why an engraving can look unchanged even though the text value is correct. computeAll()
+    # is why an engraving can look unchanged even though the text value is correct. computeAll
     # makes the visible model match. Only meaningful in parametric mode (direct mode has no tree).
     recomputed = False
     try:

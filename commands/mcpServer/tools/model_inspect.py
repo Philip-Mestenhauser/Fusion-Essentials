@@ -7,7 +7,6 @@ The "rich read" pattern (CLAUDE.md "Reads are RICH"): a light default (bounding 
 include=['mass'] for full physical properties. 'target' is a TargetRef (a find_geometry handle or a
 name, or '' for the whole design); a MESH target automatically reports mesh stats instead. Read-only.
 
-API signatures: docs/fusion-api-notes.md "Measurement".
 """
 
 import json

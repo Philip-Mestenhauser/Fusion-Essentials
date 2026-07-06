@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails CI if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 137  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 137  |  **Input-kinds:** 15  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -18,7 +18,6 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `EdgeLoopRef` | A boundary defined by edge handles from find_geometry. |
 | `GeometryHandle` | A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken). |
 | `GeometryHandleList` | A LIST of geometry handles (e.g. the specific edges to fillet, the bodies to mirror). Accepts a |
-| `NameRef` | A by-name reference (occurrence/component/body/sketch). Resolution is left to the tool (it |
 | `OccurrenceRef` | A reference to an assembly OCCURRENCE (a component instance), by its `fullPathName` (unambiguous, |
 | `OccurrenceRefList` | A list of occurrence references (JSON list or comma-separated), each resolved via OccurrenceRef's |
 | `PlaneRef` | A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply: |

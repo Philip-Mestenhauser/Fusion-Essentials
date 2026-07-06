@@ -7,8 +7,7 @@
              defined by a sketch profile. True-shape nesting fits actual outlines; rectangular
              nests bounding boxes. WRITES.
 
-The API equivalent of the Manufacture/Design Arrange command. Signatures: docs/fusion-api-notes.md
-"Model feature signatures".
+The API equivalent of the Manufacture/Design Arrange command.
 """
 
 import adsk.core
@@ -20,6 +19,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, resolve_sketch
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -138,7 +138,8 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

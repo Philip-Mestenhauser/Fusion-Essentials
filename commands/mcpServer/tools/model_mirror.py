@@ -7,7 +7,6 @@
                   side of a V-bank, a left/right bracket, a symmetric housing. Optionally join the
                   mirror to the original. WRITES.
 
-Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -19,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 # PlaneRef input (multi-source: origin alias | construction name | face/plane handle) for the mirror plane.
 _PLANE = _inputs.PlaneRef("plane", default="yz", description="The plane to mirror across.")
@@ -92,7 +92,8 @@ mirror_tool = (
             "description": "Combine the mirror with the original into one body (default false)."})
     .strict_schema()
 )
-mirror_item = Item.create_tool_item(tool=mirror_tool, write="write", handler=handler, run_on_main_thread=True)
+mirror_item = Item.create_tool_item(tool=mirror_tool, write="write", handler=handler, run_on_main_thread=True,
+                                    postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

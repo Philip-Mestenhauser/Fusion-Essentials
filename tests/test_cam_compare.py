@@ -90,6 +90,7 @@ class TestGuards:
                             lambda: (None, "This document has no CAM (Manufacture) data."))
         res = cc.compare_operations_handler(operation_a="A", operation_b="B")
         assert res["isError"] is True
+        assert "no CAM (Manufacture) data" in res["message"]
 
     def test_operation_not_found_errors(self, install):
         install([FakeOperation("Op1", {"p1": "1"})])

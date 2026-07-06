@@ -6,8 +6,6 @@ yields a SINGLE body is reported as an error (no silent ok), a face split that c
 an error, and the resulting body count / net face-count increase are read back and reported.
 """
 
-import pytest
-
 from conftest import (load_tool, make_design, install, MakeComp, payload,
                       error_message, assert_no_active_design)
 

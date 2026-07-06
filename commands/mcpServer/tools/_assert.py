@@ -3,21 +3,14 @@
 
 """Typed POSTCONDITION kinds: the state-side mirror of ``_outputs.OutputKind``.
 
-An Edit tool declares ``postconditions=[...]`` at registration (Item.create_tool_item), exactly as it
-declares ``RETURNS = [...]``. Around the handler the kernel runs capture -> handler -> verify:
-``capture()`` reads ground truth BEFORE the mutation; ``verify()`` re-reads it AFTER and returns
-("", evidence) when the world actually changed as claimed, or a named reason when it did not. A
-non-empty reason converts the handler's ok() into an error - so an API that returns success while
-changing nothing (Document.save() versioning nothing, updateAllReferences() leaving a stale ref, an
-export writing no file - all observed live) is caught structurally instead of per-handler.
-
-Severities: "hard" (reason -> isError) and "soft" (reason -> payload marked unconfirmed, for effects
-that propagate asynchronously and may legitimately lag the call - cloud versioning, uploads).
-Evidence is data an agent needs (size_bytes, stale_after): folded into the payload via setdefault so
-a declared RETURNS key can be SUPPLIED by its postcondition rather than computed twice.
-
-A Postcondition NEVER mutates: capture/verify are safe() reads; a verify that cannot read ground
-truth reports "could not confirm", never a false "". See tools/CLAUDE.md for the authoring rule.
+An Edit tool declares ``postconditions=[...]`` at registration (Item.create_tool_item); the kernel
+runs capture -> handler -> verify and converts an ok() whose declared effect did not take into an
+error - the platform can return success while changing nothing. Severities: "hard" (reason ->
+isError) and "soft" (payload marked unconfirmed, for effects that legitimately lag the call).
+Evidence a verify reads is folded into the payload via setdefault, so a declared RETURNS key can be
+SUPPLIED by its postcondition rather than computed twice. A Postcondition NEVER mutates:
+capture/verify are safe() reads, and a verify that cannot read ground truth reports "could not
+confirm", never a false "". See tools/CLAUDE.md for the authoring rule.
 """
 
 import json
@@ -224,15 +217,6 @@ class FeatureHealthy(Postcondition):
         if warnings:
             evidence["feature_warnings"] = warnings
         return "", evidence
-
-
-class EntityGone(Postcondition):
-    """After a delete: the payload's deleted count/flag is backed by the API's deleteMe result read
-    at the call site. This kind exists for sites whose ground truth needs no re-query (deleteMe's
-    False IS the read-back); collection-recount variants belong in the tool until a shared shape
-    emerges. Declared so the lint inventory names the tool's verification story."""
-
-    name = "entity_gone"
 
 
 def wrap(handler, postconditions):

@@ -120,3 +120,4 @@ class TestRecomputeHandler:
         monkeypatch.setattr(dops._common, "design", lambda: None)
         res = dops.recompute_handler()
         assert res["isError"] is True
+        assert "No active design" in res["message"]

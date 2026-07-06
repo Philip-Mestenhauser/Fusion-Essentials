@@ -7,8 +7,6 @@ Pinned: handle resolution + the require-predicate enforcement, the units/Distanc
 schema/contract auto-generation, and resolve_inputs end-to-end.
 """
 
-import json
-
 from conftest import load_tool
 
 inp = load_tool("_inputs")

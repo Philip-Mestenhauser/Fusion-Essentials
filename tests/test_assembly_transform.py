@@ -30,14 +30,6 @@ asm = load_tool("assembly_transform")
 
 # -- fakes ---------------------------------------------------------------------
 
-class FakeVec:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-    def asPoint(self):
-        return ("pt", self.x, self.y, self.z)
-
-
 class _Vec:
     """Vector3D subset for edge-axis derivation: length + normalize."""
     def __init__(self, x, y, z):

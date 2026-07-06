@@ -53,7 +53,6 @@ INSTRUCTIONS = (
 
 # Header names (Streamable HTTP transport).
 SESSION_HEADER = 'Mcp-Session-Id'
-PROTOCOL_VERSION_HEADER = 'MCP-Protocol-Version'
 
 # Our server's identifying name. Returned by GET /health and used by the
 # post-start self-check to confirm WE are the server answering on the port

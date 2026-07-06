@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch, scale - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -156,6 +156,26 @@ def terse(rec: dict, noise: dict) -> dict:
     return {k: v for k, v in rec.items() if not (k in noise and v == noise[k])}
 
 
+def timeline_health(design):
+    """(error_names, warning_names, total) over the parametric timeline by healthState (2=error,
+    1=warning) - the shared before/after guard for edits that can break downstream features, so a
+    change that corrupts the model is reported instead of swallowed. A direct-modelling design
+    (no timeline) yields empty lists."""
+    errors, warnings, total = [], [], 0
+    tl = safe(lambda: design.timeline)
+    if tl is None:
+        return errors, warnings, total
+    for i in range(safe(lambda: tl.count, 0) or 0):
+        it = tl.item(i)
+        total += 1
+        hs = safe(lambda it=it: it.healthState)
+        if hs == 2:
+            errors.append(safe(lambda it=it: it.name) or f"#{i}")
+        elif hs == 1:
+            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
+    return errors, warnings, total
+
+
 # ── unit scaling (Fusion's internal length unit is cm) ──────────────────────
 
 UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
@@ -184,8 +204,7 @@ def min_distance(entity_a, entity_b):
     with the shared failure handling ``model_measure_between`` and ``model_measure_relation`` both need.
     Returns ``(MeasureResults, None)`` on success or ``(None, error_result)`` on any failure - the
     measurement is a READ, so a failure is surfaced, never swallowed. The result's ``.value`` is in cm;
-    ``.positionOne``/``.positionTwo`` are the closest points (cm). Signature:
-    docs/fusion-api-notes.md 'Measurement'."""
+    ``.positionOne``/``.positionTwo`` are the closest points (cm)."""
     mgr = safe(lambda: app.measureManager)
     if not mgr:
         return None, error("MeasureManager unavailable.")

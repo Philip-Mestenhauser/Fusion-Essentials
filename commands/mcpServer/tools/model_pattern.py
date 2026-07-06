@@ -9,7 +9,6 @@
                          total angle (360 = full ring). WRITES.
 
 Direction/axis defaults to a world construction axis (x/y/z); pass 'axis'/'direction' to choose.
-Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -21,6 +20,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -64,8 +64,7 @@ def _resolve_input_entities(design, occurrences, bodies):
 
 
 def _axis_entity(comp, axis_key):
-    """The x/y/z construction axis of the given component (must own the pattern's input entities -
-    see docs/fusion-api-notes.md "Model feature signatures")."""
+    """The x/y/z construction axis of the given component (must own the pattern's input entities)."""
     attr = _AXES.get((axis_key or "z").strip().lower())
     if not attr:
         return None
@@ -218,7 +217,8 @@ rectangular_tool = (
     .strict_schema()
 )
 rectangular_item = Item.create_tool_item(tool=rectangular_tool, write="write", handler=rectangular_handler,
-                                         run_on_main_thread=True)
+                                         run_on_main_thread=True,
+                                         postconditions=[_assert.FeatureHealthy()])
 
 _CIRC_DESC = (
                                          "Pattern component OCCURRENCES evenly around an axis. 'occurrences' = the occurrence name(s) to "
@@ -238,7 +238,8 @@ circular_tool = (
     .strict_schema()
 )
 circular_item = Item.create_tool_item(tool=circular_tool, write="write", handler=circular_handler,
-                                      run_on_main_thread=True)
+                                      run_on_main_thread=True,
+                                      postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

@@ -611,6 +611,7 @@ class TestCloseDocument:
         _doc_lifecycle.app = _App()
         res = _doc_lifecycle.close_document_handler()
         assert res["isError"] is True
+        assert "No documents are open" in res["message"]
 
 
 class TestNewDocument:

@@ -4,7 +4,7 @@
 """MCP building block: refresh out-of-date external references in the active document.
 
 The API equivalent of "Get Latest" on a referenced component - one by name, or all that are out
-of date. See docs/fusion-api-notes.md ("Data model") for the documentReferences signatures.
+of date.
 """
 
 import json
@@ -55,6 +55,10 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
             errors.append({"name": rname, "error": "getLatestVersion returned false"})
             continue
         after_v = safe(lambda ref=ref: ref.version)
+        if bool(safe(lambda ref=ref: ref.isOutOfDate, False)):
+            errors.append({"name": rname,
+                           "error": "still out of date after getLatestVersion returned true"})
+            continue
         updated.append({"name": rname, "version_before": before_v, "version_after": after_v,
         "was_out_of_date": ood})
 

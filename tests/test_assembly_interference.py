@@ -183,6 +183,7 @@ class TestInterferenceHandler:
         monkeypatch.setattr(ai._common, "design", lambda: None)
         res = ai.handler()
         assert res["isError"] is True
+        assert "No active design" in res["message"]
 
     def test_areCoincidentFacesIncluded_failure_surfaces_as_error(self, monkeypatch):
         # a rejected areCoincidentFacesIncluded assignment must raise into the handler's error path,

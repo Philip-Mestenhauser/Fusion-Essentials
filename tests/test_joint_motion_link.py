@@ -108,8 +108,12 @@ class TestFindJoint:
 class TestHandlerGuards:
     def test_requires_both_names(self):
         _install(["A", "B"])
-        assert jml.handler(joint_one="A")["isError"] is True
-        assert jml.handler(joint_two="B")["isError"] is True
+        res1 = jml.handler(joint_one="A")
+        assert res1["isError"] is True
+        assert "Provide 'joint_one' and 'joint_two'" in res1["message"]
+        res2 = jml.handler(joint_two="B")
+        assert res2["isError"] is True
+        assert "Provide 'joint_one' and 'joint_two'" in res2["message"]
 
     def test_rejects_same_joint(self):
         _install(["A", "B"])
@@ -127,7 +131,9 @@ class TestHandlerGuards:
         jml._common.app = jml.app
         import adsk.fusion
         adsk.fusion.Design.cast = lambda x: None
-        assert jml.handler(joint_one="A", joint_two="B")["isError"] is True
+        res = jml.handler(joint_one="A", joint_two="B")
+        assert res["isError"] is True
+        assert "No active design" in res["message"]
 
 
 class TestLinkCreation:

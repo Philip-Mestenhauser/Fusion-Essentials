@@ -87,11 +87,11 @@ class TestHealthHelper:
     def test_rolls_up_errors_and_warnings(self):
         tl = FakeTimeline([FakeTLObject("A", 0, health=0), FakeTLObject("B", 1, health=2),
                            FakeTLObject("C", 2, health=1)])
-        errors, warnings, total = df._health(tl)
+        errors, warnings, total = df._timeline_health(type("D", (), {"timeline": tl})())
         assert total == 3 and errors == ["B"] and warnings == ["C"]
 
     def test_none_timeline_empty(self):
-        assert df._health(None) == ([], [], 0)
+        assert df._timeline_health(type("D", (), {"timeline": None})()) == ([], [], 0)
 
 
 class TestFindByName:

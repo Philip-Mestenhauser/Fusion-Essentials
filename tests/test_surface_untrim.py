@@ -142,6 +142,7 @@ def test_missing_faces_rejected():
     _wire(_Feature(), {})
     res = su.untrim_handler(faces=None)
     assert res["isError"] is True
+    assert "needs a list of geometry handles" in error_message(res)
 
 
 def test_null_feature_is_error():

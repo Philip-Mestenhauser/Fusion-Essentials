@@ -6,8 +6,8 @@
 """MCP building block: capture the Fusion viewport so the agent can visually review results.
 
 Returns the image as an MCP image content block (base64 PNG). Optionally reorients the camera first
-(top/front/iso/etc.) and fits the view; see docs/fusion-api-notes.md "Viewport / camera" for the
-underlying camera API and the exact-world-axis-vectors gotcha this relies on.
+(top/front/iso/etc.) and fits the view; the camera is set to exact world-axis vectors because
+assigning camera.viewOrientation is unreliable.
 """
 
 import base64
@@ -25,20 +25,9 @@ from . import _view_common
 
 app = adsk.core.Application.get()
 
-# Map friendly names -> ViewOrientations enum values (from the API reference).
-_ORIENTATIONS = {
-    "current": None,  # leave the camera as-is
-    "top": adsk.core.ViewOrientations.TopViewOrientation,
-    "bottom": adsk.core.ViewOrientations.BottomViewOrientation,
-    "front": adsk.core.ViewOrientations.FrontViewOrientation,
-    "back": adsk.core.ViewOrientations.BackViewOrientation,
-    "left": adsk.core.ViewOrientations.LeftViewOrientation,
-    "right": adsk.core.ViewOrientations.RightViewOrientation,
-    "iso-top-left": adsk.core.ViewOrientations.IsoTopLeftViewOrientation,
-    "iso-top-right": adsk.core.ViewOrientations.IsoTopRightViewOrientation,
-    "iso-bottom-left": adsk.core.ViewOrientations.IsoBottomLeftViewOrientation,
-    "iso-bottom-right": adsk.core.ViewOrientations.IsoBottomRightViewOrientation,
-}
+# The named views: 'current' (leave the camera as-is) + the shared camera-orientation table,
+# which supplies the exact eye/target/up vectors each name maps to.
+_VIEWS = ("current",) + tuple(_view_common.VIEW_DIRECTIONS)
 
 _MAX_DIM = 4096
 
@@ -110,8 +99,8 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
             zoom: float = 1.0, fit_to: str = "") -> dict:
     """Capture the active viewport and return it as a base64 PNG image block."""
     view = (view or "current").strip().lower()
-    if view not in _ORIENTATIONS:
-        return error(f"Unknown view '{view}'. Valid: {', '.join(_ORIENTATIONS)}")
+    if view not in _VIEWS:
+        return error(f"Unknown view '{view}'. Valid: {', '.join(_VIEWS)}")
 
     try:
         width = max(1, min(int(width), _MAX_DIM))
@@ -138,26 +127,23 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change
     # the user's view as a side effect).
-    if _ORIENTATIONS[view] is not None or want_fit or (zoom and zoom != 1.0):
+    if view != "current" or want_fit or (zoom and zoom != 1.0):
         try:
             saved_camera = vp.camera          # snapshot of the user's current view
             cam = vp.camera
-            if _ORIENTATIONS[view] is not None:
-                vecs = _ortho_camera_vectors(view)
-                if vecs is not None:
-                    # Set the camera EXPLICITLY to exact world-axis vectors so the view is GUARANTEED
-                    # square to world (not a rotate-toward that leaves a tilt). target keeps the
-                    # current focus; eye is placed along the exact look direction.
-                    look, up = vecs
-                    tgt = cam.target
-                    dist = safe(lambda: cam.eye.distanceTo(cam.target), 100.0) or 100.0
-                    cam.eye = adsk.core.Point3D.create(
-                        tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
-                    cam.upVector = adsk.core.Vector3D.create(*up)
-                    if _is_ortho_face(view):
-                        cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-                else:
-                    cam.viewOrientation = _ORIENTATIONS[view]
+            if view != "current":
+                # Every named view resolves in the shared table (_VIEWS is built from it). Set the
+                # camera EXPLICITLY to exact world-axis vectors so the view is GUARANTEED square to
+                # world (not a rotate-toward that leaves a tilt). target keeps the current focus;
+                # eye is placed along the exact look direction.
+                look, up = _ortho_camera_vectors(view)
+                tgt = cam.target
+                dist = safe(lambda: cam.eye.distanceTo(cam.target), 100.0) or 100.0
+                cam.eye = adsk.core.Point3D.create(
+                    tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
+                cam.upVector = adsk.core.Vector3D.create(*up)
+                if _is_ortho_face(view):
+                    cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
             vp.camera = cam                   # assigning back applies the change
             vp.fit()
             # zoom: scale the camera-to-target distance after fitting (>1 zooms OUT, <1 zooms IN).
@@ -223,7 +209,7 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="view_screenshot", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("view", list(_ORIENTATIONS), default="current",
+    .add_input_property(*_inputs.Choice("view", list(_VIEWS), default="current",
             description="Camera orientation.").as_property())
     .add_input_property("width", {"type": "integer", "description": "Width in px (1-4096, default 800)."})
     .add_input_property("height", {"type": "integer", "description": "Height in px (1-4096, default 600)."})

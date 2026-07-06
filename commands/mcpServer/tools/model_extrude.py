@@ -6,8 +6,7 @@
   extrude -> turn a closed sketch profile into a 3D body by extruding it a distance, or up to a
              face. Choose the operation, distance/taper, and optional surface (no end caps). WRITES.
 
-Companion to sketch_create / sketch_add_geometry. Signatures: docs/fusion-api-notes.md
-"Model feature signatures".
+Companion to sketch_create / sketch_add_geometry.
 """
 
 import adsk.core
@@ -19,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component, root_body_advisory
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -291,7 +291,8 @@ extrude_tool = (
             "description": "Extrude into a SURFACE wall (no end caps, isSolid=False) instead of a solid (default false). Auto-applied when the sketch has only an open path. Every result reports 'is_solid'."})
     .strict_schema()
 )
-extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True)
+extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True,
+                                     postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

@@ -8,7 +8,6 @@
                            find_geometry handle or a name. The relational complement to model_inspect
                            (which measures ONE target's own size/mass). Read-only.
 
-API signatures: docs/fusion-api-notes.md "Measurement".
 """
 
 import math
@@ -53,19 +52,10 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
     ent_a, kind_a = res_a
     ent_b, kind_b = res_b
 
-    mgr = safe(lambda: app.measureManager)
-    if not mgr:
-        return error("MeasureManager unavailable.")
-
     if m == "distance":
-        try:
-            mr = mgr.measureMinimumDistance(ent_a, ent_b)
-        except Exception as e:
-            return error(f"Distance measurement failed: {e}. (Target a specific body/face - an "
-                         "occurrence whose bodies are proxies can be rejected; a find_geometry face/body "
-                         "handle is the precise input.)")
-        if not mr:
-            return error("measureMinimumDistance returned nothing for these two targets.")
+        mr, derr = _common.min_distance(ent_a, ent_b)
+        if derr:
+            return derr
         return ok({
             "mode": "distance",
             "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",
@@ -79,6 +69,9 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         })
 
     # angle
+    mgr = safe(lambda: app.measureManager)
+    if not mgr:
+        return error("MeasureManager unavailable.")
     try:
         mr = mgr.measureAngle(ent_a, ent_b)
     except Exception as e:

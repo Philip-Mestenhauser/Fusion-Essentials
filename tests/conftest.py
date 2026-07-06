@@ -53,7 +53,23 @@ def install_mock_adsk():
     ``None``). The type classes a tool uses for ``isinstance`` / ``.cast`` /
     ``type(x).__name__`` checks ARE modelled below, because those drive real
     branching.
+
+    IDEMPOTENT: gen_manifest.py/gen_wiring.py call this again at their own import
+    time so they work standalone (outside pytest) too - they rely on a second call
+    being a no-op when a mock is already installed. A real re-install here would
+    replace sys.modules['adsk'/'adsk.fusion'/...] with BRAND NEW objects; any module
+    already loaded (e.g. _inputs.py, cached tool modules) keeps its OLD reference,
+    so a later isinstance/.cast check compares against the wrong generation of
+    mock and fails in a way that depends on collection order (observed live: any
+    session that collects test_generators.py - which imports gen_manifest AND
+    gen_wiring - alongside other tool tests broke isinstance checks throughout).
     """
+    existing = sys.modules.get("adsk")
+    if (isinstance(existing, types.ModuleType)
+            and sys.modules.get("adsk.fusion") is getattr(existing, "fusion", None)
+            and sys.modules.get("adsk.core") is getattr(existing, "core", None)):
+        return existing, existing.core, existing.fusion
+
     core = Mock()
     app = Mock()
     # Tools commonly tack `"active_document": app.activeDocument.name` onto a
@@ -309,19 +325,6 @@ class _NamedCollection:
         return None
 
 
-class Component:
-    """Matches a Component: owns bRepBodies but no boundingBox of its own here.
-
-    ``type(self).__name__ == 'Component'`` — the tool treats this as "not
-    directly measurable" and falls back to a body.
-    """
-    def __init__(self, name="Comp", bodies=()):
-        self.name = name
-        self.bRepBodies = _NamedCollection(bodies)
-        # A component's own boundingBox (used by the world-aligned path).
-        self.boundingBox = None
-
-
 @pytest.fixture
 def bbox():
     """Factory: FakeBoundingBox3D from (min xyz, max xyz) in cm (Fusion's unit)."""
@@ -553,22 +556,6 @@ def assert_no_active_design(mod, handler, **valid_kwargs):
     res = handler(**valid_kwargs)
     msg = error_message(res).lower()
     assert "design" in msg or "document" in msg, res
-
-
-def rich_read_caller(mod, design):
-    """Wire `design` into `mod` (both seams, via install) and return a caller that invokes the tool's
-    handler and returns the decoded ok() payload. The one-liner a rich-read test's fixture uses:
-
-        @pytest.fixture
-        def call(): return rich_read_caller(dg, make_design(...))
-        def test_default(call): assert "mode" in call()           # no include= → orientation slice
-        def test_slice(call):   assert "tree" in call(include=["tree"])
-
-    Setup happens INSIDE the fixture, so the autouse restore tears the seam down in scope order — a
-    leaked seam is structurally impossible (the cure for the suite's order-dependence; see
-    CLAUDE.md 'Tests')."""
-    install(mod, design)
-    return lambda **kw: payload(mod.handler(**kw))
 
 
 def assert_unknown_units(handler, units_param="units", **valid_kwargs):

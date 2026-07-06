@@ -15,7 +15,6 @@ import adsk.core
 import adsk.fusion
 
 from . import _common
-from ._common import UNIT_TO_CM
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = "the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool"
@@ -783,8 +782,7 @@ def _axis_from_face(name, face):
     """A DIRECTION for a face used as an axis SOURCE: a PLANAR face -> its normal; a CYLINDRICAL or
     CONICAL face -> its axis. Returned tagged ('world', unit_vec) - the SAME shape a world axis uses,
     so every AxisRef consumer that handles a world direction handles a face-derived one with no change
-    ('world' here means 'a fixed direction vector', not necessarily a world axis). Returns (tagged, err).
-    ConstructionAxis/Cone/Plane geometry per docs/fusion-api-notes.md 'Face normals ...'."""
+    ('world' here means 'a fixed direction vector', not necessarily a world axis). Returns (tagged, err)."""
     st = _common.safe(lambda: face.geometry.surfaceType)
     g = _common.safe(lambda: face.geometry)
     ST = adsk.core.SurfaceTypes
@@ -973,24 +971,6 @@ class Choice(InputKind):
         if v not in [o.lower() for o in self.options]:
             return None, f"'{self.name}' must be one of: {', '.join(self.options)} (got '{raw}')."
         return v, None
-
-
-# ── a plain string name (occurrence/component/body/sketch by name) ──────────
-
-class NameRef(InputKind):
-    """A by-name reference (occurrence/component/body/sketch). Resolution is left to the tool (it
-    knows which collection), but the kind documents that a name is expected + how to discover it."""
-
-    MAP_HINT = "a plain by-name ref; prefer a handle/fullPathName kind if one exists"
-
-    def __init__(self, name, of="entity", discover_with="", **kw):
-        super().__init__(name, **kw)
-        self.of = of
-        self.discover_with = discover_with
-
-    def contract_note(self) -> str:
-        d = f" (list names with {self.discover_with})" if self.discover_with else ""
-        return f"Name of {self.of}{d}."
 
 
 # ── occurrence reference (an assembly instance, by its unambiguous fullPathName) ──────────────────

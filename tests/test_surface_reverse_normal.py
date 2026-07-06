@@ -144,6 +144,7 @@ def test_missing_bodies_rejected():
     _wire(_flip_result, {})
     res = srn.reverse_normal_handler(bodies=None)
     assert res["isError"] is True
+    assert "needs at least one body" in res["message"]
 
 
 def test_null_feature_is_error():

@@ -187,10 +187,10 @@ class TestList:
         _install(monkeypatch)
         monkeypatch.setattr(ct, "_shared_libraries",
                             lambda scope: ([{"name": "Milling Tools (Metric)", "url": "u1"},
-                                           {"name": "Haas Vf2.hub", "url": "u2"}], None))
+                                           {"name": "Team Mill.hub", "url": "u2"}], None))
         out = _payload(ct.handler(action="list", scope="hub"))
         assert out["library_count"] == 2
-        assert "Haas Vf2.hub" in [l["name"] for l in out["libraries"]]
+        assert "Team Mill.hub" in [l["name"] for l in out["libraries"]]
 
 
 # ── add (multiple by reference) ─────────────────────────────────────────────
@@ -206,7 +206,7 @@ class TestAdd:
 
     def test_persist_whose_url_reread_disagrees_bites(self, monkeypatch):
         # updateToolLibrary reports success but the library re-read fresh from its url holds the
-        # wrong tool count (fusion-api-notes: True is NOT proof) -> error, not ok
+        # wrong tool count (updateToolLibrary returning True is NOT proof) -> error, not ok
         tgt = _Target(tools=[_Tool("12mm Flat")], persisted_count_value=1)
         _install(monkeypatch, target=tgt)
         res = ct.handler(action="add", scope="cloud", library="MyLib",
@@ -226,6 +226,7 @@ class TestAdd:
         _install(monkeypatch)
         res = ct.handler(action="add", scope="cloud", library="MyLib")
         assert res["isError"] is True
+        assert "Provide 'add_tools'" in res["message"]
 
 
 # ── rich add: create-by-type + holder + presets (the demo, via tool calls) ──
@@ -344,6 +345,7 @@ class TestAddRich:
         res = ct.handler(action="add", scope="cloud", library="L",
                          add_tools=[{"description": "no source"}])
         assert res["isError"] is True
+        assert "needs 'from_type'" in res["message"]
 
 
 # ── remove (multiple) ────────────────────────────────────────────────────────
@@ -486,6 +488,7 @@ class TestCreateLibrary:
         _install_create(monkeypatch)
         res = ct.handler(action="create_library", scope="document", library="X")
         assert res["isError"] is True
+        assert "Cannot create a library in the document scope" in res["message"]
 
     def test_requires_name(self, monkeypatch):
         _install_create(monkeypatch)

@@ -269,12 +269,14 @@ class TestFileLanded:
         ghost = str(tmp_path / "ghost.pdf")
         res = kernel.wrap(lambda **kw: _ok({"file_path": ghost}), [kernel.FileLanded()])()
         assert res["isError"] is True
+        assert "file_exists=False" in res["message"]
 
     def test_empty_file_bites(self, tmp_path):
         p = tmp_path / "empty.pdf"
         p.write_text("")
         res = kernel.wrap(lambda **kw: _ok({"file_path": str(p)}), [kernel.FileLanded()])()
         assert res["isError"] is True
+        assert "file_exists=True" in res["message"] and "size_bytes=0" in res["message"]
 
     def test_real_file_confirms_and_supplies_size(self, tmp_path):
         p = tmp_path / "real.pdf"

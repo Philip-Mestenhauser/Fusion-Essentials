@@ -3,8 +3,7 @@
 
 """Shared helpers for the cloud data-model tools: hub/project/folder resolution, path splitting,
 and URN/web-URL identifier decoding. Used by data_ops.py, doc_lifecycle.py, _data_read.py,
-doc_open.py, and doc_insert_occurrence.py. See docs/fusion-api-notes.md ("Data model") for the
-URN/URL decoding rule.
+doc_open.py, and doc_insert_occurrence.py.
 """
 
 import base64

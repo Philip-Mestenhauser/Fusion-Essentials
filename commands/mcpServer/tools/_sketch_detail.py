@@ -4,8 +4,7 @@
 """Detail engine behind sketch_get: X-rays ONE sketch - entities, construction geometry,
 constraints, dimensions. Not a separately-registered tool; sketch_get delegates here when called
 with a 'sketch_name'. Entity ids ('<type>:<index>') match the references sketch_constrain /
-model_extrude / sketch_add_geometry use. Read-only; see docs/fusion-api-notes.md ("Sketches") for
-the underlying adsk.fusion signatures.
+model_extrude / sketch_add_geometry use. Read-only.
 """
 
 import adsk.core

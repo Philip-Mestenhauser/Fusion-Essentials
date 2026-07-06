@@ -3,8 +3,9 @@
 
 """Shared camera-orientation table for the standard named views (top/bottom/front/back/left/right
 plus the four iso corners; Fusion is Z-up). VIEW_DIRECTIONS is the eye-target direction; consumers
-that instead need the opposite-sign LOOK direction (target-eye) call look_direction(). See
-docs/fusion-api-notes.md "Viewport / camera" for the API gotcha this table works around.
+that instead need the opposite-sign LOOK direction (target-eye) call look_direction(). The table
+exists because assigning camera.viewOrientation does not reliably move the eye/target - consumers
+set explicit vectors instead.
 """
 
 MAP_BLURB = ("camera-orientation table for the standard named views - view_direction/"

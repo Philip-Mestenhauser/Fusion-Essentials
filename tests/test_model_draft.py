@@ -6,8 +6,6 @@ drafted-face read-back, the no-active-design guard, resolution-error propagation
 verifier that a feature which computes with a health ERROR is reported as failure, not a false ok.
 """
 
-import pytest
-
 from conftest import (load_tool, make_design, install, MakeComp, payload,
                       error_message, assert_no_active_design)
 

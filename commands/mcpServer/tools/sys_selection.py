@@ -9,8 +9,7 @@
 
 The confirmation lives in the AGENT'S own UI (e.g. a chat button), not a Fusion dialog - the user
 clicks the entity, then clicks the agent's control, which calls sys_get_selection. Both handlers read
-ui.activeSelections and never block (ui.selectEntity() would block the main thread). See
-docs/fusion-api-notes.md "Selection" for the entity-detail API surface.
+ui.activeSelections and never block (ui.selectEntity() would block the main thread).
 """
 
 import adsk.core

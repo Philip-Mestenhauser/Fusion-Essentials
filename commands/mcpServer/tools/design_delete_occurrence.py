@@ -4,7 +4,7 @@
 """Deletes ONE occurrence (component instance) from the active design - the counterpart to
 model_create_component. Resolves the target via the shared OccurrenceRef logic (ambiguity-refusing);
 names any joints the delete removed; reports timeline health before/after. A pattern/mirror child
-can't be deleted on its own (see docs/fusion-api-notes.md "Occurrence delete"). WRITES (destructive).
+can't be deleted on its own. WRITES (destructive).
 """
 
 import adsk.core
@@ -20,23 +20,8 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 
-def _timeline_health(design):
-    """Return (errors, warnings, total) for the parametric timeline - the same before/after health
-    guard param_delete uses, so a delete that breaks a downstream feature is reported, not swallowed.
-    (No timeline in a direct-modelling design -> empty lists.)"""
-    errors, warnings, total = [], [], 0
-    tl = safe(lambda: design.timeline)
-    if tl is None:
-        return errors, warnings, total
-    for i in range(safe(lambda: tl.count, 0) or 0):
-        it = tl.item(i)
-        total += 1
-        hs = safe(lambda it=it: it.healthState)
-        if hs == 2:
-            errors.append(safe(lambda it=it: it.name) or f"#{i}")
-        elif hs == 1:
-            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
-    return errors, warnings, total
+# the shared timeline-health walk (before/after edit guard) - one home in _common
+from ._common import timeline_health as _timeline_health
 
 
 def _joint_names(occ):

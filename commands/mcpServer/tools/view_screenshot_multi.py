@@ -4,8 +4,7 @@
 """MCP building block: capture SEVERAL views of the model in one call (multi-view "eyes").
 
 Re-orients + fits + saveAsImageFile per requested view (the same mechanism view_screenshot uses for
-one viewport per call), restoring the user's camera at the end. Read-only. See
-docs/fusion-api-notes.md "Viewport / camera" for the camera API this shares with view_screenshot.
+one viewport per call), restoring the user's camera at the end. Read-only.
 """
 
 import base64
@@ -18,18 +17,13 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error
+from . import _view_common
 
 app = adsk.core.Application.get()
 
-# Friendly name -> ViewOrientations enum (mirrors view_screenshot; no 'current' here - every view
-# is an explicit orientation).
-_ORIENTATIONS = {
-    "top": "TopViewOrientation", "bottom": "BottomViewOrientation",
-    "front": "FrontViewOrientation", "back": "BackViewOrientation",
-    "left": "LeftViewOrientation", "right": "RightViewOrientation",
-    "iso-top-left": "IsoTopLeftViewOrientation", "iso-top-right": "IsoTopRightViewOrientation",
-    "iso-bottom-left": "IsoBottomLeftViewOrientation", "iso-bottom-right": "IsoBottomRightViewOrientation",
-}
+# The named views - the shared camera-orientation table (no 'current' here: every view in a
+# multi-shot is an explicit orientation).
+_VIEWS = tuple(_view_common.VIEW_DIRECTIONS)
 _DEFAULT_VIEWS = ["front", "top", "right", "iso-top-right"]
 _ALL_ORTHOS = ["front", "back", "left", "right", "top", "bottom"]
 _MAX_DIM = 4096
@@ -55,8 +49,8 @@ def _parse_views(views):
         return list(_ALL_ORTHOS), None
     out, seen = [], set()
     for name in tokens:
-        if name not in _ORIENTATIONS:
-            return None, (f"Unknown view '{name}'. Valid: {', '.join(_ORIENTATIONS)} "
+        if name not in _VIEWS:
+            return None, (f"Unknown view '{name}'. Valid: {', '.join(_VIEWS)} "
     "(or 'all' for the six orthographic views).")
         if name not in seen:
             seen.add(name)
@@ -93,18 +87,15 @@ def handler(views=None, width: int = 600, height: int = 500) -> dict:
                 # reads. Shares the vector table with view_screenshot.
                 from .view_screenshot import _ortho_camera_vectors, _is_ortho_face
                 cam = vp.camera
-                vecs = _ortho_camera_vectors(name)
-                if vecs is not None:
-                    look, up = vecs
-                    tgt = cam.target
-                    dist = cam.eye.distanceTo(cam.target) or 100.0
-                    cam.eye = adsk.core.Point3D.create(
-                        tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
-                    cam.upVector = adsk.core.Vector3D.create(*up)
-                    if _is_ortho_face(name):
-                        cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-                else:
-                    cam.viewOrientation = getattr(adsk.core.ViewOrientations, _ORIENTATIONS[name])
+                # every parsed view name resolves in the shared table (_VIEWS is built from it)
+                look, up = _ortho_camera_vectors(name)
+                tgt = cam.target
+                dist = cam.eye.distanceTo(cam.target) or 100.0
+                cam.eye = adsk.core.Point3D.create(
+                    tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
+                cam.upVector = adsk.core.Vector3D.create(*up)
+                if _is_ortho_face(name):
+                    cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
                 vp.camera = cam
                 vp.fit()
             except Exception as e:
@@ -155,7 +146,7 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="view_screenshot_multi", description=TOOL_DESCRIPTION)
     .add_input_property("views", {"type": "array",
-            "items": {"type": "string", "enum": list(_ORIENTATIONS) + ["all"]},
+            "items": {"type": "string", "enum": list(_VIEWS) + ["all"]},
             "description": "Views to capture, in order; ['all'] for the six orthographic views; omit for a front/top/right/iso default."})
     .add_input_property("width", {"type": "integer", "description": "Width of each image in px (default 600)."})
     .add_input_property("height", {"type": "integer", "description": "Height of each image in px (default 500)."})

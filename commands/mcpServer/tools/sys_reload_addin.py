@@ -6,8 +6,7 @@
 Lets an agent edit a command file, then reload the add-in to pick up the change without the user
 manually toggling it in the Scripts and Add-Ins dialog. The reload is DEFERRED (a timer thread fires a
 custom event on the main thread after this call returns) because the tool's own server is part of the
-add-in it reloads - see docs/fusion-api-notes.md "Add-in reload" for why that matters and how the
-module-cache purge works. The client should expect the connection to drop and reconnect.
+add-in it reloads. The client should expect the connection to drop and reconnect.
 """
 
 import os
@@ -74,7 +73,7 @@ def _find_self_script():
 
 def _purge_addin_modules() -> int:
     """Delete this add-in's already-imported modules from sys.modules so the next
-    Script.run() re-imports them FRESH from disk (see docs/fusion-api-notes.md "Add-in reload").
+    Script.run() re-imports them FRESH from disk.
 
     Purges any loaded module whose source file lives under this add-in's root folder - both import
     namespaces Fusion uses (the package `commands.mcpServer.*` and the `__main__<encoded-path>...`

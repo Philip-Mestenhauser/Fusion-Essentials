@@ -1,0 +1,134 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Unit tests for the doc generators (gen_spec / gen_manifest / gen_wiring).
+
+test_generated_docs_current.py pins output FRESHNESS (the committed doc matches the generator);
+these pin the generators' LOGIC (the generator matches the truth). A generator defect that lies
+consistently sails through a freshness check, so the load-bearing transforms are pinned here on
+synthetic input - above all gen_wiring's per-tool attribution, where sibling tools sharing a name
+stem must never swap notes.
+"""
+
+import ast
+
+import pytest
+
+import gen_manifest
+import gen_spec
+import gen_wiring
+
+
+# ── gen_wiring: registration call-site attribution ───────────────────────────
+
+class TestToolHandlerMap:
+    def _map(self, src):
+        return gen_wiring._tool_handler_map(ast.parse(src))
+
+    def test_sibling_tools_sharing_a_stem_keep_their_own_handlers(self):
+        src = (
+            'tool_a = Tool.create_simple(name="doc_save", description=D)\n'
+            'item_a = Item.create_tool_item(tool=tool_a, write="write", handler=save_handler)\n'
+            'tool_b = Tool.create_simple(name="doc_save_as", description=D2)\n'
+            'item_b = Item.create_tool_item(tool=tool_b, write="write", handler=save_as_handler)\n'
+        )
+        m = self._map(src)
+        assert m == {"doc_save": "save_handler", "doc_save_as": "save_as_handler"}
+
+    def test_chained_builder_calls_still_resolve(self):
+        src = (
+            'tool = (Tool.create_simple(name="view_screenshot", description=D)\n'
+            '        .add_input_property("width", {})\n'
+            '        .strict_schema())\n'
+            'item = Item.create_tool_item(tool=tool, write="read", handler=handler)\n'
+        )
+        assert self._map(src) == {"view_screenshot": "handler"}
+
+    def test_create_with_string_input_form_resolves(self):
+        src = (
+            'tool = Tool.create_with_string_input(name="param_set", description=D,\n'
+            '                                     input_param_name="name")\n'
+            'item = Item.create_tool_item(tool=tool, write="write", handler=set_handler)\n'
+        )
+        assert self._map(src) == {"param_set": "set_handler"}
+
+    def test_registration_without_a_name_or_handler_is_absent(self):
+        src = (
+            'tool = Tool.create_simple(description=D)\n'
+            'item = Item.create_tool_item(tool=tool, write="read", handler=handler)\n'
+            'other = Item.create_tool_item(tool=unknown_var, write="read", handler=h2)\n'
+        )
+        assert self._map(src) == {}
+
+
+# ── gen_spec: test-name -> behavior-line transform ────────────────────────────
+
+class TestGenSpecTransforms:
+    def test_humanize_strips_prefix_and_underscores(self):
+        assert gen_spec._humanize("test_picks_largest_body_by_volume") == "picks largest body by volume"
+
+    def test_module_doc_summary_is_first_paragraph_flattened(self):
+        tree = ast.parse('"""First line\ncontinues here.\n\nSecond paragraph."""\n')
+        assert gen_spec._module_doc_summary(tree) == "First line continues here."
+
+    def test_render_counts_files_and_behaviors(self):
+        data = {"test_mytool.py": ("Does things.", [("Guards", "refuses empty name"),
+                                                    ("Guards", "refuses bad units"),
+                                                    ("", "happy path works")])}
+        out = gen_spec.render(data)
+        assert "**Tools with a test file:** 1" in out
+        assert "**Behaviors pinned:** 3" in out
+        assert "## `mytool`" in out
+        assert "**Guards**" in out
+        assert "- refuses empty name" in out
+
+
+# ── gen_manifest: family grouping + CLAUDE.md splice ──────────────────────────
+
+class TestGenManifestFamilies:
+    def test_first_matching_prefix_wins_and_leftovers_group_as_other(self):
+        tools = [{"name": "model_extrude"}, {"name": "cam_get"}, {"name": "zzz_thing"}]
+        fam = gen_manifest.families(tools)
+        assert any(t["name"] == "model_extrude" for t in fam.get("model", []))
+        assert any(t["name"] == "cam_get" for t in fam.get("cam", []))
+        assert any(t["name"] == "zzz_thing" for t in fam.get("other", []))
+
+    def test_claude_map_escapes_pipes_in_kind_hints(self):
+        data = {"kinds": [{"kind": "UnitField", "hint": "mm | cm | in selector", "summary": ""}],
+                "tools": [{"name": "model_extrude"}], "helpers": []}
+        out = gen_manifest.render_claude_map(data)
+        assert "mm \\| cm \\| in selector" in out          # an unescaped pipe would break the table
+
+
+class TestSpliceClaude:
+    def _claude(self, tmp_path, monkeypatch, body):
+        p = tmp_path / "CLAUDE.md"
+        p.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(gen_manifest, "CLAUDE_PATH", str(p))
+        return p
+
+    def test_splice_replaces_only_between_markers(self, tmp_path, monkeypatch):
+        p = self._claude(tmp_path, monkeypatch,
+                         "before\n" + gen_manifest._MAP_BEGIN + "\nstale\n" + gen_manifest._MAP_END + "\nafter\n")
+        block = gen_manifest._MAP_BEGIN + "\nfresh\n" + gen_manifest._MAP_END
+        assert gen_manifest.splice_claude(block) is False       # it changed something
+        text = p.read_text(encoding="utf-8")
+        assert "fresh" in text and "stale" not in text
+        assert text.startswith("before\n") and text.endswith("after\n")
+
+    def test_check_mode_reports_stale_without_writing(self, tmp_path, monkeypatch):
+        p = self._claude(tmp_path, monkeypatch,
+                         gen_manifest._MAP_BEGIN + "\nstale\n" + gen_manifest._MAP_END)
+        block = gen_manifest._MAP_BEGIN + "\nfresh\n" + gen_manifest._MAP_END
+        assert gen_manifest.splice_claude(block, check=True) is False
+        assert "stale" in p.read_text(encoding="utf-8")          # untouched
+
+    def test_current_content_reports_true(self, tmp_path, monkeypatch):
+        block = gen_manifest._MAP_BEGIN + "\ncurrent\n" + gen_manifest._MAP_END
+        self._claude(tmp_path, monkeypatch, block)
+        assert gen_manifest.splice_claude(block, check=True) is True
+
+    def test_missing_markers_raise_systemexit(self, tmp_path, monkeypatch):
+        self._claude(tmp_path, monkeypatch, "no markers here\n")
+        with pytest.raises(SystemExit):
+            gen_manifest.splice_claude("block")

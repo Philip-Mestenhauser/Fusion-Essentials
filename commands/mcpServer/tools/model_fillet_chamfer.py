@@ -7,7 +7,6 @@
   model_chamfer -> bevel edges with a constant distance (a Chamfer feature).
 
 Target specific edges (a find_geometry edge-handle list) or all/filtered edges of a named body.
-Signatures: docs/fusion-api-notes.md "Model feature signatures".
 """
 
 import adsk.core
@@ -19,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
@@ -180,7 +180,8 @@ fillet_tool = (
         description="Which edges to affect (used only with body_name).").as_property())
     .strict_schema()
 )
-fillet_item = Item.create_tool_item(tool=fillet_tool, write="write", handler=_fillet_handler, run_on_main_thread=True)
+fillet_item = Item.create_tool_item(tool=fillet_tool, write="write", handler=_fillet_handler, run_on_main_thread=True,
+                                    postconditions=[_assert.FeatureHealthy()])
 
 chamfer_tool = (
     Tool.create_simple(name="model_chamfer", description=_CHAMFER_DESC)
@@ -193,7 +194,8 @@ chamfer_tool = (
         description="Which edges to affect (used only with body_name).").as_property())
     .strict_schema()
 )
-chamfer_item = Item.create_tool_item(tool=chamfer_tool, write="write", handler=_chamfer_handler, run_on_main_thread=True)
+chamfer_item = Item.create_tool_item(tool=chamfer_tool, write="write", handler=_chamfer_handler, run_on_main_thread=True,
+                                     postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

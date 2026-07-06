@@ -105,17 +105,52 @@ def _module_functions(mod_name):
     return fns, top_desc
 
 
+def _tool_handler_map(tree):
+    """tool name -> handler function name, resolved through the registration call-sites
+    (V = Tool.create_*(name="X")... then Item.create_tool_item(tool=V, handler=H)) - the
+    unambiguous seam, so sibling tools sharing a name stem never swap attributed notes."""
+    var_to_tool = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        for call in ast.walk(node.value):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr in ("create_simple", "create_with_string_input")):
+                for kw in call.keywords:
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                        var_to_tool[node.targets[0].id] = kw.value.value
+    mapping = {}
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "create_tool_item"):
+            continue
+        tool_var = handler_name = None
+        for kw in call.keywords:
+            if kw.arg == "tool" and isinstance(kw.value, ast.Name):
+                tool_var = kw.value.id
+            if kw.arg == "handler" and isinstance(kw.value, ast.Name):
+                handler_name = kw.value.id
+        if tool_var in var_to_tool and handler_name:
+            mapping[var_to_tool[tool_var]] = handler_name
+    return mapping
+
+
 def _attribute(mod_name, tool_name):
-    """(note_string_LIST, extra_desc_strings) belonging to a tool - its handler fn (matched by name
-    stem) plus module-level DESC constants."""
+    """(note_string_LIST, extra_desc_strings) belonging to a tool - its REGISTERED handler's
+    notes (resolved by call-site, see _tool_handler_map) plus module-level DESC constants.
+    Falls back to whole-stem name matching for an unusual registration shape."""
     fns, top_desc = _module_functions(mod_name)
-    stem = tool_name.split("_", 1)[1] if "_" in tool_name else tool_name
-    stem_parts = stem.split("_")
+    src = open(os.path.join(TOOLS_DIR, mod_name + ".py"), encoding="utf-8").read()
+    handler = _tool_handler_map(ast.parse(src)).get(tool_name)
     note = []
-    for fn_name, node in fns.items():
-        fl = fn_name.lower()
-        if stem in fl or any(p in fl for p in stem_parts):
-            note += _note_error_strings(node)
+    if handler and handler in fns:
+        note += _note_error_strings(fns[handler])
+    else:
+        stem = tool_name.split("_", 1)[1] if "_" in tool_name else tool_name
+        for fn_name, node in fns.items():
+            if stem in fn_name.lower():
+                note += _note_error_strings(node)
     return note, "\n".join(top_desc)
 
 

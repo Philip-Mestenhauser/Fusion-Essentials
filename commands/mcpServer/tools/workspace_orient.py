@@ -164,9 +164,10 @@ def _selection_echo():
     return (count or 0), out
 
 
-def _timeline_health(design):
-    """(errors, warnings, suppressed, total) feature counts from the parametric timeline.
-    Mirrors design_ops' mapping (2 error / 1 warning / 3 suppressed). Empty errors == nothing broken."""
+def _timeline_rollup(design):
+    """(errors, warnings, suppressed, total) feature COUNTS from the parametric timeline (2 error /
+    1 warning / 3 suppressed) - the orientation rollup. Distinct from _common.timeline_health,
+    which returns feature NAMES for the before/after edit guard. Empty errors == nothing broken."""
     errors = warnings = suppressed = total = 0
     tl = safe(lambda: design.timeline)
     if tl is None:
@@ -334,7 +335,7 @@ def handler() -> dict:
     sketch_total = safe(lambda: root.sketches.count, 0) or 0
     param_total = safe(lambda: design.userParameters.count, 0) or 0
 
-    errors, warnings, suppressed, tl_total = _timeline_health(design)
+    errors, warnings, suppressed, tl_total = _timeline_rollup(design)
     joint_count, broken_joints = _joint_rollup(root)
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root)

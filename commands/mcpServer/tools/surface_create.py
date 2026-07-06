@@ -3,8 +3,7 @@
 
 """MCP building blocks that CREATE open (non-solid) surface bodies - surface_extrude, surface_revolve,
 surface_patch - the entry point to surface modelling. Discriminator: BRepBody.isSolid == False. WRITES;
-never wrap a feature .add() in safe() - assert the returned feature/body and read isSolid back. See
-docs/fusion-api-notes.md ("Surfaces") for the underlying adsk.fusion signatures.
+never wrap a feature .add() in safe() - assert the returned feature/body and read isSolid back.
 """
 
 import math
@@ -18,6 +17,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
+from . import _assert
 
 app = adsk.core.Application.get()
 
@@ -180,7 +180,9 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         "distance": round(float(distance), 6),
         "units": units,
         "symmetric": bool(symmetric),
-        "note": "Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken.",
+        "note": ("Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken."
+                 if not any_solid else
+                 "The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet."),
     })
 
 
@@ -256,7 +258,8 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         "result_bodies": names,
         "is_solid": any_solid,       # read back from the body, not assumed (expected False for a shell)
         "symmetric": bool(symmetric),
-        "note": "Open surface body created (isSolid=false).",
+        "note": ("Open surface body created (isSolid=false)." if not any_solid else
+                 "The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet."),
     })
 
 
@@ -388,7 +391,8 @@ surface_extrude_tool = (
     .strict_schema()
 )
 surface_extrude_item = Item.create_tool_item(tool=surface_extrude_tool, write="write", handler=extrude_handler,
-                                             run_on_main_thread=True)
+                                             run_on_main_thread=True,
+                                             postconditions=[_assert.FeatureHealthy()])
 
 _REVOLVE_DESC = (
                                              "Revolve an OPEN profile (sketch open chain, or 'curves' handles) about an x/y/z axis into a SHEET "
@@ -410,7 +414,8 @@ surface_revolve_tool = (
     .strict_schema()
 )
 surface_revolve_item = Item.create_tool_item(tool=surface_revolve_tool, write="write", handler=revolve_handler,
-                                             run_on_main_thread=True)
+                                             run_on_main_thread=True,
+                                             postconditions=[_assert.FeatureHealthy()])
 
 _PATCH_DESC = (
                                              "Fill CLOSED loop(s) of edges with surface face(s) - 'cap the hole(s)' / 'bridge the gap(s)'. "
@@ -437,7 +442,8 @@ surface_patch_tool = (
     .strict_schema()
 )
 surface_patch_item = Item.create_tool_item(tool=surface_patch_tool, write="write", handler=patch_handler,
-                                           run_on_main_thread=True)
+                                           run_on_main_thread=True,
+                                           postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

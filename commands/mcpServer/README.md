@@ -67,19 +67,20 @@ Work by **progressive disclosure**, not by dumping whole documents:
    `view_screenshot` → restore). Re-read the state tool after any structural change.
 
 **Know the blind spots** — places a read looks authoritative but isn't, so you draw a silent wrong
-conclusion (CAM validity is stale outside Manufacture; `is_fully_constrained` is sketch-only with no
-DOF count; grounding is a two-flag trap; `doc_get` is a superset of tabs; bbox-center ≠
-modelling origin; saves/opens are async). The full per-environment reference is
-[`docs/reading-fusion-state.md`](../../docs/reading-fusion-state.md) — consult it on a first-contact
-session or whenever a read result is ambiguous.
+conclusion: CAM validity flags are stale until the Manufacture workspace has been entered;
+`is_fully_constrained` is sketch-only (assembly freedom comes from joint motion types); grounding
+is a two-flag trap (`isGrounded` vs `ground_to_parent`); the open-documents list is a superset of
+the visible tabs; a bounding-box center is not the modelling origin; saves and opens are
+asynchronous (confirm with a fresh read, never assume). When a read result is ambiguous, re-read
+with the narrower tool named in the payload's `pointers`.
 
 ## Tools
 
-**The authoritative tool list is the [`tools/`](tools/) directory — one file per tool — or
-ask a connected client for its tool list (`tools/list`).** Each tool's own
-`TOOL_DESCRIPTION` is the contract the agent sees; this README does not restate it (a
-second copy only drifts). Tool names are predictable: `<family>_<verb>`, so the family
-prefix tells you the area —
+**The authoritative tool inventory is [`tests/MANIFEST.md`](../../tests/MANIFEST.md)** —
+generated from the live registry (137 tools, each with its inputs and write level) — or ask a
+connected client for its tool list (`tools/list`). Each tool's own `TOOL_DESCRIPTION` is the
+contract the agent sees; this README does not restate it (a second copy only drifts). Tool names
+are predictable: `<family>_<verb>`, so the family prefix tells you the area —
 
 | Prefix | Area | Examples |
 |--------|------|----------|
@@ -96,6 +97,7 @@ prefix tells you the area —
 | `view_` | workspace & viewport (screenshots, isolate, section) | `view_screenshot`, `view_inspect`, `view_section` |
 | `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get`, `cam_generate`, `cam_get_status` |
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
+| `drawing_` / `workspace_` / `save_` | 2D drawings, orientation, save-as-mesh | `drawing_create`, `workspace_orient`, `save_as_mesh` |
 
 Every tool's result declares whether it **mutates** (read / writes the design / writes to
 the cloud / destructive) — the `write` level is part of each tool's definition and is
@@ -117,7 +119,7 @@ here when learning the surface:
 - **`view_inspect`** + **`view_screenshot`** — the agent's "eyes": isolate/orient a single
   component, then capture it (a screenshot of a whole assembly is the least reliable input).
 - **`sys_execute_script`** — the gated escape hatch: arbitrary Fusion Python, off by default
-  (see Security). The 70-odd typed tools exist so this is rarely needed.
+  (see Security). The 137 typed tools exist so this is rarely needed.
 
 ### Things that aren't obvious from a tool's name
 
@@ -129,6 +131,31 @@ here when learning the surface:
 - `cam_generate` is fire-and-poll: it returns immediately with a handle; poll `cam_get_status`
   until done (it never blocks for the multi-minute compute).
 
+## What makes the tools trustworthy (the contracts)
+
+Three typed kind systems make false success structurally hard. They are what to study if you are
+forking this as a pattern for your own MCP server:
+
+- **Inputs** ([`tools/_inputs.py`](tools/_inputs.py)) — a tool never takes a bare `name: str` for
+  existing geometry. Typed kinds resolve names and handles, REFUSE ambiguity instead of guessing
+  an instance, and self-heal a stale geometry handle from its world-position locator.
+- **Outputs** ([`tools/_outputs.py`](tools/_outputs.py)) — a tool declares `RETURNS = [...]`
+  (handles, URNs, names, verdicts); tests assert the declared keys are actually minted, and an
+  assertion read's verdict is a real boolean beside its measured evidence, never prose.
+- **Postconditions** ([`tools/_assert.py`](tools/_assert.py)) — a write tool declares
+  verify-the-effect kinds; the kernel re-reads ground truth after the mutation and converts a
+  "success" that changed nothing into an error. The platform does return success while changing
+  nothing; the kernel exists because of it.
+
+The naming schema (`<family>_<verb>`, with the verb's read/write kind linted against the declared
+write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by
+lints in `tests/`. The suite (2,400+ tests) runs outside Fusion in seconds: `py -3 -m pytest -q`.
+Generated inventories: [`tests/MANIFEST.md`](../../tests/MANIFEST.md) (per-tool),
+[`tests/SPEC.md`](../../tests/SPEC.md) (behavior ledger), and
+[`docs/tool-wiring.md`](../../docs/tool-wiring.md) (how tools point to each other, plus a
+self-audit of the guidance strings). Authoring conventions live in
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) and the `CLAUDE.md` files beside the code.
+
 ## Security
 
 - **Loopback only.** The server binds `127.0.0.1`; it is not reachable from other
@@ -138,8 +165,9 @@ here when learning the surface:
   arbitrary Python in your active Fusion session — including modifying or deleting
   your design. It is **disabled by default**; enable it only if you trust the agent
   and the client connecting to the server, via **Settings → MCP Server → "Allow AI to
-  execute arbitrary Fusion API scripts"** (then reload). Scripts run inside a Fusion
-  transaction, so a script that raises is rolled back.
+  execute arbitrary Fusion API scripts"** (then reload). A script's changes are grouped
+  into ONE undo step, but a script that raises is **not** guaranteed to roll back —
+  partial changes can commit, so verify state afterward and undo manually if needed.
 
 ## Platform support
 

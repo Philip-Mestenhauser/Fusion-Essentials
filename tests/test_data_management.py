@@ -433,7 +433,6 @@ def _install_folder_tree(root):
             return index.get(fid)
     dm.app = type("A", (), {"data": FakeData()})()
     # dm._data() returns app.data (guarded) — make _data return it directly
-    import types
     dm._data = lambda: FakeData()
     return index
 

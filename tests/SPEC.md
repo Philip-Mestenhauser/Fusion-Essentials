@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 126  |  **Behaviors pinned:** 2454
+**Tools with a test file:** 129  |  **Behaviors pinned:** 2474
 
 ## `_cam_common`
 
@@ -376,6 +376,8 @@ after changing tests._
 - quiet suppresses the jointed warning
 - unjointed move has no warning
 - rotate about edge handle
+- rotate about construction axis infinite line
+- unreadable edge geometry errors
 - combined rotate and translate preserves pivot
 **RigidGroup**
 - group reporting fewer members bites
@@ -427,6 +429,13 @@ after changing tests._
 - empty file bites
 - real file confirms and supplies size
 - missing path key is named
+
+## `assert_strength`
+
+> Lint: every test must be able to fail for the RIGHT reason.
+
+**AssertStrength**
+- no test relies on a bare iserror flag alone
 
 ## `cam_compare`
 
@@ -1057,6 +1066,17 @@ after changing tests._
 - silent noop setter reports honest error not false success
 - raising setter reports honest error
 
+## `dead_code`
+
+> Lint: no dead module-level code under commands/mcpServer/, tests/, or the doc generators.
+
+**NoUnusedImports**
+- every import is used or a named seam
+- import seam table matches reality
+**NoUnreferencedDefinitions**
+- every module level definition is referenced somewhere
+- every test file definition is referenced in its file
+
 ## `design_configure`
 
 > Unit tests for ``design_configure`` — the configured-design build+switch tool.
@@ -1653,6 +1673,28 @@ after changing tests._
 
 **GeneratedDocsAreCurrent**
 - generator check passes
+
+## `generators`
+
+> Unit tests for the doc generators (gen_spec / gen_manifest / gen_wiring).
+
+**ToolHandlerMap**
+- sibling tools sharing a stem keep their own handlers
+- chained builder calls still resolve
+- create with string input form resolves
+- registration without a name or handler is absent
+**GenSpecTransforms**
+- humanize strips prefix and underscores
+- module doc summary is first paragraph flattened
+- render counts files and behaviors
+**GenManifestFamilies**
+- first matching prefix wins and leftovers group as other
+- claude map escapes pipes in kind hints
+**SpliceClaude**
+- splice replaces only between markers
+- check mode reports stale without writing
+- current content reports true
+- missing markers raise systemexit
 
 ## `handle_resolution_uniform`
 

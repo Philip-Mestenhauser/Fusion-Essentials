@@ -272,8 +272,9 @@ class TestOffsetAngle:
     def test_offset_counts_as_an_edit(self):
         # offset alone should NOT trip the "nothing to change" guard.
         _, joint = _install(["BoomPivot"])
-        res = jt.edit_handler(joint_name="BoomPivot", offset=5)
-        assert res["isError"] is False
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", offset=5))
+        assert joint.offset.expression == "5 mm"
+        assert out["offset"] == 5.0
 
     def test_unknown_units_errors(self):
         _install(["BoomPivot"])

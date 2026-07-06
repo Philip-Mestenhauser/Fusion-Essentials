@@ -256,10 +256,10 @@ def stop():
     try:
         # Remove the deferred-reload custom event (a fresh start() reinstalls it).
         try:
-            from .tools import reload_addin
-            reload_addin.uninstall_reload_event()
+            from .tools import sys_reload_addin
+            sys_reload_addin.uninstall_reload_event()
         except Exception:
-            pass
+            futil.handle_error(f'{CMD_NAME}.stop.uninstall_reload_event')
         if _http_server is not None or _server_thread is not None:
             mcp_server.stop_server(_http_server, _server_thread)
         TaskManager.stop()

@@ -260,6 +260,7 @@ class TestNewKinds:
         s = FakeSketch(); _install_draw(s)
         res = sk.add_sketch_geometry_handler(kind="ellipse", cx=0, cy=0, radius=0)
         assert res["isError"] is True
+        assert "radius must be > 0" in res["message"]
 
 
 class TestCoreKinds:

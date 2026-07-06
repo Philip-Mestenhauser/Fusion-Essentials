@@ -11,9 +11,6 @@ large project could otherwise blow the main-thread time budget.
 
 import adsk.core
 
-from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
-from ..mcp_primitives.registry import register
 from ._common import ok, error
 from ._data_common import _find_project, _child_folder_by_name
 

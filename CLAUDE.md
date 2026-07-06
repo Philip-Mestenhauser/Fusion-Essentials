@@ -16,7 +16,7 @@ state? This is Command-Query Separation, and it *is* the `write=` flag.
 | Kind | Does | `write=` | Examples |
 |---|---|---|---|
 | **Read** | Return information, change nothing. Safe to call blind. | read | `cam_get`, `find_geometry`, `model_measure_between`, `workspace_orient` |
-| **Edit** | Act: mutate the model/data, or run an async operation. Gets the write guard; must verify its effect. | write / destructive | `model_extrude`, `joint_create_edit`, `doc_lifecycle`, `cam_edit_tools` |
+| **Edit** | Act: mutate the model/data, or run an async operation. Gets the write guard; must verify its effect. | write / destructive | `model_extrude`, `joint_edit`, `doc_save`, `cam_edit_tools` |
 
 Within **Read** there are three *shapes* — same kind, different job (they help you pick the tool's form,
 not its permission):
@@ -79,7 +79,6 @@ between the markers):
 | `EdgeLoopRef` | a closed/open edge-loop boundary from edge handles |
 | `GeometryHandle` | one face/edge/vertex by find_geometry handle (require=face/edge/...), not a coordinate |
 | `GeometryHandleList` | several faces/edges by handles (fillet/drill THESE) |
-| `NameRef` | a plain by-name ref; prefer a handle/fullPathName kind if one exists |
 | `OccurrenceRef` | an assembly occurrence by fullPathName (refuses ambiguous names) |
 | `OccurrenceRefList` | several occurrences (fullPathNames/names) |
 | `PlaneRef` | a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle |
@@ -90,7 +89,7 @@ between the markers):
 
 **Tool families** (137 tools — `sys_find_tool <kw>` to search, `tests/MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(8) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(11) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
 
-**Shared helpers** (reuse/extend — grep before writing a resolver): `_common` (ok/error/safe, design/target_component, resolve_sketch, scale - the response+resolve substrate); `_inputs` (the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool); `_outputs` (RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once); `_holder` (holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries); `_data_common` (cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN)); `_cam_common` (get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)); `_export` (sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export); `_joints` (build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + find_joint (walks joints AND asBuiltJoints, root and every sub-component)); `_view_common` (camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set)
+**Shared helpers** (reuse/extend — grep before writing a resolver): `_common` (ok/error/safe, design/target_component, resolve_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate); `_inputs` (the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool); `_outputs` (RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once); `_holder` (holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries); `_data_common` (cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN)); `_cam_common` (get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)); `_export` (sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export); `_joints` (build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + find_joint (walks joints AND asBuiltJoints, root and every sub-component)); `_view_common` (camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set)
 <!-- END GENERATED MAP -->
 
 Wire a kind with `tool.add_input_property(*kind.as_property())`; resolve via `_inputs.resolve_inputs(...)`.
