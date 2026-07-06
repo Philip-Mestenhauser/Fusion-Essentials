@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 130  |  **Behaviors pinned:** 2484
+**Tools with a test file:** 131  |  **Behaviors pinned:** 2496
 
 ## `_cam_common`
 
@@ -2127,6 +2127,28 @@ after changing tests._
 - defaults to enforced
 - can opt out
 - execute api script item is timeout exempt
+
+## `mcp_server`
+
+> Wire-level tests for SimpleMCPServer's JSON-RPC protocol behavior.
+
+**InitializeProtocolVersionNegotiation**
+- initialize with supported version echoes it
+- initialize with unsupported version responds with supported version
+- initialize with no protocol version responds with default
+**ToolsCallUnknownTool**
+- unknown tool is a protocol error with code 32602
+**ToolsCallArgumentValidation**
+- unknown argument is an error result and handler not called
+- missing required argument is an error result and handler not called
+- valid call with optional argument omitted succeeds
+- empty schema tool with no arguments succeeds
+- omitted arguments default to empty dict
+**ToolsCallHandlerExceptions**
+- handler exception becomes iserror result not protocol error
+**NotificationsAndPing**
+- notification without id returns none
+- ping returns empty result
 
 ## `mesh_combine`
 

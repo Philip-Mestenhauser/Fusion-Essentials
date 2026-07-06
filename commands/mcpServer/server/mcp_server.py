@@ -35,8 +35,12 @@ from .task_manager import TaskManager
 MCP_PATH = '/mcp'
 
 # MCP protocol version we implement (Streamable HTTP transport, 2025-03-26).
-# We echo the client's requested version on initialize when it sends one.
 PROTOCOL_VERSION = '2025-03-26'
+
+# Every protocol revision this server actually understands. On initialize we honor the
+# client's requested protocolVersion ONLY if it appears here; otherwise we respond with
+# PROTOCOL_VERSION instead of echoing a revision whose semantics we do not implement.
+SUPPORTED_PROTOCOL_VERSIONS = ('2025-03-26',)
 
 # Server-level instructions, returned on `initialize` (the MCP spec field). This is the ONLY server text
 # a client sees BEFORE it fetches any tool schema - so it's the one place a cold agent is guaranteed to
@@ -133,9 +137,13 @@ class SimpleMCPServer:
             return self._error(request.get("id"), -32603, str(e))
 
     def _handle_initialize(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-        # Echo the client's requested protocol version when provided, else default.
+        # Honor the client's requested protocol version only if we actually implement it;
+        # otherwise respond with our own version rather than claiming support we don't have.
         client_version = (params or {}).get("protocolVersion")
-        protocol_version = client_version or PROTOCOL_VERSION
+        if client_version in SUPPORTED_PROTOCOL_VERSIONS:
+            protocol_version = client_version
+        else:
+            protocol_version = PROTOCOL_VERSION
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -157,10 +165,18 @@ class SimpleMCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
         if tool_name not in self.tools:
-            return self._error(request_id, -32601, f"Tool not found: {tool_name}")
+            # -32602 (Invalid params) is the spec's example code for an unknown tool name.
+            return self._error(request_id, -32602, f"Tool not found: {tool_name}")
+        item = self.tools[tool_name]
+
+        # Validate BEFORE dispatch: an unknown/missing argument is a doomed call, so reject it
+        # here rather than posting a main-thread task (or raising a raw TypeError from **kwargs).
+        validation_error = self._validate_tool_arguments(tool_name, item, arguments)
+        if validation_error is not None:
+            return {"jsonrpc": "2.0", "id": request_id, "result": validation_error}
+
         futil.log(f"MCP calling tool: {tool_name}")
         try:
-            item = self.tools[tool_name]
             if item.run_on_main_thread:
                 result = await self._execute_on_main_thread(
                     item.handler, arguments,
@@ -169,8 +185,50 @@ class SimpleMCPServer:
                 result = item.handler(**arguments)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except Exception as e:
+            # A tool EXECUTION failure (including the curated timeout messages from
+            # _execute_on_main_thread) is reported inside the result with isError=true, per the MCP
+            # spec, so the calling agent can read it and self-correct. It is NOT a JSON-RPC protocol
+            # error (-32603 is reserved for protocol-level failures) and carries no Python traceback.
             futil.handle_error(f"MCP tool '{tool_name}'")
-            return self._error(request_id, -32603, f"Tool execution error: {e}")
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self._tool_error_result(f"Tool '{tool_name}' failed: {e}"),
+            }
+
+    @staticmethod
+    def _tool_error_result(message: str) -> Dict[str, Any]:
+        return {
+            "content": [{"type": "text", "text": message}],
+            "isError": True,
+            "message": message,
+        }
+
+    def _validate_tool_arguments(self, tool_name: str, item: Item,
+                                 arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Check `arguments` against item.primitive.input_schema before dispatch.
+
+        Only checks argument NAMES (unknown keys, missing required keys) - the tools' typed
+        input kinds already validate values, so no type checking happens here.
+        """
+        schema = item.primitive.input_schema or {}
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+
+        unknown = sorted(key for key in arguments if key not in properties)
+        if unknown:
+            keys = ", ".join(f"'{key}'" for key in unknown)
+            return self._tool_error_result(
+                f"Unknown argument for tool '{tool_name}': {keys}. "
+                f"Expected arguments: {sorted(properties.keys())}. Remove it and retry.")
+
+        for name in required:
+            if name not in arguments:
+                return self._tool_error_result(
+                    f"Missing required argument for tool '{tool_name}': '{name}'. "
+                    f"Required: {required}.")
+
+        return None
 
     async def _execute_on_main_thread(self, handler_func, arguments: Dict[str, Any],
                                       enforce_timeout: bool = True) -> Any:
