@@ -5,25 +5,21 @@
 
 from .annotations import Annotations
 from .tool import Tool
-from .resource import Resource
-from .prompt import Prompt
 from .item import Item
 from .registry import (
     Registry,
     get_registry,
     reset_registry,
     register,
+    unregister,
     has_tool,
-    has_resource,
     get_tools,
-    get_resources,
-    get_prompts,
-    clear_registry,
-    registry_count,
+    family_of,
+    GATEABLE_FAMILIES,
 )
 
 __all__ = [
-    'Annotations', 'Tool', 'Resource', 'Prompt', 'Item', 'Registry',
-    'get_registry', 'reset_registry', 'register', 'has_tool', 'has_resource',
-    'get_tools', 'get_resources', 'get_prompts', 'clear_registry', 'registry_count',
+    'Annotations', 'Tool', 'Item', 'Registry',
+    'get_registry', 'reset_registry', 'register', 'unregister', 'has_tool',
+    'get_tools', 'family_of', 'GATEABLE_FAMILIES',
 ]

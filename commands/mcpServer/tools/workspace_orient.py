@@ -10,13 +10,15 @@ budget-aware POINTERS naming the targeted tool to refine each area. Call this fi
 document; drill down with the pointers rather than dumping the whole design. Read-only.
 """
 
+import re
+
 import adsk.core
 import adsk.fusion
 import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
-from ..mcp_primitives.registry import register
+from ..mcp_primitives import registry
 from ._common import ok, error, safe
 from . import _common
 
@@ -28,6 +30,31 @@ app = adsk.core.Application.get()
 _BIG_OCCURRENCES = 40        # above this, design_get(include=['tree']) is heavy -> suggest a target
 _BIG_BODIES = 60             # above this, whole-design find_geometry is heavy -> suggest target=...
 _DIGEST_LIMIT = 25           # top-level occurrences listed in the browser digest (not the full tree)
+
+# Every pointer string below reads "<tool_name>(...) - ..." - the tool it names is the first token up
+# to the opening paren. Used by _drop_unregistered_pointers to recognize which tool a pointer targets
+# without a separate hand-maintained key->tool map that could drift from the strings themselves.
+_POINTER_TOOL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(")
+
+
+def _pointer_tool(text):
+    """The tool name a pointer string names, or None if it doesn't follow the '<tool_name>(...)' shape."""
+    m = _POINTER_TOOL_RE.match(text or "")
+    return m.group(1) if m else None
+
+
+def _drop_unregistered_pointers(pointers):
+    """Drop a pointer naming a tool that ISN'T registered - a disabled family's pointer would name a
+    tool that 404s (see GATEABLE_FAMILIES in mcp_primitives/registry.py).
+
+    An EMPTY registry means no live server is backing this call (the unit-test context, where tools
+    never call register_tool()) - filtering is skipped there so those tests see every pointer. In
+    production workspace_orient itself is always registered, so the registry is never empty then.
+    """
+    if not registry.get_tools():
+        return pointers
+    return {k: v for k, v in pointers.items()
+            if (_pointer_tool(v) is None or registry.has_tool(_pointer_tool(v)))}
 
 
 def _design_mode(design):
@@ -409,7 +436,7 @@ def handler() -> dict:
         pointers["cam"] = ("cam_get() for the machining job; "
                            + (f"{cam['ungenerated_operations']} operation(s) need generating."
                               if cam and cam.get("ungenerated_operations") else "toolpaths look generated."))
-    out["pointers"] = pointers
+    out["pointers"] = _drop_unregistered_pointers(pointers)
 
     # State the facts (what was found) and point at the check, rather than emitting an "unhealthy"
     # verdict. is_healthy is a conservative OR; on a deliberately-configured doc (a fixture/CAM template
@@ -453,4 +480,4 @@ item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_ma
 
 
 def register_tool():
-    register(item)
+    registry.register(item)

@@ -26,8 +26,11 @@ _SWEPT_DIRS = (
 # identical list of phrases as ITS OWN smell-detection pattern (for tool wire text, not this file) -
 # both would otherwise trip on their own pattern list. SPEC.md/MANIFEST.md are GENERATED digests of
 # the test/registry source (test names, docstring summaries) - sweeping the source they are built
-# from already covers their content, so they are excluded rather than checked twice.
-_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "SPEC.md", "MANIFEST.md"}
+# from already covers their content, so they are excluded rather than checked twice. CHANGELOG.md
+# is the one SANCTIONED history document (dated, additive, per-release): the evergreen rule keeps
+# history narrative out of living code and docs, not out of the changelog whose genre it is.
+_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "SPEC.md", "MANIFEST.md",
+                   "CHANGELOG.md"}
 
 # phrase -> case-insensitive denylist (history narrative + plan back-references naming a phrase).
 # Word-boundary wrapped so e.g. "the fix" does not match inside "the fixture", "used to" does not

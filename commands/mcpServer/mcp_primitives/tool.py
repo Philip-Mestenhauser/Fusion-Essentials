@@ -5,7 +5,6 @@
 
 """MCP Tool schema for defining tool metadata and input schema."""
 
-import json
 from typing import Optional
 from .annotations import Annotations
 
@@ -81,9 +80,6 @@ class Tool:
         if self.annotations:
             result['annotations'] = self.annotations.to_dict()
         return result
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
 
     def __str__(self) -> str:
         return f"Tool(name='{self.name}', title='{self.title}')"

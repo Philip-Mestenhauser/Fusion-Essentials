@@ -159,6 +159,25 @@ def load_tool(module_name):
 _SERVER_PKG_ROOT = "feaddin"
 
 
+def register_all_tools():
+    """Load + register EVERY tool module against a fresh registry; return the registered Items.
+
+    The one shared harness for wire-surface tests (shape + budget) - a single copy, so the two
+    files cannot drift. Callers pair it with the conftest registry snapshot/restore (autouse),
+    which undoes the global-registry mutation after each test."""
+    names = [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
+             if fn.endswith(".py") and not fn.startswith("_")]
+    load_tool(names[0])                    # bootstraps the package path on first use
+    from mcpServer.mcp_primitives import registry
+    registry.reset_registry()
+    for mod_name in names:
+        mod = load_tool(mod_name)
+        reg = getattr(mod, "register_tool", None)
+        if callable(reg):
+            reg()
+    return registry.get_tools()
+
+
 def load_mcp_server():
     """Import the REAL server/mcp_server.py (plus task_manager) for wire-level tests.
 
@@ -196,7 +215,7 @@ def load_mcp_server():
     _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer")
     _pkg(f"{_SERVER_PKG_ROOT}.commands.mcpServer.server")
 
-    for suffix in ("", ".item", ".tool", ".resource", ".prompt", ".annotations", ".registry"):
+    for suffix in ("", ".item", ".tool", ".annotations", ".registry"):
         src = "mcpServer.mcp_primitives" + suffix
         importlib.import_module(src)
         sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.mcp_primitives{suffix}"] = sys.modules[src]
@@ -320,9 +339,22 @@ def _restore_shared_adsk_mocks():
     import os.path as _ospath
     _os_saved = [(_ospath, a, getattr(_ospath, a)) for a in ("isfile", "isdir", "exists")
                  if hasattr(_ospath, a)]
+    # The registry SINGLETON is process-global, and several suite-wide tests populate it (a naming
+    # lint's per-module reset+register loop, the wire-shape tests' full registration). Since
+    # workspace_orient's pointer filter reads the live registry at call time, a leaked PARTIAL
+    # registry makes pointer tests order-dependent. Snapshot the singleton pointer AND the instance's
+    # tool dict at setup; restore both after - mirroring gen_manifest.collect()'s own guard.
+    _reg_mod = sys.modules.get("mcpServer.mcp_primitives.registry")
+    _reg_inst = _reg_mod._registry_instance if _reg_mod else None
+    _reg_tools = dict(_reg_inst._tools) if _reg_inst is not None else None
     try:
         yield
     finally:
+        if _reg_mod is not None:
+            _reg_mod._registry_instance = _reg_inst
+            if _reg_inst is not None:
+                _reg_inst._tools.clear()
+                _reg_inst._tools.update(_reg_tools)
         for _obj, _attr, _orig in _os_saved:
             setattr(_obj, _attr, _orig)
         _restore_adsk_dicts(_PRISTINE_ADSK)

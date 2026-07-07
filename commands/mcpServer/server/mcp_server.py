@@ -5,8 +5,8 @@
 
 """A dependency-free MCP server over HTTP that runs inside Fusion's Python.
 
-Implements the MCP JSON-RPC methods we need (initialize, tools/list, tools/call,
-resources/list, resources/read) by hand, so no external packages are required.
+Implements the MCP JSON-RPC methods we need (initialize, tools/list, tools/call)
+by hand, so no external packages are required.
 
 Differences from the sample this was adapted from:
   - The MCP endpoint is served on the path **/mcp** (to match Fusion's built-in
@@ -35,13 +35,11 @@ from .task_manager import TaskManager
 # configured for the well-known endpoint reach us unchanged.
 MCP_PATH = '/mcp'
 
-# MCP protocol version we implement (Streamable HTTP transport, 2025-03-26).
-PROTOCOL_VERSION = '2025-03-26'
-
-# Every protocol revision this server actually understands. On initialize we honor the
-# client's requested protocolVersion ONLY if it appears here; otherwise we respond with
-# PROTOCOL_VERSION instead of echoing a revision whose semantics we do not implement.
+# Every protocol revision this server actually understands (Streamable HTTP transport). On
+# initialize we honor the client's requested protocolVersion ONLY if it appears here; otherwise
+# we respond with our newest supported revision instead of echoing semantics we do not implement.
 SUPPORTED_PROTOCOL_VERSIONS = ('2025-03-26',)
+PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[-1]    # the default we offer: newest supported
 
 # Server-level instructions, returned on `initialize` (the MCP spec field). This is the ONLY server text
 # a client sees BEFORE it fetches any tool schema - so it's the one place a cold agent is guaranteed to
@@ -83,8 +81,17 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = False  # we WANT bind to fail loudly if 27182 is taken
 
 
+# Handler kwargs DELIBERATELY absent from a tool's wire schema: the handler accepts the key and
+# answers with a targeted redirect, which beats a generic unknown-argument error. The argument
+# gate lets these through on otherwise-strict tools. Shrink-only; the reason lives as a comment
+# at the tool's own registration site.
+_SCHEMA_OMITTED_ARGS = {
+    'joint_edit': frozenset({'rotation_deg'}),   # posing is joint_drive's job; handler redirects
+}
+
+
 class SimpleMCPServer:
-    """Routes MCP JSON-RPC requests to registered tool/resource handlers."""
+    """Routes MCP JSON-RPC requests to registered tool handlers."""
 
     def __init__(self, name: str = SERVER_NAME):
         self.name = name
@@ -92,23 +99,16 @@ class SimpleMCPServer:
         # response. Generated lazily so each server instance has a stable id.
         self.session_id = uuid.uuid4().hex
         self.tools: Dict[str, Item] = {}
-        self.resources: Dict[str, Item] = {}
         self.server_info = {"name": name, "version": __version__}
 
     def register(self, item: Item):
         if not isinstance(item, Item):
             raise ValueError("Can only register Item instances")
         item_type = item.get_type()
-        if item_type == "tool":
-            self.tools[item.primitive.name] = item
-            futil.log(f"MCP tool registered: {item.primitive.name}")
-        elif item_type == "resource":
-            self.resources[item.primitive.uri] = item
-            futil.log(f"MCP resource registered: {item.primitive.uri}")
-        elif item_type == "prompt":
-            futil.log(f"MCP prompt registered: {item.primitive.name} (not served yet)")
-        else:
-            raise ValueError(f"Unknown item type: {item_type}")
+        if item_type != "tool":
+            raise ValueError(f"Only Tool items can be registered, got type: {item_type}")
+        self.tools[item.primitive.name] = item
+        futil.log(f"MCP tool registered: {item.primitive.name}")
 
     async def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -130,10 +130,6 @@ class SimpleMCPServer:
                 return self._handle_tools_list(request_id)
             elif method == "tools/call":
                 return await self._handle_tools_call(request_id, params)
-            elif method == "resources/list":
-                return self._handle_resources_list(request_id)
-            elif method == "resources/read":
-                return await self._handle_resources_read(request_id, params)
             else:
                 return self._error(request_id, -32601, f"Method not found: {method}")
         except Exception as e:
@@ -152,7 +148,7 @@ class SimpleMCPServer:
             "id": request_id,
             "result": {
                 "protocolVersion": protocol_version,
-                "capabilities": {"tools": {}, "resources": {"listChanged": False}},
+                "capabilities": {"tools": {}},
                 "serverInfo": self.server_info,
                 # Visible to the client BEFORE any tool schema is fetched - the cold-start front door
                 # (routes a contextless agent to sys_capability_map / workspace_orient first).
@@ -211,19 +207,29 @@ class SimpleMCPServer:
                                  arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Check `arguments` against item.primitive.input_schema before dispatch.
 
-        Only checks argument NAMES (unknown keys, missing required keys) - the tools' typed
-        input kinds already validate values, so no type checking happens here.
+        Only argument NAMES are checked (the typed input kinds validate values). Unknown keys
+        are rejected ONLY when the tool's wire schema declares additionalProperties=false - a
+        lenient schema stays lenient, so the schema never promises what the server then refuses.
+        Keys a handler deliberately accepts off-schema pass through (_SCHEMA_OMITTED_ARGS).
+        Failures come back as isError TOOL results rather than JSON-RPC protocol errors - a
+        deliberate deviation from the spec's invalid-params bucket: an in-band result is what a
+        calling agent can actually read and self-correct from.
         """
         schema = item.primitive.input_schema or {}
         properties = schema.get("properties") or {}
         required = schema.get("required") or []
 
-        unknown = sorted(key for key in arguments if key not in properties)
-        if unknown:
-            keys = ", ".join(f"'{key}'" for key in unknown)
-            return self._tool_error_result(
-                f"Unknown argument for tool '{tool_name}': {keys}. "
-                f"Expected arguments: {sorted(properties.keys())}. Remove it and retry.")
+        # strictness is declared on the primitive (strict_schema() sets additional_properties=False;
+        # to_dict() renders it as the wire schema's additionalProperties) - read the same source.
+        if item.primitive.additional_properties is False:
+            allowed_extra = _SCHEMA_OMITTED_ARGS.get(tool_name, frozenset())
+            unknown = sorted(key for key in arguments
+                             if key not in properties and key not in allowed_extra)
+            if unknown:
+                keys = ", ".join(f"'{key}'" for key in unknown)
+                return self._tool_error_result(
+                    f"Unknown argument for tool '{tool_name}': {keys}. "
+                    f"Expected arguments: {sorted(properties.keys())}. Remove it and retry.")
 
         for name in required:
             if name not in arguments:
@@ -296,40 +302,6 @@ class SimpleMCPServer:
             "main-thread operation cannot be interrupted). It may still COMMIT its result. Do NOT "
             "blindly retry - re-check the design/document state first, then retry only if the "
             "change did not take effect. (For long operations, prefer a fire-and-poll tool.)")
-
-    def _handle_resources_list(self, request_id: Any) -> Dict[str, Any]:
-        resources = [
-            item.primitive.to_dict()
-            for item in self.resources.values()
-            if item.primitive.uri
-        ]
-        return {"jsonrpc": "2.0", "id": request_id, "result": {"resources": resources}}
-
-    async def _handle_resources_read(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-        uri = params.get("uri")
-        item = self.resources.get(uri)
-        if not item:
-            return self._error(request_id, -32601, f"Resource not found: {uri}")
-        try:
-            handler_args = {k: v for k, v in params.items() if k != "uri"}
-            if item.run_on_main_thread:
-                result = await self._execute_on_main_thread(item.handler, handler_args)
-            else:
-                result = item.handler(**handler_args)
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "contents": [{
-                        "uri": uri,
-                        "mimeType": item.primitive.mime_type or "application/json",
-                        "text": result,
-                    }]
-                },
-            }
-        except Exception as e:
-            futil.handle_error(f"MCP resource '{uri}'")
-            return self._error(request_id, -32603, f"Resource read error: {e}")
 
     def _error(self, request_id: Any, code: int, message: str) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}

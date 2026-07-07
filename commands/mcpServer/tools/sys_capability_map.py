@@ -11,7 +11,7 @@ within a family. Read-only, no adsk.*.
 from ._common import ok
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
-from ..mcp_primitives.registry import register, get_tools
+from ..mcp_primitives.registry import register, get_tools, family_of
 
 # Per-family FACTS: a one-line factual summary + the entry-point tool (the tool that starts that
 # family's workflow - a fact about the family, not advice). Families not listed here still appear,
@@ -37,10 +37,9 @@ _FAMILY = {
 }
 
 
-def _family_of(name):
-    """The family of a tool = its first underscore segment (cam_get -> 'cam'). data_get/doc_get etc.
-    group correctly; single-word tools (find_geometry) use the whole first segment."""
-    return (name or "").split("_", 1)[0]
+# family-of-name is shared with the registry's family-gating helper (mcp_primitives/registry.py) -
+# one definition, so this map and the gating checkboxes can never disagree on what a "family" is.
+_family_of = family_of
 
 
 def handler() -> dict:

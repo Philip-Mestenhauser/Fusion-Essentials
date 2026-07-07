@@ -4,35 +4,9 @@ SimpleMCPServer._handle_tools_list must emit every tool entry via to_dict(), whi
 includes annotations (readOnlyHint/destructiveHint) and strict-schema additionalProperties=false.
 """
 
-import os
-
 import pytest
 
-from conftest import load_mcp_server, load_tool, TOOLS_DIR
-
-
-def _tool_modules():
-    """Every tools/*.py module name that defines a register_tool() (skips _private helpers)."""
-    names = []
-    for fn in sorted(os.listdir(TOOLS_DIR)):
-        if not fn.endswith(".py") or fn.startswith("_"):
-            continue
-        names.append(fn[:-3])
-    return names
-
-
-def _all_registered_tools():
-    """Load + register every tool module against a fresh registry; return the tool Items."""
-    names = _tool_modules()
-    load_tool(names[0])
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for mod_name in names:
-        mod = load_tool(mod_name)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return registry.get_tools()
+from conftest import load_mcp_server, register_all_tools
 
 
 @pytest.fixture
@@ -41,7 +15,7 @@ def server():
     production _handle_tools_list, not a re-implementation of it."""
     mcp_server = load_mcp_server()
     srv = mcp_server.SimpleMCPServer()
-    for item in _all_registered_tools():
+    for item in register_all_tools():
         srv.register(item)
     return srv
 

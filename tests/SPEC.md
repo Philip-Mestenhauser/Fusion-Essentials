@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 132  |  **Behaviors pinned:** 2499
+**Tools with a test file:** 134  |  **Behaviors pinned:** 2520
 
 ## `_cam_common`
 
@@ -1643,6 +1643,30 @@ after changing tests._
 - no file narrates history or points at a plan
 - allowlist entries still exist and still trip
 
+## `family_gating`
+
+> Unit tests for per-family tool gating.
+
+**FamilyOf**
+- cam get is cam
+- find geometry is find
+- workspace orient is workspace
+- empty string is safe
+- none is safe
+**GateableFamilies**
+- excludes hub and orientation families
+- every member is a real registered family
+**RegistryUnregister**
+- removes a registered tool
+- unknown name returns false
+- module level wrapper mirrors the instance method
+**PointerFiltering**
+- disabled family pointer dropped others kept
+- empty registry keeps every pointer
+**EntrySettingsKeyContract**
+- family enabled keys match gateable families exactly
+- default settings defaults every family key to true
+
 ## `find_geometry`
 
 > Unit tests for ``find_geometry.py`` — query geometry, return stable handles.
@@ -2141,6 +2165,9 @@ after changing tests._
 **ToolsCallArgumentValidation**
 - unknown argument is an error result and handler not called
 - missing required argument is an error result and handler not called
+- lenient schema passes unknown keys to handler
+- schema omitted arg reaches the handler
+- omitted args table matches reality
 - valid call with optional argument omitted succeeds
 - empty schema tool with no arguments succeeds
 - omitted arguments default to empty dict
@@ -3659,6 +3686,15 @@ after changing tests._
 - every input description is ascii
 **DescriptionConstantsAreAscii**
 - every description constant is ascii
+
+## `wire_budget`
+
+> Wire budget: the tools/list payload an agent pays for every session stays under a ceiling.
+
+- tools list payload within budget
+- no single tool exceeds wire ceiling
+- no description exceeds ceiling
+- override table matches reality
 
 ## `wire_shape`
 

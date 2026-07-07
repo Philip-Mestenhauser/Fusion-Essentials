@@ -4,6 +4,9 @@ All notable changes to the Fusion-Essentials MCP server.
 
 ## 0.2.0 - 2026-07-06
 
+### Removed
+- Unused prompt/resource primitive framework inherited from the Autodesk sample (never registered or served); the server now declares only the tools capability.
+
 ### Fixed
 - tools/list now sends each tool's readOnlyHint/destructiveHint annotations and
   strict-schema additionalProperties on the wire (they were declared and tested but
@@ -23,6 +26,7 @@ All notable changes to the Fusion-Essentials MCP server.
 - Argument name validation before dispatch: an unknown or missing-required argument
   gets an actionable isError refusal instead of a raw Python TypeError.
 - Single version source (version.py) reported by server_info and GET /health.
+- Per-family enablement checkboxes (appearance, cam, data, drawing, mesh, save, surface) in Settings -> MCP Server; disabled families are not registered or advertised.
 
 ## 0.1.0
 

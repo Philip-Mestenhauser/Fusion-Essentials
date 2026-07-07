@@ -17,6 +17,12 @@ It is **off by default** and runs only on your own machine (loopback).
 4. The server starts on `http://127.0.0.1:27182/mcp`. Confirm with a browser:
    `http://127.0.0.1:27182/health` should return `{"status": "healthy", ...}`.
 
+Optional tool **families** (`appearance`, `cam`, `data`, `drawing`, `mesh`, `save`, `surface`) can each
+be disabled with a checkbox under **Settings → MCP Server**, to shrink the tool surface an agent has
+to load when you don't need that domain. All families are enabled by default. Like the other MCP
+settings, a disabled family takes effect on reload — its tools are not registered, and
+`workspace_orient` / `sys_capability_map` / `sys_find_tool` then reflect only what's enabled.
+
 ### Port note
 
 `27182` is Fusion's own well-known MCP port. The Fusion-Essentials server and

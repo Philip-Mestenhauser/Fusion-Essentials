@@ -115,7 +115,7 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 - `server/mcp_server.py` — HTTP + JSON-RPC server, **Streamable HTTP** transport (2025-03-26).
 - `server/task_manager.py` — marshals work onto Fusion's **main thread** via a custom event.
-- `mcp_primitives/` — Tool / Resource / Item schema classes plus the registry.
+- `mcp_primitives/` — Tool / Item schema classes plus the registry.
 - `tools/` — one module per tool family slice, named `<family>_<verb>.py` (a few grandfathered
   modules register several verbs; `tests/MANIFEST.md` is the authoritative per-tool list). Each
   has a `handler(...)` (the logic; its parameters are the tool inputs), a `TOOL_DESCRIPTION`, a

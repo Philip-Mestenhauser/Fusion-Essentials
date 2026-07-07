@@ -26,6 +26,7 @@ from ... import shared_state
 from .server import mcp_server
 from .server.task_manager import TaskManager
 from .mcp_primitives import registry
+from .mcp_primitives import GATEABLE_FAMILIES, family_of, unregister
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -60,6 +61,44 @@ DEFAULT_SETTINGS = {
         "label": "Allow AI to execute arbitrary Fusion API scripts (advanced; security risk)",
         "default": False,
     },
+    # One checkbox per GATEABLE_FAMILIES member, default True so an existing user's tool surface is
+    # unchanged until they opt out. shared_state.load_settings_init merge-adds these keys for users
+    # who already have a settings file (see shared_state.merge_settings), so upgrading is silent.
+    "family_enabled_appearance": {
+        "type": "checkbox",
+        "label": "Enable appearance MCP tools",
+        "default": True,
+    },
+    "family_enabled_cam": {
+        "type": "checkbox",
+        "label": "Enable cam MCP tools",
+        "default": True,
+    },
+    "family_enabled_data": {
+        "type": "checkbox",
+        "label": "Enable data MCP tools",
+        "default": True,
+    },
+    "family_enabled_drawing": {
+        "type": "checkbox",
+        "label": "Enable drawing MCP tools",
+        "default": True,
+    },
+    "family_enabled_mesh": {
+        "type": "checkbox",
+        "label": "Enable mesh MCP tools",
+        "default": True,
+    },
+    "family_enabled_save": {
+        "type": "checkbox",
+        "label": "Enable save MCP tools",
+        "default": True,
+    },
+    "family_enabled_surface": {
+        "type": "checkbox",
+        "label": "Enable surface MCP tools",
+        "default": True,
+    },
 }
 
 # Register this module's settings group so it appears as a Settings tab.
@@ -73,6 +112,28 @@ def _execute_api_script_allowed() -> bool:
         return bool(settings.get(_ALLOW_EXECUTE_KEY, {}).get("default", False))
     except Exception:
         return False
+
+
+def _disabled_families() -> set:
+    """Read the family_enabled_<fam> checkboxes: the set of GATEABLE_FAMILIES the user turned OFF.
+
+    Same defensive read style as _execute_api_script_allowed(): a missing settings file, a missing
+    key, or any read error all mean ENABLED - a family is only disabled by an explicit False, never
+    by a settings read failure.
+    """
+    disabled = set()
+    try:
+        settings = shared_state.load_settings(SETTINGS_ID)
+    except Exception:
+        return disabled
+    for fam in GATEABLE_FAMILIES:
+        try:
+            enabled = bool(settings.get(f"family_enabled_{fam}", {}).get("default", True))
+        except Exception:
+            enabled = True
+        if not enabled:
+            disabled.add(fam)
+    return disabled
 
 # Module-level handles to the running server, torn down in stop().
 _http_server = None
@@ -134,8 +195,21 @@ def _collect_items():
         except Exception as e:
             futil.log(f'{CMD_NAME}: sys_execute_script.register_tool() failed: {e}')
 
+    # FAMILY GATING: purge by TOOL NAME, after the sweep - a module's filename prefix does not always
+    # match its registered tools' families (mesh_export.py registers save_as_mesh, family "save"), so
+    # skipping modules by filename would miss that. Walk the now-fully-populated registry instead and
+    # drop anything whose family the user disabled.
+    disabled = _disabled_families()
+    if disabled:
+        purged = 0
+        for item in list(registry.get_tools()):
+            if family_of(item.get_name()) in disabled:
+                if unregister(item.get_name()):
+                    purged += 1
+        futil.log(f'{CMD_NAME}: disabled families ({", ".join(sorted(disabled))}) - purged {purged} tool(s)')
+
     futil.log(f'{CMD_NAME}: registered {len(registered)} tool modules (auto-discovered)')
-    return registry.get_tools() + registry.get_resources()
+    return registry.get_tools()
 
 
 def start():

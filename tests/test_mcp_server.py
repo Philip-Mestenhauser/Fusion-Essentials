@@ -40,6 +40,9 @@ def _make_tool_item(name, handler, *, required=("a",), optional=("b",), run_on_m
         tool.add_input_property(prop, {"type": "string"}).add_required_input(prop)
     for prop in optional:
         tool.add_input_property(prop, {"type": "string"})
+    # strict: the arg gate only rejects unknown keys where the schema DECLARES strictness, so the
+    # fixture declares it; leniency has its own dedicated test.
+    tool.strict_schema()
     return Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=run_on_main_thread)
 
 
@@ -105,6 +108,7 @@ class TestToolsCallArgumentValidation:
         assert result["isError"] is True
         assert "'c'" in result["message"]
         assert "a" in result["message"] and "b" in result["message"]
+        assert result["content"][0]["text"] == result["message"]   # the field a real client reads
         assert calls["n"] == 0
 
     def test_missing_required_argument_is_an_error_result_and_handler_not_called(self, server):
@@ -122,7 +126,62 @@ class TestToolsCallArgumentValidation:
         result = response["result"]
         assert result["isError"] is True
         assert "'a'" in result["message"]
+        assert result["content"][0]["text"] == result["message"]   # the field a real client reads
         assert calls["n"] == 0
+
+    def test_lenient_schema_passes_unknown_keys_to_handler(self, server):
+        # a tool that never declared additionalProperties=false stays lenient on the wire AND at
+        # the gate - the schema must not promise leniency the server then refuses.
+        seen = {}
+
+        def handler(**kwargs):
+            seen.update(kwargs)
+            return _ok()
+
+        item = _make_tool_item("lenient", handler)
+        item.primitive.additional_properties = None    # undeclared = lenient, the wire default
+        server.register(item)
+        response = asyncio.run(server.handle_request({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "lenient", "arguments": {"a": "1", "c": "extra"}},
+        }))
+        assert response["result"]["isError"] is False
+        assert seen.get("c") == "extra"
+
+    def test_schema_omitted_arg_reaches_the_handler(self, server, mcp_server_module, monkeypatch):
+        # a strict tool may deliberately accept an off-schema kwarg (the handler answers with a
+        # targeted redirect) - the gate lets a listed key through instead of shadowing it.
+        seen = {}
+
+        def handler(**kwargs):
+            seen.update(kwargs)
+            return _ok()
+
+        monkeypatch.setattr(mcp_server_module, "_SCHEMA_OMITTED_ARGS",
+                            {"x": frozenset({"c"})})
+        server.register(_make_tool_item("x", handler))
+        response = asyncio.run(server.handle_request({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "x", "arguments": {"a": "1", "c": "redirect-me"}},
+        }))
+        assert response["result"]["isError"] is False
+        assert seen.get("c") == "redirect-me"
+
+    def test_omitted_args_table_matches_reality(self, mcp_server_module):
+        # every _SCHEMA_OMITTED_ARGS entry names a REAL registered tool whose real handler truly
+        # accepts the kwarg - a stale entry (tool renamed, kwarg dropped) fails here.
+        import inspect
+        from conftest import register_all_tools
+        items = {i.primitive.name: i for i in register_all_tools()}
+        for tool_name, extras in mcp_server_module._SCHEMA_OMITTED_ARGS.items():
+            assert tool_name in items, f"omitted-args entry for unknown tool '{tool_name}'"
+            h = items[tool_name].handler
+            while getattr(h, "__wrapped__", None) is not None:
+                h = h.__wrapped__
+            params = inspect.signature(h).parameters
+            for extra in extras:
+                assert extra in params, (
+                    f"'{tool_name}' handler does not accept '{extra}' - stale omitted-args entry")
 
     def test_valid_call_with_optional_argument_omitted_succeeds(self, server):
         seen = {}
