@@ -404,7 +404,7 @@ _BODY_REDIRECTS = {
     "solid":   "Use the solid-modelling tools, or convert it (a surface -> thicken/stitch; a mesh -> mesh_to_brep).",
     "surface": "Use the surface_* tools. A solid has no open surface to act on; a mesh isn't a BRep surface.",
     "brep":    "A mesh is not a BRep body - convert it with mesh_to_brep, or use the mesh_* tools.",
-    "mesh":    "Use the mesh_* tools. A BRep solid/surface isn't a mesh - convert with brep_to_mesh if you need one.",
+    "mesh":    "Use the mesh_* tools. A BRep solid/surface isn't a mesh - convert with save_as_mesh if you need one.",
     "any":     "",
 }
 
@@ -507,6 +507,12 @@ def _resolve_any_body(name, raw):
     if ent is not None:
         if _is_brep(ent) or _is_mesh(ent):
             return ent, None
+        # A face/edge/vertex handle names its OWNING body - walk to it. find_geometry mints no body
+        # handle (only face/edge/vertex), so this is what makes "pass a find_geometry handle" - the
+        # advice the ambiguous-name error gives - actually resolvable for a body in an assembly.
+        owner = _common.safe(lambda: ent.body)
+        if owner is not None and (_is_brep(owner) or _is_mesh(owner)):
+            return owner, None
         return None, f"'{name}': handle points at a {type(ent).__name__}, not a body."
     # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the candidate list rather
     # than grabbing the first - a find_geometry handle disambiguates. One match resolves as before.

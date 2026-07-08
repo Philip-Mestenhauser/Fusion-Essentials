@@ -12,7 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_setup
 from . import _inputs
 # Reuse the operation editor's parameter-parsing engine (single source of truth for {name:expr} / string).
 from .cam_edit_operation import _parse_parameters
@@ -98,20 +98,6 @@ def _resolve_bodies(names):
     return _BODIES.resolve(names)
 
 
-def _find_setup(cam, name):
-    name = (name or "").strip()
-    for i in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda i=i: cam.setups.item(i))
-        if s is not None and safe(lambda s=s: s.name) == name:
-            return s
-    return None
-
-
-def _setup_names(cam):
-    return [safe(lambda i=i: cam.setups.item(i).name)
-            for i in range(safe(lambda: cam.setups.count, 0) or 0)]
-
-
 def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None,
             machine: str = "") -> dict:
     """Edit a CAM setup's parameters, its model/fixture/stock bodies, and/or its machine.
@@ -143,9 +129,9 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)
-    target = _find_setup(cam, setup)
+    target, available = find_setup(cam, setup)
     if not target:
-        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in _setup_names(cam))}.")
+        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in available)}.")
 
     # ── validate EVERYTHING before applying anything (no half-edited setup) ──
     sp = safe(lambda: target.parameters)

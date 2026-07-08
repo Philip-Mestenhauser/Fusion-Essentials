@@ -10,7 +10,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_setup
 
 app = adsk.core.Application.get()
 
@@ -23,19 +23,7 @@ def activate_setup_handler(setup: str = "") -> dict:
     if err:
         return error(err)
 
-    available = []
-    target = None
-    try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            nm = safe(lambda: s.name)
-            available.append(nm)
-            if (nm or "").lower() == want.lower():
-                target = s
-                break
-    except Exception as e:
-        return error(f"Could not read setups: {e}")
-
+    target, available = find_setup(cam, want)
     if not target:
         return error(f"Setup not found: '{setup}'. "
                       f"Available: {', '.join(n for n in available if n) or '(none)'}")

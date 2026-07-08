@@ -80,13 +80,7 @@ def reverse_normal_handler(bodies=None) -> dict:
 
     # AFTER: read the flip back off the feature's OWN result bodies (fresh references; the input
     # references can go invalid once the parametric feature rebuilds the bodies).
-    result_bodies = []
-    fb = safe(lambda: feature.bodies)
-    n = int(safe(lambda: fb.count, 0) or 0) if fb else 0
-    for i in range(n):
-        b = safe(lambda i=i: fb.item(i))
-        if b is not None:
-            result_bodies.append(b)
+    result_bodies = _common.result_bodies(feature)
     after_total, after_reversed = _count_reversed(result_bodies) if result_bodies else (0, 0)
     faces_consumed = int(safe(lambda: feature.faces.count, 0) or 0)
 

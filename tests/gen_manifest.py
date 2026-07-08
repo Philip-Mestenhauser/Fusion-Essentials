@@ -248,55 +248,65 @@ def render(data) -> str:
 # markers so the surrounding hand-written prose is untouched and the block can't rot.
 
 CLAUDE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CLAUDE.md")
-_MAP_BEGIN = "<!-- BEGIN GENERATED MAP (py -3 tests/gen_manifest.py) -->"
-_MAP_END = "<!-- END GENERATED MAP -->"
+TOOLS_CLAUDE_PATH = os.path.join(os.path.dirname(CLAUDE_PATH), "commands", "mcpServer", "tools", "CLAUDE.md")
+# Root CLAUDE.md carries only the tiny families census (orientation for ANY session). The full
+# kinds + helpers catalog is an authoring concern, so it lives in tools/CLAUDE.md - loaded only when
+# you work in tools/. Both are generated from the same source, so neither can drift.
+_FAM_BEGIN = "<!-- BEGIN GENERATED FAMILIES (py -3 tests/gen_manifest.py) -->"
+_FAM_END = "<!-- END GENERATED FAMILIES -->"
+_CAT_BEGIN = "<!-- BEGIN GENERATED CATALOG (py -3 tests/gen_manifest.py) -->"
+_CAT_END = "<!-- END GENERATED CATALOG -->"
 
 
-def render_claude_map(data) -> str:
-    """The compact kinds-catalog + family-skeleton block for CLAUDE.md (between the markers)."""
-    kinds = data["kinds"]
+def render_families(data) -> str:
+    """The one-line families census for root CLAUDE.md: name(count), in section order."""
     fam = families(data["tools"])
-    lines = [_MAP_BEGIN,
-             "| Kind | References (use this — don't hand-roll a name/index) |",
-             "|---|---|"]
-    for k in kinds:
-        # escape any '|' in the hint so it can't break the markdown table column.
-        hint = (k["hint"] or k["summary"]).replace("|", "\\|")
-        lines.append(f"| `{k['kind']}` | {hint} |")
-    lines.append("")
-    # Families: name(count), in section order — a one-line index of where tools live.
     order = [name for _, name in _FAMILY_PREFIXES]
     for extra in sorted(fam):
         if extra not in order:
             order.append(extra)
     fam_bits = [f"`{name}`({len(fam[name])})" for name in order if fam.get(name)]
     total = sum(len(v) for v in fam.values())
-    lines.append(f"**Tool families** ({total} tools — `sys_find_tool <kw>` to search, "
-                 "`tests/MANIFEST.md` for the full list): " + " ".join(fam_bits))
-    # Shared helpers — the "reuse before you write, grep these" list (generated, so it can't drift).
-    helper_bits = "; ".join(f"`{h['module']}` ({h['blurb']})" if h["blurb"] else f"`{h['module']}`"
-                            for h in data.get("helpers", []))
+    return (f"{_FAM_BEGIN}\n"
+            f"**Tool families** ({total} tools — `sys_find_tool <kw>` to search, "
+            "`MANIFEST.md` for the full list): " + " ".join(fam_bits) + f"\n{_FAM_END}")
+
+
+def render_catalog(data) -> str:
+    """The kinds catalog + shared-helper table for tools/CLAUDE.md - the abstraction surface an author
+    must reuse rather than re-roll. Both tables are generated, so they can't drift from the code."""
+    lines = [_CAT_BEGIN,
+             "| Kind | References (use this — don't hand-roll a name/index) |",
+             "|---|---|"]
+    for k in data["kinds"]:
+        # escape any '|' in the hint so it can't break the markdown table column.
+        hint = (k["hint"] or k["summary"]).replace("|", "\\|")
+        lines.append(f"| `{k['kind']}` | {hint} |")
     lines.append("")
-    lines.append("**Shared helpers** (reuse/extend — grep before writing a resolver): " + helper_bits)
-    lines.append(_MAP_END)
+    lines.append("| Helper | Provides (import from here - never re-implement) |")
+    lines.append("|---|---|")
+    for h in data.get("helpers", []):
+        blurb = (h["blurb"] or "").replace("|", "\\|")
+        lines.append(f"| `{h['module']}` | {blurb} |")
+    lines.append(_CAT_END)
     return "\n".join(lines)
 
 
-def splice_claude(map_block, *, check=False):
-    """Replace the marked region of CLAUDE.md with map_block. Returns True if already current.
-    With check=True, does not write — just reports whether it would change."""
-    with open(CLAUDE_PATH, encoding="utf-8") as fh:
+def _splice(path, begin, end, block, *, check=False):
+    """Replace the region between begin/end markers in `path` with `block`. Returns True if already
+    current. With check=True, does not write - just reports whether it would change."""
+    with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    if _MAP_BEGIN not in text or _MAP_END not in text:
-        raise SystemExit(f"CLAUDE.md is missing the map markers {_MAP_BEGIN!r}/{_MAP_END!r} — add them "
-                         "where the generated kinds/families block should live.")
-    pre, rest = text.split(_MAP_BEGIN, 1)
-    _, post = rest.split(_MAP_END, 1)
-    new = pre + map_block + post
+    if begin not in text or end not in text:
+        raise SystemExit(f"{os.path.basename(path)} is missing the markers {begin!r}/{end!r} — add "
+                         "them where the generated block should live.")
+    pre, rest = text.split(begin, 1)
+    _, post = rest.split(end, 1)
+    new = pre + block + post
     if new == text:
         return True
     if not check:
-        with open(CLAUDE_PATH, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(new)
     return False
 
@@ -309,7 +319,8 @@ def main():
 
     data = collect()
     rendered = render(data)
-    map_block = render_claude_map(data)
+    fam_block = render_families(data)
+    cat_block = render_catalog(data)
 
     if args.check:
         stale = []
@@ -319,19 +330,22 @@ def main():
                 existing = fh.read()
         if existing.strip() != rendered.strip():
             stale.append("tests/MANIFEST.md")
-        if not splice_claude(map_block, check=True):
-            stale.append("CLAUDE.md (generated map block)")
+        if not _splice(CLAUDE_PATH, _FAM_BEGIN, _FAM_END, fam_block, check=True):
+            stale.append("CLAUDE.md (families census)")
+        if not _splice(TOOLS_CLAUDE_PATH, _CAT_BEGIN, _CAT_END, cat_block, check=True):
+            stale.append("tools/CLAUDE.md (kinds+helpers catalog)")
         if stale:
             print("Stale — run `py -3 tests/gen_manifest.py` and commit: " + ", ".join(stale),
                   file=sys.stderr)
             sys.exit(1)
-        print("MANIFEST.md and the CLAUDE.md map are up to date.")
+        print("MANIFEST.md, the families census, and the catalog are up to date.")
         return
 
     with open(MANIFEST_PATH, "w", encoding="utf-8") as fh:
         fh.write(rendered + "\n")
-    splice_claude(map_block)
-    print(f"Wrote {MANIFEST_PATH} and spliced the CLAUDE.md map "
+    _splice(CLAUDE_PATH, _FAM_BEGIN, _FAM_END, fam_block)
+    _splice(TOOLS_CLAUDE_PATH, _CAT_BEGIN, _CAT_END, cat_block)
+    print(f"Wrote {MANIFEST_PATH}, the CLAUDE.md families census, and the tools/CLAUDE.md catalog "
           f"({len(data['tools'])} tools, {len(data['kinds'])} kinds).")
 
 

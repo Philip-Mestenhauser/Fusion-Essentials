@@ -36,12 +36,20 @@ def _module_doc_summary(tree: ast.Module) -> str:
 
 
 def collect():
-    """Return {test_file: (summary, [(group, behavior), ...])} for every test file."""
+    """Return {test_file: (summary, [(group, behavior), ...])} for every test file.
+
+    Recurses TESTS_DIR - test files live in tests/unit/ and tests/lints/ (and none under
+    tests/live/, which holds Fusion-driven scripts, not test_*.py). Keyed by basename (unique),
+    ordered alphabetically so the spec groups by tool regardless of bucket."""
+    paths = []
+    for root, _dirs, files in os.walk(TESTS_DIR):
+        for fname in files:
+            if fname.startswith("test_") and fname.endswith(".py"):
+                paths.append(os.path.join(root, fname))
+
     out = {}
-    for fname in sorted(os.listdir(TESTS_DIR)):
-        if not (fname.startswith("test_") and fname.endswith(".py")):
-            continue
-        path = os.path.join(TESTS_DIR, fname)
+    for path in sorted(paths, key=os.path.basename):
+        fname = os.path.basename(path)
         with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read(), filename=fname)
 

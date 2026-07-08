@@ -14,8 +14,9 @@ from ._common import safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type "
-             "dispatch, frame-relative or a custom direction entity) + find_joint (walks joints AND "
-             "asBuiltJoints, root and every sub-component)")
+             "dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk "
+             "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
+             "broken joints over) + find_joint (resolve ONE by name over those same scopes)")
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
 # passing a custom_entity to apply_motion instead).
@@ -130,10 +131,42 @@ def current_joint_type(joint):
     return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
 
 
+def all_joints(design):
+    """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: the root
+    component plus every sub-component (both are SEPARATE collections, and a joint internal to a
+    sub-component lives on that component - a root-only walk under-reports, so a broken sub-component or
+    as-built joint would be invisible to a health rollup). The ONE joint walk: find_joint resolves a
+    name over it, and the assembly_probe / workspace_orient health rollups count broken joints over it,
+    so 'which joints exist' is answered the same way everywhere. Joints are de-duplicated by
+    entityToken: design.allComponents includes the root as a proxy DISTINCT from
+    design.rootComponent, so the root's joints are reached twice - counting them once each would
+    over-report joint_count and repeat a broken joint in the health rollup."""
+    out, seen = [], set()
+    scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
+    for c in scopes:
+        if c is None:
+            continue
+        for coll_name in ("joints", "asBuiltJoints"):
+            jc = safe(lambda c=c, cn=coll_name: getattr(c, cn))
+            for i in range(safe(lambda: jc.count, 0) or 0 if jc else 0):
+                j = safe(lambda i=i: jc.item(i))
+                if j is None:
+                    continue
+                # entityToken is stable across the two root proxies; id() falls back for fakes.
+                token = safe(lambda j=j: j.entityToken)
+                key = token if token is not None else id(j)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(j)
+    return out
+
+
 def find_joint(design, name):
-    """Find a Joint or AsBuiltJoint by name. Joints between components live on the root component; a
-    joint internal to a sub-component lives there instead - and asBuiltJoints is a separate collection
-    from joints, so both must be searched or an as-built joint is invisible."""
+    """Find a Joint or AsBuiltJoint by name (via itemByName - the API's own per-scope resolve-one),
+    over the same scopes as all_joints: the root component, then every sub-component, joints AND
+    asBuiltJoints (both are separate collections, and a joint internal to a sub-component lives there,
+    so a root-only lookup would miss it)."""
     want = (name or "").strip()
     j = safe(lambda: design.rootComponent.joints.itemByName(want))
     if j:

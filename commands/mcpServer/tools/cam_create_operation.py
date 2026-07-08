@@ -11,7 +11,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_setup
 
 app = adsk.core.Application.get()
 
@@ -54,20 +54,6 @@ def _tool_at(library_url, index):
     return t, None
 
 
-def _find_setup(cam, name):
-    name = (name or "").strip()
-    for i in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda i=i: cam.setups.item(i))
-        if s is not None and safe(lambda s=s: s.name) == name:
-            return s
-    return None
-
-
-def _setup_names(cam):
-    return [safe(lambda i=i: cam.setups.item(i).name)
-            for i in range(safe(lambda: cam.setups.count, 0) or 0)]
-
-
 def _strategy_names(setup):
     out = []
     for s in safe(lambda: list(setup.operations.compatibleStrategies), []) or []:
@@ -91,9 +77,9 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     if not cam:
         return error(cerr)
 
-    target = _find_setup(cam, setup)
+    target, available = find_setup(cam, setup)
     if not target:
-        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in _setup_names(cam))}.")
+        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in available)}.")
 
     strategy = (strategy or "").strip()
     strategies = _strategy_names(target)

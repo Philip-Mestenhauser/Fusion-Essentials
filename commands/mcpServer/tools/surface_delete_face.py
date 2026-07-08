@@ -81,18 +81,11 @@ def delete_face_handler(faces=None, heal=False) -> dict:
 
     # AFTER: read result bodies off the feature. Fewer result bodies than input bodies means a delete
     # consumed a whole body (every face gone) - surface that as a warning, never fake success.
-    result = []
-    fb = safe(lambda: feature.bodies)
-    nb = int(safe(lambda: fb.count, 0) or 0) if fb else 0
-    for i in range(nb):
-        b = safe(lambda i=i: fb.item(i))
-        if b is None:
-            continue
-        result.append({
-            "name": safe(lambda b=b: b.name),
-            "faces": int(safe(lambda b=b: b.faces.count, 0) or 0),
-            "is_solid": bool(safe(lambda b=b: b.isSolid)),
-        })
+    result = [{
+        "name": safe(lambda b=b: b.name),
+        "faces": int(safe(lambda b=b: b.faces.count, 0) or 0),
+        "is_solid": bool(safe(lambda b=b: b.isSolid)),
+    } for b in _common.result_bodies(feature)]
 
     bodies_before = len(before)
     bodies_after = len(result)

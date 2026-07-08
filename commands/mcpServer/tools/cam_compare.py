@@ -4,13 +4,11 @@
 """cam_compare_operations - diff two operations' CAM parameters (a relational read over two named ops,
 not a domain disclosure, so it stays its own tool rather than a cam_get slice)."""
 
-import adsk.cam
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_operation
 
 
 _DIFFERENCES_CAP = 200   # two operations can differ across hundreds of CAM parameters; bound the rows
@@ -25,8 +23,8 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     if err:
         return error(err)
 
-    op_a = _find_operation_by_name(cam, operation_a.strip())
-    op_b = _find_operation_by_name(cam, operation_b.strip())
+    op_a, _ = find_operation(cam, operation_a)
+    op_b, _ = find_operation(cam, operation_b)
     if not op_a:
         return error(f"Operation not found: '{operation_a}'.")
     if not op_b:
@@ -66,20 +64,6 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     if truncated:
         out["note"] = f"differences was capped at {cap} of {total}; raise max_results to see the rest."
     return ok(out)
-
-
-def _find_operation_by_name(cam, name):
-    want = name.lower()
-    try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            for op in safe(lambda: s.allOperations, []):
-                operation = adsk.cam.Operation.cast(op)
-                if operation and (safe(lambda: operation.name) or "").lower() == want:
-                    return operation
-    except Exception:
-        pass
-    return None
 
 
 def _operation_params(op) -> dict:

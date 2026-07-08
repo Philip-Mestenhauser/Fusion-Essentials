@@ -33,9 +33,6 @@ _FORMATS = {
     "dxf": (".dxf", None, False),
 }
 
-# target is a body by handle (precise) or name; component/occurrence names + whole-design handled too.
-_TARGET = _inputs.BodyRef("target", required=False,
-                          description="What to export (omit = the whole design).")
 _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
                          description="Neutral CAD format to write (dxf = a 2D sketch/face export).")
 
@@ -47,16 +44,20 @@ _DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=F
 
 
 def _resolve_target(design, target):
-    """Resolve 'target' -> (geometry, description). Empty -> root component (whole design).
+    """Resolve 'target' -> (geometry, description, error). Empty -> root component (whole design).
 
-    Order: empty -> whole design; a handle/long token -> a specific body; then a component or
-    occurrence by name; then a body by name (root, then occurrences). Returns (None, None) if a
-    given name matches nothing.
+    Order: empty -> whole design; a handle -> a specific body; then a component, an occurrence, or a
+    body by name. The occurrence and body name lookups go through the shared ambiguity-refusing
+    resolvers (_inputs._resolve_occurrence / _resolve_any_body), so a name shared by several instances
+    is REFUSED with the candidate list rather than silently exporting the first (the wrong-geometry
+    bug of a first-match itemByName). Component stays FIRST among the name lookups so a component's own
+    name is not captured by its instances' substring match. Returns (None, None, None) on a plain miss,
+    or (None, None, err) when a name was ambiguous.
     """
     root = design.rootComponent
     name = (target or "").strip()
     if not name:
-        return root, "whole design (root component)"
+        return root, "whole design (root component)", None
 
     # Handle / entity token -> a specific body (bodies are auto-named, so a handle is precise). Try the
     # sanctioned resolver (composite-handle aware + self-healing) FIRST; a plain name returns None here
@@ -64,32 +65,30 @@ def _resolve_target(design, target):
     ent = _inputs._resolve_token_entity(design, name)
     if ent is not None:
         if isinstance(ent, adsk.fusion.BRepBody):
-            return ent, f"body (handle {name[:10]}...)"
-        return None, None
+            return ent, f"body (handle {name[:10]}...)", None
+        return None, None, None
 
     # Component by name (export the whole component).
     comp = safe(lambda: _export.component_by_name(design, name))
     if comp:
-        return comp, f"component '{name}'"
+        return comp, f"component '{name}'", None
 
-    # Occurrence by name / full path.
-    occ = safe(lambda: root.occurrences.itemByName(name))
-    if occ:
-        return occ, f"occurrence '{name}'"
-    for o in (safe(lambda: root.allOccurrences) or []):
-        if (safe(lambda o=o: o.fullPathName) or "") == name or (safe(lambda o=o: o.name) or "") == name:
-            return o, f"occurrence '{name}'"
+    # Occurrence by name / fullPathName - the shared resolver refuses an ambiguous name (several
+    # instances) with its candidate list instead of grabbing the first.
+    occ, occ_err = _inputs._resolve_occurrence("target", name)
+    if occ is not None:
+        return occ, f"occurrence '{safe(lambda: occ.name) or name}'", None
+    if occ_err and "ambiguous" in occ_err.lower():
+        return None, None, occ_err
 
-    # Body by name (root, then any occurrence).
-    body = safe(lambda: root.bRepBodies.itemByName(name))
-    if body:
-        return body, f"body '{name}'"
-    for o in (safe(lambda: root.allOccurrences) or []):
-        b = safe(lambda o=o: o.bRepBodies.itemByName(name))
-        if b:
-            return b, f"body '{name}' in '{safe(lambda o=o: o.name)}'"
+    # Body by name (root + any occurrence) - likewise ambiguity-refusing.
+    body, body_err = _inputs._resolve_any_body("target", name)
+    if body is not None:
+        return body, f"body '{safe(lambda: body.name) or name}'", None
+    if body_err and "ambiguous" in body_err.lower():
+        return None, None, body_err
 
-    return None, None
+    return None, None, None
 
 
 def _export_one(em, factory_name, is_stl, geom, path):
@@ -325,11 +324,11 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     if not path.lower().endswith(ext):
         path = path + ext
 
-    geom, desc = _resolve_target(design, target)
+    geom, desc, terr = _resolve_target(design, target)
     if geom is None:
-        return error(f"Export target '{target}' not found. Pass a body HANDLE from find_geometry "
+        return error(terr or (f"Export target '{target}' not found. Pass a body HANDLE from find_geometry "
     "(precise), a body/component/occurrence NAME, or omit 'target' to export the "
-    "whole design.")
+    "whole design."))
 
     # make sure the destination directory exists
     out_dir = os.path.dirname(path)
@@ -381,7 +380,8 @@ tool = (
     .add_input_property(_FORMAT.name, _FORMAT.schema())
     .add_input_property("file_path", {"type": "string",
             "description": "Local output path (a file; or a DIRECTORY when split_by_component=true). Extension appended if missing; directory created if needed."})
-    .add_input_property(_TARGET.name, _TARGET.schema())
+    .add_input_property("target", {"type": "string",
+            "description": "What to export: a find_geometry body HANDLE, or a body / component / occurrence NAME; omit for the WHOLE design. A name shared by several instances is refused (pass a handle or fullPathName)."})
     .add_input_property("split_by_component", {"type": "boolean",
             "description": "Export each top-level occurrence to its own file in directory 'file_path' (default false)."})
     .add_input_property("dxf_sketch", {"type": "string",

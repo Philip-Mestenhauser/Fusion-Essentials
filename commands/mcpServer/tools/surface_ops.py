@@ -19,29 +19,20 @@ from . import _assert
 
 app = adsk.core.Application.get()
 
-# Operation name -> adsk.fusion.FeatureOperations attribute (same table model_extrude/model_combine use).
-_OPERATIONS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"join": "JoinFeatureOperation",
-"cut": "CutFeatureOperation",
-"intersect": "IntersectFeatureOperation",
-}
+# Operations this tool allows (the shared name->FeatureOperations map is _common.OPERATIONS).
+_OPERATIONS = ("new", "new_body", "join", "cut", "intersect")
 
 
 def _feature_operation(op_key):
-    return getattr(adsk.fusion.FeatureOperations, _OPERATIONS[op_key])
+    return getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
 
 
 def _result_body_report(feature):
     """Read result bodies + their isSolid OFF THE FEATURE (never assumed). Returns
     (body_names, is_solid_flags)."""
-    names, flags = [], []
-    bodies = safe(lambda: feature.bodies)
-    n = safe(lambda: bodies.count, 0) if bodies else 0
-    for i in range(n):
-        names.append(safe(lambda i=i: bodies.item(i).name))
-        flags.append(bool(safe(lambda i=i: bodies.item(i).isSolid)))
+    bodies = _common.result_bodies(feature)
+    names = [safe(lambda b=b: b.name) for b in bodies]
+    flags = [bool(safe(lambda b=b: b.isSolid)) for b in bodies]
     return names, flags
 
 

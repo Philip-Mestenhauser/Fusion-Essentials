@@ -56,7 +56,7 @@ class Item:
           'read'        -> read-only (does not modify state)
           'write'       -> modifies state
           'destructive' -> a hard-to-reverse write (delete, history-discarding conversion, close doc)
-        Every tool must pass one (enforced by tests/test_write_status_annotations.py)."""
+        Every tool must pass one (enforced by test_write_status_annotations.py)."""
         if write == "read":
             tool.reads()
         elif write == "write":

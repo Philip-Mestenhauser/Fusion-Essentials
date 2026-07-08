@@ -3,10 +3,10 @@
 Every tool speaks to the agent through three wire surfaces: its DESCRIPTION (always present, the
 manual), and its runtime NOTE / ERROR strings (situational, the results). When one of those strings
 names another tool, that is a BREADCRUMB - a tip steering the agent to a next step. This script reads
-those references out of the code and renders one reviewable map, so the team can engineer the wiring
-deliberately: see what tips we give in what cases, where breadcrumbs are missing (orphans), where a
-guard is duplicated across the surface (a shared-helper candidate), and where a tip points at a name
-that no longer exists (a dead reference).
+those references out of the code into a text diagnostic (no graphs - this is for an agent working in
+the repo, not a human), so an agent developing tools can see: where breadcrumbs are missing (orphans),
+where a guard is duplicated across the surface (a shared-helper candidate), and where a tip points at a
+name that no longer exists (a dead reference).
 
 It is the wiring counterpart to MANIFEST (what tools exist) and SPEC (what they're pinned to do):
 
@@ -251,26 +251,6 @@ def _indeg(edges):
     return d
 
 
-def _mermaid(edges, records, title):
-    by_fam = defaultdict(list)
-    connected = {s for s, o in edges.items() if o} | {d for o in edges.values() for d in o}
-    for n in records:
-        if n in connected:
-            by_fam[records[n]["family"]].append(n)
-    lines = [f"### {title}", "", "```mermaid", "flowchart LR"]
-    for fam in sorted(by_fam):
-        lines.append(f"  subgraph {fam}")
-        for n in sorted(by_fam[fam]):
-            lines.append(f'    {n}["{n}"]')
-        lines.append("  end")
-    lines.append("")
-    for s in sorted(edges):
-        for dst in sorted(edges[s]):
-            lines.append(f"  {s} --> {dst}")
-    lines.append("```")
-    return lines
-
-
 def render(data):
     records, desc_e, note_e = data["records"], data["desc_edges"], data["note_edges"]
     ghosts, guards, gwhere = data["ghosts"], data["guards"], data["guard_where"]
@@ -282,11 +262,11 @@ def render(data):
     L = [
         "# Tool wiring (generated)",
         "",
-        "_Auto-generated from the tool source by `tests/gen_wiring.py`. Do not edit by hand._ The",
-        "breadcrumb map: where each tool's agent-facing text (its **description** = the manual, and its",
-        "runtime **note/error** = the situational tip) names ANOTHER tool, steering the agent onward.",
-        "Use it to engineer the wiring: close orphans (a tool nothing leads to), fix dead references,",
-        "and factor duplicated guards into shared helpers.",
+        "_Auto-generated from the tool source by `tests/gen_wiring.py`. Do not edit by hand._ For an",
+        "agent DEVELOPING tools in this repo, to diagnose the surface agents CONSUMING these tools",
+        "navigate by: where each tool's text (its **description** = the manual, its runtime **note/error**",
+        "= the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,",
+        "close orphans, factor duplicated guards into shared helpers.",
         "",
         f"**Tools:** {len(records)}  |  **description breadcrumbs:** {sum(len(v) for v in desc_e.values())}"
         f"  |  **note/error breadcrumbs:** {sum(len(v) for v in note_e.values())}",
@@ -361,14 +341,6 @@ def render(data):
     L[9] = L[9] + f"  |  **guidance smells flagged:** {smell_total}"
     L += audit
 
-    # the two graphs
-    L += ["", "## The graphs", "",
-          "Two surfaces, two graphs. The **description** graph is the manual (what a tool teaches up",
-          "front); the **note/error** graph is situational (what the server tells you FROM a result).",
-          ""]
-    L += _mermaid(desc_e, records, "Description breadcrumbs (the manual)")
-    L.append("")
-    L += _mermaid(note_e, records, "Note / error breadcrumbs (situational, from results)")
     return "\n".join(L)
 
 

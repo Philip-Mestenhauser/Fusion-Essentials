@@ -14,7 +14,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe
+from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _assert
@@ -174,7 +174,7 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         specs.append({"snap_one": snap_one, "snap_two": snap_two, "flip": bool(flipped),
         "offset": float(offset or 0.0), "angle_deg": float(angle_deg or 0.0)})
 
-    k = UNIT_TO_CM.get((units or "mm").strip().lower())
+    k = _common.scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 

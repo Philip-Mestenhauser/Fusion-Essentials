@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 134  |  **Behaviors pinned:** 2520
+**Tools with a test file:** 145  |  **Behaviors pinned:** 2570
 
 ## `_cam_common`
 
@@ -337,6 +337,7 @@ after changing tests._
 - all healthy
 - broken joint surfaced
 - suppressed joint is not broken
+- unknown rollup state is not a problem
 - stale joint health flagged when timeline is clean
 - no stale flag when timeline also shows the error
 - timeline problem surfaced
@@ -436,6 +437,31 @@ after changing tests._
 
 **AssertStrength**
 - no test relies on a bare iserror flag alone
+
+## `axis_vectors_shared`
+
+> Lint: the world-axis x/y/z -> unit-vector map is _inputs._AXIS_VECS, never a local copy.
+
+**AxisVectorsShared**
+- no local world axis vector map
+- the lint bites
+
+## `cam_common`
+
+> Unit tests for the shared CAM finders in ``_cam_common`` - find_setup / find_operation / walk_operations / setup_names. These are the ONE case-insensitive resolution every CAM tool shares, so 'Setup1' vs 'setup1' resolves the same everywhere. The fakes cover BOTH allOperations shapes the CAM test suite uses (a Fusion count/item collection AND a plain list).
+
+**FindSetup**
+- found case insensitive
+- not found returns available
+- empty cam is safe
+**SetupNames**
+- lists all setup names
+**WalkOperations**
+- flattens across setups countitem
+- handles list backed alloperations
+**FindOperation**
+- found case insensitive across setups
+- not found returns available
 
 ## `cam_compare`
 
@@ -858,6 +884,9 @@ after changing tests._
 
 > Unit tests for ``cam_templates.py`` navigation logic.
 
+**ApplyTemplateEnumValidation**
+- unknown generate is rejected not silently skipped
+- unknown location is rejected
 **FindTemplateByName**
 - unknown location is rejected
 - finds template in root
@@ -921,6 +950,12 @@ after changing tests._
 **Ptxyz**
 - scales and rounds
 - none point is none
+**ResultBodies**
+- empty feature bodies
+- collects bodies in order
+- filters none bodies
+- none feature is safe
+- unreadable bodies is safe
 **TargetSketch**
 - named sketch found
 - named sketch not found
@@ -938,6 +973,15 @@ after changing tests._
 - success returns result and no error
 - measure exception is surfaced as error
 - none result is an error not a silent none
+
+## `coverage_sweep_complete`
+
+> Gate: every registered tool is accounted for in the live coverage sweep.
+
+**CoverageSweepComplete**
+- every tool is covered excluded or pending
+- no stale table entries
+- pending and covered are disjoint
 
 ## `data_get`
 
@@ -1113,6 +1157,10 @@ after changing tests._
 - map to unknown part config errors
 - map to unknown assembly config errors
 - insert config defaults to first part row
+**Activate**
+- switches configuration clean
+- unknown configuration errors
+- new timeline error after switch is surfaced
 
 ## `design_delete_feature`
 
@@ -1178,7 +1226,9 @@ after changing tests._
 - body by name
 - body by handle
 - long body name not mistaken for handle
+- occurrence by name
 - missing named target errors
+- ambiguous name refused not first instance
 **PathHandling**
 - missing path errors
 - extension auto appended
@@ -1240,7 +1290,6 @@ after changing tests._
 **HasCam**
 - cam present
 - no cam
-- no parent document is safe
 **TimelineSlice**
 - entity type group
 - entity type class name
@@ -1263,6 +1312,11 @@ after changing tests._
 - none empty
 - comma string
 - list lowercased
+**FindOccurrenceByName**
+- component name roots at first instance
+- exact occurrence name resolves
+- ambiguous occurrence name is refused not first matched
+- miss returns no error
 **RootBodies**
 - root body names lists direct bodies
 - no root bodies returns empty
@@ -1339,6 +1393,14 @@ after changing tests._
 - compute failure is an error
 - no active design errors
 
+## `doc_citations`
+
+> Lint: every file a doc or comment cites exists, and prose cites bare basenames.
+
+**DocCitations**
+- cited files exist
+- prose cites bare basenames
+
 ## `doc_get`
 
 > Tests for `doc_get` — the session rich read (active doc identity + open-doc list).
@@ -1391,6 +1453,9 @@ after changing tests._
 - rotation built
 - bad units
 - bad rotate axis
+**AlwaysReference**
+- inserts as reference
+- embedded result bites
 **ResolveDataFile**
 - plain urn resolves directly
 - urn extracted from surrounding text
@@ -1522,6 +1587,13 @@ after changing tests._
 - get latest raises propagates
 - name filter updates only matching
 
+## `docstring_restatement`
+
+> Measurement: handler docstrings that merely restate the wire description.
+
+**DocstringRestatement**
+- restatement count does not regress
+
 ## `drawing_create`
 
 > Unit tests for ``drawing_create.py`` - create a 2D drawing from the active design.
@@ -1637,7 +1709,7 @@ after changing tests._
 
 ## `evergreen_no_baggage`
 
-> Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history or points back at the planning document that produced it (CLAUDE.md "No historical baggage").
+> Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history or points back at the planning document that produced it (see tools/CLAUDE.md, "Module docstrings").
 
 **NoHistoricalOrPlanBaggage**
 - no file narrates history or points at a plan
@@ -1713,8 +1785,8 @@ after changing tests._
 - render counts files and behaviors
 **GenManifestFamilies**
 - first matching prefix wins and leftovers group as other
-- claude map escapes pipes in kind hints
-**SpliceClaude**
+- catalog escapes pipes in kind hints
+**Splice**
 - splice replaces only between markers
 - check mode reports stale without writing
 - current content reports true
@@ -1768,6 +1840,7 @@ after changing tests._
 - schema is array
 **BodyRef**
 - resolves a handle
+- face handle walks to its owning body
 - resolves a short name
 - long name is NOT mistaken for a handle
 - unresolvable reports name guidance
@@ -2093,6 +2166,11 @@ after changing tests._
 - finds root joint by exact name
 - finds as built joint
 - unknown name returns none
+**AllJoints**
+- walks root and subcomponents and asbuilt
+- dedups root when allcomponents includes it
+- dedups root reached via distinct proxy
+- empty design is safe
 **HandlerGuards**
 - requires both names
 - rejects same joint
@@ -2134,6 +2212,15 @@ after changing tests._
 - bottom is min z
 - directional snaps parse
 - empty body returns none
+
+## `layout`
+
+> Lint: the test tree stays organized by KIND.
+
+**Layout**
+- each test is in its correct bucket
+- no behavior tests under live
+- lint set has no stale names
 
 ## `main_thread_timeout`
 
@@ -2543,7 +2630,7 @@ after changing tests._
 - negative distance allowed
 **Taper**
 - taper uses one side extent with deg string
-- symmetric suppresses taper path
+- symmetric with taper uses symmetric extent
 - zero taper is plain distance
 **AsSurface**
 - default extrude is solid unchanged
@@ -2886,6 +2973,15 @@ after changing tests._
 **NoFirstMatchResolverAnywhere**
 - no tool hand rolls a substring name match
 - allowlist entries still exist and still trip the smell
+- reversed pattern bites
+
+## `no_hand_cast_product`
+
+> Lint: acquire the active Design / CAM product through the resolver, not a hand cast.
+
+**NoHandCastProduct**
+- no design cast of active product
+- no manual cam cast
 
 ## `occurrence_ref_lint`
 
@@ -2897,6 +2993,13 @@ after changing tests._
 **SharedResolverBehaviour**
 - fullpath beats a same named instance
 - ambiguous bare name errors
+
+## `operations_shared`
+
+> Lint: the operation-keyword -> FeatureOperations map is _common.OPERATIONS, never a local copy.
+
+**OperationsShared**
+- no local feature operations map
 
 ## `output_contracts`
 
@@ -3531,6 +3634,13 @@ after changing tests._
 - explicitly referenced modules are importable with their entry points
 - entry does not attribute access swept or gated modules
 
+## `tool_citations`
+
+> Lint: a tool name cited in the constitution docs resolves to a registered tool.
+
+**ToolCitations**
+- cited tool names are registered
+
 ## `tool_naming`
 
 > Lint/contract for the TOOL NAMING SCHEMA (CLAUDE.md "Read vs Edit").
@@ -3539,6 +3649,21 @@ after changing tests._
 - every name is domain verb
 - verb is in the closed set
 - verb kind matches write status
+
+## `units_scaled`
+
+> Lint: unit<->cm conversion routes through _common.scale, never a re-inlined or copied table.
+
+**UnitsScaled**
+- no raw unit to cm access outside common
+- no local unit table copy outside common
+
+## `units_typed`
+
+> Lint: a length/coordinate input carries its unit in a typed selector, not in loose prose.
+
+**UnitsAreTyped**
+- numeric input naming a unit has a units selector
 
 ## `version`
 

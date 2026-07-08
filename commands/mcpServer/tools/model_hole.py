@@ -161,7 +161,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             extent: str = "blind", depth: str = "",
             cbore_diameter: str = "", cbore_depth: str = "",
             csink_diameter: str = "", csink_angle: str = "",
-            tap: str = "", fastener: str = "", fit: str = "normal") -> dict:
+            tap: str = "", fastener: str = "", fit: str = "normal", units: str = "mm") -> dict:
     """Drill holes with the real Hole command."""
     hole_type = (hole_type or "simple").strip().lower()
     if hole_type not in _TYPES:
@@ -238,12 +238,16 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         return error(f"Could not create a placement sketch on the face: {e}")
     if not sketch:
         return error("Could not create a placement sketch on the face (sketches.add returned nothing).")
+    factor = _common.scale(units)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     sketch_pts = []
     for xyz in pts:
         try:
-            p = adsk.core.Point3D.create(float(xyz[0]) / 10.0, float(xyz[1]) / 10.0, float(xyz[2]) / 10.0)
+            p = adsk.core.Point3D.create(float(xyz[0]) * factor, float(xyz[1]) * factor,
+                                         float(xyz[2]) * factor)
         except Exception:
-            return error(f"Bad point {xyz!r}; expected [x, y, z] in mm.")
+            return error(f"Bad point {xyz!r}; expected [x, y, z] in '{units}'.")
         sp = safe(lambda p=p: sketch.sketchPoints.add(p))
         if not sp:
             return error(f"Could not add a sketch point at {xyz!r}.")
@@ -305,8 +309,9 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 TOOL_DESCRIPTION = (
     "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
     "hole/thread metadata. 'hole_type': simple / counterbore / countersink. 'diameter' e.g. '8 mm'. "
-    "'face' = a find_geometry planar-face handle to drill into; 'points' = list of [x,y,z] (mm) on "
-    "that face (multiple points => one patterned hole feature). 'extent': 'blind' (needs 'depth') or "
+    "'face' = a find_geometry planar-face handle to drill into; 'points' = list of [x,y,z] (mm) in "
+    "the FACE'S LOCAL frame (the drill sketch sits on the face; z is off-plane, so [x,y,0] drills at "
+    "x,y on it), multiple points => one patterned hole feature. 'extent': 'blind' (needs 'depth') or "
     "'through'. counterbore needs 'cbore_diameter'/'cbore_depth'; countersink needs "
     "'csink_diameter'/'csink_angle'. 'tap' = a thread designation like 'M5x0.8' to make it tapped. "
     "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit' close/normal/loose) sizes + "
@@ -320,7 +325,8 @@ tool = (
     .add_input_property("diameter", {"type": "string", "description": "Hole diameter, e.g. '8 mm'."})
     .add_input_property("face", _FACE.schema())
     .add_input_property("points", {"type": "array", "items": {"type": "array", "items": {"type": "number"}},
-            "description": "Positions [x,y,z] in mm on the face to drill at."})
+            "description": "Positions in the face's LOCAL frame (in 'units'); [x,y,0] drills at x,y on the face."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("extent", {"type": "string", "enum": list(_EXTENTS),
             "description": "'blind' (with 'depth') or 'through'."})
     .add_input_property("depth", {"type": "string", "description": "Blind hole depth, e.g. '10 mm'."})

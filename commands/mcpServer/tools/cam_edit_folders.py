@@ -12,25 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_setup
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("list", "create", "rename", "move")
-
-
-def _find_setup(cam, name):
-    name = (name or "").strip()
-    for i in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda i=i: cam.setups.item(i))
-        if s is not None and safe(lambda s=s: s.name) == name:
-            return s
-    return None
-
-
-def _setup_names(cam):
-    return [safe(lambda i=i: cam.setups.item(i).name)
-            for i in range(safe(lambda: cam.setups.count, 0) or 0)]
 
 
 def _walk_container(container, out):
@@ -57,7 +43,7 @@ def _find_op(setup, name):
     named = []
     _walk_container(setup, named)
     for nm, o in named:
-        if nm == name:
+        if (nm or "").lower() == (name or "").lower():
             return o
     return None
 
@@ -152,9 +138,9 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)
-    target = _find_setup(cam, setup)
+    target, available = find_setup(cam, setup)
     if not target:
-        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in _setup_names(cam))}.")
+        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in available)}.")
 
     if action == "list":
         return _do_list(target)

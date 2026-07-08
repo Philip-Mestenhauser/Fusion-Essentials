@@ -10,7 +10,6 @@ a thin router over _slice_*() helpers. Read-only.
 import json
 
 import adsk.core
-import adsk.cam
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
@@ -18,6 +17,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse
 from . import _common
+from . import _cam_common
+from . import _inputs
 
 app = adsk.core.Application.get()
 
@@ -59,24 +60,35 @@ _TREE_MAX_DEPTH = 8
 _TREE_MAX_NODES = 2000
 
 
-def _find_occurrence_by_name(root, want_lower):
-    """Depth-first search for an occurrence whose name (or its component's name) matches (bounded)."""
+def _find_occurrence_by_name(root, want):
+    """Resolve the occurrence to root the tree at: a COMPONENT name (root at its first instance - every
+    instance of a component shows the same structure) or an occurrence name/fullPathName (via the
+    shared ambiguity-refusing _inputs._resolve_occurrence). Returns (occurrence, error): an ambiguous
+    occurrence name is refused with its candidates, not silently matched to the first. Bounded DFS."""
+    want_lower = (want or "").strip().lower()
+    # 1) A COMPONENT name (exact): all instances share one structure, so the first instance roots it.
     try:
         stack = list(root.occurrences)
     except Exception:
-        return None
+        stack = []
     seen = 0
     while stack and seen < _TREE_MAX_NODES:
         occ = stack.pop()
         seen += 1
-        nm = safe(lambda: occ.name, "")
-        comp_nm = safe(lambda: occ.component.name, "")
-        if want_lower in (nm or "").lower() or want_lower == (comp_nm or "").lower():
-            return occ
+        if (safe(lambda: occ.component.name, "") or "").lower() == want_lower:
+            return occ, None
         try:
             stack.extend(list(occ.childOccurrences))
         except Exception:
             pass
+    # 2) An OCCURRENCE name / fullPathName - the shared resolver refuses an ambiguous name instead of
+    # returning whichever same-named instance came first.
+    occ, occ_err = _inputs._resolve_occurrence("component", want)
+    if occ is not None:
+        return occ, None
+    if occ_err and "ambiguous" in occ_err.lower():
+        return None, occ_err
+    return None, None
     return None
 
 
@@ -134,9 +146,10 @@ def _slice_tree(design, max_depth, component):
     if root is None:
         return None, error("No root component.")
     counter = {"n": 0, "truncated": False}
-    want = (component or "").strip().lower()
-    if want:
-        start = _find_occurrence_by_name(root, want)
+    if (component or "").strip():
+        start, amb = _find_occurrence_by_name(root, component)
+        if amb:
+            return None, error(amb)
         if not start:
             return None, error(f"Component/occurrence not found: '{component}'.")
         return {"root": component, "max_depth": depth, "truncated": counter["truncated"],
@@ -348,11 +361,8 @@ def _content_pointers(contents):
 def _has_cam(design):
     """True when the active document also has a CAM (Manufacture) product. A CAM document's whole point
     is its machining state, which design_get is blind to - so a cam pointer to cam_get is its inbound
-    breadcrumb. itemByProductType('CAMProductType') is None when there's no CAM data."""
-    doc = safe(lambda: design.parentDocument)
-    if doc is None:
-        return False
-    return safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType("CAMProductType"))) is not None
+    breadcrumb."""
+    return _cam_common.get_cam()[0] is not None
 
 
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────

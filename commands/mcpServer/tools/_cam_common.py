@@ -13,7 +13,10 @@ import adsk.fusion
 from ._common import ok, error, safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "get_cam (the shared CAM-product resolver every CAM tool calls) + live_readiness (the one CAM job-health signal)"
+MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / "
+             "find_operation (resolve a setup/operation by name, case-insensitive, returning the object "
+             "+ available names) over setups / walk_operations (the shared setup + operation walks) + "
+             "live_readiness (the one CAM job-health signal)")
 
 app = adsk.core.Application.get()
 
@@ -33,6 +36,73 @@ def get_cam():
         return None, ("This document has no CAM (Manufacture) data. Open a document with setups, "
                       "or create them in the Manufacture workspace.")
     return cam, None
+
+
+def _iter_collection(coll):
+    """Yield items from a Fusion collection (count/item) OR a plain list/tuple - test fakes back
+    allOperations with either shape, so a bare `for` or a bare `range(count)` would break half of them."""
+    if coll is None:
+        return
+    if isinstance(coll, (list, tuple)):
+        for it in coll:
+            yield it
+        return
+    for i in range(safe(lambda: coll.count, 0) or 0):
+        it = safe(lambda i=i: coll.item(i))
+        if it is not None:
+            yield it
+
+
+def setups(cam):
+    """Every Setup in the document, as a list - the basis for the by-name resolvers below."""
+    return list(_iter_collection(safe(lambda: cam.setups)))
+
+
+def setup_names(cam):
+    """Every setup's name, for a 'not found, available: ...' message - built one way everywhere."""
+    return [safe(lambda s=s: s.name) for s in setups(cam)]
+
+
+def find_setup(cam, name):
+    """The Setup named `name` (case-INSENSITIVE exact), or (None, available_names). The ONE setup-by-name
+    resolver every CAM tool shares, so a setup is matched the SAME way everywhere - several hand-rolls
+    were case-sensitive and one case-insensitive, so 'Setup1' vs 'setup1' resolved differently per tool."""
+    want = (name or "").strip().lower()
+    available = []
+    for s in setups(cam):
+        nm = safe(lambda s=s: s.name)
+        available.append(nm)
+        if (nm or "").lower() == want:
+            return s, available
+    return None, available
+
+
+def walk_operations(cam):
+    """Every real Operation across every setup, folder/pattern-nested ops INCLUDED (setup.allOperations
+    flattens them; it drops the folder/pattern CONTAINER objects, which an operation walk doesn't want).
+    Operation.cast skips any non-operation the collection yields. The ONE operation walk - find_operation
+    resolves a name over it - so 'which operations exist' is answered the same way everywhere."""
+    out = []
+    for s in setups(cam):
+        for op in _iter_collection(safe(lambda s=s: s.allOperations)):
+            o = adsk.cam.Operation.cast(op)
+            if o is not None:
+                out.append(o)
+    return out
+
+
+def find_operation(cam, name):
+    """The Operation named `name` (case-INSENSITIVE exact) anywhere in the CAM tree, or
+    (None, available_names). The ONE operation-by-name resolver so every CAM tool matches a name the
+    SAME way - the hand-rolls split between case-sensitive and case-insensitive."""
+    want = (name or "").strip().lower()
+    available = []
+    for o in walk_operations(cam):
+        nm = safe(lambda o=o: o.name)
+        available.append(nm)
+        if (nm or "").lower() == want:
+            return o, available
+    return None, available
 
 
 def first_error_line(obj):

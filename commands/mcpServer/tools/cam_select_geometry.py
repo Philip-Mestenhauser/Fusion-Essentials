@@ -13,7 +13,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error, safe, scale
 from ._cam_common import get_cam
 from . import _inputs
 
@@ -66,7 +66,7 @@ def _find_operation(cam, name):
         s = safe(lambda si=si: cam.setups.item(si))
         if s is not None:
             walk(s)
-    matches = [o for o in found if safe(lambda o=o: o.name) == name]
+    matches = [o for o in found if (safe(lambda o=o: o.name) or "").lower() == (name or "").lower()]
     if not matches:
         names = [safe(lambda o=o: o.name) for o in found]
         return None, f"No operation named '{name}'. Operations: {', '.join(str(n) for n in names)[:300]}."
@@ -161,9 +161,9 @@ def _apply_holes(op, faces):
     return (len(list(nv)) if nv is not None else 0), None
 
 
-def _filter_by_diameter(faces, min_d, max_d):
-    """Keep cylinder faces whose diameter (mm) is within [min_d, max_d]. Non-cylinder faces are
-    dropped. Returns (kept, dropped_non_cylinder, dropped_out_of_range)."""
+def _filter_by_diameter(faces, min_d, max_d, factor):
+    """Keep cylinder faces whose diameter (in display units; 'factor' = cm per unit) is within
+    [min_d, max_d]. Non-cylinder faces are dropped. Returns (kept, non_cylinder, out_of_range)."""
     kept, non_cyl, out_range = [], 0, 0
     for f in faces:
         g = safe(lambda f=f: f.geometry)
@@ -171,7 +171,7 @@ def _filter_by_diameter(faces, min_d, max_d):
         if r is None:
             non_cyl += 1
             continue
-        d = r * 20.0                          # cm radius -> mm diameter
+        d = (2.0 * r) / factor                # cm radius -> diameter in display units
         if (min_d is not None and d < min_d - 1e-6) or (max_d is not None and d > max_d + 1e-6):
             out_range += 1
             continue
@@ -206,7 +206,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
             min_diameter: float = None, max_diameter: float = None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
-            generate: bool = True) -> dict:
+            units: str = "mm", generate: bool = True) -> dict:
     """Select machining geometry on a CAM operation (+ optional heights), then optionally regenerate.
 
     operation: op name (cam_get(include=['operations'])). selection: chain/pocket/face/silhouette/holes.
@@ -258,8 +258,11 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if selection == _HOLES:
         faces = entities
         if min_diameter is not None or max_diameter is not None:
-            faces, non_cyl, out_range = _filter_by_diameter(entities, min_diameter, max_diameter)
-            diam_note = (f"diameter filter [{min_diameter},{max_diameter}]mm kept {len(faces)} "
+            factor = scale(units)
+            if factor is None:
+                return error(f"Unknown units '{units}'. Use mm, cm, or in.")
+            faces, non_cyl, out_range = _filter_by_diameter(entities, min_diameter, max_diameter, factor)
+            diam_note = (f"diameter filter [{min_diameter},{max_diameter}]{units} kept {len(faces)} "
                          f"(dropped {out_range} out-of-range, {non_cyl} non-cylinder).")
             if not faces:
                 return error("No cylinder faces left after the diameter filter. " + diam_note)
@@ -312,7 +315,7 @@ TOOL_DESCRIPTION = (
     "SELECT the machining geometry on a CAM operation using find_geometry handles, then (optionally) "
     "regenerate. 'selection': chain (seed edges -> Fusion walks a contour chain; is_open/reverted) / "
     "pocket (the pocket-floor face) / face / silhouette / holes (drill/bore/circular: cylinder faces, optionally "
-    "filtered by min_diameter/max_diameter in mm). 'handles' = find_geometry handles (edges for chain, "
+    "filtered by min_diameter/max_diameter in 'units'). 'handles' = find_geometry handles (edges for chain, "
     "faces otherwise). Optional top_mode/top_offset + bottom_mode/bottom_offset set heights (mode = "
     "e.g. 'from stock top'/'from contour'/'from hole bottom'; never set the resolved _value). WRITES; "
     "generation is async and gated internally. If has_toolpath comes back False the op produced no path "
@@ -329,8 +332,9 @@ tool = (
             "description": "find_geometry handles: edges for chain, faces for pocket/face/holes."})
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
-    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (mm)."})
-    .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (mm)."})
+    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units')."})
+    .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (in 'units')."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("top_mode", {"type": "string", "description": "top height mode, e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string", "description": "top height offset, e.g. '0 mm'."})
     .add_input_property("bottom_mode", {"type": "string", "description": "bottom height mode, e.g. 'from contour'."})

@@ -147,17 +147,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
                      f"triangles, {after_mesh_count} mesh bodies before and after) - the tool "
                      "meshes may not overlap the target.")
 
-    result_bodies = []
-    # Parametric: the feature carries the result .bodies.
-    if feature:
-        bodies = safe(lambda: feature.bodies)
-        if bodies is not None:
-            n = safe(lambda: bodies.count, 0) or 0
-            for i in range(n):
-                b = safe(lambda i=i: bodies.item(i))
-                if b is not None:
-                    result_bodies.append({"name": safe(lambda: b.name),
-        "handle": safe(lambda: b.entityToken)})
+    # Parametric: the feature carries the result .bodies (result_bodies() handles a None feature).
+    result_bodies = [{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
+                     for b in _common.result_bodies(feature)]
     # Non-parametric (feature None): the combine landed in the TARGET mesh in place - report it.
     if not result_bodies:
         result_bodies.append({"name": safe(lambda: tgt.name),

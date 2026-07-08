@@ -100,6 +100,22 @@ def all_components(d):
     return out or [root]
 
 
+def result_bodies(feature):
+    """The bodies a parametric feature produced, as a list of FRESH body references read straight off
+    the feature - the input references a caller passed in can go invalid once the feature rebuilds, so
+    read the result set back here. None-filtered; empty when the feature (or its bodies) is unreadable
+    or the feature is None. Callers project what they need per body (name / isSolid / area / faces /
+    entityToken)."""
+    fb = safe(lambda: feature.bodies)
+    n = int(safe(lambda: fb.count, 0) or 0) if fb else 0
+    out = []
+    for i in range(n):
+        b = safe(lambda i=i: fb.item(i))
+        if b is not None:
+            out.append(b)
+    return out
+
+
 def resolve_sketch(d, name):
     """Resolve a sketch BY NAME across the whole design - the ONE true resolver every by-name sketch
     tool should use. Search order: the ACTIVE edit component first (where model_create_component(
@@ -269,5 +285,6 @@ OPERATIONS = {
     "join": "JoinFeatureOperation",
     "cut": "CutFeatureOperation",
     "intersect": "IntersectFeatureOperation",
+    "new_component": "NewComponentFeatureOperation",
 }
 

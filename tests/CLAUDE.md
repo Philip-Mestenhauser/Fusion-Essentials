@@ -71,5 +71,5 @@ refusal is easy to write in a way that always passes.
 
 ## Regenerating docs
 
-`py -3 tests/gen_spec.py` rebuilds `tests/SPEC.md` from test names after adding/renaming tests;
+`py -3 tests/gen_spec.py` rebuilds `SPEC.md` from test names after adding/renaming tests;
 `--check` fails if it's stale (also enforced by `test_generated_docs_current.py`).

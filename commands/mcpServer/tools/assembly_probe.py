@@ -14,6 +14,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
+from . import _joints
 
 app = adsk.core.Application.get()
 
@@ -74,9 +75,13 @@ def _occ_world(occ, inv_k):
 
 
 def _health(obj):
-    """(healthy: bool, message) for an entity with a healthState; suppressed (3) counts as healthy."""
+    """(healthy: bool, message) for an entity with a healthState. Only WarningHealthState (1) and
+    ErrorHealthState (2) are unhealthy - the SAME classification as _common.timeline_health, so the
+    probe and design_get agree on one design. Healthy (0), Suppressed (3), and any other rollup state
+    count as healthy: a collapsed TimelineGroup (Fusion wraps one around an inserted component)
+    reports an 'unknown' state that is not a compute failure - flagging it is a false alarm."""
     hs = safe(lambda: obj.healthState)
-    if hs is None or hs == 0 or hs == 3:            # healthy, or intentionally suppressed
+    if hs != 1 and hs != 2:                         # only warning / error are real problems
         return True, None
     msg = safe(lambda: obj.errorOrWarningMessage) or ""
     # Fusion sometimes repeats the message; keep just the first sentence-ish chunk.
@@ -120,21 +125,19 @@ def handler(units: str = "mm", include_joints: bool = True,
         return error("No active design. Open or create a document first (see doc_new).")
     root = design.rootComponent
 
-    # joints first, so we can index them per occurrence. asBuiltJoints is a SEPARATE collection from
-    # joints (as-built joints mate parts where they already are); read both or they're invisible here.
+    # The FULL joint walk (_joints.all_joints): root AND every sub-component, joints AND asBuiltJoints
+    # (both are separate collections, and a joint internal to a sub-component lives there) - so a broken
+    # sub-component/as-built joint is counted, not invisible. Indexed per occurrence below.
     joints = []
     occ_joints = {}
     if include_joints:
-        for coll_name in ("joints", "asBuiltJoints"):
-            jc = safe(lambda cn=coll_name: getattr(root, cn))
-            for i in range(safe(lambda: jc.count, 0) if jc else 0):
-                j = jc.item(i)
-                rec = _joint_record(j)
-                joints.append(rec)
-                for key in ("occurrence_one", "occurrence_two"):
-                    nm = rec.get(key)
-                    if nm:
-                        occ_joints.setdefault(nm, []).append(rec["name"])
+        for j in _joints.all_joints(design):
+            rec = _joint_record(j)
+            joints.append(rec)
+            for key in ("occurrence_one", "occurrence_two"):
+                nm = rec.get(key)
+                if nm:
+                    occ_joints.setdefault(nm, []).append(rec["name"])
 
     # Cap the JOINTS array reported to the caller; occ_joints (the cross-index) was built from the
     # FULL walk above, and broken_joints/health below reads the FULL 'joints' list, so capping here

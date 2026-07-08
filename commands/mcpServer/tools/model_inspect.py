@@ -27,8 +27,6 @@ _SLICES = ("mass",)   # mesh stats are automatic for a mesh target (routed by ki
 # target accepts a handle (body/face/mesh) or a name (occurrence/component/body), or '' = whole design.
 _TARGET = _inputs.TargetRef("target")
 
-# physical properties: length unit -> cm factor (the API reports cm). Volume scales f^3, area f^2.
-_LEN_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
 _ACCURACY = {
     "low": adsk.fusion.CalculationAccuracy.LowCalculationAccuracy,
     "medium": adsk.fusion.CalculationAccuracy.MediumCalculationAccuracy,
@@ -217,7 +215,7 @@ def _full_props(pp, k):
 
 def _physical_properties(design, entity, desc, units, accuracy, per_body):
     """The full physical properties of a resolved entity."""
-    k = _LEN_TO_CM.get((units or "mm").strip().lower())
+    k = _common.scale(units)   # length unit -> cm (the API reports cm). Volume scales k^3, area k^2.
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     acc_key = (accuracy or "medium").strip().lower()

@@ -20,17 +20,8 @@ from . import _assert
 
 app = adsk.core.Application.get()
 
-_OFFSET_OPS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"new_component": "NewComponentFeatureOperation",
-}
-_THICKEN_OPS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"join": "JoinFeatureOperation",
-"cut": "CutFeatureOperation",
-}
+_OFFSET_OPS = ("new", "new_body", "new_component")
+_THICKEN_OPS = ("new", "new_body", "join", "cut")
 _EXTEND_TYPES = {
 "natural": "NaturalSurfaceExtendType",
 "tangent": "TangentSurfaceExtendType",
@@ -121,15 +112,9 @@ def _select_cells(trim_input, keep):
 
 def _result_bodies(feature):
     """(names, any_solid) for a feature's bodies - read name + isSolid LIVE per body."""
-    names = []
-    any_solid = False
-    bodies = safe(lambda: feature.bodies)
-    n = safe(lambda: bodies.count, 0) if bodies else 0
-    for i in range(n):
-        b = safe(lambda i=i: bodies.item(i))
-        names.append(safe(lambda: b.name))
-        if bool(safe(lambda: b.isSolid)):
-            any_solid = True
+    bodies = _common.result_bodies(feature)
+    names = [safe(lambda b=b: b.name) for b in bodies]
+    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in bodies)
     return names, any_solid
 
 
@@ -182,11 +167,10 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
     names, any_solid = _result_bodies(feature)
     # Commit proof: removing cells must shrink the surface's area; unchanged area = no cell removed.
     area_after = None
-    fb = safe(lambda: feature.bodies)
-    if fb is not None:
-        vals = [safe(lambda i=i: fb.item(i).area) for i in range(safe(lambda: fb.count, 0) or 0)]
-        vals = [v for v in vals if v]
-        area_after = sum(vals) if vals else None
+    vals = [safe(lambda b=b: b.area) for b in _common.result_bodies(feature)]
+    vals = [v for v in vals if v]
+    if vals:
+        area_after = sum(vals)
     if (cell_info and cell_info["cells_removed"] and area_before and area_after is not None
             and area_after >= area_before * (1 - 1e-6)):
         return error(f"Trim committed but the surface area did not decrease "
@@ -281,7 +265,7 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
         coll.add(f)
 
     dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
-    op = getattr(adsk.fusion.FeatureOperations, _OFFSET_OPS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         off_input = comp.features.offsetFeatures.createInput(coll, dist_val, op, bool(chaining))
         feature = comp.features.offsetFeatures.add(off_input)
@@ -330,7 +314,7 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         coll.add(f)
 
     thick_val = adsk.core.ValueInput.createByReal(float(thickness) * k)
-    op = getattr(adsk.fusion.FeatureOperations, _THICKEN_OPS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         thk_input = comp.features.thickenFeatures.createInput(coll, thick_val, bool(symmetric),
                                                               op, bool(chaining))

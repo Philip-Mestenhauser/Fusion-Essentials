@@ -14,13 +14,15 @@ import re
 
 import adsk.core
 import adsk.fusion
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives import registry
 from ._common import ok, error, safe
 from . import _common
+from . import _cam_common
+from . import _inputs
+from . import _joints
 
 app = adsk.core.Application.get()
 
@@ -58,11 +60,9 @@ def _drop_unregistered_pointers(pointers):
 
 
 def _design_mode(design):
-    """'parametric' | 'direct' | None - read from designType (ParametricDesignType == 1)."""
-    dt = safe(lambda: design.designType)
-    if dt is None:
-        return None
-    return "parametric" if int(dt) == 1 else "direct"
+    """'parametric' / 'direct' / 'unknown' via the shared _inputs.current_design_type - the one source
+    ModeGuard and every design-mode read share (a type that is neither reports 'unknown')."""
+    return _inputs.current_design_type(design)
 
 
 def _data_identity(doc):
@@ -211,23 +211,20 @@ def _timeline_rollup(design):
     return errors, warnings, suppressed, total
 
 
-def _joint_rollup(root):
-    """(joint_count, broken_joints[names]) - a joint is BROKEN only when it failed to COMPUTE:
-    healthState 1 (warning) or 2 (error). healthState 3 (SUPPRESSED) is intentional - the author parked
-    it (e.g. an alternate joint in a fixture template) - so it is NOT broken. Same signal assembly_probe
-    surfaces, rolled to a count + names here."""
+def _joint_rollup(design):
+    """(joint_count, broken_joints[names]) over the FULL joint walk (_joints.all_joints: root AND every
+    sub-component, joints AND asBuiltJoints) - a root-only count would hide a broken sub-component or
+    as-built joint. A joint is BROKEN only when it failed to COMPUTE: healthState 1 (warning) or 2
+    (error). healthState 3 (SUPPRESSED) is intentional - the author parked it (e.g. an alternate joint
+    in a fixture template) - so it is NOT broken. Same signal assembly_probe surfaces, rolled to a
+    count + names here."""
     broken = []
-    jc = safe(lambda: root.joints)
-    n = safe(lambda: jc.count, 0) if jc else 0
-    for i in range(n or 0):
-        j = safe(lambda i=i: jc.item(i))
-        if j is None:
-            continue
+    joints = _joints.all_joints(design)
+    for idx, j in enumerate(joints):
         hs = safe(lambda j=j: j.healthState)
         if hs in (1, 2):                            # warning/error only; 3=suppressed is intentional
-            nm = safe(lambda j=j: j.name) or f"#{i}"
-            broken.append(nm)
-    return (n or 0), broken
+            broken.append(safe(lambda j=j: j.name) or f"#{idx}")
+    return len(joints), broken
 
 
 def _grounded_count(root):
@@ -287,7 +284,7 @@ def _xref_health(doc):
 def _cam_summary(doc):
     """(has_cam, {setups, total_operations, ungenerated_operations}) WITHOUT switching to Manufacture.
     itemByProductType('CAMProductType') is None when the document has no CAM data."""
-    cam = safe(lambda: adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType')))
+    cam, _ = _cam_common.get_cam()
     if not cam:
         return False, None
     setups = safe(lambda: cam.setups)
@@ -363,7 +360,7 @@ def handler() -> dict:
     param_total = safe(lambda: design.userParameters.count, 0) or 0
 
     errors, warnings, suppressed, tl_total = _timeline_rollup(design)
-    joint_count, broken_joints = _joint_rollup(root)
+    joint_count, broken_joints = _joint_rollup(design)
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root)
     has_cam, cam = _cam_summary(doc)

@@ -179,8 +179,12 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error(f"Could not start extrude: {e}")
 
     # extent: 'to_object' (extrude up to a face handle) wins over a blind distance.
+    taper = float(taper_deg or 0.0)
     try:
         if use_to_object:
+            if taper:
+                return error("taper_deg is not supported with extent=to_object - a to-entity extrude "
+                             "takes no taper. Use a distance extent, or drop the taper.")
             face, ferr = _TO_OBJECT.resolve(to_object)
             if ferr:
                 return error(ferr)
@@ -188,8 +192,13 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             ext_input.setOneSideExtent(to_extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
         else:
             dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
-            taper = float(taper_deg or 0.0)
-            if taper and not symmetric:
+            if taper and symmetric:
+                # symmetric WITH taper: setDistanceExtent carries no taper, so setSymmetricExtent does.
+                # isFullLength=False -> 'distance' is the per-side half-length, matching setDistanceExtent
+                # (isSymmetric=True, distance), which live-measures as 'distance' on EACH side (2x total).
+                taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
+                ext_input.setSymmetricExtent(dist_val, False, taper_val)
+            elif taper:
                 # one-sided with taper: build a DistanceExtentDefinition + taper ValueInput
                 extent = adsk.fusion.DistanceExtentDefinition.create(dist_val)
                 taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
@@ -284,7 +293,7 @@ extrude_tool = (
     .add_input_property("symmetric", {"type": "boolean",
             "description": "Extrude both sides of the plane by 'distance' each (default false)."})
     .add_input_property("taper_deg", {"type": "number",
-            "description": "Optional draft/taper angle in degrees (one-sided only)."})
+            "description": "Optional draft/taper angle in degrees (one-sided or symmetric; not with to_object)."})
     .add_input_property("to_object", _TO_OBJECT.schema())
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property("as_surface", {"type": "boolean",

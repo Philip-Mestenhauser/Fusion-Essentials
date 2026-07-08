@@ -15,6 +15,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _data_common
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -63,13 +64,15 @@ def _resolve_appearance(design, name):
 
 
 def _resolve_datafile(design, name_or_id):
-    """A configured-design DataFile by lineage id (urn:...) or by name within the active project.
-    Patched in tests. The part MUST be in the same project as the assembly for a referenced insert."""
-    # an explicit lineage urn resolves directly
-    if isinstance(name_or_id, str) and name_or_id.startswith("urn:"):
-        df = safe(lambda: app.data.findFileById(name_or_id))
-        if df:
-            return df
+    """A configured-design DataFile by lineage id (a urn, or a Fusion web/share URL) or by name within
+    the active project. Patched in tests. The part MUST be in the same project as the assembly for a
+    referenced insert."""
+    # A urn or a pasted Fusion web URL: route through the shared candidate decoder, which also
+    # base64url-decodes the lineage segment a share link carries (a raw startswith('urn:') check
+    # silently failed on a pasted URL).
+    df, _resolved, _tried = _data_common._resolve_data_file(name_or_id)
+    if df:
+        return df
     # otherwise search the active project's files by name
     proj = safe(lambda: app.data.activeProject)
     folder = safe(lambda: proj.rootFolder) if proj else None
@@ -150,6 +153,7 @@ def _do_activate(design, table, name):
         avail = ", ".join(_row_names(table)) or "(none)"
         return error(f"No configuration matched '{target}'. Available: {avail}.")
     before = safe(lambda: table.activeRow.name)
+    err_before, _, _ = _common.timeline_health(design)
     if not safe(lambda: row.activate(), False):
         return error(f"Activating configuration '{target}' failed (activate() returned false).")
     safe(lambda: design.computeAll()) # rebuild so the switched geometry shows
@@ -158,10 +162,22 @@ def _do_activate(design, table, name):
     if now is not None and want_row is not None and now != want_row:
         return error(f"activate() returned true but the active configuration still reads '{now}' "
                      f"(expected '{want_row}') - the switch did not take.")
-    return ok({"activated": True, "requested": target, "previous": before,
-               "now_active": now,
-               "note": "Configuration switched + rebuilt. Pair with view_screenshot to view it, or "
-                       "design_get(include=['timeline']) / param_get to see what changed."})
+    # A different configuration can drive parameters that over/under-constrain the model, so the
+    # rebuilt geometry may carry NEW timeline errors even though the switch itself took. Surface them
+    # (the switch stands) rather than reporting a clean success over a broken model.
+    err_after, warn_after, _ = _common.timeline_health(design)
+    out = {"activated": True, "requested": target, "previous": before,
+           "now_active": now,
+           "note": "Configuration switched + rebuilt. Pair with view_screenshot to view it, or "
+                   "design_get(include=['timeline']) / param_get to see what changed."}
+    if len(err_after) > len(err_before):
+        out["timeline_warning"] = (
+            f"Switching to '{target}' left the timeline with a new error ({err_after}). This "
+            "configuration's values may over/under-constrain the model - the switch stands; inspect "
+            "with design_get(include=['timeline']).")
+    elif warn_after:
+        out["timeline_warnings"] = warn_after
+    return ok(out)
 
 
 def _do_add_configuration(table, name):

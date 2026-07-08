@@ -2,9 +2,10 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: insert a saved cloud document into the active design as a new component
-occurrence - the API equivalent of Insert > Insert Derive / Insert into Current Design. An
-external reference (isReferencedComponent=True) requires source and host in the SAME project -
-Fusion enforces it.
+occurrence - the API equivalent of Insert > Insert into Current Design. It comes in as an external
+reference that stays linked to the source and tracks its version (never a severed embedded copy).
+Referencing between two SAVED documents requires a shared project (Fusion refuses it otherwise); an
+unsaved host is fine.
 """
 
 import adsk.core
@@ -13,7 +14,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe
+from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _data_common
@@ -28,8 +29,7 @@ _REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
         description="Existing occurrence to delete first (its joints go with it).")
 
 
-_AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
-def handler(document_id: str = "", into_component: str = "", as_reference: bool = True,
+def handler(document_id: str = "", into_component: str = "",
             remove_existing: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
     """Insert a saved cloud document into the active design as an occurrence; see TOOL_DESCRIPTION."""
@@ -73,13 +73,13 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
     "false). It may be referenced/locked.")
 
     # Build the placement transform (default identity; position/orient if requested).
-    k = UNIT_TO_CM.get((units or "mm").strip().lower())
+    k = _common.scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     import math
     transform = adsk.core.Matrix3D.create()
     if rotate_deg:
-        axis_vec = _AXES.get((rotate_axis or "z").strip().lower())
+        axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
         origin = adsk.core.Point3D.create(float(x) * k, float(y) * k, float(z) * k)
@@ -89,17 +89,22 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
         transform.translation = adsk.core.Vector3D.create(float(x) * k, float(y) * k, float(z) * k)
 
     try:
-        new_occ = comp.occurrences.addByInsert(data_file, transform, bool(as_reference))
+        new_occ = comp.occurrences.addByInsert(data_file, transform, True)
     except Exception as e:
-        hint = ("(Inserting as an external reference requires the document to be in the SAME "
-    "PROJECT as the host design - save it into this project first, or pass "
-    "as_reference=false to embed it.)") if as_reference else ""
-        return error(f"Insert failed: {e}. {hint}")
+        return error(f"Insert failed: {e}. (An external reference requires the source and host in "
+    "the SAME PROJECT - save the host into the source's project, then retry.)")
     if not new_occ:
         return error("addByInsert returned nothing (the insert did not produce an occurrence).")
     if safe(lambda: new_occ.isValid) is False:
         return error("addByInsert returned an occurrence but it reads isValid=false - the insert "
                      "did not land.")
+    # Verify the associative link actually formed - this tool only ever inserts a live reference,
+    # so an occurrence that came in embedded (isReferencedComponent=false) is a silent failure.
+    is_ref = safe(lambda: new_occ.isReferencedComponent)
+    if is_ref is False:
+        return error("Insert landed but the occurrence is NOT an external reference "
+                     "(isReferencedComponent=false) - the associative link did not form. Confirm "
+                     "the source and host share a project, then retry.")
 
     return ok({
         "inserted": True,
@@ -107,7 +112,7 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
         "document_id": resolved,
         "into_component": comp_desc,
         "new_occurrence_name": safe(lambda: new_occ.name),
-        "is_reference": safe(lambda: new_occ.isReferencedComponent),
+        "is_reference": is_ref,
         "removed_occurrence": removed,
         "placed_at": ({"x": x, "y": y, "z": z, "units": units} if (x or y or z) else "origin"),
         "rotate_deg": float(rotate_deg or 0.0),
@@ -119,14 +124,15 @@ def handler(document_id: str = "", into_component: str = "", as_reference: bool 
 
 TOOL_DESCRIPTION = (
     "Insert a SAVED cloud document into the active design as a new component occurrence - the API "
-    "equivalent of Insert into Current Design. 'document_id' is the lineage URN (or web URL) of "
-    "the document to insert. 'into_component' is the occurrence whose component to insert into "
-    "(default: the root component). 'as_reference' inserts it as an external reference (default "
-    "true - requires the document to be in the SAME PROJECT as the host) or embedded (false). "
-    "Optional 'remove_existing' = an existing occurrence to delete first (its joints go with it). "
-    "The new occurrence is placed at the identity transform - position it afterward "
-    "with joint_create or a transform edit. WRITES to the design. Generic: this just creates "
-    "the occurrence; how you use it (fixtures, template model swap, layouts) is up to you."
+    "equivalent of Insert into Current Design. It comes in as an external reference that stays "
+    "linked to the source and tracks its version (never a severed embedded copy). 'document_id' is "
+    "the lineage URN (or web URL) of the document to insert. 'into_component' is the occurrence "
+    "whose component to insert into (default: the root component). Referencing between two SAVED "
+    "documents requires a shared project (an unsaved host references fine). Optional "
+    "'remove_existing' = an existing occurrence to delete first (its joints go with it). Place it "
+    "with x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine later with a "
+    "joint. WRITES to the design. Generic: this just creates the occurrence; how you use it "
+    "(fixtures, template model swap, layouts) is up to you."
 )
 
 tool = (
@@ -137,8 +143,6 @@ tool = (
         input_param_description="Lineage URN (or web URL) of the saved cloud document to insert.",
     )
     .add_input_property(*_INTO_COMPONENT.as_property())
-    .add_input_property("as_reference", {"type": "boolean",
-            "description": "Insert as external reference (default true; requires same project) or embedded (false)."})
     .add_input_property(*_REMOVE_EXISTING.as_property())
     .add_input_property("x", {"type": "number", "description": "Placement X in 'units' (default 0)."})
     .add_input_property("y", {"type": "number", "description": "Placement Y in 'units' (default 0)."})

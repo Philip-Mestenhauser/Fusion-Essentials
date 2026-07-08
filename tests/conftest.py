@@ -9,15 +9,14 @@ through ``adsk.fusion``. To unit-test their pure logic outside Fusion we:
      tool is imported (so the module-top ``Application.get()`` succeeds).
   2. Load a single tool module in isolation — without running
      ``commands/__init__.py`` (which builds Fusion UI panels) or
-     ``tools/__init__.py`` (which imports all ~30 tools, most needing adsk).
+     ``tools/__init__.py`` (which imports every tool module, most needing adsk).
 
 ``load_tool("model_inspect")`` does both and returns the module so a
 test can call its ``handler(...)`` and private helpers directly.
 
 The mocks here are deliberately small: they implement only what a tool actually
 touches. Extend them as you add tests for more tools — that is the intended
-workflow, mirroring the bootstrap kit's ``mock_adsk.py`` philosophy, adapted to
-this project's package layout (no ``<prefix>_`` packages, no webapp).
+workflow.
 """
 
 import importlib.util
@@ -59,10 +58,8 @@ def install_mock_adsk():
     being a no-op when a mock is already installed. A real re-install here would
     replace sys.modules['adsk'/'adsk.fusion'/...] with BRAND NEW objects; any module
     already loaded (e.g. _inputs.py, cached tool modules) keeps its OLD reference,
-    so a later isinstance/.cast check compares against the wrong generation of
-    mock and fails in a way that depends on collection order (observed live: any
-    session that collects test_generators.py - which imports gen_manifest AND
-    gen_wiring - alongside other tool tests broke isinstance checks throughout).
+    so a later isinstance/.cast check would compare against the wrong generation
+    of mock and fail in a way that depends on collection order.
     """
     existing = sys.modules.get("adsk")
     if (isinstance(existing, types.ModuleType)
@@ -86,7 +83,7 @@ def install_mock_adsk():
     fusion.Design = Mock()
     fusion.Design.cast = Mock(side_effect=lambda x: x)
 
-    # adsk.cam is needed by the CAM tools (cam_info, cam_templates, generate_toolpaths).
+    # adsk.cam is needed by the CAM tools.
     cam = Mock()
     # Tools cast raw collection items with adsk.cam.Operation.cast(op) and skip
     # anything that casts to None. A bare Mock().cast returns a truthy Mock, which
@@ -138,12 +135,11 @@ def load_tool(module_name):
     full_name = f"mcpServer.tools.{module_name}"
     # Reuse an already-loaded module instead of re-execing it into a NEW object. This is essential for
     # the shared substrate (_common/_inputs): tools do `from . import _common`, binding whatever
-    # _common object is in sys.modules at load time. If load_tool re-execs _common later, that creates
-    # a SECOND _common — and a tool loaded earlier keeps pointing at the first, while the conftest
-    # snapshot/restore (and a later test's patch) act on the second. The two diverge and the handler
-    # reads a stale _common.app -> _common.design() returns None mid-suite ("No active design"). One
-    # canonical module per name keeps the seam single-identity. Tests re-patch app/Design.cast in their
-    # own _install, so reusing the module object is safe.
+    # _common object is in sys.modules at load time. Re-execing _common would create a SECOND _common —
+    # a tool loaded earlier keeps pointing at the first while the conftest snapshot/restore (and a
+    # later test's patch) act on the second, so a patch or restore made through one is invisible
+    # through the other. One canonical module per name keeps the seam single-identity; each test wires
+    # its own per-test state onto that one object (install()/monkeypatch), so reusing it is safe.
     if full_name in sys.modules:
         return sys.modules[full_name]
     spec = importlib.util.spec_from_file_location(
@@ -242,7 +238,7 @@ def load_mcp_server():
 # module object per tool for the whole session, such a patch LEAKS into the next test that uses the
 # same module unless restored — producing order-dependent failures (the handler builds onto a stale
 # fake). So the fixture restores these seam attrs on EVERY loaded tool module after each test, not
-# just the substrate few. (`_design` added because a handful of tools bind a local `_design`.)
+# just the substrate few. (`_design` covers the tools that bind a local `_design`.)
 _PRISTINE_SEAMS = {}
 _SEAM_ATTRS = ("design", "target_component", "_design", "app", "_data")
 
@@ -307,22 +303,18 @@ _PRISTINE_ADSK = _snapshot_adsk_dicts()
 def _restore_shared_adsk_mocks():
     """Snapshot-and-restore the mutable ``adsk`` mock attributes around every test.
 
-    Several tool tests (inspect_view, section_view, show_toolpath, parameters,
-    extrude, patterns) install per-test behaviour by REASSIGNING shared mock
-    callables — ``adsk.fusion.Design.cast``, ``adsk.cam.CAM.cast``/
-    ``Operation.cast``, ``adsk.core.Point3D.create``/``Vector3D.create``/
-    ``ValueInput.createByString``/``createByReal``/``ObjectCollection.create``.
-    Because these live on module-level Mocks shared by the whole session, a
-    reassignment would otherwise LEAK into later tests (e.g. clobbering
-    ``Design.cast``'s pass-through so measure_bounding_box sees no design). This
-    autouse fixture records the originals before each test and puts them back
-    after, keeping tests order-independent without per-file teardown.
+    Tool tests install per-test behaviour by REASSIGNING attributes on the shared
+    mocks — a cast/create callable (``adsk.fusion.Design.cast``,
+    ``adsk.core.ValueInput.createByReal``), a fake type class
+    (``adsk.fusion.BRepBody``), an enum member (``DesignTypes.*``). Because these
+    live on module-level Mocks shared by the whole session, a reassignment would
+    otherwise LEAK into later tests (e.g. a clobbered ``Design.cast`` pass-through
+    makes an unrelated tool see no design at all). This autouse fixture records
+    the originals before each test and puts them back after, keeping tests
+    order-independent without per-file teardown.
     """
     # The whole adsk.core/fusion/cam mock namespace is snapshot/restored from _PRISTINE_ADSK (captured
-    # once at install). That covers BOTH the reassigned callables (Design.cast, Point3D.create,
-    # ValueInput.create*, ObjectCollection.create, …) AND the fake TYPE CLASSES / enum members tests
-    # assign onto the shared mocks (adsk.fusion.BRepBody/MeshBody/BaseFeature, DesignTypes.*, …) —
-    # the latter were the source of order-dependent isinstance/enum failures.
+    # once at install): test-assigned attributes are removed, reassigned ones reverted.
     # Tools that share _common.design()/target_component()/app (instead of a local _design()) are
     # tested by patching those on the _common module (the seam _inputs.py uses). Snapshot them at SETUP
     # and restore after, so a test's patch can't leak into a later test. _common is loaded lazily by
@@ -510,15 +502,13 @@ class BRepEdge:
 
 # ── shared fake-design builder + dual-seam install (the test-plumbing convention) ───────────────────
 #
-# Why this exists: nearly every test_<tool>.py re-implemented the SAME wiring — build a FakeComp/
-# FakeDesign, then patch the design onto BOTH seams a tool reads it through:
-#   • the tool's own  `mod._common.design()` / `target_component()`  (and `mod.app`), and
+# A tool reads the active design through TWO seams:
+#   • its own  `mod._common.design()` / `target_component()`  (and `mod.app`), and
 #   • the input-kinds' `mod._inputs._common.design()` / `target_component()`  (BodyRef/PlaneRef/… use
 #     _inputs, which has its OWN bound _common reference).
-# Forgetting the _inputs seam is a silent trap: the handler resolves but the INPUT kind resolves
-# against the wrong (or stale) design, so the test passes while testing the wrong thing. Centralising
-# it here makes "patch both seams" structural instead of a remembered rule, and removes the per-file
-# `adsk.fusion.<Type> = LocalClass` / `ObjectCollection.create` reassignments that leaked across files.
+# Patching only the first is a silent trap: the handler resolves but the INPUT kind resolves against
+# the wrong (or stale) design, so the test passes while testing the wrong thing. install() patches
+# BOTH seams to the same design, making "patch both seams" structural instead of a remembered rule.
 
 class MakeComp:
     """A component with the standard Fusion collection protocol (count/item/itemByName).
@@ -567,7 +557,7 @@ def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_component
 
 
 def install(mod, design, *, cast_design=True, object_collection=True):
-    """Wire `design` into a tool module under both seams, the way every _install() did by hand.
+    """Wire `design` into a tool module under both seams (see the dual-seam note above).
 
     Patches: mod.app (+ mod._common.app), and — when present — mod._inputs._common.design /
     target_component, plus adsk.fusion.Design.cast (pass-through for our design) and

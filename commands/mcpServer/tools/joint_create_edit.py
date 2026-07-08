@@ -17,7 +17,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe
+from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _assert
@@ -460,7 +460,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         if slide_err:
             return error(slide_err)
 
-    scale = UNIT_TO_CM.get((units or "mm").strip().lower())
+    scale = _common.scale(units)
     if scale is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
@@ -591,7 +591,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         return error(f"Unknown world_axis '{world_axis}'. Valid: x, y, z.")
 
     # Validate units (used by offset).
-    if (offset is not None) and (UNIT_TO_CM.get((units or "mm").strip().lower()) is None):
+    if (offset is not None) and (_common.scale(units) is None):
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
     # Decide what's being changed; refuse a no-op so we never roll the timeline for nothing.
@@ -697,7 +697,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             jm = safe(lambda: joint.jointMotion)
             if jm is None:
                 return error("This joint has no editable motion (rigid/inferred has no limits).")
-            lim_scale = UNIT_TO_CM.get((units or "mm").strip().lower(), 0.1)
+            lim_scale = _common.scale(units) or 0.1
             lim_changed, lim_err = _apply_limits(
                 jm, min_deg=min_deg, max_deg=max_deg, rest_deg=rest_deg,
                 min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=lim_scale)

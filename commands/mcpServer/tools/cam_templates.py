@@ -12,7 +12,8 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_setup
+from . import _inputs
 
 app = adsk.core.Application.get()
 
@@ -24,9 +25,13 @@ _LOCATIONS = {
     "samples": 3,
     "external": 4,
     "fusion": 5,
-    "fusion360": 5,
     "hub": 6,
 }
+
+# The wire-validated selector for a library location: its enum carries the legal names, so an unknown
+# location fails at the schema instead of the handler re-listing them (see honesty contract).
+_LOCATION = _inputs.Choice("location", options=list(_LOCATIONS), default="cloud",
+                           description="Which template library to read/write.")
 
 _MAX_NODES = 1500
 
@@ -69,10 +74,10 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
         if not start_url:
             return error(f"Invalid library URL: '{url}'.")
     else:
-        loc = _LOCATIONS.get(location.strip().lower())
-        if loc is None:
-            return error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
-        start_url = safe(lambda: lib.urlByLocation(loc))
+        loc_key, lerr = _LOCATION.resolve(location)
+        if lerr:
+            return error(lerr)
+        start_url = safe(lambda: lib.urlByLocation(_LOCATIONS[loc_key]))
         if not start_url:
             return error(f"Could not resolve the '{location}' library root "
     "(it may not be configured/available).")
@@ -167,13 +172,14 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
 # cam_apply_template
 # ---------------------------------------------------------------------------
 
-# AutomaticGenerationModes: ForceGeneration=0, SkipGeneration=1, UserPreference=2.
+# AutomaticGenerationModes member per friendly mode. The _GEN Choice validates against these keys,
+# so an unrecognized 'generate' is a hard error, not a silent create-ops-generate-nothing.
 _GEN_MODES = {
 "skip": "SkipGeneration",            # default: create ops, don't generate toolpaths
-"generate": "ForceGeneration",       # create AND generate toolpaths
-"force": "ForceGeneration",
-"user_preference": "UserPreference",
+"generate": "ForceGeneration",       # create AND generate the toolpaths
 }
+_GEN = _inputs.Choice("generate", options=list(_GEN_MODES), default="skip",
+                      description="Toolpath generation after the operations are created.")
 
 
 def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
@@ -182,13 +188,21 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     """Apply a CAM template to a setup, recreating its operations there. WRITES.
 
     Identify the template by 'template_url' (precise) or 'template_name' (searched
-    within 'location'). 'generate' controls toolpath generation (skip/regenerate/
-    generate_new); default 'skip' just creates the operations.
+    within 'location'). 'generate' is skip (default - just create the operations) or
+    generate (also compute the toolpaths).
     """
     if not (setup or "").strip():
         return error("Provide 'setup' - the name of the setup to apply the template to.")
     if not (template_url.strip() or template_name.strip()):
         return error("Provide 'template_url' or 'template_name'.")
+    # Validate the enums up front (fail fast, before any CAM work) - an unknown 'generate' must error,
+    # not silently skip generation.
+    gen_key, gerr = _GEN.resolve(generate)
+    if gerr:
+        return error(gerr)
+    loc_key, lerr = _LOCATION.resolve(location)
+    if lerr:
+        return error(lerr)
 
     cam, err = get_cam()
     if err:
@@ -198,18 +212,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         return error(err)
 
     # Find the target setup.
-    target_setup = None
-    available_setups = []
-    try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            nm = safe(lambda: s.name)
-            available_setups.append(nm)
-            if (nm or "").lower() == setup.strip().lower():
-                target_setup = s
-                break
-    except Exception as e:
-        return error(f"Could not read setups: {e}")
+    target_setup, available_setups = find_setup(cam, setup)
     if not target_setup:
         return error(f"Setup not found: '{setup}'. "
                       f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
@@ -224,9 +227,9 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         if not template:
             return error(f"No template found at URL: {template_url}")
     else:
-        template, where = _find_template_by_name(lib, location, template_name.strip())
+        template, where = _find_template_by_name(lib, loc_key, template_name.strip())
         if not template:
-            return error(f"Template named '{template_name}' not found under '{location}'. "
+            return error(f"Template named '{template_name}' not found under '{loc_key}'. "
                           + (where or ""))
 
     if not safe(lambda: template.isValidTemplate, True):
@@ -237,7 +240,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     try:
         ti = adsk.cam.CreateFromCAMTemplateInput.create()
         ti.camTemplate = template
-        mode_name = _GEN_MODES.get((generate or "skip").lower(), "SkipGeneration")
+        mode_name = _GEN_MODES[gen_key]
         mode_val = safe(lambda: getattr(adsk.cam.AutomaticGenerationModes, mode_name))
         if mode_val is not None:
             ti.mode = mode_val
@@ -261,7 +264,7 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         "applied": True,
         "template": safe(lambda: template.name),
         "setup": safe(lambda: target_setup.name),
-        "generation_mode": (generate or "skip"),
+        "generation_mode": gen_key,
         "created_count": len(created_names),
         "created_operations": created_names,
         "operations_added": ((ops_after - ops_before)
@@ -364,18 +367,7 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         return error(err)
 
     # Find the setup.
-    target_setup = None
-    available_setups = []
-    try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            nm = safe(lambda: s.name)
-            available_setups.append(nm)
-            if (nm or "").lower() == setup.strip().lower():
-                target_setup = s
-                break
-    except Exception as e:
-        return error(f"Could not read setups: {e}")
+    target_setup, available_setups = find_setup(cam, setup)
     if not target_setup:
         return error(f"Setup not found: '{setup}'. "
                       f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
@@ -429,10 +421,10 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     "not be templatable together).")
 
     # Resolve the destination FOLDER url (importTemplate wants a folder url).
-    loc = _LOCATIONS.get(location.strip().lower())
-    if loc is None:
-        return error(f"Unknown location '{location}'. Valid: {', '.join(_LOCATIONS)}")
-    root = safe(lambda: lib.urlByLocation(loc))
+    loc_key, lerr = _LOCATION.resolve(location)
+    if lerr:
+        return error(lerr)
+    root = safe(lambda: lib.urlByLocation(_LOCATIONS[loc_key]))
     if not root:
         return error(f"Could not resolve the '{location}' library root.")
 
@@ -505,8 +497,8 @@ _apply_tool = (
     )
     .add_input_property("template_url", {"type": "string", "description": "Template asset URL (from cam_get(include=['templates'])."})
     .add_input_property("template_name", {"type": "string", "description": "Template name (searched under location)."})
-    .add_input_property("location", {"type": "string", "description": "Library location to search by name (default cloud)."})
-    .add_input_property("generate", {"type": "string", "description": "skip (default) | generate."})
+    .add_input_property(*_LOCATION.as_property())
+    .add_input_property(*_GEN.as_property())
 )
 apply_template_to_setup_item = Item.create_tool_item(
     tool=_apply_tool, write="write", handler=apply_template_to_setup_handler, run_on_main_thread=True
@@ -527,7 +519,7 @@ _save_tool = (
     )
     .add_input_property("operations", {"type": "string", "description": "Comma-separated operation names to bundle."})
     .add_input_property("setup", {"type": "string", "description": "Setup containing the operations."})
-    .add_input_property("location", {"type": "string", "description": "Library location (default cloud): cloud, local, ..."})
+    .add_input_property(*_LOCATION.as_property())
     .add_input_property("folder", {"type": "string", "description": "Top-level destination folder name (created if missing)."})
     .add_input_property("description", {"type": "string", "description": "Optional template description."})
 )

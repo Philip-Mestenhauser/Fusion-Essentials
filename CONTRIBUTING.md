@@ -31,7 +31,7 @@ blind spots.
 - **Progressive disclosure — orient broadly, then drill cheaply.** An agent arrives at a document blind,
   and reading an entire large design does not scale. So the posture is: one cheap broad read first
   (`workspace_orient` — what's open, its health, whether CAM exists, the major pieces, and *pointers* to
-  the right narrow tool), then scoped refinement on demand (`design_get_tree(component=…)`,
+  the right narrow tool), then scoped refinement on demand (`design_get` scoped to a component,
   `find_geometry(target=…)`, `assembly_probe`). A new read tool should fit this shape: cheap and broad,
   or scoped and deep — and say which.
 
@@ -44,18 +44,18 @@ blind spots.
 
 - **Return the IDs the next call needs — unprompted.** A tool that creates or identifies something
   should put its stable id in the result even when not asked: `find_geometry` returns a handle,
-  `doc_get_active_id` a data-model URN, `assembly_probe` exact occurrence names, `model_measure_bbox`
+  `doc_get` a data-model URN, `assembly_probe` exact occurrence names, `model_inspect`
   measured extents. This is what makes a chain deterministic — the next target is an id the previous step
   *minted*, not a name the agent hopes resolves.
 
 - **The code guides correct use; the description carries the contract.** Because the agent only sees the
   schema, dependencies and failure modes must be legible up front. Two mechanisms in
-  `commands/mcpServer/tools/_inputs.py` do this in code rather than prose: a typed **input kind**
+  `_inputs.py` do this in code rather than prose: a typed **input kind**
   (`GeometryHandle`/`BodyRef`/`PlaneRef`/`AxisRef`/`Choice`/…) bundles schema + resolution + validation +
   an auto-generated contract line, so an input that needs a face can *only* take a handle, never a bare
   coordinate; and a **`ModeGuard`** derives its error from the requirement, so a precondition rejection
   can't point the wrong way. Prefer these over hand-rolling a `name: str` — that is how blind spots get
-  reintroduced. The **producer-side mirror** is `tools/_outputs.py`: a tool declares `RETURNS = [...]`
+  reintroduced. The **producer-side mirror** is `_outputs.py`: a tool declares `RETURNS = [...]`
   of typed **output kinds** (`ReturnsHandle`/`ReturnsUrn`/`ReturnsName`/`ReturnsValue`), which generate the
   description's `PRODUCES:` line AND back a test that asserts the handler actually mints the declared key —
   so a renamed id field fails CI instead of silently lying to every consumer that reads it. A mutation
@@ -67,12 +67,12 @@ blind spots.
   before committing it as a tool. A team can keep their own tools and skills on a fork — version
   controlled together, hot-reloadable, gated per-tool where the blast radius warrants.
 
-**The layering** (innermost first): the response/value substrate (`tools/_common.py` — the `ok`/`error`
+**The layering** (innermost first): the response/value substrate (`_common.py` — the `ok`/`error`
 contract, `safe`, the design/component/sketch resolvers, unit scaling); the typed input/output kinds
-(`tools/_inputs.py` + `tools/_outputs.py`); the MCP primitives (`mcp_primitives/` — the `Tool` builder, the `Item` that binds
+(`_inputs.py` + `_outputs.py`); the MCP primitives (`mcp_primitives/` — the `Tool` builder, the `Item` that binds
 a primitive to its handler + execution metadata, the registry); and the tool module itself
 (`tools/<domain_verb>.py`), which holds only domain logic. Read any one tool file (e.g.
-`tools/workspace_orient.py` or `tools/find_geometry.py`) to see the whole pattern in one place.
+`workspace_orient.py` or `find_geometry.py`) to see the whole pattern in one place.
 
 > Most of these conventions are now *enforced* rather than merely encouraged: write-status is a structured
 > annotation (linted), enum inputs are typed `Choice`/`UnitField` kinds, occurrence/geometry references are
@@ -113,11 +113,11 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 ### Layout
 
-- `server/mcp_server.py` — HTTP + JSON-RPC server, **Streamable HTTP** transport (2025-03-26).
-- `server/task_manager.py` — marshals work onto Fusion's **main thread** via a custom event.
+- `mcp_server.py` (in `server/`) — HTTP + JSON-RPC server, **Streamable HTTP** transport (2025-03-26).
+- `task_manager.py` (in `server/`) — marshals work onto Fusion's **main thread** via a custom event.
 - `mcp_primitives/` — Tool / Item schema classes plus the registry.
 - `tools/` — one module per tool family slice, named `<family>_<verb>.py` (a few grandfathered
-  modules register several verbs; `tests/MANIFEST.md` is the authoritative per-tool list). Each
+  modules register several verbs; `MANIFEST.md` is the authoritative per-tool list). Each
   has a `handler(...)` (the logic; its parameters are the tool inputs), a `TOOL_DESCRIPTION`, a
   `tool = Tool.create_...`, an `item = Item.create_tool_item(...)`, and a `register_tool()`.
   Modules are **auto-discovered** by a `pkgutil` sweep — drop the file in, no registry edits.
@@ -139,11 +139,9 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 - The server binds **`127.0.0.1:27182`**, path **`/mcp`** — Fusion's own well-known MCP port.
   Whoever binds first wins; if Fusion's built-in MCP server holds it, the add-in detects this
   and warns the user.
-- `sys_get_session` returns the live document; `data_list_projects` / `data_list_files` (in
-  `tools/data_read.py`, with shared helpers in `tools/_data_common.py`) read the Data API
-  (`app.data.dataProjects`, `rootFolder`); `doc_open` opens by UID (`app.data.findFileById`);
-  `view_screenshot` captures the viewport (and restores the camera); `sys_execute_script` runs
-  arbitrary Python (gated, off by default); `sys_reload_addin` restarts the add-in.
+- What each tool does, and the exact `adsk.*` it calls, is not restated here: a tool's own
+  `description` is its contract, and `sys_get_api_doc` searches the installed API's real signatures.
+  This section keeps only the behaviors NOT visible from a description or the code.
 - `doc_open` is **async** — `documents.open()` returns before the document is active.
 - `sys_execute_script` uses Fusion's `Python.Run` text command. It is **Windows-tested only**;
   the temp-path handling normalizes `\`→`/` for cross-platform use but is **unverified on
@@ -174,7 +172,7 @@ server in your client (`/mcp` in Claude Code) to refresh, or drive it over raw H
 
 POST JSON-RPC to `http://127.0.0.1:27182/mcp` with header
 `Accept: application/json, text/event-stream`. Example tool call:
-`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"data_list_projects","arguments":{}}}`.
+`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"data_get","arguments":{}}}`.
 Diagnostics: `GET /health`, `GET /tools`.
 
 ### Adding a new tool (the pattern)
@@ -185,7 +183,7 @@ Diagnostics: `GET /health`, `GET /tools`.
    `tools/__init__.py` or `entry.py`. `_`-prefixed modules are treated as shared helpers and
    skipped. (`test_tool_autodiscovery.py` enforces this contract.)
 2. Resolve any input that refers to existing geometry/occurrences/bodies through a typed kind in
-   `tools/_inputs.py` (`GeometryHandle`/`BodyRef`/`OccurrenceRef`/`PlaneRef`/`AxisRef`/`Choice`/…)
+   `_inputs.py` (`GeometryHandle`/`BodyRef`/`OccurrenceRef`/`PlaneRef`/`AxisRef`/`Choice`/…)
    rather than a hand-rolled `name: str` — the kinds refuse ambiguity and self-heal stale handles.
 3. Ground every `adsk.*` call in the live API before writing it — the Fusion API is niche and
    easy to get wrong. `sys_get_api_doc` searches the installed version's real signatures and
@@ -194,7 +192,7 @@ Diagnostics: `GET /health`, `GET /tools`.
 
 ### Auditing for dead code
 
-Unreferenced symbols and unused imports are enforced continuously by `tests/test_dead_code.py`
+Unreferenced symbols and unused imports are enforced continuously by `test_dead_code.py`
 (name-based, so a dead symbol masked by a live same-named one elsewhere is not flagged - unique
 names are what make deadness statically provable). UNREACHABLE BRANCHES need runtime evidence
 instead: generate candidates with branch coverage over the suite -
@@ -213,7 +211,7 @@ guidance pointing at tools that do not exist).
 For CAN'T-FAIL tests (assertions no code change would ever flip), the periodic detector is
 mutation testing: `py -3 -m pip install mutmut`, point it at one tool module at a time, and
 treat every surviving mutant as a missing assertion. Too slow for CI; the continuous floor is
-`tests/test_assert_strength.py` (a test may not rely on a bare isError flag alone).
+`test_assert_strength.py` (a test may not rely on a bare isError flag alone).
 
 ### Testing a tool
 

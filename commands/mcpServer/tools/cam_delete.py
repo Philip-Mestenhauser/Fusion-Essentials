@@ -61,7 +61,8 @@ def handler(entity: str = "") -> dict:
         return error(cerr)
 
     named = _all_named(cam)
-    matches = [(n, o) for (n, o) in named if n == want]
+    # case-insensitive, matching _cam_common.find_setup/find_operation and the other CAM tools.
+    matches = [(n, o) for (n, o) in named if (n or "").lower() == want.lower()]
     if not matches:
         available = [n for (n, o) in named if n]
         return error(f"No CAM entity named '{want}'. Available: "

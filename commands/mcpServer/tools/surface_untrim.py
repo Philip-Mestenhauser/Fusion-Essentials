@@ -112,12 +112,7 @@ def untrim_handler(faces=None, loop_type="all", extension=None, units="mm") -> d
             created.append(fc)
     area_after = _sum_area(created)
 
-    result_bodies = []
-    fb = safe(lambda: feature.bodies)
-    nb = int(safe(lambda: fb.count, 0) or 0) if fb else 0
-    for i in range(nb):
-        b = safe(lambda i=i: fb.item(i))
-        result_bodies.append(safe(lambda: b.name))
+    result_bodies = [safe(lambda b=b: b.name) for b in _common.result_bodies(feature)]
 
     grew = bool(created and area_after > area_before + 1e-9)
     payload = {

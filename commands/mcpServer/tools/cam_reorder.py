@@ -47,7 +47,7 @@ def _all_named(cam):
 
 def _resolve(named, name):
     """(object, None) for a unique name; (None, error) if missing or ambiguous."""
-    matches = [o for (n, o) in named if n == name]
+    matches = [o for (n, o) in named if (n or "").lower() == (name or "").lower()]
     if not matches:
         avail = [n for (n, o) in named if n]
         return None, (f"No CAM operation/folder/pattern named '{name}'. Available: "

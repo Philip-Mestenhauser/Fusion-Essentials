@@ -36,7 +36,10 @@ def _walk_operations(container, out):
 def _find_operation(cam, name):
     """Find an operation by name anywhere in the CAM tree, including inside folders/patterns.
     Returns (op, available_names)."""
-    want = (name or "").strip()
+    # Case-INSENSITIVE exact match, matching _cam_common.find_operation and the other CAM tools (this
+    # resolver stays folder-recursive - the fakes model a folder-nested op only via .folders/.patterns,
+    # not flattened into allOperations the way the live API does).
+    want = (name or "").strip().lower()
     available = []
     for si in range(safe(lambda: cam.setups.count, 0) or 0):
         setup = cam.setups.item(si)
@@ -50,7 +53,7 @@ def _find_operation(cam, name):
                 nested.append((safe(lambda op=op: op.name) or "", op))
         for nm, op in nested:
             available.append(nm)
-            if nm == want:
+            if (nm or "").lower() == want:
                 return op, available
     return None, available
 

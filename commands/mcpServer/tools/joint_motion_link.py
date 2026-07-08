@@ -14,20 +14,16 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
-from ._joints import find_joint
+from ._joints import find_joint, all_joints
 
 app = adsk.core.Application.get()
 
 
 def _joint_names(design):
-    """This design's root-component joint names, for a resolve-failure error message."""
-    names = []
-    joints = safe(lambda: design.rootComponent.joints)
-    for i in range(safe(lambda: joints.count, 0) or 0):
-        nm = safe(lambda i=i: joints.item(i).name)
-        if nm:
-            names.append(nm)
-    return names
+    """Every joint name in the design (the full walk), for a resolve-failure error message - so the
+    list matches what find_joint can actually resolve (a sub-component or as-built joint included),
+    not just root joints."""
+    return [nm for nm in (safe(lambda j=j: j.name) for j in all_joints(design)) if nm]
 
 
 def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dict:
@@ -94,8 +90,8 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     if ratio_error:
         # The link was added but the ratio could not be applied - most often BAD_JOINT_DOF, i.e.
         # these two joints can't be motion-linked (e.g. they're already coupled through the same
-        # rigid chain, so there's no independent DOF to relate - live-observed on Wheel_Spin↔
-        # Pedal1_Spin). The added link is now a COMPUTE-FAILED feature; roll it back so we don't leave
+        # rigid chain, so there's no independent DOF to relate). The added link is now a
+        # COMPUTE-FAILED feature; roll it back so we don't leave
         # a broken 1:1 link the user never asked for, and return an honest error.
         safe(lambda: ml.deleteMe())
         hint = ("the two joints can't be motion-linked. This usually means they're already coupled "

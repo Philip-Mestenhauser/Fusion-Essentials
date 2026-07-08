@@ -19,8 +19,6 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
-
 
 def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", activate: bool = False,
@@ -36,7 +34,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     import math
     matrix = adsk.core.Matrix3D.create()
     if rotate_deg:
-        axis_vec = _AXES.get((rotate_axis or "z").strip().lower())
+        axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
         origin = adsk.core.Point3D.create(float(x) * k, float(y) * k, float(z) * k)

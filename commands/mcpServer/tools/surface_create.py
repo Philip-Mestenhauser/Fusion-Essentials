@@ -22,18 +22,9 @@ from . import _assert
 app = adsk.core.Application.get()
 
 # Surface create/join only - cut/intersect aren't meaningful for a new open sheet.
-_SURFACE_OPS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"join": "JoinFeatureOperation",
-}
-
-# Patch may only create a NEW body or a NEW component (confirmed: those two ops only).
-_PATCH_OPS = {
-"new": "NewBodyFeatureOperation",
-"new_body": "NewBodyFeatureOperation",
-"new_component": "NewComponentFeatureOperation",
-}
+_SURFACE_OPS = ("new", "new_body", "join")   # cut/intersect aren't meaningful for a new open sheet
+# Patch may only create a NEW body or a NEW component.
+_PATCH_OPS = ("new", "new_body", "new_component")
 
 _CONTINUITY = {
 "connected": "ConnectedSurfaceContinuityType",
@@ -102,15 +93,9 @@ def _open_sketch_profile(comp, sketch):
 
 def _body_names_and_solid(feature):
     """(names, any_solid) for a feature's result bodies - read each body's name + isSolid LIVE."""
-    names = []
-    any_solid = False
-    bodies = safe(lambda: feature.bodies)
-    n = safe(lambda: bodies.count, 0) if bodies else 0
-    for i in range(n):
-        b = safe(lambda i=i: bodies.item(i))
-        names.append(safe(lambda: b.name))
-        if bool(safe(lambda: b.isSolid)):
-            any_solid = True
+    bodies = _common.result_bodies(feature)
+    names = [safe(lambda b=b: b.name) for b in bodies]
+    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in bodies)
     return names, any_solid
 
 
@@ -155,7 +140,7 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
     if perr:
         return error(perr)
 
-    op = getattr(adsk.fusion.FeatureOperations, _SURFACE_OPS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         ext_input = comp.features.extrudeFeatures.createInput(profile, op)
         ext_input.isSolid = False        # THE surface switch: no end caps, an open sheet body
@@ -234,7 +219,7 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
     if not axis_entity:
         return error(f"Could not resolve the {a}-axis of the active component.")
 
-    op = getattr(adsk.fusion.FeatureOperations, _SURFACE_OPS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         rev_input = comp.features.revolveFeatures.createInput(profile, axis_entity, op)
         rev_input.isSolid = False
@@ -311,7 +296,7 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
-    op = getattr(adsk.fusion.FeatureOperations, _PATCH_OPS[op_key])
+    op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     cont = safe(lambda: getattr(adsk.fusion.SurfaceContinuityType, _CONTINUITY[cont_key]))
 
     # Normalise to a list of loops. 'boundaries' (multi) wins; else the single 'boundary'.

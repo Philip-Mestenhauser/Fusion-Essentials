@@ -1,14 +1,24 @@
 # Tests
 
-Unit tests for the MCP tools in `commands/mcpServer/tools/`. They run **outside
+Tests for the MCP tools in `commands/mcpServer/tools/`. They run **outside
 Fusion** against a mocked `adsk` layer, so the whole suite finishes in seconds
 and needs no live Fusion session. See [CLAUDE.md](CLAUDE.md) for the short,
 mandatory-for-new-tests version of "which pattern to copy."
 
+Layout — the tree splits by KIND, and `test_layout.py` enforces it:
+
+- `tests/unit/` — tests that EXERCISE behavior (per-tool handlers, the shared framework, the server).
+- `tests/lints/` — tests that READ the codebase to enforce a CONVENTION (naming, wire-ASCII, dead
+  code, doc freshness, ...). These are the repo policing itself.
+- `tests/live/` — Fusion-driven scripts (the coverage sweep, the cold-agent evals). Run on demand
+  with a real Fusion session; NOT collected by the mock suite above.
+- `tests/` root — the shared harness: `conftest.py` and the `gen_*.py` generators.
+
 ```bash
-py -3 -m pytest            # run everything
-py -3 -m pytest tests/test_sys_selection.py -v   # one tool, verbose
-py -3 tests/gen_spec.py    # regenerate SPEC.md (the behavior spec)
+py -3 -m pytest                              # run everything (unit + lints)
+py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose
+py -3 -m pytest tests/lints -q               # just the convention lints
+py -3 tests/gen_spec.py                      # regenerate SPEC.md (the behavior spec)
 ```
 
 > Requires `pytest` (`py -3 -m pip install pytest`). Config lives in
@@ -127,7 +137,7 @@ Then:
 1. Read the tool. List its `_helper` functions and the `handler`. Find the pure
    logic: unit math, parsing, the 0/1/N branches, validation gates, the
    `_ok`/`_error` shape.
-2. `tool = load_tool("<module_name>")` at the top of `tests/test_<tool>.py`.
+2. `tool = load_tool("<module_name>")` at the top of `tests/unit/test_<tool>.py`.
 3. Write **one test per specific, plausible bug**, not one per function. The
    name should read like a spec line (`test_picks_largest_body_by_volume`), it
    ends up in `SPEC.md`.

@@ -77,7 +77,7 @@ def _aim_at_cut(normal, flipped):
 
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
-            flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
+            units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
     """Cut the model with a section plane to see inside. Non-destructive."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
@@ -112,7 +112,10 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
     cut_entity = None
     desc = None
     pkey = None   # origin-alias key for auto-view normal; stays None for face/construction handles
-    base_offset_cm = float(offset) / 10.0   # mm -> cm
+    factor = _common.scale(units)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Use mm, cm, or in.")
+    base_offset_cm = float(offset) * factor   # display units -> cm
 
     if through:
         occ, occ_err = _find_occurrence(design, through)
@@ -176,7 +179,8 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         "action": "cut",
         "section": safe(lambda: sec.name),
         "where": desc,
-        "offset_mm": round(float(offset), 3),
+        "offset": round(float(offset), 3),
+        "units": units,
         "flipped": bool(flip),
         "auto_viewed": aimed,
         "note": ("Model is now cut" + (" and the camera is aimed at the cut face." if aimed else
@@ -210,7 +214,8 @@ tool = (
     .add_input_property("through", {"type": "string",
             "description": "Occurrence name to cut through its center (alternative to a bare plane)."})
     .add_input_property("offset", {"type": "number",
-            "description": "Offset the cut along the plane normal, in mm (+/-). Default 0."})
+            "description": "Offset the cut along the plane normal (+/-), in 'units'. Default 0."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("flip", {"type": "boolean",
             "description": "Cut the opposite side (default false)."})
     .add_input_property("show_hatch", {"type": "boolean",

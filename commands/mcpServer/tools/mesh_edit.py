@@ -25,16 +25,8 @@ app = adsk.core.Application.get()
 def _result_bodies(feat):
     """The MeshBody(ies) a mesh feature produced, as JSON-safe records. Reads only - a feature with no
     .bodies (or an empty one) returns []. Reports the cut/grouped result."""
-    out = []
-    bodies = safe(lambda: feat.bodies)
-    if bodies is None:
-        return out
-    n = safe(lambda: bodies.count, 0) or 0
-    for i in range(n):
-        b = safe(lambda i=i: bodies.item(i))
-        if b is not None:
-            out.append({"name": safe(lambda: b.name), "handle": safe(lambda: b.entityToken)})
-    return out
+    return [{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
+            for b in _common.result_bodies(feat)]
 
 
 # ── mesh_generate_face_groups ───────────────────────────────────────────────────────────────────

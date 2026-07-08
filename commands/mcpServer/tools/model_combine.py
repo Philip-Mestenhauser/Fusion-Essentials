@@ -27,11 +27,7 @@ _TOOLS = _inputs.BodyRefList("tools", required=True, description="The tool bodie
 
 app = adsk.core.Application.get()
 
-_OPERATIONS = {
-"join": "JoinFeatureOperation",
-"cut": "CutFeatureOperation",
-"intersect": "IntersectFeatureOperation",
-}
+_OPERATIONS = ("join", "cut", "intersect")   # combine needs an existing target; no "new"
 
 
 def handler(target: str = "", tools=None, operation: str = "join",
@@ -65,7 +61,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
     try:
         ci = comp.features.combineFeatures.createInput(tgt, coll)
-        ci.operation = getattr(adsk.fusion.FeatureOperations, _OPERATIONS[op_key])
+        ci.operation = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
         ci.isKeepToolBodies = bool(keep_tools)
         ci.isNewComponent = bool(new_component)
         feature = comp.features.combineFeatures.add(ci)

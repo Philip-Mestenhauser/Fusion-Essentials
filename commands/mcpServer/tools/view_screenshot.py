@@ -20,6 +20,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, safe
+from . import _common
 from . import _inputs
 from . import _view_common
 
@@ -56,8 +57,7 @@ def _isolate_for_fit(name):
     Returns (restore_callable, error_or_None) - error is set (and restore is None) when the
     occurrence didn't resolve (including an ambiguous name, which names the candidates).
     Best-effort + non-destructive."""
-    import adsk.fusion
-    design = adsk.fusion.Design.cast(app.activeProduct)
+    design = _common.design()
     root = safe(lambda: design.rootComponent) if design else None
     if not root:
         return None, f"fit_to: no active design to resolve '{name}' against."
@@ -170,7 +170,7 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
         with open(temp_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         content = []
-        note = _active_component_note(adsk.fusion.Design.cast(app.activeProduct))
+        note = _active_component_note(_common.design())
         if note:
             content.append({"type": "text", "text": note})
         content.append({"type": "image", "data": b64, "mimeType": "image/png"})

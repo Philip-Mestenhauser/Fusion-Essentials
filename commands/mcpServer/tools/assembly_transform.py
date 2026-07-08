@@ -206,17 +206,18 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
         return error(f"Move was accepted but '{safe(lambda: occ.name)}' reads an unchanged "
                      "transform - it did not move. A grounded/jointed occurrence can snap back: "
                      "free it (assembly_ground false) or pose it through its joint (joint_drive).")
-    position_mm = safe(lambda: {"x": round(after.translation.x * 10, 4),
-                                "y": round(after.translation.y * 10, 4),
-                                "z": round(after.translation.z * 10, 4)}) if after is not None else None
+    # Report the pose back in the caller's 'units' (translation.* is Fusion-internal cm; k is cm-per-unit).
+    position = safe(lambda: {"x": round(after.translation.x / k, 4),
+                             "y": round(after.translation.y / k, 4),
+                             "z": round(after.translation.z / k, 4)}) if after is not None else None
 
     note = ("Occurrence repositioned (free move, no joint). Pair with view_screenshot to view, and "
             "assembly_interference to check the new position doesn't clash with other parts.")
     result = {
     "moved": True,
     "occurrence": safe(lambda: occ.name),
-    "position_mm": position_mm,
-    "translation_mm": {"x": dx, "y": dy, "z": dz},
+    "position": position,
+    "translation": {"x": dx, "y": dy, "z": dz},
     "rotate_deg": float(rotate_deg or 0.0),
     "rotate_axis": axis_desc if (rotate_deg or multi) else None,
     "rotate_xyz": ({"x": rotate_x, "y": rotate_y, "z": rotate_z} if multi else None),

@@ -18,7 +18,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import UNIT_TO_CM, error, ok, safe, resolve_sketch
+from ._common import error, ok, safe, resolve_sketch
 from . import _common
 from . import _inputs
 from . import _joints
@@ -288,7 +288,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     if kp not in _KEYPOINTS:
         return error(f"Unknown keypoint '{keypoint}'. Valid: {', '.join(_KEYPOINTS)}.")
 
-    scale = UNIT_TO_CM.get((units or "mm").strip().lower())
+    scale = _common.scale(units)
     if scale is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
