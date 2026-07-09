@@ -164,6 +164,64 @@ class TestTargetSketch:
         assert sketch is None and requested == ""
 
 
+def _comp_with_sketches(name, sketch_names=()):
+    # Like the live Component: NO allComponents attribute (that collection is a Design property),
+    # so reading it here raises AttributeError exactly as adsk does.
+    sks = [type("Sk", (), {"name": n})() for n in sketch_names]
+    return type("C", (), {"name": name, "sketches": _Coll(sks)})()
+
+
+def _design_with(root, subs, active=None):
+    # allComponents lives on the DESIGN and is a counted collection (count/item), root included.
+    return type("D", (), {"rootComponent": root, "activeComponent": active or root,
+                          "allComponents": _Coll([root] + list(subs))})()
+
+
+class TestAllComponents:
+    def test_reads_the_collection_off_the_design_not_the_root(self):
+        # Component has no allComponents in the live API - reading it off the root raises, safe()
+        # swallows, and the walk silently degrades to [root], hiding every sub-component from
+        # "design-wide" reads (observed live: a 3-component doc summarized as 0 sketches).
+        root = _comp_with_sketches("Root")
+        sub = _comp_with_sketches("Frame")
+        assert common.all_components(_design_with(root, [sub])) == [root, sub]
+
+    def test_falls_back_to_root_when_the_design_lacks_the_collection(self):
+        root = _comp_with_sketches("Root")
+        d = type("D", (), {"rootComponent": root, "activeComponent": root})()
+        assert common.all_components(d) == [root]
+
+    def test_no_root_is_empty(self):
+        class D:
+            @property
+            def rootComponent(self):
+                raise RuntimeError("no design")
+        assert common.all_components(D()) == []
+
+
+class TestResolveSketchDesignWide:
+    def test_finds_a_sub_component_sketch_while_root_is_active(self):
+        root = _comp_with_sketches("Root")
+        sub = _comp_with_sketches("Frame", ["FrameSketch"])
+        sk = common.resolve_sketch(_design_with(root, [sub]), "FrameSketch")
+        assert sk is not None and sk.name == "FrameSketch"
+
+    def test_active_component_searched_first_for_a_shared_name(self):
+        # Two components each hold a "Profile" sketch; the ACTIVE component's instance must win -
+        # it is where sketch_create just put the caller's sketch in the assembly workflow.
+        root = _comp_with_sketches("Root", ["Profile"])
+        sub = _comp_with_sketches("Frame", ["Profile"])
+        d = _design_with(root, [sub], active=sub)
+        assert common.resolve_sketch(d, "Profile") is sub.sketches.item(0)
+
+
+class TestAllSketchNames:
+    def test_spans_every_component(self):
+        root = _comp_with_sketches("Root", ["Base"])
+        sub = _comp_with_sketches("Frame", ["FrameSketch"])
+        assert common.all_sketch_names(_design_with(root, [sub])) == ["Base", "FrameSketch"]
+
+
 class TestResolveEntityRef:
     class _Curves:
         def __init__(self, lines=(), arcs=(), circles=()):

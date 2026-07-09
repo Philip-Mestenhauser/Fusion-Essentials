@@ -20,6 +20,29 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 
+def _ensure_multi_component_intent(design):
+    """A PART-intent design refuses addNewComponent ('Part Design documents can only contain one
+    component'). Since Jan-2026 a fresh doc defaults to PART intent, so a multi-component build
+    (an assembly, a template) dead-ends on the FIRST component. Promote PART -> HYBRID (not Assembly:
+    Hybrid keeps modeling ENABLED while allowing multiple internal components, which a part-and-parts
+    template needs; Assembly would forbid the bodies). Returns a one-line note if it promoted, else
+    None. Live-verified: PART refuses addNewComponent; after the promote it succeeds."""
+    T = adsk.fusion.DesignIntentTypes
+    intent = safe(lambda: design.designIntent)
+    if intent != T.PartDesignIntentType:
+        return None      # ASSEMBLY / HYBRID already accept components; leave the intent as the user set it
+    try:
+        design.designIntent = T.HybridDesignIntentType
+    except Exception:
+        return None      # promote refused (shouldn't happen for a bodyless/hybrid-able part) - let
+                         # addNewComponent raise its own clear error below
+    # Confirm the promotion took, so we only claim it when the intent actually changed.
+    if safe(lambda: design.designIntent) == T.HybridDesignIntentType:
+        return ("design intent was PART (one-component-only); promoted to HYBRID so multiple "
+                "components are allowed while modeling stays enabled.")
+    return None
+
+
 def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", activate: bool = False,
             rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
@@ -37,11 +60,17 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
-        origin = adsk.core.Point3D.create(float(x) * k, float(y) * k, float(z) * k)
+        # Rotate about the world origin; the translation set below places the component. (Rotating
+        # about the placement point would only bake a pivot correction into the translation column
+        # that the next line overwrites anyway - net result is identical, so keep it explicit.)
         matrix.setToRotation(math.radians(float(rotate_deg)),
-                             adsk.core.Vector3D.create(*axis_vec), origin)
+                             adsk.core.Vector3D.create(*axis_vec), adsk.core.Point3D.create(0, 0, 0))
     if x or y or z:
         matrix.translation = adsk.core.Vector3D.create(float(x) * k, float(y) * k, float(z) * k)
+
+    # A fresh (Part-intent) design refuses addNewComponent - promote it to Hybrid first so the build
+    # can hold multiple components. Report the promotion if it happened.
+    intent_note = _ensure_multi_component_intent(design)
 
     try:
         occ = design.rootComponent.occurrences.addNewComponent(matrix)
@@ -79,13 +108,17 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     }
     if name_warning:
         out["name_warning"] = name_warning
+    if intent_note:
+        out["design_intent_promoted"] = intent_note
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
 "Create a new EMPTY component occurrence in the active design - the prerequisite for building an "
 "assembly of separate, independently jointable/groundable parts (the modelling tools build into "
-"the active component, so make one component per part). 'name' names it; 'x'/'y'/'z' optionally "
+"the active component, so make one component per part). A fresh PART-design doc (one-component-only) "
+"is auto-promoted to HYBRID so a multi-part build just works. The occurrence is always added "
+"at ROOT level - the active component does not nest it. 'name' names it; 'x'/'y'/'z' optionally "
 "place the occurrence (in 'units', mm default; omit for origin); 'activate' makes it the active "
 "edit target so subsequent sketch_create / extrude build into it. Placement COMPOSES with sketch "
 "coordinates: after placing at x/y/z, sketch in component-local coords - or place at the origin "

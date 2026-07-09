@@ -59,6 +59,11 @@ _ALLOWLIST = {}
 def _iter_files():
     for base in _SWEPT_DIRS:
         for root, dirs, files in os.walk(base):
+            # evals/results/ holds per-run RECORDS: dated, additive, per-run history documents -
+            # the same sanctioned genre as CHANGELOG.md (and gitignored besides). History narrative
+            # is their content, not baggage.
+            if root.replace("\\", "/").endswith("tests/live/evals"):
+                dirs[:] = [d for d in dirs if d != "results"]
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for fn in files:
                 if not (fn.endswith(".py") or fn.endswith(".md")):

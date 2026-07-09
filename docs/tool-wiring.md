@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 137  |  **description breadcrumbs:** 503  |  **note/error breadcrumbs:** 237
+**Tools:** 138  |  **description breadcrumbs:** 508  |  **note/error breadcrumbs:** 244
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -25,19 +25,18 @@ close orphans, factor duplicated guards into shared helpers.
 - **15x** across 10 module(s): "No active design. Open or create a document first (see doc_new)."
 - **7x** across 4 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
-- **5x** across 4 module(s): "'. Use sketch_get or sketch_create."
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 63  (desc 10, note 53)
-- `find_geometry`  <- 58  (desc 46, note 12)
+- `find_geometry`  <- 57  (desc 46, note 11)
 - `view_screenshot`  <- 47  (desc 21, note 26)
+- `sketch_create`  <- 30  (desc 19, note 11)
 - `cam_get`  <- 29  (desc 19, note 10)
-- `sketch_create`  <- 29  (desc 18, note 11)
 - `data_get`  <- 26  (desc 16, note 10)
 - `design_get`  <- 22  (desc 11, note 11)
 - `model_extrude`  <- 21  (desc 19, note 2)
-- `sketch_get`  <- 17  (desc 7, note 10)
+- `sketch_get`  <- 19  (desc 8, note 11)
 - `data_upload_file`  <- 15  (desc 12, note 3)
 - `doc_get`  <- 15  (desc 10, note 5)
 - `model_inspect`  <- 14  (desc 8, note 6)
@@ -191,15 +190,22 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Parameters set. The toolpath is now OUT OF DATE - regenerate it with cam_generate (be in the Manufacture workspace).
 
 ### `cam_edit_setup`
-- Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. The WCS is steered via the wcs_* parameters (the matrix itself is read-only).
+- Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A geometry-bound WCS (via 'wcs') follows the selected geometry, so a later design edit that moves it invalidates...
 - Provide 'setup' - the CAM setup name (see cam_get).
-- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, and/or a 'machine'.
+- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', and/or a 'wcs' binding.
 - ' has no parameter(s):
 - . (Read the setup's parameter names first; only existing ones are settable.)
+- - the assignment did not take.
 - Machine assignment did not take on setup '
 - ' but the setup now reports '
-- . (Fixtures need fixtures enabled; solid stock needs stockMode='SolidStock'.)
 - Could not assign machine '
+- ' has no WCS mode parameter '
+- bound no geometry - '
+- ' reads back empty after the set. The handle may not be a valid WCS reference for this setup.
+- Could not switch setup '
+- ' to from-solid stock (SolidStock mode):
+- Could not set WCS mode '
+- Could not enable fixtures on setup '
 
 ### `cam_generate`
 - Generation launch returned no future (nothing to generate?).
@@ -436,7 +442,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
 - files. Each top-level occurrence is one file - ready to print/assemble individually.
-- ' not found. Pass a body HANDLE from find_geometry (precise), a body/component/occurrence NAME, or omit 'target' to export the whole design.
+- ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
 - export reported success but
 - . execute() returned true but produced nothing - treating this as a failure, not a false success. Check the target geometry and the output path are valid.
 - Exported to local disk. To round-trip into the cloud, upload it with data_upload_file (STEP/IGES are translated to a Fusion design on the cloud).
@@ -463,8 +469,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `doc_activate`
 - Switch ACCEPTED but not yet active - activation is async and hasn't propagated. Call doc_get to confirm it took before acting on the new document.
-- Provide 'name' - the open document to activate.
+- Provide 'name' - the open document to activate (a display name, or a lineage URN / web URL to be unambiguous).
+- ' matches more than one OPEN document - refusing to guess which to activate. Pass the lineage URN (or web URL) instead of the name; get it from doc_get. Open:
 - No open document matched '
+- . (A name can be shared - pass a lineage URN to be unambiguous.)
 - Activate failed for '
 
 ### `doc_close`
@@ -472,7 +480,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - discarding unsaved changes
 - No documents are open.
 - . No document was closed.
+- ' matches more than one OPEN document - refusing to guess which to close. Pass the lineage URN (or web URL) instead of the name; get it from doc_get. Open:
 - No open document matched '
+- . (A name can be shared - pass a lineage URN to be unambiguous.)
 - No active document to close.
 
 ### `doc_copy`
@@ -550,13 +560,17 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Document had no unsaved changes - nothing to version.
 
 ### `doc_save_as`
+- The saved document becomes the active document. Its 'document_id' is the lineage URN - the stable identity to address it by (doc_open/doc_activate/data_delete_file); a NAME can be shared by several...
+- NAME COLLISION - see 'name_collision'.
 - Provide 'name' for the saved document.
 - Provide 'project' (name) or 'project_id' for the destination.
 - No active document to save. Open a document first.
 - Destination project not found:
 - Fusion declined to save '
 - ' to the destination. No change made.
-- Save is async on the cloud side. document_id is typically NULL right after saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm with doc_get after a short wait - the saved c...
+- A different file named '
+- ' already existed in this folder (
+- ); this saveAs created a SECOND file with the same name (a new lineage - Fusion allows this). To add a version to the EXISTING file instead, open it (doc_open by that URN) and use doc_save; or dele...
 - Could not access destination project root:
 - Destination folder path not found: '
 - '). Folders at project root:
@@ -875,7 +889,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Create or open a document first (see doc_new).
 - No sketch to extrude. Create one and draw a closed profile first.
 - Extrude returned no feature.
-- '. Use sketch_get or sketch_create.
+- Use sketch_get or sketch_create.
 - Could not start extrude:
 - Could not set extrude extent:
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
@@ -885,8 +899,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not scope to target_bodies:
 
 ### `model_hole`
-- Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). Pattern it with model_pattern for a bolt circle.
-- fit). Diameter set from the standard clearance table (the API tags the fastener but doesn't auto-size on this version). Pattern with model_pattern for a bolt circle.
+- Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). For a bolt circle, pass every position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hol...
+- fit). Diameter set from the standard clearance table (the API tags the fastener but doesn't auto-size on this version).
 - Clearance hole drilled + TAGGED for
 - Provide 'diameter' (e.g. '8 mm') or a 'fastener' (e.g. 'M6 Socket Head Cap Screw') to size the hole.
 - Provide 'points' - a list of [x, y, z] positions on the face to drill at.
@@ -949,6 +963,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - quantity must be >= 2 for a circular pattern.
 - No active design. Open or create a document with components first.
 - Circular pattern returned no feature.
+- were requested. The feature is left in the timeline for inspection - design_delete_feature removes it.
 - Occurrences patterned around the axis. Pair with view_screenshot to view.
 - Circular pattern failed:
 
@@ -958,9 +973,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document with components first.
 - Unknown direction_one '
 - Rectangular pattern returned no feature.
+- ). The feature is left in the timeline for inspection - design_delete_feature removes it.
 - Occurrences patterned in a grid. Pair with view_screenshot to view.
-- Rectangular pattern failed:
 - Unknown direction_two '
+- Rectangular pattern failed:
 
 ### `model_revolve`
 - '. Use: new, join, cut, intersect.
@@ -972,7 +988,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Revolve returned no feature.
 - Profile revolved into a solid. Pair with view_screenshot (iso) to view it.
 - angle_deg must be a number (degrees).
-- '. Use sketch_get or sketch_create.
+- Use sketch_get or sketch_create.
 - ' has no closed profile to revolve.
 - out of range - sketch has
 - Could not start revolve:
@@ -1121,6 +1137,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not resolve plane '
 - '. Use one of: xy, xz, yz (origin planes; aliases top/front/right), or the name of a construction plane, or pass 'on_face' = a planar-face handle from find_geometry.
 - Failed to create sketch on
+
+### `sketch_delete_entity`
+- Provide 'target' as '<type>:<index>' - type = line | arc | circle | point | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.
+- Unknown target type '
+- '. Use line | arc | circle | point | constraint.
+- (s). Indexes are 0-based in creation order; list them with sketch_get.
+- ). The entity may be consumed by a dimension/constraint - remove those first.
+- Entity removed. Deleting a curve can cascade to constraints/dimensions that referenced it; re-read with sketch_get before adding more.
+- ' has a non-integer index; use '<type>:<index>' (e.g. 'line:1').
+- did not take (constraint count
+- ). It may be a fixed/driving constraint the solver won't remove.
+- Constraint removed. Re-constrain if needed (see sketch_constrain).
 
 ### `sketch_dimension`
 - No active design. Create or open a document first (see doc_new).

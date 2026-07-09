@@ -34,18 +34,20 @@ def _all_operations(cam):
 
 
 def _find_op(cam, name):
-    want = (name or "").strip()
-    exact = contains = None
+    """The operation named `name` (case-insensitive EXACT), or (None, available-names). Exact-only:
+    an operation name is unique within the CAM tree, so a partial/ambiguous name is REFUSED (None +
+    available names) rather than resolved to the first substring match, which could isolate the wrong
+    toolpath."""
+    want = (name or "").strip().lower()
+    exact = None
     names = []
     for sname, o in _all_operations(cam):
         nm = safe(lambda o=o: o.name) or ""
         if len(names) < 80:
             names.append(nm)
-        if nm == want:
+        if nm.lower() == want:
             exact = o
-        elif contains is None and want and want.lower() in nm.lower():
-            contains = o
-    return (exact or contains), names
+    return exact, names
 
 
 def _find_folder_ops(cam, folder_name):

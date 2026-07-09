@@ -326,9 +326,9 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
     geom, desc, terr = _resolve_target(design, target)
     if geom is None:
-        return error(terr or (f"Export target '{target}' not found. Pass a body HANDLE from find_geometry "
-    "(precise), a body/component/occurrence NAME, or omit 'target' to export the "
-    "whole design."))
+        return error(terr or (f"Export target '{target}' not found. Pass a body/component NAME, an "
+    "occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit "
+    "'target' to export the whole design."))
 
     # make sure the destination directory exists
     out_dir = os.path.dirname(path)
@@ -381,7 +381,7 @@ tool = (
     .add_input_property("file_path", {"type": "string",
             "description": "Local output path (a file; or a DIRECTORY when split_by_component=true). Extension appended if missing; directory created if needed."})
     .add_input_property("target", {"type": "string",
-            "description": "What to export: a find_geometry body HANDLE, or a body / component / occurrence NAME; omit for the WHOLE design. A name shared by several instances is refused (pass a handle or fullPathName)."})
+            "description": "What to export: a find_geometry handle, or a body / component / occurrence NAME; omit for the WHOLE design. Resolution is COMPONENT-FIRST: instances of one component share its name, so that name exports the COMPONENT geometry (never refused); to export ONE instance pass its fullPathName (e.g. Bracket:2). Only a name that is ambiguous ACROSS different occurrences/bodies is refused with candidates."})
     .add_input_property("split_by_component", {"type": "boolean",
             "description": "Export each top-level occurrence to its own file in directory 'file_path' (default false)."})
     .add_input_property("dxf_sketch", {"type": "string",

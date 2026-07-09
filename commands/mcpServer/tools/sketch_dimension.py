@@ -135,7 +135,8 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 TOOL_DESCRIPTION = (
 "Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of "
 "parametric sketching (sketch_constrain does the geometric half). distance/horizontal_distance/"
-"vertical_distance need two points/lines; radius/diameter need one arc/circle; angle needs two "
+"vertical_distance need BOTH entity refs (points or lines; to dimension one line's length, pass "
+"its two endpoints); radius/diameter need one arc/circle; angle needs two "
 "lines. 'entity_one'/'entity_two' are '<type>:<index>' refs (line/arc/circle/point, "
 "e.g. 'line:0') - the same scheme as sketch_constrain. 'value' drives the dimension by expression "
 "('25 mm', '90 deg', 'StockX/2'); omit to keep the auto-measured value. The created dimension "

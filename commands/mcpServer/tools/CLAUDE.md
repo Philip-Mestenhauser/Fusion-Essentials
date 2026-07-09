@@ -46,6 +46,7 @@ don't edit between the markers.
 | `ProfileRef` | a sketch profile by stable handle, not sketch_name+profile_index |
 | `ProfileRefList` | an ORDERED list of profiles (loft - order is load-bearing) |
 | `TargetRef` | a thing to measure/colour: handle (body/face/mesh; edge+construction when allowed) OR occurrence/component/body name; ''=whole design |
+| `TargetRefList` | several machinable targets: bodies (handles/names) and/or container occurrences (names) |
 | `UnitField` | the 'units' selector (mm/cm/in enum) for a Distance |
 
 | Helper | Provides (import from here - never re-implement) |
@@ -81,6 +82,45 @@ return success while changing nothing: `Document.save()` versioning nothing and
   is not an option.
 - Verify-the-effect logic that is intrinsically entangled with payload assembly, per-file loops, or
   compensation/rollback may stay in the handler — name that in the exemption reason.
+
+## What an excellent tool looks like — the bar, stated positively
+
+The lints say "no"; these are the "yes". A tool is excellent when it:
+
+1. **Reads its effect back — a swallowed no-op is an error, never a false `ok`.** The API returns
+   success while changing nothing (observed live across save/versioning/reference-refresh/machine-
+   assignment). Assume nothing; re-read the mutated state and fail the call if it didn't take. This is
+   a SPECTRUM — pick the rung the effect needs:
+   - rung 1: report a COUNT (a *wrong* result with the right count passes — insufficient for a mutation
+     whose region/geometry could be wrong, e.g. a fillet);
+   - rung 2: report the effect EXISTS (a body/feature was made — but maybe the wrong one);
+   - rung 3: read the RIGHT count/value BACK off the feature and error on mismatch (`model_pattern`
+     reads `patternElements.count`; `cam_edit_setup` re-reads every assignment);
+   - rung 4: verify the RIGHT GEOMETRY changed — volume/faces/file-on-disk (`model_shell` volume-diff,
+     `cam_post` folder snapshot-diff). A material-removal feature needs rung 4; a reflection or a
+     deterministic-placement sketch is complete at rung 2 (the target rung is a judgment).
+   Hard sub-cases and their exemplars: an ASYNC effect that lags the call → report the *verified* state
+   + a `pending`, never the intent (`doc_activate`); a setter the platform LIES about → assign, re-read,
+   honest error if unchanged (`data_switch_hub`); a CREATE → re-list and error if the new thing didn't
+   appear (`data_ops`); a refresh → re-check `isOutOfDate` after (`doc_update_xref`).
+2. **Refuses ambiguity — returns the candidates, never grabs the first.** A name that matches several
+   is a hard error listing what's available (`cam_delete`, `OccurrenceRef`, `find_setup`), not a silent
+   wrong pick.
+3. **Documents its non-obvious API trap AT THE POINT OF USE, marked live-verified.** The hard-won
+   platform truth lives in a comment exactly where the code depends on it ("the Future must stay
+   referenced or Fusion abandons the generation"; "`allOperations` omits folders, verified live";
+   "`postProcess()` true is not proof a file was written"). The next reader gets the right model without
+   re-discovering the trap. A destructive/crash-prone path gets a declare-intent guard (`doc_open`).
+   For an INVISIBLE resource opened across calls (a base-feature edit scope: `count==0`,
+   `itemByName==None`, `timeline` raises while it's open), CAPTURE the handle `add()` returned — it can
+   never be re-found — and do NOT gate the CLOSE on a state the open scope itself changes (`design_mode`
+   deliberately doesn't mode-gate `finish`, or it would leak the scope it opened).
+4. **Teaches at the failure moment, in ONE shared home — not in every description.** Failure-time
+   teaching → the error, once, in the shared resolver (`_cam_common.get_cam`'s Manufacture-gate error).
+   Purpose + next-step → a lean description. Input legality → a typed kind. (The direction-vector rule.)
+5. **Reuses one resolver / one parser / one health signal — never re-rolls it.** A shared INVARIANT
+   consolidated in its owner (`find_setup`, `live_readiness`, `_data_common._resolve_data_file` for the
+   URN/URL format, `resolve_sketch` for the design-wide sketch walk). Never dedupe mere shared SYNTAX.
 
 ## Named exemplars — copy the nearest one before inventing a new shape
 

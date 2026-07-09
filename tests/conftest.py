@@ -389,7 +389,8 @@ class BRepBody:
 
 
 class _NamedCollection:
-    """Counted collection (Fusion's count/item(i)) with itemByName lookup."""
+    """Counted collection (Fusion's count/item(i)) with itemByName lookup. Iterable too - live adsk
+    collections support both consumption styles and production code uses both."""
     def __init__(self, items=()):
         self._items = list(items)
 
@@ -405,6 +406,9 @@ class _NamedCollection:
             if getattr(it, "name", None) == name:
                 return it
         return None
+
+    def __iter__(self):
+        return iter(self._items)
 
 
 @pytest.fixture
@@ -541,7 +545,9 @@ class MakeDesign:
 
     @property
     def allComponents(self):
-        return list(self._all_components)
+        # A counted+iterable collection on the DESIGN, as in the live API - Component has no
+        # allComponents attribute, so a fake must not offer one anywhere else.
+        return _NamedCollection(self._all_components)
 
     def findEntityByToken(self, token):
         e = self._tokens.get(token)

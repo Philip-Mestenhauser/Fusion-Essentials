@@ -38,6 +38,13 @@ mocks return a truthy child `Mock` for anything unmodeled, so `assert result is 
 nothing). Cover sizes 0, 1, 2, N for anything taking a collection, and the guards (bad units, no
 active design, missing/ambiguous target) alongside the happy path.
 
+For each test ask: **what specific, plausible bug would this catch?** If the only answer is "the
+function was deleted," it is decoration — assert the value that would change if the logic were wrong.
+A test may only pin behavior that is CORRECT: pinning a wrong result (e.g. a first-match resolver's
+substring hit) locks the defect in place, so when a handler's behavior is corrected the test that
+asserted the wrong behavior SHOULD go red — that red is the signal to update the assertion to the
+correct value, not evidence the change was wrong.
+
 ## The legacy bespoke pattern exists in most files — do not copy it
 
 Most of the suite predates the shared fakes: a test file defines its own local `_install(...)`

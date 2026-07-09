@@ -174,18 +174,21 @@ class TestIsolate:
         assert op1.isLightBulbOn is True
         assert op3.isLightBulbOn is False   # op3 starts shown; isolate turns every other op off
 
-    def test_substring_match_when_no_exact(self):
-        op1, _, _ = _simple_world()
-        out = _payload(st.handler(action="isolate", operation="rough"))
-        assert out["operation"] == "Rough Top"
+    def test_partial_name_is_refused_not_substring_matched(self):
+        # A partial name must NOT resolve to the first substring hit - that silently isolates the
+        # wrong toolpath. It is refused with the available names, so the agent can pick the exact one.
+        _simple_world()
+        out = st.handler(action="isolate", operation="rough")
+        assert out["isError"] is True
+        assert "rough" in out["message"].lower()
+        assert "Rough Top" in out["message"]      # the available names are surfaced for a retry
 
-    def test_exact_beats_substring(self):
-        # 'Rough' exists as a substring of 'Rough Top', but an exact 'Rough'
-        # op should win if present.
+    def test_exact_match_is_case_insensitive(self):
+        # An exact name resolves regardless of case; a unique operation name has one right answer.
         exact = FakeOp("Rough")
         longer = FakeOp("Rough Top")
         _install([FakeSetup("S", [longer, exact])])
-        out = _payload(st.handler(action="isolate", operation="Rough"))
+        out = _payload(st.handler(action="isolate", operation="rough"))
         assert out["operation"] == "Rough"
 
     def test_unmatched_operation_errors(self):

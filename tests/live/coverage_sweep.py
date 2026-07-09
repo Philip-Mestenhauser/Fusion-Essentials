@@ -99,6 +99,9 @@ STEPS = [
                           "sketch_name": "SweepSketch"}, "ok", None),
     ("sketch_dimension", {"dim_type": "distance", "entity_one": "point:0", "entity_two": "point:2",
                           "sketch_name": "SweepSketch", "value": "40 mm"}, "ok", None),
+    # Remove the horizontal constraint just added (the F39 recovery path) - deleting a CONSTRAINT does
+    # not shift the curve indices the extrude below depends on. Verifies the count read-back.
+    ("sketch_delete_entity", {"sketch_name": "SweepSketch", "target": "constraint:0"}, "ok", None),
     ("sketch_add_3d_line", {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 25}, "ok", None),
 
     # solids ------------------------------------------------------------------

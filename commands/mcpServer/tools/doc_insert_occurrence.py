@@ -82,9 +82,11 @@ def handler(document_id: str = "", into_component: str = "",
         axis_vec = _inputs._AXIS_VECS.get((rotate_axis or "z").strip().lower())
         if not axis_vec:
             return error(f"Unknown rotate_axis '{rotate_axis}'. Use x, y, or z.")
-        origin = adsk.core.Point3D.create(float(x) * k, float(y) * k, float(z) * k)
+        # Rotate about the world origin; the translation set below places the occurrence. (Rotating
+        # about the placement point would only bake a pivot correction into the translation column
+        # that the next line overwrites anyway - net result is identical, so keep it explicit.)
         transform.setToRotation(math.radians(float(rotate_deg)),
-                                adsk.core.Vector3D.create(*axis_vec), origin)
+                                adsk.core.Vector3D.create(*axis_vec), adsk.core.Point3D.create(0, 0, 0))
     if x or y or z:
         transform.translation = adsk.core.Vector3D.create(float(x) * k, float(y) * k, float(z) * k)
 

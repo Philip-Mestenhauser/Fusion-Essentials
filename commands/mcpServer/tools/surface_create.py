@@ -56,6 +56,18 @@ def _target_sketch(design, comp, sketch_name):
     return (coll.item(n - 1) if n else None), name
 
 
+def _curve_host_component(ents, fallback):
+    """The component that OWNS the first curve/edge, so its profile + feature are built there. A BRep
+    edge is owned via edge.body.parentComponent; a sketch curve via curve.parentSketch.parentComponent.
+    Building the open profile on the active component while the source lives elsewhere is the bSet
+    trap. Falls back to the active component when no owner is readable."""
+    e = ents[0] if ents else None
+    owner = safe(lambda: e.body.parentComponent)          # BRep edge
+    if owner is None:
+        owner = safe(lambda: e.parentSketch.parentComponent)   # sketch curve
+    return owner or fallback
+
+
 def _open_profile_from_curves(comp, ents):
     """Build an OPEN profile from a list of curve/edge entities. B-Rep edges go through
     createBRepEdgeProfile; sketch curves through createOpenProfile. Returns (profile, error)."""
@@ -118,7 +130,9 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # profile: from explicit curve handles, else from a sketch's open chain.
+    # profile: from explicit curve handles, else from a sketch's open chain. Build the profile AND the
+    # feature on the component that OWNS the source (the curves' or sketch's owner) - a profile-consuming
+    # feature created on the active component raises bSet when the source is owned elsewhere.
     if curves not in (None, "", []):
         resolved, cerr = _CURVES.resolve(curves)
         if cerr:
@@ -127,7 +141,8 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         ents = meta["entities"]
         if not ents:
             return error("'curves' resolved to no edges/curves.")
-        profile, perr = _open_profile_from_curves(comp, ents)
+        host = _curve_host_component(ents, comp)
+        profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
         sketch, requested = _target_sketch(design, comp, sketch_name)
@@ -135,18 +150,19 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
             return error("No sketch or 'curves' to extrude. Draw an OPEN chain first, or pass curves.")
-        profile, perr = _open_sketch_profile(comp, sketch)
+        host = safe(lambda: sketch.parentComponent) or comp
+        profile, perr = _open_sketch_profile(host, sketch)
         source = safe(lambda: sketch.name)
     if perr:
         return error(perr)
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
-        ext_input = comp.features.extrudeFeatures.createInput(profile, op)
+        ext_input = host.features.extrudeFeatures.createInput(profile, op)
         ext_input.isSolid = False        # THE surface switch: no end caps, an open sheet body
         dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
         ext_input.setDistanceExtent(bool(symmetric), dist_val)
-        feature = comp.features.extrudeFeatures.add(ext_input)
+        feature = host.features.extrudeFeatures.add(ext_input)
     except Exception as e:
         return error(f"Surface extrude failed: {e}.")
     if not feature:
@@ -194,6 +210,10 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
+    # Build the profile, take the origin axis, AND create the feature on the source's OWNING component
+    # (curves' or sketch's owner) - a profile-consuming feature on the active component raises bSet when
+    # the source is owned elsewhere, and a revolve input mixes contexts if the axis is a different
+    # component's.
     if curves not in (None, "", []):
         resolved, cerr = _CURVES.resolve(curves)
         if cerr:
@@ -202,7 +222,8 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         ents = meta["entities"]
         if not ents:
             return error("'curves' resolved to no edges/curves.")
-        profile, perr = _open_profile_from_curves(comp, ents)
+        host = _curve_host_component(ents, comp)
+        profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
         sketch, requested = _target_sketch(design, comp, sketch_name)
@@ -210,22 +231,23 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
             return error("No sketch or 'curves' to revolve. Draw an OPEN chain first, or pass curves.")
-        profile, perr = _open_sketch_profile(comp, sketch)
+        host = safe(lambda: sketch.parentComponent) or comp
+        profile, perr = _open_sketch_profile(host, sketch)
         source = safe(lambda: sketch.name)
     if perr:
         return error(perr)
 
-    axis_entity = safe(lambda: getattr(comp, _AXES[a]))
+    axis_entity = safe(lambda: getattr(host, _AXES[a]))
     if not axis_entity:
         return error(f"Could not resolve the {a}-axis of the active component.")
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
-        rev_input = comp.features.revolveFeatures.createInput(profile, axis_entity, op)
+        rev_input = host.features.revolveFeatures.createInput(profile, axis_entity, op)
         rev_input.isSolid = False
         angle_val = adsk.core.ValueInput.createByReal(math.radians(ang))
         rev_input.setAngleExtent(bool(symmetric), angle_val)
-        feature = comp.features.revolveFeatures.add(rev_input)
+        feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
         return error(f"Surface revolve failed: {e}. (The profile must be coplanar with the axis.)")
     if not feature:
@@ -404,8 +426,9 @@ surface_revolve_item = Item.create_tool_item(tool=surface_revolve_tool, write="w
 
 _PATCH_DESC = (
                                              "Fill CLOSED loop(s) of edges with surface face(s) - 'cap the hole(s)' / 'bridge the gap(s)'. "
-                                             "Pass EITHER 'boundary' (ONE loop: a single edge handle, or a list of edge handles for one loop - "
-                                             "Fusion auto-completes a connected loop), OR 'boundaries' (a LIST of loops, patched ALL in one "
+                                             "Pass EITHER 'boundary' (ONE loop: prefer a SINGLE seed edge - Fusion auto-completes the "
+                                             "connected loop; an explicit multi-edge list of a flat coplanar rim can fail to compute where "
+                                             "the single-seed form succeeds), OR 'boundaries' (a LIST of loops, patched ALL in one "
                                              "call - each element is one edge handle Fusion auto-completes, or a list of handles forming one "
                                              "loop). Use 'boundaries' to patch every hole of a part at once (pass each hole's rim edge). "
                                              "'continuity': connected | tangent | curvature. 'operation': new | new_component. In the multi "

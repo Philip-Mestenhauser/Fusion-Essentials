@@ -309,12 +309,70 @@ def _entity_point_cm(ent):
     return (c.x, c.y, c.z) if c else None
 
 
+def _refind_profile(des, kind, want_pt):
+    """Re-find a sketch PROFILE from its locator. findEntityByToken returns NOTHING for a
+    sub-component sketch profile's token (verified live) - so for profiles the locator is the real
+    resolution path, not just staleness recovery. The kind may carry 'profile[<sketch>~<area_cm2>]';
+    the sketch scopes the scan (design-wide resolve) and the area tells same-centroid profiles apart
+    (an annulus band and its full disk share a centroid). Returns the Profile or None."""
+    sk_name, want_area = "", None
+    if "[" in kind and kind.endswith("]"):
+        payload = kind[kind.index("[") + 1:-1]
+        head, sep, area_s = payload.rpartition("~")
+        if sep:
+            try:
+                want_area = float(area_s)
+                sk_name = head
+            except Exception:
+                sk_name = payload
+        else:
+            sk_name = payload
+    if sk_name:
+        sk = _common.resolve_sketch(des, sk_name)
+        sketches = [sk] if sk is not None else []
+    else:
+        sketches = []
+        for comp in _common.all_components(des):
+            coll = _common.safe(lambda c=comp: c.sketches)
+            for i in range(_common.safe(lambda: coll.count, 0) if coll else 0):
+                sketches.append(coll.item(i))
+    lx, ly, lz = want_pt
+    best, best_score = None, None
+    for sk in sketches:
+        profs = _common.safe(lambda s=sk: s.profiles)
+        for i in range(_common.safe(lambda: profs.count, 0) if profs else 0):
+            p = profs.item(i)
+            ap = _common.safe(lambda p=p: p.areaProperties())
+            c = _common.safe(lambda: ap.centroid) if ap else None
+            area = _common.safe(lambda: ap.area) if ap else None
+            if c is None:
+                continue
+            dist = ((c.x - lx) ** 2 + (c.y - ly) ** 2 + (c.z - lz) ** 2) ** 0.5
+            if dist > 0.1:                              # cm - not the recorded region
+                continue
+            if want_area is not None:
+                if area is None:
+                    continue
+                rel = abs(area - want_area) / max(abs(want_area), 1e-9)
+                if rel > 0.01:                          # wrong region sharing the centroid
+                    continue
+                score = (dist, rel)
+            else:
+                score = (dist, 0.0)
+            if best_score is None or score < best_score:
+                best, best_score = p, score
+    return best
+
+
 def _refind_by_locator(des, locator):
     """Re-find the entity matching a (kind, x, y, z) locator by scanning the design's BRep geometry for
     the nearest face/edge/vertex of that kind to the recorded point. Returns the entity or None. This is
     the staleness recovery: the token died, but the geometry is unchanged, so its kind+position still
-    pins it."""
+    pins it. Profile locators route to _refind_profile (sketch profiles are not BRep and their tokens
+    can be dead on arrival)."""
     kind, lx, ly, lz = locator
+    if kind.startswith("profile"):
+        return _refind_profile(des, kind, (lx, ly, lz))
     root = _common.safe(lambda: des.rootComponent)
     if not root:
         return None
@@ -1190,6 +1248,72 @@ class TargetRef(InputKind):
                       "body name, or '' (whole design). See design_get(include=['tree']) / find_geometry.")
 
 
+class TargetRefList(InputKind):
+    """A LIST of machinable targets - each a BODY (handle/name) or a container OCCURRENCE (name/
+    fullPathName), resolved via TargetRef. For a CAM setup's models/fixtures/stock: selecting the
+    CONTAINER occurrence (not the body inside it) is what lets the setup KEEP its selection when the
+    container's contents are replaced (the reconfiguring-not-reprogramming property - see the RFA
+    template methodology). The CAM API's Setup.models/fixtures/stockSolids accept Occurrence, BRepBody,
+    or MeshBody, so this yields exactly those. A bare COMPONENT name maps to its single occurrence
+    (0 or >1 occurrences is a hard error - never guess which instance). Kind-checks EVERY element
+    before returning, so a wrong-kind target fails the call before any mutation."""
+
+    json_type = "array"
+    MAP_HINT = "several machinable targets: bodies (handles/names) and/or container occurrences (names)"
+
+    # CAM consumes bodies and occurrences; a component resolves to its occurrence, mesh is allowed.
+    _CAM_KINDS = ("body", "mesh", "occurrence", "component")
+
+    def __init__(self, name, **kw):
+        super().__init__(name, **kw)
+        # One owned TargetRef does the per-item resolution (trait #5: no second resolver).
+        self._ref = TargetRef(name, allow=self._CAM_KINDS)
+
+    def schema(self) -> dict:
+        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
+
+    def contract_note(self) -> str:
+        return ("A list of machinable targets, each a body (find_geometry 'handle' or name) OR a "
+                "CONTAINER occurrence/component name. A container selects the whole component (so the "
+                "setup keeps its selection when the container's contents change), not one body.")
+
+    def _component_occurrence(self, comp):
+        """The single occurrence referencing `comp`, or (None, error) on 0 or >1 (never guess)."""
+        des = _common.design()
+        root = _common.safe(lambda: des.rootComponent) if des else None
+        occs = _common.safe(lambda: list(root.allOccurrencesByComponent(comp))) or [] if root else []
+        if not occs:
+            return None, (f"component '{_common.safe(lambda: comp.name)}' has no occurrence to machine "
+                          "(it is not instanced in the assembly).")
+        if len(occs) > 1:
+            return None, (f"component '{_common.safe(lambda: comp.name)}' has {len(occs)} occurrences - "
+                          "ambiguous which to select; pass the occurrence by its fullPathName instead.")
+        return occs[0], None
+
+    def resolve(self, raw):
+        if raw in (None, "", []):
+            if self.required:
+                return None, f"'{self.name}' needs at least one target (a body or container name)."
+            return [], None
+        items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
+        out = []
+        for i, item in enumerate(items):
+            resolved, err = self._ref.resolve(item)
+            if err:
+                return None, f"'{self.name}'[{i}]: {err}"
+            ent, kind = resolved
+            if kind == "component":
+                # CAM wants the occurrence for a container, not the Component definition.
+                occ, occ_err = self._component_occurrence(ent)
+                if occ_err:
+                    return None, f"'{self.name}'[{i}]: {occ_err}"
+                ent = occ
+            out.append(ent)
+        if not out:
+            return None, f"'{self.name}': no valid targets resolved."
+        return out, None
+
+
 # ── profile reference (a STABLE handle, or a {sketch, profile_index} legacy selector) ────────────
 #
 # Replaces the fragile sketch_name+profile_index pattern (a blind index into an order-UNSTABLE
@@ -1198,22 +1322,24 @@ class TargetRef(InputKind):
 # sort/dedupe) - loft order is load-bearing, unlike fillet's edge set.
 
 def _resolve_profile_legacy(name, sketch_name, profile_index):
-    """Resolve a {sketch, profile_index} selector against the ACTIVE component's sketches.
-    Mirrors model_extrude's _target_sketch (named sketch, or most-recent when blank) + a bounds-checked
-    index. Returns (profile, error)."""
+    """Resolve a {sketch, profile_index} selector. A named sketch resolves DESIGN-WIDE (active
+    component first) via resolve_sketch; blank keeps model_extrude's most-recent-in-active-component
+    behavior. Bounds-checked index. Returns (profile, error)."""
     des = _common.design()
     if not des:
         return None, "No active design to resolve the profile against."
-    comp = _common.target_component(des)
-    coll = _common.safe(lambda: comp.sketches)
-    if coll is None:
-        return None, f"'{name}': no sketches in the active component to select a profile from."
     sk_name = (sketch_name or "").strip()
     if sk_name:
-        sketch = _common.safe(lambda: coll.itemByName(sk_name))
+        sketch = _common.resolve_sketch(des, sk_name)
         if not sketch:
-            return None, f"'{name}': no sketch named '{sk_name}'. Use sketch_get or sketch_create."
+            names = _common.all_sketch_names(des)
+            return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
+                          + (", ".join(n for n in names if n) or "(none)") + ".")
     else:
+        comp = _common.target_component(des)
+        coll = _common.safe(lambda: comp.sketches)
+        if coll is None:
+            return None, f"'{name}': no sketches in the active component to select a profile from."
         n = _common.safe(lambda: coll.count, 0)
         sketch = coll.item(n - 1) if n else None
         if not sketch:
@@ -1231,6 +1357,16 @@ def _resolve_profile_legacy(name, sketch_name, profile_index):
         return None, (f"'{name}': profile_index {idx} out of range - sketch has {pcount} profile(s) "
                       f"(0..{pcount-1}).")
     return profiles.item(idx), None
+
+
+def profile_host_component(profile, sketch, fallback):
+    """The component whose features collection can consume this profile: the one OWNING its sketch.
+    Handing another component's native profile to features.createInput raises
+    'InternalValidationError : bSet' (verified live), so a profile-consuming feature - and its body -
+    must be created on the sketch's owner. Duck-typed (an ObjectCollection has no parentSketch);
+    falls back (usually to the active component) when no owner is readable."""
+    sk = _common.safe(lambda: profile.parentSketch)
+    return _common.safe(lambda: (sk or sketch).parentComponent) or fallback
 
 
 def _resolve_one_profile(name, raw):

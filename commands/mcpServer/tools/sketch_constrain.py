@@ -107,9 +107,13 @@ TOOL_DESCRIPTION = (
     "parametric (captures design intent). Reference entities as '<type>:<index>' within "
     "'sketch_name', type = line/arc/circle/point (e.g. 'line:0', 'arc:1', 'point:2'). Two-curve "
     "constraints (perpendicular/parallel/tangent/equal/concentric/collinear) take "
-    "entity_one+entity_two; midpoint/coincident take a point as entity_one + a curve as entity_two; "
-    "horizontal/vertical/fix/unfix take one entity; symmetry takes "
-    "entity_one+entity_two+symmetry_line (the axis)."
+    "entity_one+entity_two; horizontal/vertical/fix/unfix take one entity; symmetry takes "
+    "entity_one+entity_two+symmetry_line (the axis). COINCIDENT/midpoint take a POINT as entity_one. "
+    "IMPORTANT: coincident(point, CURVE) puts the point ONTO that curve (point-on-curve) - it does "
+    "NOT center anything. To CENTER a circle/arc at a location (e.g. its center on the origin), "
+    "coincident its CENTER point to the target POINT: entity_one='point:<circle center>', "
+    "entity_two='point:<origin/other point>' - point-to-point, not point-to-curve. A wrong constraint "
+    "is removed surgically with sketch_delete_entity(target='constraint:<index>'), no sketch rebuild."
 )
 
 tool = (

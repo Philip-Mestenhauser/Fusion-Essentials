@@ -23,9 +23,11 @@ _OP_TYPES = {"milling": "MillingOperation", "turning": "TurningOperation"}
 
 _OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="milling",
                           description="The machining operation type for the setup.")
-# models is a list of bodies by handle (precise) or name; omitted -> all root bodies.
-_MODELS = _inputs.BodyRefList("models", required=False,
-                              description="Bodies to machine (omit = all solid bodies).")
+# models: bodies (handle/name) OR container occurrences/components (name); omitted -> all root bodies.
+# A container OCCURRENCE is what a shop template selects, so the setup keeps its selection when the
+# container's contents are replaced (Setup.models accepts Occurrence, BRepBody, or MeshBody).
+_MODELS = _inputs.TargetRefList("models", required=False,
+                                description="Bodies OR container occurrences to machine (omit = all solid bodies).")
 
 
 def _all_root_bodies(design):
@@ -97,12 +99,13 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
 TOOL_DESCRIPTION = (
     "Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since "
     "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. 'operation_type' "
-    "is milling (default) | turning. 'models' selects the bodies to machine - find_geometry HANDLES "
-    "(precise - bodies are auto-named) or body NAMES (a list or comma-separated) - or omit to use "
-    "ALL solid bodies in the root component. 'name' optionally names the setup. After this, add "
+    "is milling (default) | turning. 'models' selects what to machine - find_geometry HANDLES, body "
+    "NAMES, OR a CONTAINER occurrence/component name (a list) - or omit for ALL root solid bodies. "
+    "Selecting a CONTAINER (not the body inside) keeps the setup's selection when its contents are "
+    "swapped - the shop-template pattern. 'name' optionally names the setup. After this, add "
     "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "
-    "cam_generate. The CAM product must exist (switch to Manufacture once if the doc has no CAM "
-    "data). WRITES to the document's CAM data."
+    "cam_generate. The CAM product must exist (when it does not, the error names the next call). "
+    "WRITES to the document's CAM data."
 )
 
 tool = (

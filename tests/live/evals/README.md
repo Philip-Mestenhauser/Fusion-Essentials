@@ -12,8 +12,25 @@ user hits them.
 
 ## How to run one
 
-Point an agent at a scenario, e.g. "Execute `tests/live/evals/scenarios/hinged_mechanism.md`." The
-scenario embeds the execution contract below; this README is the full statement of it.
+Pipeline-tier scenarios embed an `AGENT PROMPT (verbatim)` block: stage the fixture per the
+frontmatter, then hand that block to the executing agent BYTE-IDENTICAL - compose nothing around
+it, so every run of a scenario is the same experiment and runs compare cleanly. Declared
+{{placeholders}} in frontmatter are the only permitted substitution; everything outside the block
+is grader-only and never reaches the agent. Legacy scenarios instead say "Execute
+`tests/live/evals/scenarios/<name>.md`" and embed the contract in the body; this README is the full
+statement of that contract.
+
+## Recording results (the historical ledger lives in the hub)
+
+After each run, write a per-run record (`results/run-NN_<scenario>.md`: verdict, per-postcondition
+reads, token total, tool-call count, and what the run SURFACED - a tool defect, a wire/description
+defect, an eval weakness, or clean) and persist it to the user's hub so history accrues over time:
+project **MCP Test Project** -> a folder named **Eval-<date>** (`data_create_folder`) -> upload the
+record (`data_upload_file`, then poll `data_get_upload_status` until `complete` - never assume).
+Local copies stay in `results/` (gitignored). The most valuable part of a record is the SURFACED
+line: each run is an agent-observing-agent probe of whether the wire surface teaches Fusion's
+human-oriented model (from->to joints, assembly repositioning, sketch frames, document paradigms) -
+capture what the driving agent had to DISCOVER mid-run, because that discovery is a description gap.
 
 ## The execution contract (every scenario obeys this)
 

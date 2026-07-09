@@ -182,11 +182,32 @@ class FakeComp:
         return self._edge_profile
 
 
+class _CompColl:
+    """A counted+iterable collection of components, as Design.allComponents is in the live API (a
+    Component has NO such attribute - only the Design does)."""
+    def __init__(self, comps):
+        self._c = list(comps)
+    @property
+    def count(self):
+        return len(self._c)
+    def item(self, i):
+        return self._c[i] if 0 <= i < len(self._c) else None
+    def __iter__(self):
+        return iter(self._c)
+
+
 class FakeDesign:
     def __init__(self, comp):
         self._comp = comp
         self.rootComponent = comp
         self.activeComponent = comp
+        self._all_components = [comp]
+
+    @property
+    def allComponents(self):
+        # allComponents lives on the DESIGN only (never a Component), as in the live API; defaults to
+        # just the root so single-component tests are unchanged.
+        return _CompColl(self._all_components)
 
 
 class _OC:
@@ -216,6 +237,25 @@ def _wire_adsk(handle_map=None):
         setattr(sct, n, n)
     # handle resolution is attached to the real design in _install now (see below) — this only wires
     # the adsk enum stand-ins.
+
+
+def _install_multi(active, sub_components=()):
+    """Like _install but the design spans several components: `active` is the ACTIVE/root component and
+    each sub-component carries its own sketches/features. resolve_sketch walks design.allComponents to
+    find a sketch owned by a sub-component (the F24/master-sketch shape)."""
+    design = FakeDesign(active)
+    design._all_components = [active] + list(sub_components)
+    design.findEntityByToken = lambda t: []
+    sc.app = type("A", (), {"activeProduct": design})()
+    sc._common.app = sc.app
+    sc._common.design = lambda: design
+    import adsk.fusion
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    _wire_adsk({})
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d: active
+    sc._common.target_component = lambda d: active
+    return design
 
 
 def _install(comp, handle_map=None):
@@ -336,6 +376,23 @@ class TestSurfaceExtrude:
         res = sc.extrude_handler(sketch_name="Empty", distance=5)
         assert res["isError"] is True and "no curves" in res["message"].lower()
 
+    def test_surface_extrude_built_on_the_sketchs_owning_component(self):
+        # The named sketch lives in a SUB-component (its parentComponent) while a DIFFERENT component
+        # is active. Building the open profile + feature on the active component while the sketch is
+        # owned elsewhere is the F24 bSet trap, so both must be built on the sketch's OWNER. The active
+        # comp and the owner carry SEPARATE extrudeFeatures; the test proves the owner's got the call.
+        owner_ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        owned_sketch = FakeSketch("OwnedSketch")
+        owner = FakeComp(FakeFeatures(ef=owner_ef), sketches=[owned_sketch])
+        owned_sketch.parentComponent = owner
+        active_ef = FakeExtrudeFeatures(result_bodies=[FakeBody("X", is_solid=False)])
+        active = FakeComp(FakeFeatures(ef=active_ef), sketches=[])
+        _install_multi(active, sub_components=[owner])
+        out = _payload(sc.extrude_handler(sketch_name="OwnedSketch", distance=5))
+        assert out["created"] is True
+        assert owner_ef.last_input is not None      # the OWNER built the surface extrude
+        assert active_ef.last_input is None         # NOT the active component (the bSet trap)
+
 
 # ── surface_revolve ─────────────────────────────────────────────────────────
 
@@ -375,6 +432,23 @@ class TestSurfaceRevolve:
         _install(comp)
         res = sc.revolve_handler(sketch_name="S", angle_deg=90, axis="w")
         assert res["isError"] is True and "x, y, or z" in res["message"]
+
+    def test_surface_revolve_built_on_the_sketchs_owning_component(self):
+        # Named sketch owned by a SUB-component while a different component is active. Both the profile
+        # and the origin axis must come from the OWNER (an axis from the wrong component mixes contexts,
+        # and the profile-consuming feature raises bSet on the active component - F24). Proven by which
+        # revolveFeatures object got the call.
+        owner_rf = FakeRevolveFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        owned_sketch = FakeSketch("OwnedSketch")
+        owner = FakeComp(FakeFeatures(rf=owner_rf), sketches=[owned_sketch])
+        owned_sketch.parentComponent = owner
+        active_rf = FakeRevolveFeatures(result_bodies=[FakeBody("X", is_solid=False)])
+        active = FakeComp(FakeFeatures(rf=active_rf), sketches=[])
+        _install_multi(active, sub_components=[owner])
+        out = _payload(sc.revolve_handler(sketch_name="OwnedSketch", angle_deg=180))
+        assert out["created"] is True
+        assert owner_rf.last_input is not None      # the OWNER built the surface revolve
+        assert active_rf.last_input is None         # NOT the active component (the bSet trap)
 
 
 # ── surface_patch ───────────────────────────────────────────────────────────

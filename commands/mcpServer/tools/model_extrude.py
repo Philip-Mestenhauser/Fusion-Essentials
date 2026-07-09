@@ -116,10 +116,19 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
 
     root = target_component(design)
-    sketch, requested = _common.target_sketch(root, sketch_name)
+    # By NAME: the design-wide resolver (active component first, then root, then the rest) - so a
+    # ROOT master sketch stays reachable while a sub-component is the active edit target. An EMPTY
+    # name keeps meaning "the most recent sketch in the ACTIVE component".
+    requested = (sketch_name or "").strip()
+    if requested:
+        sketch = _common.resolve_sketch(design, requested)
+    else:
+        sketch, _ = _common.target_sketch(root, "")
     if not sketch:
         if requested:
-            return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
+            names = _common.all_sketch_names(design)
+            avail = f" Available: {', '.join(names)}." if names else ""
+            return error(f"No sketch named '{requested}'.{avail} Use sketch_get or sketch_create.")
         return error("No sketch to extrude. Create one and draw a closed profile first.")
 
     profiles = safe(lambda: sketch.profiles)
@@ -131,7 +140,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     open_surface = False
     indices = [0]
     if want_surface:
-        profile_arg, perr = _open_profile_or_error(root, sketch)
+        profile_arg, perr = _open_profile_or_error(
+            safe(lambda: sketch.parentComponent) or root, sketch)
         if perr:
             # No closed profile AND no open curves -> the original dead-end, but now points at the
             # surface path so the agent knows as_surface exists.
@@ -171,8 +181,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                 profile_arg = coll
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
+    host = _inputs.profile_host_component(profile_arg, sketch, root)
     try:
-        ext_input = root.features.extrudeFeatures.createInput(profile_arg, op)
+        ext_input = host.features.extrudeFeatures.createInput(profile_arg, op)
         if open_surface:
             ext_input.isSolid = False   # surface: no end caps (confirmed-live ExtrudeFeatureInput.isSolid)
     except Exception as e:
@@ -225,7 +236,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             return error(f"Could not scope to target_bodies: {e}")
 
     try:
-        feature = root.features.extrudeFeatures.add(ext_input)
+        feature = host.features.extrudeFeatures.add(ext_input)
     except Exception as e:
         return error(f"Extrude failed: {e}. (A 'cut'/'intersect' needs existing geometry to act on.)")
     if not feature:
@@ -244,7 +255,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     else:
         note = "Profile extruded into a solid. Pair with view_screenshot (iso) to view it."
     if op_key == "new":
-        adv = root_body_advisory(design, root)          # 'root' = target_component(design)
+        adv = root_body_advisory(design, host)          # advise on where the body actually landed
         if adv:
             note += " " + adv
 
@@ -253,6 +264,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "sketch": safe(lambda: sketch.name),
+        "component": safe(lambda: feature.parentComponent.name),
         "profile_index": ("handle" if indices == [None]
                           else (indices[0] if len(indices) == 1 else indices)),
         "profiles_extruded": len(indices),
@@ -276,8 +288,9 @@ TOOL_DESCRIPTION = (
 "(the robust way to pick one region of a multi-profile sketch, e.g. a region drawn on a face). "
 "'distance' is the depth in 'units' (mm default; negative reverses). 'operation': new (new body) | "
 "join | cut | intersect - cut/intersect act on existing bodies. 'symmetric' extrudes both sides of "
-"the plane; 'taper_deg' applies a draft angle. WRITES to the design. Returns the resulting "
-"body names; pair with view_screenshot to view."
+"the plane; 'taper_deg' applies a draft angle. The feature and its body land in the component "
+"OWNING the sketch (not the active component); the result reports it as 'component'. WRITES to "
+"the design. Returns the resulting body names; pair with view_screenshot to view."
 )
 
 extrude_tool = (

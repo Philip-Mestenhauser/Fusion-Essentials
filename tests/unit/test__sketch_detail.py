@@ -194,7 +194,8 @@ class _SubComponentDesign:
         self.rootComponent = type("Root", (), {"sketches": FakeSketches([])})()
         self._sub = type("Sub", (), {"sketches": FakeSketches([sub_sketch])})()
         self.activeComponent = self._sub                       # the activated sub-component
-        self.rootComponent.allComponents = _Coll([self.rootComponent, self._sub])
+        # allComponents lives on the DESIGN in the live API (Component has no such attribute)
+        self.allComponents = _Coll([self.rootComponent, self._sub])
 
 
 def _install_subcomponent(sketch):
@@ -504,12 +505,15 @@ class TestProfiles:
         assert areas == sorted(areas, reverse=True)               # outer region first
         assert out["profiles"][0]["area"] > out["profiles"][1]["area"]
 
-    def test_handle_is_a_composite_self_healing_token(self):
-        # make_handle appends a '|@profile:x,y,z' locator so a stale token can re-resolve by position.
+    def test_handle_locator_carries_sketch_and_area(self):
+        # The locator is '|@profile[<sketch>~<area>]:x,y,z' - findEntityByToken resolves nothing for
+        # a sub-component sketch profile's token, so the sketch scopes the re-find and the area
+        # tells same-centroid profiles apart. A bare '@profile:' locator cannot re-resolve either.
         _install(_face_sketch())
         out = _payload(sd.handler(sketch_name="OnFace"))
         ring = next(p for p in out["profiles"] if p["area"] > 1)
-        assert "tok_ring" in ring["handle"] and "@profile:" in ring["handle"]
+        assert "tok_ring" in ring["handle"]
+        assert "|@profile[OnFace~" in ring["handle"]
 
     def test_loop_count_distinguishes_ring_from_region(self):
         # the face-minus-circle ring has 2 loops (outer + the circle as inner void); the circle has 1.

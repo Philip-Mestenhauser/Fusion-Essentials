@@ -157,7 +157,11 @@ class TestRectangular:
         assert inp.d1 == "AXIS_X"
         assert inp.q1 == ("real", 3)
         assert inp.dist1[0] == "real" and abs(inp.dist1[1] - 3.0) < 1e-9   # 30 mm -> 3 cm
-        assert inp.dir_two is None               # no second direction
+        # Direction two is ALWAYS set explicitly to quantity 1 for a single row: a fresh createInput
+        # carries a UI-style quantityTwo=3 default, so leaving it unset silently TRIPLES the pattern
+        # (verified live: quantity_one=2 with dir-two unset produced 6 coincident instances).
+        assert inp.dir_two is not None
+        assert inp.dir_two[1] == ("real", 1)     # quantityTwo pinned to 1, never the API default
         assert inp.dist_type == "Spacing"
 
     def test_two_directions(self):

@@ -89,10 +89,18 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    sketch, requested = _common.target_sketch(comp, sketch_name)
+    # By NAME: the design-wide resolver (active component first) - a root master sketch stays
+    # reachable from an activated sub-component. Empty = most recent sketch in the ACTIVE component.
+    requested = (sketch_name or "").strip()
+    if requested:
+        sketch = _common.resolve_sketch(design, requested)
+    else:
+        sketch, _ = _common.target_sketch(comp, "")
     if not sketch:
         if requested:
-            return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
+            names = _common.all_sketch_names(design)
+            avail = f" Available: {', '.join(names)}." if names else ""
+            return error(f"No sketch named '{requested}'.{avail} Use sketch_get or sketch_create.")
         return error("No sketch to revolve. Create one and draw a closed profile first.")
 
     profiles = safe(lambda: sketch.profiles)
@@ -115,13 +123,16 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             return error(f"profile_index {idx} out of range - sketch has {pcount} profile(s).")
         profile = profiles.item(idx)
 
-    axis_entity, axis_label = _axis_entity(comp, sketch, axis)
+    # Host the feature on the sketch's OWNING component (see profile_host_component) and take origin
+    # axes from that same component - a revolve input mixes contexts otherwise.
+    host = _inputs.profile_host_component(profile, sketch, comp)
+    axis_entity, axis_label = _axis_entity(host, sketch, axis)
     if not axis_entity:
         return error(f"Could not resolve axis '{axis}': {axis_label or 'use x | y | z, a straight-edge/sketch handle, or line:<index>.'}")
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
-        rev_input = comp.features.revolveFeatures.createInput(profile, axis_entity, op)
+        rev_input = host.features.revolveFeatures.createInput(profile, axis_entity, op)
     except Exception as e:
         return error(f"Could not start revolve: {e}. (The axis must not pass through the profile "
     "in a way that self-intersects.)")
@@ -140,7 +151,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error(f"Could not set revolve angle: {e}")
 
     try:
-        feature = comp.features.revolveFeatures.add(rev_input)
+        feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
         return error(f"Revolve failed: {e}. (A 'cut'/'intersect' needs existing geometry to act "
     "on; the axis and profile must be coplanar.)")
@@ -157,6 +168,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "sketch": safe(lambda: sketch.name),
+        "component": safe(lambda: feature.parentComponent.name),
         "profile_index": idx,
         "axis": axis_label,
         "angle_deg": round(ang, 6),
@@ -164,7 +176,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "symmetric": bool(symmetric),
         "result_bodies": body_names,
         "note": ("Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
-                 + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, comp))) else "")),
+                 + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, host))) else "")),
     })
 
 
@@ -176,7 +188,9 @@ TOOL_DESCRIPTION = (
 "(the component origin axis), a straight-edge 'handle' from find_geometry, OR 'line:<index>' to "
 "revolve about a straight line you drew in the sketch. 'angle_deg' is the sweep (360 = full "
 "revolve). 'operation': new | join | cut | "
-"intersect. 'symmetric' splits the angle both ways about the profile plane. WRITES; returns the "
+"intersect. 'symmetric' splits the angle both ways about the profile plane. The feature and its "
+"body land in the component OWNING the sketch (not the active component); the result reports it "
+"as 'component'. WRITES; returns the "
 "resulting body names."
 )
 

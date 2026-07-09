@@ -292,7 +292,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         "extent": extent,
         "feature": safe(lambda: feature.name),
         "note": "Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). "
-                "Pattern it with model_pattern for a bolt circle.",
+                "For a bolt circle, pass every position in 'points' in ONE call - the pattern tools "
+                "take bodies/occurrences, not hole features.",
     }
     if tap:
         result["tapped"] = tap.strip()
@@ -302,7 +303,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         result["clearance_diameter"] = diameter
         result["note"] = ("Clearance hole drilled + TAGGED for " + fastener + " (" + fit + " fit). "
                           "Diameter set from the standard clearance table (the API tags the fastener but "
-                          "doesn't auto-size on this version). Pattern with model_pattern for a bolt circle.")
+                          "doesn't auto-size on this version).")
     return ok(result)
 
 
@@ -310,12 +311,14 @@ TOOL_DESCRIPTION = (
     "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
     "hole/thread metadata. 'hole_type': simple / counterbore / countersink. 'diameter' e.g. '8 mm'. "
     "'face' = a find_geometry planar-face handle to drill into; 'points' = list of [x,y,z] (mm) in "
-    "the FACE'S LOCAL frame (the drill sketch sits on the face; z is off-plane, so [x,y,0] drills at "
-    "x,y on it), multiple points => one patterned hole feature. 'extent': 'blind' (needs 'depth') or "
+    "the FACE'S LOCAL frame - the SAME frame sketch_create(on_face=...) reports for that face "
+    "(sketch (0,0) at its origin_mm, axes x_world/y_world); z is off-plane, so [x,y,0] drills at "
+    "x,y on it. Multiple points => one patterned hole feature. 'extent': 'blind' (needs 'depth') or "
     "'through'. counterbore needs 'cbore_diameter'/'cbore_depth'; countersink needs "
     "'csink_diameter'/'csink_angle'. 'tap' = a thread designation like 'M5x0.8' to make it tapped. "
     "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit' close/normal/loose) sizes + "
-    "tags the hole for that fastener (overrides 'diameter'). WRITES. Pair with model_pattern for bolt circles."
+    "tags the hole for that fastener (overrides 'diameter'). WRITES. For a bolt circle, pass every "
+    "position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hole features."
 )
 
 tool = (

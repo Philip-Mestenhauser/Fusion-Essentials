@@ -43,15 +43,7 @@ def _base_feature_count(design):
         return 0
     total = 0
     counted_any = False
-    comps = safe(lambda: root.allComponents)
-    # allComponents includes the root; fall back to just root if the collection is unavailable.
-    iterable = []
-    if comps is not None:
-        n = safe(lambda: comps.count, 0)
-        iterable = [safe(lambda i=i: comps.item(i)) for i in range(n)]
-    if not iterable:
-        iterable = [root]
-    for comp in iterable:
+    for comp in _common.all_components(design):
         if comp is None:
             continue
         bf = safe(lambda c=comp: c.features.baseFeatures)
@@ -185,12 +177,9 @@ def _resolve_base_feature(design, comp, name):
     root = safe(lambda: design.rootComponent)
     if root is not None and root is not comp:
         candidates.append(root)
-    comps = safe(lambda: root.allComponents) if root is not None else None
-    if comps is not None:
-        for i in range(safe(lambda: comps.count, 0)):
-            c = safe(lambda i=i: comps.item(i))
-            if c is not None and c not in candidates:
-                candidates.append(c)
+    for c in _common.all_components(design):
+        if c is not None and c not in candidates:
+            candidates.append(c)
     for c in candidates:
         bf = safe(lambda c=c: c.features.baseFeatures.itemByName(nm))
         if bf:

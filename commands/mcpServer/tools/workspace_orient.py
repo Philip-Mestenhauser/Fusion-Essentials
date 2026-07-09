@@ -65,6 +65,19 @@ def _design_mode(design):
     return _inputs.current_design_type(design)
 
 
+def _design_wide_counts(design):
+    """(bodies, sketches) summed across every component (root + sub-components) via the shared
+    _common.all_components walk. bRepBodies/sketches are per-COMPONENT collections: reading them off
+    the root alone reports only root-component geometry, so a design whose bodies/sketches live in
+    sub-components (the normal multi-part workflow) under-reports - a sketch-only-in-sub-components doc
+    reads sketches:0. all_components enumerates the DESIGN's components (Component has no such walk)."""
+    bodies = sketches = 0
+    for comp in _common.all_components(design):
+        bodies += safe(lambda c=comp: c.bRepBodies.count, 0) or 0
+        sketches += safe(lambda c=comp: c.sketches.count, 0) or 0
+    return bodies, sketches
+
+
 def _data_identity(doc):
     """WHERE the active document lives in the data model: its lineage URN + version + web URL, and the
     hub / project / folder that contain it - so an orienting agent knows its place in the data model
@@ -355,8 +368,10 @@ def handler() -> dict:
     root = safe(lambda: design.rootComponent)
     mode = _design_mode(design)
     occ_total = safe(lambda: root.allOccurrences.count, 0) or 0
-    body_total = safe(lambda: root.bRepBodies.count, 0) or 0
-    sketch_total = safe(lambda: root.sketches.count, 0) or 0
+    # Bodies and sketches are design-wide (every component, not just root): a sub-component's sketch or
+    # body must count, or a multi-part doc under-reports (a doc whose only sketches live in
+    # sub-components reads sketches:0 from a root-only count).
+    body_total, sketch_total = _design_wide_counts(design)
     param_total = safe(lambda: design.userParameters.count, 0) or 0
 
     errors, warnings, suppressed, tl_total = _timeline_rollup(design)

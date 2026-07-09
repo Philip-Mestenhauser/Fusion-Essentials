@@ -27,6 +27,10 @@ class _Coll:
         return len(self._i)
     def item(self, i):
         return self._i[i]
+    def __iter__(self):
+        # Live adsk collections are iterable (allComponents is walked with list()); model that so a
+        # design-wide walk over this collection behaves like the real API.
+        return iter(self._i)
 
 
 class FakeOcc:
@@ -83,13 +87,30 @@ class _UnitsMgr:
         return value * factor
 
 
+class FakeSubComp:
+    """A sub-component carrying its OWN sketches/bodies collections - like the live Component. It has
+    NO allComponents attribute (that collection is a Design property), matching the API so a design-wide
+    count that mistakenly read it off a component would raise, not silently degrade."""
+    def __init__(self, name, bodies=0, sketches=0):
+        self.name = name
+        self.bRepBodies = _Coll([None] * bodies)
+        self.sketches = _Coll([None] * sketches)
+
+
 class FakeDesign:
-    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0):
+    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0, sub_components=()):
         self.rootComponent = root
         self.timeline = _Coll(timeline)
         self.unitsManager = _UnitsMgr(units)
         self.designType = design_type        # 1 = parametric, 0 = direct
         self.userParameters = type("UP", (), {"count": parameters})()
+        # allComponents lives on the DESIGN and is a counted collection (root included), as in the live
+        # API - _common.all_components reads it here, never off a Component.
+        self._all_components = [root] + list(sub_components)
+
+    @property
+    def allComponents(self):
+        return _Coll(self._all_components)
 
 
 class FakeSetup:
@@ -340,6 +361,45 @@ class TestOrientation:
         out = _payload(wo.handler())
         assert len(out["browser_digest"]) == wo._DIGEST_LIMIT      # capped, not all 40
         assert out["design"]["top_level_occurrences"] == 40        # but the true count is reported
+
+
+# ── design-wide counts: sketches + bodies span sub-components, not just root (F25) ────────────────
+
+class TestDesignWideCounts:
+    """The sketch/body counts in the design summary must be DESIGN-WIDE (every component), not
+    root/active-scoped. Live regression: a gimbal doc whose 3 sketches all live in sub-components,
+    with root active, reported 'sketches: 0' - misleading a cold agent about whether geometry exists.
+    """
+
+    def test_sketches_in_sub_components_are_counted_with_empty_root(self):
+        # root has ZERO sketches; the geometry lives in three sub-components. A root-only count reports
+        # 0; the design-wide walk must report the true 3 (this is the exact F25 shape).
+        root = FakeRoot(top_occs=[FakeOcc("Frame:1"), FakeOcc("OuterRing:1"), FakeOcc("InnerRing:1")],
+                        all_count=3, sketches=0, bodies=0)
+        subs = [FakeSubComp("Frame", sketches=1), FakeSubComp("OuterRing", sketches=1),
+                FakeSubComp("InnerRing", sketches=1)]
+        des = FakeDesign(root, timeline=[FakeTL(0)], sub_components=subs)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["sketches"] == 3      # NOT 0 - would be 0 under a root-only count
+
+    def test_bodies_summed_across_root_and_sub_components(self):
+        # root holds 1 body; two sub-components hold 2 and 3 - total 6 across the design.
+        root = FakeRoot(top_occs=[FakeOcc("A:1"), FakeOcc("B:1")], all_count=2, bodies=1, sketches=2)
+        subs = [FakeSubComp("A", bodies=2, sketches=1), FakeSubComp("B", bodies=3, sketches=0)]
+        des = FakeDesign(root, timeline=[FakeTL(0)], sub_components=subs)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["bodies"] == 6        # 1 + 2 + 3, NOT the root-only 1
+        assert out["design"]["sketches"] == 3      # 2 + 1 + 0, NOT the root-only 2
+
+    def test_single_component_design_matches_root(self):
+        # No sub-components: design-wide == root-only, so the common single-part case is unchanged.
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bodies=4, sketches=5)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["bodies"] == 4 and out["design"]["sketches"] == 5
 
 
 # ── CAM detection (without switching to Manufacture) ─────────────────────────────────────────────

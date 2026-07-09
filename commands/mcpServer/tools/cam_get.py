@@ -169,24 +169,12 @@ def _slice_templates(cam, template_location, template_url, template_depth):
 # The caller scopes to one operation first, then reads the detail they want.
 
 def _find_operation(cam, name):
-    """The Operation named `name` (exact, then case-insensitive substring), or (None, available-names)."""
-    want = (name or "").strip()
-    exact = contains = None
-    names = []
-    for i in range(safe(lambda: cam.setups.count, 0)):
-        s = cam.setups.item(i)
-        for o in safe(lambda s=s: s.allOperations, []) or []:
-            oc = adsk.cam.Operation.cast(o)
-            if not oc:
-                continue
-            nm = safe(lambda oc=oc: oc.name) or ""
-            if len(names) < 60:
-                names.append(nm)
-            if nm == want:
-                exact = oc
-            elif contains is None and want and want.lower() in nm.lower():
-                contains = oc
-    return (exact or contains), names
+    """The Operation named `name` (case-insensitive EXACT), or (None, available-names). Delegates to
+    the shared _cam_common.find_operation so a name resolves the same way in every CAM tool - and so an
+    ambiguous/partial name is REFUSED (returns None + the available names) rather than silently
+    grabbing the first substring match."""
+    from . import _cam_common as _cc
+    return _cc.find_operation(cam, name)
 
 
 def _grouped_visible_params(param_coll):

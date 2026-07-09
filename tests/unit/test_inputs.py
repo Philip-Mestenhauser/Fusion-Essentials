@@ -1182,6 +1182,103 @@ class TestProfileRef:
         assert val is None and "no sketch named" in err
 
 
+class FakeAreaProfile(FakeProfile):
+    """A profile carrying areaProperties() - what the locator re-find reads."""
+    def __init__(self, tag, centroid=(0.0, 0.0, 0.0), area=1.0):
+        super().__init__(tag)
+        self._c, self._a = centroid, area
+
+    def areaProperties(self):
+        c = type("C", (), {})()
+        c.x, c.y, c.z = self._c
+        return type("AP", (), {"centroid": c, "area": self._a})()
+
+
+class TestProfileHandleLocator:
+    """findEntityByToken returns NOTHING for a sub-component sketch profile's token (live API fact),
+    so a profile handle's '|@profile[<sketch>~<area>]:<centroid>' locator is its real resolution
+    path - these pin that path."""
+
+    def test_dead_token_resolves_via_sketch_area_locator(self):
+        band = FakeAreaProfile("band", centroid=(0.0, 0.0, 0.0), area=27.269)
+        _install_profiles(sketches=[("OuterRingSketch", [band])])
+        h = "DEADTOKEN|@profile[OuterRingSketch~27.2690]:0.000000,0.000000,0.000000"
+        val, err = inp.ProfileRef("profile").resolve(h)
+        assert err is None and val is band
+
+    def test_area_disambiguates_same_centroid_profiles(self):
+        # An annulus band and its full disk share centroid (0,0,0); only the area tells them apart.
+        # A centroid-only match would grab whichever scans first - the wrong-region extrude.
+        disk = FakeAreaProfile("disk", centroid=(0.0, 0.0, 0.0), area=78.5398)
+        band = FakeAreaProfile("band", centroid=(0.0, 0.0, 0.0), area=27.269)
+        _install_profiles(sketches=[("OuterRingSketch", [disk, band])])
+        h = "DEADTOKEN|@profile[OuterRingSketch~27.2690]:0.000000,0.000000,0.000000"
+        val, err = inp.ProfileRef("profile").resolve(h)
+        assert err is None and val is band
+
+    def test_wrong_area_is_a_miss_not_a_nearest_grab(self):
+        disk = FakeAreaProfile("disk", centroid=(0.0, 0.0, 0.0), area=78.5398)
+        _install_profiles(sketches=[("S", [disk])])
+        h = "DEADTOKEN|@profile[S~999.0000]:0.000000,0.000000,0.000000"
+        val, err = inp.ProfileRef("profile").resolve(h)
+        assert val is None and "did not resolve" in err
+
+    def test_far_centroid_is_a_miss(self):
+        p = FakeAreaProfile("p", centroid=(5.0, 0.0, 0.0), area=10.0)
+        _install_profiles(sketches=[("S", [p])])
+        h = "DEADTOKEN|@profile[S~10.0000]:0.000000,0.000000,0.000000"
+        val, err = inp.ProfileRef("profile").resolve(h)
+        assert val is None and "did not resolve" in err
+
+    def test_legacy_named_sketch_resolves_design_wide(self):
+        # The sketch lives in a SUB-component while root is active: the {sketch, index} selector
+        # must reach it (an active-component-scoped lookup reports 'no sketch named' instead).
+        import adsk.fusion
+        adsk.fusion.Profile = FakeProfile
+        p = FakeProfile("sub-profile")
+
+        class _Profiles:
+            count = 1
+            def item(self, i):
+                return p if i == 0 else None
+
+        class _SkColl:
+            def __init__(self, sks):
+                self._sks = sks
+            @property
+            def count(self):
+                return len(self._sks)
+            def item(self, i):
+                return self._sks[i]
+            def itemByName(self, n):
+                for s in self._sks:
+                    if s.name == n:
+                        return s
+                return None
+
+        sub_sketch = type("Sk", (), {"name": "FrameSketch", "profiles": _Profiles()})()
+        root = type("C", (), {"name": "Root", "sketches": _SkColl([])})()
+        sub = type("C", (), {"name": "Frame", "sketches": _SkColl([sub_sketch])})()
+
+        class _CompColl:
+            _l = [root, sub]
+            @property
+            def count(self):
+                return len(self._l)
+            def item(self, i):
+                return self._l[i]
+
+        class FakeDesign:
+            rootComponent = root
+            allComponents = _CompColl()
+            def findEntityByToken(self, h):
+                return []
+        inp._common.design = lambda: FakeDesign()
+        inp._common.target_component = lambda d: root
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "FrameSketch", "profile_index": 0})
+        assert err is None and val is p
+
+
 class TestProfileRefList:
     def test_resolves_handles_in_order(self):
         p0, p1, p2 = FakeProfile("0"), FakeProfile("1"), FakeProfile("2")
@@ -1331,17 +1428,29 @@ def _install_target(*, handle_map=None, occurrences=(), components=(), brep_name
         @property
         def count(self): return len(self._l)
         def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
-    comp_coll = _CompColl([_Comp("Root")] + [_Comp(n) for n in components])
+    comp_objs = [_Comp(n) for n in components]
+    comp_coll = _CompColl([_Comp("Root")] + comp_objs)
+    # component -> its occurrences (for TargetRefList's container mapping). A component named "X"
+    # maps to the occurrence(s) in `occurrences` whose component.name == "X"; an occurrence carries a
+    # .component back-pointer here so allOccurrencesByComponent can match it.
+    for occ in occurrences:
+        if getattr(occ, "component", None) is None:
+            occ.component = _Comp(occ.name.split(":")[0])
 
     class _Root:
         name = "Root"
         allOccurrences = list(occurrences)
-        allComponents = comp_coll
         bRepBodies = _BColl(brep_named)
         meshBodies = _MColl(mesh_named)
+        @staticmethod
+        def allOccurrencesByComponent(comp):
+            return [o for o in occurrences
+                    if getattr(getattr(o, "component", None), "name", None) == comp.name]
 
     class FakeDesign:
         rootComponent = _Root()
+        # allComponents lives on the DESIGN in the live API (Component has no such attribute)
+        allComponents = comp_coll
         def findEntityByToken(self, h):
             e = handle_map.get(h)
             return [e] if e is not None else []
@@ -1413,6 +1522,70 @@ class TestTargetRef:
         assert res is None
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
+
+
+class TestTargetRefList:
+    """The CAM-setup selector: a list of bodies AND/OR container occurrences/components. A component
+    maps to its single occurrence (the CAM API wants Occurrence for a container, not the Component)."""
+
+    def test_body_handles_pass_through(self):
+        b1 = FakeBRep("Body1", is_solid=True)
+        b2 = FakeBRep("Body2", is_solid=True)
+        _install_target(handle_map={"H1": b1, "H2": b2})
+        val, err = inp.TargetRefList("models").resolve(["H1", "H2"])
+        assert err is None and val == [b1, b2]
+
+    def test_container_occurrence_selected_as_occurrence(self):
+        # the RFA pattern: selecting the CONTAINER occurrence, not a body inside it.
+        occ = _FakeOcc("Model Container:1", "Model Container:1")
+        _install_target(occurrences=[occ])
+        val, err = inp.TargetRefList("models").resolve(["Model Container:1"])
+        assert err is None and val == [occ]        # the Occurrence itself, ready for Setup.models
+
+    def test_component_name_maps_to_its_occurrence(self):
+        # a bare component name resolves to its single occurrence (CAM wants the Occurrence). The
+        # component name deliberately does NOT substring-match the occurrence's own name, so
+        # resolution FALLS THROUGH TargetRef's occurrence step to the component step + the mapping.
+        occ = _FakeOcc("stockInst:1", "stockInst:1")
+        occ.component = type("C", (), {"name": "StockDef"})()
+        _install_target(occurrences=[occ], components=["StockDef"])
+        val, err = inp.TargetRefList("stock").resolve(["StockDef"])
+        assert err is None and val == [occ]        # mapped Component -> its Occurrence
+
+    def test_component_with_no_occurrence_errors(self):
+        _install_target(components=["Orphan"])     # a component that is not instanced
+        val, err = inp.TargetRefList("models").resolve(["Orphan"])
+        assert val is None and "no occurrence" in err.lower()
+
+    def test_component_with_multiple_occurrences_refused(self):
+        # two instances of the same component -> ambiguous which to machine; refuse (never guess).
+        # The component name ("JawDef") does not substring-match either occurrence name, so
+        # resolution reaches the component branch and its multi-occurrence refusal.
+        a = _FakeOcc("jawInstA:1", "Vise:1+jawInstA:1")
+        b = _FakeOcc("jawInstB:1", "Vise:1+jawInstB:1")
+        comp = type("C", (), {"name": "JawDef"})()
+        a.component = comp; b.component = comp
+        _install_target(occurrences=[a, b], components=["JawDef"])
+        val, err = inp.TargetRefList("models").resolve(["JawDef"])
+        assert val is None and "ambiguous" in err.lower() and "fullPathName" in err
+
+    def test_mixed_body_and_container(self):
+        b = FakeBRep("StockBody", is_solid=True)
+        occ = _FakeOcc("Model Container:1", "Model Container:1")
+        _install_target(handle_map={"H": b}, occurrences=[occ])
+        val, err = inp.TargetRefList("models").resolve(["H", "Model Container:1"])
+        assert err is None and val == [b, occ]
+
+    def test_empty_optional_is_empty_list(self):
+        _install_target()
+        val, err = inp.TargetRefList("models", required=False).resolve([])
+        assert err is None and val == []
+
+    def test_one_bad_element_fails_whole_list(self):
+        occ = _FakeOcc("Good:1", "Good:1")
+        _install_target(occurrences=[occ])
+        val, err = inp.TargetRefList("models").resolve(["Good:1", "Ghost"])
+        assert val is None and "[1]" in err and "Ghost" in err
 
 
 # ── TargetRef edge + construction geometry (gated by allow=) ─────────────────────────────────────

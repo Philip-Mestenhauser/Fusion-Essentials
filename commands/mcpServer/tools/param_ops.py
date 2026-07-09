@@ -28,6 +28,9 @@ def _param_summary(p) -> dict:
     "expression": safe(lambda: p.expression),
     "unit": safe(lambda: p.unit),
     "comment": safe(lambda: p.comment),
+    # round-trippable with param_set_favorite / param_add(favorite=) - None when the parameter
+    # kind carries no favorite flag (model parameters).
+    "favorite": safe(lambda: p.isFavorite),
     "value": None,
     }
     # value is numeric in db units; text params raise - fall back to textValue.
@@ -342,19 +345,21 @@ set_tool = (
 
 set_item = Item.create_tool_item(tool=set_tool, write="write", handler=set_handler, run_on_main_thread=True)
 
+# NOTE: built with create_simple + a PLAIN name property (not create_with_string_input, which marks
+# its input REQUIRED) - batch mode legitimately omits 'name', so the schema must not demand it.
 _add_tool = (
-    Tool.create_with_string_input(
+    Tool.create_simple(
         name="param_add",
         description=(
             "Add ONE or MANY user parameters. Single: name + expression (+ unit/comment/"
             "favorite). BATCH: pass 'params' = a list of {name, expression, unit?, comment?, "
-            "favorite?} dicts to add many in ONE call (prefer this over many calls). 'unit' = "
-            "mm/cm/in/deg or '' for unitless (default mm). GUARDED: each add that introduces a NEW "
-            "timeline error is rolled back; in a batch the first failure stops, keeping earlier adds. "
-            "Use param_set to change an existing one."),
-        input_param_name="name",
-        input_param_description="New parameter name (single add; omit when using 'params').",
+            "favorite?} dicts to add many in ONE call (prefer this over many calls; 'name' is then "
+            "omitted). 'unit' = mm/cm/in/deg or '' for unitless (default mm). GUARDED: each add that "
+            "introduces a NEW timeline error is rolled back; in a batch the first failure stops, "
+            "keeping earlier adds. Use param_set to change an existing one."),
     )
+    .add_input_property("name", {"type": "string",
+            "description": "New parameter name (single add; omit when using 'params')."})
     .add_input_property("expression", {"type": "string",
             "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';' - max(a; b)."})
     .add_input_property("unit", {"type": "string",

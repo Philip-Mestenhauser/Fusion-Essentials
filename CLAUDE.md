@@ -47,9 +47,20 @@ e.g. `view_inspect`) and Edit packaging (`action=` dispatch, one-verb-per-file) 
   success is the cardinal sin: a failed delete/edit must return `isError`, never a false `ok`.
 - After a write, verify the effect and report it. If the API returns success but nothing changed
   (it happens), treat that as failure. Surface partial success explicitly (what was done, what wasn't).
+- A static read of `adsk.*` code cannot tell you what the API actually does. Before "fixing" a
+  geometry/matrix/API bug you spotted by reading, reproduce it live (`sys_execute_script` against a
+  scratch doc, or drive the tool and read the result back) — a plausible-looking bug is often correct
+  code whose API contract you misread, and the "fix" is the regression. Confirm the defect exists, then
+  confirm the fix, both against a live document.
 - Guard inputs and report *why* a precondition failed, naming the offending value. Resolve references
   (occurrences, geometry) through the typed kinds in `_inputs.py` — they refuse ambiguity instead of
   grabbing the wrong instance; don't hand-roll a `name: str`.
+- Resolving a name yourself: whether first-match is a bug depends on whether the name space is unique.
+  A **scope-unique** name (a CAM setup/operation) resolves correctly by case-insensitive EXACT match,
+  returning the available names on a miss (`_cam_common.find_operation`). A **non-unique** name (two
+  sub-assemblies each holding a "Bolt:1") must **refuse** the ambiguity, never return the first
+  substring/`.find()`/`[0]` hit — that silently targets the wrong entity. `test_no_first_match_resolvers`
+  catches the always-wrong shapes (substring, indexed-first), but the unique-vs-not judgment is yours.
 
 ## Input kinds — use one BEFORE hand-rolling a `name`/`index` reference
 
@@ -62,7 +73,7 @@ every kind, plus the shared helpers to reuse — is the generated map in
 [commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md), loaded when you author a tool.
 
 <!-- BEGIN GENERATED FAMILIES (py -3 tests/gen_manifest.py) -->
-**Tool families** (137 tools — `sys_find_tool <kw>` to search, `MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(8) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(11) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
+**Tool families** (138 tools — `sys_find_tool <kw>` to search, `MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(9) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(11) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
 <!-- END GENERATED FAMILIES -->
 
 ## Tool descriptions and agent-facing strings — pure ASCII, verified claims only

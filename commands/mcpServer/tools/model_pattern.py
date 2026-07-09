@@ -115,13 +115,16 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         s1 = adsk.core.ValueInput.createByReal(float(spacing_one) * k)
         pin = owner.features.rectangularPatternFeatures.createInput(coll, d1, q1, s1, dist_type)
 
-        if int(quantity_two) > 1:
-            d2 = _axis_entity(owner, direction_two)
-            if not d2:
-                return error(f"Unknown direction_two '{direction_two}'. Use x, y, or z.")
-            q2 = adsk.core.ValueInput.createByReal(int(quantity_two))
-            s2 = adsk.core.ValueInput.createByReal(float(spacing_two) * k)
-            pin.setDirectionTwo(d2, q2, s2)
+        # ALWAYS set direction two explicitly. A fresh createInput carries UI-style defaults
+        # (quantityTwo=3, verified live: a quantity_one=2 single-row request silently produced 6
+        # coincident instances while only direction one was set) - leaving the default unset is how
+        # a single-row pattern triples itself.
+        d2 = _axis_entity(owner, direction_two)
+        if not d2:
+            return error(f"Unknown direction_two '{direction_two}'. Use x, y, or z.")
+        q2 = adsk.core.ValueInput.createByReal(max(1, int(quantity_two)))
+        s2 = adsk.core.ValueInput.createByReal(float(spacing_two) * k)
+        pin.setDirectionTwo(d2, q2, s2)
 
         feature = owner.features.rectangularPatternFeatures.add(pin)
     except Exception as e:
@@ -129,7 +132,14 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
     if not feature:
         return error("Rectangular pattern returned no feature.")
 
-    total = int(quantity_one) * max(1, int(quantity_two))
+    # Verify the effect: the REAL instance count read off the created feature, never the request.
+    requested_total = int(quantity_one) * max(1, int(quantity_two))
+    real_total = safe(lambda: feature.patternElements.count)
+    if real_total is not None and int(real_total) != requested_total:
+        return error(
+            f"Pattern '{safe(lambda: feature.name)}' created {int(real_total)} instances but "
+            f"{requested_total} were requested ({quantity_one} x {max(1, int(quantity_two))}). The "
+            "feature is left in the timeline for inspection - design_delete_feature removes it.")
     return ok({
         "patterned": True,
         "type": "rectangular",
@@ -141,7 +151,8 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         "direction_two": direction_two.lower() if int(quantity_two) > 1 else None,
         "quantity_two": int(quantity_two), "spacing_two": round(float(spacing_two), 6),
         "units": units,
-        "total_instances": total,
+        # the read-back count when available (the verified value); the computed request otherwise
+        "total_instances": int(real_total) if real_total is not None else requested_total,
         "note": "Occurrences patterned in a grid. Pair with view_screenshot to view.",
     })
 
@@ -180,6 +191,13 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
     if not feature:
         return error("Circular pattern returned no feature.")
 
+    # Verify the effect: the REAL instance count read off the created feature, never the request.
+    real_total = safe(lambda: feature.patternElements.count)
+    if real_total is not None and int(real_total) != int(quantity):
+        return error(
+            f"Pattern '{safe(lambda: feature.name)}' created {int(real_total)} instances but "
+            f"{int(quantity)} were requested. The feature is left in the timeline for inspection - "
+            "design_delete_feature removes it.")
     return ok({
         "patterned": True,
         "type": "circular",
@@ -187,7 +205,7 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
         "entities": resolved,
         "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
         "axis": axis.lower(),
-        "quantity": int(quantity),
+        "quantity": int(real_total) if real_total is not None else int(quantity),
         "total_angle_deg": float(total_angle_deg),
         "symmetric": bool(symmetric),
         "note": "Occurrences patterned around the axis. Pair with view_screenshot to view.",

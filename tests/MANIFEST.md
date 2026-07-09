@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails CI if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 137  |  **Input-kinds:** 15  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 138  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -24,6 +24,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `ProfileRef` | A reference to a sketch PROFILE - a stable 'handle' (entityToken, order-stable across rebuilds) |
 | `ProfileRefList` | An ORDERED list of profile references - for loft, where profile ORDER is load-bearing (the loft |
 | `TargetRef` | A reference to a THING to measure/colour, resolved from any of several shapes: |
+| `TargetRefList` | A LIST of machinable targets - each a BODY (handle/name) or a container OCCURRENCE (name/ |
 | `UnitField` | The 'units' selector. resolve() returns the cm-per-unit scale factor. |
 
 ## Tools by family
@@ -95,6 +96,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `sketch_add_geometry` | Draw one geometry entity on a sketch |
 | ✎ | `sketch_constrain` | Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is parametric (captures design intent) |
 | ✎ | `sketch_create` | Create a new sketch on a plane OR on an existing planar face |
+| ⚠ | `sketch_delete_entity` | Delete ONE sketch entity or constraint from a named sketch - the surgical alternative to deleting and rebuilding the whole sketch |
 | ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of parametric sketching (sketch_constrain does the geometric half) |
 | · | `sketch_get` | Read sketches by zoom level |
 | ✎ | `sketch_project` | Project existing model geometry into a sketch - Fusion's Project command - creating sketch curves/points from edges, faces (all of their edges), or vertices |
@@ -112,7 +114,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ⚠ | `cam_delete` | Delete a CAM entity - a setup / operation / folder / pattern - by name (the CAM-side delete; design_delete_feature / _occurrence only act on the DESIGN timeline... |
 | ✎ | `cam_edit_folders` | CAM FOLDERS in a setup |
 | ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach |
-| ✎ | `cam_edit_setup` | Edit a CAM SETUP - its parameters and/or its model/fixture/stock bodies (the setup-level companion to cam_edit_operation) |
+| ✎ | `cam_edit_setup` | Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern |
 | ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools (each action's inputs are documented on the properties below) |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often minutes; poll cam_get_status(handle), never block) |
 | · | `cam_get` | Read the active document's CAM (Manufacture) state by zoom level |

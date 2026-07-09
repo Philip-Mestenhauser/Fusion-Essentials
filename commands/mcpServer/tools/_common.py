@@ -86,12 +86,13 @@ def root_body_advisory(d, comp):
 
 def all_components(d):
     """Every component in the design (root + all sub-components), as a flat list. ``allComponents``
-    includes the root; falls back to just the root when the collection is unavailable. The basis for
-    a design-wide by-name lookup that does NOT assume the root component."""
+    is a property of the DESIGN (Component has no such attribute - reading it there silently degrades
+    this walk to root-only); it includes the root. Falls back to just the root when the collection is
+    unavailable. The basis for a design-wide by-name lookup that does NOT assume the root component."""
     root = safe(lambda: d.rootComponent)
     if root is None:
         return []
-    comps = safe(lambda: root.allComponents)
+    comps = safe(lambda: d.allComponents)
     if comps is None:
         return [root]
     n = safe(lambda: comps.count, 0)

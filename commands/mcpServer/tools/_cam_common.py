@@ -33,8 +33,9 @@ def get_cam():
         return None, "Could not access document products."
     cam = safe(lambda: adsk.cam.CAM.cast(products.itemByProductType('CAMProductType')))
     if not cam:
-        return None, ("This document has no CAM (Manufacture) data. Open a document with setups, "
-                      "or create them in the Manufacture workspace.")
+        return None, ("This document has no CAM (Manufacture) product yet - a fresh design gains "
+                      "one on first entry: call view_switch_workspace('manufacture') once, then "
+                      "retry this call.")
     return cam, None
 
 

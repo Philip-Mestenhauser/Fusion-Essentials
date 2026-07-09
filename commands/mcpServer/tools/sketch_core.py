@@ -87,15 +87,20 @@ def _sketch_summary(sketch) -> dict:
 
 
 def get_sketches_handler() -> dict:
-    """List the sketches in the active design with their entity/profile counts."""
+    """List EVERY sketch in the design (all components), each tagged with its owning component -
+    so a sketch inside a sub-component is visible without activating it first (the by-name overview
+    resolves design-wide via resolve_sketch, and this list matches that reach)."""
     design = _common.design()
     if not design:
         return error("No active design (open or create a document with design geometry).")
     sketches = []
     try:
-        coll = target_component(design).sketches
-        for i in range(coll.count):
-            sketches.append(_sketch_summary(coll.item(i)))
+        for comp in _common.all_components(design):
+            coll = safe(lambda c=comp: c.sketches)
+            for i in range(safe(lambda: coll.count, 0) if coll else 0):
+                rec = _sketch_summary(coll.item(i))
+                rec["component"] = safe(lambda c=comp: c.name)
+                sketches.append(rec)
     except Exception as e:
         return error(f"Could not read sketches: {e}")
     return ok({"sketch_count": len(sketches), "sketches": sketches})
@@ -544,7 +549,10 @@ _CREATE_DESC = (
                                         "Create a new sketch on a plane OR on an existing planar face. Use 'plane' = xy / xz / yz "
                                         "(origin planes; aliases top/front/right) or a construction-plane name; OR 'on_face' = a "
                                         "planar-face handle from find_geometry to sketch directly ON a part's face (e.g. the top of a "
-                                        "boss) - on_face takes precedence. Optional 'name' renames the sketch. WRITES; then draw on it "
+                                        "boss) - on_face takes precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges "
+                                        "into it, so the sketch starts with profiles you did not draw - after drawing, re-read "
+                                        "sketch_get and pick the region by its area/centroid handle, never by a guessed index. "
+                                        "Optional 'name' renames the sketch. WRITES; then draw on it "
                                         "with sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
@@ -582,10 +590,10 @@ add_geometry_tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("x1", {"type": "number", "description": "X of point 1 / start (line, rectangle, arc)."})
     .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
-    .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle)."})
-    .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle)."})
-    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon)."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon)."})
+    .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle); center_rectangle: HALF-width from center."})
+    .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle); center_rectangle: HALF-height from center."})
+    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle)."})
+    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle)."})
     .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot half-width."})
     .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
     .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})

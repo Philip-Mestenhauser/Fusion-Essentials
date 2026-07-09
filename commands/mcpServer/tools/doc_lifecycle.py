@@ -26,11 +26,34 @@ from . import _assert
 from ._data_common import (
     _data, _agent_description, _find_project, _split_path,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
+    _urn_candidates,
 )
 
 app = adsk.core.Application.get()
 
 _MAX_XREFS = 64
+
+# Post-saveAs the cloud assigns the lineage URN asynchronously - doc.dataFile.id reads a local
+# pre-upload handle (not a 'urn:') for a moment first. Pump the main loop a few times to let the
+# lineage settle so the tool can report the URN that ADDRESSES the file it just wrote (identity is
+# the lineage URN, not the name - Fusion allows same-name docs). Bounded burst, same idiom as
+# cam_generate's status pump; capped so it never hangs the call if the URN never resolves.
+_URN_POLL_TRIES = 12
+_URN_POLL_SLEEP = 0.25
+
+
+def _settled_lineage_urn(doc):
+    """Pump briefly and return doc.dataFile.id once it is a lineage 'urn:', else None. The URN is the
+    stable identity a caller needs to address the saved file unambiguously (two files may share a name)."""
+    import time
+    for _ in range(_URN_POLL_TRIES):
+        df = safe(lambda: doc.dataFile)
+        raw = safe(lambda: df.id) if df else None
+        if isinstance(raw, str) and raw.startswith("urn:"):
+            return raw
+        safe(lambda: adsk.doEvents())
+        time.sleep(_URN_POLL_SLEEP)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +410,13 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
                     "Pass create_path=true, or use data_get(include=['folders']) to see the structure.")
 
+    # Fusion PERMITS same-name documents (identity is the lineage URN, not the name). saveAs on a
+    # colliding name FORKS a new lineage - that is legal, not an error. But an agent that meant to
+    # VERSION the existing file would be blind to the fork, so detect a pre-existing same-name file in
+    # the target folder BEFORE the save and report it (with its URN + the version-in-place remedy).
+    existing = _file_in_folder_by_name(target, name)
+    existing_id = safe(lambda: existing.id) if existing else None
+
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
@@ -394,29 +424,37 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
     if not did:
         return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
-    # After saveAs the DataFile id is NOT yet the cloud lineage URN - immediately post-save it
-    # is a local pre-upload path/handle. Only surface it if it actually looks like a URN;
-    # otherwise report null so the caller doesn't mistake the temp handle for the document id.
-    new_id = None
-    df = safe(lambda: doc.dataFile)
-    if df:
-        raw = safe(lambda: df.id)
-        if isinstance(raw, str) and raw.startswith("urn:"):
-            new_id = raw
+    # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
+    # can be shared). It resolves asynchronously, so pump briefly rather than returning null.
+    new_id = _settled_lineage_urn(doc)
 
-    return ok({
+    note = ("The saved document becomes the active document. Its 'document_id' is the lineage URN - "
+            "the stable identity to address it by (doc_open/doc_activate/data_delete_file); a NAME can "
+            "be shared by several files, the URN cannot.")
+    if new_id is None:
+        note += (" The URN had not resolved yet (cloud save is async); read it from doc_get or "
+                 "data_get(project, folder) in a moment.")
+    result = {
         "saved": True,
         "name": name,
         "was_previously_saved": was_saved,
         "destination_project": safe(lambda: proj.name),
         "destination_folder": (_folder_path_string(target) or "(project root)"),
         "auto_created_parents": auto_created,
-        "document_id": new_id,   # null until cloud processing assigns the lineage URN
-        "note": ("Save is async on the cloud side. document_id is typically NULL right after "
-            "saveAs (Fusion still holds a local handle, not the lineage URN yet). Confirm "
-            "with doc_get after a short wait - the saved copy becomes the "
-            "active document and will then report its real urn: lineage id."),
-    })
+        "document_id": new_id,   # the lineage URN of the file just written (null only if not yet settled)
+    }
+    if existing_id and existing_id != new_id:
+        result["name_collision"] = {
+            "existing_document_id": existing_id,
+            "warning": (f"A different file named '{name}' already existed in this folder "
+                        f"({existing_id}); this saveAs created a SECOND file with the same name (a new "
+                        "lineage - Fusion allows this). To add a version to the EXISTING file instead, "
+                        "open it (doc_open by that URN) and use doc_save; or delete one with "
+                        "data_delete_file. Address files by URN, not name, from here."),
+        }
+        note = (f"NAME COLLISION - see 'name_collision'. " + note)
+    result["note"] = note
+    return ok(result)
 
 
 # --- helpers / result shape ---
@@ -452,23 +490,48 @@ def new_document_handler() -> dict:
 # ---------------------------------------------------------------------------
 
 def _find_open_document(name):
-    """Return the open Document whose name matches (exact, then case-insensitive substring), and a
-    sample of the open names. Operates on app.documents (all loaded docs - see doc_get'
-    note that this is a superset of the user's visible tabs)."""
-    want = (name or "").strip()
+    """Return the open Document identified by `name`, and a sample of the open names.
+
+    `name` may be a lineage URN or a Fusion web URL (the UNAMBIGUOUS identity - Fusion allows several
+    open docs to share a display name, e.g. two 'Untitled' or two files both named 'P1-Gimbal'); it is
+    matched against each open doc's dataFile.id first. Failing that, it is matched as a display name by
+    case-insensitive EXACT match. A name that matches MORE THAN ONE open doc is REFUSED (returns None +
+    an ambiguous flag) rather than silently acting on the wrong one - pass the URN to disambiguate.
+    Operates on app.documents (all loaded docs - a superset of the user's visible tabs).
+
+    Returns (document_or_None, names, ambiguous_bool)."""
+    raw = (name or "").strip()
     docs = safe(lambda: app.documents)
-    exact = contains = None
     names = []
-    if docs is not None:
-        for i in range(safe(lambda: docs.count, 0)):
-            d = docs.item(i)
-            nm = safe(lambda d=d: d.name) or ""
-            names.append(nm)
-            if nm == want:
-                exact = d
-            elif contains is None and want and want.lower() in nm.lower():
-                contains = d
-    return (exact or contains), names
+    if docs is None:
+        return None, names, False
+
+    open_docs = []
+    for i in range(safe(lambda: docs.count, 0)):
+        d = docs.item(i)
+        nm = safe(lambda d=d: d.name) or ""
+        names.append(nm)
+        open_docs.append((d, nm))
+
+    # 1) URN / web-URL identity: resolve the raw value to candidate URNs, match an open doc's dataFile.id.
+    urn_candidates = _urn_candidates(raw) if raw else []
+    urn_candidates = [c for c in urn_candidates if c.startswith("urn:")]
+    if urn_candidates:
+        for d, _nm in open_docs:
+            did = safe(lambda d=d: d.dataFile.id)
+            if isinstance(did, str) and any(did == c or did.startswith(c.split("?")[0]) for c in urn_candidates):
+                return d, names, False
+        # A URN was supplied but no OPEN doc carries it - not a name; report a clean miss (not ambiguous).
+        return None, names, False
+
+    # 2) Display-name EXACT match. Refuse if more than one open doc shares the name (pass a URN instead).
+    want = raw.lower()
+    matches = [d for d, nm in open_docs if nm.lower() == want]
+    if len(matches) == 1:
+        return matches[0], names, False
+    if len(matches) > 1:
+        return None, names, True     # ambiguous name-twin - caller tells the user to pass a URN
+    return None, names, False
 
 
 def save_document_handler(description: str = "") -> dict:
@@ -517,9 +580,14 @@ def close_document_handler(name: str = "", save_changes: bool = False,
     if close_all:
         targets = [docs.item(i) for i in range(safe(lambda: docs.count, 0))]
     elif name.strip():
-        d, names = _find_open_document(name)
+        d, names, ambiguous = _find_open_document(name)
+        if ambiguous:
+            return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
+                         "close. Pass the lineage URN (or web URL) instead of the name; get it from "
+                         f"doc_get. Open: {', '.join(n for n in names if n)}.")
         if not d:
-            return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+            return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
+                         "(A name can be shared - pass a lineage URN to be unambiguous.)")
         targets = [d]
     else:
         active = safe(lambda: app.activeDocument)
@@ -558,10 +626,16 @@ def close_document_handler(name: str = "", save_changes: bool = False,
 def activate_document_handler(name: str = "") -> dict:
     """Bring an open document to the foreground (make it the active document)."""
     if not name.strip():
-        return error("Provide 'name' - the open document to activate.")
-    d, names = _find_open_document(name)
+        return error("Provide 'name' - the open document to activate (a display name, or a lineage "
+                     "URN / web URL to be unambiguous).")
+    d, names, ambiguous = _find_open_document(name)
+    if ambiguous:
+        return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
+                     "activate. Pass the lineage URN (or web URL) instead of the name; get it from "
+                     f"doc_get. Open: {', '.join(n for n in names if n)}.")
     if not d:
-        return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}.")
+        return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
+                     "(A name can be shared - pass a lineage URN to be unambiguous.)")
     try:
         did = d.activate()
     except Exception as e:
@@ -652,9 +726,11 @@ _save_document_as_tool = (
             "one that has NEVER been saved (no cloud id yet). This is different from data_upload_file "
             "(which uploads a LOCAL file) and doc_copy (which copies an existing SAVED "
             "cloud file): only this one captures the live session. 'folder' may be a nested "
-            "path; set create_path=true to create missing destination folders. The save is "
-            "ASYNCHRONOUS on the cloud side - the returned document_id may be null immediately; "
-            "confirm with doc_get or data_get after a short wait. "
+            "path; set create_path=true to create missing destination folders. Fusion ALLOWS "
+            "same-name files (identity is the lineage URN, not the name): saving over an existing "
+            "name FORKS a new file and the result flags it as 'name_collision' - to version the "
+            "existing file instead, open it by URN and use doc_save. The result's 'document_id' is "
+            "the new file's lineage URN (the tool waits briefly for it to resolve). "
             "WRITES to the cloud data model."
         ),
         input_param_name="name",
@@ -709,10 +785,11 @@ _close_document_tool = (
         name="doc_close",
         description=(
             "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
-            "doc); 'close_all' = close every open document; 'save_changes' = save unsaved edits "
-            "first (default false = DISCARD them). NOTE: app.documents includes referenced/"
-            "dependency docs with no visible tab - close_all closes those too. Fusion always keeps "
-            "one doc open. Hard to reverse - discarded edits are gone."),
+            "doc; a display name, or a lineage URN / web URL when the name is shared - a shared name "
+            "is REFUSED, not guessed); 'close_all' = close every open document; 'save_changes' = save "
+            "unsaved edits first (default false = DISCARD them). NOTE: app.documents includes "
+            "referenced/dependency docs with no visible tab - close_all closes those too. Fusion "
+            "always keeps one doc open. Hard to reverse - discarded edits are gone."),
     )
     .add_input_property("name", {"type": "string",
             "description": "Open document to close (omit = active document)."})
@@ -730,10 +807,11 @@ _activate_document_tool = (
         name="doc_activate",
         description=(
             "Bring an open document to the foreground (make it the active document). 'name' = the "
-            "open document to activate (see doc_get). Only changes which document is "
-            "active."),
+            "open document to activate: a display NAME, or - when several open docs share a name - "
+            "its lineage URN or web URL (the unambiguous identity; a shared name is REFUSED). See "
+            "doc_get for both. Only changes which document is active."),
         input_param_name="name",
-        input_param_description="Open document name to activate.",
+        input_param_description="Open document to activate: display name, or lineage URN / web URL if the name is shared.",
     ).strict_schema()
 )
 activate_document_item = Item.create_tool_item(

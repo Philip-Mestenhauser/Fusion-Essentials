@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 145  |  **Behaviors pinned:** 2570
+**Tools with a test file:** 146  |  **Behaviors pinned:** 2633
 
 ## `_cam_common`
 
@@ -158,7 +158,7 @@ after changing tests._
 **Profiles**
 - emits per profile records with handles
 - sorted largest area first
-- handle is a composite self healing token
+- handle locator carries sketch and area
 - loop count distinguishes ring from region
 - empty when no profiles
 **ProgressiveDisclosure**
@@ -605,12 +605,21 @@ after changing tests._
 **Bodies**
 - sets models
 - sets fixtures and stock
+- stock switches mode to solid before assigning
+- fixtures are enabled before assigning
 - params and bodies together
 **Machine**
 - assigns machine and reads it back
 - unknown machine is error
 - assignment that does not take is error
 - machine counts as something to do
+**WCS**
+- binds origin to geometry and sets mode
+- binds axes for orientation
+- unknown wcs key is error
+- bad wcs handle is error
+- bind that reads back empty is error
+- wcs counts as something to do
 
 ## `cam_edit_tools`
 
@@ -859,8 +868,8 @@ after changing tests._
 - reports every op and state
 **Isolate**
 - shows only target
-- substring match when no exact
-- exact beats substring
+- partial name is refused not substring matched
+- exact match is case insensitive
 - unmatched operation errors
 **ShowHide**
 - show turns on
@@ -961,6 +970,15 @@ after changing tests._
 - named sketch not found
 - no name returns most recent
 - no name no sketches is none
+**AllComponents**
+- reads the collection off the design not the root
+- falls back to root when the design lacks the collection
+- no root is empty
+**ResolveSketchDesignWide**
+- finds a sub component sketch while root is active
+- active component searched first for a shared name
+**AllSketchNames**
+- spans every component
 **ResolveEntityRef**
 - resolves line by index
 - resolves point by index
@@ -1058,8 +1076,12 @@ after changing tests._
 - requires name
 - unmatched errors
 **FindOpenDocument**
-- exact then substring
-- substring when no exact
+- exact match case insensitive
+- partial name is refused
+- shared name is ambiguous not first match
+- urn disambiguates a name twin
+- web url resolves via embedded urn
+- urn with no matching open doc is a clean miss
 **DeleteFolderGate**
 - empty folder deletes without recursive confirm
 - nonempty force without recursive confirm returns preview and refuses
@@ -1088,6 +1110,12 @@ after changing tests._
 - lists tree with paths
 - max depth clamped to at least one
 - invalid max depth defaults
+**SaveDocumentAs**
+- reports written lineage urn
+- name collision is flagged with existing urn
+- no collision when same name absent
+- saveas declined is an error
+- requires name and project
 
 ## `data_switch_hub`
 
@@ -1935,6 +1963,12 @@ after changing tests._
 - legacy selector blank sketch uses most recent
 - legacy index out of range
 - legacy unknown sketch
+**ProfileHandleLocator**
+- dead token resolves via sketch area locator
+- area disambiguates same centroid profiles
+- wrong area is a miss not a nearest grab
+- far centroid is a miss
+- legacy named sketch resolves design wide
 **ProfileRefList**
 - resolves handles in order
 - order is PRESERVED not sorted
@@ -1963,6 +1997,15 @@ after changing tests._
 - allow restricts kind
 - unresolvable errors
 - ambiguous occurrence name errors with candidates
+**TargetRefList**
+- body handles pass through
+- container occurrence selected as occurrence
+- component name maps to its occurrence
+- component with no occurrence errors
+- component with multiple occurrences refused
+- mixed body and container
+- empty optional is empty list
+- one bad element fails whole list
 **TargetRefEdgeAndConstruction**
 - edge handle resolves when allowed
 - edge handle refused under default allow
@@ -2567,11 +2610,16 @@ after changing tests._
 - unknown units errors
 - orientation rotation
 - rotation angle converted to radians
-- rotation origin scaled to cm
+- rotation pivot is world origin not the placement
 - rotate axis none when no rotation
 - position scaled inches
 - unknown rotate axis errors
 - no active design errors
+**DesignIntentPromotion**
+- part intent is promoted to hybrid
+- hybrid intent is left alone
+- assembly intent is left alone
+- intent absent is untouched
 
 ## `model_draft`
 
@@ -2964,6 +3012,8 @@ after changing tests._
 - add returning none is error
 - createinput failure surfaces
 - add failure surfaces
+**CrossComponentHost**
+- sweep is built on the profiles owning component
 - declared returns present in payload
 
 ## `no_first_match_resolvers`
@@ -2974,6 +3024,8 @@ after changing tests._
 - no tool hand rolls a substring name match
 - allowlist entries still exist and still trip the smell
 - reversed pattern bites
+- containment and indexed shapes bite
+- correct exact match is not flagged
 
 ## `no_hand_cast_product`
 
@@ -3228,6 +3280,27 @@ after changing tests._
 - unreadable frame is none
 - partial frame is none
 
+## `sketch_delete_entity`
+
+> Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point or constraint.
+
+**DeleteCurve**
+- delete line shrinks collection
+- delete circle
+- delete point
+- out of range index errors
+- delete that removed nothing is an error
+- delete exception is reported
+**DeleteConstraint**
+- delete constraint shrinks collection
+- constraint out of range errors
+- constraint delete no effect is error
+**Guards**
+- missing sketch
+- malformed target
+- unknown type
+- noninteger index
+
 ## `sketch_dimension`
 
 > Unit tests for ``sketch_dimension.py`` — dimensional constraints + driven values.
@@ -3256,12 +3329,14 @@ after changing tests._
 
 ## `sketch_get_merge`
 
-> Unit tests for sketch_get's routing between its two depths.
+> Unit tests for sketch_get's routing between its two depths, and the summary's design-wide walk.
 
 **SketchGetRouting**
 - no name lists summary
 - name delegates to detail engine
 - whitespace name treated as no name
+**SketchSummaryWalk**
+- lists sub component sketches tagged with their owner
 
 ## `sketch_project`
 
@@ -3353,12 +3428,14 @@ after changing tests._
 - unknown units rejected
 - join op and symmetric passed through
 - sketch with no curves errors
+- surface extrude built on the sketchs owning component
 **SurfaceRevolve**
 - sets isSolid false
 - reports result is solid read back
 - zero angle guard
 - non numeric angle rejected
 - unknown axis rejected
+- surface revolve built on the sketchs owning component
 **SurfacePatch**
 - patch over closed edge loop
 - single edge passes edge for autocomplete
@@ -3436,6 +3513,7 @@ after changing tests._
 - centerline set on input
 - rails added and counted
 - unknown operation rejected
+- loft built on the profiles owning component
 **Stitch**
 - became solid true on watertight
 - became solid false when gaps remain
@@ -3856,6 +3934,10 @@ after changing tests._
 - direct mode has no timeline
 - browser digest is depth one
 - digest capped for wide assemblies
+**DesignWideCounts**
+- sketches in sub components are counted with empty root
+- bodies summed across root and sub components
+- single component design matches root
 **Cam**
 - no cam
 - cam present with ungenerated ops

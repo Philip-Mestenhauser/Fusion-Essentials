@@ -278,6 +278,23 @@ class TestLoft:
         assert res["isError"] is True
         assert "new, join, cut, intersect" in res["message"]
 
+    def test_loft_built_on_the_profiles_owning_component(self):
+        # The profiles are OWNED by a sub-component while a DIFFERENT component is active. Handing
+        # another component's native profile to the active component's features raises bSet live (F24),
+        # so the loft feature must be created on the OWNER's features. The active comp carries its own
+        # loftFeatures; the owner carries a SEPARATE one - the test proves the owner's got the call.
+        owner_lf = _FakeLoftFeatures()
+        owner = type("Owner", (), {"features": _FakeFeatures(loft=owner_lf)})()
+        # each profile's parentSketch.parentComponent points at the owner (the live Profile chain)
+        p0 = _FakeProfile("0"); p0.parentSketch = type("Sk", (), {"parentComponent": owner})()
+        p1 = _FakeProfile("1"); p1.parentSketch = type("Sk", (), {"parentComponent": owner})()
+        active_lf = _FakeLoftFeatures()
+        _install(_FakeFeatures(loft=active_lf), handle_map={"H0": p0, "H1": p1})
+        out = _payload(so.loft_handler(profiles=["H0", "H1"]))
+        assert out["lofted"] is True
+        assert owner_lf.last_input is not None     # the OWNER built the loft
+        assert active_lf.last_input is None        # NOT the active component (the bSet trap)
+
 
 # ── STITCH ────────────────────────────────────────────────────────────────────
 

@@ -1,43 +1,60 @@
 # Scenario coverage map
 
-Which scenario drives which tool, and the behavior each grades. Coverage is a DIAGNOSTIC (which tools
-a run happens to touch), never the target - the scenarios grade outcome, not path (see README.md). A
-cold agent may reach a correct outcome via a different tool than the one listed; that is fine.
+Which scenario drives which tool DOMAIN, and the behavior each grades. Coverage is a DIAGNOSTIC (which
+tools a run happens to touch), never the target - the scenarios are GOAL-SHAPED and grade outcome +
+honesty, not path (see README.md). A cold agent may reach a correct outcome via a different tool than
+the ones listed; that is fine, and a wall the agent CAN'T get around is itself the most valuable
+finding (an over-specified task hides such walls; a goal-shaped one exposes them).
 
-## Scenario -> tools exercised -> behavior graded
+## The pipeline (T1 -> T6): one artifact chain, each test a tool domain
 
-| Scenario | Tier | Tools it naturally drives | Behavior the postconditions grade |
+Each pipeline test builds on the prior test's saved artifact (P1-Gimbal -> ... -> P4-Gimbal), so the
+chain exercises a full CAD/CAM lifecycle. Staged/addressed by lineage URN (documents can share a name).
+
+| Scenario | Domain | Tool families it naturally drives | Behavior the postconditions grade |
 |---|---|---|---|
-| `hinged_mechanism` | smoke | model_create_component (x2), assembly_move, a joint-create tool, assembly_probe, workspace_orient, design_get | one component per part; a part moved by an INCH input reads back its position in the requested unit; the joint-health rollup counts the joint across the design and reports a matching verdict |
-| `duplicate_part_export` | smoke | model_create_component, model_hole, a copy/pattern, design_export, design_get, find_geometry | a precise instance (fullPathName / handle) exports, not whichever comes first; one non-empty STEP file lands; a component-scoped tree read roots at that component |
-| `surface_thicken_bodies` | smoke | a surface-create tool, a surface-thicken tool, model_inspect, find_geometry | a surface becomes a solid of the stated size; the body NAMES the agent reports match the bodies read off the model (result-body read-back) |
-| `cam_milling_job` | cam | model build, cam_create_setup, cam_create_operation (x2), a cam op edit, cam_compare_operations, cam_save_template, cam_get | a setup + two operations + a saved template exist by name; a setup/operation resolves by name case-insensitively across every CAM tool; an unrecognized template-generation mode is refused |
-| `configured_design` | cloud | design_configure (create/add_configuration/add_parameter/activate), design_get, model_inspect | the configuration table gains a variant and switches to it; switching drives geometry; a switch that leaves a feature in error is reported, not hidden |
-| `insert_saved_part` | cloud | doc_insert_occurrence, design_get | a saved source doc inserts as an occurrence at a world offset + rotation about a world axis; the transform matches |
+| `T1_Sketch-Eval` | sketch + parameters | param (add/set/favorite/delete), sketch (create/add_geometry/constrain/dimension/get), model_create_component, doc_save_as, screenshots | a parametric multi-component foundation; expressions REFERENCE shared parameters; changing one driving parameter PROPAGATES to >=2 parts (read fresh); the P1-Gimbal artifact lands |
+| `T2_Model-Eval` | solid modeling | model_extrude (+ profile handles), sketch_get (multi-profile region pick), model_inspect, find_geometry, doc_save_as | each sketch becomes a body OWNED by its component; rings are hollow bands not discs; the outer ring's pivots are through-holes; the multi-profile region trap is navigated |
+| `T3_Joints-Assembly-Eval` | joints + assembly kinematics | assembly_ground, joint-create tools, joint_drive, assembly_probe, screenshots | a working two-axis gimbal - two perpendicular pivots wired to the right pairs, jointed WITHOUT disturbing rest; drives articulate correctly and restore; the frame stays fixed |
+| `T4_Detail-Features-Eval` | detail features | model_hole, model_fillet, model_chamfer, find_geometry, model_inspect, assembly_probe, screenshots | detail features land on the RIGHT geometry (the wrong-edge fillet trap - screenshot/volume catches it); the mechanism stays alive (joints healthy after recompute) |
+| `T5_Data-Xref-Eval` | data model + xrefs | doc_copy, doc_insert_occurrence, doc_open/activate (async, by URN), doc_get(xref_tree), doc_update_xref, param_set, data_get | associativity: a reference goes stale on a source edit, updating brings the change through; version isolation (the original stays put); same-name/async-activation hazards navigated |
+| `T6_CAM-Eval` | CAM template document | model_create_component (auto-promotes intent), param, joints (work-holding), cam_create_setup / cam_edit_setup (CONTAINER selection), cam_create_operation, cam_generate, cam_save_template | the shop-template pattern: container components + parametric stock + a vise + a CAM setup that selects the CONTAINERS (not bodies) + valid toolpaths; a self-centering-vise gap is a first-class finding |
+
+## The fuzzy counterparts (unaided-wire measurement)
+
+| Scenario | Domain | What it measures |
+|---|---|---|
+| `fuzzy_f1_gimbal_foundation` | sketch + parameters | the SAME territory as T1 with a 3-5 sentence goal - the delta vs T1 measures the wire's unaided teaching power (decomposition, activation, expression-driven dimensions) |
+| `fuzzy_f2_gimbal_mechanism` | joints + kinematics | the SAME territory as T3, goal-shaped - whether the wire alone carries an agent to a working mechanism |
+
+The pipeline tests are now themselves goal-shaped (specific WHAT + full-tool-surface encouragement, no
+dictated HOW), so the scripted-vs-fuzzy distinction has narrowed to the fuzzy tests being TERSER; both
+grade outcome + honesty. Keep the fuzzy pair as the minimal-guidance control per territory.
 
 ## Tools whose behavior is guaranteed by the mock suite rather than a live scenario
 
 Some paths are impractical to force in an outcome-graded cold-agent task (they need a specific object
 graph, or they are a rare branch). These are pinned by the mock unit suite instead:
 
-- **result-body read-back on the mesh + offset/trim/untrim/reverse-normal surface tools** - the same
-  shared read-back `surface_thicken_bodies` exercises on the thicken path; the mesh path needs an
-  imported mesh fixture. Pinned by `test_common.py` (the shared reader) + each tool's unit test.
+- **result-body read-back on the mesh + offset/trim/untrim/reverse-normal surface tools** - the shared
+  read-back the surface/mesh tools use; the mesh path needs an imported mesh fixture. Pinned by
+  `test_common.py` (the shared reader) + each tool's unit test.
 - **joint-health over a broken SUB-COMPONENT joint** - needs a nested assembly with a deliberately
   faulted joint; grading it would use the very tools under test. Pinned by `test_joint_motion_link.py`
   (the full joint walk collects sub-component + as-built joints and de-duplicates the root).
-- **joint_motion_link's missing-joint error list** - a minor path (it walks the full joint set for the
-  "available joints" message). Pinned by its unit test.
-- **the design_export ambiguity REFUSAL and the design_get ambiguous-occurrence REFUSAL** - a
-  refusal is hard to force without constraining the path; `duplicate_part_export` records it as a
-  bonus if the agent hits it. Pinned by `test_design_export.py` / `test_design_get.py`.
+- **the design_export ambiguity REFUSAL and the design_get ambiguous-occurrence REFUSAL** - a refusal
+  is hard to force without constraining the path. Pinned by `test_design_export.py` / `test_design_get.py`.
 - **the template-generation-mode and library-location enums** - an invalid value is a refusal, not a
   happy path. Pinned by `test_cam_templates.py`.
+- **the CAM setup CONTAINER-selection kind** (occurrence/component vs body, component->occurrence
+  mapping with ambiguity refusal) - pinned by `test_inputs.py::TestTargetRefList`; T6 exercises it live.
+- **the design-intent auto-promote** (a fresh Part-intent doc -> Hybrid so multi-component builds
+  work) - pinned by `test_model_create_component.py::TestDesignIntentPromotion`; every multi-component
+  scenario exercises it live.
 
 ## Running
 
 Point a capable agent at a scenario file; it self-executes per `README.md` (one agent, cold start,
-grade by direct reads, no sub-agents, no document-switching). Run the `smoke` tier first (fresh empty
-design, no external fixture). The `cam` and `cloud` tiers need the fixtures named in their
-frontmatter; a scenario whose fixture the environment cannot provide is reported SKIP, not a tool
-failure.
+grade by direct reads, no sub-agents, no document-switching). The pipeline chain runs T1 -> T6 in order
+(each consumes the prior artifact by URN); a scenario whose fixture the environment cannot provide is
+reported SKIP, not a tool failure.

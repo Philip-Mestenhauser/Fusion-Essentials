@@ -277,6 +277,52 @@ class TestHonesty:
         assert res["isError"] is True and "sweep failed" in res["message"].lower()
 
 
+# ── cross-component hosting (F24 class): the feature lands on the profile's OWNER ────────────────
+
+class _OwnedProfile:
+    """A closed profile whose parentSketch.parentComponent names its OWNING component - the chain
+    profile_host_component reads to decide where the feature is built (mirrors the live Profile)."""
+    def __init__(self, owner):
+        self.parentSketch = type("Sk", (), {"parentComponent": owner})()
+
+
+def _install_two_component(body_names=("Body1",)):
+    """Root is the ACTIVE component; a SUB-component 'Frame' owns the profile + the path sketch. Each
+    component carries its OWN features surface, so the test can tell WHICH one the sweep was built on.
+    Returns (root_features, sub_features, design)."""
+    from conftest import MakeComp
+    root_sf = FakeSweepFeatures(body_names=body_names)
+    root = MakeComp(name="Root", bodies=())
+    root.features = FakeFeatures(root_sf)
+    root.createOpenProfile = lambda coll, chain: FakeOpenProfile()
+    root.sketches = _NamedCollection([])
+
+    sub_sf = FakeSweepFeatures(body_names=body_names)
+    sub = MakeComp(name="Frame", bodies=())
+    sub.features = FakeFeatures(sub_sf)
+    sub.createOpenProfile = lambda coll, chain: FakeOpenProfile()
+    # The profile is OWNED by the sub-component; the path sketch lives there too.
+    prof_sketch = FakeSketch("Prof", profiles=[_OwnedProfile(sub)])
+    sub.sketches = _NamedCollection([prof_sketch, FakeSketch("PathSketch", curves=3)])
+
+    design = make_design(comp=root, all_components=[root, sub])
+    install(sw, design)
+    return root_sf, sub_sf, design
+
+
+class TestCrossComponentHost:
+    def test_sweep_is_built_on_the_profiles_owning_component(self):
+        # The profile is owned by sub-component 'Frame' while ROOT is active. Handing another
+        # component's profile to the ACTIVE component's features raises bSet live (F24), so the feature
+        # must be created on the OWNER's features - proven here by which features object got the call.
+        root_sf, sub_sf, _ = _install_two_component()
+        out = _payload(sw.handler(profile={"sketch": "Prof", "profile_index": 0},
+                                  path="sketch:PathSketch"))
+        assert out["swept"] is True
+        assert sub_sf.last is not None       # the OWNER built the sweep
+        assert root_sf.last is None          # NOT the active/root component (would be the bSet trap)
+
+
 # ── declared outputs ────────────────────────────────────────────────────────
 
 def test_declared_returns_present_in_payload():

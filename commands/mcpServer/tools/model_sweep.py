@@ -82,26 +82,34 @@ def _sketch_for_open(comp, profile_raw):
 
 
 def _resolve_profile(comp, profile_raw, as_surface):
-    """Resolve the sweep profile. Returns (profile_arg, want_solid, open_profile, error).
+    """Resolve the sweep profile. Returns (profile_arg, want_solid, open_profile, host, error).
 
     Closed profile resolved -> that profile; want_solid = not as_surface (a closed profile swept with
     isSolid=False is an open surface tube, no end caps). No closed profile, but the selector names a
     sketch with open curves -> an OPEN profile is built and want_solid is forced False (an open profile
-    cannot make a solid) - the open-path -> surface fallback."""
+    cannot make a solid) - the open-path -> surface fallback.
+
+    host is the component the sweep FEATURE must be built on: the profile's OWNING component. Handing
+    another component's native profile to features.createInput raises 'InternalValidationError : bSet'
+   , so the feature - and any open profile built here - is hosted on the sketch's owner, not the
+    active component."""
     if profile_raw in (None, "", []):
-        return None, None, None, ("'profile' is required (a profile handle from sketch_get, or a "
-                                  "{sketch, profile_index} selector).")
+        return None, None, None, None, ("'profile' is required (a profile handle from sketch_get, or a "
+                                        "{sketch, profile_index} selector).")
     prof, err = _PROFILE.resolve(profile_raw)
     if prof is not None:
-        return prof, (not bool(as_surface)), False, None
-    # No closed profile. If the selector names a sketch with open curves, build an OPEN profile.
+        host = _inputs.profile_host_component(prof, None, comp)
+        return prof, (not bool(as_surface)), False, host, None
+    # No closed profile. If the selector names a sketch with open curves, build an OPEN profile on the
+    # sketch's OWNING component (the same host the feature is built on).
     sk = _sketch_for_open(comp, profile_raw)
     if sk is not None:
-        open_prof, operr = _open_profile_or_error(comp, sk)
+        host = _common.safe(lambda: sk.parentComponent) or comp
+        open_prof, operr = _open_profile_or_error(host, sk)
         if open_prof is not None:
-            return open_prof, False, True, None
-        return None, None, None, operr or err
-    return None, None, None, err
+            return open_prof, False, True, host, None
+        return None, None, None, None, operr or err
+    return None, None, None, None, err
 
 
 def _build_path(comp, path_raw):
@@ -172,17 +180,19 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    profile_arg, want_solid, open_profile, perr = _resolve_profile(comp, profile, as_surface)
+    profile_arg, want_solid, open_profile, host, perr = _resolve_profile(comp, profile, as_surface)
     if perr:
         return error(perr)
 
-    sweep_path, path_label, patherr = _build_path(comp, path)
+    # Build the path AND the feature on the profile's OWNING component (host) - a profile-consuming
+    # feature created on the active component raises bSet when the profile is owned elsewhere.
+    sweep_path, path_label, patherr = _build_path(host, path)
     if patherr:
         return error(patherr)
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
-        sweep_input = comp.features.sweepFeatures.createInput(profile_arg, sweep_path, op)
+        sweep_input = host.features.sweepFeatures.createInput(profile_arg, sweep_path, op)
     except Exception as e:
         return error(f"Could not start sweep: {e}. (The path must geometrically connect and the "
                      "profile should sit on/near the path start.)")
@@ -209,7 +219,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
             return error(f"Could not scope to target_bodies: {e}")
 
     try:
-        feature = comp.features.sweepFeatures.add(sweep_input)
+        feature = host.features.sweepFeatures.add(sweep_input)
     except Exception as e:
         return error(f"Sweep failed: {e}. (A 'cut'/'intersect' needs existing geometry to act on; "
                      "the profile and path must form a valid sweep.)")
@@ -234,7 +244,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     else:
         note = "Profile swept into a solid along the path. Pair with view_screenshot (iso) to view it."
     if op_key == "new":
-        adv = root_body_advisory(design, comp)
+        adv = root_body_advisory(design, host)
         if adv:
             note += " " + adv
 
@@ -242,6 +252,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         "swept": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
+        "component": safe(lambda: feature.parentComponent.name),
         "path": path_label,
         "orientation": orient_key,
         "as_surface": bool(open_profile or is_solid is False),

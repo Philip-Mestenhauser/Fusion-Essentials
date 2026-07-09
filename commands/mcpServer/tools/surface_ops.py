@@ -94,7 +94,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         if cerr:
             return error(cerr)
 
-    root = target_component(design)
+    # Host the loft on the profiles' OWNING component: handing another component's native profile to
+    # features.createInput raises 'InternalValidationError : bSet', so the feature - and its body
+    # - is built on the sketch's owner, not the active component.
+    root = _inputs.profile_host_component(secs[0], None, target_component(design))
     op = _feature_operation(op_key)
     try:
         loft_input = root.features.loftFeatures.createInput(op)

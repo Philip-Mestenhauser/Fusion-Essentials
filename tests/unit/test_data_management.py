@@ -168,13 +168,21 @@ class TestAgentDescription:
 
 # ── fakes for the app.documents tree ────────────────────────────────────────
 
+class _FakeDataFile:
+    def __init__(self, file_id):
+        self.id = file_id
+
+
 class FakeDocument:
     def __init__(self, name, is_saved=True, is_modified=False, is_visible=True,
-                 save_ok=True, save_persists=True, close_ok=True, activate_ok=True):
+                 save_ok=True, save_persists=True, close_ok=True, activate_ok=True,
+                 data_file_id=None):
         self.name = name
         self.isSaved = is_saved
         self.isModified = is_modified
         self.isVisible = is_visible
+        # A lineage URN identifies the doc unambiguously when names collide; None models an unsaved doc.
+        self.dataFile = _FakeDataFile(data_file_id) if data_file_id is not None else None
         self._save_ok = save_ok
         self._save_persists = save_persists   # False models Fusion's false-success (returns True, no version)
         self._close_ok = close_ok
@@ -367,20 +375,64 @@ class TestActivateDocument:
 
 
 class TestFindOpenDocument:
-    def test_exact_then_substring(self):
+    def test_exact_match_case_insensitive(self):
         a = FakeDocument("PartA")
         b = FakeDocument("PartA_CAM")
         _install_app([a, b])
-        # exact wins over the substring sibling
-        found, names = dm._find_open_document("PartA")
+        # an exact name resolves to that document, not a same-prefixed sibling
+        found, names, ambiguous = dm._find_open_document("parta")   # case-insensitive
         assert found is a
+        assert ambiguous is False
         assert "PartA_CAM" in names
 
-    def test_substring_when_no_exact(self):
+    def test_partial_name_is_refused(self):
+        # a partial name must NOT resolve to a substring sibling - documents can share names, so
+        # the first partial hit could be the wrong document. Refused: returns None + the names.
         a = FakeDocument("PartA_CAM")
         _install_app([a])
-        found, _ = dm._find_open_document("CAM")
-        assert found is a
+        found, names, ambiguous = dm._find_open_document("CAM")
+        assert found is None
+        assert ambiguous is False           # a partial miss is NOT a name-twin ambiguity
+        assert "PartA_CAM" in names
+
+    def test_shared_name_is_ambiguous_not_first_match(self):
+        # TWO open docs share the display name 'P1-Gimbal' (Fusion allows this). Resolving by that
+        # name must REFUSE (ambiguous), never grab the first - the run-12 name-twin, made safe.
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        b = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:BBB")
+        _install_app([a, b])
+        found, names, ambiguous = dm._find_open_document("P1-Gimbal")
+        assert found is None
+        assert ambiguous is True
+
+    def test_urn_disambiguates_a_name_twin(self):
+        # the SAME two same-named docs: the lineage URN resolves to exactly the right one.
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        b = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:BBB")
+        _install_app([a, b])
+        found, _names, ambiguous = dm._find_open_document("urn:adsk.wipprod:dm.lineage:BBB")
+        assert found is b
+        assert ambiguous is False
+
+    def test_web_url_resolves_via_embedded_urn(self):
+        # a Fusion web URL carries the lineage URN as a base64url path segment - it must resolve too.
+        import base64
+        urn = "urn:adsk.wipprod:dm.lineage:BBB"
+        seg = base64.b64encode(urn.encode()).decode().rstrip("=").replace("+", "-").replace("/", "_")
+        url = f"https://x.autodesk360.com/g/projects/123/data/FOLDERSEG_LONG_ENOUGH/{seg}?show=overview"
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        b = FakeDocument("P1-Gimbal", data_file_id=urn)
+        _install_app([a, b])
+        found, _names, ambiguous = dm._find_open_document(url)
+        assert found is b
+        assert ambiguous is False
+
+    def test_urn_with_no_matching_open_doc_is_a_clean_miss(self):
+        a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
+        _install_app([a])
+        found, _names, ambiguous = dm._find_open_document("urn:adsk.wipprod:dm.lineage:ZZZ")
+        assert found is None
+        assert ambiguous is False           # a URN that matches nothing is a miss, not an ambiguity
 
 
 # ── data_delete_folder recursive-delete gate ─────────────────────────────────────
@@ -763,3 +815,85 @@ class TestListFolders:
         _install_proj_data([self._tree()])
         out = _payload(dm.list_folders_handler(project="Proj", max_depth="oops"))
         assert out["max_depth"] == 4
+
+
+# ── doc_save_as: lineage-URN reporting + name-collision detection (F38) ───────────
+#
+# Fusion PERMITS same-name documents; identity is the lineage URN. doc_save_as must (a) report the
+# URN of the file it wrote (it resolves asynchronously post-save), and (b) when a DIFFERENT file with
+# the same name already sits in the target folder, flag the fork as a name_collision rather than let
+# the agent be blind to it. These pin both, plus that a fresh (non-colliding) save carries no warning.
+
+class _SaveAsFile:
+    """A DataFile already in the destination folder (has name + id, the collision-guard fields)."""
+    def __init__(self, name, file_id):
+        self.name = name
+        self.id = file_id
+
+
+class _SaveAsActiveDoc:
+    """The active document being saved. saveAs records the call; dataFile.id is the settled lineage URN
+    (the poll returns on its first read since the URN is present - no real wait in the test)."""
+    def __init__(self, new_urn, is_saved=False, save_ok=True):
+        self.name = "Untitled"
+        self.isSaved = is_saved
+        self._save_ok = save_ok
+        self.saved_as = None
+        self.dataFile = _FakeDataFile(new_urn)     # what the poll will report as document_id
+
+    def saveAs(self, name, folder, description, tag):
+        self.saved_as = (name, getattr(folder, "name", None), description)
+        self.name = name + " v1"
+        return self._save_ok
+
+
+def _install_saveas(active_doc, folder_files=()):
+    """Wire a one-project/one-root-folder data model + the active doc, with folder_files pre-populated."""
+    root = FakeProjFolder("Pipeline-v1", is_root=True)
+    root._files.extend(folder_files)
+    proj = FakeProj("MCP Test Project", "pid", root)
+    _install_proj_data([proj])
+    dm.app = type("A", (), {"activeDocument": active_doc})()
+    return root
+
+
+class TestSaveDocumentAs:
+    def test_reports_written_lineage_urn(self):
+        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
+        _install_saveas(doc)
+        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
+        assert out["saved"] is True
+        assert out["document_id"] == "urn:adsk.wipprod:dm.lineage:NEW"   # the URN, not null
+        assert "name_collision" not in out                              # nothing pre-existed
+        assert doc.saved_as[0] == "P1-Gimbal"
+
+    def test_name_collision_is_flagged_with_existing_urn(self):
+        # a DIFFERENT file named 'P1-Gimbal' already sits in the folder -> the save forks; warn + name it.
+        existing = _SaveAsFile("P1-Gimbal", "urn:adsk.wipprod:dm.lineage:OLD")
+        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
+        _install_saveas(doc, folder_files=[existing])
+        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
+        assert out["saved"] is True
+        assert out["name_collision"]["existing_document_id"] == "urn:adsk.wipprod:dm.lineage:OLD"
+        assert out["document_id"] == "urn:adsk.wipprod:dm.lineage:NEW"   # the fork's URN
+        assert "collision" in out["note"].lower()
+
+    def test_no_collision_when_same_name_absent(self):
+        # a same-named file in a DIFFERENT context must not false-trigger: only the target folder counts.
+        other = _SaveAsFile("SomethingElse", "urn:adsk.wipprod:dm.lineage:X")
+        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
+        _install_saveas(doc, folder_files=[other])
+        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
+        assert "name_collision" not in out
+
+    def test_saveas_declined_is_an_error(self):
+        doc = _SaveAsActiveDoc(new_urn="urn:x", save_ok=False)
+        _install_saveas(doc)
+        res = dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project")
+        assert res["isError"] is True and "declined" in res["message"].lower()
+
+    def test_requires_name_and_project(self):
+        doc = _SaveAsActiveDoc(new_urn="urn:x")
+        _install_saveas(doc)
+        assert dm.save_document_as_handler(name="", project="MCP Test Project")["isError"] is True
+        assert dm.save_document_as_handler(name="P1-Gimbal", project="")["isError"] is True

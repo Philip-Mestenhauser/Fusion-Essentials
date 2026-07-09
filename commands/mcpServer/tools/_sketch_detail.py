@@ -177,6 +177,7 @@ def _profiles(sketch):
     profs = safe(lambda: sketch.profiles)
     n = safe(lambda: profs.count, 0) if profs else 0
     out = []
+    sk_name = safe(lambda: sketch.name) or ""
     for i in range(n):
         p = profs.item(i)
         ap = safe(lambda p=p: p.areaProperties())
@@ -185,12 +186,20 @@ def _profiles(sketch):
         # world centroid (cm, the API unit) doubles as the locator for the composite handle.
         pos = (c.x, c.y, c.z) if c else None
         loops = safe(lambda p=p: p.profileLoops.count)
+        # The locator kind carries sketch+area, not just 'profile': findEntityByToken resolves
+        # NOTHING for a sub-component sketch profile's token (verified live), so the locator is a
+        # profile handle's real resolution path - and area is what tells same-centroid profiles
+        # apart (an annulus band and its full disk share a centroid). A ':' or ',' in the sketch
+        # name would garble the locator parse, so such a name is omitted (area+centroid still pin
+        # the profile design-wide).
+        safe_name = sk_name if (":" not in sk_name and "," not in sk_name) else ""
+        kind = f"profile[{safe_name}~{area:.4f}]" if area is not None else "profile"
         out.append({
             "index": i,
             "area": _round(area),
             "centroid": [_round(c.x), _round(c.y), _round(c.z)] if c else None,
             "loop_count": loops,
-            "handle": _inputs.make_handle(p, "profile", pos) if pos else safe(lambda: p.entityToken),
+            "handle": _inputs.make_handle(p, kind, pos) if pos else safe(lambda: p.entityToken),
         })
     # largest first - the outer/main region is the common target; index preserves API order.
     out.sort(key=lambda r: (r["area"] is None, -(r["area"] or 0)))

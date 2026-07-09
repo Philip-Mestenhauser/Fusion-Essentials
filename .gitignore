@@ -154,6 +154,14 @@ cython_debug/
 
 # Claude Code: machine-local and session scaffolding never ship. The exemplar skill and the shared
 # settings.json (a worked example of scoping agent tool-call approvals) are deliberately tracked.
-# Plans are stand-up-the-work scaffolding: useful while a refactor is in flight, removed once it ships.
 .claude/settings.local.json
-.claude/plans/
+CLAUDE.local.md
+
+# Plans / review scaffolding: stand-up-the-work notes, useful while work is in flight, removed once
+# it ships. Kept at top-level /plans (not under .claude/) because the harness prompts for approval on
+# every write inside .claude/ regardless of permission settings - a fixed guardrail, not a config gap.
+/plans/
+
+# Eval run outputs: a transcript captures workspace_orient output (hub name, project URNs) - private,
+# never committed (see tests/live/evals/README.md "Privacy"). The scenarios are tracked; results are not.
+tests/live/evals/results/

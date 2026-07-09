@@ -61,6 +61,7 @@ class FakeText:
 
 
 class _Coll:
+    # Like a live adsk collection: counted (count/item) AND iterable - consumers use both styles.
     def __init__(self, items):
         self._i = list(items)
     @property
@@ -68,6 +69,8 @@ class _Coll:
         return len(self._i)
     def item(self, i):
         return self._i[i]
+    def __iter__(self):
+        return iter(self._i)
 
 
 class FakeSketch:
@@ -89,7 +92,8 @@ class FakeDesign:
         self.computed = False
     @property
     def allComponents(self):
-        return self._comps
+        # a counted collection on the DESIGN, as in the live API (Component has no such attribute)
+        return _Coll(self._comps)
     # resolve_sketch (used by the create path) searches rootComponent + all_components.
     @property
     def rootComponent(self):

@@ -57,15 +57,42 @@ class FakeRoot:
 
 
 class FakeDesign:
-    def __init__(self):
+    def __init__(self, intent=None):
         self.rootComponent = FakeRoot()
+        # designIntent: None = the fake carries no intent (the pre-existing tests - promotion skipped).
+        # Set intent="part"/"hybrid"/"assembly" to exercise the F-intent auto-promote.
+        self._intent = intent
+        self.intent_sets = []                 # records every assignment, to prove the promote fired
+
+    @property
+    def designIntent(self):
+        if self._intent is None:
+            return None
+        import adsk.fusion
+        T = adsk.fusion.DesignIntentTypes
+        return {"part": T.PartDesignIntentType, "hybrid": T.HybridDesignIntentType,
+                "assembly": T.AssemblyDesignIntentType}[self._intent]
+
+    @designIntent.setter
+    def designIntent(self, v):
+        import adsk.fusion
+        T = adsk.fusion.DesignIntentTypes
+        self._intent = {T.PartDesignIntentType: "part", T.HybridDesignIntentType: "hybrid",
+                        T.AssemblyDesignIntentType: "assembly"}[v]
+        self.intent_sets.append(self._intent)
 
 
-def _install():
-    design = FakeDesign()
+def _install(intent=None):
+    # Give the mock its DesignIntentTypes enum (distinct sentinel objects).
+    import adsk.fusion, adsk.core
+    class _T:
+        PartDesignIntentType = "PART_INTENT"
+        HybridDesignIntentType = "HYBRID_INTENT"
+        AssemblyDesignIntentType = "ASSEMBLY_INTENT"
+    adsk.fusion.DesignIntentTypes = _T
+    design = FakeDesign(intent=intent)
     cc.app = type("A", (), {"activeProduct": design})()
     cc._common.app = cc.app
-    import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.Matrix3D.create = staticmethod(FakeMatrix)
     adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
@@ -153,12 +180,15 @@ class TestCreateComponent:
         assert abs(angle - math.pi / 2) < 1e-9        # 90deg -> pi/2 rad
         assert axis == ("vec", 0, 0, 1)               # z axis
 
-    def test_rotation_origin_scaled_to_cm(self):
+    def test_rotation_pivot_is_world_origin_not_the_placement(self):
+        # The rotation pivots about the WORLD origin; placement is applied by the separate translation
+        # (verified live: occurrence lands at the placement with a correct basis). A pivot at the
+        # placement point would only bake a correction into the translation column that the next line
+        # overwrites - so the pivot must be world origin, not the scaled placement.
         design = _install()
         _payload(cc.handler(rotate_deg=45, rotate_axis="y", x=10, y=0, z=20, units="mm"))
         angle, axis, origin = design.rootComponent.occurrences.last_transform.rotation
-        # origin is the scaled placement point (10mm -> 1cm, 20mm -> 2cm)
-        assert origin == ("pt", 1.0, 0.0, 2.0)
+        assert origin == ("pt", 0.0, 0.0, 0.0)
 
     def test_rotate_axis_none_when_no_rotation(self):
         _install()
@@ -185,3 +215,37 @@ class TestCreateComponent:
         adsk.fusion.Design.cast = lambda x: None
         res = cc.handler()
         assert res["isError"] is True and "No active design" in res["message"]
+
+
+# ── F-intent: a PART design is auto-promoted to HYBRID so a multi-component build works ──────────
+# A fresh (Jan-2026+) doc is PART intent, which REFUSES addNewComponent ('Part Design documents can
+# only contain one component'). model_create_component detects that and promotes PART -> HYBRID
+# (keeps modeling enabled, unlike Assembly) before creating, reporting it as design_intent_promoted.
+
+class TestDesignIntentPromotion:
+    def test_part_intent_is_promoted_to_hybrid(self):
+        design = _install(intent="part")
+        out = _payload(cc.handler(name="Model"))
+        assert out["created"] is True
+        assert design._intent == "hybrid"                       # promoted, not left at part
+        assert design.intent_sets == ["hybrid"]                 # set exactly once, to hybrid (NOT assembly)
+        assert "design_intent_promoted" in out and "HYBRID" in out["design_intent_promoted"]
+
+    def test_hybrid_intent_is_left_alone(self):
+        design = _install(intent="hybrid")
+        out = _payload(cc.handler(name="Model"))
+        assert design.intent_sets == []                         # already hybrid - no promote, no churn
+        assert "design_intent_promoted" not in out
+
+    def test_assembly_intent_is_left_alone(self):
+        design = _install(intent="assembly")
+        out = _payload(cc.handler(name="Model"))
+        assert design.intent_sets == []                         # assembly accepts components - untouched
+        assert "design_intent_promoted" not in out
+
+    def test_intent_absent_is_untouched(self):
+        # a design with no designIntent (older Fusion / a mock) must not crash and must not claim a promote
+        design = _install(intent=None)
+        out = _payload(cc.handler(name="Model"))
+        assert out["created"] is True
+        assert "design_intent_promoted" not in out
