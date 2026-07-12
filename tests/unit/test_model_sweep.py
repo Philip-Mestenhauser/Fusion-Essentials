@@ -192,12 +192,11 @@ class TestOptions:
 
     def test_orientation_parallel_applied(self):
         # Pin that the parallel keyword actually reaches the input via the SweepOrientationTypes enum.
-        adsk.fusion.SweepOrientationTypes.ParallelOrientationType = "PARALLEL"
         sf, _ = _install()
         out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
                                   orientation="parallel"))
         assert out["orientation"] == "parallel"
-        assert sf.last.orientation == "PARALLEL"
+        assert sf.last.orientation == adsk.fusion.SweepOrientationTypes.ParallelOrientationType
 
     def test_target_bodies_rejected_on_new(self):
         _install()

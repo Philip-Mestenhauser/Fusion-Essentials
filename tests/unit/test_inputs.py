@@ -16,12 +16,14 @@ inp = load_tool("_inputs")
 
 class FakePlanarFace:
     def __init__(self):
-        self.geometry = type("G", (), {"surfaceType": "PLANE"})()
+        import adsk.core
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
 
 
 class FakeCylFace:
     def __init__(self):
-        self.geometry = type("G", (), {"surfaceType": "CYL"})()
+        import adsk.core
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.CylinderSurfaceType})()
 
 
 class FakeEdge:
@@ -30,10 +32,8 @@ class FakeEdge:
 
 def _install(token_map):
     """Install a fake design whose findEntityByToken resolves tokens from token_map, and wire the
-    adsk isinstance + SurfaceTypes the kinds check against."""
-    import adsk.fusion, adsk.core
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"
+    adsk isinstance types the kinds check against (SurfaceTypes ints come seeded)."""
+    import adsk.fusion
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)   # isinstance check covers both fakes
     adsk.fusion.BRepEdge = FakeEdge
     adsk.fusion.BRepVertex = type("V", (), {})
@@ -108,9 +108,7 @@ class _HealFace(FakePlanarFace):
 def _install_with_bodies(faces, token_map):
     """A design whose findEntityByToken uses token_map AND whose rootComponent carries bodies/faces so
     _refind_by_locator can scan them (the locator-fallback path)."""
-    import adsk.fusion, adsk.core
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"
+    import adsk.fusion
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace, _HealFace)
     adsk.fusion.BRepEdge = FakeEdge
     adsk.fusion.BRepVertex = type("V", (), {})
@@ -306,9 +304,7 @@ class FakeConstructionPlane:
 def _install_planes(named=None, handle_map=None):
     """Install a fake design+component exposing origin planes, named construction planes, and a
     findEntityByToken for handle resolution. PlaneRef resolves via _common.design()/target_component."""
-    import adsk.fusion, adsk.core
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"
+    import adsk.fusion
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
     adsk.fusion.ConstructionPlane = FakeConstructionPlane
     named = named or {}
@@ -409,18 +405,18 @@ class TestPlaneRef:
 
 class _FakeLinearEdge:
     def __init__(self):
-        self.geometry = type("G", (), {"curveType": "LINE"})()
+        import adsk.core
+        self.geometry = type("G", (), {"curveType": adsk.core.Curve3DTypes.Line3DCurveType})()
 
 
 class _FakeArcEdge:
     def __init__(self):
-        self.geometry = type("G", (), {"curveType": "ARC"})()
+        import adsk.core
+        self.geometry = type("G", (), {"curveType": adsk.core.Curve3DTypes.Arc3DCurveType})()
 
 
 def _install_axis(handle_map=None):
-    import adsk.fusion, adsk.core
-    ct = adsk.core.Curve3DTypes
-    ct.Line3DCurveType = "LINE"; ct.Arc3DCurveType = "ARC"; ct.Circle3DCurveType = "CIRCLE"
+    import adsk.fusion
     adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
     handle_map = handle_map or {}
 
@@ -497,21 +493,23 @@ class TestAxisRef:
 
 class _FakePlanarAxisFace:
     def __init__(self, normal):
-        self.geometry = type("G", (), {"surfaceType": "PLANE", "normal": _Pt(*normal)})()
+        import adsk.core
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType,
+                                       "normal": _Pt(*normal)})()
 
 
 class _FakeCylAxisFace:
     def __init__(self, axis):
-        self.geometry = type("G", (), {"surfaceType": "CYL", "axis": _Pt(*axis)})()
+        import adsk.core
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.CylinderSurfaceType,
+                                       "axis": _Pt(*axis)})()
 
 
 def _install_axis_face(handle_map):
     """AxisRef reaches the face branch only after the edge/sketch-line isinstance checks, so wire real
-    (non-Mock) BRepEdge + SketchLine classes so those checks return False cleanly, plus BRepFace and the
-    SurfaceTypes enum the face branch reads."""
-    import adsk.fusion, adsk.core
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"; st.ConeSurfaceType = "CONE"
+    (non-Mock) BRepEdge + SketchLine classes so those checks return False cleanly, plus BRepFace (the
+    SurfaceTypes ints come seeded)."""
+    import adsk.fusion
     adsk.fusion.BRepFace = (_FakePlanarAxisFace, _FakeCylAxisFace)
     adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
     adsk.fusion.SketchLine = type("SL", (), {})
@@ -1016,12 +1014,9 @@ class _FakeBaseFeature:
 
 
 def _install_mode():
-    """Wire DesignTypes + BaseFeature so current_design_type / _in_base_feature_scope work. Uses the
-    confirmed-live numeric convention (ParametricDesignType==1, DirectDesignType==0)."""
+    """Wire BaseFeature so current_design_type / _in_base_feature_scope work (the DesignTypes ints
+    come seeded from live_api_facts)."""
     import adsk.fusion
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
     adsk.fusion.BaseFeature = _FakeBaseFeature
 
 

@@ -1,22 +1,34 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Tier 0 coverage sweep: every registered tool called at least once against LIVE Fusion.
+"""Live tool verification: every registered tool called at least once against LIVE Fusion.
 
 A deterministic script of direct tools/call requests (no LLM, no SDK) walking a dependency DAG
 that builds its own world in a scratch document and tears it down. The gate: a ledger with zero
 unexplained rows - every tool is pass / expected-refusal / skipped(reason).
 
-Run:  py -3 tests/live/coverage_sweep.py            (requires Fusion running + the add-in enabled)
-      py -3 tests/live/coverage_sweep.py --json     (also write tests/live/results/coverage-<ts>.json)
+A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED.md`` - the tracked receipt: the
+per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
+run to the exact tool source it exercised. ``--check`` recomputes the hash offline (no Fusion
+needed) and fails on any difference, so a green suite cannot ride on a live run that never saw
+the current code. The hash is of the WORKING TREE while Fusion runs its LOADED copy of the
+add-in: after editing source, reload the add-in before re-running, or the receipt stamps code
+the session never executed.
+
+Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the add-in enabled)
+      py -3 tests/live/tool_verify.py --check    (no Fusion: exit 1 when VERIFIED.md is missing
+                                                  or its source hash differs from the tree)
+      py -3 tests/live/tool_verify.py --json     (also write tests/live/results/verify-<ts>.json)
 
 Steps are DATA (see STEPS): each row is (tool, args, expect) where args may be a dict or a
 callable(ctx) reading what earlier steps stored, and expect is "ok" or "refused" (a deliberate
-guard probe whose error must name the offense). Extend coverage by adding rows, not code.
+guard check whose error must name the offense). Extend coverage by adding rows, not code.
 """
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -26,6 +38,11 @@ BASE = "http://127.0.0.1:27182"
 MCP = BASE + "/mcp"
 SERVER_NAME = "Fusion-Essentials MCP Server"
 DOC_PREFIX = "EVAL_sweep"
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
+SRC_ROOT = os.path.join(REPO_ROOT, "commands", "mcpServer")
+VERIFIED = os.path.join(_HERE, "VERIFIED.md")
 
 
 def _post(payload):
@@ -83,7 +100,7 @@ def _ctx_get(ctx, key, what):
 STEPS = [
     # world setup -------------------------------------------------------------
     ("doc_new", {}, "ok", None),
-    ("workspace_orient", {}, "ok", None),
+    ("workspace_orient", {}, "ok", ("fusion_version", lambda p: p["fusion_version"])),
     ("sys_capability_map", {}, "ok", None),
     ("sys_find_tool", {"query": "extrude"}, "ok", None),
     ("sys_get_api_doc", {"searchPattern": "ExtrudeFeatures", "max_results": 3}, "ok", None),
@@ -266,7 +283,7 @@ EXCLUDED = {
 }
 
 # Registered tools NOT yet scripted into STEPS - the honest "todo" ledger. SHRINK-ONLY: scripting a
-# tool moves it out of here into STEPS. test_coverage_sweep_complete.py enforces that every
+# tool moves it out of here into STEPS. test_tool_verify_complete.py enforces that every
 # registered tool is covered, excluded, or listed here, so a NEWLY added tool can't decay coverage
 # silently - it fails the gate until someone scripts it, excuses it, or adds it here deliberately.
 PENDING = frozenset({
@@ -285,6 +302,82 @@ PENDING = frozenset({
     "surface_trim", "surface_untrim", "sys_get_selection", "view_screenshot_multi", "view_section",
     "view_switch_workspace",
 })
+
+
+def source_hash(root=None):
+    """SHA-256 over every .py under commands/mcpServer/ - the receipt key binding a green run
+    to the exact tool source it exercised. Relative paths are normalized to '/' and CRLF to LF
+    so the digest is identical across OS and git line-ending config; __pycache__ is skipped."""
+    root = root or SRC_ROOT
+    rels = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for fn in filenames:
+            if fn.endswith(".py"):
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                rels.append(rel.replace(os.sep, "/"))
+    hasher = hashlib.sha256()
+    for rel in sorted(rels):
+        with open(os.path.join(root, rel.replace("/", os.sep)), "rb") as fh:
+            content = fh.read().replace(b"\r\n", b"\n")
+        hasher.update(rel.encode("utf-8") + b"\0" + content + b"\0")
+    return hasher.hexdigest()
+
+
+_STAMP_RE = re.compile(r"^Stamp: source ([0-9a-f]{64}) \| Fusion (\S+) \| verified (\S+)",
+                       re.MULTILINE)
+
+
+def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None):
+    """Write the tracked receipt. Called only on a run with zero FAIL/blocked steps."""
+    n_cov = sum(1 for _, s in ledger if s == "covered")
+    n_pend = sum(1 for _, s in ledger if s.startswith("PENDING"))
+    n_skip = len(ledger) - n_cov - n_pend
+    lines = [
+        "# Live tool verification (generated by tool_verify.py - do not edit)",
+        "",
+        "Every registered tool driven once against live Fusion by `tool_verify.py`. The stamp's",
+        "source hash binds this run to the exact `commands/mcpServer/` tree it exercised:",
+        "`--check` recomputes the hash and fails on any difference, so a green suite cannot ride",
+        "on a live run that never saw the current code. Only a run with zero FAIL/blocked steps",
+        "writes this file.",
+        "",
+        "Stamp: source {0} | Fusion {1} | verified {2}".format(src_hash, fusion_version, stamp_date),
+        "",
+        "{0} covered / {1} skipped(reason) / {2} pending".format(n_cov, n_skip, n_pend),
+        "",
+        "| tool | status |",
+        "|---|---|",
+    ]
+    for tool, status in ledger:
+        lines.append("| {0} | {1} |".format(tool, status.replace("|", "/")))
+    with open(path or VERIFIED, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path or VERIFIED
+
+
+def check(root=None, verified_path=None):
+    """The receipt gate: drives nothing, needs no Fusion. Exit 0 = the last green live run saw
+    exactly this tool source; 1 = no receipt, or the source changed since that run."""
+    path = verified_path or VERIFIED
+    if not os.path.exists(path):
+        print("VERIFIED.md does not exist - run tool_verify.py once against live Fusion.")
+        return 1
+    with open(path, encoding="utf-8") as fh:
+        m = _STAMP_RE.search(fh.read())
+    if not m:
+        print("VERIFIED.md has no stamp line - regenerate it (run tool_verify.py).")
+        return 1
+    stamped_hash, stamped_version, stamped_date = m.groups()
+    current = source_hash(root)
+    if current != stamped_hash:
+        print("tool source changed since the last live verification ({0}, Fusion {1}) -"
+              .format(stamped_date, stamped_version))
+        print("re-run with Fusion up: py -3 tests/live/tool_verify.py")
+        return 1
+    print("live verification current: source matches the green run of {0} (Fusion {1})"
+          .format(stamped_date, stamped_version))
+    return 0
 
 
 def run(write_json):
@@ -337,10 +430,19 @@ def run(write_json):
             print(f"  {tool:32} {s}")
 
     fails = [r for r in rows if r[1] in ("FAIL", "blocked")]
+    if fails:
+        print("\nVERIFIED.md NOT rewritten - resolve the FAIL/blocked steps first.")
+    else:
+        src_hash = source_hash()
+        stamp_date = time.strftime("%Y-%m-%d")
+        fusion_version = ctx.get("fusion_version", "?")
+        print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3})".format(
+            write_verified(ledger, fusion_version, stamp_date, src_hash),
+            src_hash[:12], fusion_version, stamp_date))
     if write_json:
-        import os
-        os.makedirs("tests/live/results", exist_ok=True)
-        path = f"tests/live/results/coverage-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        results_dir = os.path.join(_HERE, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        path = os.path.join(results_dir, f"verify-{time.strftime('%Y%m%d-%H%M%S')}.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"steps": rows, "ledger": ledger, "server": health}, fh, indent=2)
         print(f"\nwrote {path}")
@@ -349,5 +451,7 @@ def run(write_json):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true")
     ap.add_argument("--json", action="store_true")
-    sys.exit(run(ap.parse_args().json))
+    args = ap.parse_args()
+    sys.exit(check() if args.check else run(args.json))

@@ -34,7 +34,7 @@ The server exposes **137 typed tools** built on three enforced contracts: typed 
 ambiguous references, declared outputs (including real pass/fail verdicts with their evidence), and
 postconditions that re-read ground truth after every write so a "success" that changed nothing
 becomes an error. The authoritative per-tool inventory is generated:
-[`tests/MANIFEST.md`](tests/MANIFEST.md). Full setup, client configuration, the design philosophy,
+[`tests/generated/MANIFEST.md`](tests/generated/MANIFEST.md). Full setup, client configuration, the design philosophy,
 and security notes are in the [MCP Server README](commands/mcpServer/README.md).
 
 ## Contributing

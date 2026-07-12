@@ -5,7 +5,7 @@ live Fusion MCP session and it runs the whole test itself. The scenario file IS 
 it tells the agent how to execute and how to grade. Scenarios grade the OUTCOME (did the right thing
 get built, and did the agent report it truthfully), never the path taken.
 
-This is the top of the test pyramid: the mock unit suite proves handler LOGIC, `coverage_sweep.py`
+This is the top of the test pyramid: the mock unit suite proves handler LOGIC, `tool_verify.py`
 proves every tool FUNCTIONS when called correctly, and these prove an agent holding only the wire
 DESCRIPTIONS can actually drive the surface. Description and schema defects surface here the way a
 user hits them.

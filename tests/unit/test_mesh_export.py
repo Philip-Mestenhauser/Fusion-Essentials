@@ -253,9 +253,6 @@ def _wire_adsk():
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
     adsk.fusion.BaseFeature = FakeBaseFeature
     # export refinement + tessellation-quality enums
     mrs = adsk.fusion.MeshRefinementSettings

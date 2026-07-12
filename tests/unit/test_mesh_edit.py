@@ -18,24 +18,17 @@ Pinned (the DoD):
 
 import json
 
-import pytest
-
 from conftest import load_tool
 
 me = load_tool("mesh_edit")
+
+# Measured mesh-edit enums (seeded from live_api_facts) - fakes and assertions speak these.
+import adsk.fusion  # noqa: E402
+_CUT = adsk.fusion.MeshPlaneCutTypes
+_FILL = adsk.fusion.MeshPlaneCutFillTypes
+_FG = adsk.fusion.MeshGenerateFaceGroupsMethodTypes
 mo = load_tool("mesh_ops")
 inp = me._inputs
-
-
-@pytest.fixture(autouse=True)
-def _restore_shared_enum_attrs():
-    # SurfaceTypes lives on the SHARED adsk mock; the raw string-sentinel assignment in the
-    # plane-cut test leaks into other test modules' tools under random ordering - restore it.
-    import adsk.core
-    st = adsk.core.SurfaceTypes
-    saved = st.PlaneSurfaceType
-    yield
-    st.PlaneSurfaceType = saved
 
 
 # ── fakes (named to match the Fusion type names the kind discrimination reads) ──────────────────
@@ -239,23 +232,7 @@ def _wire_adsk():
     adsk.fusion.BRepBody = BRepBody
     adsk.fusion.ConstructionPlane = ConstructionPlane
     adsk.fusion.BRepFace = BRepFace
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
     adsk.fusion.BaseFeature = _BaseFeature
-    # face-groups method enum
-    fg = adsk.fusion.MeshGenerateFaceGroupsMethodTypes
-    fg.FastMeshGenerateFaceGroupsMethodType = "FAST"
-    fg.AccurateMeshGenerateFaceGroupsMethodType = "ACCURATE"
-    # plane-cut enums
-    ct = adsk.fusion.MeshPlaneCutTypes
-    ct.TrimMeshPlaneCutType = "TRIM"
-    ct.SplitBodyMeshPlaneCutType = "SPLIT_BODY"
-    ct.SplitFacesMeshPlaneCutType = "SPLIT_FACES"
-    ft = adsk.fusion.MeshPlaneCutFillTypes
-    ft.NoFillMeshPlaneCutFillType = "NOFILL"
-    ft.MinimalMeshPlaneCutFillType = "MINIMAL"
-    ft.UniformMeshPlaneCutFillType = "UNIFORM"
     return adsk.fusion
 
 
@@ -304,7 +281,7 @@ class TestFaceGroups:
         assert out["feature"] == "FaceGroups1"
         assert fg.add_called is True
         # the accurate enum was set on the input
-        assert getattr(fg.last_input, "method", None) == "ACCURATE"
+        assert getattr(fg.last_input, "method", None) == _FG.AccurateMeshGenerateFaceGroupsMethodType
         # the convert-now-works note is present
         assert "prismatic" in out["note"].lower()
 
@@ -312,7 +289,7 @@ class TestFaceGroups:
         src, fg, _ = self._setup(parametric=False)
         out = _payload(me.mesh_generate_face_groups_handler(mesh="H", method="fast"))
         assert out["method"] == "fast"
-        assert getattr(fg.last_input, "method", None) == "FAST"
+        assert getattr(fg.last_input, "method", None) == _FG.FastMeshGenerateFaceGroupsMethodType
 
     def test_parametric_routes_through_base_feature_scope(self):
         # PARAMETRIC -> run_in_base_feature opens the scope: the captured BaseFeature is started AND
@@ -435,8 +412,8 @@ class TestPlaneCut:
         assert out["result_body_count"] == 1
         assert out["result_bodies"][0]["name"] == "ScanTrimmed"
         # the right enums were set
-        assert getattr(pc.last_input, "cutType", None) == "TRIM"
-        assert getattr(pc.last_input, "fillType", None) == "MINIMAL"
+        assert getattr(pc.last_input, "cutType", None) == _CUT.TrimMeshPlaneCutType
+        assert getattr(pc.last_input, "fillType", None) == _FILL.MinimalMeshPlaneCutFillType
         # the ConstructionPlane was passed straight to createInput (not reduced to .geometry)
         assert pc.create_args[1] is plane
 
@@ -446,8 +423,9 @@ class TestPlaneCut:
         _install(me, des, handle_map={"H": src, "P": plane})
 
     def test_each_cut_type_resolves_enum(self):
-        for ct_in, ct_enum in (("trim", "TRIM"), ("split_body", "SPLIT_BODY"),
-                               ("split_faces", "SPLIT_FACES")):
+        for ct_in, ct_enum in (("trim", _CUT.TrimMeshPlaneCutType),
+                               ("split_body", _CUT.SplitBodyMeshPlaneCutType),
+                               ("split_faces", _CUT.SplitFacesMeshPlaneCutType)):
             plane = ConstructionPlane("CP")
             src, pc, _ = self._setup(result_bodies=[MeshBody("R")])
             self._install_plane_handle(plane, src, pc)
@@ -456,7 +434,9 @@ class TestPlaneCut:
             assert getattr(pc.last_input, "cutType", None) == ct_enum
 
     def test_each_fill_resolves_enum(self):
-        for fill_in, fill_enum in (("none", "NOFILL"), ("minimal", "MINIMAL"), ("uniform", "UNIFORM")):
+        for fill_in, fill_enum in (("none", _FILL.NoFillMeshPlaneCutFillType),
+                                   ("minimal", _FILL.MinimalMeshPlaneCutFillType),
+                                   ("uniform", _FILL.UniformMeshPlaneCutFillType)):
             plane = ConstructionPlane("CP")
             src, pc, _ = self._setup(result_bodies=[MeshBody("R")])
             self._install_plane_handle(plane, src, pc)
@@ -604,8 +584,7 @@ class TestPlaneCut:
     def test_planar_face_handle_reduced_to_its_geometry(self):
         # PlaneRef resolves a planar BRepFace; the cut wants its .geometry (a core.Plane), NOT the face.
         import adsk.core
-        adsk.core.SurfaceTypes.PlaneSurfaceType = "PLANE_SURF"
-        plane_geom = type("PlaneGeom", (), {"surfaceType": "PLANE_SURF"})()
+        plane_geom = type("PlaneGeom", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
         face = BRepFace(plane_geom)
         result = MeshBody("Trimmed")
         src, pc, _ = self._setup(result_bodies=[result])
@@ -634,10 +613,6 @@ class TestMeshToBrepHint:
         import adsk.fusion
         adsk.fusion.MeshBody = MeshBody
         adsk.fusion.BRepBody = BRepBody
-        cm = adsk.fusion.MeshConvertMethodTypes
-        cm.PrismaticMeshConvertMethodType = "PRISM"
-        cm.FacetedMeshConvertMethodType = "FACET"
-        cm.OrganicMeshConvertMethodType = "ORG"
 
         class _ConvFeatures:
             def __init__(self):

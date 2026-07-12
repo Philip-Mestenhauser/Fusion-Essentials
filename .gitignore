@@ -158,10 +158,16 @@ cython_debug/
 CLAUDE.local.md
 
 # Plans / review scaffolding: stand-up-the-work notes, useful while work is in flight, removed once
-# it ships. Kept at top-level /plans (not under .claude/) because the harness prompts for approval on
-# every write inside .claude/ regardless of permission settings - a fixed guardrail, not a config gap.
+# it ships. Top-level /plans is the preferred home (the harness prompts for approval on every write
+# inside .claude/); plans that land under .claude/plans/ stay untracked all the same.
 /plans/
+.claude/plans/
 
 # Eval run outputs: a transcript captures workspace_orient output (hub name, project URNs) - private,
 # never committed (see tests/live/evals/README.md "Privacy"). The scenarios are tracked; results are not.
 tests/live/evals/results/
+
+# measure_api / tool_verify run archives: per-run records; the durable state they feed
+# (tests/live/CONTRACTS.md + tests/live_api_facts.py + tests/live/VERIFIED.md) is tracked,
+# the archives are not.
+tests/live/results/

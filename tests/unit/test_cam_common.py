@@ -3,8 +3,8 @@
 
 """Unit tests for the shared CAM finders in ``_cam_common`` - find_setup / find_operation /
 walk_operations / setup_names. These are the ONE case-insensitive resolution every CAM tool shares, so
-'Setup1' vs 'setup1' resolves the same everywhere. The fakes cover BOTH allOperations shapes the CAM
-test suite uses (a Fusion count/item collection AND a plain list)."""
+'Setup1' vs 'setup1' resolves the same everywhere. allOperations fakes carry the count/item
+collection shape - the measured live protocol."""
 
 from types import SimpleNamespace
 
@@ -30,8 +30,8 @@ def _op(name):
     return SimpleNamespace(name=name)
 
 
-def _setup(name, ops, as_list=False):
-    return SimpleNamespace(name=name, allOperations=(list(ops) if as_list else _Coll(ops)))
+def _setup(name, ops):
+    return SimpleNamespace(name=name, allOperations=_Coll(ops))
 
 
 def _cam(setups):
@@ -66,10 +66,9 @@ class TestWalkOperations:
                     _setup("S2", [_op("Drill1")])])
         assert [o.name for o in cc.walk_operations(cam)] == ["Face1", "Adaptive1", "Drill1"]
 
-    def test_handles_list_backed_alloperations(self):
-        # some CAM fakes back allOperations with a plain list, not count/item - both must iterate.
-        cam = _cam([_setup("S1", [_op("Face1")], as_list=True)])
-        assert [o.name for o in cc.walk_operations(cam)] == ["Face1"]
+    def test_empty_setup_walks_to_nothing(self):
+        cam = _cam([_setup("S1", [])])
+        assert cc.walk_operations(cam) == []
 
 
 class TestFindOperation:

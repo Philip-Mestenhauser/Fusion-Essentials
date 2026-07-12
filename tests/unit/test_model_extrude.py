@@ -146,8 +146,6 @@ def _install(sketches):
         def add(self, x): self.items.append(x)
     adsk.core.ObjectCollection.create = staticmethod(_OC)
     adsk.fusion.ToEntityExtentDefinition.create = staticmethod(lambda face, chained: ("to", face, chained))
-    ed = adsk.fusion.ExtentDirections
-    ed.PositiveExtentDirection = "pos"
     return ef
 
 

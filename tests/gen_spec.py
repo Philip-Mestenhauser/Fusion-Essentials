@@ -6,8 +6,8 @@ renders SPEC.md — a per-tool checklist of behaviors that are pinned by a test.
 
 Run from the repo root:
 
-    py -3 tests/gen_spec.py        # writes tests/SPEC.md
-    py -3 tests/gen_spec.py --check  # exit 1 if SPEC.md is stale (for CI)
+    py -3 tests/gen_spec.py        # writes tests/generated/SPEC.md
+    py -3 tests/gen_spec.py --check  # exit 1 if SPEC.md is stale
 
 Use it to review scope ("what behaviors do I actually guarantee?") and to spot
 gaps ("this tool has a test file but nothing covers the error path").
@@ -20,7 +20,7 @@ import re
 import sys
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-SPEC_PATH = os.path.join(TESTS_DIR, "SPEC.md")
+SPEC_PATH = os.path.join(TESTS_DIR, "generated", "SPEC.md")
 
 
 def _humanize(test_name: str) -> str:

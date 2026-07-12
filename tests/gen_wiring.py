@@ -1,4 +1,4 @@
-"""Generate docs/tool-wiring.md - the BREADCRUMB WIRING map, from the live registry + tool source.
+"""Generate tests/generated/tool-wiring.md - the BREADCRUMB WIRING map, from the live registry + tool source.
 
 Every tool speaks to the agent through three wire surfaces: its DESCRIPTION (always present, the
 manual), and its runtime NOTE / ERROR strings (situational, the results). When one of those strings
@@ -10,8 +10,8 @@ name that no longer exists (a dead reference).
 
 It is the wiring counterpart to MANIFEST (what tools exist) and SPEC (what they're pinned to do):
 
-    py -3 tests/gen_wiring.py          # writes docs/tool-wiring.md
-    py -3 tests/gen_wiring.py --check  # exit 1 if docs/tool-wiring.md is stale (for CI)
+    py -3 tests/gen_wiring.py          # writes tests/generated/tool-wiring.md
+    py -3 tests/gen_wiring.py --check  # exit 1 if tool-wiring.md is stale
 
 The reference edges are read from the CODE (AST), attributed per tool via its handler function, split
 by SURFACE (description = the manual, note/error = the situational tip). sys_capability_map is excluded
@@ -34,8 +34,7 @@ if COMMANDS_DIR not in sys.path:
     sys.path.insert(0, COMMANDS_DIR)
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "docs")
-WIRING_PATH = os.path.join(DOCS_DIR, "tool-wiring.md")
+WIRING_PATH = os.path.join(TESTS_DIR, "generated", "tool-wiring.md")
 
 from gen_manifest import _FAMILY_PREFIXES  # noqa: E402 - single source for the family map
 
@@ -163,6 +162,8 @@ _SMELLS = [
     ("cause-guess", re.compile(r"\b(almost always|probably|might be|likely (?:owned|because)|"
                                r"is likely|presumably|i think|we think|seems)\b", re.I)),
     ("hedge", re.compile(r"\b(should (?:probably|maybe)|may or may not|not sure|possibly)\b", re.I)),
+    ("process-note", re.compile(r"\b(revisit this|for now|todo|fixme|in one session|going red|"
+                                r"work order)\b", re.I)),
 ]
 
 
@@ -347,7 +348,7 @@ def render(data):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true",
-                        help="Exit 1 if docs/tool-wiring.md is out of date (does not write).")
+                        help="Exit 1 if tests/generated/tool-wiring.md is out of date (does not write).")
     args = parser.parse_args()
     rendered = render(collect())
     if args.check:

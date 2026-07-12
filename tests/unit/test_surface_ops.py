@@ -160,7 +160,9 @@ class _FakeComp:
             "itemByName": staticmethod(lambda n: comp._bodies.get(n)),
             "count": property(lambda s: len(comp._bodies)),
         })()
-        self.meshBodies = type("MB", (), {"itemByName": staticmethod(lambda n: None)})()
+        # Live meshBodies has count/item but NO itemByName (meshbodies-no-itembyname in
+        # tests/live/CONTRACTS.md); this comp holds no meshes.
+        self.meshBodies = type("MB", (), {"count": 0, "item": staticmethod(lambda i: None)})()
 
 
 class _FakeDesign:

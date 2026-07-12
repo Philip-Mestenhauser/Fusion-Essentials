@@ -94,7 +94,9 @@ class TestGeometryFromArgsValidation:
 
 class _FakeFace:
     def __init__(self, planar):
-        stype = "PLANE" if planar else "CYL"
+        import adsk.core
+        st = adsk.core.SurfaceTypes
+        stype = st.PlaneSurfaceType if planar else st.CylinderSurfaceType
         self.geometry = type("G", (), {"surfaceType": stype})()
 
 
@@ -130,10 +132,6 @@ def _install_geom(handle_map):
         def createByPoint(v):
             calls["kind"] = "point"; return ("g", "point")
     adsk.fusion.JointGeometry = JG
-    kpt = adsk.fusion.JointKeyPointTypes
-    kpt.CenterKeyPoint = 3; kpt.MiddleKeyPoint = 1
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"; st.ConeSurfaceType = "CONE"
     class _D:
         def findEntityByToken(self, t):
             e = handle_map.get(t)
@@ -407,7 +405,8 @@ class TestBboxCenterGeometry:
 
 class _FakeOrientFace:
     def __init__(self, normal):
-        self.geometry = SimpleNamespace(surfaceType="PLANE",
+        import adsk.core
+        self.geometry = SimpleNamespace(surfaceType=adsk.core.SurfaceTypes.PlaneSurfaceType,
                                         normal=SimpleNamespace(x=normal[0], y=normal[1], z=normal[2]))
 
 
@@ -422,10 +421,6 @@ def _install_face_orient(monkeypatch, body, face):
     monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
     monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
-    st = adsk.core.SurfaceTypes
-    monkeypatch.setattr(st, "PlaneSurfaceType", "PLANE", raising=False)
-    monkeypatch.setattr(st, "CylinderSurfaceType", "CYL", raising=False)
-    monkeypatch.setattr(st, "ConeSurfaceType", "CONE", raising=False)
     handles = {"BODYH": body, "FACEH": face}
 
     class _D:

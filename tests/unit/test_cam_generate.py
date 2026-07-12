@@ -12,7 +12,7 @@ that reports an inline/UI generation with no cam_generate handle.
 import json
 from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 gen = load_tool("cam_generate")
 
@@ -40,7 +40,7 @@ class _FakeCAM:
 
 
 def _setup(name, ops=()):
-    return SimpleNamespace(name=name, allOperations=list(ops))
+    return SimpleNamespace(name=name, allOperations=_NamedCollection(ops))
 
 
 class TestFindTarget:
@@ -91,7 +91,7 @@ def _op(name, warning=None, error=None):
 
 
 def _cam_with_ops(ops):
-    setup = SimpleNamespace(allOperations=list(ops))
+    setup = SimpleNamespace(allOperations=_NamedCollection(ops))
     return SimpleNamespace(setups=SimpleNamespace(count=1, item=lambda i: setup))
 
 
@@ -181,6 +181,8 @@ class TestStatusHandler:
         assert res["isError"] is True and "gen1" in res["message"]
 
     def _completed_entry(self):
+        # numberOfCompleted is pass-through data, not a completion signal - live it reads 0 even
+        # when isGenerationCompleted is True (cam-generate-future in tests/live/CONTRACTS.md).
         return {"future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=2,
                                           numberOfCompleted=2),
                 "target": "all setups", "started_at": 0.0, "total": 2}

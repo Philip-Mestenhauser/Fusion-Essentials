@@ -3,7 +3,7 @@
 The registry IS the inventory: every ``tools/<name>.py`` self-registers a Tool with a name, a
 write-status, a description, and an input schema. This script imports each tool module (against the
 test harness's mocked ``adsk``), pulls those facts off the registered primitives, also collects the
-typed ``InputKind`` subclasses from ``_inputs.py``, and renders ``tests/MANIFEST.md`` — one grouped
+typed ``InputKind`` subclasses from ``_inputs.py``, and renders ``tests/generated/MANIFEST.md`` — one grouped
 "what tools + kinds exist" reference.
 
 Why generate instead of hand-write: a static index goes stale the instant a tool is added (a prior
@@ -14,8 +14,8 @@ agent gets the whole map in one file, and the build guarantees it is current.
 
 Run from the repo root:
 
-    py -3 tests/gen_manifest.py          # writes tests/MANIFEST.md
-    py -3 tests/gen_manifest.py --check  # exit 1 if MANIFEST.md is stale (for CI)
+    py -3 tests/gen_manifest.py          # writes tests/generated/MANIFEST.md
+    py -3 tests/gen_manifest.py --check  # exit 1 if MANIFEST.md is stale
 """
 
 import argparse
@@ -37,7 +37,7 @@ from conftest import load_tool, TOOLS_DIR, COMMANDS_DIR  # noqa: E402
 if COMMANDS_DIR not in sys.path:
     sys.path.insert(0, COMMANDS_DIR)
 
-MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MANIFEST.md")
+MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated", "MANIFEST.md")
 
 # Tool name prefix -> family label. The order here is the manifest's section order; a tool falls into
 # the FIRST prefix it matches (so 'design_get' -> design, 'sys_find_tool' -> sys). A tool matching
@@ -329,7 +329,7 @@ def main():
             with open(MANIFEST_PATH, encoding="utf-8") as fh:
                 existing = fh.read()
         if existing.strip() != rendered.strip():
-            stale.append("tests/MANIFEST.md")
+            stale.append("tests/generated/MANIFEST.md")
         if not _splice(CLAUDE_PATH, _FAM_BEGIN, _FAM_END, fam_block, check=True):
             stale.append("CLAUDE.md (families census)")
         if not _splice(TOOLS_CLAUDE_PATH, _CAT_BEGIN, _CAT_END, cat_block, check=True):

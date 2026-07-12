@@ -17,7 +17,7 @@ import json
 import os
 import types
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 cp = load_tool("cam_post")
 
@@ -131,7 +131,7 @@ class _Setup:
         self._ops = list(ops)
     @property
     def allOperations(self):
-        return self._ops
+        return _NamedCollection(self._ops)
 
 
 class _Setups:

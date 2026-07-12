@@ -10,16 +10,25 @@ Layout — the tree splits by KIND, and `test_layout.py` enforces it:
 - `tests/unit/` — tests that EXERCISE behavior (per-tool handlers, the shared framework, the server).
 - `tests/lints/` — tests that READ the codebase to enforce a CONVENTION (naming, wire-ASCII, dead
   code, doc freshness, ...). These are the repo policing itself.
-- `tests/live/` — Fusion-driven scripts (the coverage sweep, the cold-agent evals). Run on demand
-  with a real Fusion session; NOT collected by the mock suite above.
+- `tests/live/` — Fusion-driven scripts (`tool_verify.py`, `measure_api.py`, the cold-agent
+  evals). Run on demand with a real Fusion session; NOT collected by the mock suite above.
 - `tests/` root — the shared harness: `conftest.py` and the `gen_*.py` generators.
 
 ```bash
-py -3 -m pytest                              # run everything (unit + lints)
-py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose
-py -3 -m pytest tests/lints -q               # just the convention lints
+py -3 tests/check_all.py                     # THE button: generator checks + suite + live gate
+py -3 tests/check_all.py --offline           # no Fusion here (skips the live gate, visibly)
+py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose (while iterating)
 py -3 tests/gen_spec.py                      # regenerate SPEC.md (the behavior spec)
 ```
+
+`check_all.py` runs everything in dependency order and fails loudly with the repair command per
+stage. Its green has two honest flavors: LIVE-VERIFIED (the facts stamp was checked against a
+reachable Fusion) and OFFLINE (you said so explicitly - the mocks were not re-confirmed). Either
+way it checks the live-run receipt: `tests/live/VERIFIED.md` carries a source hash from the last
+green `tool_verify.py` run, and the button goes red when tool source has changed since (repair:
+re-run `tool_verify.py` with Fusion up, commit the rewritten receipt). `--install-hook` makes
+every commit run the generator staleness checks. The layer-by-layer quality-system map lives in
+ONE place: `py -3 tests/check_all.py --help`.
 
 > Requires `pytest` (`py -3 -m pip install pytest`). Config lives in
 > `pytest.ini` at the repo root — it sets `testpaths`/`pythonpath` so no env
@@ -173,7 +182,7 @@ asserting an implementation detail → fix the test).
 
 ## The behavior spec (`SPEC.md`)
 
-`tests/SPEC.md` is **generated** from the test names by `gen_spec.py` — a
+`tests/generated/SPEC.md` is **generated** from the test names by `gen_spec.py` — a
 per-tool checklist of every behavior currently pinned by a test. Use it to
 review scope ("what do my tools actually guarantee?") and to spot gaps. Don't
 edit it by hand; regenerate after changing tests:

@@ -20,13 +20,10 @@ from conftest import load_tool
 dm = load_tool("design_mode")
 
 
-# ── mode wiring (the confirmed-live numeric convention: Parametric==1, Direct==0) ───────────────
+# ── mode wiring (DesignTypes ints come seeded from live_api_facts) ──────────────────────────────
 
 def _wire_modes():
     import adsk.fusion
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
     adsk.fusion.BaseFeature = _FakeBaseFeature
 
 

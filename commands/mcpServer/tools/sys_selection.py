@@ -66,7 +66,9 @@ def _unit(vec):
         return None
     try:
         v = vec.copy()
-        if not v.normalize():
+        # normalize() returns True even for a zero vector (live-verified Fusion 2704.1.23), so
+        # the degenerate case is caught by magnitude, not the return value.
+        if not v.normalize() or (v.x * v.x + v.y * v.y + v.z * v.z) < 1e-12:
             return None
         return [round(v.x, 6), round(v.y, 6), round(v.z, 6)]
     except Exception:

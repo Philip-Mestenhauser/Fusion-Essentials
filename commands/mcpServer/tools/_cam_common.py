@@ -40,13 +40,9 @@ def get_cam():
 
 
 def _iter_collection(coll):
-    """Yield items from a Fusion collection (count/item) OR a plain list/tuple - test fakes back
-    allOperations with either shape, so a bare `for` or a bare `range(count)` would break half of them."""
+    """Yield items from a Fusion count/item collection - the measured live protocol
+    (brepbodies-protocol in tests/live/CONTRACTS.md); the fakes carry the same shape."""
     if coll is None:
-        return
-    if isinstance(coll, (list, tuple)):
-        for it in coll:
-            yield it
         return
     for i in range(safe(lambda: coll.count, 0) or 0):
         it = safe(lambda i=i: coll.item(i))
@@ -728,11 +724,8 @@ def get_machining_time_handler(setup: str = "") -> dict:
     if err:
         return error(err)
 
-    # getMachiningTime(operations, feedScale, rapidFeed, toolChangeTime) - units confirmed live:
-    #   feedScale  is a PERCENT (100 = run at programmed feed), NOT a 0..1 fraction (a fraction
-    #              like 1.0 means 1% feed -> machining time ~100x too long).
-    #   rapidFeed  is centimeters per SECOND, NOT cm/min; a typical 250 in/min rapid is ~10.58 cm/s.
-    #   toolChangeTime is seconds.
+    # feedScale/rapidFeed/toolChangeTime (API-doc units: percent, cm/s, s) are INERT on Fusion
+    # 2704 (measured: cam-machining-time-knobs in tests/live/CONTRACTS.md).
     feed_scale = 100.0          # 100% of programmed feed
     rapid_feed = 10.58          # ~250 in/min = 635 cm/min = 10.58 cm/s
     tool_change = 1.5           # seconds

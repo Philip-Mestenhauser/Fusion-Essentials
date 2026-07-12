@@ -172,11 +172,6 @@ def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None)
     jt._common.app = jt.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    # JointDirections axis enum
-    JD = adsk.fusion.JointDirections
-    JD.XAxisJointDirection = 0
-    JD.YAxisJointDirection = 1
-    JD.ZAxisJointDirection = 2
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return design, joints[0]
 
@@ -340,8 +335,6 @@ class TestWorldAxis:
         _, joint = _install(["BoomPivot"])
         # joint's current motion is revolute (FakeRevoluteMotion); world_axis=z should re-apply
         # revolute with CustomJointDirection + the root's zConstructionAxis ('WAXIS_Z').
-        import adsk.fusion
-        adsk.fusion.JointDirections.CustomJointDirection = 3
         _payload(jt.edit_handler(joint_name="BoomPivot", world_axis="z"))
         # the recorded call carries the custom world axis entity, not a frame-relative enum
         kinds = [c for c in joint.motion_calls if c[0] == "revolute"]
@@ -350,8 +343,6 @@ class TestWorldAxis:
 
     def test_world_axis_without_type_reuses_current(self):
         _, joint = _install(["BoomPivot"])
-        import adsk.fusion
-        adsk.fusion.JointDirections.CustomJointDirection = 3
         out = _payload(jt.edit_handler(joint_name="BoomPivot", world_axis="y"))
         assert out["world_axis"] == "y"
         assert out["joint_type"] == "revolute"   # reused the joint's current type

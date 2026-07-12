@@ -82,7 +82,7 @@ with the narrower tool named in the payload's `pointers`.
 
 ## Tools
 
-**The authoritative tool inventory is [`tests/MANIFEST.md`](../../tests/MANIFEST.md)** —
+**The authoritative tool inventory is [`tests/generated/MANIFEST.md`](../../tests/generated/MANIFEST.md)** —
 generated from the live registry (137 tools, each with its inputs and write level) — or ask a
 connected client for its tool list (`tools/list`). Each tool's own `TOOL_DESCRIPTION` is the
 contract the agent sees; this README does not restate it (a second copy only drifts). Tool names
@@ -155,10 +155,11 @@ forking this as a pattern for your own MCP server:
 
 The naming schema (`<family>_<verb>`, with the verb's read/write kind linted against the declared
 write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by
-lints in `tests/`. The suite (2,400+ tests) runs outside Fusion in seconds: `py -3 -m pytest -q`.
-Generated inventories: [`tests/MANIFEST.md`](../../tests/MANIFEST.md) (per-tool),
-[`tests/SPEC.md`](../../tests/SPEC.md) (behavior ledger), and
-[`docs/tool-wiring.md`](../../docs/tool-wiring.md) (how tools point to each other, plus a
+lints in `tests/`. The one command is `py -3 tests/check_all.py` (generator checks + the whole
+suite + the live gate). Generated inventories live in `tests/generated/`:
+[`MANIFEST.md`](../../tests/generated/MANIFEST.md) (per-tool),
+[`SPEC.md`](../../tests/generated/SPEC.md) (behavior ledger), and
+[`tool-wiring.md`](../../tests/generated/tool-wiring.md) (how tools point to each other, plus a
 self-audit of the guidance strings). Authoring conventions live in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) and the `CLAUDE.md` files beside the code.
 

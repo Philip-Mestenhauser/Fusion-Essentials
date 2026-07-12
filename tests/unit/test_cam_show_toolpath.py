@@ -49,11 +49,17 @@ class FakeSetup:
 
     @property
     def allOperations(self):
-        return list(self._ops)
+        # Live allOperations flattens folder-nested ops in and drops the folder containers
+        # (cam-alloperations-shape in tests/live/CONTRACTS.md).
+        out = list(self._ops)
+        for child in self.children:
+            if isinstance(child, CAMFolder):
+                out.extend(child.allOperations)
+        return out
 
 
 class CAMFolder:
-    """Named to match type(child).__name__ == 'CAMFolder' in _find_folder_ops."""
+    """Named to match type(child).__name__ == 'CAMFolder' in _find_folder_ops (the live type name)."""
     def __init__(self, name, ops):
         self.name = name
         self._ops = list(ops)
@@ -274,6 +280,18 @@ class TestShowFolder:
         assert out["shown_count"] == 1
         assert a1.isLightBulbOn is True
         assert a2.isLightBulbOn is False           # path-less op stays off
+
+    def test_isolate_covers_folder_nested_ops(self):
+        # allOperations flattens folder children in (live-verified), so isolating a top-level op
+        # must also turn OFF a shown op nested inside a folder - not leave it lit.
+        f_op = FakeOp("FOp1", shown=True)
+        folder = CAMFolder("Drilling", [f_op])
+        top = FakeOp("Top1")
+        _install([FakeSetup("S", [top], children=[folder])])
+        out = _payload(st.handler(action="isolate", operation="Top1"))
+        assert out["operation"] == "Top1"
+        assert top.isLightBulbOn is True
+        assert f_op.isLightBulbOn is False
 
     def test_show_folder_matches_camfolder_child(self):
         # show_folder resolves a CAMFolder NESTED in a setup (not just a setup name).

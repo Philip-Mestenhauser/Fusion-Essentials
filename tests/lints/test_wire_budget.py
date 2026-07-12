@@ -14,8 +14,7 @@ exactly where per-description drift hid - a few tools each growing a little neve
 total. A NEW tool that pushes the total over must be paid for by slimming existing prose in the
 same change, not by bumping the global (that is the ratchet working as intended). The per-tool
 count is the ratchet's granularity: if you add a tool, the total moving up should be roughly its
-own weight, and a wire-budget review (see .claude/plans/eval-pipeline/steering.md) reads the
-delta each work-order batch.
+own weight.
 """
 
 import json

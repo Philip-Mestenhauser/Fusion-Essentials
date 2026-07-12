@@ -297,7 +297,8 @@ class TestApplyLimits:
 
 class _FakePlanarFace:
     def __init__(self):
-        self.geometry = type("G", (), {"surfaceType": "PLANE"})()
+        import adsk.core
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
 
 
 def _install_resolve_seam(token_map):
@@ -310,10 +311,6 @@ def _install_resolve_seam(token_map):
         "createByPoint": staticmethod(lambda p: ("point",)),
     })
     adsk.fusion.JointGeometry = rec
-    kp = adsk.fusion.JointKeyPointTypes
-    kp.CenterKeyPoint = "CENTER"; kp.MiddleKeyPoint = "MIDDLE"
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"; st.ConeSurfaceType = "CONE"
     adsk.fusion.BRepFace = _FakePlanarFace
     adsk.fusion.BRepEdge = type("E", (), {})
     adsk.fusion.BRepVertex = type("V", (), {})
@@ -338,8 +335,10 @@ class TestResolveInputHandle:
         face = _FakePlanarFace()
         design = _install_resolve_seam({"H_FACE": face})
         g, label, err = joint._resolve_input(design, "H_FACE")
+        import adsk.fusion
         assert err is None
-        assert g == ("planar", "CENTER")          # built a JointGeometry from the face, not an origin
+        # built a JointGeometry from the face, not an origin
+        assert g == ("planar", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
         assert label.startswith("handle:")
 
     def test_non_token_falls_through_to_jo_name(self):
@@ -483,12 +482,6 @@ def _jg_seam():
         "createByPoint": staticmethod(lambda p: calls.append(("point", None)) or ("point",)),
     })
     adsk.fusion.JointGeometry = rec
-    kp = adsk.fusion.JointKeyPointTypes
-    kp.CenterKeyPoint = "CENTER"; kp.MiddleKeyPoint = "MIDDLE"
-    st = adsk.core.SurfaceTypes
-    st.PlaneSurfaceType = "PLANE"; st.CylinderSurfaceType = "CYL"; st.ConeSurfaceType = "CONE"
-    ct = adsk.core.Curve3DTypes
-    ct.Circle3DCurveType = "CIRCLE"; ct.Line3DCurveType = "LINE"
 
     class _Face:
         def __init__(self, stype):
@@ -511,24 +504,31 @@ def _jg_seam():
 
 class TestJgFromEntity:
     def test_planar_face_center(self):
+        import adsk.core, adsk.fusion
         Face, _, _ = _jg_seam()
-        g, label, err = joint._jg_from_entity(Face("PLANE"))
-        assert err is None and g == ("planar", "CENTER") and "planar" in label
+        g, label, err = joint._jg_from_entity(Face(adsk.core.SurfaceTypes.PlaneSurfaceType))
+        assert err is None and "planar" in label
+        assert g == ("planar", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
 
     def test_cylinder_face_middle_not_center(self):
+        import adsk.core, adsk.fusion
         Face, _, _ = _jg_seam()
-        g, label, err = joint._jg_from_entity(Face("CYL"))
-        assert err is None and g == ("nonplanar", "MIDDLE")   # CenterKeyPoint invalid on a cylinder
+        g, label, err = joint._jg_from_entity(Face(adsk.core.SurfaceTypes.CylinderSurfaceType))
+        # CenterKeyPoint invalid on a cylinder
+        assert err is None and g == ("nonplanar", adsk.fusion.JointKeyPointTypes.MiddleKeyPoint)
 
     def test_circular_edge_center(self):
+        import adsk.core, adsk.fusion
         _, Edge, _ = _jg_seam()
-        g, label, err = joint._jg_from_entity(Edge("CIRCLE"))
-        assert err is None and g == ("curve", "CENTER") and label == "edge"
+        g, label, err = joint._jg_from_entity(Edge(adsk.core.Curve3DTypes.Circle3DCurveType))
+        assert err is None and label == "edge"
+        assert g == ("curve", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
 
     def test_line_edge_middle(self):
+        import adsk.core, adsk.fusion
         _, Edge, _ = _jg_seam()
-        g, _, err = joint._jg_from_entity(Edge("LINE"))
-        assert err is None and g == ("curve", "MIDDLE")
+        g, _, err = joint._jg_from_entity(Edge(adsk.core.Curve3DTypes.Line3DCurveType))
+        assert err is None and g == ("curve", adsk.fusion.JointKeyPointTypes.MiddleKeyPoint)
 
     def test_vertex_uses_point(self):
         _, _, Vertex = _jg_seam()
@@ -649,8 +649,6 @@ def _install_create(jo_names=("JO_A", "JO_B")):
             return []
     d = FakeDesign()
     joint._common.design = lambda: d
-    JD = adsk.fusion.JointDirections
-    JD.XAxisJointDirection = 0; JD.YAxisJointDirection = 1; JD.ZAxisJointDirection = 2
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return d, joints_coll
 

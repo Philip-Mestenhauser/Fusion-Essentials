@@ -1,16 +1,18 @@
-"""Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history or points
-back at the planning document that produced it (see tools/CLAUDE.md, "Module docstrings").
+"""Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history, points
+back at the planning document that produced it, or leaves process notes for a future maintainer
+(see tools/CLAUDE.md, "Module docstrings").
 
 A reader who opens a file for the first time should find only present-tense statements of what the
-code does. A phrase like "used to", "previously", "the fix", or "until now" narrates a past state
-instead of describing the current one - and a bare work-item label ("C7:", "WO-3", "Class B") points
-at a planning document nobody outside that process ever saw. Both rot the moment the plan is gone:
-the next reader has no idea what "C7" refers to, and "used to be swallowed" tells them nothing about
-what the code does NOW.
+code does. A phrase like "used to", "previously", "the fix", or "until now" narrates a past state;
+"for now", "revisit this", or a TODO marker admits the code is not its final form and points at a
+plan; "in one session" / "verified today" is an observation diary; a bare work-item label ("C7:",
+"WO-3", "Class B", "Phase 2") points at a planning document nobody outside that process ever saw.
+All of these rot the moment the plan is gone - the durable home for that content is the ledger
+(tests/live/CONTRACTS.md), the plan tree, or the author's memory, never the code.
 
-This sweeps every ``.py``/``.md`` file under ``commands/mcpServer/`` and ``tests/`` for both smells.
-A legitimate domain use (a variable/field that is genuinely named around one of these words, with no
-history narrative intended) is named in ``_ALLOWLIST`` with a plain-English reason.
+This sweeps every ``.py``/``.md`` file under ``commands/mcpServer/`` and ``tests/`` for these
+smells. A legitimate domain use (a variable/field/prose genuinely about one of these words, with no
+narrative intended) is named in ``_ALLOWLIST`` with a plain-English reason.
 """
 
 import os
@@ -31,17 +33,32 @@ _SWEPT_DIRS = (
 # is the one SANCTIONED history document (dated, additive, per-release): the evergreen rule keeps
 # history narrative out of living code and docs, not out of the changelog whose genre it is.
 _EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "SPEC.md", "MANIFEST.md",
-                   "CHANGELOG.md"}
+                   "tool-wiring.md", "CHANGELOG.md"}
 
 # phrase -> case-insensitive denylist (history narrative + plan back-references naming a phrase).
 # Word-boundary wrapped so e.g. "the fix" does not match inside "the fixture", "used to" does not
 # match inside "refused to", and "previously" does not match inside an identifier like
 # "was_previously_saved" (underscore is a word character, so there is no boundary there either).
 _PHRASE_NAMES = (
+    # history narrative - describes a past state instead of the current one
     "the audit", "the review", "the refactor", "honesty signal", "laundered",
     "option-b", "the fix", "before fix", "after fix", "was tried", "used to", "renamed from",
     "merged into", "until now", "previously", "the old", "closes the gap", "gap where",
     "pr-review", "findings", "release-hardening",
+    # deferral / impermanence - code admitting it is not its final form points at a plan
+    "for now", "for the moment", "eventually", "in the future", "future work", "later on",
+    "someday", "at some point", "fix later", "clean up later", "cleanup later",
+    "tech debt", "technical debt", "band-aid", "bandaid",
+    # instructions to a future maintainer - process lives in the ledger/plan/memory, not code
+    "revisit this", "don't forget", "note to self", "remember to", "update this comment",
+    "remove this comment", "update this when", "remove this when", "remove once", "delete once",
+    "once we",
+    # session/observation diary - state the fact, not the day or run it was learned on
+    "came alive", "in one session", "last session", "next session", "across sessions",
+    "earlier today", "this morning", "tonight", "yesterday", "verified today",
+    "verified earlier", "verified yesterday", "as of now", "going red",
+    # plan artifacts by name - code never points into the planning tree
+    "work order", "backlog", "claude/plans", "plan.md",
 )
 _PHRASES = [(p, re.compile(r"\b" + re.escape(p) + r"\b")) for p in _PHRASE_NAMES]
 _BUG_LETTER = re.compile(r"\bbug [a-z]\b", re.I)
@@ -52,8 +69,22 @@ _CLASS_LETTER = re.compile(r"\bClass [A-I]\b")
 # A bare work-item label like "C7:"/"C9:"/"H2:" opening a comment - the class-letter + item-number
 # shorthand a planning doc uses, meaningless once that doc is gone.
 _ITEM_LABEL = re.compile(r"#\s*[A-I][0-9]{1,2}\s*:")
+# Classic deferral markers. Case-SENSITIVE: the uppercase marker is the convention; a lowercase
+# "todo" can be ordinary prose (tool_verify's "the honest 'todo' ledger").
+_TODO_MARKER = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
+# A plan-phase label ("Phase 2") - same rot as a work-item label once the plan is gone.
+_PHASE_LABEL = re.compile(r"\bPhase [0-9]\b")
 
-_ALLOWLIST = {}
+_ALLOWLIST = {
+    "tests/lints/test_generated_docs_current.py:7":
+        "'remember to' states the human failure mode this gate compensates for, not an instruction",
+    "tests/lints/test_docstring_restatement.py:25":
+        "'backlog' defines what its own allowlist category means (a measured, owner-gated cleanup)",
+    "tests/live/evals/scenarios/T6_CAM-Eval.md:123":
+        "'work order' in an eval scenario spec names the artifact a capability finding feeds",
+    "tests/unit/test_joint_create_origin.py:404":
+        "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
+}
 
 
 def _iter_files():
@@ -89,6 +120,10 @@ def _line_offenders(path):
                 offenders.append((i, "Class <letter>", line.strip()))
             if _ITEM_LABEL.search(line):
                 offenders.append((i, "item-number label", line.strip()))
+            if _TODO_MARKER.search(line):
+                offenders.append((i, "TODO marker", line.strip()))
+            if _PHASE_LABEL.search(line):
+                offenders.append((i, "Phase <n> label", line.strip()))
     return offenders
 
 

@@ -205,8 +205,8 @@ py -3 -m pytest -q --cov=commands.mcpServer --cov-branch --cov-report=html
 then review never-executed branches in `htmlcov/`. An uncovered branch is either dead code or a
 missing test; both deserve action. This is a periodic audit, not CI - coverage of live-API
 wrapper paths is legitimately partial. The agent-facing surface has its own generated deadness
-audit: the "Blindspots" section of [docs/tool-wiring.md](docs/tool-wiring.md) (orphan tools,
-guidance pointing at tools that do not exist).
+audit: the "Blindspots" section of [tests/generated/tool-wiring.md](tests/generated/tool-wiring.md)
+(orphan tools, guidance pointing at tools that do not exist).
 
 For CAN'T-FAIL tests (assertions no code change would ever flip), the periodic detector is
 mutation testing: `py -3 -m pip install mutmut`, point it at one tool module at a time, and
@@ -231,10 +231,21 @@ because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools ar
   captured (so a regression to a wrong method name / argument fails here).
 - **Cover the guards too** — unknown-units / no-active-design / out-of-range inputs, not just the happy
   path. The error contract (`isError`, `message`) is part of the tool's behavior.
-- **Run it:** `py -3 -m pytest tests/test_<tool>.py -q` (or the whole suite with `py -3 -m pytest -q`).
-- **Regenerate the spec:** `py -3 tests/gen_spec.py` rebuilds `tests/SPEC.md` from the test names (each
-  `test_<behavior>` is one documented contract); run it after adding/renaming tests. `--check` fails if
-  `SPEC.md` is stale.
+- **Run it:** `py -3 -m pytest tests/unit/test_<tool>.py -q` while iterating; before calling any
+  change done, run THE button - `py -3 tests/check_all.py` - which chains the generator checks, the
+  whole suite, the live-run receipt check, and the live gate, each failure naming its own repair.
+  No Fusion on this machine? `--offline` skips the live gate visibly (the summary says the mocks
+  were not re-confirmed).
+- **Changed tool source?** The receipt check goes red until the live suite has seen your code:
+  run `py -3 tests/live/tool_verify.py` with Fusion up (a green run rewrites
+  `tests/live/VERIFIED.md` - commit it with your change). Reload the add-in first so the live
+  session runs the code you just edited.
+- **Regenerate the docs:** `py -3 tests/gen_all.py` rebuilds everything under `tests/generated/`
+  (SPEC from test names, MANIFEST + the CLAUDE.md maps from the registry, tool-wiring from source);
+  run it whenever check_all says an artifact is stale.
+- **New adsk API?** If your tool references an enum family the generated `live_api_facts.py` has
+  not measured, the suite goes red with the one command that fixes it: run
+  `py -3 tests/live/measure_api.py` with Fusion up, then commit the regenerated facts.
 
 See [commands/mcpServer/README.md](commands/mcpServer/README.md) for the user-facing setup,
 the full tool list, and the security model.

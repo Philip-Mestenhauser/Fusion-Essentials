@@ -15,16 +15,6 @@ import pytest
 from conftest import load_tool
 
 
-@pytest.fixture(autouse=True)
-def _restore_shared_enum_attrs():
-    # Curve3DTypes lives on the SHARED adsk mock; a raw string-sentinel assignment leaks into other
-    # test modules' tools under random ordering - save and restore it around every test here.
-    import adsk.core
-    ct = adsk.core.Curve3DTypes
-    saved = ct.Line3DCurveType
-    yield
-    ct.Line3DCurveType = saved
-
 asm = load_tool("assembly_transform")
 
 
@@ -57,7 +47,8 @@ class _Pt:
 def _line3d(sp, ep):
     """The LIVE shape of a bounded edge's geometry: a Line3D with startPoint/endPoint ONLY
     (no .direction/.origin - those belong to InfiniteLine3D)."""
-    return type("Line3D", (), {"curveType": "LINE",
+    import adsk.core
+    return type("Line3D", (), {"curveType": adsk.core.Curve3DTypes.Line3DCurveType,
                                "startPoint": _Pt(*sp), "endPoint": _Pt(*ep)})()
 
 
@@ -378,9 +369,7 @@ class TestMove:
     def test_rotate_about_edge_handle(self):
         # AxisRef edge path: rotate about a straight EDGE's line (hinge), not the occ origin.
         design, occs, _ = _install(["Block:1"])
-        import adsk.fusion, adsk.core
-        ct = adsk.core.Curve3DTypes
-        ct.Line3DCurveType = "LINE"
+        import adsk.fusion
         class _Edge:
             # LIVE shape: a bounded edge's geometry is a Line3D - startPoint/endPoint ONLY
             # (no .direction/.origin; those are InfiniteLine3D's) - the direction is DERIVED.
@@ -408,9 +397,8 @@ class TestMove:
         # directly - the fallback read path, no derivation.
         design, occs, _ = _install(["Block:1"])
         import adsk.fusion, adsk.core
-        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
         class _InfGeom:
-            curveType = "LINE"
+            curveType = adsk.core.Curve3DTypes.Line3DCurveType
             direction = _Vec(0, 0, 1)
             origin = _Pt(2, 2, 0)
         class _Edge:
@@ -433,9 +421,8 @@ class TestMove:
         # must error, never rotate about a guessed axis.
         design, occs, _ = _install(["Block:1"])
         import adsk.fusion, adsk.core
-        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
         class _BareGeom:
-            curveType = "LINE"
+            curveType = adsk.core.Curve3DTypes.Line3DCurveType
         class _Edge:
             geometry = _BareGeom()
         adsk.fusion.BRepEdge = _Edge
@@ -455,7 +442,6 @@ class TestMove:
         # rotates about the WORLD origin). The translation is composed as its OWN matrix. Use the
         # edge-rotate path (a real non-origin pivot at (5,0,0)) + a translation in the same call.
         import adsk.core, adsk.fusion
-        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
         class _Edge:
             geometry = _line3d((5, 0, 0), (9, 0, 0))
         adsk.fusion.BRepEdge = _Edge

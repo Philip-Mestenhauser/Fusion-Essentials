@@ -1,5 +1,8 @@
 # Writing a test here
 
+Before calling any change done: `py -3 tests/check_all.py` - the one command (generator checks +
+suite + live-run receipt + live gate, each failure naming its repair).
+
 This is the test-authoring recipe for `tests/`. Read the root [CLAUDE.md](../CLAUDE.md) for the
 constitution and [tests/README.md](README.md) for the full harness explanation (how `conftest.py`
 mocks `adsk`, the fake pattern, the triage for which tools need tests at all); this file is the
@@ -69,6 +72,16 @@ kind's resolution silently fails even though the handler's own reads work. Patch
 SAME design object, inside a fixture so it's torn down: `conftest.install(mod, design)` does this for
 you; if you patch by hand, patch `mod._common.design` and `mod._inputs._common.design` together.
 
+## Comments and API facts in tests
+
+A test comment is evergreen: the present-tense fact, a few lines at most - no process notes,
+observation diaries, or plan references (enforced by `test_evergreen_no_baggage.py`). An adsk API
+fact (an enum int, a behavior flag) is never hand-typed: it comes from the generated
+`live_api_facts.py` - the mock adsk enums arrive pre-seeded with measured values, the shared
+fakes read their behavior flags from it, and `test_no_hand_seeded_enums.py` bans hand-assigning a
+measured member. If a fact you need is missing, add a measurement row to `measure_api.py` and
+regenerate against live Fusion.
+
 ## Prove a test actually bites
 
 A test that can't fail is decoration. After writing one, sanity-check it by temporarily breaking the
@@ -78,5 +91,6 @@ refusal is easy to write in a way that always passes.
 
 ## Regenerating docs
 
-`py -3 tests/gen_spec.py` rebuilds `SPEC.md` from test names after adding/renaming tests;
-`--check` fails if it's stale (also enforced by `test_generated_docs_current.py`).
+`py -3 tests/gen_all.py` rebuilds everything under `tests/generated/` (SPEC from test names,
+MANIFEST + the CLAUDE.md maps from the registry, tool-wiring from source); `--check` fails if
+anything is stale (also enforced by `test_generated_docs_current.py`).

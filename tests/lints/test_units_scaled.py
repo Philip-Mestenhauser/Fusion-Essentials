@@ -5,15 +5,15 @@
 
 `_common.scale(units)` IS exactly `UNIT_TO_CM.get((units or "mm").strip().lower())`. A tool that writes
 that expression itself, or keeps its own copy of the UNIT_TO_CM table, diverges from the single source
-the moment the shared table changes (a new unit, a corrected factor). A 2026 reading-audit found this
-re-rolled at ~12 sites (`_common.scale` companion to `test_units_typed`, which polices the input side).
+the moment the shared table changes (a new unit, a corrected factor). Companion to `test_units_typed`,
+which polices the input side.
 
 Two clean signals, banned outside _common.py:
   1. raw `UNIT_TO_CM` access (`.get(` or `[`) - call `_common.scale(units)` instead;
   2. a dict literal mapping `"mm"` and `"cm"` to numbers - a copy of `UNIT_TO_CM`.
 
-A hardcoded scalar conversion (`* 10` / `/ 10`) has no clean signature and is NOT caught here - the
-reading-audit (.claude/plans/reuse-enforcement-plan.md) is the net for those.
+A hardcoded scalar conversion (`* 10` / `/ 10`) has no clean signature and is NOT caught here - only
+a human read of the arithmetic catches those.
 """
 
 import ast

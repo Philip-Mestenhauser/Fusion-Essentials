@@ -17,20 +17,9 @@ This locks the invariant two ways:
 import os
 import re
 
-import pytest
+import adsk.core
 
 from conftest import load_tool, TOOLS_DIR
-
-
-@pytest.fixture(autouse=True)
-def _restore_shared_enum_attrs():
-    # SurfaceTypes/Curve3DTypes live on the SHARED adsk mock; _wire()'s raw string-sentinel
-    # assignments leak into other test modules' tools under random ordering - restore after each test.
-    import adsk.core
-    st, ct = adsk.core.SurfaceTypes, adsk.core.Curve3DTypes
-    saved = (st.PlaneSurfaceType, ct.Line3DCurveType)
-    yield
-    st.PlaneSurfaceType, ct.Line3DCurveType = saved
 
 inp = load_tool("_inputs")
 
@@ -89,12 +78,13 @@ _SEP = inp._HANDLE_SEP
 
 class _PlanarFace:
     def __init__(self):
-        self.geometry = type("G", (), {"surfaceType": "PLANE"})()
+        # surfaceType carries the measured int (seeded from live_api_facts), like a live face.
+        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
 
 
 class _LinearEdge:
     def __init__(self):
-        self.geometry = type("G", (), {"curveType": "LINE"})()
+        self.geometry = type("G", (), {"curveType": adsk.core.Curve3DTypes.Line3DCurveType})()
 
 
 class _Body:
@@ -105,13 +95,11 @@ class _Body:
 def _wire(handle_map, *, faces=False, edges=False, bodies=False):
     """Install a design resolving the BARE token (not the composite) + the adsk type wiring each kind
     isinstance-checks against."""
-    import adsk.fusion, adsk.core
+    import adsk.fusion
     if faces:
         adsk.fusion.BRepFace = _PlanarFace
-        adsk.core.SurfaceTypes.PlaneSurfaceType = "PLANE"
     if edges:
         adsk.fusion.BRepEdge = _LinearEdge
-        adsk.core.Curve3DTypes.Line3DCurveType = "LINE"
     if bodies:
         adsk.fusion.BRepBody = _Body
 

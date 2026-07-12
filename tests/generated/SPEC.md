@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 146  |  **Behaviors pinned:** 2633
+**Tools with a test file:** 151  |  **Behaviors pinned:** 2655
 
 ## `_cam_common`
 
@@ -448,7 +448,7 @@ after changing tests._
 
 ## `cam_common`
 
-> Unit tests for the shared CAM finders in ``_cam_common`` - find_setup / find_operation / walk_operations / setup_names. These are the ONE case-insensitive resolution every CAM tool shares, so 'Setup1' vs 'setup1' resolves the same everywhere. The fakes cover BOTH allOperations shapes the CAM test suite uses (a Fusion count/item collection AND a plain list).
+> Unit tests for the shared CAM finders in ``_cam_common`` - find_setup / find_operation / walk_operations / setup_names. These are the ONE case-insensitive resolution every CAM tool shares, so 'Setup1' vs 'setup1' resolves the same everywhere. allOperations fakes carry the count/item collection shape - the measured live protocol.
 
 **FindSetup**
 - found case insensitive
@@ -458,7 +458,7 @@ after changing tests._
 - lists all setup names
 **WalkOperations**
 - flattens across setups countitem
-- handles list backed alloperations
+- empty setup walks to nothing
 **FindOperation**
 - found case insensitive across setups
 - not found returns available
@@ -883,6 +883,7 @@ after changing tests._
 - unknown folder errors
 - missing folder arg errors
 - show folder skips pathless ops
+- isolate covers folder nested ops
 - show folder matches camfolder child
 **Fit**
 - show with fit applies the fit to the camera
@@ -991,15 +992,6 @@ after changing tests._
 - success returns result and no error
 - measure exception is surfaced as error
 - none result is an error not a silent none
-
-## `coverage_sweep_complete`
-
-> Gate: every registered tool is accounted for in the live coverage sweep.
-
-**CoverageSweepComplete**
-- every tool is covered excluded or pending
-- no stale table entries
-- pending and covered are disjoint
 
 ## `data_get`
 
@@ -1735,13 +1727,29 @@ after changing tests._
 - edit runs computeAll
 - reports downstream errors after recompute
 
+## `enum_families_measured`
+
+> Lint: every adsk enum family the tools reference is MEASURED - first contact fails loudly.
+
+**EnumFamiliesMeasured**
+- every referenced family is measured
+- every consumed behavior key is measured
+
 ## `evergreen_no_baggage`
 
-> Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history or points back at the planning document that produced it (see tools/CLAUDE.md, "Module docstrings").
+> Lint: the codebase is EVERGREEN - no comment/docstring/string narrates its own history, points back at the planning document that produced it, or leaves process notes for a future maintainer (see tools/CLAUDE.md, "Module docstrings").
 
 **NoHistoricalOrPlanBaggage**
 - no file narrates history or points at a plan
 - allowlist entries still exist and still trip
+
+## `fake_shapes_exist`
+
+> Lint: every public attribute a SHARED fake exposes exists on its live adsk counterpart.
+
+**SharedFakeShapesExist**
+- every shared fake attribute exists live
+- allowlist entries still trip
 
 ## `family_gating`
 
@@ -2264,6 +2272,17 @@ after changing tests._
 - each test is in its correct bucket
 - no behavior tests under live
 - lint set has no stale names
+
+## `live_api_facts_wiring`
+
+> The live_api_facts wiring: the generated measured facts actually POPULATE the mocks.
+
+**EnumSeeding**
+- every measured enum family is seeded on the mock modules
+- seeded values are ints not child mocks
+**BehaviorFlagsConsumedAtCallTime**
+- fake vector zero normalize follows the measured flag
+- collection item out of range follows the measured flag
 
 ## `main_thread_timeout`
 
@@ -3035,6 +3054,14 @@ after changing tests._
 - no design cast of active product
 - no manual cam cast
 
+## `no_hand_seeded_enums`
+
+> Lint: a MEASURED adsk enum member is never hand-assigned in a unit test - it comes seeded.
+
+**NoHandSeededEnums**
+- measured enum members are never hand assigned
+- allowlist files still trip
+
 ## `occurrence_ref_lint`
 
 > Lint: single-occurrence resolution must go through the shared OccurrenceRef resolver.
@@ -3727,6 +3754,33 @@ after changing tests._
 - every name is domain verb
 - verb is in the closed set
 - verb kind matches write status
+
+## `tool_verify_complete`
+
+> Gate: every registered tool is accounted for in the live tool verification.
+
+**ToolVerifyComplete**
+- every tool is covered excluded or pending
+- no stale table entries
+- pending and covered are disjoint
+
+## `tool_verify_receipt`
+
+> The tool_verify receipt: the source hash + VERIFIED.md stamp binding a green live run to the exact tool source it exercised.
+
+**SourceHash**
+- same tree hashes identically
+- content change changes hash
+- rename changes hash
+- crlf and lf hash identically
+- non py and pycache are ignored
+- paths hash with forward slashes
+**VerifiedReceipt**
+- round trip write then check is current
+- check goes red when source changes after stamp
+- check goes red without a receipt
+- check goes red on a stampless receipt
+- receipt carries stamp counts and ledger rows
 
 ## `units_scaled`
 

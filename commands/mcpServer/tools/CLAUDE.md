@@ -229,7 +229,7 @@ Hard rules:
   (`find_geometry`, `sys_get_selection`) stay separate — an Acquire's output feeds an Edit, so it is
   never a slice of a Disclose read.
 
-## The lints will catch (run `py -3 -m pytest -q` before you call it done)
+## The lints will catch (run `py -3 tests/check_all.py` before you call it done)
 
 - `test_tool_naming.py` — the naming schema: verb vocabulary + verb-kind/`write=` agreement.
 - `test_write_status_annotations.py` — every registered tool declares a write-status annotation.

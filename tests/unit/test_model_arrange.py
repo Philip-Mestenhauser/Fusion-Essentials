@@ -9,9 +9,15 @@ Envelope -> add each component -> add feature). The actual solve is a live side-
 
 import json
 
+import adsk.fusion
+
 from conftest import load_tool
 
 ar = load_tool("model_arrange")
+
+# Measured solver enum (seeded from live_api_facts) - fakes and assertions speak these.
+_TRUE = adsk.fusion.ArrangeSolverTypes.Arrange2DTrueShapeSolverType
+_RECT = adsk.fusion.ArrangeSolverTypes.Arrange2DRectangularSolverType
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -107,9 +113,6 @@ def _install(sketches=(), occ_names=()):
     ar._common.app = ar.app
     import adsk.fusion, adsk.core
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    ST = adsk.fusion.ArrangeSolverTypes
-    ST.Arrange2DTrueShapeSolverType = "TRUE"
-    ST.Arrange2DRectangularSolverType = "RECT"
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
     return design, af
@@ -126,12 +129,12 @@ class TestSolverType:
     def test_true_shape_default(self):
         _, af = _install([FakeSketch("Boundary")], ["A:1"])
         _payload(ar.handler(boundary_sketch="Boundary", shapes="A:1"))
-        assert af.last_input.solver == "TRUE"
+        assert af.last_input.solver == _TRUE
 
     def test_rectangular(self):
         _, af = _install([FakeSketch("Boundary")], ["A:1"])
         _payload(ar.handler(boundary_sketch="Boundary", shapes="A:1", solver="rectangular"))
-        assert af.last_input.solver == "RECT"
+        assert af.last_input.solver == _RECT
 
     def test_unknown_solver_errors(self):
         _install([FakeSketch("Boundary")], ["A:1"])
@@ -141,20 +144,20 @@ class TestSolverType:
     def test_rect_alias_resolves_to_rectangular(self):
         _, af = _install([FakeSketch("B")], ["A:1"])
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", solver="rect"))
-        assert af.last_input.solver == "RECT"
+        assert af.last_input.solver == _RECT
         # payload's solver field is normalized off the resolved solver class name
         assert out["solver"] == "rectangular"
 
     def test_true_alias_normalizes_in_payload(self):
         _, af = _install([FakeSketch("B")], ["A:1"])
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", solver="trueshape"))
-        assert af.last_input.solver == "TRUE"
+        assert af.last_input.solver == _TRUE
         assert out["solver"] == "true_shape"
 
     def test_solver_case_insensitive(self):
         _, af = _install([FakeSketch("B")], ["A:1"])
         _payload(ar.handler(boundary_sketch="B", shapes="A:1", solver="RECTANGULAR"))
-        assert af.last_input.solver == "RECT"
+        assert af.last_input.solver == _RECT
 
 
 # ── boundary resolution ──────────────────────────────────────────────────────

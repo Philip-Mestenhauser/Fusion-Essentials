@@ -21,6 +21,11 @@ import json
 from conftest import load_tool
 
 mc = load_tool("mesh_combine")
+
+# Measured combine enums (seeded from live_api_facts) - fakes and assertions speak these.
+import adsk.fusion  # noqa: E402
+_OT = adsk.fusion.MeshCombineOperationTypes
+_AT = adsk.fusion.MeshCombineAlgorithmTypes
 inp = mc._inputs
 
 
@@ -163,18 +168,7 @@ def _wire_adsk():
     import adsk.fusion
     adsk.fusion.MeshBody = MeshBody
     adsk.fusion.BRepBody = BRepBody
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
     adsk.fusion.BaseFeature = _BaseFeature
-    ot = adsk.fusion.MeshCombineOperationTypes
-    ot.JoinMeshCombineOperationType = "JOIN"
-    ot.CutMeshCombineOperationType = "CUT"
-    ot.IntersectMeshCombineOperationType = "INTERSECT"
-    ot.MergeMeshCombineOperationType = "MERGE"
-    at = adsk.fusion.MeshCombineAlgorithmTypes
-    at.LegacyMeshCombineAlgorithmType = "LEGACY"
-    at.EnhancedMeshCombineAlgorithmType = "ENHANCED"
     return adsk.fusion
 
 
@@ -223,7 +217,7 @@ class TestOperations:
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
         assert out["combined"] is True and out["operation"] == "join"
-        assert feats.last_input.operation == "JOIN"
+        assert feats.last_input.operation == _OT.JoinMeshCombineOperationType
         # createInput got (target, list[MeshBody])
         tgt, tools = feats.create_args
         assert tgt.name == "Target"
@@ -232,17 +226,17 @@ class TestOperations:
     def test_cut(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="cut"))
-        assert feats.last_input.operation == "CUT"
+        assert feats.last_input.operation == _OT.CutMeshCombineOperationType
 
     def test_intersect(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="intersect"))
-        assert feats.last_input.operation == "INTERSECT"
+        assert feats.last_input.operation == _OT.IntersectMeshCombineOperationType
 
     def test_merge(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="merge"))
-        assert feats.last_input.operation == "MERGE"
+        assert feats.last_input.operation == _OT.MergeMeshCombineOperationType
 
     def test_multiple_tool_bodies(self):
         des, feats, *_ = _build()
@@ -265,13 +259,13 @@ class TestAlgorithm:
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"]))
         assert out["algorithm"] == "enhanced"
-        assert feats.last_input.algorithm == "ENHANCED"
+        assert feats.last_input.algorithm == _AT.EnhancedMeshCombineAlgorithmType
 
     def test_legacy(self):
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
         assert out["algorithm"] == "legacy"
-        assert feats.last_input.algorithm == "LEGACY"
+        assert feats.last_input.algorithm == _AT.LegacyMeshCombineAlgorithmType
 
 
 # ── the no-op gate: unchanged body count + unchanged target triangles = error ────────────────────

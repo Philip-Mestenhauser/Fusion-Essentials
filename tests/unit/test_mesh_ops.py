@@ -20,6 +20,10 @@ import json
 from conftest import load_tool
 
 mo = load_tool("mesh_ops")
+
+# Measured convert enum (seeded from live_api_facts) - fakes and assertions speak these.
+import adsk.fusion  # noqa: E402
+_CONV = adsk.fusion.MeshConvertMethodTypes
 inp = mo._inputs
 
 
@@ -255,19 +259,13 @@ def _wire_adsk(handle_map=None, parametric=False, mesh_units_ok=True):
     import adsk.fusion
     adsk.fusion.MeshBody = MeshBody
     adsk.fusion.BRepBody = BRepBody
-    # ModeGuard reads DesignTypes (1 parametric / 0 direct) and BaseFeature for scope detection.
-    dts = adsk.fusion.DesignTypes
-    dts.ParametricDesignType = 1
-    dts.DirectDesignType = 0
+    # ModeGuard reads BaseFeature for scope detection (DesignTypes ints come seeded).
     adsk.fusion.BaseFeature = _BaseFeature
     # mesh units enum
     if mesh_units_ok:
         mu = adsk.fusion.MeshUnits
         mu.MillimeterMeshUnit = "MM"; mu.CentimeterMeshUnit = "CM"; mu.MeterMeshUnit = "M"
         mu.InchMeshUnit = "IN"; mu.FootMeshUnit = "FT"
-    # convert/reduce enums
-    cm = adsk.fusion.MeshConvertMethodTypes
-    cm.PrismaticMeshConvertMethodType = "PRISM"; cm.FacetedMeshConvertMethodType = "FACET"
     return adsk.fusion
 
 
@@ -573,11 +571,6 @@ class TestMeshReduce:
         _wire_adsk()
         import adsk.core
         import adsk.fusion
-        adsk.fusion.MeshReduceTargetTypes.ProportionMeshReduceTargetType = "PROP"
-        adsk.fusion.MeshReduceTargetTypes.FaceCountMeshReduceTargetType = "FC"
-        adsk.fusion.MeshReduceTargetTypes.MaximumDeviationMeshReduceTargetType = "DEV"
-        adsk.fusion.MeshReduceMethodTypes.AdaptiveReduceType = "ADP"
-        adsk.fusion.MeshReduceMethodTypes.UniformReduceType = "UNI"
         # The reduce setters require a ValueInput — wire createByReal to the marker the strict input
         # accepts. A bare float would raise TypeError on _ReduceInput (as it does live).
         adsk.core.ValueInput.createByReal = staticmethod(_make_value_input)
@@ -802,10 +795,12 @@ class TestMeshToBrep:
         _wire_adsk()
         import adsk.fusion
         if not organic:
-            # organic method ABSENT -> _organic_available() False -> honest refusal
-            adsk.fusion.MeshConvertMethodTypes.OrganicMeshConvertMethodType = None
-        else:
-            adsk.fusion.MeshConvertMethodTypes.OrganicMeshConvertMethodType = "ORG"
+            # organic method ABSENT (older Fusion / no Product Design Extension) -> _organic_available()
+            # False -> honest refusal. Genuinely REMOVE the seeded member so the safe() read raises,
+            # matching the live "attribute does not exist" case (conftest restores it after the test).
+            _mct = adsk.fusion.MeshConvertMethodTypes
+            if hasattr(_mct, "OrganicMeshConvertMethodType"):
+                delattr(_mct, "OrganicMeshConvertMethodType")
         result_brep = BRepBody("ConvertedBody", is_solid=True)
         brep_coll = _Coll()                      # comp.bRepBodies — starts empty
         # In non-parametric mode add() returns None; none_appends_body models the side effect: the
@@ -915,4 +910,4 @@ class TestMeshToBrep:
         src, feats = self._setup(is_closed=True)
         out = _payload(mo.mesh_to_brep_handler(mesh="H", method="faceted"))
         assert out["method"] == "faceted"
-        assert getattr(feats.last_input, "meshConvertMethodType", None) == "FACET"
+        assert getattr(feats.last_input, "meshConvertMethodType", None) == _CONV.FacetedMeshConvertMethodType

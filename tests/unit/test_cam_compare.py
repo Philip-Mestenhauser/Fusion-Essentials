@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
 
 cc = load_tool("cam_compare")
 
@@ -45,7 +45,7 @@ class FakeOperation:
 
 class FakeSetup:
     def __init__(self, ops):
-        self.allOperations = list(ops)
+        self.allOperations = _NamedCollection(ops)
 
 
 class FakeSetups:
