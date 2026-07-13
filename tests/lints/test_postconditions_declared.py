@@ -77,6 +77,7 @@ _EXEMPT = {
     'doc_activate': 'activation is ASYNC - is_active cannot be confirmed synchronously (doc_get confirms)',
     'doc_close': 'inline: close() bool per document feeds the closed/errors lists and the combined message',
     'doc_copy': 'inline: post-copy rename reads copied.name back and authors the rename_warning field',
+    'doc_insert_derive': 'inline: healthState/documentReference.isOutOfDate/isDerived and the user-parameter delta are all read back and gate or annotate the payload',
     'doc_insert_occurrence': 'inline: addByInsert return is gated, the occurrence is checked isValid, and the reference link is verified isReferencedComponent',
     'doc_new': 'creation is its own evidence - the new doc IS the active document the guard stamps',
     'doc_open': 'open is ASYNC - the note directs to workspace_orient for confirmation',

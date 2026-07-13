@@ -73,7 +73,7 @@ every kind, plus the shared helpers to reuse — is the generated map in
 [commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md), loaded when you author a tool.
 
 <!-- BEGIN GENERATED FAMILIES (py -3 tests/gen_manifest.py) -->
-**Tool families** (138 tools — `sys_find_tool <kw>` to search, `TOOL_MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(9) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(11) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
+**Tool families** (139 tools — `sys_find_tool <kw>` to search, `TOOL_MANIFEST.md` for the full list): `model`(25) `surface`(10) `mesh`(9) `sketch`(9) `cam`(19) `assembly`(7) `joint`(7) `design`(8) `doc`(12) `data`(8) `drawing`(3) `param`(5) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(7)
 <!-- END GENERATED FAMILIES -->
 
 ## Tool descriptions and agent-facing strings — pure ASCII, verified claims only

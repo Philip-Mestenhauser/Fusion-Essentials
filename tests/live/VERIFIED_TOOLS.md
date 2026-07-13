@@ -6,9 +6,9 @@ source hash binds this run to the exact `commands/mcpServer/` tree it exercised:
 on a live run that never saw the current code. Only a run with zero FAIL/blocked steps
 writes this file.
 
-Stamp: source e67448de7895bc380eae92534bd3b56650425b1ef971db6363caa603c6ceb1dc | Fusion 2704.1.23 | verified 2026-07-12
+Stamp: source 2b0f98316b99ee621433f142c8bf73bc61060fa3a7c48418783b55cc11267f1c | Fusion 2704.1.23 | verified 2026-07-12
 
-52 covered / 23 skipped(reason) / 63 pending
+52 covered / 23 skipped(reason) / 64 pending
 
 | tool | status |
 |---|---|
@@ -59,6 +59,7 @@ Stamp: source e67448de7895bc380eae92534bd3b56650425b1ef971db6363caa603c6ceb1dc |
 | doc_close | covered |
 | doc_copy | skipped: cloud write (opt-in tier) |
 | doc_get | covered |
+| doc_insert_derive | PENDING (no step yet) |
 | doc_insert_occurrence | skipped: needs a saved cloud source in-project (opt-in tier) |
 | doc_new | covered |
 | doc_open | skipped: opens cloud files; can wedge on CAM templates (opt-in tier) |

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 138  |  **description breadcrumbs:** 508  |  **note/error breadcrumbs:** 244
+**Tools:** 139  |  **description breadcrumbs:** 517  |  **note/error breadcrumbs:** 246
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (4)** - higher concern, a check-your-work tool nothing points to:
   `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (24)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete`, `cam_edit_setup`, `cam_post`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
+**Edit (25)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_edit_setup`, `cam_post`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **35x** across 23 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -28,17 +28,17 @@ close orphans, factor duplicated guards into shared helpers.
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 63  (desc 10, note 53)
+- `doc_new`  <- 64  (desc 10, note 54)
 - `find_geometry`  <- 57  (desc 46, note 11)
 - `view_screenshot`  <- 47  (desc 21, note 26)
 - `sketch_create`  <- 30  (desc 19, note 11)
 - `cam_get`  <- 29  (desc 19, note 10)
-- `data_get`  <- 26  (desc 16, note 10)
+- `data_get`  <- 27  (desc 16, note 11)
 - `design_get`  <- 22  (desc 11, note 11)
 - `model_extrude`  <- 21  (desc 19, note 2)
 - `sketch_get`  <- 19  (desc 8, note 11)
+- `doc_get`  <- 16  (desc 11, note 5)
 - `data_upload_file`  <- 15  (desc 12, note 3)
-- `doc_get`  <- 15  (desc 10, note 5)
 - `model_inspect`  <- 14  (desc 8, note 6)
 
 ## The guidance surface (every note the agent can be told)
@@ -510,6 +510,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `doc_get`
 - active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real Documents (is_visible=t...
 - No active document. Open or create one first (doc_open / doc_new).
+
+### `doc_insert_derive`
+- One-way linked COPY: edits made here (a fillet, a patch, an offset) never travel back to the source, and the source itself was not modified. Build DFM/machining prep on top of the derived body/bodies.
+- Provide 'document_id' - the lineage URN (or web URL) of the saved cloud document to derive.
+- No active design. Open or create the host document first (see doc_new).
+- ' to a saved document. Tried:
+- . Pass a lineage URN or web URL (from data_get). The document must be SAVED to the cloud.
+- ' has no component to derive into.
+- Could not open source document '
 
 ### `doc_insert_occurrence`
 - Provide 'document_id' - the lineage URN (or web URL) of the saved cloud document to insert.

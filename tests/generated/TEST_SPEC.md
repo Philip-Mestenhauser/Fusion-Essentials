@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 154  |  **Behaviors pinned:** 2679
+**Tools with a test file:** 155  |  **Behaviors pinned:** 2706
 
 ## `_cam_common`
 
@@ -1474,6 +1474,47 @@ after changing tests._
 - default projection omits cloud slices but advertises them
 - include adds only the requested slice
 - include used in adds where used slice
+
+## `doc_insert_derive`
+
+> Unit tests for ``doc_insert_derive.py``: guards, the open-or-reuse-source-document bookkeeping, and the inline verify (healthState / documentReference.isOutOfDate / isDerived / parameter delta).
+
+**Guards**
+- empty document id errors
+- no active design
+- direct mode refused
+- unresolvable document id
+**SourceDocumentBookkeeping**
+- opens when not already open then closes on success
+- reuses already open document and leaves it open
+- open returning nothing errors
+- source with no design product errors and closes
+**AddFailures**
+- null add errors not false ok
+- add raising errors
+- missing derive features collection errors
+**HealthStateVerify**
+- error health state bites
+- warning health state does not error
+**DocumentReferenceVerify**
+- out of date at creation errors
+**IsDerivedVerify**
+- no derived body or occurrence errors
+- derived body reported in payload
+- occurrence fallback when no bodies
+- preexisting occurrence not counted as newly derived
+**ParameterVerify**
+- warns when flags set and zero landed
+- no warning when both flags false
+- reports imported count honestly
+- flags forwarded to derive input
+**IntoComponent**
+- empty uses root
+- named occurrence resolves its component
+- unknown occurrence errors
+**PayloadContract**
+- payload keys match returns
+- document metadata reported
 
 ## `doc_insert_occurrence`
 

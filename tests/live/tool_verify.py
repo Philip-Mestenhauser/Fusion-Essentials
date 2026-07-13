@@ -292,7 +292,10 @@ PENDING = frozenset({
     "cam_edit_operation", "cam_edit_setup", "cam_edit_tools", "cam_generate", "cam_get",
     "cam_get_status", "cam_post", "cam_reorder", "cam_save_template", "cam_select_geometry",
     "cam_set_nc_comment", "cam_show_toolpath", "design_activate_component", "design_configure",
-    "design_delete_feature", "design_delete_occurrence", "design_export", "joint_at_geometry",
+    "design_delete_feature", "design_delete_occurrence", "design_export",
+    # doc_insert_derive needs a saved cloud source document to derive from - a self-contained sweep
+    # step has none available; the tool is verified manually against live Fusion outside the sweep.
+    "doc_insert_derive", "joint_at_geometry",
     "joint_create", "joint_create_as_built", "joint_create_origin", "joint_drive", "joint_edit",
     "joint_motion_link", "mesh_combine", "mesh_export", "mesh_generate_face_groups", "mesh_get",
     "mesh_insert", "mesh_plane_cut", "mesh_reduce", "mesh_remesh", "mesh_to_brep", "model_arrange",

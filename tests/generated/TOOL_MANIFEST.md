@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 138  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 139  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -171,6 +171,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ⚠ | `doc_close` | Close an open document, or all of them |
 | ✎ | `doc_copy` | Copy an existing cloud document (a saved DataFile, identified by its lineage 'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a dest... |
 | · | `doc_get` | Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id (URN, the 'document_id' doc_copy/doc_open use) - plus the list ... |
+| ✎ | `doc_insert_derive` | Insert a DERIVE of another SAVED document's design into a component of the active document - a one-way linked COPY: it updates FROM the source, but edits made h... |
 | ✎ | `doc_insert_occurrence` | Insert a SAVED cloud document into the active design as a new component occurrence - the API equivalent of Insert into Current Design |
 | ✎ | `doc_new` | Create and open a new, empty Fusion design document; it becomes the active document |
 | ✎ | `doc_open` | Open a Fusion document by data-model id |
