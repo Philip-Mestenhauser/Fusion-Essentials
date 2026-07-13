@@ -84,13 +84,15 @@ def _isolate_for_fit(name):
 
 def _active_component_note(design):
     """If a NON-root component is activated, Fusion renders everything outside it as dimmed/translucent
-    'ghosts'. Return a one-line warning naming the active component so the agent reads the washed-out
-    image as activation scope, not a lighting/appearance problem. Returns None when root is active."""
-    root = safe(lambda: design.rootComponent) if design else None
-    active = safe(lambda: design.activeComponent) if design else None
-    if root is None or active is None or active is root:
+    'ghosts'. Return a one-line warning naming the activated occurrence so the agent reads the
+    washed-out image as activation scope, not a lighting problem. Root detection is
+    design.activeOccurrence - null exactly when the root is active (API doc). An identity comparison
+    of activeComponent against rootComponent can never be true (each property access mints a NEW
+    proxy object), which made this warning fire at root."""
+    occ = safe(lambda: design.activeOccurrence) if design else None
+    if occ is None:
         return None
-    nm = safe(lambda: active.name) or "a sub-component"
+    nm = safe(lambda: occ.name) or "a sub-component"
     return (f"Active component is '{nm}' - everything outside it renders dimmed/translucent in this "
             "image (activation scope, not a lighting issue). Activate the root to see all parts solid.")
 

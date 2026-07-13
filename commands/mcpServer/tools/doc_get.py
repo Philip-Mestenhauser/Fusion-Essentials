@@ -176,6 +176,9 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         "version_count": len(rows),
         "versions": rows[:cap],
         "truncated": truncated,
+        "note": ("Version metadata can LAG a just-completed save by a few seconds "
+                 "(latest_version_number/is_latest may briefly read stale) - re-read before "
+                 "comparing versions right after a save."),
     }
 
 

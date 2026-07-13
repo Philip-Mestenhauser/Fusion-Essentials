@@ -236,8 +236,9 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
         # per top-level occurrence mass + CoM. Only the whole-design / a component-with-children has
         # children; for a single body/occurrence target this list is empty.
         breakdown = []
-        root = design.rootComponent
-        occ_source = root.occurrences if entity is root else safe(lambda: getattr(entity, "occurrences", None))
+        # root and any component expose .occurrences; an identity test against rootComponent can
+        # never be true (each property access mints a new proxy), so resolve by attribute only.
+        occ_source = safe(lambda: getattr(entity, "occurrences", None))
         n = safe(lambda: occ_source.count, 0) if occ_source else 0
         for i in range(n):
             o = occ_source.item(i)

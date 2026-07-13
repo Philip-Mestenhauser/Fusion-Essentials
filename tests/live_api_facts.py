@@ -2,7 +2,7 @@
 # Regenerate: py -3 tests/live/measure_api.py (a fully-PASSING run rewrites this file).
 """Measured adsk API facts. conftest populates the mock adsk modules and the shared fakes
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
-owned by the measurement row of the same name in tests/live/CONTRACTS.md."""
+owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2704.1.23"
 VERIFIED_ON = "2026-07-11"

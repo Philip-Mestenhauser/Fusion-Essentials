@@ -168,6 +168,10 @@ CLAUDE.local.md
 tests/live/evals/results/
 
 # measure_api / tool_verify run archives: per-run records; the durable state they feed
-# (tests/live/CONTRACTS.md + tests/live_api_facts.py + tests/live/VERIFIED.md) is tracked,
+# (tests/live/CONTRACTS.md + tests/live_api_facts.py + tests/live/VERIFIED_TOOLS.md) is tracked,
 # the archives are not.
 tests/live/results/
+
+# Working plans / open findings / audit notes: owner-visible, never shipped. Squashed before
+# publish; durable outcomes land as code, lints, or tracked ledgers - never as tracked prose plans.
+/plans/

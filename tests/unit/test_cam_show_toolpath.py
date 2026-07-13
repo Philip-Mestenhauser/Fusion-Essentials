@@ -50,7 +50,7 @@ class FakeSetup:
     @property
     def allOperations(self):
         # Live allOperations flattens folder-nested ops in and drops the folder containers
-        # (cam-alloperations-shape in tests/live/CONTRACTS.md).
+        # (cam-alloperations-shape in tests/live/VERIFIED_API_FACTS.md).
         out = list(self._ops)
         for child in self.children:
             if isinstance(child, CAMFolder):

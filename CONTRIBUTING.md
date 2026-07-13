@@ -58,7 +58,7 @@ blind spots.
   reintroduced. The **producer-side mirror** is `_outputs.py`: a tool declares `RETURNS = [...]`
   of typed **output kinds** (`ReturnsHandle`/`ReturnsUrn`/`ReturnsName`/`ReturnsValue`), which generate the
   description's `PRODUCES:` line AND back a test that asserts the handler actually mints the declared key —
-  so a renamed id field fails CI instead of silently lying to every consumer that reads it. A mutation
+  so a renamed id field fails the suite instead of silently lying to every consumer that reads it. A mutation
   should never hide behind `safe()` (that turns a swallowed failure into a false success); read tools probe
   with `safe`, write tools let failures raise and report honestly.
 
@@ -76,7 +76,7 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 > Most of these conventions are now *enforced* rather than merely encouraged: write-status is a structured
 > annotation (linted), enum inputs are typed `Choice`/`UnitField` kinds, occurrence/geometry references are
-> typed kinds that refuse ambiguity, and outputs are declared via `_outputs.py` with a CI assertion that
+> typed kinds that refuse ambiguity, and outputs are declared via `_outputs.py` with a lint that asserts
 > the ids are actually minted.
 
 ---
@@ -117,7 +117,7 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 - `task_manager.py` (in `server/`) — marshals work onto Fusion's **main thread** via a custom event.
 - `mcp_primitives/` — Tool / Item schema classes plus the registry.
 - `tools/` — one module per tool family slice, named `<family>_<verb>.py` (a few grandfathered
-  modules register several verbs; `MANIFEST.md` is the authoritative per-tool list). Each
+  modules register several verbs; `TOOL_MANIFEST.md` is the authoritative per-tool list). Each
   has a `handler(...)` (the logic; its parameters are the tool inputs), a `TOOL_DESCRIPTION`, a
   `tool = Tool.create_...`, an `item = Item.create_tool_item(...)`, and a `register_tool()`.
   Modules are **auto-discovered** by a `pkgutil` sweep — drop the file in, no registry edits.
@@ -203,19 +203,20 @@ py -3 -m pytest -q --cov=commands.mcpServer --cov-branch --cov-report=html
 ```
 
 then review never-executed branches in `htmlcov/`. An uncovered branch is either dead code or a
-missing test; both deserve action. This is a periodic audit, not CI - coverage of live-API
+missing test; both deserve action. This is a periodic audit, not a gate - coverage of live-API
 wrapper paths is legitimately partial. The agent-facing surface has its own generated deadness
-audit: the "Blindspots" section of [tests/generated/tool-wiring.md](tests/generated/tool-wiring.md)
+audit: the "Blindspots" section of [tests/generated/TOOL_POINTER_MAP.md](tests/generated/TOOL_POINTER_MAP.md)
 (orphan tools, guidance pointing at tools that do not exist).
 
 For CAN'T-FAIL tests (assertions no code change would ever flip), the periodic detector is
 mutation testing: `py -3 -m pip install mutmut`, point it at one tool module at a time, and
-treat every surviving mutant as a missing assertion. Too slow for CI; the continuous floor is
+treat every surviving mutant as a missing assertion. Too slow to gate on; the continuous floor is
 `test_assert_strength.py` (a test may not rely on a bare isError flag alone).
 
 ### Testing a tool
 
-Each tool has a `tests/test_<tool>.py` beside the suite (one test file per tool). The tools run in a
+Every tool module is unit-tested or carries a recorded excuse — `test_unit_coverage_complete.py`
+reconciles the module list against the suite, so the decision is never silent. The tools run in a
 live Fusion session, so the suite **mocks `adsk`** to exercise pure handler logic outside Fusion — and
 because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools are also **live-validated**
 (`sys_reload_addin`, then call the handler on a real document).
@@ -238,10 +239,11 @@ because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools ar
   were not re-confirmed).
 - **Changed tool source?** The receipt check goes red until the live suite has seen your code:
   run `py -3 tests/live/tool_verify.py` with Fusion up (a green run rewrites
-  `tests/live/VERIFIED.md` - commit it with your change). Reload the add-in first so the live
+  `tests/live/VERIFIED_TOOLS.md` - commit it with your change). Reload the add-in first so the live
   session runs the code you just edited.
 - **Regenerate the docs:** `py -3 tests/gen_all.py` rebuilds everything under `tests/generated/`
-  (SPEC from test names, MANIFEST + the CLAUDE.md maps from the registry, tool-wiring from source);
+  (TEST_SPEC from test names, TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP
+  from source);
   run it whenever check_all says an artifact is stale.
 - **New adsk API?** If your tool references an enum family the generated `live_api_facts.py` has
   not measured, the suite goes red with the one command that fixes it: run

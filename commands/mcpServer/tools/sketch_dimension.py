@@ -35,10 +35,16 @@ def _target_sketch(design, name):
 
 
 def _point_of(entity):
-    """A representative SketchPoint for an entity: a point's geometry, or a line's start point."""
-    sp = safe(lambda: entity.startSketchPoint)   # lines have start/end sketch points
+    """A representative SketchPoint for an entity: a point's geometry, a line's start point, or a
+    circle's CENTER point. addDistanceDimension accepts only SketchPoints, so a curve ref must be
+    completed to a point - for a circle the center is the only anchor that call can express (a bare
+    circle ref otherwise dies in C++ overload resolution with no usable message)."""
+    sp = safe(lambda: entity.startSketchPoint)   # lines/arcs have start/end sketch points
     if sp is not None:
         return sp
+    cp = safe(lambda: entity.centerSketchPoint)  # circles anchor at their center
+    if cp is not None:
+        return cp
     return entity   # a sketch point itself
 
 
@@ -136,8 +142,8 @@ TOOL_DESCRIPTION = (
 "Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of "
 "parametric sketching (sketch_constrain does the geometric half). distance/horizontal_distance/"
 "vertical_distance need BOTH entity refs (points or lines; to dimension one line's length, pass "
-"its two endpoints); radius/diameter need one arc/circle; angle needs two "
-"lines. 'entity_one'/'entity_two' are '<type>:<index>' refs (line/arc/circle/point, "
+"its two endpoints; a circle ref anchors at its CENTER point); radius/diameter need one "
+"arc/circle; angle needs two lines. 'entity_one'/'entity_two' are '<type>:<index>' refs (line/arc/circle/point, "
 "e.g. 'line:0') - the same scheme as sketch_constrain. 'value' drives the dimension by expression "
 "('25 mm', '90 deg', 'StockX/2'); omit to keep the auto-measured value. The created dimension "
 "becomes a model parameter you can later drive with param_set."

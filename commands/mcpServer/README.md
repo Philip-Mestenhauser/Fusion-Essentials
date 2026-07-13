@@ -56,7 +56,9 @@ repo.)
 
 Fusion is many environments glued together (CAD, assemblies, the parametric timeline, CAM, the cloud
 data model). The biggest source of wasted/blind tool calls is acting before understanding the state.
-Work by **progressive disclosure**, not by dumping whole documents:
+Token efficiency is a first-class constraint of this surface — light default reads, family gating,
+and pointer-bearing payloads exist so an agent spends context on decisions, not dumps. Work by
+**progressive disclosure**, not by dumping whole documents:
 
 1. **Orient** — `workspace_orient` first: one cheap read that reports the active document and
    where it lives, its health, units/mode, the major pieces, whether CAM data exists, and
@@ -82,8 +84,8 @@ with the narrower tool named in the payload's `pointers`.
 
 ## Tools
 
-**The authoritative tool inventory is [`tests/generated/MANIFEST.md`](../../tests/generated/MANIFEST.md)** —
-generated from the live registry (137 tools, each with its inputs and write level) — or ask a
+**The authoritative tool inventory is [`tests/generated/TOOL_MANIFEST.md`](../../tests/generated/TOOL_MANIFEST.md)** —
+generated from the live registry (every tool, each with its inputs and write level) — or ask a
 connected client for its tool list (`tools/list`). Each tool's own `TOOL_DESCRIPTION` is the
 contract the agent sees; this README does not restate it (a second copy only drifts). Tool names
 are predictable: `<family>_<verb>`, so the family prefix tells you the area —
@@ -125,7 +127,7 @@ here when learning the surface:
 - **`view_inspect`** + **`view_screenshot`** — the agent's "eyes": isolate/orient a single
   component, then capture it (a screenshot of a whole assembly is the least reliable input).
 - **`sys_execute_script`** — the gated escape hatch: arbitrary Fusion Python, off by default
-  (see Security). The 137 typed tools exist so this is rarely needed.
+  (see Security). The typed tool surface exists so this is rarely needed.
 
 ### Things that aren't obvious from a tool's name
 
@@ -136,6 +138,22 @@ here when learning the surface:
 - `cam_get(include=['time'])` needs generated toolpaths to be meaningful.
 - `cam_generate` is fire-and-poll: it returns immediately with a handle; poll `cam_get_status`
   until done (it never blocks for the multi-minute compute).
+
+## Demonstrated workflows
+
+Two kinds of runnable demonstration show the surface driving real work end-to-end:
+
+- **Shipped procedures** (Claude Code skills in `.claude/skills/`): `build-tool-from-url` scrapes a
+  vendor cutting-tool page and adds the tool to the active document's CAM library via
+  `cam_edit_tools`; `insert-into-template` stands up a CAM job for a part — saves the CAD, defines a
+  part-space origin, places the shop template, inserts and positions the part, and sizes stock from
+  measurements. Both are built entirely from these tools; fork them as patterns for your own shop
+  procedures.
+- **The eval pipeline** (`tests/live/evals/scenarios/`): goal-shaped scenarios (parametric
+  multi-part foundations, joints and motion, detail features, external references, CAM templating)
+  that a context-isolated agent runs against a live session holding only this server's wire — the
+  standing proof that the tool descriptions alone can carry an agent from a goal to a verified
+  result.
 
 ## What makes the tools trustworthy (the contracts)
 
@@ -157,9 +175,9 @@ The naming schema (`<family>_<verb>`, with the verb's read/write kind linted aga
 write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by
 lints in `tests/`. The one command is `py -3 tests/check_all.py` (generator checks + the whole
 suite + the live gate). Generated inventories live in `tests/generated/`:
-[`MANIFEST.md`](../../tests/generated/MANIFEST.md) (per-tool),
-[`SPEC.md`](../../tests/generated/SPEC.md) (behavior ledger), and
-[`tool-wiring.md`](../../tests/generated/tool-wiring.md) (how tools point to each other, plus a
+[`TOOL_MANIFEST.md`](../../tests/generated/TOOL_MANIFEST.md) (per-tool),
+[`TEST_SPEC.md`](../../tests/generated/TEST_SPEC.md) (behavior ledger), and
+[`TOOL_POINTER_MAP.md`](../../tests/generated/TOOL_POINTER_MAP.md) (how tools point to each other, plus a
 self-audit of the guidance strings). Authoring conventions live in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) and the `CLAUDE.md` files beside the code.
 

@@ -33,7 +33,7 @@ don't edit between the markers.
 | Kind | References (use this — don't hand-roll a name/index) |
 |---|---|
 | `AxisRef` | a direction: world x/y/z, a straight-edge/sketch-line handle, OR a face normal/axis |
-| `BodyRef` | a body by handle (precise) or name; kind=solid/surface/mesh |
+| `BodyRef` | a body by handle (precise), body name, or single-body component name; kind=solid/surface/mesh |
 | `BodyRefList` | several bodies (handles or names) |
 | `Choice` | one of a fixed set -> JSON enum |
 | `Distance` | a length in display units (pair with one UnitField) |

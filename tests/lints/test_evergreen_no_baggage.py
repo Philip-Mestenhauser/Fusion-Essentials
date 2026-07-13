@@ -8,7 +8,7 @@ code does. A phrase like "used to", "previously", "the fix", or "until now" narr
 plan; "in one session" / "verified today" is an observation diary; a bare work-item label ("C7:",
 "WO-3", "Class B", "Phase 2") points at a planning document nobody outside that process ever saw.
 All of these rot the moment the plan is gone - the durable home for that content is the ledger
-(tests/live/CONTRACTS.md), the plan tree, or the author's memory, never the code.
+(tests/live/VERIFIED_API_FACTS.md), the plan tree, or the author's memory, never the code.
 
 This sweeps every ``.py``/``.md`` file under ``commands/mcpServer/`` and ``tests/`` for these
 smells. A legitimate domain use (a variable/field/prose genuinely about one of these words, with no
@@ -27,13 +27,13 @@ _SWEPT_DIRS = (
 
 # This lint file necessarily quotes every denylisted phrase as data, and gen_wiring.py carries an
 # identical list of phrases as ITS OWN smell-detection pattern (for tool wire text, not this file) -
-# both would otherwise trip on their own pattern list. SPEC.md/MANIFEST.md are GENERATED digests of
-# the test/registry source (test names, docstring summaries) - sweeping the source they are built
-# from already covers their content, so they are excluded rather than checked twice. CHANGELOG.md
+# both would otherwise trip on their own pattern list. TEST_SPEC.md/TOOL_MANIFEST.md are GENERATED
+# digests of the test/registry source (test names, docstring summaries) - sweeping the source they
+# are built from already covers their content, so they are excluded rather than checked twice. CHANGELOG.md
 # is the one SANCTIONED history document (dated, additive, per-release): the evergreen rule keeps
 # history narrative out of living code and docs, not out of the changelog whose genre it is.
-_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "SPEC.md", "MANIFEST.md",
-                   "tool-wiring.md", "CHANGELOG.md"}
+_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "TEST_SPEC.md", "TOOL_MANIFEST.md",
+                   "TOOL_POINTER_MAP.md", "CHANGELOG.md"}
 
 # phrase -> case-insensitive denylist (history narrative + plan back-references naming a phrase).
 # Word-boundary wrapped so e.g. "the fix" does not match inside "the fixture", "used to" does not

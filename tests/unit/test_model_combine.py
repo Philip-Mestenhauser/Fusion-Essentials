@@ -105,7 +105,7 @@ class TestGuards:
         # BodyRef ('target') now owns the not-found error
         _install(["A", "B"])
         res = cb.handler(target="Nope", tools=["B"])
-        assert res["isError"] is True and "no body named 'Nope'" in res["message"]
+        assert res["isError"] is True and "no body or component named 'Nope'" in res["message"]
 
     def test_no_tools(self):
         # BodyRefList ('tools', required) owns the empty error
@@ -116,7 +116,7 @@ class TestGuards:
     def test_tool_not_found(self):
         _install(["A", "B"])
         res = cb.handler(target="A", tools=["B", "X"])
-        assert res["isError"] is True and "no body named 'X'" in res["message"]
+        assert res["isError"] is True and "no body or component named 'X'" in res["message"]
 
     def test_tool_same_as_target(self):
         _install(["A", "B"])

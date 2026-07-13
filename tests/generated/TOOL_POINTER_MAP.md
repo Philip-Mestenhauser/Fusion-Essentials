@@ -1,4 +1,4 @@
-# Tool wiring (generated)
+# Tool pointer map (generated)
 
 _Auto-generated from the tool source by `tests/gen_wiring.py`. Do not edit by hand._ For an
 agent DEVELOPING tools in this repo, to diagnose the surface agents CONSUMING these tools

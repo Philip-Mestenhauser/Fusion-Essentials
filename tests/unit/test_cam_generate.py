@@ -182,7 +182,7 @@ class TestStatusHandler:
 
     def _completed_entry(self):
         # numberOfCompleted is pass-through data, not a completion signal - live it reads 0 even
-        # when isGenerationCompleted is True (cam-generate-future in tests/live/CONTRACTS.md).
+        # when isGenerationCompleted is True (cam-generate-future in tests/live/VERIFIED_API_FACTS.md).
         return {"future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=2,
                                           numberOfCompleted=2),
                 "target": "all setups", "started_at": 0.0, "total": 2}

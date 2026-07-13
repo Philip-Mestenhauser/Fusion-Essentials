@@ -41,7 +41,7 @@ def get_cam():
 
 def _iter_collection(coll):
     """Yield items from a Fusion count/item collection - the measured live protocol
-    (brepbodies-protocol in tests/live/CONTRACTS.md); the fakes carry the same shape."""
+    (brepbodies-protocol in tests/live/VERIFIED_API_FACTS.md); the fakes carry the same shape."""
     if coll is None:
         return
     for i in range(safe(lambda: coll.count, 0) or 0):
@@ -725,7 +725,7 @@ def get_machining_time_handler(setup: str = "") -> dict:
         return error(err)
 
     # feedScale/rapidFeed/toolChangeTime (API-doc units: percent, cm/s, s) are INERT on Fusion
-    # 2704 (measured: cam-machining-time-knobs in tests/live/CONTRACTS.md).
+    # 2704 (measured: cam-machining-time-knobs in tests/live/VERIFIED_API_FACTS.md).
     feed_scale = 100.0          # 100% of programmed feed
     rapid_feed = 10.58          # ~250 in/min = 635 cm/min = 10.58 cm/s
     tool_change = 1.5           # seconds

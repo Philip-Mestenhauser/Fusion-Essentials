@@ -161,7 +161,7 @@ class _FakeComp:
             "count": property(lambda s: len(comp._bodies)),
         })()
         # Live meshBodies has count/item but NO itemByName (meshbodies-no-itembyname in
-        # tests/live/CONTRACTS.md); this comp holds no meshes.
+        # tests/live/VERIFIED_API_FACTS.md); this comp holds no meshes.
         self.meshBodies = type("MB", (), {"count": 0, "item": staticmethod(lambda i: None)})()
 
 

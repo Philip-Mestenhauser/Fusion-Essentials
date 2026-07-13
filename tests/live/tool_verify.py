@@ -7,7 +7,7 @@ A deterministic script of direct tools/call requests (no LLM, no SDK) walking a 
 that builds its own world in a scratch document and tears it down. The gate: a ledger with zero
 unexplained rows - every tool is pass / expected-refusal / skipped(reason).
 
-A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED.md`` - the tracked receipt: the
+A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
 per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
 run to the exact tool source it exercised. ``--check`` recomputes the hash offline (no Fusion
 needed) and fails on any difference, so a green suite cannot ride on a live run that never saw
@@ -16,7 +16,7 @@ add-in: after editing source, reload the add-in before re-running, or the receip
 the session never executed.
 
 Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the add-in enabled)
-      py -3 tests/live/tool_verify.py --check    (no Fusion: exit 1 when VERIFIED.md is missing
+      py -3 tests/live/tool_verify.py --check    (no Fusion: exit 1 when VERIFIED_TOOLS.md is missing
                                                   or its source hash differs from the tree)
       py -3 tests/live/tool_verify.py --json     (also write tests/live/results/verify-<ts>.json)
 
@@ -42,7 +42,7 @@ DOC_PREFIX = "EVAL_sweep"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 SRC_ROOT = os.path.join(REPO_ROOT, "commands", "mcpServer")
-VERIFIED = os.path.join(_HERE, "VERIFIED.md")
+VERIFIED = os.path.join(_HERE, "VERIFIED_TOOLS.md")
 
 
 def _post(payload):
@@ -361,12 +361,12 @@ def check(root=None, verified_path=None):
     exactly this tool source; 1 = no receipt, or the source changed since that run."""
     path = verified_path or VERIFIED
     if not os.path.exists(path):
-        print("VERIFIED.md does not exist - run tool_verify.py once against live Fusion.")
+        print("VERIFIED_TOOLS.md does not exist - run tool_verify.py once against live Fusion.")
         return 1
     with open(path, encoding="utf-8") as fh:
         m = _STAMP_RE.search(fh.read())
     if not m:
-        print("VERIFIED.md has no stamp line - regenerate it (run tool_verify.py).")
+        print("VERIFIED_TOOLS.md has no stamp line - regenerate it (run tool_verify.py).")
         return 1
     stamped_hash, stamped_version, stamped_date = m.groups()
     current = source_hash(root)
@@ -431,7 +431,7 @@ def run(write_json):
 
     fails = [r for r in rows if r[1] in ("FAIL", "blocked")]
     if fails:
-        print("\nVERIFIED.md NOT rewritten - resolve the FAIL/blocked steps first.")
+        print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked steps first.")
     else:
         src_hash = source_hash()
         stamp_date = time.strftime("%Y-%m-%d")

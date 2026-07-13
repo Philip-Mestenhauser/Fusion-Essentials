@@ -1,4 +1,4 @@
-"""Generate tests/generated/tool-wiring.md - the BREADCRUMB WIRING map, from the live registry + tool source.
+"""Generate tests/generated/TOOL_POINTER_MAP.md - the tool-to-tool pointer map, from the live registry + tool source.
 
 Every tool speaks to the agent through three wire surfaces: its DESCRIPTION (always present, the
 manual), and its runtime NOTE / ERROR strings (situational, the results). When one of those strings
@@ -8,10 +8,11 @@ the repo, not a human), so an agent developing tools can see: where breadcrumbs 
 where a guard is duplicated across the surface (a shared-helper candidate), and where a tip points at a
 name that no longer exists (a dead reference).
 
-It is the wiring counterpart to MANIFEST (what tools exist) and SPEC (what they're pinned to do):
+It is the pointer-map counterpart to TOOL_MANIFEST (what tools exist) and TEST_SPEC (what they're
+pinned to do):
 
-    py -3 tests/gen_wiring.py          # writes tests/generated/tool-wiring.md
-    py -3 tests/gen_wiring.py --check  # exit 1 if tool-wiring.md is stale
+    py -3 tests/gen_wiring.py          # writes tests/generated/TOOL_POINTER_MAP.md
+    py -3 tests/gen_wiring.py --check  # exit 1 if TOOL_POINTER_MAP.md is stale
 
 The reference edges are read from the CODE (AST), attributed per tool via its handler function, split
 by SURFACE (description = the manual, note/error = the situational tip). sys_capability_map is excluded
@@ -34,7 +35,7 @@ if COMMANDS_DIR not in sys.path:
     sys.path.insert(0, COMMANDS_DIR)
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-WIRING_PATH = os.path.join(TESTS_DIR, "generated", "tool-wiring.md")
+WIRING_PATH = os.path.join(TESTS_DIR, "generated", "TOOL_POINTER_MAP.md")
 
 from gen_manifest import _FAMILY_PREFIXES  # noqa: E402 - single source for the family map
 
@@ -261,7 +262,7 @@ def render(data):
         combined_in[n] = desc_in[n] + note_in[n]
 
     L = [
-        "# Tool wiring (generated)",
+        "# Tool pointer map (generated)",
         "",
         "_Auto-generated from the tool source by `tests/gen_wiring.py`. Do not edit by hand._ For an",
         "agent DEVELOPING tools in this repo, to diagnose the surface agents CONSUMING these tools",
@@ -348,15 +349,15 @@ def render(data):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true",
-                        help="Exit 1 if tests/generated/tool-wiring.md is out of date (does not write).")
+                        help="Exit 1 if tests/generated/TOOL_POINTER_MAP.md is out of date (does not write).")
     args = parser.parse_args()
     rendered = render(collect())
     if args.check:
         existing = open(WIRING_PATH, encoding="utf-8").read() if os.path.exists(WIRING_PATH) else ""
         if existing.strip() != rendered.strip():
-            print("tool-wiring.md is stale - run `py -3 tests/gen_wiring.py` and commit.", file=sys.stderr)
+            print("TOOL_POINTER_MAP.md is stale - run `py -3 tests/gen_wiring.py` and commit.", file=sys.stderr)
             sys.exit(1)
-        print("tool-wiring.md is up to date.")
+        print("TOOL_POINTER_MAP.md is up to date.")
         return
     with open(WIRING_PATH, "w", encoding="utf-8") as fh:
         fh.write(rendered + "\n")

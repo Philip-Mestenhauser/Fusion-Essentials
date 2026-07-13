@@ -66,7 +66,7 @@ class TestGuards:
     def test_body_not_found(self):
         _install(["A"])
         res = mr.handler(bodies=["A", "X"], plane="yz")
-        assert res["isError"] is True and "no body named 'X'" in res["message"]
+        assert res["isError"] is True and "no body or component named 'X'" in res["message"]
 
 
 class TestMirror:

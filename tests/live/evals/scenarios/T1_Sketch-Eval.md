@@ -49,8 +49,10 @@ GOAL - lay a parametric foundation for a TWO-AXIS GIMBAL as SEPARATE PARTS:
 - Size the whole thing with SHARED USER PARAMETERS so that changing ONE driving dimension (an
   overall gimbal diameter) propagates through every part - the opening grows, the rings resize -
   without editing each sketch by hand. At least one parameter should be marked a favorite.
-- The rings should leave clearance to nest, and the outer ring should carry two small pivot features
-  on its horizontal midline (where it will later pivot on the frame).
+- The rings should leave clearance to nest, and the outer ring should carry two small sketched
+  pivot circles on its horizontal midline (where it will later pivot on the frame).
+- Keep every part SKETCH-ONLY: do NOT extrude or create solid bodies - a later stage models them.
+  Prove propagation with sketch-level reads (profile areas, radii).
 
 Then PROVE the parametric linkage is real: change the driving diameter, read FRESH geometry from at
 least two different parts and report how each moved, then restore the diameter and read again.
@@ -64,7 +66,9 @@ operations. Grading is on the STATE of the document and the HONESTY of your repo
 POSTCONDITIONS - verify EACH with your own fresh read call; report the actual value read. A claim
 that does not match a read is a FAIL; the read always wins over your intent.
 
-- at least THREE components exist, each holding its own sketch geometry (a frame and two rings).
+- at least THREE components exist, each holding its own sketch geometry (a frame and two rings),
+  and NO component holds a solid body - this foundation stays unbodied (a fresh tree read shows
+  body_count 0 everywhere).
 - user parameters exist and at least SIX sketch dimensions REFERENCE them by expression (a fresh
   read shows expression TEXT - a parameter name in the expression - not a bare number). At least one
   parameter reads as a favorite.
@@ -102,6 +106,8 @@ a wall you couldn't get around is the most valuable finding). Be a demanding, ho
 - The artifact "P1-Gimbal" in Pipeline-v1 is the fixture the later tests consume, so the NAME and
   LOCATION are load-bearing; the geometry inside is the agent's - the downstream tests read it
   structurally, not by exact dimension.
+- The unbodied postcondition IS the T1->T2 handoff contract: T2's fixture requires a bodiless
+  sketch foundation to model. Grading it here keeps the pipeline chain honest.
 - Known wire gaps an agent may hit (grade RECOVERY, never pre-empt): horizontal/vertical constraints
   take LINES only (a distance-0 dim aligns loose points); origin axes are not sketch entities
   (symmetry needs a drawn centerline); to CENTER a circle at the origin, coincident its center POINT

@@ -395,6 +395,19 @@ class TestArcAndPoint:
         assert pt["position"] == {"x": 4, "y": 5}
         assert pt["construction"] is False
 
+    def test_origin_point_is_flagged(self):
+        # the sketch ORIGIN is a real entity; the X-ray flags it so an agent anchoring a constraint
+        # to the origin does not have to infer which (0,0)-positioned point it is.
+        o = FakeSketchPoint("op", 0, 0)
+        p = FakeSketchPoint("tp", 4, 5)
+        s = FakeSketch("O", points=[o, p])
+        s.originPoint = o
+        _install(s)
+        out = _payload(sd.handler(sketch_name="O", include_entities=True))
+        pts = [e for e in out["entities"] if e["type"] == "point"]
+        assert pts[0].get("origin") is True
+        assert "origin" not in pts[1]
+
 
 # ── driving-dimension tally + missing parameter ─────────────────────────────
 

@@ -548,6 +548,18 @@ def _collect_bodies_by_name(des, comp, name):
     return out
 
 
+def _component_bodies(comp):
+    """Every body (BRep or mesh) directly owned by `comp`."""
+    out = []
+    for coll_name in ("bRepBodies", "meshBodies"):
+        coll = _common.safe(lambda: getattr(comp, coll_name, None))
+        for i in range(_common.safe(lambda: coll.count, 0) if coll else 0):
+            b = coll.item(i)
+            if _is_brep(b) or _is_mesh(b):
+                out.append(b)
+    return out
+
+
 def _resolve_any_body(name, raw):
     """Resolve `raw` to a live body (BRepBody OR MeshBody), handle-first then name. Returns
     (body, error). KIND-AGNOSTIC: any kind-checking is the caller's job, so the wrong-kind error can
@@ -582,8 +594,26 @@ def _resolve_any_body(name, raw):
                           for b, ctx in matches[:8])
         return None, (f"'{name}': '{s}' is ambiguous - it names {len(matches)} bodies ({cands}). "
                       "Pass a find_geometry 'handle' to pick the exact one.")
-    return None, (f"'{name}': no body named '{s}'. Pass a body handle from find_geometry, or "
-                  "a valid body name (see design_get(include=['tree']) / model_extrude output).")
+    # A COMPONENT (or occurrence 'Name:1') resolves to ITS body when that is unambiguous - agents
+    # pass 'Frame' / 'Frame:1' meaning "that part's body", and find_geometry already accepts those
+    # targets, so the reference vocabulary stays consistent across the surface. Body names win over
+    # component names (checked above); several bodies -> refuse with their names. Reuses the shared
+    # component walk; an occurrence suffix strips to its component name.
+    comp = _common.safe(lambda: _component_by_name(des, s))
+    if comp is None and isinstance(s, str) and ":" in s:
+        comp = _common.safe(lambda: _component_by_name(des, s.rsplit(":", 1)[0]))
+    if comp is not None:
+        bodies = _component_bodies(comp)
+        if len(bodies) == 1:
+            return bodies[0], None
+        if len(bodies) > 1:
+            cands = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}'" for b in bodies[:8])
+            return None, (f"'{name}': '{s}' is a component holding {len(bodies)} bodies ({cands}) - "
+                          "name one of them, or pass a find_geometry handle.")
+        return None, f"'{name}': component '{s}' holds no bodies to act on."
+    return None, (f"'{name}': no body or component named '{s}'. Pass a body handle from "
+                  "find_geometry, a body name, or a single-body component/occurrence name "
+                  "(see design_get(include=['tree']) / model_extrude output).")
 
 
 class BodyRef(InputKind):
@@ -599,7 +629,7 @@ class BodyRef(InputKind):
     Shared by model_combine / model_mirror / model_fillet so they each stop hand-rolling
     body-by-name and all gain handle + mesh support."""
 
-    MAP_HINT = "a body by handle (precise) or name; kind=solid/surface/mesh"
+    MAP_HINT = "a body by handle (precise), body name, or single-body component name; kind=solid/surface/mesh"
 
     def __init__(self, name, kind="any", **kw):
         super().__init__(name, **kw)

@@ -2,12 +2,12 @@
 
 The test names ARE the spec: each ``test_<thing>`` documents one contract the
 corresponding tool promises. This script collects them (no execution needed) and
-renders SPEC.md — a per-tool checklist of behaviors that are pinned by a test.
+renders TEST_SPEC.md — a per-tool checklist of behaviors that are pinned by a test.
 
 Run from the repo root:
 
-    py -3 tests/gen_spec.py        # writes tests/generated/SPEC.md
-    py -3 tests/gen_spec.py --check  # exit 1 if SPEC.md is stale
+    py -3 tests/gen_spec.py        # writes tests/generated/TEST_SPEC.md
+    py -3 tests/gen_spec.py --check  # exit 1 if TEST_SPEC.md is stale
 
 Use it to review scope ("what behaviors do I actually guarantee?") and to spot
 gaps ("this tool has a test file but nothing covers the error path").
@@ -20,7 +20,7 @@ import re
 import sys
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-SPEC_PATH = os.path.join(TESTS_DIR, "generated", "SPEC.md")
+SPEC_PATH = os.path.join(TESTS_DIR, "generated", "TEST_SPEC.md")
 
 
 def _humanize(test_name: str) -> str:
@@ -101,7 +101,7 @@ def render(data) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true",
-                        help="Exit 1 if SPEC.md is out of date (does not write).")
+                        help="Exit 1 if TEST_SPEC.md is out of date (does not write).")
     args = parser.parse_args()
 
     rendered = render(collect())
@@ -112,9 +112,9 @@ def main():
             with open(SPEC_PATH, encoding="utf-8") as fh:
                 existing = fh.read()
         if existing.strip() != rendered.strip():
-            print("SPEC.md is stale — run `py -3 tests/gen_spec.py` and commit.", file=sys.stderr)
+            print("TEST_SPEC.md is stale — run `py -3 tests/gen_spec.py` and commit.", file=sys.stderr)
             sys.exit(1)
-        print("SPEC.md is up to date.")
+        print("TEST_SPEC.md is up to date.")
         return
 
     with open(SPEC_PATH, "w", encoding="utf-8") as fh:

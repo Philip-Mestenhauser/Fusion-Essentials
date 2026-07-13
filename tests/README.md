@@ -18,13 +18,13 @@ Layout — the tree splits by KIND, and `test_layout.py` enforces it:
 py -3 tests/check_all.py                     # THE button: generator checks + suite + live gate
 py -3 tests/check_all.py --offline           # no Fusion here (skips the live gate, visibly)
 py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose (while iterating)
-py -3 tests/gen_spec.py                      # regenerate SPEC.md (the behavior spec)
+py -3 tests/gen_spec.py                      # regenerate TEST_SPEC.md (the behavior spec)
 ```
 
 `check_all.py` runs everything in dependency order and fails loudly with the repair command per
 stage. Its green has two honest flavors: LIVE-VERIFIED (the facts stamp was checked against a
 reachable Fusion) and OFFLINE (you said so explicitly - the mocks were not re-confirmed). Either
-way it checks the live-run receipt: `tests/live/VERIFIED.md` carries a source hash from the last
+way it checks the live-run receipt: `tests/live/VERIFIED_TOOLS.md` carries a source hash from the last
 green `tool_verify.py` run, and the button goes red when tool source has changed since (repair:
 re-run `tool_verify.py` with Fusion up, commit the rewritten receipt). `--install-hook` makes
 every commit run the generator staleness checks. The layer-by-layer quality-system map lives in
@@ -149,7 +149,7 @@ Then:
 2. `tool = load_tool("<module_name>")` at the top of `tests/unit/test_<tool>.py`.
 3. Write **one test per specific, plausible bug**, not one per function. The
    name should read like a spec line (`test_picks_largest_body_by_volume`), it
-   ends up in `SPEC.md`.
+   ends up in `TEST_SPEC.md`.
 4. Assert on concrete values. Cover sizes **0, 1, 2, N** for anything taking a
    collection. Round-trip any encode/decode pair (see `test_quoting.py`).
 5. **Set up state with `monkeypatch` or a `@pytest.fixture`, never an imperative
@@ -180,14 +180,14 @@ meant it, then update the test. Never edit a test purely to make it pass without
 understanding why it broke (refactor that changed behavior → fix the code; test
 asserting an implementation detail → fix the test).
 
-## The behavior spec (`SPEC.md`)
+## The behavior spec (`TEST_SPEC.md`)
 
-`tests/generated/SPEC.md` is **generated** from the test names by `gen_spec.py` — a
+`tests/generated/TEST_SPEC.md` is **generated** from the test names by `gen_spec.py` — a
 per-tool checklist of every behavior currently pinned by a test. Use it to
 review scope ("what do my tools actually guarantee?") and to spot gaps. Don't
 edit it by hand; regenerate after changing tests:
 
 ```bash
-py -3 tests/gen_spec.py           # rewrite SPEC.md
-py -3 tests/gen_spec.py --check   # exit 1 if stale (for CI)
+py -3 tests/gen_spec.py           # rewrite TEST_SPEC.md
+py -3 tests/gen_spec.py --check   # exit 1 if stale (run by check_all / the commit hook)
 ```

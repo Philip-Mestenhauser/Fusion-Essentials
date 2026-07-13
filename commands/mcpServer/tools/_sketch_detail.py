@@ -116,10 +116,17 @@ def _entities(sketch):
         "minor_radius": _round(safe(lambda: el.minorAxisRadius))})
 
     pts = safe(lambda: sketch.sketchPoints)
+    origin = safe(lambda: sketch.originPoint)
     for i in range(safe(lambda: pts.count, 0) if pts else 0):
         g = safe(lambda i=i: pts.item(i).geometry)
-        out.append({"id": f"point:{i}", "type": "point", "construction": False,
-        "position": {"x": _round(g.x), "y": _round(g.y)} if g else None})
+        rec = {"id": f"point:{i}", "type": "point", "construction": False,
+        "position": {"x": _round(g.x), "y": _round(g.y)} if g else None}
+        # the sketch ORIGIN is a real, addressable point entity - flag it so an agent anchoring a
+        # constraint to the origin does not have to infer which (0,0) point it is. Proxy equality
+        # (not `is`) is the sanctioned entity comparison.
+        if origin is not None and safe(lambda i=i: pts.item(i) == origin):
+            rec["origin"] = True
+        out.append(rec)
 
     return out, construction
 
@@ -301,8 +308,9 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
 
     entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch)
     note = ("Full X-ray. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain / extrude "
-                 "refs. is_fully_constrained=false means free DOF remain; a dimension driving=true "
-                 "locks geometry, driving=false only measures.")
+                 "refs. The point flagged origin:true is the sketch ORIGIN (anchor origin-pinned "
+                 "constraints to it). is_fully_constrained=false means free DOF remain; a dimension "
+                 "driving=true locks geometry, driving=false only measures.")
     if truncated:
         note += (f" entities/constraints/dimensions each capped at {_XRAY_CAP}; counts above "
                  "(constraint_count/dimension_count/counts) are the full, uncapped totals.")

@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 151  |  **Behaviors pinned:** 2655
+**Tools with a test file:** 153  |  **Behaviors pinned:** 2672
 
 ## `_cam_common`
 
@@ -143,6 +143,7 @@ after changing tests._
 **ArcAndPoint**
 - arc center and radius
 - point position
+- origin point is flagged
 **DimensionTally**
 - driving dimension count
 - dimension with no parameter is safe
@@ -445,6 +446,17 @@ after changing tests._
 **AxisVectorsShared**
 - no local world axis vector map
 - the lint bites
+
+## `cam_activate_setup`
+
+> cam_activate_setup: the name guard, miss-lists-available, and the activation read-back (an activate() the platform accepts but that does not take must surface as an error).
+
+- blank setup name is refused
+- cam gate error is surfaced
+- unknown setup lists available names
+- activates and reports the setup name
+- activate that does not take is an error
+- activate raising is surfaced not swallowed
 
 ## `cam_common`
 
@@ -1139,6 +1151,7 @@ after changing tests._
 - import seam table matches reality
 **NoUnreferencedDefinitions**
 - every module level definition is referenced somewhere
+- definition exempt table matches reality
 - every test file definition is referenced in its file
 
 ## `design_configure`
@@ -1801,7 +1814,7 @@ after changing tests._
 
 ## `generated_docs_current`
 
-> Lint: the generated docs (SPEC/MANIFEST/tool-wiring + the CLAUDE.md map) match the live tree.
+> Lint: the generated docs (TEST_SPEC/TOOL_MANIFEST/TOOL_POINTER_MAP + the CLAUDE.md map) match the live tree.
 
 **GeneratedDocsAreCurrent**
 - generator check passes
@@ -1875,6 +1888,10 @@ after changing tests._
 - empty optional returns empty list
 - schema is array
 **BodyRef**
+- component name with single body resolves to it
+- occurrence suffix resolves to the component body
+- multi body component name refuses with body names
+- body name wins over component name
 - resolves a handle
 - face handle walks to its owning body
 - resolves a short name
@@ -3339,6 +3356,7 @@ after changing tests._
 - diameter
 - angle two lines
 - vertical orientation
+- distance to a circle anchors at its center
 **RadialTextPoint**
 - offset one radius along x from center
 - zero radius uses unit offset
@@ -3745,6 +3763,7 @@ after changing tests._
 
 **ToolCitations**
 - cited tool names are registered
+- not a tool entries still cited and still not tools
 
 ## `tool_naming`
 
@@ -3753,6 +3772,7 @@ after changing tests._
 **ToolNaming**
 - every name is domain verb
 - verb is in the closed set
+- exemption tables match reality
 - verb kind matches write status
 
 ## `tool_verify_complete`
@@ -3766,7 +3786,7 @@ after changing tests._
 
 ## `tool_verify_receipt`
 
-> The tool_verify receipt: the source hash + VERIFIED.md stamp binding a green live run to the exact tool source it exercised.
+> The tool_verify receipt: the source hash + VERIFIED_TOOLS.md stamp binding a green live run to the exact tool source it exercised.
 
 **SourceHash**
 - same tree hashes identically
@@ -3781,6 +3801,14 @@ after changing tests._
 - check goes red without a receipt
 - check goes red on a stampless receipt
 - receipt carries stamp counts and ledger rows
+
+## `unit_coverage_complete`
+
+> Gate: every tool module is exercised by a unit test, or excused with a recorded reason.
+
+**UnitCoverageComplete**
+- every tool module is tested or excused
+- no stale excuses
 
 ## `units_scaled`
 

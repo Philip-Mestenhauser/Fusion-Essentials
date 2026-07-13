@@ -88,10 +88,13 @@ class TestIsolateForFit:
 
 class TestActiveComponentNote:
     def _design(self, active_is_root=True, active_name="Gimbal:1"):
+        # activeOccurrence is None exactly when the root is active (the API contract the note keys
+        # on); a non-root activation exposes the activated OCCURRENCE. An identity test of
+        # activeComponent against rootComponent can never be true live - each property access mints
+        # a new proxy - so the note must never be derived from a component comparison.
         from types import SimpleNamespace
-        root = SimpleNamespace(name="Root")
-        active = root if active_is_root else SimpleNamespace(name=active_name)
-        return SimpleNamespace(rootComponent=root, activeComponent=active)
+        occ = None if active_is_root else SimpleNamespace(name=active_name)
+        return SimpleNamespace(activeOccurrence=occ)
 
     def test_root_active_no_note(self):
         assert gs._active_component_note(self._design(active_is_root=True)) is None

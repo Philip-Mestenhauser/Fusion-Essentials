@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""The tool_verify receipt: the source hash + VERIFIED.md stamp binding a green live run to the
+"""The tool_verify receipt: the source hash + VERIFIED_TOOLS.md stamp binding a green live run to the
 exact tool source it exercised.
 
 ``source_hash()`` must be OS-portable - relative paths hashed with '/' separators, CRLF
@@ -72,7 +72,7 @@ class TestVerifiedReceipt:
 
     def test_round_trip_write_then_check_is_current(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
-        receipt = str(tmp_path / "VERIFIED.md")
+        receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11",
                                    tool_verify.source_hash(root), path=receipt)
         assert tool_verify.check(root=root, verified_path=receipt) == 0
@@ -80,7 +80,7 @@ class TestVerifiedReceipt:
 
     def test_check_goes_red_when_source_changes_after_stamp(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
-        receipt = str(tmp_path / "VERIFIED.md")
+        receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11",
                                    tool_verify.source_hash(root), path=receipt)
         (tmp_path / "src" / "a.py").write_bytes(b"x = 2\n")
@@ -90,19 +90,19 @@ class TestVerifiedReceipt:
 
     def test_check_goes_red_without_a_receipt(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
-        assert tool_verify.check(root=root, verified_path=str(tmp_path / "VERIFIED.md")) == 1
+        assert tool_verify.check(root=root, verified_path=str(tmp_path / "VERIFIED_TOOLS.md")) == 1
         assert "tool_verify.py" in capsys.readouterr().out
 
     def test_check_goes_red_on_a_stampless_receipt(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
-        receipt = tmp_path / "VERIFIED.md"
+        receipt = tmp_path / "VERIFIED_TOOLS.md"
         receipt.write_text("# Live tool verification\n\nno stamp here\n", encoding="utf-8")
         assert tool_verify.check(root=root, verified_path=str(receipt)) == 1
         assert "stamp" in capsys.readouterr().out
 
     def test_receipt_carries_stamp_counts_and_ledger_rows(self, tmp_path):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
-        receipt = str(tmp_path / "VERIFIED.md")
+        receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         src_hash = tool_verify.source_hash(root)
         tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11", src_hash, path=receipt)
         with open(receipt, encoding="utf-8") as fh:

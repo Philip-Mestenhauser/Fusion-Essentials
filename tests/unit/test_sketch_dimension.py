@@ -27,7 +27,7 @@ class FakeDims:
     def __init__(self):
         self.calls = []
     def addDistanceDimension(self, p1, p2, orient, tp):
-        self.calls.append(("distance", orient)); return FakeDim("distance")
+        self.calls.append(("distance", orient, p1, p2)); return FakeDim("distance")
     def addRadialDimension(self, c, tp):
         self.calls.append(("radius",)); return FakeDim("radius")
     def addDiameterDimension(self, c, tp):
@@ -38,6 +38,10 @@ class FakeDims:
 
 class FakeLine:
     startSketchPoint = "sp"
+
+
+class FakeCircle:
+    centerSketchPoint = "center_sp"   # no startSketchPoint - a circle has no endpoints
 
 
 class FakeColl:
@@ -55,7 +59,7 @@ class FakeSketch:
         self.name = "S"
         self.sketchDimensions = FakeDims()
         lines = FakeColl([FakeLine(), FakeLine()])
-        circles = FakeColl([object()])
+        circles = FakeColl([FakeCircle()])
         self.sketchCurves = type("C", (), {"sketchLines": lines, "sketchArcs": FakeColl([]),
                                            "sketchCircles": circles})()
         self.sketchPoints = FakeColl([])
@@ -98,7 +102,7 @@ class TestDispatch:
     def test_horizontal_orientation(self):
         s = _install()
         _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0", entity_two="line:1"))
-        assert s.sketchDimensions.calls[-1] == ("distance", "horiz")
+        assert s.sketchDimensions.calls[-1][:2] == ("distance", "horiz")
 
     def test_radius_one_circle(self):
         s = _install()
@@ -119,7 +123,17 @@ class TestDispatch:
     def test_vertical_orientation(self):
         s = _install()
         _payload(sd.handler(dim_type="vertical_distance", entity_one="line:0", entity_two="line:1"))
-        assert s.sketchDimensions.calls[-1] == ("distance", "vert")
+        assert s.sketchDimensions.calls[-1][:2] == ("distance", "vert")
+
+    def test_distance_to_a_circle_anchors_at_its_center(self):
+        # a circle has no startSketchPoint; the handler completes it to centerSketchPoint - the only
+        # anchor addDistanceDimension can express - instead of passing the raw curve into the API.
+        s = _install()
+        _payload(sd.handler(dim_type="distance", entity_one="circle:0", entity_two="line:0"))
+        kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
+        assert kind == "distance"
+        assert p1 == "center_sp"
+        assert p2 == "sp"
 
 
 # ── _radial_text_point: the offset-from-center math (the module's key bug-fix) ──

@@ -3,19 +3,19 @@
 The registry IS the inventory: every ``tools/<name>.py`` self-registers a Tool with a name, a
 write-status, a description, and an input schema. This script imports each tool module (against the
 test harness's mocked ``adsk``), pulls those facts off the registered primitives, also collects the
-typed ``InputKind`` subclasses from ``_inputs.py``, and renders ``tests/generated/MANIFEST.md`` — one grouped
+typed ``InputKind`` subclasses from ``_inputs.py``, and renders ``tests/generated/TOOL_MANIFEST.md`` — one grouped
 "what tools + kinds exist" reference.
 
 Why generate instead of hand-write: a static index goes stale the instant a tool is added (a prior
 ``TOOL_INDEX`` was removed for exactly that). This regenerates from the registry, and ``--check`` fails
-CI when the committed ``MANIFEST.md`` drifts — so the inventory cannot lie. It is the GENERATIVE
+the suite when the committed ``TOOL_MANIFEST.md`` drifts — so the inventory cannot lie. It is the GENERATIVE
 counterpart to the live ``sys_find_tool`` lookup (same data, batch form): a reviewer or a cold-booting
 agent gets the whole map in one file, and the build guarantees it is current.
 
 Run from the repo root:
 
-    py -3 tests/gen_manifest.py          # writes tests/generated/MANIFEST.md
-    py -3 tests/gen_manifest.py --check  # exit 1 if MANIFEST.md is stale
+    py -3 tests/gen_manifest.py          # writes tests/generated/TOOL_MANIFEST.md
+    py -3 tests/gen_manifest.py --check  # exit 1 if TOOL_MANIFEST.md is stale
 """
 
 import argparse
@@ -37,7 +37,7 @@ from conftest import load_tool, TOOLS_DIR, COMMANDS_DIR  # noqa: E402
 if COMMANDS_DIR not in sys.path:
     sys.path.insert(0, COMMANDS_DIR)
 
-MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated", "MANIFEST.md")
+MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated", "TOOL_MANIFEST.md")
 
 # Tool name prefix -> family label. The order here is the manifest's section order; a tool falls into
 # the FIRST prefix it matches (so 'design_get' -> design, 'sys_find_tool' -> sys). A tool matching
@@ -144,7 +144,7 @@ def _collect_kinds():
             continue
         doc = (inspect.getdoc(cls) or "").strip().split("\n")[0]
         # MAP_HINT (a curated one-liner ON the kind) drives the terse CLAUDE.md map; the docstring's
-        # first line is the fuller summary for MANIFEST.md. A blank MAP_HINT shows up blank in the map
+        # first line is the fuller summary for TOOL_MANIFEST.md. A blank MAP_HINT shows up blank in the map
         # — the signal to a kind-author to fill it in.
         out.append({"kind": cname, "summary": doc[:160], "hint": getattr(cls, "MAP_HINT", "")})
     out.sort(key=lambda k: k["kind"])
@@ -199,8 +199,8 @@ def render(data) -> str:
         "# Tool & Input-Kind Manifest (generated)",
         "",
         "_Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand —"
-        " re-run the generator after adding/renaming a tool or kind. `--check` fails CI if this is"
-        " stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what"
+        " re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this"
+        " is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what"
         " already exists before building it._",
         "",
         f"**Tools:** {len(tools)}  |  **Input-kinds:** {len(kinds)}  |  "
@@ -241,10 +241,10 @@ def render(data) -> str:
 
 # ── the token-efficient MAP spliced into CLAUDE.md (for a tool-AUTHOR agent at session start) ──────
 #
-# MANIFEST.md (above) is the full browse-everything file. The CLAUDE.md map is the OPPOSITE: the shape
-# of the space, tiny enough to sit in a code-author agent's context the moment they open the repo —
+# TOOL_MANIFEST.md (above) is the full browse-everything file. The CLAUDE.md map is the OPPOSITE: the
+# shape of the space, tiny enough to sit in a code-author agent's context the moment they open the repo —
 # the kinds catalog (the invisible abstraction they must not re-invent) + family names+counts (so they
-# know roughly where to point sys_find_tool / which MANIFEST.md section to read). Spliced between
+# know roughly where to point sys_find_tool / which TOOL_MANIFEST.md section to read). Spliced between
 # markers so the surrounding hand-written prose is untouched and the block can't rot.
 
 CLAUDE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CLAUDE.md")
@@ -269,7 +269,7 @@ def render_families(data) -> str:
     total = sum(len(v) for v in fam.values())
     return (f"{_FAM_BEGIN}\n"
             f"**Tool families** ({total} tools — `sys_find_tool <kw>` to search, "
-            "`MANIFEST.md` for the full list): " + " ".join(fam_bits) + f"\n{_FAM_END}")
+            "`TOOL_MANIFEST.md` for the full list): " + " ".join(fam_bits) + f"\n{_FAM_END}")
 
 
 def render_catalog(data) -> str:
@@ -314,7 +314,7 @@ def _splice(path, begin, end, block, *, check=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true",
-                        help="Exit 1 if MANIFEST.md or the CLAUDE.md map block is out of date (no write).")
+                        help="Exit 1 if TOOL_MANIFEST.md or the CLAUDE.md map block is out of date (no write).")
     args = parser.parse_args()
 
     data = collect()
@@ -329,7 +329,7 @@ def main():
             with open(MANIFEST_PATH, encoding="utf-8") as fh:
                 existing = fh.read()
         if existing.strip() != rendered.strip():
-            stale.append("tests/generated/MANIFEST.md")
+            stale.append("tests/generated/TOOL_MANIFEST.md")
         if not _splice(CLAUDE_PATH, _FAM_BEGIN, _FAM_END, fam_block, check=True):
             stale.append("CLAUDE.md (families census)")
         if not _splice(TOOLS_CLAUDE_PATH, _CAT_BEGIN, _CAT_END, cat_block, check=True):
@@ -338,7 +338,7 @@ def main():
             print("Stale — run `py -3 tests/gen_manifest.py` and commit: " + ", ".join(stale),
                   file=sys.stderr)
             sys.exit(1)
-        print("MANIFEST.md, the families census, and the catalog are up to date.")
+        print("TOOL_MANIFEST.md, the families census, and the catalog are up to date.")
         return
 
     with open(MANIFEST_PATH, "w", encoding="utf-8") as fh:

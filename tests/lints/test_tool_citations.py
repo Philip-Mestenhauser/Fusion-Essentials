@@ -44,8 +44,6 @@ _INLINE_CODE = re.compile(r"`([^`]+)`")
 # tool-shaped tokens a doc names on purpose that are NOT tools (a helper function, or an action= value
 # of an action-dispatched tool). Shrink-only; each needs a reason.
 _NOT_A_TOOL = {
-    "view_direction": "a _view_common helper (the camera-orientation table), not a tool",
-    "find_joint": "a _joints helper that walks joints/asBuiltJoints, not a tool",
     "find_setup": "a _cam_common helper that resolves a CAM setup by exact name, not a tool",
     "find_operation": "a _cam_common helper that resolves a CAM operation by exact name, not a tool",
     "save_view": "an action= value of view_inspect, not a standalone tool",
@@ -97,3 +95,22 @@ class TestToolCitations:
         assert not offenders, (
             "A doc cites a tool name no registered tool answers to (rename to the current tool, or add "
             "a genuine helper/action to _NOT_A_TOOL with a reason):\n  " + "\n  ".join(offenders))
+
+    def test_not_a_tool_entries_still_cited_and_still_not_tools(self):
+        # both staleness directions for the exemption table: an entry that became a real tool now
+        # SHADOWS the check; an entry no doc cites anymore is dead weight. Either way, drop it.
+        registered = _registered_names()
+        cited = set()
+        for doc in _DOCS:
+            if doc.exists():
+                code = " ".join(m.group(1)
+                                for m in _INLINE_CODE.finditer(doc.read_text(encoding="utf-8")))
+                cited |= set(_SNAKE.findall(code))
+        stale = []
+        for tok, reason in _NOT_A_TOOL.items():
+            assert reason.strip(), f"_NOT_A_TOOL: {tok} needs a plain-English reason"
+            if tok in registered:
+                stale.append(f"{tok}: now a registered tool - drop the entry")
+            elif tok not in cited:
+                stale.append(f"{tok}: no doc cites it anymore - drop the entry")
+        assert not stale, "stale _NOT_A_TOOL entries:\n  " + "\n  ".join(stale)

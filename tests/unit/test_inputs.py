@@ -230,11 +230,12 @@ class FakeBody:
         self.name = name
 
 
-def _install_bodies(named=None, handle_map=None):
+def _install_bodies(named=None, handle_map=None, components=None):
     import adsk.fusion
     adsk.fusion.BRepBody = FakeBody
     named = named or {}
     handle_map = handle_map or {}
+    components = components or {}          # component name -> list of its bodies
 
     class FakeBodies:
         def itemByName(self, n):
@@ -243,6 +244,26 @@ def _install_bodies(named=None, handle_map=None):
     class FakeComp:
         bRepBodies = FakeBodies()
 
+    class _Coll:
+        # count/item is the measured live collection protocol; iteration kept for older consumers.
+        def __init__(self, items):
+            self._i = list(items)
+        @property
+        def count(self):
+            return len(self._i)
+        def item(self, i):
+            return self._i[i]
+        def __iter__(self):
+            return iter(self._i)
+
+    class FakeNamedComp:
+        def __init__(self, name, bodies):
+            self.name = name
+            self.bRepBodies = _Coll(bodies)
+            self.meshBodies = _Coll([])
+
+    comp_objs = [FakeNamedComp(n, bs) for n, bs in components.items()]
+
     class FakeDesign:
         rootComponent = FakeComp()
         def findEntityByToken(self, h):
@@ -250,7 +271,7 @@ def _install_bodies(named=None, handle_map=None):
             return [e] if e is not None else []
         @property
         def allComponents(self):
-            return []
+            return _Coll(comp_objs) if comp_objs else []
     comp = FakeComp()
     inp._common.design = lambda: FakeDesign()
     inp._common.target_component = lambda d: comp
@@ -258,6 +279,30 @@ def _install_bodies(named=None, handle_map=None):
 
 
 class TestBodyRef:
+    def test_component_name_with_single_body_resolves_to_it(self):
+        b = FakeBody("Body1")
+        _install_bodies(components={"Frame": [b]})
+        body, err = inp.BodyRef("body_name").resolve("Frame")
+        assert err is None and body is b
+
+    def test_occurrence_suffix_resolves_to_the_component_body(self):
+        b = FakeBody("Body1")
+        _install_bodies(components={"Frame": [b]})
+        body, err = inp.BodyRef("body_name").resolve("Frame:1")
+        assert err is None and body is b
+
+    def test_multi_body_component_name_refuses_with_body_names(self):
+        _install_bodies(components={"Frame": [FakeBody("Body1"), FakeBody("Body2")]})
+        body, err = inp.BodyRef("body_name").resolve("Frame")
+        assert body is None
+        assert "2 bodies" in err and "Body1" in err and "Body2" in err
+
+    def test_body_name_wins_over_component_name(self):
+        direct = FakeBody("Frame")            # a BODY literally named Frame
+        _install_bodies(named={"Frame": direct}, components={"Frame": [FakeBody("Body1")]})
+        body, err = inp.BodyRef("body_name").resolve("Frame")
+        assert err is None and body is direct
+
     def test_resolves_a_handle(self):
         b = FakeBody("B")
         _install_bodies(handle_map={"/vTOKEN": b})

@@ -212,6 +212,17 @@ class TestNoUnreferencedDefinitions:
                                "framework name belongs in _DEFINITION_EXEMPT with a reason):\n"
                                + "\n".join(offenders))
 
+    def test_definition_exempt_table_matches_reality(self):
+        # empty today, armed for its first entry: an exemption must carry a reason and must still
+        # be corpus-unreferenced - a name that gained a reference does not need exempting anymore.
+        counts = _mention_counts()
+        stale = []
+        for name, reason in _DEFINITION_EXEMPT.items():
+            assert str(reason).strip(), f"_DEFINITION_EXEMPT: {name} needs a plain-English reason"
+            if counts.get(name, 0) > 1:
+                stale.append(f"{name}: referenced now - drop the exemption")
+        assert not stale, "stale _DEFINITION_EXEMPT entries:\n  " + "\n  ".join(stale)
+
     def test_every_test_file_definition_is_referenced_in_its_file(self):
         # Test files are self-contained, so deadness is decidable PER FILE - and must be, since
         # fake names repeat across files and would mask a corpus-global match.

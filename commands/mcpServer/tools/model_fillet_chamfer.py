@@ -158,14 +158,15 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
 _FILLET_DESC = (
     "Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs. "
-    "TARGET the edges one of two ways: (a) 'edges' = a list of edge handles from find_geometry to "
-    "fillet SPECIFIC edges (the precise way); or (b) omit 'edges' and give 'body_name' (a body handle "
-    "or name; omit = most recent body) to fillet ALL its edges, optionally narrowed by 'edge_filter' "
-    "(convex/concave). 'radius' is in 'units' (mm default). 'edges' takes precedence."
+    "TARGET via 'edges' = edge handles from find_geometry (SPECIFIC edges), OR 'body_name' (a "
+    "handle, body name, or single-body component name; omit = most recent body) + optional "
+    "'edge_filter' (convex/concave) for all/filtered edges of a body. 'radius' is in 'units' (mm "
+    "default). 'edges' takes precedence."
 )
 _CHAMFER_DESC = (
 "Bevel (chamfer) edges with a constant distance - an angled edge break. TARGET via 'edges' = "
-"edge handles from find_geometry (specific edges), OR 'body_name' (a body handle or name) + optional "
+"edge handles from find_geometry (specific edges), OR 'body_name' (a handle, body name, or "
+"single-body component name) + optional "
 "'edge_filter' (convex/concave) for all/filtered edges of a body. 'distance' is in 'units' (mm "
 "default). 'edges' takes precedence."
 )

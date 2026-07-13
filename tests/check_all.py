@@ -4,7 +4,7 @@
 """The one command: every generator check, the whole suite, and the live gate, in order.
 
 Stages (each fails loudly with the command that repairs it):
-  1. generators --check   (SPEC / MANIFEST / tool-wiring stay in sync with the code)
+  1. generators --check   (TEST_SPEC / TOOL_MANIFEST / TOOL_POINTER_MAP stay in sync with the code)
   2. pytest               (unit tests + lints)
   3. tool_verify --check  (the receipt: the last green live run saw exactly this tool source;
                            recomputed offline, no Fusion needed)
@@ -27,10 +27,10 @@ The quality system, layer by layer (the one guarantee each makes):
   constitution docs      the rules, taught once at the point of use (CLAUDE.md beside the code)
   unit tests (~2670)     tool logic proven against fakes - which are POPULATED from measured facts
   lints (~30)            the repo polices its own conventions (naming, wire text, comments, fakes)
-  generators             SPEC / MANIFEST / tool-wiring regenerate from code; gen_all --check gates
+  generators             TEST_SPEC / TOOL_MANIFEST / TOOL_POINTER_MAP regenerate from code; gen_all --check gates
   api measurement        live Fusion MEASURES enum values + behavior flags -> live_api_facts.py
   facts + guard lints    mocks seeded from measurement; a hand-typed or unmeasured API claim is red
-  tool verify + evals    every tool called once against real Fusion, receipted in VERIFIED.md
+  tool verify + evals    every tool called once against real Fusion, receipted in VERIFIED_TOOLS.md
                          (source-hash stamp; --check = stale gate); cold-agent scenario evals
 """
 
@@ -135,7 +135,8 @@ def main():
 
     verify = os.path.join(TESTS, "live", "tool_verify.py")
     if not _run("tool_verify --check", [sys.executable, verify, "--check"],
-                "py -3 tests/live/tool_verify.py   (Fusion up - a green run rewrites VERIFIED.md)"):
+                "py -3 tests/live/tool_verify.py   (Fusion up - a green run rewrites "
+                "VERIFIED_TOOLS.md)"):
         return 1
 
     if args.offline:

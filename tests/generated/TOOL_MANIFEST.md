@@ -1,6 +1,6 @@
 # Tool & Input-Kind Manifest (generated)
 
-_Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails CI if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
+_Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
 **Tools:** 138  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
 

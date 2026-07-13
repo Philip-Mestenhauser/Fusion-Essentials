@@ -156,7 +156,7 @@ class TestGuards:
         # BodyRef resolves the named body; an unknown name errors, naming the value + the handle path.
         _install([FakeBody("B", [True])])
         res = fl._fillet_handler(body_name="X", radius=1)
-        assert res["isError"] is True and "no body named 'X'" in res["message"]
+        assert res["isError"] is True and "no body or component named 'X'" in res["message"]
 
     def test_bad_edge_filter(self):
         _install([FakeBody("B", [True])])
