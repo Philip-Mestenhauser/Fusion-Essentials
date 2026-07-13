@@ -63,3 +63,15 @@ class TestNoHandSeededEnums:
             elif not _offending_lines(path):
                 stale.append(f"{fn}: no hand-assignment remains - remove the allowlist entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
+
+    def test_the_lint_bites(self, tmp_path):
+        # prove the scan catches a hand-assignment of a measured member and skips the same text
+        # inside a comment (a worked example, not a live assignment).
+        assert _MEMBERS, "no measured enum members - live_api_facts.ENUMS is empty"
+        member = _MEMBERS[0]
+        hot = tmp_path / "test_hot.py"
+        hot.write_text(f"    adsk.fusion.SomeEnum.{member} = 5\n", encoding="utf-8")
+        cool = tmp_path / "test_cool.py"
+        cool.write_text(f"    # e.g. adsk.fusion.SomeEnum.{member} = 5\n", encoding="utf-8")
+        assert _offending_lines(str(hot)), "a hand-assigned measured member must trip the scan"
+        assert not _offending_lines(str(cool)), "a comment line must NOT trip the scan"

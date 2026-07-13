@@ -24,6 +24,7 @@ _LINT_TESTS = frozenset({
     "test_doc_citations", "test_docstring_restatement", "test_enum_families_measured",
     "test_evergreen_no_baggage", "test_fake_shapes_exist",
     "test_generated_docs_current", "test_generators", "test_helper_duplication", "test_layout",
+    "test_no_duplicate_defs",
     "test_no_first_match_resolvers", "test_no_hand_cast_product", "test_no_hand_seeded_enums",
     "test_occurrence_ref_lint",
     "test_operations_shared",

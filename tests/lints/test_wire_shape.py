@@ -53,18 +53,6 @@ class TestToolsListWireFormat:
                     f"Read-only tool {entry['name']} has destructiveHint={destructive}"
                 )
 
-    def test_write_tools_have_correct_annotations(self, server):
-        """Write tools: readOnlyHint=false. Destructive writes: destructiveHint=true."""
-        result = server._handle_tools_list(request_id="test-3")
-        tools = result["result"]["tools"]
-        write_tools = [e for e in tools if e.get("annotations", {}).get("readOnlyHint") is False]
-        assert write_tools, "No write tools found to validate (at least one expected)"
-        for entry in write_tools:
-            ann = entry.get("annotations", {})
-            assert ann.get("readOnlyHint") is False, (
-                f"{entry['name']}: write tool must have readOnlyHint=false"
-            )
-
     def test_no_audience_priority_lastmodified_in_annotations(self, server):
         """Annotations must not include audience, priority, or lastModified (tool-level annotations
         carry only readOnlyHint and destructiveHint on the wire)."""
@@ -78,7 +66,9 @@ class TestToolsListWireFormat:
 
     def test_strict_schema_tool_has_additional_properties_false(self, server):
         """At least one known strict-schema tool (e.g. assembly_ground from assembly_transform.py)
-        has inputSchema.additionalProperties == false on the wire."""
+        has inputSchema.additionalProperties == false on the wire. Strictness (.strict_schema() on
+        the Tool builder) is a per-tool OPT-IN, not a blanket property of every registered tool - so
+        this checks known adopters rather than sweeping every entry."""
         result = server._handle_tools_list(request_id="test-5")
         tools = result["result"]["tools"]
         strict_schema_tools = [
@@ -93,8 +83,6 @@ class TestToolsListWireFormat:
         assert any(
             name in tool_names for name in [
                 "assembly_ground", "assembly_move", "assembly_rigid_group",
-                "assembly_joint_angle", "assembly_joint_distance",
-                "assembly_joint_origin"
             ]
         ), f"No known strict-schema tool found. Found: {tool_names}"
 

@@ -21,11 +21,10 @@ basename) and the shrink-only _NOT_A_TOOL table (a helper function or an action 
 purpose) keep legitimate non-tool references from flagging.
 """
 
-import os
 import re
 from pathlib import Path
 
-from conftest import load_tool, TOOLS_DIR
+from conftest import register_all_tools
 
 REPO = Path(__file__).resolve().parent.parent.parent
 _MCP = REPO / "commands" / "mcpServer"
@@ -51,17 +50,7 @@ _NOT_A_TOOL = {
 
 
 def _registered_names():
-    names = [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
-             if fn.endswith(".py") and not fn.startswith("_") and fn != "__init__.py"]
-    load_tool(names[0])
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for n in names:
-        mod = load_tool(n)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return {it.to_dict().get("name") for it in registry.get_tools()}
+    return {it.to_dict().get("name") for it in register_all_tools()}
 
 
 def _module_basenames():

@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 153  |  **Behaviors pinned:** 2672
+**Tools with a test file:** 154  |  **Behaviors pinned:** 2679
 
 ## `_cam_common`
 
@@ -1755,6 +1755,7 @@ after changing tests._
 **NoHistoricalOrPlanBaggage**
 - no file narrates history or points at a plan
 - allowlist entries still exist and still trip
+- the lint bites
 
 ## `fake_shapes_exist`
 
@@ -3052,6 +3053,14 @@ after changing tests._
 - sweep is built on the profiles owning component
 - declared returns present in payload
 
+## `no_duplicate_defs`
+
+> Lint: no module under commands/mcpServer/ defines the same top-level function/class name twice.
+
+**NoDuplicateDefs**
+- no module shadows a top level def
+- the lint bites
+
 ## `no_first_match_resolvers`
 
 > Lint: the substring-first-match smell is banned across EVERY tool module, not just the ones already fixed (see ``test_occurrence_ref_lint.py`` for the resolver this smell should route through instead).
@@ -3070,6 +3079,7 @@ after changing tests._
 **NoHandCastProduct**
 - no design cast of active product
 - no manual cam cast
+- the lint bites
 
 ## `no_hand_seeded_enums`
 
@@ -3078,6 +3088,7 @@ after changing tests._
 **NoHandSeededEnums**
 - measured enum members are never hand assigned
 - allowlist files still trip
+- the lint bites
 
 ## `occurrence_ref_lint`
 
@@ -3086,6 +3097,7 @@ after changing tests._
 **RoutedToolsStayOnSharedResolver**
 - no routed tool hand rolls a substring name match
 - routed tools reference the shared resolver
+- the lint bites
 **SharedResolverBehaviour**
 - fullpath beats a same named instance
 - ambiguous bare name errors
@@ -3096,6 +3108,7 @@ after changing tests._
 
 **OperationsShared**
 - no local feature operations map
+- the lint bites
 
 ## `output_contracts`
 
@@ -3817,6 +3830,7 @@ after changing tests._
 **UnitsScaled**
 - no raw unit to cm access outside common
 - no local unit table copy outside common
+- the lint bites
 
 ## `units_typed`
 
@@ -3989,7 +4003,6 @@ after changing tests._
 - tools list sends annotations on the wire
 - all entries have required keys
 - read only tools have correct annotations
-- write tools have correct annotations
 - no audience priority lastmodified in annotations
 - strict schema tool has additional properties false
 - destructive tools marked on the wire

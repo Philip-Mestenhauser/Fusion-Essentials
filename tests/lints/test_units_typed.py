@@ -16,10 +16,9 @@ declares no 'units' input. The shrink-only _EXEMPT table carries any input where
 selectable unit is deliberate, each with a one-line reason.
 """
 
-import os
 import re
 
-from conftest import load_tool, TOOLS_DIR
+from conftest import register_all_tools
 
 # a unit token, allowing a leading digit ("5mm") but not a letter ("swimming", "incoming").
 _UNIT = re.compile(r"(?<![A-Za-z])(mm|cm|inch(?:es)?|millimet\w*|centimet\w*)(?![A-Za-z])", re.I)
@@ -29,20 +28,6 @@ _UNIT = re.compile(r"(?<![A-Za-z])(mm|cm|inch(?:es)?|millimet\w*|centimet\w*)(?!
 _EXEMPT = {
     # "some_tool.some_input": "reason a fixed unit is correct here",
 }
-
-
-def _all_registered_tools():
-    names = [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
-             if fn.endswith(".py") and not fn.startswith("_") and fn != "__init__.py"]
-    load_tool(names[0])                       # bootstrap sys.path + the mcpServer.tools stub FIRST
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for n in names:
-        mod = load_tool(n)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return registry.get_tools()
 
 
 def _is_numeric(schema):
@@ -73,7 +58,7 @@ def _numeric_unit_props(props, path, out):
 class TestUnitsAreTyped:
     def test_numeric_input_naming_a_unit_has_a_units_selector(self):
         offenders = []
-        for it in _all_registered_tools():
+        for it in register_all_tools():
             d = it.to_dict()
             name = d.get("name")
             props = (d.get("inputSchema") or {}).get("properties", {}) or {}

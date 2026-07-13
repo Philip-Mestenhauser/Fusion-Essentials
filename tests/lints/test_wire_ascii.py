@@ -20,25 +20,7 @@ import ast
 import os
 import re
 
-from conftest import load_tool, TOOLS_DIR
-
-
-def _tool_modules():
-    return [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
-            if fn.endswith(".py") and not fn.startswith("_") and fn != "__init__.py"]
-
-
-def _all_registered_tools():
-    names = _tool_modules()
-    load_tool(names[0])              # first load sets up sys.path + the mcpServer.tools stub
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for mod_name in names:
-        mod = load_tool(mod_name)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return registry.get_tools()
+from conftest import TOOLS_DIR, register_all_tools
 
 
 def _non_ascii(text):
@@ -64,7 +46,7 @@ def _walk_property_descriptions(props, path, out):
 class TestToolDescriptionsAreAscii:
     def test_every_tool_description_is_ascii(self):
         offenders = []
-        for it in _all_registered_tools():
+        for it in register_all_tools():
             d = it.to_dict()
             desc = d.get("description") or ""
             bad = _non_ascii(desc)
@@ -75,7 +57,7 @@ class TestToolDescriptionsAreAscii:
 
     def test_every_input_description_is_ascii(self):
         offenders = []
-        for it in _all_registered_tools():
+        for it in register_all_tools():
             d = it.to_dict()
             name = d.get("name")
             props = (d.get("inputSchema") or {}).get("properties", {}) or {}

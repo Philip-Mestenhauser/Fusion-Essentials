@@ -60,3 +60,10 @@ class TestUnitsScaled:
         assert not offenders, (
             "a local copy of the unit-factor table diverges from _common.UNIT_TO_CM - import it (or use "
             "_common.scale/CM_TO_UNIT):\n  " + "\n  ".join(offenders))
+
+    def test_the_lint_bites(self):
+        # prove the raw-access regex catches a direct subscript/attribute hit and skips a longer
+        # identifier that merely starts with the same prefix.
+        assert _RAW_ACCESS.search("k = UNIT_TO_CM['mm']")
+        assert _RAW_ACCESS.search("k = UNIT_TO_CM.get(units)")
+        assert not _RAW_ACCESS.search("k = UNIT_TO_CMX['mm']")

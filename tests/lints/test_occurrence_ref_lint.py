@@ -70,6 +70,12 @@ class TestRoutedToolsStayOnSharedResolver:
             "expected these to call _inputs._resolve_occurrence (directly or via "
             "OccurrenceRef/OccurrenceRefList): " + ", ".join(missing))
 
+    def test_the_lint_bites(self):
+        # prove the substring-name regex catches a loose containment test and skips the correct
+        # exact-match shape (the resolver's own comparison, which is never ambiguous).
+        assert _SUBSTRING_NAME.search("if want.lower() in occ.name.lower():")
+        assert not _SUBSTRING_NAME.search("if nm.lower() == want:")
+
 
 class TestSharedResolverBehaviour:
     """A behavioural anchor: the resolver the lint points everyone at must actually refuse ambiguity."""

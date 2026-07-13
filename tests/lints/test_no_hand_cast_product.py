@@ -46,3 +46,10 @@ class TestNoHandCastProduct:
         assert not offenders, (
             "hand cast to a CAM product - call `_cam_common.get_cam()` (the one shared CAM resolver):\n  "
             + "\n  ".join(offenders))
+
+    def test_the_lint_bites(self):
+        # prove the regex catches the banned activeProduct cast and skips the sanctioned fallback
+        # shape _common.design() itself uses (cast off doc.products, not app.activeProduct).
+        assert _DESIGN_CAST.search("d = adsk.fusion.Design.cast(app.activeProduct)")
+        assert not _DESIGN_CAST.search(
+            "d = adsk.fusion.Design.cast(app.activeDocument.products.itemByProductType('DesignProductType'))")

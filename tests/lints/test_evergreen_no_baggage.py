@@ -162,3 +162,12 @@ class TestNoHistoricalOrPlanBaggage:
                 elif not _line_offenders(path):
                     stale.append(f"{key}: file no longer trips the smell - remove the allowlist entry")
         assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)
+
+    def test_the_lint_bites(self, tmp_path):
+        # prove the phrase scan catches a real deferral phrase and skips a word-boundary look-alike.
+        hot = tmp_path / "hot.py"
+        hot.write_text("# for now, this branch is unused\n", encoding="utf-8")
+        cool = tmp_path / "cool.py"
+        cool.write_text("# assert result matches the fixture output\n", encoding="utf-8")
+        assert _line_offenders(str(hot)), "'for now' must trip the evergreen scan"
+        assert not _line_offenders(str(cool)), "'the fixture' must NOT trip ('the fix' is word-bounded)"

@@ -14,8 +14,7 @@ So a name declares its KIND, and readOnlyHint (from write=) must match: a read-v
 read-only; an edit-verb tool must not be. This is what makes the name an honest type, not a label.
 """
 
-from conftest import load_tool, TOOLS_DIR
-import os
+from conftest import register_all_tools
 
 # ── the closed verb vocabulary, grouped by kind ─────────────────────────────────────────────────────
 
@@ -55,20 +54,6 @@ _WRITE_VERB_EXEMPT = {
 }
 
 
-def _all_items():
-    names = [fn[:-3] for fn in sorted(os.listdir(TOOLS_DIR))
-             if fn.endswith(".py") and not fn.startswith("_") and fn != "__init__.py"]
-    load_tool(names[0])                       # bootstrap sys.path + the mcpServer.tools stub FIRST
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for n in names:
-        mod = load_tool(n)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return registry.get_tools()
-
-
 def _name_and_readonly(item):
     d = item.to_dict()
     name = d.get("name")
@@ -93,7 +78,7 @@ def _verb_of(name):
 class TestToolNaming:
     def test_every_name_is_domain_verb(self):
         bad = []
-        for it in _all_items():
+        for it in register_all_tools():
             name, _ = _name_and_readonly(it)
             if name in _SHAPE_EXEMPT:
                 continue
@@ -104,7 +89,7 @@ class TestToolNaming:
 
     def test_verb_is_in_the_closed_set(self):
         unknown = {}
-        for it in _all_items():
+        for it in register_all_tools():
             name, _ = _name_and_readonly(it)
             if name in _SHAPE_EXEMPT:
                 continue
@@ -118,7 +103,7 @@ class TestToolNaming:
         # the house rule for every lint table: an entry that no longer names a registered tool, or
         # no longer needs its exemption, is deleted - never left to rot.
         status = {}
-        for it in _all_items():
+        for it in register_all_tools():
             name, readonly = _name_and_readonly(it)
             status[name] = readonly
         stale = []
@@ -137,7 +122,7 @@ class TestToolNaming:
         # the honesty check: a read-kind verb (get/find/probe/...) MUST be read-only; an edit-kind verb
         # MUST NOT be. A mismatch is a mislabeled tool (wrong write= OR a name that lies about what it does).
         mismatches = []
-        for it in _all_items():
+        for it in register_all_tools():
             name, readonly = _name_and_readonly(it)
             if name in _SHAPE_EXEMPT:
                 continue

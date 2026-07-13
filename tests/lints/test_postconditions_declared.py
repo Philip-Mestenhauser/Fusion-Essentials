@@ -1,38 +1,20 @@
 """Lint: every WRITE/DESTRUCTIVE tool declares postconditions - or carries a reasoned exemption.
 
 The postcondition kernel (tools/_assert.py) is the third kind system: _inputs types what a tool is
-GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify). This
-lint makes the declaration a structural requirement: a write tool either passes postconditions=[...]
-to Item.create_tool_item, or appears in _EXEMPT below with a one-line audited reason. The table only
-ever SHRINKS (an entry is deleted by declaring postconditions); adding a new write tool to it needs
-the same deliberation as adding a naming-vocabulary verb.
+GIVEN, _outputs types what it RETURNS, _assert types what it DID (capture -> mutate -> verify).
+Verifying the effect INLINE, in the handler, is the audited NORM here - most write tools construct
+their payload fields or author their error text from a live read-back, so the verify logic stays
+where the values it reads feed straight into the response (the _EXEMPT table below is that audit's
+ledger, one line per tool naming which class its inline verification falls into). The kernel
+DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared _assert.Postcondition
+kind can capture/verify without touching handler-local payload assembly. This lint makes the choice a
+structural requirement either way: a write tool either passes postconditions=[...] to
+Item.create_tool_item, or appears in _EXEMPT with a one-line audited reason. The table only ever
+SHRINKS (an entry is deleted by declaring postconditions); adding a new write tool to it needs the
+same deliberation as adding a naming-vocabulary verb.
 """
 
-import os
-
-from conftest import load_tool, TOOLS_DIR
-
-
-def _tool_modules():
-    names = []
-    for fn in sorted(os.listdir(TOOLS_DIR)):
-        if not fn.endswith(".py") or fn.startswith("_"):
-            continue
-        names.append(fn[:-3])
-    return names
-
-
-def _all_registered_tools():
-    names = _tool_modules()
-    load_tool(names[0])
-    from mcpServer.mcp_primitives import registry
-    registry.reset_registry()
-    for mod_name in names:
-        mod = load_tool(mod_name)
-        reg = getattr(mod, "register_tool", None)
-        if callable(reg):
-            reg()
-    return registry.get_tools()
+from conftest import load_tool, register_all_tools
 
 
 def _postconditions_of(item):
@@ -151,7 +133,7 @@ _EXEMPT = {
 class TestPostconditionsDeclared:
     def test_every_write_tool_declares_or_is_exempt(self):
         missing = []
-        for it in _all_registered_tools():
+        for it in register_all_tools():
             ann = it.primitive.annotations
             if ann is None or ann.read_only is not False:
                 continue                      # read tools mutate nothing to verify
@@ -166,7 +148,7 @@ class TestPostconditionsDeclared:
 
     def test_exemptions_only_name_real_undeclared_write_tools(self):
         # a stale exemption (tool removed, renamed, or since migrated) must be deleted, not linger.
-        items = {it.get_name(): it for it in _all_registered_tools()}
+        items = {it.get_name(): it for it in register_all_tools()}
         stale = []
         for name in _EXEMPT:
             it = items.get(name)
@@ -182,7 +164,7 @@ class TestPostconditionsDeclared:
 
     def test_declared_postconditions_are_postcondition_kinds(self):
         kernel = load_tool("_assert")
-        for it in _all_registered_tools():
+        for it in register_all_tools():
             posts = _postconditions_of(it)
             for p in posts or []:
                 assert isinstance(p, kernel.Postcondition), (
