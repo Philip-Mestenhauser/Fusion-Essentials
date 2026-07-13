@@ -127,12 +127,15 @@ live run of this skill demonstrated (three failed script variants before the roo
 
 ## Part-space extents and orientation (the oriented bounding box)
 
-The "Center of Model" JO is built with its Z along the machining direction (`zdir`) the operator
-picked, and located at the part's bounding-box centre. To report extents IN that part frame (not
-world axes), measure with `measureManager.getOrientedBoundingBox(body, lenDir, widDir)` passing the
-JO's secondary (X) and third (Y) axis vectors: the result's `length`/`width`/`height` then correspond
-to part-space X / Y / Z, where Z is the machining axis. This makes `extents_mm` meaningful regardless
-of how the part was modelled relative to world axes — it is always reported in the machining frame.
+The "Center of Model" JO is built (`joint_create_origin(anchor="bbox_center", ...)`) with its Z along
+the machining direction (`zdir`) the operator picked, and located at the part's bounding-box centre.
+To report extents IN that part frame (not world axes), `model_inspect(target=<body>, frame="Center of
+Model")` measures with `measureManager.getOrientedBoundingBox(body, lenDir, widDir)` passing the JO's
+secondary (X) and third (Y) axis vectors: the result's `x`/`y`/`z` (length/width/height) then
+correspond to part-space X / Y / Z, where Z is the machining axis. This makes `extents_mm` meaningful
+regardless of how the part was modelled relative to world axes - it is always reported in the
+machining frame. `model_inspect`'s `frame=` parameter is the typed home for this measurement; no other
+tool computes an oriented (as opposed to world-axis-aligned) bounding box.
 
 ## Determinism checklist (why the phases are ordered this way)
 

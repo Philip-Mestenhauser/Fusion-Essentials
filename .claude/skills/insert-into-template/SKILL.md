@@ -17,6 +17,7 @@ allowed-tools: >-
   fusion-essentials:data_get
   fusion-essentials:data_create_folder
   fusion-essentials:doc_save_as
+  fusion-essentials:doc_save
   fusion-essentials:doc_close
   fusion-essentials:design_get
   fusion-essentials:param_get
@@ -28,7 +29,9 @@ allowed-tools: >-
   fusion-essentials:sketch_add_3d_line
   fusion-essentials:sys_execute_script
   fusion-essentials:joint_create
+  fusion-essentials:joint_create_origin
   fusion-essentials:find_geometry
+  fusion-essentials:model_inspect
   fusion-essentials:assembly_ground
   fusion-essentials:assembly_move
   fusion-essentials:assembly_probe
@@ -71,7 +74,7 @@ DEFAULT_FOLDER       = "{model}"      # folder path; "{model}" expands to the CA
 # one used when the operator does not name a specific template.
 TEMPLATE_LIBRARY_PROJECT = "CAM"                          # project holding the template library
 TEMPLATE_LIBRARY_FOLDER  = "Workflow Templates"           # the single folder = the library
-DEFAULT_TEMPLATE         = "<your default template name>" # used when no template is named
+DEFAULT_TEMPLATE         = "4th Axis Windowframe Template" # used when no template is named
 
 # Naming convention.
 TEMPLATE_NAME_SUFFIX = "_CAM"         # template copy is named "<model name>_CAM"
@@ -108,20 +111,23 @@ lineage) is in [reference.md](reference.md). Read it if a crawl result is ambigu
 - **No approval round-trips.** Do not ask the operator to confirm or choose between steps. The one
   human input is identifying the machining face (Phase 1) — a required input, not an approval.
   All other choices come from the CONFIGURATION block or from deterministic rules below.
-- **Bundle in-document work into scripts; keep fragile + cross-document operations as tools.**
-  Round-trips are the cost; the Fusion ops are fast. So the CHEAP deterministic in-document work is
-  bundled into one `sys_execute_script` per logical step (atomic, all-or-nothing, prints what you
-  need to verify). What STAYS a named tool: (i) data-model ops that CROSS documents or are async —
-  `doc_save_as` (the template-copy mechanism — NOT `doc_copy`, which crashes on CAM templates) and
-  `doc_open`; (ii) the FRAGILE design ops whose tools encode non-obvious
-  fixes — `doc_insert_occurrence`, `joint_create` (the proxy-by-NAME fix for joining a JO inside a
-  referenced occurrence — used for BOTH the root-JO mate and the stock-top fallback), and
-  `find_geometry` (locating the stock top face) — do not re-implement these in a script. Concretely:
-  Phase 2 (PART) is one script (center+
-  extents → JO → hide → print); Phase 6 (TEMPLATE) is Script A (name + container + DETECT root JO) →
-  insert → POSITION (join Center-of-Model→root JO if present, else stock-top fallback) → probe health →
-  (optional) write PartX/Y/Z. This is NOT "faking a missing block" — the scripts compose
-  the SAME built operations. Read each result and verify the printed values.
+- **Bundle in-document work into a script only where no typed call reaches it.** Phase 2 (the
+  part-space origin) is typed calls only - `find_geometry` -> `joint_create_origin` ->
+  `model_inspect(frame=...)` - no script. Phase 6 (TEMPLATE) bundles its container-detection + naming
+  pass into one `sys_execute_script` (atomic, all-or-nothing, prints what you need to verify) because
+  no typed read walks a component's occurrence+body children, classifies the WCS-cube heuristic, and
+  scans root joint origins in one call - round-trips are the cost there, the Fusion ops are fast. What
+  STAYS a named tool regardless of script use: (i) data-model ops that CROSS documents or are async -
+  `doc_save_as` (the template-copy mechanism - NOT `doc_copy`, which crashes on CAM templates) and
+  `doc_open`; (ii) the FRAGILE design ops whose tools encode non-obvious fixes - `doc_insert_occurrence`,
+  `joint_create` (the proxy-by-NAME fix for joining a JO inside a referenced occurrence - used for
+  BOTH the root-JO mate and the stock-top fallback), `joint_create_origin` (the oriented bbox-center
+  build), and `find_geometry` (locating the stock top face; re-finding the operator-picked face for
+  `orient_axis`) - do not re-implement these in a script. Concretely: Phase 6 (TEMPLATE) is Script A
+  (name + container + DETECT root JO) -> insert -> POSITION (join Center-of-Model->root JO if present,
+  else stock-top fallback) -> probe health -> (optional) write PartX/Y/Z. This is NOT "faking a missing
+  block" - the script composes the SAME built operations. Read each result and verify the
+  printed/returned values.
 - **Address by id (URN) once resolved.** Names are for humans; URNs drive the flow.
 - **Async tools** (`doc_save_as`, `doc_open`) return before completion —
   confirm with a follow-up `doc_get` (active document); never assume.
@@ -154,7 +160,10 @@ Do the human input FIRST, and skip the prompt cycle if a face is already selecte
    the skill's only human handshake. Emitting it as a fixed `AskUserQuestion` makes the result
    reproducible run-to-run instead of depending on how the agent phrases a chat sentence.)
 4. VALIDATE: exactly one selection with a non-null `direction`. If null (e.g. a sphere), re-prompt
-   via the same handshake. Record `zdir = direction`, `direction_kind`, and the owning `body_name`.
+   via the same handshake. Record `zdir = direction`, `direction_kind`, the owning `body_name`, and
+   the face's `centroid` position (all from the same `sys_get_selection` read) - Phase 2 re-finds this
+   exact face by position to get a geometry handle (`sys_get_selection` reports geometry, not a
+   `find_geometry`-style handle).
 5. `workspace_orient` (workspace/product/units) + `doc_get` (active document + identity) — record
    model name, units, and the doc's identity:
    - `has_data_file` **false** (unsaved): the doc name is "Untitled" — NOT a usable model name. Derive
@@ -167,64 +176,48 @@ Do the human input FIRST, and skip the prompt cycle if a face is already selecte
 
 → Record: `zdir`, `body_name`, model name, units, lineage URN (or null), destination project+folder.
 
-## Phase 2 — Build the "Center of Model" part-space origin (ONE bundled script, WRITE)
+## Phase 2 - Build the "Center of Model" part-space origin (typed calls, WRITE)
 
 The part-space frame is at the **center of the part's bounding box**, ORIENTED so its Z axis is
-`zdir`, named **"Center of Model"**. (Bbox center — not the modeling origin (0,0,0), which is
-arbitrary — makes the part attach to the fixture by its geometric center, predictably.)
+`zdir`, named **"Center of Model"**. (Bbox center - not the modeling origin (0,0,0), which is
+arbitrary - makes the part attach to the fixture by its geometric center, predictably.)
 
-Run this as a SINGLE `sys_execute_script`. It measures bbox center AND extents (so no separate
-measure step is needed later), builds the oriented JO at the center, hides the helper sketch, and
-prints the part-space extents + verification. Substitute `<BODY_NAME>` and `<ZDIR_*>` from Phase 1.
+Three typed calls, in order. Substitute `body_name` and `centroid` from Phase 1.
 
-```python
-def run(context):
-    import adsk.core, adsk.fusion, json
-    app = adsk.core.Application.get()
-    des = adsk.fusion.Design.cast(app.activeProduct)
-    root = des.rootComponent
-    body = root.bRepBodies.itemByName("<BODY_NAME>")
-    bb = body.boundingBox
-    cx = (bb.minPoint.x + bb.maxPoint.x) / 2.0                # cm
-    cy = (bb.minPoint.y + bb.maxPoint.y) / 2.0
-    cz = (bb.minPoint.z + bb.maxPoint.z) / 2.0
-    zx, zy, zz = <ZDIR_I>, <ZDIR_J>, <ZDIR_K>
-    L = 1.0
-    sk = root.sketches.add(root.xYConstructionPlane); sk.name = "CenterOfModel_Dir"
-    P = adsk.core.Point3D.create
-    ln = sk.sketchCurves.sketchLines.addByTwoPoints(P(cx,cy,cz), P(cx+zx*L, cy+zy*L, cz+zz*L))
-    geo = adsk.fusion.JointGeometry.createByCurve(ln, adsk.fusion.JointKeyPointTypes.StartKeyPoint)
-    jo = root.jointOrigins.add(root.jointOrigins.createInput(geo)); jo.name = "Center of Model"
-    sk.isVisible = False
-    # part-space extents IN THE MACHINING FRAME: pass the JO's secondary(X)+third(Y) axes to
-    # getOrientedBoundingBox so length/width/height = part-space X/Y/Z (Z = machining axis).
-    # (See reference.md "Part-space extents and orientation".)
-    z = jo.geometry.primaryAxisVector
-    obb = app.measureManager.getOrientedBoundingBox(body,
-            jo.geometry.secondaryAxisVector, jo.geometry.thirdAxisVector)
-    o = jo.geometry.origin
-    print(json.dumps({
-        "z_axis":[round(z.x,4),round(z.y,4),round(z.z,4)],
-        "origin_mm":[round(o.x*10,3),round(o.y*10,3),round(o.z*10,3)],
-        "extents_mm":{"x":round(obb.length*10,3),"y":round(obb.width*10,3),"z":round(obb.height*10,3)}}))
-```
-VERIFY `z_axis` ≈ `zdir`, `origin_mm` ≈ bbox center. RECORD `extents_mm` (the part-space X/Y/Z —
-no separate measure needed; these feed the OPTIONAL `PartX/Y/Z` stock sizing in Phase 6 step 4).
+1. `find_geometry(target=<body_name>, kind="planar_face", nearest_to=<centroid in mm - Phase 1's
+   centroid is raw cm, so MULTIPLY by 10>, max_results=1)` - re-finds the exact face the operator
+   picked. `sys_get_selection` reports its direction/position but mints no reusable handle, so this
+   is how Phase 2 gets one. VERIFY the single returned match's `normal` is parallel to `zdir` (or its
+   exact negation - if negated, pass `flip=true` in the next call).
+2. `joint_create_origin(anchor="bbox_center", bbox_target=<body_name>, orient_axis=<the handle from
+   step 1>, flip=<true only if step 1's normal opposed zdir>, name="Center of Model")` - computes the
+   world bbox center, builds the oriented frame there (its own hidden helper sketch + JointGeometry),
+   creates the joint origin, and reads the result BACK against its own computed center - rolling back
+   and erroring if the origin did not land where computed, rather than printing a number for the
+   caller to eyeball. VERIFY the response's `frame_axes.primary_axis_Z` is parallel to `zdir` - the
+   live proof the picked face's normal drove the orientation.
+3. `model_inspect(target=<body_name>, frame="Center of Model", units="mm")` - measures the body's
+   bounding box IN the new joint-origin frame (the same oriented-bounding-box computation the frame's
+   own axes define - see reference.md "Part-space extents and orientation"). Its `x`/`y`/`z` are the
+   part-space extents (Z = the machining axis) and `center` should match step 2's computed center.
+   RECORD these as `extents_mm` - no separate measure tool exists for this; it feeds the OPTIONAL
+   `PartX/Y/Z` stock sizing in Phase 6 step 4 (and the stock-top fallback's offset in Phase 6 step 2b).
 
 (The "Center of Model" JO is the PART-SIDE attach frame: bbox-center, oriented to the machining Z.
 Phase 6 joins THIS JO to the template's root JO when one exists (the primary path), or to the stock
-top face as a fallback. Either way the part side is this JO — so it is built on every run. A template
+top face as a fallback. Either way the part side is this JO - so it is built on every run. A template
 needs NO matching JO for the fallback, but if it HAS a root JO, this JO mates to it cleanly.)
 
-→ Record: `joint_origin_name = "Center of Model"`, the verified Z axis, and `extents_mm`.
+-> Record: `joint_origin_name = "Center of Model"`, the verified Z axis (`frame_axes.primary_axis_Z`),
+and `extents_mm`.
 
 ## Phase 3 — Save the part with the JO (WRITE, async)
 
 The "Center of Model" JO lives only in the live session until saved, and an x-ref points at a
 SAVED version — so the CAD must be saved with the JO BEFORE Phase 6 inserts it as a reference.
-1. UNSAVED: `doc_save_as(name=<model name>, project_id, folder, create_path=true)` — saveAs
-   captures the live session (incl. the JO) into one new version. ALREADY SAVED: `Document.save()`
-   via `sys_execute_script` for a new version containing the JO.
+1. UNSAVED: `doc_save_as(name=<model name>, project_id, folder, create_path=true)` - saveAs
+   captures the live session (incl. the JO) into one new version. ALREADY SAVED: `doc_save()` for a
+   new version containing the JO.
 2. `doc_get` (after a short wait) — record the URN + version that contains the JO.
    (If the CAD has its OWN stock parameters, set them from `extents_mm` and re-save — most parts
    don't; the template's PartX/Y/Z are driven in Phase 6.)
