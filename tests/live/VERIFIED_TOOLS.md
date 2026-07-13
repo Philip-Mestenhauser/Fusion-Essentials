@@ -6,7 +6,7 @@ source hash binds this run to the exact `commands/mcpServer/` tree it exercised:
 on a live run that never saw the current code. Only a run with zero FAIL/blocked steps
 writes this file.
 
-Stamp: source 2b0f98316b99ee621433f142c8bf73bc61060fa3a7c48418783b55cc11267f1c | Fusion 2704.1.23 | verified 2026-07-12
+Stamp: source 289dc7f29b7877cb0997d9607305c700317c47fa959eb00f2c825477068c0bae | Fusion 2704.1.23 | verified 2026-07-12
 
 52 covered / 23 skipped(reason) / 64 pending
 

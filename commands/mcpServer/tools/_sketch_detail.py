@@ -37,8 +37,11 @@ _CONSTRAINT_REFS = {
 }
 
 
-def _round(v):
-    return round(float(v), 4) if v is not None else None
+def _round(v, f):
+    """v scaled by f then rounded to 4dp, or None if v is None. f is the cm -> display-unit factor
+    (_common.CM_TO_UNIT[units]) - the ONE seam every geometric value in this file's payloads passes
+    through, so a caller mixing sketch_get with model_inspect/write tools sees the same unit."""
+    return round(float(v) * f, 4) if v is not None else None
 
 
 def _build_token_map(sketch):
@@ -62,15 +65,16 @@ def _build_token_map(sketch):
     return tok2id
 
 
-def _line_geo(ln):
+def _line_geo(ln, f):
     s = safe(lambda: ln.startSketchPoint.geometry)
     e = safe(lambda: ln.endSketchPoint.geometry)
-    return {"start": {"x": _round(s.x), "y": _round(s.y)} if s else None,
-    "end": {"x": _round(e.x), "y": _round(e.y)} if e else None}
+    return {"start": {"x": _round(s.x, f), "y": _round(s.y, f)} if s else None,
+    "end": {"x": _round(e.x, f), "y": _round(e.y, f)} if e else None}
 
 
-def _entities(sketch):
-    """List every entity with id, type, isConstruction, and key geometry."""
+def _entities(sketch, f):
+    """List every entity with id, type, isConstruction, and key geometry, in display units (f = cm ->
+    display-unit factor)."""
     out = []
     curves = safe(lambda: sketch.sketchCurves)
     construction = 0
@@ -81,7 +85,7 @@ def _entities(sketch):
         con = bool(safe(lambda ln=ln: ln.isConstruction, False))
         construction += 1 if con else 0
         rec = {"id": f"line:{i}", "type": "line", "construction": con}
-        rec.update(_line_geo(ln))
+        rec.update(_line_geo(ln, f))
         out.append(rec)
 
     arcs = safe(lambda: curves.sketchArcs)
@@ -91,8 +95,8 @@ def _entities(sketch):
         construction += 1 if con else 0
         c = safe(lambda: a.centerSketchPoint.geometry)
         out.append({"id": f"arc:{i}", "type": "arc", "construction": con,
-        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-        "radius": _round(safe(lambda: a.radius))})
+        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "radius": _round(safe(lambda: a.radius), f)})
 
     circles = safe(lambda: curves.sketchCircles)
     for i in range(safe(lambda: circles.count, 0) if circles else 0):
@@ -101,8 +105,8 @@ def _entities(sketch):
         construction += 1 if con else 0
         c = safe(lambda: cc.centerSketchPoint.geometry)
         out.append({"id": f"circle:{i}", "type": "circle", "construction": con,
-        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-        "radius": _round(safe(lambda: cc.radius))})
+        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "radius": _round(safe(lambda: cc.radius), f)})
 
     ellipses = safe(lambda: curves.sketchEllipses)
     for i in range(safe(lambda: ellipses.count, 0) if ellipses else 0):
@@ -111,16 +115,16 @@ def _entities(sketch):
         construction += 1 if con else 0
         c = safe(lambda: el.centerSketchPoint.geometry)
         out.append({"id": f"ellipse:{i}", "type": "ellipse", "construction": con,
-        "center": {"x": _round(c.x), "y": _round(c.y)} if c else None,
-        "major_radius": _round(safe(lambda: el.majorAxisRadius)),
-        "minor_radius": _round(safe(lambda: el.minorAxisRadius))})
+        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "major_radius": _round(safe(lambda: el.majorAxisRadius), f),
+        "minor_radius": _round(safe(lambda: el.minorAxisRadius), f)})
 
     pts = safe(lambda: sketch.sketchPoints)
     origin = safe(lambda: sketch.originPoint)
     for i in range(safe(lambda: pts.count, 0) if pts else 0):
         g = safe(lambda i=i: pts.item(i).geometry)
         rec = {"id": f"point:{i}", "type": "point", "construction": False,
-        "position": {"x": _round(g.x), "y": _round(g.y)} if g else None}
+        "position": {"x": _round(g.x, f), "y": _round(g.y, f)} if g else None}
         # the sketch ORIGIN is a real, addressable point entity - flag it so an agent anchoring a
         # constraint to the origin does not have to infer which (0,0) point it is. Proxy equality
         # (not `is`) is the sanctioned entity comparison.
@@ -171,7 +175,7 @@ def _vector_items(ent):
     return None
 
 
-def _profiles(sketch):
+def _profiles(sketch, f):
     """Per-profile records so an agent can SEE the closed regions and grab a specific one's HANDLE.
 
     A sketch yields one Profile per closed region; a sketch drawn ON A FACE yields the drawn region
@@ -180,7 +184,11 @@ def _profiles(sketch):
     composite entityToken (the same self-healing form find_geometry mints), validated durable across
     recompute / sketch-edit / boolean-cut / timeline-rollback (live probe), so it's a real ProfileRef
     you can pass to model_extrude / model_revolve / model_loft. Sorted largest-area first (the outer
-    boundary is usually [0]); 'index' is the position in sketch.profiles for the legacy selector."""
+    boundary is usually [0]); 'index' is the position in sketch.profiles for the legacy selector.
+
+    f = cm -> display-unit factor for the reported 'area'/'centroid' (area scales f^2). The handle's
+    embedded locator keeps the RAW cm area/centroid (make_handle's contract) so it re-resolves the
+    same live profile regardless of 'units' - only the DISPLAYED fields scale."""
     profs = safe(lambda: sketch.profiles)
     n = safe(lambda: profs.count, 0) if profs else 0
     out = []
@@ -198,17 +206,19 @@ def _profiles(sketch):
         # profile handle's real resolution path - and area is what tells same-centroid profiles
         # apart (an annulus band and its full disk share a centroid). A ':' or ',' in the sketch
         # name would garble the locator parse, so such a name is omitted (area+centroid still pin
-        # the profile design-wide).
+        # the profile design-wide). Uses the RAW area (not display-scaled) - the handle must stay
+        # stable no matter what 'units' this call was made with.
         safe_name = sk_name if (":" not in sk_name and "," not in sk_name) else ""
         kind = f"profile[{safe_name}~{area:.4f}]" if area is not None else "profile"
         out.append({
             "index": i,
-            "area": _round(area),
-            "centroid": [_round(c.x), _round(c.y), _round(c.z)] if c else None,
+            "area": _round(area, f * f),
+            "centroid": [_round(c.x, f), _round(c.y, f), _round(c.z, f)] if c else None,
             "loop_count": loops,
             "handle": _inputs.make_handle(p, kind, pos) if pos else safe(lambda: p.entityToken),
         })
-    # largest first - the outer/main region is the common target; index preserves API order.
+    # largest first - the outer/main region is the common target; index preserves API order. A
+    # positive scale factor preserves order, so sorting on the scaled 'area' still agrees.
     out.sort(key=lambda r: (r["area"] is None, -(r["area"] or 0)))
     return out
 
@@ -216,15 +226,18 @@ def _profiles(sketch):
 _XRAY_CAP = 200   # a dense sketch can carry hundreds of entities/constraints/dimensions; bound each
 
 
-def _entity_xray(sketch, max_results=_XRAY_CAP):
+def _entity_xray(sketch, f, max_results=_XRAY_CAP):
     """The HEAVY layer: every entity / constraint / dimension as its own record. Built ONLY when the
     caller asks (include_entities=true) - on a dense sketch this is dozens of records and would flood
     the agent's window if returned by default. Each of entities/constraints/dimensions is independently
     capped at max_results (default _XRAY_CAP). Returns (entities, constraints, dimensions,
     construction_count, driving_dim_count, truncated) - construction_count/driving_dim_count are
-    computed over the FULL (uncapped) walk, so they stay honest even when the arrays are capped."""
+    computed over the FULL (uncapped) walk, so they stay honest even when the arrays are capped.
+
+    f = cm -> display-unit factor, applied to every LENGTH value (entity geometry, a distance/radius/
+    diameter dimension's 'value')."""
     tok2id = _build_token_map(sketch)
-    entities, construction_count = _entities(sketch)
+    entities, construction_count = _entities(sketch, f)
 
     constraints = []
     gc = safe(lambda: sketch.geometricConstraints)
@@ -236,9 +249,14 @@ def _entity_xray(sketch, max_results=_XRAY_CAP):
     for i in range(safe(lambda: sd.count, 0) if sd else 0):
         d = sd.item(i)
         par = safe(lambda d=d: d.parameter)
+        raw_value = safe(lambda: par.value) if par else None
+        # An ANGULAR dimension's value is radians, not a length - _common's length factor does not
+        # apply (scaling it would mislabel an angle as if it were a display-unit length), so it
+        # passes through unscaled (f=1.0).
+        is_angle = type(d).__name__ == "SketchAngularDimension"
         dimensions.append({
             "name": safe(lambda: par.name) if par else None,
-            "value": _round(safe(lambda: par.value)) if par else None,
+            "value": _round(raw_value, 1.0 if is_angle else f),
             "expression": safe(lambda: par.expression) if par else None,
             # driving = constrains geometry; a driven/reference dim just MEASURES (doesn't lock).
             "driving": bool(safe(lambda d=d: d.isDriving, True)),
@@ -255,9 +273,14 @@ def _entity_xray(sketch, max_results=_XRAY_CAP):
     return (entities_out, constraints_out, dimensions_out, construction_count, driving_dims, truncated)
 
 
-def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
+def handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm") -> dict:
     """Read one sketch: light overview by default, the full entity/constraint/dimension X-ray with
-    include_entities=true."""
+    include_entities=true. Lengths/areas are reported in 'units' (mm default; area = units^2)."""
+    unit = (units or "mm").strip().lower()
+    f = _common.CM_TO_UNIT.get(unit)
+    if f is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
+
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -295,20 +318,21 @@ def handler(sketch_name: str = "", include_entities: bool = False) -> dict:
         "constraint_count": constraint_count,
         "dimension_count": dim_count,
         "profile_count": safe(lambda: sketch.profiles.count, 0),
+        "units": unit,
         # The actionable layer: pass a profile's 'handle' as a ProfileRef to extrude/revolve/loft
         # instead of guessing a profile_index.
-        "profiles": _profiles(sketch),
+        "profiles": _profiles(sketch, f),
     }
 
     if not include_entities:
-        out["note"] = ("Overview only. 'profiles[].handle' -> ProfileRef for extrude/revolve/loft. For "
-                       "the full entity/constraint/dimension X-ray (to edit the sketch), call again "
-                       "with include_entities=true.")
+        out["note"] = ("Overview only, lengths in 'units' (area=units^2). 'profiles[].handle' -> "
+                       "ProfileRef for extrude/revolve/loft. For the full entity/constraint/dimension "
+                       "X-ray, call again with include_entities=true.")
         return ok(out)
 
-    entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch)
-    note = ("Full X-ray. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain / extrude "
-                 "refs. The point flagged origin:true is the sketch ORIGIN (anchor origin-pinned "
+    entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch, f)
+    note = ("Full X-ray, lengths in 'units'. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
+                 "/ extrude refs. The point flagged origin:true is the sketch ORIGIN (anchor origin-pinned "
                  "constraints to it). is_fully_constrained=false means free DOF remain; a dimension "
                  "driving=true locks geometry, driving=false only measures.")
     if truncated:

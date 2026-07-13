@@ -42,18 +42,20 @@ class TestSketchGetRouting:
 
         class FakeDetail:
             @staticmethod
-            def handler(sketch_name="", include_entities=False):
+            def handler(sketch_name="", include_entities=False, units="mm"):
                 seen["name"] = sketch_name
                 seen["include_entities"] = include_entities
+                seen["units"] = units
                 return {"isError": False, "content": [{"type": "text", "text": "{}"}]}
 
         # the handler imports `from . import _sketch_detail` lazily; install a stub module
         import sys
         monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail", FakeDetail)
 
-        res = sketches.sketch_get_handler(sketch_name="Emblem", include_entities=True)
+        res = sketches.sketch_get_handler(sketch_name="Emblem", include_entities=True, units="in")
         assert seen.get("name") == "Emblem"     # routed to the detail engine with the name
         assert seen.get("include_entities") is True   # the zoom flag is threaded through
+        assert seen.get("units") == "in"        # the units param is threaded through too
         assert res["isError"] is False
 
     def test_whitespace_name_treated_as_no_name(self, monkeypatch):

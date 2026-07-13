@@ -250,11 +250,12 @@ class TestEntities:
         assert out["construction_count"] == 1
 
     def test_circle_geometry(self):
+        # FakeCircle raw geometry is in cm (5, 5, r=3); default units=mm scales x10.
         _install(_rich_sketch())
         out = _payload(sd.handler(sketch_name="S4", include_entities=True))
         circ = next(e for e in out["entities"] if e["id"] == "circle:0")
         assert circ["type"] == "circle"
-        assert circ["radius"] == 3 and circ["center"] == {"x": 5, "y": 5}
+        assert circ["radius"] == 30 and circ["center"] == {"x": 50, "y": 50}
 
     def test_counts_summary(self):
         _install(_rich_sketch())
@@ -344,11 +345,12 @@ class TestEllipseAndPolygon:
         return FakeSketch("E", lines=[l0, l1, l2], ellipses=[el], constraints=cons)
 
     def test_ellipse_enumerated(self):
+        # FakeEllipse raw major/minor are cm (5, 2); default units=mm scales x10.
         _install(self._sketch())
         out = _payload(sd.handler(sketch_name="E", include_entities=True))
         el = next(e for e in out["entities"] if e["id"] == "ellipse:0")
         assert el["type"] == "ellipse"
-        assert el["major_radius"] == 5 and el["minor_radius"] == 2
+        assert el["major_radius"] == 50 and el["minor_radius"] == 20
         assert out["counts"]["ellipses"] == 1
 
     def test_polygon_lists_all_its_lines(self):
@@ -377,22 +379,24 @@ class FakeArc:
 
 class TestArcAndPoint:
     def test_arc_center_and_radius(self):
+        # FakeArc raw geometry is in cm (2, 3, r=7); default units=mm scales x10.
         a = FakeArc("ta", 2, 3, 7)
         s = FakeSketch("A", arcs=[a])
         _install(s)
         out = _payload(sd.handler(sketch_name="A", include_entities=True))
         arc = next(e for e in out["entities"] if e["id"] == "arc:0")
         assert arc["type"] == "arc"
-        assert arc["center"] == {"x": 2, "y": 3} and arc["radius"] == 7
+        assert arc["center"] == {"x": 20, "y": 30} and arc["radius"] == 70
         assert out["counts"]["arcs"] == 1
 
     def test_point_position(self):
+        # FakeSketchPoint raw geometry is in cm (4, 5); default units=mm scales x10.
         p = FakeSketchPoint("tp", 4, 5)
         s = FakeSketch("P", points=[p])
         _install(s)
         out = _payload(sd.handler(sketch_name="P", include_entities=True))
         pt = next(e for e in out["entities"] if e["id"] == "point:0")
-        assert pt["position"] == {"x": 4, "y": 5}
+        assert pt["position"] == {"x": 40, "y": 50}
         assert pt["construction"] is False
 
     def test_origin_point_is_flagged(self):
@@ -522,9 +526,12 @@ class TestProfiles:
         # The locator is '|@profile[<sketch>~<area>]:x,y,z' - findEntityByToken resolves nothing for
         # a sub-component sketch profile's token, so the sketch scopes the re-find and the area
         # tells same-centroid profiles apart. A bare '@profile:' locator cannot re-resolve either.
+        # profiles are sorted largest-first (test_sorted_largest_area_first), so [0] is the ring -
+        # a magnitude threshold like 'area > 1' would stop being selective once 'area' is display-
+        # unit-scaled (a small profile's mm^2 figure can exceed a raw-cm^2 threshold too).
         _install(_face_sketch())
         out = _payload(sd.handler(sketch_name="OnFace"))
-        ring = next(p for p in out["profiles"] if p["area"] > 1)
+        ring = out["profiles"][0]
         assert "tok_ring" in ring["handle"]
         assert "|@profile[OnFace~" in ring["handle"]
 
@@ -603,3 +610,91 @@ class TestXrayCaps:
         assert out["truncated"] is True
         assert len(out["dimensions"]) == sd._XRAY_CAP
         assert out["dimension_count"] == sd._XRAY_CAP + 5
+
+
+# ── unit scaling: geometry/areas/dimension values report in DISPLAY units, never raw cm ─────────
+#
+# Every fake's geometry is set up in cm (the API's own unit); each assertion is the SCALED
+# display-unit value, so sketch_get's payload never carries a bare, unlabeled internal-cm number.
+
+class TestUnitsScaling:
+    def test_default_mm_scales_positions_10x(self):
+        # a fake point at internal cm (4, 5) reads (40, 50) under the mm default - _common.CM_TO_UNIT.
+        p = FakeSketchPoint("tp", 4, 5)
+        _install(FakeSketch("P", points=[p]))
+        out = _payload(sd.handler(sketch_name="P", include_entities=True))
+        pt = next(e for e in out["entities"] if e["id"] == "point:0")
+        assert pt["position"] == {"x": 40, "y": 50}
+
+    def test_units_field_named_in_overview(self):
+        _install(_face_sketch())
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert out["units"] == "mm"
+
+    def test_units_field_named_in_xray(self):
+        _install(_face_sketch())
+        out = _payload(sd.handler(sketch_name="OnFace", include_entities=True))
+        assert out["units"] == "mm"
+
+    def test_cm_units_pass_through_unscaled(self):
+        p = FakeSketchPoint("tp", 4, 5)
+        _install(FakeSketch("P", points=[p]))
+        out = _payload(sd.handler(sketch_name="P", include_entities=True, units="cm"))
+        pt = next(e for e in out["entities"] if e["id"] == "point:0")
+        assert pt["position"] == {"x": 4, "y": 5}
+        assert out["units"] == "cm"
+
+    def test_inch_units_scale_by_cm_to_unit_factor(self):
+        a = FakeArc("ta", 0, 0, 2.54)          # 2.54 cm radius = exactly 1 inch
+        _install(FakeSketch("A", arcs=[a]))
+        out = _payload(sd.handler(sketch_name="A", include_entities=True, units="in"))
+        arc = next(e for e in out["entities"] if e["id"] == "arc:0")
+        assert arc["radius"] == 1.0
+
+    def test_area_scales_squared(self):
+        # raw cm^2 area 11.71 -> mm^2 is x100 (the LENGTH factor squared), not x10.
+        _install(_face_sketch())
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        ring = out["profiles"][0]           # sorted largest-first (test_sorted_largest_area_first)
+        assert ring["area"] == 1171.0
+
+    def test_profile_centroid_scales_linearly(self):
+        # centroid is a length (scales by f), NOT an area (f^2) - a distinct factor from 'area' above.
+        _install(FakeSketch("C", profiles=[FakeProfile("t", area=1.0, cx=2.0, cy=3.0)]))
+        out = _payload(sd.handler(sketch_name="C"))
+        assert out["profiles"][0]["centroid"] == [20.0, 30.0, 0.0]
+
+    def test_unknown_units_rejected(self):
+        _install(_face_sketch())
+        res = sd.handler(sketch_name="OnFace", units="banana")
+        assert res["isError"] is True
+        assert "banana" in res["message"]
+
+    def test_handle_locator_area_stays_raw_cm_regardless_of_units(self):
+        # the handle is a stable re-find locator (CLAUDE.md "Handles/ids unchanged") - it must embed
+        # the SAME raw-cm area no matter what display 'units' this particular call used, so a caller
+        # who reads in 'in' and later resolves the handle from an 'mm' context still finds it.
+        _install(_face_sketch())
+        mm = _payload(sd.handler(sketch_name="OnFace", units="mm"))
+        inch = _payload(sd.handler(sketch_name="OnFace", units="in"))
+        assert mm["profiles"][0]["handle"] == inch["profiles"][0]["handle"]
+
+    def test_dimension_value_scaled_to_display_units(self):
+        # 1.4 cm raw (matching a '14 mm' expression) reads back as value 14.0 under mm default.
+        s = FakeSketch("D", dimensions=[FakeDim("d1", 1.4, "14 mm")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D", include_entities=True))
+        assert out["dimensions"][0]["value"] == 14.0
+
+    def test_angular_dimension_value_not_length_scaled(self):
+        # an angular dimension's value is RADIANS, not a length - the mm factor must not touch it,
+        # or a 90-degree angle would misreport as if it were a 15.7 mm length.
+        class SketchAngularDimension:
+            def __init__(self, value):
+                self.parameter = type("Par", (), {"name": "ang", "value": value,
+                                                   "expression": "90 deg"})()
+                self.isDriving = True
+        s = FakeSketch("D", dimensions=[SketchAngularDimension(1.5708)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D", include_entities=True))
+        assert out["dimensions"][0]["value"] == 1.5708

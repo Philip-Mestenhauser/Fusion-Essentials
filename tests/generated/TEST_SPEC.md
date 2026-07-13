@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 155  |  **Behaviors pinned:** 2706
+**Tools with a test file:** 155  |  **Behaviors pinned:** 2717
 
 ## `_cam_common`
 
@@ -171,6 +171,18 @@ after changing tests._
 - entities at cap truncates and flags
 - constraints at cap truncates and flags
 - dimensions at cap truncates and flags
+**UnitsScaling**
+- default mm scales positions 10x
+- units field named in overview
+- units field named in xray
+- cm units pass through unscaled
+- inch units scale by cm to unit factor
+- area scales squared
+- profile centroid scales linearly
+- unknown units rejected
+- handle locator area stays raw cm regardless of units
+- dimension value scaled to display units
+- angular dimension value not length scaled
 
 ## `_view_common`
 

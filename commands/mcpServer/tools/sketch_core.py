@@ -106,13 +106,13 @@ def get_sketches_handler() -> dict:
     return ok({"sketch_count": len(sketches), "sketches": sketches})
 
 
-def sketch_get_handler(sketch_name: str = "", include_entities: bool = False) -> dict:
+def sketch_get_handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm") -> dict:
     """No 'sketch_name': a summary list of every sketch. With one: that sketch's overview (or the
-    full X-ray with include_entities=true) via the _sketch_detail engine."""
+    full X-ray with include_entities=true) via the _sketch_detail engine, in 'units' (mm default)."""
     if (sketch_name or "").strip():
         # delegate to the detail engine (imported lazily; no circular dependency)
         from . import _sketch_detail as sketch_detail
-        return sketch_detail.handler(sketch_name=sketch_name, include_entities=include_entities)
+        return sketch_detail.handler(sketch_name=sketch_name, include_entities=include_entities, units=units)
     return get_sketches_handler()
 
 
@@ -527,12 +527,12 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
 
 _GET_DESC = (
     "Read sketches by zoom level. WITHOUT 'sketch_name': a summary list of every sketch (name, plane, "
-    "entity + profile counts, visibility) to find names. WITH 'sketch_name': that sketch's OVERVIEW - "
-    "entity counts, is_fully_constrained, and a 'profiles' list (each closed region's area, centroid, "
-    "loop_count, and a 'handle' to pass as a ProfileRef to model_extrude / model_revolve / "
-    "model_loft - so you pick a region by area/position, not a guessed index). Add include_entities="
-    "true for the full per-entity/constraint/dimension X-ray (heavier - only when editing the sketch). "
-    "Entity ids match those used by sketch_constrain."
+    "entity + profile counts, visibility). WITH 'sketch_name': that sketch's OVERVIEW, in 'units' - "
+    "entity counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
+    "'handle' to pass as a ProfileRef to model_extrude / model_revolve / model_loft - pick a region "
+    "by area/position, not a guessed index). Add include_entities=true for the full per-entity/"
+    "constraint/dimension X-ray (heavier - only when editing the sketch). Entity ids match "
+    "sketch_constrain's."
 )
 sketch_get_tool = (
     Tool.create_simple(name="sketch_get", description=_GET_DESC)
@@ -540,6 +540,7 @@ sketch_get_tool = (
             "description": "Omit for a summary list of all sketches; give a name for that sketch's overview (counts + profiles)."})
     .add_input_property("include_entities", {"type": "boolean",
             "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier; for editing geometry)."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
 sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", handler=sketch_get_handler,
