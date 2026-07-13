@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 155  |  **Behaviors pinned:** 2717
+**Tools with a test file:** 155  |  **Behaviors pinned:** 2734
 
 ## `_cam_common`
 
@@ -1474,6 +1474,15 @@ after changing tests._
 - cap truncates and blocks all current
 - unreadable reference blocks all current
 - max depth bounds walk and flags partial
+- occurrence row carries xref kind
+**XrefTreeDerive**
+- derive row present with kind field
+- stale derive flips all current false
+- empty derive features no crash
+- component without features attribute no crash
+- unreadable derive reference blocks all current
+- both kinds present and rolled up together
+- cap is shared across both kinds
 **UsedIn**
 - drawing reference appears and is typed
 - mixed parents rolled up by type
@@ -1672,6 +1681,16 @@ after changing tests._
 - false return from get latest reported as error
 - get latest raises propagates
 - name filter updates only matching
+**DeriveReferences**
+- derive refresh uses the version setter not get latest version
+- stale derive is enumerated and refreshed
+- setter failure is reported honestly not swallowed
+- up to date derive is skipped
+- empty derive features no crash
+- missing products attribute no crash
+- both kinds refreshed together and counted
+- name filter matches a derive by its source name
+- zero document references but derive present still refreshes
 
 ## `docstring_restatement`
 

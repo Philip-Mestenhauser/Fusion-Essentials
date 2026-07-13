@@ -590,8 +590,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No external reference named '
 - '. References in this document:
 - Some references failed to update:
-- References refreshed to their latest version. If a newly-added feature (e.g. a joint origin) was missing because the reference was stale, it is now available.
-- This document has no external references.
+- References refreshed to their latest version. If a newly-added feature (e.g. a joint origin) was missing because the reference was stale, it is now available. Covers occurrence xrefs and derive lin...
+- This document has no external references (occurrence xrefs or derive links).
 
 ### `drawing_create`
 - No active design to draw. Open or create a design first (see doc_new), then retry.

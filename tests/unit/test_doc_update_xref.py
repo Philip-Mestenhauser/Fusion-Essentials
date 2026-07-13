@@ -17,15 +17,40 @@ def _payload(result):
 
 
 class FakeRef:
+    """Models BOTH refresh paths doc_update_xref uses: getLatestVersion() (occurrence xrefs) and the
+    'version' property SETTER (derive links - getLatestVersion() raises live for those). Assigning
+    .version recomputes isOutOfDate against dataFile.latestVersionNumber, mirroring the real API's
+    documented "setting this property will cause ... to update" effect."""
     def __init__(self, name, is_out_of_date=True, version=1, latest_returns=True,
-                 latest_raises=None, stays_stale=False):
+                 latest_raises=None, stays_stale=False, latest_version=None, setter_raises=None):
         self._name = name
-        self.isOutOfDate = is_out_of_date
-        self.version = version
+        self._is_out_of_date = is_out_of_date
+        self._version = version
         self._latest_returns = latest_returns
         self._latest_raises = latest_raises
         self._stays_stale = stays_stale       # the platform lie: True returned, ref still stale
-        self.dataFile = type("DF", (), {"name": name})()
+        self._setter_raises = setter_raises   # confirmed live: the setter can ALSO refuse a derive
+        lv = version + 1 if latest_version is None else latest_version
+        self.dataFile = type("DF", (), {"name": name, "latestVersionNumber": lv})()
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, v):
+        if self._setter_raises:
+            raise RuntimeError(self._setter_raises)
+        self._version = v
+        self._is_out_of_date = (v != self.dataFile.latestVersionNumber)
+
+    @property
+    def isOutOfDate(self):
+        return self._is_out_of_date
+
+    @isOutOfDate.setter
+    def isOutOfDate(self, v):
+        self._is_out_of_date = v
 
     def getLatestVersion(self):
         if self._latest_raises:
@@ -48,13 +73,60 @@ class FakeRefs:
         return self._refs[i]
 
 
+class FakeDeriveFeatColl:
+    def __init__(self, items):
+        self._i = list(items)
+
+    @property
+    def count(self):
+        return len(self._i)
+
+    def item(self, i):
+        return self._i[i]
+
+
+class FakeDeriveFeat:
+    """A DeriveFeature: .documentReference is any FakeRef-shaped object (same dataFile/isOutOfDate/
+    version/getLatestVersion surface as an occurrence's DocumentReference)."""
+    def __init__(self, name, dref=None):
+        self.name = name
+        self.documentReference = dref
+
+
+class FakeFeatures:
+    def __init__(self, derive_feats):
+        self.deriveFeatures = FakeDeriveFeatColl(derive_feats)
+
+
+class FakeComp:
+    def __init__(self, derive_feats=None):
+        self.features = FakeFeatures(derive_feats or [])
+
+
+class FakeDesign:
+    def __init__(self, root_comp):
+        self.rootComponent = root_comp
+
+
+class FakeProducts:
+    def __init__(self, design):
+        self._design = design
+
+    def itemByProductType(self, kind):
+        return self._design if kind == 'DesignProductType' else None
+
+
 class FakeDoc:
-    def __init__(self, refs):
+    def __init__(self, refs, design=None):
         self.documentReferences = FakeRefs(refs)
+        self.products = FakeProducts(design)
 
 
-def _install(refs=None):
-    doc = FakeDoc(refs or [])
+def _install(refs=None, derive_feats=None):
+    """derive_feats (if given) populate the ROOT component's features.deriveFeatures - the design-level
+    walk doc_update_xref now runs ALONGSIDE Document.documentReferences."""
+    design = FakeDesign(FakeComp(derive_feats)) if derive_feats is not None else None
+    doc = FakeDoc(refs or [], design=design)
     xr.app = type("A", (), {"activeDocument": doc})()
     return doc
 
@@ -131,3 +203,96 @@ class TestUpdateBehavior:
         out = _payload(xr.handler(name="Alpha"))
         assert out["updated_count"] == 1
         assert out["updated"][0]["name"] == "Alpha"
+
+
+# ── derive links (Document.documentReferences can miss these entirely - confirmed live) ───────────
+
+class TestDeriveReferences:
+    def test_derive_refresh_uses_the_version_setter_not_get_latest_version(self):
+        # Confirmed LIVE: calling getLatestVersion() on a DeriveFeature's documentReference raises
+        # InternalValidationError (it works fine for an occurrence's) - the derive path must advance
+        # via the 'version' property setter instead. latest_raises would blow up this test if the
+        # derive path ever called getLatestVersion() again.
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1,
+                       latest_raises="InternalValidationError: derive path must not call this")
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["version_after"] == 2
+        assert out["updated"][0]["was_out_of_date"] is True
+
+    def test_stale_derive_is_enumerated_and_refreshed(self):
+        # Document.documentReferences is EMPTY here (no occurrence xrefs) - only the derive walk
+        # (component.features.deriveFeatures) can find this reference.
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1, latest_returns=True)
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["name"] == "DeriveSrc"
+        assert out["updated"][0]["kind"] == "derive"
+
+    def test_setter_failure_is_reported_honestly_not_swallowed(self):
+        # Confirmed LIVE: the version setter can ALSO raise for a whole-design derive
+        # (InternalValidationError) - this must surface as an honest, actionable per-reference error
+        # (never a false "updated"), and must not crash the whole call with a bare stack trace.
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=1,
+                       setter_raises="2 : InternalValidationError : res")
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        res = xr.handler()
+        assert res["isError"] is True
+        assert "DeriveSrc" in res["message"]
+        assert "re-derive" in res["message"]
+        assert "InternalValidationError" in res["message"]
+
+    def test_up_to_date_derive_is_skipped(self):
+        dref = FakeRef("DeriveSrc", is_out_of_date=False)
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 0
+        assert out["skipped"][0]["name"] == "DeriveSrc"
+        assert out["skipped"][0]["kind"] == "derive"
+
+    def test_empty_derive_features_no_crash(self):
+        _install(refs=[], derive_feats=[])
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 0
+        assert "no external references" in out["note"].lower()
+
+    def test_missing_products_attribute_no_crash(self):
+        # a document exposing no .products at all (design product unresolvable) must not crash the
+        # derive walk - every step is guarded by safe().
+        class BareDoc:
+            def __init__(self, refs):
+                self.documentReferences = FakeRefs(refs)
+        xr.app = type("A", (), {"activeDocument": BareDoc([])})()
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 0
+
+    def test_both_kinds_refreshed_together_and_counted(self):
+        xref = FakeRef("PartA", is_out_of_date=True, latest_returns=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, latest_returns=True)
+        _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler())
+        assert out["updated_count"] == 2
+        assert out["total_references"] == 2
+        kinds = {row["name"]: row["kind"] for row in out["updated"]}
+        assert kinds == {"PartA": "xref", "DeriveSrc": "derive"}
+
+    def test_name_filter_matches_a_derive_by_its_source_name(self):
+        xref = FakeRef("PartA", is_out_of_date=True)
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, latest_returns=True)
+        _install(refs=[xref], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler(name="DeriveSrc"))
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["name"] == "DeriveSrc"
+
+    def test_zero_document_references_but_derive_present_still_refreshes(self):
+        # THE live-confirmed gap this fix closes: on a cold reopen, Document.documentReferences can
+        # read count=0 (the derive's link isn't resolved in-session) even though a genuinely stale
+        # derive exists - the derive walk must find it regardless of documentReferences' state.
+        dref = FakeRef("DeriveSrc", is_out_of_date=True, version=2, latest_returns=True)
+        _install(refs=[], derive_feats=[FakeDeriveFeat("Derive1", dref)])
+        out = _payload(xr.handler())
+        assert out["total_references"] == 1
+        assert out["updated_count"] == 1
+        assert out["updated"][0]["version_after"] == 3

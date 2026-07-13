@@ -5,16 +5,14 @@ legitimately needs more gets a _DESCRIPTION_OVERRIDES entry with a one-line audi
 (the same shrink-only convention as the other lint tables) - the bare globals are never bumped
 to absorb silent growth. A description that outgrows its ceiling should lose prose to a typed
 input or a result note (see tools/CLAUDE.md "What actually crosses the wire"). Measured baseline
-when set: 137 tools, 216,713 bytes total, longest description 1,295 chars. Sizes are measured on
+when set: 139 tools, 222,193 bytes total, longest description 1,295 chars. Sizes are measured on
 the canonical compact JSON encoding of the tools/list result (the token-cost driver), not the
 indented HTTP body.
 
-The total headroom is deliberately SNUG (~1.5%): the ~8% slack the earlier baseline carried is
-exactly where per-description drift hid - a few tools each growing a little never tripped the
-total. A NEW tool that pushes the total over must be paid for by slimming existing prose in the
-same change, not by bumping the global (that is the ratchet working as intended). The per-tool
-count is the ratchet's granularity: if you add a tool, the total moving up should be roughly its
-own weight.
+The total headroom is deliberately SNUG: a NEW tool that pushes the total over must be paid for by
+slimming existing prose in the same change, not by bumping the global (that is the ratchet working
+as intended). The per-tool count is the ratchet's granularity: if you add a tool, the total moving
+up should be roughly its own weight.
 """
 
 import json
@@ -23,18 +21,9 @@ import pytest
 
 from conftest import load_mcp_server, register_all_tools
 
-# Snug watermark: current real total is 216,713; this leaves room for ~one average tool before a
-# batch must slim to stay under. Ratchet DOWN as prose moves to errors/notes; a new tool that
-# needs the room slims something else in the same change.
-#
-# doc_insert_derive is the escape-valve exception: the other 138 tools measure 219,926 bytes (74
-# bytes of headroom), and every top offender surveyed for a slim (drawing_create, joint_create/
-# joint_create_origin/joint_edit, model_measure_relation) is densely load-bearing - each property
-# teaches a real, non-machine-checkable API constraint rather than restating fat - so slimming them
-# would cost teaching, not pay down bloat. This ratchet is raised by EXACTLY doc_insert_derive's own
-# measured wire weight (2,514 bytes) rather than slimming unrelated tools to absorb it:
-# 220_000 + 2_514 = 222_514.
-TOTAL_PAYLOAD_BUDGET_BYTES = 222_514
+# Snug watermark: current real total is 222,193. Ratchet DOWN as prose moves to errors/notes or a
+# description tightens; a new tool that needs the room slims something else in the same change.
+TOTAL_PAYLOAD_BUDGET_BYTES = 222_250
 PER_TOOL_BUDGET_BYTES = 4_500
 
 # General per-description ceiling; a named override carries its own audited reason and is

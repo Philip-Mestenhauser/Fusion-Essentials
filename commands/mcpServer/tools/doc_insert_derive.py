@@ -239,17 +239,13 @@ def handler(document_id: str = "", into_component: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Insert a DERIVE of another SAVED document's design into a component of the active document - a "
-    "one-way linked COPY: it updates FROM the source, but edits made here (a fillet, a patch, an "
-    "offset) NEVER travel back - the base for machining-prep/DFM modeling. For a linked INSTANCE of "
-    "the source's live geometry instead, use doc_insert_occurrence. 'document_id' is the source's "
-    "lineage URN (or web URL). 'into_component' is the occurrence whose component receives the "
-    "derive (default: root). include_parameters/include_favorite_parameters (default true) import "
-    "the source's component/favorite parameters (parameters_imported is honest - can land 0). "
-    "place_at_origin (default true) places the derived geometry at the destination origin. v1 "
-    "derives the source's WHOLE design (no partial-entity selection yet). Refresh a stale link with "
-    "doc_update_xref (doc_get's xref_tree does not cover a derive). Requires a PARAMETRIC "
-    "destination design. WRITES; verifies the feature computed healthy and something landed.\n"
+    "Insert a DERIVE of another document's design into a component of the active document - a "
+    "one-way linked copy: it updates FROM the source, and modeling done here on top of the derived "
+    "geometry never travels back (the source stays authoritative). For a linked INSTANCE that stays "
+    "the source's geometry, use doc_insert_occurrence instead. Requires a parametric design. "
+    "Freshness shows in doc_get(include=['xref_tree']) (kind='derive' rows). doc_update_xref "
+    "attempts a refresh; on refusal (reported, not silent), delete and re-derive "
+    "(design_delete_feature, doc_insert_derive).\n"
     + _outputs.produces_block(RETURNS)
 )
 

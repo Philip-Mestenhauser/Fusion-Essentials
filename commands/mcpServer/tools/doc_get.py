@@ -15,7 +15,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, terse, design
+from ._common import ok, error, safe, terse, design, all_components
 from . import _outputs
 
 app = adsk.core.Application.get()
@@ -182,20 +182,22 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     }
 
 
-def _xref_row(occ, depth, counters):
-    """One referenced-occurrence freshness record. Increments counters['stale']/['unreadable'] so the
-    rollup reflects the ACTUAL walk - a ref whose freshness can't be read is unreadable, never assumed current."""
-    path = safe(lambda: occ.fullPathName)
-    dref = safe(lambda: occ.documentReference)
+def _dref_freshness(dref, counters):
+    """A DocumentReference -> the freshness fields shared by EVERY xref_tree row, whatever kind of
+    link produced it (an occurrence's documentReference, or a DeriveFeature's): readable/
+    source_document/current_version/latest_version/out_of_date. Increments counters['stale']/
+    ['unreadable'] so the rollup reflects the ACTUAL walk - a ref whose freshness can't be read is
+    unreadable, never assumed current. The one leaf op both xref-tree walks (occurrences, derive
+    features) reduce to; each walk stays separate (house rule: unify the leaf, not the walk)."""
     if dref is None:
         counters["unreadable"] += 1
-        return {"path": path, "depth": depth, "readable": False,
-                "warning": ("referenced occurrence but its documentReference could not be read "
-                            "(permission/unresolved); freshness unknown.")}
+        return {"readable": False,
+                "warning": ("documentReference could not be read (permission/unresolved); freshness "
+                            "unknown.")}
     df = safe(lambda: dref.dataFile)
     source = safe(lambda: df.name)
     ood = safe(lambda: dref.isOutOfDate, None) # None only on read failure; a real False stays False
-    row = {"path": path, "depth": depth, "readable": True,
+    row = {"readable": True,
            "source_document": source,
            "current_version": safe(lambda: dref.version),
            "latest_version": safe(lambda: df.latestVersionNumber)}
@@ -210,13 +212,57 @@ def _xref_row(occ, depth, counters):
     return row
 
 
+def _xref_row(occ, depth, counters):
+    """One referenced-OCCURRENCE freshness record (kind 'xref'): path/depth + the shared freshness
+    fields off occ.documentReference."""
+    row = {"path": safe(lambda: occ.fullPathName), "depth": depth, "kind": "xref"}
+    row.update(_dref_freshness(safe(lambda: occ.documentReference), counters))
+    return row
+
+
+def _derive_row(comp, feat, counters):
+    """One DERIVE-feature freshness record (kind 'derive'): a derive's DocumentReference lives on the
+    FEATURE (Component.features.deriveFeatures item), never on an occurrence - a derived occurrence
+    reports isReferencedComponent=false (confirmed live), so the occurrence walk above can never see
+    it. path = '<component>:<feature name>' (a derive has no assembly depth of its own)."""
+    comp_name = safe(lambda: comp.name)
+    feat_name = safe(lambda: feat.name)
+    path = f"{comp_name}:{feat_name}" if (comp_name and feat_name) else (feat_name or comp_name)
+    row = {"path": path, "kind": "derive"}
+    row.update(_dref_freshness(safe(lambda: feat.documentReference), counters))
+    return row
+
+
+def _walk_derive_rows(d, refs, cap, counters, state):
+    """Append one row per DeriveFeature across EVERY component (root + sub-components, via the shared
+    _common.all_components walk) to refs, sharing the cap/counters/truncated state with the occurrence
+    walk above - the rollup (all_current/stale_count/unreadable_count/truncated) covers BOTH kinds."""
+    for comp in all_components(d):
+        if state["truncated"]:
+            return
+        derive_feats = safe(lambda c=comp: c.features.deriveFeatures)
+        n = safe(lambda df=derive_feats: df.count, 0) if derive_feats is not None else 0
+        for i in range(n or 0):
+            if len(refs) >= cap:
+                state["truncated"] = True
+                return
+            feat = safe(lambda df=derive_feats, i=i: df.item(i))
+            if feat is None:
+                continue
+            refs.append(_derive_row(comp, feat, counters))
+
+
 def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
-    """Recursive walk of every externally-referenced occurrence (root.occurrences -> childOccurrences),
-    each ref's source doc + current-vs-latest version + out_of_date flag, with an all_current rollup.
+    """Freshness rollup over BOTH external-link kinds: referenced occurrences (root.occurrences ->
+    childOccurrences, kind 'xref') AND derive links (every component's features.deriveFeatures, kind
+    'derive' - a derive's occurrence reports isReferencedComponent=false, confirmed live, so it is
+    invisible to the occurrence walk; its DocumentReference lives on the FEATURE instead). Each ref's
+    source doc + current-vs-latest version + out_of_date flag, with an all_current rollup over both.
 
     Honesty: all_current is True ONLY on a COMPLETE walk with zero stale and zero unreadable refs. A cap
     hit (truncated), a depth cap (depth_capped), or any unreadable ref all make the walk partial, so
-    all_current cannot be claimed True on partial knowledge. Bounded by xref_max and optional max_depth."""
+    all_current cannot be claimed True on partial knowledge. Bounded by xref_max (shared across both
+    kinds) and optional max_depth (the occurrence walk only - a derive has no assembly depth)."""
     d = design()
     if not d:
         return {"available": False,
@@ -251,11 +297,13 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
             walk(safe(lambda occ=occ: occ.childOccurrences), depth + 1)
 
     walk(safe(lambda: root.occurrences), 1)
+    _walk_derive_rows(d, refs, cap, counters, state)
     complete = not (state["truncated"] or state["depth_capped"])
     all_current = complete and counters["stale"] == 0 and counters["unreadable"] == 0
-    note = ("all_current is authoritative ONLY on a complete walk; it is false whenever any ref is "
-            "stale, any ref is unreadable, or the walk was capped (truncated/depth_capped). This walks "
-            "the in-session assembly; refresh stale refs with doc_update_xref.")
+    note = ("Covers both link kinds: kind='xref' (referenced occurrences) and kind='derive' (derive "
+            "features). all_current is authoritative ONLY on a complete walk; it is false whenever any "
+            "ref is stale, any ref is unreadable, or the walk was capped (truncated/depth_capped). "
+            "This walks the in-session assembly; refresh stale refs with doc_update_xref.")
     if not complete:
         note += " Walk was partial - all_current reflects only the examined refs."
     return {
@@ -372,8 +420,9 @@ def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int =
                  "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name; "
                  "an unsaved/modified/hidden one keeps the flag. This is the SESSION; for cloud "
                  "projects/files see data_get. include=['versions'] adds the active doc's cloud version "
-                 "history (newest-first, capped); include=['xref_tree'] adds the recursive "
-                 "referenced-component freshness rollup (all_current + stale_count); "
+                 "history (newest-first, capped); include=['xref_tree'] adds the recursive freshness "
+                 "rollup for referenced components (kind='xref') AND derive links (kind='derive') "
+                 "(all_current + stale_count); "
                  "include=['used_in'] adds the reverse view - documents that USE this one (drawings "
                  "made from it, parent assemblies that insert it), with a by-type rollup.")
     if truncated:
@@ -403,8 +452,9 @@ TOOL_DESCRIPTION = (
     "assembly loads its references as real Documents). The default projection is in-memory (cheap); for "
     "the CLOUD data model (hubs/projects/files) use data_get. Opt-in cloud slices via include=[...]: "
     "'versions' = the active doc's version history (number/date/description/id, newest-first, capped); "
-    "'xref_tree' = recursive walk of every referenced component with current-vs-latest version + an "
-    "all_current/stale_count freshness rollup; 'used_in' = the REVERSE view (where-used) - documents "
+    "'xref_tree' = recursive freshness walk of referenced components AND derive links (kind='xref'/"
+    "'derive') with current-vs-latest version + an all_current/stale_count rollup; 'used_in' = the "
+    "REVERSE view (where-used) - documents "
     "that reference THIS one (a drawing made from it, a parent assembly that inserts it), each with "
     "name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default 50) and "
     "each slice is capped too; 'truncated' flags when a cap was hit. Read-only (roll a version back with "
@@ -416,7 +466,7 @@ tool = (
     Tool.create_simple(name="doc_get", description=TOOL_DESCRIPTION)
     .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'open_documents' array returned (default 50)."})
     .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in"]},
-            "description": "Opt-in cloud slices: 'versions' (version history), 'xref_tree' (referenced-component freshness), and/or 'used_in' (where-used - documents that reference this one)."})
+            "description": "Opt-in cloud slices: 'versions' (version history), 'xref_tree' (referenced-component and derive-link freshness), and/or 'used_in' (where-used - documents that reference this one)."})
     .add_input_property("versions_max", {"type": "integer", "description": "Cap on the 'versions' slice list (default 25)."})
     .add_input_property("xref_max", {"type": "integer", "description": "Cap on the 'xref_tree' references walked/returned (default 50)."})
     .add_input_property("max_depth", {"type": "integer", "description": "Optional max assembly depth for the 'xref_tree' walk (1 = top-level refs only)."})

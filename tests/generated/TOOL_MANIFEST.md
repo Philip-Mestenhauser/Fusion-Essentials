@@ -171,7 +171,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ⚠ | `doc_close` | Close an open document, or all of them |
 | ✎ | `doc_copy` | Copy an existing cloud document (a saved DataFile, identified by its lineage 'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a dest... |
 | · | `doc_get` | Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id (URN, the 'document_id' doc_copy/doc_open use) - plus the list ... |
-| ✎ | `doc_insert_derive` | Insert a DERIVE of another SAVED document's design into a component of the active document - a one-way linked COPY: it updates FROM the source, but edits made h... |
+| ✎ | `doc_insert_derive` | Insert a DERIVE of another document's design into a component of the active document - a one-way linked copy: it updates FROM the source, and modeling done here... |
 | ✎ | `doc_insert_occurrence` | Insert a SAVED cloud document into the active design as a new component occurrence - the API equivalent of Insert into Current Design |
 | ✎ | `doc_new` | Create and open a new, empty Fusion design document; it becomes the active document |
 | ✎ | `doc_open` | Open a Fusion document by data-model id |

@@ -235,8 +235,28 @@ class _Occ:
         self.childOccurrences = _OccList(children or [])
 
 
+class _DeriveFeatColl:
+    def __init__(self, items): self._i = items
+    @property
+    def count(self): return len(self._i)
+    def item(self, i): return self._i[i]
+
+
+class _DeriveFeat:
+    def __init__(self, name, dref=None):
+        self.name = name
+        self.documentReference = dref
+
+
+class _Features:
+    def __init__(self, derive_feats): self.deriveFeatures = _DeriveFeatColl(derive_feats)
+
+
 class _Root:
-    def __init__(self, occs): self.occurrences = _OccList(occs)
+    def __init__(self, occs, name="Root", derive_feats=None):
+        self.occurrences = _OccList(occs)
+        self.name = name
+        self.features = _Features(derive_feats or [])   # empty by default - most tests don't derive
 
 
 class _Des:
@@ -296,6 +316,89 @@ class TestXrefTree:
         assert out["depth_capped"] is True
         assert out["reference_count"] == 0        # the depth-2 ref was not walked
         assert out["all_current"] is False        # a depth-capped walk is partial
+
+    def test_occurrence_row_carries_xref_kind(self, monkeypatch):
+        a = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        _use_design(monkeypatch, _Root([a]))
+        out = dg._slice_xref_tree()
+        assert out["references"][0]["kind"] == "xref"
+
+
+# ── (B2) xref_tree slice - derive links (blind spot fix) ──────────────────────
+
+class TestXrefTreeDerive:
+    def test_derive_row_present_with_kind_field(self, monkeypatch):
+        # a derive's DocumentReference lives on the FEATURE, not an occurrence - this is the row the
+        # occurrence-only walk above could never produce.
+        dref = _DRef("DeriveSrc", 1, 1, False)
+        root = _Root([], name="Root", derive_feats=[_DeriveFeat("Derive1", dref)])
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree()
+        assert out["reference_count"] == 1
+        row = out["references"][0]
+        assert row["kind"] == "derive"
+        assert row["path"] == "Root:Derive1"
+        assert row["source_document"] == "DeriveSrc"
+        assert row["out_of_date"] is False
+        assert out["all_current"] is True
+
+    def test_stale_derive_flips_all_current_false(self, monkeypatch):
+        dref = _DRef("DeriveSrc", 1, 2, True)   # pinned at v1, source latest v2, out of date
+        root = _Root([], derive_feats=[_DeriveFeat("Derive1", dref)])
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree()
+        assert out["stale_count"] == 1
+        assert out["all_current"] is False
+        assert out["references"][0]["out_of_date"] is True
+
+    def test_empty_derive_features_no_crash(self, monkeypatch):
+        root = _Root([], derive_feats=[])
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree()
+        assert out["reference_count"] == 0
+        assert out["all_current"] is True
+
+    def test_component_without_features_attribute_no_crash(self, monkeypatch):
+        # a component exposing no .features at all (not just an empty deriveFeatures) must not crash
+        # the walk - every attribute access in the derive walk is guarded by safe().
+        class _BareRoot:
+            def __init__(self, occs):
+                self.occurrences = _OccList(occs)
+                self.name = "Root"
+        _use_design(monkeypatch, _BareRoot([]))
+        out = dg._slice_xref_tree()
+        assert out["reference_count"] == 0
+        assert out["all_current"] is True
+
+    def test_unreadable_derive_reference_blocks_all_current(self, monkeypatch):
+        feat = _DeriveFeat("Derive1", dref=None)   # a derive feature whose documentReference is unreadable
+        root = _Root([], derive_feats=[feat])
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree()
+        assert out["unreadable_count"] == 1
+        assert out["all_current"] is False
+        row = out["references"][0]
+        assert row["readable"] is False and "warning" in row
+
+    def test_both_kinds_present_and_rolled_up_together(self, monkeypatch):
+        occ = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        dref = _DRef("DeriveSrc", 1, 1, False)
+        root = _Root([occ], derive_feats=[_DeriveFeat("Derive1", dref)])
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree()
+        assert out["reference_count"] == 2
+        kinds = {r["kind"] for r in out["references"]}
+        assert kinds == {"xref", "derive"}
+
+    def test_cap_is_shared_across_both_kinds(self, monkeypatch):
+        occ = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
+        feats = [_DeriveFeat(f"Derive{i}", _DRef(f"D{i}", 1, 1, False)) for i in range(2)]
+        root = _Root([occ], derive_feats=feats)
+        _use_design(monkeypatch, root)
+        out = dg._slice_xref_tree(xref_max=2)
+        assert len(out["references"]) == 2         # 1 xref + 2 derive = 3 total, capped to 2
+        assert out["truncated"] is True
+        assert out["all_current"] is False          # a capped walk is partial knowledge
 
 
 # ── (C) used_in slice (where-used / reverse references) ───────────────────────
