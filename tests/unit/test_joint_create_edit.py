@@ -1,10 +1,10 @@
 """Unit tests for ``joint_create_edit.py`` pure logic.
 
-Targets: ``_find_joint_origin`` (resolution order - root JO returned as-is,
-empty name -> None, not-found -> None) and ``_apply_motion`` (dispatch by joint
-type, including the unsupported-type fallthrough). The assembly-context-proxy
-path for sub-component JOs is integration-only (needs a live occurrence graph),
-so it's deliberately left to a Fusion test.
+Targets: ``_available_joint_origins`` (the collect-names leaf over the shared _joints JO walk),
+``_resolve_input`` (handle / snap / JO-name dispatch, now routing the JO-name path through the
+JointOriginRef kind), and ``_apply_motion`` (dispatch by joint type, incl. the unsupported-type
+fallthrough). Resolve-one/qualified/ambiguity of a JO by name is the JointOriginRef kind's contract -
+tested in test_inputs.py, not here.
 """
 
 import json
@@ -15,40 +15,23 @@ from conftest import load_tool
 joint = load_tool("joint_create_edit")
 
 
-# ── _find_joint_origin: resolution ─────────────────────────────────────────
+# ── JO collection fake: count/item (the shared _joints walk) AND itemByName (scoped lookups) ─────────
 
 class _JOCollection:
+    """A JointOrigins collection exposing BOTH the walk protocol (count/item) and itemByName."""
     def __init__(self, by_name):
-        self._by_name = by_name
+        self._by_name = dict(by_name)
+        self._items = list(by_name.values())
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return self._items[i]
 
     def itemByName(self, name):
         return self._by_name.get(name)
-
-
-def _design_with_root_jos(**jos):
-    root = SimpleNamespace(jointOrigins=_JOCollection(jos))
-    return SimpleNamespace(rootComponent=root, allComponents=[])
-
-
-class TestFindJointOrigin:
-    def test_empty_name_returns_none(self):
-        design = _design_with_root_jos()
-        assert joint._find_joint_origin(design, "") is None
-        assert joint._find_joint_origin(design, "   ") is None
-
-    def test_root_jo_returned_directly(self):
-        target = SimpleNamespace(name="JO_A")
-        design = _design_with_root_jos(JO_A=target)
-        assert joint._find_joint_origin(design, "JO_A") is target
-
-    def test_name_is_trimmed_before_lookup(self):
-        target = SimpleNamespace(name="JO_A")
-        design = _design_with_root_jos(JO_A=target)
-        assert joint._find_joint_origin(design, "  JO_A  ") is target
-
-    def test_not_found_anywhere_returns_none(self):
-        design = _design_with_root_jos(JO_A=SimpleNamespace(name="JO_A"))
-        assert joint._find_joint_origin(design, "JO_missing") is None
 
 
 # ── _apply_motion: dispatch + fallthrough ──────────────────────────────────
@@ -316,17 +299,21 @@ def _install_resolve_seam(token_map):
     adsk.fusion.BRepVertex = type("V", (), {})
     adsk.fusion.ConstructionPoint = type("CP", (), {})
     adsk.fusion.SketchPoint = type("SP", (), {})
+    adsk.fusion.JointOrigin = type("JointOrigin", (), {})   # a real type so is_joint_origin() works
 
     class FakeDesign:
         def __init__(self):
-            self.rootComponent = SimpleNamespace(jointOrigins=_JOCollection({}))
+            self.rootComponent = SimpleNamespace(name="Root", jointOrigins=_JOCollection({}))
             self.allComponents = []
 
         def findEntityByToken(self, h):
             e = token_map.get(h)
             return [e] if e is not None else []
     d = FakeDesign()
+    # Dual-seam: the handler reads design via joint._common, but the JointOriginRef kind (the JO-name
+    # path) resolves through joint._inputs._common - patch BOTH to the same design (tests/CLAUDE.md).
     joint._common.design = lambda: d
+    joint._inputs._common.design = lambda: d
     return d
 
 
@@ -342,12 +329,26 @@ class TestResolveInputHandle:
         assert label.startswith("handle:")
 
     def test_non_token_falls_through_to_jo_name(self):
-        # 'JO_A' is not a resolvable token -> handle path declines, JO-name path resolves it.
+        # 'JO_A' is not a resolvable token -> handle path declines, JO-name path (JointOriginRef) resolves it.
         design = _install_resolve_seam({})
         target = SimpleNamespace(name="JO_A")
         design.rootComponent.jointOrigins = _JOCollection({"JO_A": target})
         g, label, err = joint._resolve_input(design, "JO_A")
         assert err is None and g is target and label == "JO_A"
+
+    def test_joint_origin_handle_used_directly(self):
+        # A JOINT ORIGIN handle (assembly_get mints these) is a first-class joint input - used directly,
+        # NOT run through build_joint_geometry (which would reject it).
+        import adsk.fusion
+        design = _install_resolve_seam({})
+        jo = adsk.fusion.JointOrigin()
+        jo.name = "Stock_Center"
+        design.rootComponent.jointOrigins = _JOCollection({})
+        design._tokens = {}
+        # re-point findEntityByToken at a map holding the JO handle
+        design.findEntityByToken = lambda h: [jo] if h == "H_JO" else []
+        g, label, err = joint._resolve_input(design, "H_JO")
+        assert err is None and g is jo and label == "handle:joint_origin"
 
     def test_unresolvable_spec_errors_naming_all_paths(self):
         design = _install_resolve_seam({})
@@ -356,62 +357,27 @@ class TestResolveInputHandle:
         assert "handle" in err and "Joint Origin" in err and "snap" in err
 
 
-# ── occurrence-scoped JO: '<occurrence>:<JO name>' resolves to the assembly-context proxy ────
-# The form an agent naturally writes for a JO inside an inserted part ('SculpturalTower:1:Center
-# of Model'). It must resolve to the JO PROXIED into that occurrence's context - a resolver that
-# rejects it sends the agent down a raw-script path that hits Fusion's live error
-# "Provided input paths for joint are not valid".
+# The resolve-one / qualified '<occurrence>:<JO name>' / ambiguity contract now lives on the
+# JointOriginRef kind - exercised in test_inputs.py (TestJointOriginRef), not here.
 
 class _IterableJOs:
-    """itemByName + iteration, like a live adsk JointOrigins collection."""
+    """A JointOrigins collection: count/item (the shared walk) + itemByName + iteration."""
     def __init__(self, by_name):
-        self._by_name = by_name
+        self._by_name = dict(by_name)
+        self._items = list(by_name.values())
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return self._items[i]
 
     def itemByName(self, name):
         return self._by_name.get(name)
 
     def __iter__(self):
         return iter(self._by_name.values())
-
-
-def _occ_with_jo(occ_name, jo_name, proxy):
-    native = SimpleNamespace(name=jo_name,
-                             createForAssemblyContext=lambda occ: proxy)
-    comp = SimpleNamespace(name=occ_name.rsplit(":", 1)[0],
-                           jointOrigins=_IterableJOs({jo_name: native}))
-    return SimpleNamespace(name=occ_name, component=comp)
-
-
-class TestOccurrenceScopedJO:
-    def test_scoped_spec_resolves_to_proxy(self, monkeypatch):
-        proxy = SimpleNamespace(name="Center of Model (proxy)")
-        occ = _occ_with_jo("SculpturalTower:1", "Center of Model", proxy)
-        design = _design_with_root_jos()
-        monkeypatch.setattr(joint, "_find_occurrence",
-                            lambda d, n: (occ, None) if n == "SculpturalTower:1" else (None, "no"))
-        got = joint._resolve_occurrence_scoped_jo(design, "SculpturalTower:1:Center of Model")
-        assert got is proxy
-
-    def test_resolve_input_falls_through_to_scoped_jo(self, monkeypatch):
-        proxy = SimpleNamespace(name="proxy")
-        occ = _occ_with_jo("SculpturalTower:1", "Center of Model", proxy)
-        design = _install_resolve_seam({})
-        monkeypatch.setattr(joint, "_find_occurrence",
-                            lambda d, n: (occ, None) if n == "SculpturalTower:1" else (None, "no"))
-        g, label, err = joint._resolve_input(design, "SculpturalTower:1:Center of Model")
-        assert err is None and g is proxy
-
-    def test_plain_occurrence_name_is_not_treated_as_scoped(self, monkeypatch):
-        # 'Boom:1' rpartitions into ('Boom', '1') - '1' is no JO, so the spec must NOT resolve.
-        occ = _occ_with_jo("Boom:1", "Center of Model", SimpleNamespace())
-        design = _design_with_root_jos()
-        monkeypatch.setattr(joint, "_find_occurrence", lambda d, n: (occ, None))
-        assert joint._resolve_occurrence_scoped_jo(design, "Boom:1") is None
-
-    def test_missing_occurrence_returns_none(self, monkeypatch):
-        design = _design_with_root_jos()
-        monkeypatch.setattr(joint, "_find_occurrence", lambda d, n: (None, "no such occurrence"))
-        assert joint._resolve_occurrence_scoped_jo(design, "Ghost:1:Center of Model") is None
 
 
 # ── resolve-failure error lists the design's Joint Origins (self-correction data) ───────────
@@ -638,7 +604,7 @@ def _install_create(jo_names=("JO_A", "JO_B")):
     import adsk.fusion, adsk.core
     jos = {n: SimpleNamespace(name=n) for n in jo_names}
     joints_coll = _CreateJoints()
-    root = SimpleNamespace(jointOrigins=_JOCollection(jos), joints=joints_coll,
+    root = SimpleNamespace(name="Root", jointOrigins=_JOCollection(jos), joints=joints_coll,
                            allOccurrences=[], allComponents=[])
 
     class FakeDesign:
@@ -648,7 +614,9 @@ def _install_create(jo_names=("JO_A", "JO_B")):
         def findEntityByToken(self, h):
             return []
     d = FakeDesign()
+    # Dual-seam: the JO-name inputs resolve through the JointOriginRef kind (joint._inputs._common).
     joint._common.design = lambda: d
+    joint._inputs._common.design = lambda: d
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return d, joints_coll
 

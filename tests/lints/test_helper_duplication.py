@@ -22,6 +22,7 @@ _DENYLIST = {
     "find_operation": ("_cam_common", "def"),
     "walk_operations": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
+    "op_state_tally": ("_cam_common", "def"),
     "_b64url_decode": ("_data_common", "def"),
     "_urn_candidates": ("_data_common", "def"),
     "sanitize": ("_export", "def"),
@@ -32,13 +33,23 @@ _DENYLIST = {
     "timeline_health": ("_common", "def"),
     "result_bodies": ("_common", "def"),
     "resolve_entity_ref": ("_common", "def"),
+    "design_wide_counts": ("_common", "def"),
     "CM_TO_UNIT": ("_common", "assign"),
     "OPERATIONS": ("_common", "assign"),
+    "unit_vector": ("_geom", "def"),
+    "unit_vector_between": ("_geom", "def"),
+    "evaluator_normal_at": ("_geom", "def"),
     "build_joint_geometry": ("_joints", "def"),
     "apply_motion": ("_joints", "def"),
     "find_joint": ("_joints", "def"),
     "all_joints": ("_joints", "def"),
     "current_joint_type": ("_joints", "def"),
+    # The ONE JointOrigin walk + its leaf ops - the traversal joint_create_edit and model_inspect share
+    # (resolve-one / collect-names / read-axes all sit on all_joint_origins).
+    "all_joint_origins": ("_joints", "def"),
+    "find_joint_origins_by_name": ("_joints", "def"),
+    "jo_assembly_proxy": ("_joints", "def"),
+    "jo_reference_names": ("_joints", "def"),
 }
 
 

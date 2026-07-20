@@ -125,7 +125,7 @@ def _iter_sketch_texts(design, sketch_name):
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
             create: bool = False, height: float = 5.0, x: float = 0.0, y: float = 0.0,
             units: str = "mm") -> dict:
-    """Set the displayed string of sketch text entities - or create new text (create=true)."""
+    """See TOOL_DESCRIPTION."""
     if text is None:
         return error("Provide 'text' - the string to display.")
 

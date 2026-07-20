@@ -19,6 +19,11 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
+# parent: nest the new component INSIDE an existing occurrence's component (occurrences.addNewComponent
+# on the PARENT component - verified live). Omitted = the root component (the back-compat default).
+_PARENT = _inputs.OccurrenceRef("parent", required=False,
+    description="Nest the new component INSIDE this occurrence; omit for root.")
+
 
 def _ensure_multi_component_intent(design):
     """A PART-intent design refuses addNewComponent ('Part Design documents can only contain one
@@ -45,14 +50,22 @@ def _ensure_multi_component_intent(design):
 
 def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", activate: bool = False,
-            rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
-    """Create a new empty component occurrence."""
+            rotate_deg: float = 0.0, rotate_axis: str = "z", parent: str = "") -> dict:
+    """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
+
+    # parent: resolve the occurrence to nest INSIDE (its component receives the new child). Omitted =
+    # root. OccurrenceRef refuses an ambiguous name instead of grabbing the wrong instance.
+    parent_occ = None
+    if (parent or "").strip():
+        parent_occ, perr = _PARENT.resolve(parent)
+        if perr:
+            return error(perr)
 
     import math
     matrix = adsk.core.Matrix3D.create()
@@ -72,8 +85,14 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     # can hold multiple components. Report the promotion if it happened.
     intent_note = _ensure_multi_component_intent(design)
 
+    # ROOT (default) or NESTED: addNewComponent on the parent occurrence's COMPONENT nests the new
+    # component inside it (verified live: the child then reads a nested fullPathName). Omitted = root.
+    host_occurrences = (safe(lambda: parent_occ.component.occurrences) if parent_occ is not None
+                        else safe(lambda: design.rootComponent.occurrences))
+    if host_occurrences is None:
+        return error("Could not access the target occurrences collection to create the component.")
     try:
-        occ = design.rootComponent.occurrences.addNewComponent(matrix)
+        occ = host_occurrences.addNewComponent(matrix)
     except Exception as e:
         return error(f"Could not create component: {e}")
     if not occ:
@@ -90,21 +109,40 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             name_warning = (f"requested name '{want_name}' was not applied (it is '{actual}') - "
                             "likely a duplicate or invalid name.")
 
+    # Read the nesting back: a component created via a sub-component's occurrences is NATIVE to it, so
+    # its own fullPathName shows only the child. Proxy it into the CHOSEN parent occurrence's assembly
+    # context to report the true nested path ('Parent:1+Child:1'); fall back to constructing it if the
+    # proxy can't be made (Fusion joins fullPathName segments with '+').
+    read_occ = occ
+    if parent_occ is not None:
+        proxy = safe(lambda: occ.createForAssemblyContext(parent_occ))
+        if proxy is not None:
+            read_occ = proxy
+    full_path = safe(lambda: read_occ.fullPathName)
+    if parent_occ is not None and read_occ is occ:
+        pp, cn = safe(lambda: parent_occ.fullPathName), safe(lambda: occ.name)
+        if pp and cn:
+            full_path = f"{pp}+{cn}"
+
     activated = False
     if activate:
-        activated = bool(safe(lambda: occ.activate(), False))
+        activated = bool(safe(lambda: read_occ.activate(), False))
 
     out = {
         "created": True,
         "occurrence": safe(lambda: occ.name),
         "component": safe(lambda: occ.component.name),
+        "full_path": full_path,               # nested path shows the parent when 'parent' was given
+        "nested_in": safe(lambda: parent_occ.fullPathName) if parent_occ is not None else None,
         "position": {"x": x, "y": y, "z": z} if (x or y or z) else "origin",
         "rotate_deg": float(rotate_deg or 0.0),
         "rotate_axis": (rotate_axis or "z").lower() if rotate_deg else None,
         "units": units,
         "activated": activated,
-        "note": "Empty component created. Activate it (or it is active) then model into it with "
-        "sketch_create / extrude; ground / joint it as an assembly part.",
+        "note": ("Empty component created" + (f" nested inside '{safe(lambda: parent_occ.fullPathName)}'"
+                 if parent_occ is not None else " at root")
+                 + ". Activate it (or it is active) then model into it with sketch_create / extrude; "
+                 "ground / joint it as an assembly part."),
     }
     if name_warning:
         out["name_warning"] = name_warning
@@ -115,14 +153,15 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
 TOOL_DESCRIPTION = (
 "Create a new EMPTY component occurrence in the active design - the prerequisite for building an "
-"assembly of separate, independently jointable/groundable parts (the modelling tools build into "
-"the active component, so make one component per part). A fresh PART-design doc (one-component-only) "
-"is auto-promoted to HYBRID so a multi-part build just works. The occurrence is always added "
-"at ROOT level - the active component does not nest it. 'name' names it; 'x'/'y'/'z' optionally "
+"assembly of separate, independently jointable/groundable parts (one component per part). A fresh "
+"PART-design doc (one-component-only) "
+"is auto-promoted to HYBRID so a multi-part build just works. Added at ROOT by default; pass "
+"'parent' (an occurrence) to nest the new component INSIDE it ('full_path' shows the nesting). "
+"'name' names it; 'x'/'y'/'z' optionally "
 "place the occurrence (in 'units', mm default; omit for origin); 'activate' makes it the active "
 "edit target so subsequent sketch_create / extrude build into it. Placement COMPOSES with sketch "
-"coordinates: after placing at x/y/z, sketch in component-local coords - or place at the origin "
-"and sketch at world coords. Doing both lands geometry at placement + world (double-offset)."
+"coords: sketch in component-local coords after placing, or at world coords with no placement "
+"(doing both double-offsets)."
 )
 
 tool = (
@@ -136,6 +175,7 @@ tool = (
             "description": "Make the new component the active edit target (default false)."})
     .add_input_property("rotate_deg", {"type": "number", "description": "Optionally orient: rotate this many degrees about 'rotate_axis' (default 0)."})
     .add_input_property(*_inputs.world_axis("rotate_axis", default="z", description="World axis for the orientation rotation.").as_property())
+    .add_input_property(*_PARENT.as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

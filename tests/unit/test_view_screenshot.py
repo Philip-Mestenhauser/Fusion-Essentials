@@ -152,3 +152,31 @@ class TestOrthoCameraVectors:
             assert gs._is_ortho_face(v) is True
         for v in ("iso-top-right", "current", "banana"):
             assert gs._is_ortho_face(v) is False
+
+
+# ── _keep_visible: fit_to isolate keeps the target + its ancestors + descendants visible, matched ──
+# ── by fullPathName (NOT Python `is`, which never matches across fresh occurrence proxies and would ──
+# ── hide the target itself -> a BLANK image). Nesting boundary is '+' per level. ──────────────────
+
+class TestKeepVisible:
+    def test_target_itself_kept(self):
+        assert gs._keep_visible("Frame:1", "Frame:1") is True
+
+    def test_ancestor_kept(self):
+        # hiding Frame:1 would hide its nested child - the exact nested-target BLANK cause
+        assert gs._keep_visible("Frame:1", "Frame:1+Pedestal:1") is True
+
+    def test_descendant_kept(self):
+        assert gs._keep_visible("Frame:1+Pedestal:1", "Frame:1") is True
+
+    def test_sibling_hidden(self):
+        assert gs._keep_visible("Gear:1", "Frame:1") is False
+
+    def test_string_prefix_is_not_a_path_boundary(self):
+        # 'Frame:10' is a different instance, NOT an ancestor of 'Frame:1' - the '+' boundary matters
+        assert gs._keep_visible("Frame:10", "Frame:1") is False
+        assert gs._keep_visible("Frame:1", "Frame:10") is False
+
+    def test_missing_path_is_hidden(self):
+        assert gs._keep_visible(None, "Frame:1") is False
+        assert gs._keep_visible("Frame:1", None) is False

@@ -399,16 +399,30 @@ class FakeBoundingBox3D:
 
 
 class BRepBody:
-    """Matches type(entity).__name__ == 'BRepBody' in the tool's logic."""
-    def __init__(self, name="Body", bbox=None):
+    """Matches type(entity).__name__ == 'BRepBody' in the tool's logic. volume/is_solid/entity_token
+    are optional (all real BRepBody attributes per live_api_facts.SHAPES) for a before/after
+    read-back check (e.g. a cut's volume delta). Visibility mirrors the live contract:
+    isLightBulbOn is the body's OWN settable browser bulb; isVisible is the EFFECTIVE state
+    (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter."""
+    def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
+                 light_bulb=True, hidden_by_ancestor=False):
         self.name = name
         self.boundingBox = bbox
+        self.volume = volume
+        self.isSolid = is_solid
+        self.entityToken = entity_token or name
+        self.isLightBulbOn = light_bulb
+        self._hidden_by_ancestor = hidden_by_ancestor
+
+    @property
+    def isVisible(self):
+        return bool(self.isLightBulbOn) and not self._hidden_by_ancestor
 
 
 class _NamedCollection:
     """Counted collection (Fusion's count/item(i)) with itemByName lookup (None on a miss),
     iterable - the measured live protocol (see live_api_facts; NamedViews' raise-on-miss is the
-    known exception, see test_view_inspect)."""
+    known exception, see test_view_set)."""
     def __init__(self, items=()):
         self._items = list(items)
 
@@ -449,7 +463,7 @@ def bbox():
 # below are NAMED to match those runtime type names exactly.
 
 class FakeVector3D:
-    """Vector with the .copy()/.normalize() interface _unit() prefers.
+    """Vector matching Fusion's real Vector3D interface: plain .x/.y/.z plus .copy()/.normalize().
 
     Zero-vector behavior is the measured BEHAVIOR flag: live normalize() reports success and
     leaves the components untouched, so callers zero-check by magnitude, never by the return
@@ -470,13 +484,29 @@ class FakeVector3D:
 
 
 class Plane:
-    def __init__(self, normal):
+    """surfaceType is intrinsic (a Plane fake IS always PlaneSurfaceType) - set automatically so
+    callers reading face.geometry.surfaceType don't each hand-wire the same measured constant."""
+    def __init__(self, normal, origin=None):
         self.normal = normal
+        self.origin = origin
+        self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["PlaneSurfaceType"]
 
 
 class Cylinder:
-    def __init__(self, axis):
+    """surfaceType is intrinsic - see Plane."""
+    def __init__(self, axis, origin=None):
         self.axis = axis
+        self.origin = origin
+        self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["CylinderSurfaceType"]
+
+
+class Cone:
+    """A conical surface - mirrors Cylinder's .axis (both expose it per the live _inputs.py
+    face-axis code). surfaceType is intrinsic - see Plane."""
+    def __init__(self, axis, origin=None):
+        self.axis = axis
+        self.origin = origin
+        self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["ConeSurfaceType"]
 
 
 class Sphere:
@@ -484,12 +514,37 @@ class Sphere:
 
 
 class Line3D:
-    pass
+    """curveType is intrinsic - see Plane."""
+    def __init__(self, start=None, end=None):
+        self.startPoint = start
+        self.endPoint = end
+        self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Line3DCurveType"]
 
 
 class Circle3D:
-    def __init__(self, normal):
+    """curveType is intrinsic - see Plane."""
+    def __init__(self, normal, center=None, radius=None):
         self.normal = normal
+        self.center = center
+        self.radius = radius
+        self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Circle3DCurveType"]
+
+
+class FakeUnitsManager:
+    """A UnitsManager whose evaluateExpression resolves only a known set - an unknown reference
+    RAISES, matching the live FusionUnitsManager (it errors on an unresolvable or dimension-
+    incompatible expression). The shared engine for a tool that accepts a parameter-EXPRESSION
+    string routed through ValueInput.createByString (model_extrude's distance, model_construction's
+    offset). model_extrude.py still keeps a local copy pending migration to this one."""
+    defaultLengthUnits = "mm"
+
+    def __init__(self, valid=("25 mm", "StockZ/2")):
+        self._valid = set(valid)
+
+    def evaluateExpression(self, expr, units=None):
+        if expr not in self._valid:
+            raise RuntimeError(f"unresolved parameter in '{expr}'")
+        return 2.5
 
 
 class _Vertex:
@@ -502,14 +557,17 @@ class BRepFace:
 
     `_classify` reads area/centroid/edges.count/body.name when it builds a face
     record; supply benign defaults so the result is JSON-serializable. Override
-    via kwargs in tests that assert on them.
+    via kwargs in tests that assert on them. `entity_token` is None by default (matching a fake
+    built before handle-minting needed it - safe() degrades a None token the same as a missing
+    attribute); set it for a test that mints/asserts on a find_geometry-style handle.
     """
-    def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None):
+    def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None, entity_token=None):
         self.geometry = surface
         self.area = area
         self.centroid = centroid
         self.edges = _NamedCollection([None] * edge_count)
         self.body = _SimpleNamed(body_name) if body_name else None
+        self.entityToken = entity_token
 
 
 class _SimpleNamed:
@@ -518,11 +576,15 @@ class _SimpleNamed:
 
 
 class BRepEdge:
-    """Matches type(entity).__name__ == 'BRepEdge'. `geometry` is the curve."""
-    def __init__(self, curve, start=None, end=None):
+    """Matches type(entity).__name__ == 'BRepEdge'. `geometry` is the curve. `point_on_edge`/
+    `entity_token` are None by default (see BRepFace) - set them for a test that mints/asserts on a
+    find_geometry-style handle."""
+    def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None):
         self.geometry = curve
         self.startVertex = _Vertex(start) if start else None
         self.endVertex = _Vertex(end) if end else None
+        self.pointOnEdge = point_on_edge
+        self.entityToken = entity_token
 
 
 # ── shared fake-design builder + dual-seam install (the test-plumbing convention) ───────────────────

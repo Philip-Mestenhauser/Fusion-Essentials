@@ -78,11 +78,7 @@ _PHASE_LABEL = re.compile(r"\bPhase [0-9]\b")
 _ALLOWLIST = {
     "tests/lints/test_generated_docs_current.py:7":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
-    "tests/lints/test_docstring_restatement.py:25":
-        "'backlog' defines what its own allowlist category means (a measured, owner-gated cleanup)",
-    "tests/live/evals/scenarios/T6_CAM-Eval.md:123":
-        "'work order' in an eval scenario spec names the artifact a capability finding feeds",
-    "tests/unit/test_joint_create_origin.py:404":
+    "tests/unit/test_joint_create_origin.py:447":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
 }
 

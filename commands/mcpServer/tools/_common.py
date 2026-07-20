@@ -101,6 +101,20 @@ def all_components(d):
     return out or [root]
 
 
+def design_wide_counts(d):
+    """(bodies, sketches) summed across every component (root + sub-components) via ``all_components``.
+    ``bRepBodies``/``sketches`` are per-COMPONENT collections: reading them off the root alone reports
+    only root-component geometry, so a design whose bodies/sketches live in sub-components (the normal
+    multi-part workflow) under-reports - a sketch-only-in-sub-components doc would read sketches:0. The
+    ONE design-wide body/sketch count every summary read shares (workspace_orient, design_get) so they
+    agree on one design instead of one counting root-only and the other walking every component."""
+    bodies = sketches = 0
+    for comp in all_components(d):
+        bodies += safe(lambda c=comp: c.bRepBodies.count, 0) or 0
+        sketches += safe(lambda c=comp: c.sketches.count, 0) or 0
+    return bodies, sketches
+
+
 def result_bodies(feature):
     """The bodies a parametric feature produced, as a list of FRESH body references read straight off
     the feature - the input references a caller passed in can go invalid once the feature rebuilds, so
@@ -171,6 +185,17 @@ def terse(rec: dict, noise: dict) -> dict:
     errored one additionally shows is_suppressed=True / has_error=True, so the problem rows are easy
     to spot in an otherwise-uniform list."""
     return {k: v for k, v in rec.items() if not (k in noise and v == noise[k])}
+
+
+def timeline_marker(design):
+    """(marker_position, count) for the parametric timeline, or (None, None) for a direct-modelling
+    design. marker_position < count means the features AFTER the marker are ROLLED BACK - NOT in the
+    current model (they revert to home) - the state an in-place edit that failed to restore the marker
+    leaves behind, which a health read must surface rather than report a rolled-back model as healthy."""
+    tl = safe(lambda: design.timeline)
+    if tl is None:
+        return None, None
+    return safe(lambda: tl.markerPosition), (safe(lambda: tl.count, 0) or 0)
 
 
 def timeline_health(design):

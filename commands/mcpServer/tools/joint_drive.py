@@ -44,14 +44,7 @@ def _limit_violation(limits, value, what):
 
 
 def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "mm") -> dict:
-    """Drive a joint to a commanded value (the Drive Joints command).
-
-    joint_name: the joint to drive (revolute / slider / cylindrical). angle_deg: rotation value in
-    DEGREES (revolute or cylindrical). distance: slide value in 'units' (slider or cylindrical).
-    units: mm/cm/in for 'distance' (default mm). Provide angle_deg for a revolute, distance for a
-    slider, or both for a cylindrical. WRITES - drives the joint and the mechanism follows; respects
-    (and warns on) the joint's enabled limits.
-    """
+    """See TOOL_DESCRIPTION."""
     if angle_deg is None and distance is None:
         return error("Provide 'angle_deg' (revolute/cylindrical) and/or 'distance' (slider/cylindrical) "
                      "to drive the joint to.")
@@ -64,7 +57,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         return error("No active design with components.")
     joint = _find_joint(design, joint_name)
     if not joint:
-        return error(f"No joint named '{joint_name}'. Use assembly_probe or design_get(include=['timeline']) to list "
+        return error(f"No joint named '{joint_name}'. Use assembly_get or design_get(include=['timeline']) to list "
                      "joint names.")
 
     jtype = _current_joint_type(joint)
@@ -122,7 +115,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         "value_now": read_back,
         "units": units,
         "note": "Joint driven (the Drive Joints command) - the mechanism followed along this joint's "
-                "DOF. This poses the model; it does not add a timeline feature. Pair with assembly_probe "
+                "DOF. This poses the model; it does not add a timeline feature. Pair with assembly_get "
                 "to confirm the kinematics and view_screenshot to see it.",
     }
     if warnings:
@@ -135,7 +128,7 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 TOOL_DESCRIPTION = (
     "DRIVE a joint to a value - the API's Drive Joints command. Set a revolute / slider / cylindrical "
     "joint to a commanded angle and/or distance and the mechanism moves along that joint's DOF. "
-    "'joint_name' is the joint (from assembly_probe). 'angle_deg' = rotation in degrees (revolute or "
+    "'joint_name' is the joint (from assembly_get). 'angle_deg' = rotation in degrees (revolute or "
     "cylindrical); 'distance' = slide in 'units' (slider or cylindrical); give one, or both for a "
     "cylindrical. Respects the joint's enabled limits (warns + reports the clamped value). The clean way "
     "to POSE a mechanism by joint value instead of assembly_move + capture_position. Only revolute / "
@@ -145,7 +138,7 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="joint_drive", description=TOOL_DESCRIPTION)
-    .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to drive (from assembly_probe / design_get(include=['timeline']))."})
+    .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to drive (from assembly_get / design_get(include=['timeline']))."})
     .add_input_property("angle_deg", {"type": "number", "description": "Rotation value in DEGREES (revolute / cylindrical)."})
     .add_input_property("distance", {"type": "number", "description": "Slide value in 'units' (slider / cylindrical)."})
     .add_input_property(*_inputs.units_property(description="Units for 'distance'."))

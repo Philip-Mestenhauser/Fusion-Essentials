@@ -267,7 +267,7 @@ class TestTouching:
         _install_mgr(monkeypatch, _MR(0.0))
         out = _payload(mr.handler(relation="touching"))
         assert out["passed"] is True
-        assert "assembly_interference" in out["note"]   # does not silently call an overlap "touching"
+        assert "assembly_inspect_interference" in out["note"]   # does not silently call an overlap "touching"
 
 
 # ── concentric: two circular entities whose CENTER POINTS coincide (distinct from coaxial) ────────

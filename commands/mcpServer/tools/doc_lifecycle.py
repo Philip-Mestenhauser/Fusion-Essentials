@@ -12,7 +12,7 @@ plus delete-file. (Reading the open-document session is doc_get.)
   doc_close       -> close an open document (or all), saving or discarding unsaved changes
   doc_activate    -> bring an open document to the foreground
 
-The data-model container tools (projects/folders/upload) live in data_ops.py; shared helpers live
+The data-model tools (projects/folders/upload) live in data_ops.py; shared helpers live
 in _data_common. Every save is tagged with the AI-agent marker via _agent_description.
 """
 
@@ -79,6 +79,7 @@ def _xref_summary(data_file):
 
 def copy_document_handler(document_id: str = "", name: str = "",
                           source_project: str = "", source_project_id: str = "",
+                          source_folder: str = "",
                           project: str = "", project_id: str = "",
                           folder: str = "", create_path: bool = False) -> dict:
     """Copy an existing cloud document into a destination project/folder; see TOOL_DESCRIPTION."""
@@ -113,12 +114,55 @@ def copy_document_handler(document_id: str = "", name: str = "",
             ident = source_project_id or source_project
             return error(f"Source project not found: {ident}. Available: "
                           f"{', '.join(savail) or '(none)'}")
-        src, candidates = _find_file_by_name(sproj, name)
-        if not src:
-            return error(f"Document '{name}' not found in source project "
+        start = safe(lambda: sproj.rootFolder)
+        if start is None:
+            return error(f"Could not access the root folder of source project "
+                         f"'{safe(lambda: sproj.name)}'.")
+        scope_label = "(project root)"
+        sf_segments = _split_path(source_folder)
+        if sf_segments:
+            start, sf_missing = _resolve_folder_path(start, sf_segments)
+            if not start:
+                opts = [safe(lambda: f.name) for f in
+                        safe(lambda: sproj.rootFolder.dataFolders.asArray(), [])]
+                return error(
+                    f"source_folder path not found: '{source_folder}' (missing segment "
+                    f"'{sf_missing}') in project '{safe(lambda: sproj.name)}'. Folders at project "
+                    f"root: {', '.join(n for n in opts if n) or '(none)'}. "
+                    "Use data_get(include=['folders']) to see the structure.")
+            scope_label = _folder_path_string(start) or scope_label
+        matches, seen, visited, truncated = _find_file_by_name(start, name)
+        if truncated:
+            # A partial search cannot prove the name is unique (an unsearched folder could hold a
+            # same-name twin), so a budget-cut walk is REFUSED - never acted on. Name what was
+            # searched and the two exact paths that do not need a walk.
+            found = "; ".join(
+                f"'{safe(lambda f=f: f.name)}' in '{path or '(project root)'}' "
+                f"(URN {safe(lambda f=f: f.id)})" for f, path in matches)
+            return error(
+                f"By-name search stopped at its budget: visited {visited} folders "
+                f"(cap {_WALK_FOLDER_BUDGET}) under {scope_label} of project "
+                f"'{safe(lambda: sproj.name)}' without covering it ({len(seen)} files seen"
+                + (f"; matches so far: {found}" if found else "") + "). The walk is bounded because "
+                "each folder is a slow cloud fetch on Fusion's main thread. Pass document_id (the "
+                "lineage URN, from data_get" + (" or the matches above" if found else "") + ") to "
+                "skip the walk, or narrow it with source_folder='<path>'.")
+        if not matches:
+            return error(f"Document '{name}' not found under {scope_label} of source project "
                           f"'{safe(lambda: sproj.name)}'. Files seen: "
-                          f"{', '.join(candidates[:30]) or '(none)'}. "
+                          f"{', '.join(seen[:30]) or '(none)'}. "
                           "Use data_get, or pass document_id (URN).")
+        if len(matches) > 1:
+            rows = "; ".join(
+                f"'{safe(lambda f=f: f.name)}' in '{path or '(project root)'}' "
+                f"(URN {safe(lambda f=f: f.id)})"
+                for f, path in matches)
+            return error(
+                f"Source name '{name}' is ambiguous - {len(matches)} files share it in project "
+                f"'{safe(lambda: sproj.name)}': {rows}. Fusion allows same-name files in different "
+                "folders; refusing rather than copying the wrong one. Pass document_id (the lineage "
+                "URN above) to copy one exactly.")
+        src = matches[0][0]
 
     # --- resolve the destination project + folder ---
     dproj, davail = _find_project(data, name=project or None, project_id=project_id or None)
@@ -207,37 +251,49 @@ def copy_document_handler(document_id: str = "", name: str = "",
     return ok(result)
 
 
-def _find_file_by_name(project, name):
-    """Find a DataFile by (case-insensitive) name anywhere in a project's folder tree.
+# The by-name folder walk's HARD budget. Every folder visited costs TWO cloud fetches (dataFiles +
+# dataFolders) on Fusion's MAIN thread - measured live at ~0.8 s/folder - so an unbounded project-wide
+# walk over a folder-heavy project stalls the UI for tens of minutes (observed as a Fusion-killing
+# hang). 20 folders keeps the worst case around ~16 s; a bigger project must be addressed by
+# document_id (URN) or narrowed with source_folder.
+_WALK_FOLDER_BUDGET = 20
 
-    Returns (file, seen_names). Bounded walk so a huge project can't hang the UI.
+
+def _find_file_by_name(root_folder, name):
+    """Every DataFile whose name matches `name` (case-insensitive) in the folder tree under
+    `root_folder` - Fusion allows same-name files in DIFFERENT folders, so this collects ALL matches
+    and the caller REFUSES an ambiguous (>1) result rather than picking the first one the walk reaches.
+
+    Breadth-first (shallow folders searched before deep run/archive subtrees) and HARD-bounded by
+    _WALK_FOLDER_BUDGET; `truncated` reports that the budget cut the walk short, in which case the
+    caller must refuse rather than trust a partial search (an unsearched folder could hold a
+    same-name twin).
+
+    Returns (matches, seen_names, visited, truncated), each match a (file, folder_path_string) pair.
     """
     want = (name or "").strip().lower()
     seen = []
-    stack = []
-    try:
-        stack.append(project.rootFolder)
-    except Exception:
-        return None, seen
+    matches = []
+    queue = [root_folder] if root_folder is not None else []
     visited = 0
-    while stack and visited < 5000:
-        folder = stack.pop()
+    while queue and visited < _WALK_FOLDER_BUDGET:
+        folder = queue.pop(0)
         visited += 1
         try:
             for f in folder.dataFiles.asArray():
-                nm = safe(lambda: f.name)
+                nm = safe(lambda f=f: f.name)
                 if nm:
                     seen.append(nm)
                     if nm.strip().lower() == want:
-                        return f, seen
+                        matches.append((f, _folder_path_string(folder)))
         except Exception:
             pass
         try:
             for sub in folder.dataFolders.asArray():
-                stack.append(sub)
+                queue.append(sub)
         except Exception:
             pass
-    return None, seen
+    return matches, seen, visited, bool(queue)
 
 
 def _file_in_folder_by_name(folder, name):
@@ -359,9 +415,28 @@ def delete_document_handler(document_id: str = "", confirm_name: str = "",
 # doc_save_as
 # ---------------------------------------------------------------------------
 
+def _resolve_folder_eventual(root, segments):
+    """Resolve an existing folder path, with ONE bounded retry for cloud EVENTUAL-CONSISTENCY.
+
+    During a cloud-recovery outage the resolve can report a segment MISSING that IS present in the
+    freshly enumerated sibling list at the project root (the folder appears in its own
+    available-folders list yet will not resolve - observed live, where a plain retry then succeeded).
+    ONLY that exact self-contradiction is retried; a segment genuinely absent from the siblings is a
+    real miss and is NOT retried. Returns (folder, missing, retried)."""
+    target, missing = _resolve_folder_path(root, segments)
+    if target is not None or not missing:
+        return target, missing, False
+    siblings = [safe(lambda f=f: f.name) for f in safe(lambda: root.dataFolders.asArray(), []) or []]
+    if missing in [s for s in siblings if s]:
+        safe(lambda: adsk.doEvents())          # nudge the cloud folder cache to settle, then re-resolve
+        target2, missing2 = _resolve_folder_path(root, segments)
+        return target2, missing2, True
+    return target, missing, False
+
+
 def save_document_as_handler(name: str = "", project: str = "", project_id: str = "",
                              folder: str = "", create_path: bool = False,
-                             description: str = "") -> dict:
+                             description: str = "", allow_duplicate_name: bool = False) -> dict:
     """Save the ACTIVE (possibly never-saved) document into a project/folder via Document.saveAs."""
     name = (name or "").strip()
     if not name:
@@ -393,6 +468,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
 
     target = root
     auto_created = []
+    folder_retry_note = None
     segments = _split_path(folder)
     if segments:
         if create_path:
@@ -401,7 +477,7 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
             except Exception as e:
                 return error(f"Could not prepare destination path '{folder}': {e}")
         else:
-            target, missing = _resolve_folder_path(root, segments)
+            target, missing, retried = _resolve_folder_eventual(root, segments)
             if not target:
                 opts = [safe(lambda: f.name) for f in safe(lambda: root.dataFolders.asArray(), [])]
                 return error(
@@ -409,13 +485,25 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                     f"'{missing}'). Folders at project root: "
                     f"{', '.join(n for n in opts if n) or '(none)'}. "
                     "Pass create_path=true, or use data_get(include=['folders']) to see the structure.")
+            if retried:
+                folder_retry_note = (f"folder '{folder}' did not resolve on the first read though it "
+                                     "was present in the project's folder list, then resolved on a "
+                                     "retry - cloud folder listings can lag right after a save/outage "
+                                     "(eventual-consistency).")
 
     # Fusion PERMITS same-name documents (identity is the lineage URN, not the name). saveAs on a
-    # colliding name FORKS a new lineage - that is legal, not an error. But an agent that meant to
-    # VERSION the existing file would be blind to the fork, so detect a pre-existing same-name file in
-    # the target folder BEFORE the save and report it (with its URN + the version-in-place remedy).
+    # colliding name FORKS a new lineage - legal, but rarely what was meant, so a pre-existing
+    # same-name file in the target folder is REFUSED by default (consistent with doc_copy). The fork
+    # is available deliberately via allow_duplicate_name=true, which keeps the permit+warn path below.
     existing = _file_in_folder_by_name(target, name)
     existing_id = safe(lambda: existing.id) if existing else None
+    if existing and not allow_duplicate_name:
+        return error(
+            f"A file named '{name}' already exists in "
+            f"'{_folder_path_string(target) or '(project root)'}' (URN {existing_id}). doc_save_as "
+            "would FORK a SECOND file with the same name (a new lineage) - refused by default. To "
+            "add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to "
+            "deliberately create a same-name fork anyway, pass allow_duplicate_name=true.")
 
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
@@ -453,6 +541,9 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
                         "data_delete_file. Address files by URN, not name, from here."),
         }
         note = (f"NAME COLLISION - see 'name_collision'. " + note)
+    if folder_retry_note:
+        result["folder_resolve_retried"] = True
+        note = folder_retry_note + " " + note
     result["note"] = note
     return ok(result)
 
@@ -512,6 +603,17 @@ def _find_open_document(name):
         nm = safe(lambda d=d: d.name) or ""
         names.append(nm)
         open_docs.append((d, nm))
+
+    # 0) 'open:N' - the open_index doc_get emits. The ONLY way to address an UNSAVED doc that shares a
+    # name ('Untitled') and has no URN. N indexes app.documents in the same order doc_get enumerates.
+    if raw.lower().startswith("open:"):
+        try:
+            idx = int(raw.split(":", 1)[1].strip())
+        except ValueError:
+            return None, names, False
+        if 0 <= idx < len(open_docs):
+            return open_docs[idx][0], names, False
+        return None, names, False
 
     # 1) URN / web-URL identity: resolve the raw value to candidate URNs, match an open doc's dataFile.id.
     urn_candidates = _urn_candidates(raw) if raw else []
@@ -583,11 +685,12 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         d, names, ambiguous = _find_open_document(name)
         if ambiguous:
             return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
-                         "close. Pass the lineage URN (or web URL) instead of the name; get it from "
-                         f"doc_get. Open: {', '.join(n for n in names if n)}.")
+                         "close. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
+                         "(the only handle for an UNSAVED same-name doc with no URN). Open: "
+                         f"{', '.join(n for n in names if n)}.")
         if not d:
             return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
-                         "(A name can be shared - pass a lineage URN to be unambiguous.)")
+                         "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
         targets = [d]
     else:
         active = safe(lambda: app.activeDocument)
@@ -595,8 +698,14 @@ def close_document_handler(name: str = "", save_changes: bool = False,
             return error("No active document to close.")
         targets = [active]
 
-    closed, errors = [], []
+    closed, errors, skipped_invalid = [], [], 0
     for d in targets:
+        # A close_all closes reference/dependency docs too; closing one INVALIDATES its now-orphaned
+        # reference proxies, so a later close on such a dead proxy raises a cosmetic error. Skip a proxy
+        # that is already invalid (count it, don't fail the call over it).
+        if safe(lambda d=d: d.isValid, True) is False:
+            skipped_invalid += 1
+            continue
         nm = safe(lambda d=d: d.name)
         try:
             if d.close(bool(save_changes)):
@@ -604,7 +713,11 @@ def close_document_handler(name: str = "", save_changes: bool = False,
             else:
                 errors.append({nm: "close returned false"})
         except Exception as e:
-            errors.append({nm: str(e)[:60]})
+            # If the close itself invalidated it (it was a dead proxy after all), that's not a failure.
+            if safe(lambda d=d: d.isValid, True) is False:
+                skipped_invalid += 1
+            else:
+                errors.append({nm: str(e)[:60]})
 
     if not closed and errors:
         detail = "; ".join(f"{nm}: {msg}" for e in errors for nm, msg in e.items())
@@ -612,11 +725,14 @@ def close_document_handler(name: str = "", save_changes: bool = False,
 
     note = ("Closed " + ("with save" if save_changes else "discarding unsaved changes") +
             ". Fusion keeps at least one document open.")
+    if skipped_invalid:
+        note += f" Skipped {skipped_invalid} already-invalidated reference doc(s)."
     if errors:
         note += f" {len(errors)} of {len(targets)} target(s) failed to close - see 'errors'."
     return ok({
     "closed": closed, "closed_count": len(closed),
     "errors": errors,
+    "skipped_invalid": skipped_invalid,
     "save_changes": bool(save_changes),
     "remaining_open": safe(lambda: app.documents.count),
     "note": note,
@@ -631,11 +747,12 @@ def activate_document_handler(name: str = "") -> dict:
     d, names, ambiguous = _find_open_document(name)
     if ambiguous:
         return error(f"'{name}' matches more than one OPEN document - refusing to guess which to "
-                     "activate. Pass the lineage URN (or web URL) instead of the name; get it from "
-                     f"doc_get. Open: {', '.join(n for n in names if n)}.")
+                     "activate. Pass the lineage URN / web URL, or the 'open:N' index from doc_get "
+                     "(the only handle for an UNSAVED same-name doc with no URN). Open: "
+                     f"{', '.join(n for n in names if n)}.")
     if not d:
         return error(f"No open document matched '{name}'. Open: {', '.join(n for n in names if n)}. "
-                     "(A name can be shared - pass a lineage URN to be unambiguous.)")
+                     "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
     try:
         did = d.activate()
     except Exception as e:
@@ -659,7 +776,7 @@ def activate_document_handler(name: str = "") -> dict:
 # --- tool definitions ---
 
 _copy_document_tool = (
-    Tool.create_with_string_input(
+    Tool.create_simple(
         name="doc_copy",
         description=(
             "Copy an existing cloud document (a saved DataFile, identified by its lineage "
@@ -673,15 +790,19 @@ _copy_document_tool = (
             "NOTE: this does NOT share lineage, so Fusion will not auto-repair joints from "
             "the copy. WRITES to the cloud data model."
         ),
-        input_param_name="document_id",
-        input_param_description="Lineage id (URN) of the document to copy (preferred; from data_get).",
     )
+    # document_id is OPTIONAL, not required: the handler also accepts the by-name path
+    # ('name' + 'source_project'). One of document_id / name must be given (guarded in the handler).
+    .add_input_property("document_id", {"type": "string",
+        "description": "Lineage id (URN) of the document to copy (preferred; from data_get). Optional - omit to look up by 'name' + 'source_project'."})
     .add_input_property("name", {"type": "string",
         "description": "Document name (alt to document_id); requires source_project."})
     .add_input_property("source_project", {"type": "string",
         "description": "Source project name (for a 'name' lookup)."})
     .add_input_property("source_project_id", {"type": "string",
         "description": "Source project id (alt to source_project)."})
+    .add_input_property("source_folder", {"type": "string",
+        "description": "Scope the 'name' lookup to this folder path (the by-name walk is budget-bounded; big projects need this or document_id)."})
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("folder", {"type": "string",
@@ -722,16 +843,13 @@ _save_document_as_tool = (
         name="doc_save_as",
         description=(
             "Save the ACTIVE Fusion document into a project/folder under a given 'name', via "
-            "Document.saveAs. Use this to save a design that is open in the session - including "
-            "one that has NEVER been saved (no cloud id yet). This is different from data_upload_file "
-            "(which uploads a LOCAL file) and doc_copy (which copies an existing SAVED "
-            "cloud file): only this one captures the live session. 'folder' may be a nested "
-            "path; set create_path=true to create missing destination folders. Fusion ALLOWS "
-            "same-name files (identity is the lineage URN, not the name): saving over an existing "
-            "name FORKS a new file and the result flags it as 'name_collision' - to version the "
-            "existing file instead, open it by URN and use doc_save. The result's 'document_id' is "
-            "the new file's lineage URN (the tool waits briefly for it to resolve). "
-            "WRITES to the cloud data model."
+            "Document.saveAs. Captures the live session, including a design that has NEVER been "
+            "saved (no cloud id yet) - unlike data_upload_file (a LOCAL file) or doc_copy (a SAVED "
+            "cloud file). 'folder' may be nested; create_path=true makes missing folders. A "
+            "same-name file already in the target folder is REFUSED by default (identity is the "
+            "lineage URN, not the name): pass allow_duplicate_name=true to fork a second lineage, or "
+            "version the existing file by opening its URN and using doc_save. Result 'document_id' "
+            "is the new lineage URN (resolves asynchronously). WRITES to the cloud data model."
         ),
         input_param_name="name",
         input_param_description="Name to save the active document as.",
@@ -744,6 +862,8 @@ _save_document_as_tool = (
         "description": "Create missing destination folders (default false)."})
     .add_input_property("description", {"type": "string",
         "description": "Optional version description for the save."})
+    .add_input_property("allow_duplicate_name", {"type": "boolean",
+        "description": "Permit a same-name fork in the target folder (default false = refuse)."})
 )
 save_document_as_item = Item.create_tool_item(
     tool=_save_document_as_tool, write="write", handler=save_document_as_handler, run_on_main_thread=True
@@ -785,14 +905,14 @@ _close_document_tool = (
         name="doc_close",
         description=(
             "Close an open document, or all of them. 'name' = the doc to close (omit = the ACTIVE "
-            "doc; a display name, or a lineage URN / web URL when the name is shared - a shared name "
-            "is REFUSED, not guessed); 'close_all' = close every open document; 'save_changes' = save "
+            "doc; a display name, a lineage URN / web URL, or 'open:N' from doc_get when the name is "
+            "shared - a shared name is REFUSED, not guessed); 'close_all' = close every open document; 'save_changes' = save "
             "unsaved edits first (default false = DISCARD them). NOTE: app.documents includes "
             "referenced/dependency docs with no visible tab - close_all closes those too. Fusion "
-            "always keeps one doc open. Hard to reverse - discarded edits are gone."),
+            "always keeps one doc open. Discarded edits are gone."),
     )
     .add_input_property("name", {"type": "string",
-            "description": "Open document to close (omit = active document)."})
+            "description": "Doc to close: a name, a URN / web URL, or 'open:N' (doc_get) for an unsaved same-name doc; omit = active."})
     .add_input_property("save_changes", {"type": "boolean",
             "description": "Save unsaved edits before closing (default false = discard)."})
     .add_input_property("close_all", {"type": "boolean",
@@ -807,11 +927,11 @@ _activate_document_tool = (
         name="doc_activate",
         description=(
             "Bring an open document to the foreground (make it the active document). 'name' = the "
-            "open document to activate: a display NAME, or - when several open docs share a name - "
-            "its lineage URN or web URL (the unambiguous identity; a shared name is REFUSED). See "
-            "doc_get for both. Only changes which document is active."),
+            "open document to activate: a display NAME, or - when several open docs share a name - its "
+            "lineage URN / web URL / 'open:N' index from doc_get (the unambiguous identity; a shared "
+            "name is REFUSED). 'open:N' reaches an UNSAVED same-name doc that has no URN."),
         input_param_name="name",
-        input_param_description="Open document to activate: display name, or lineage URN / web URL if the name is shared.",
+        input_param_description="Doc to activate: a display name, a URN / web URL, or 'open:N' (doc_get) - the only handle for an unsaved same-name doc.",
     ).strict_schema()
 )
 activate_document_item = Item.create_tool_item(

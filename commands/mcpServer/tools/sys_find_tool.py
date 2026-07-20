@@ -67,7 +67,7 @@ def _kind_matches(query_terms):
 
 
 def handler(query: str = "", include_kinds: bool = True) -> dict:
-    """Search the registered tools (and optionally the _inputs.py input-kinds) by keyword."""
+    """See TOOL_DESCRIPTION."""
     q = (query or "").strip().lower()
     if not q:
         return error("Provide 'query' - keywords to search tool names/descriptions/inputs (and the "

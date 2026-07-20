@@ -19,21 +19,21 @@ app = adsk.core.Application.get()
 _POSITIONS = ("before", "after")
 
 
-def _walk_container(container, out):
-    """Collect (name, object) for operations + folders + patterns under a container, recursively.
-    allOperations omits folders/patterns, so walk .folders / .patterns explicitly."""
-    ops = safe(lambda: container.operations)
+def _walk_parent(parent, out):
+    """Collect (name, object) for operations + folders + patterns under a parent (setup or folder),
+    recursively. allOperations omits folders/patterns, so walk .folders / .patterns explicitly."""
+    ops = safe(lambda: parent.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
         o = safe(lambda i=i: ops.item(i))
         if o is not None:
             out.append((safe(lambda o=o: o.name), o))
-    for getter in (lambda: container.folders, lambda: container.patterns):
+    for getter in (lambda: parent.folders, lambda: parent.patterns):
         coll = safe(getter)
         for i in range(safe(lambda: coll.count, 0) or 0):
             c = safe(lambda i=i: coll.item(i))
             if c is not None:
                 out.append((safe(lambda c=c: c.name), c))
-                _walk_container(c, out)
+                _walk_parent(c, out)
 
 
 def _all_named(cam):
@@ -41,7 +41,7 @@ def _all_named(cam):
     for si in range(safe(lambda: cam.setups.count, 0) or 0):
         s = safe(lambda si=si: cam.setups.item(si))
         if s is not None:
-            _walk_container(s, out)
+            _walk_parent(s, out)
     return out
 
 
@@ -58,8 +58,7 @@ def _resolve(named, name):
 
 
 def handler(entity: str = "", position: str = "after", reference: str = "") -> dict:
-    """Reorder a CAM operation/folder/pattern. entity: the item to move. position: 'before' or 'after'.
-    reference: the item to move it relative to. WRITES."""
+    """See TOOL_DESCRIPTION."""
     entity = (entity or "").strip()
     reference = (reference or "").strip()
     position = (position or "after").strip().lower()
@@ -86,7 +85,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
     did = safe(fn, False)
     if not did:
         return error(f"Move of '{entity}' {position} '{reference}' was not allowed (e.g. moving an "
-                     "operation out of its setup, or across incompatible containers).")
+                     "operation out of its setup, or across incompatible parents (setup or folder)).")
 
     return ok({
         "moved": entity,

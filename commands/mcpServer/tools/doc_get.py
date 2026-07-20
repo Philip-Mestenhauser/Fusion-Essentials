@@ -91,13 +91,17 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
         is_modified = safe(lambda d=d: d.isModified)
         is_saved = safe(lambda d=d: d.isSaved)
         if i < cap:
-            rows.append(terse({
+            row = terse({
                 "name": name,
                 "is_active": safe(lambda d=d: d is active),
                 "is_visible": safe(lambda d=d: d.isVisible),
                 "is_saved": is_saved,
                 "is_modified": is_modified,
-            }, _DOC_NOISE))
+            }, _DOC_NOISE)
+            # open_index is the STABLE session address a caller passes as 'open:N' to doc_activate /
+            # doc_close - the only way to reach an UNSAVED doc that shares a name and has no URN.
+            row["open_index"] = i
+            rows.append(row)
         # exception = unsaved work (never-saved OR modified-since-save) - what a close-all would lose.
         # Computed over EVERY open document, not just the capped rows.
         if is_saved is False or is_modified is True:
@@ -407,9 +411,7 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
 
 def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int = _VERSIONS_CAP,
             xref_max: int = _XREF_CAP, max_depth=None, used_in_max: int = _USED_IN_CAP) -> dict:
-    """Read the session's documents: the active one plus the (capped) open list; see TOOL_DESCRIPTION.
-
-    Router: the default projection is the session read; include=['versions'|'xref_tree'] adds a cloud slice."""
+    """See TOOL_DESCRIPTION."""
     active = _active_identity()
     if active is None:
         return error("No active document. Open or create one first (doc_open / doc_new).")
@@ -417,8 +419,10 @@ def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int =
     inc = {s.strip().lower() for s in (include or [])}
     note = ("active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). "
                  "open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real "
-                 "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name; "
-                 "an unsaved/modified/hidden one keeps the flag. This is the SESSION; for cloud "
+                 "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name "
+                 "+ open_index; an unsaved/modified/hidden one keeps the flag. Each row's 'open_index' is a "
+                 "stable session address - pass 'open:N' to doc_activate/doc_close to reach an UNSAVED doc "
+                 "that shares a name and has no URN. This is the SESSION; for cloud "
                  "projects/files see data_get. include=['versions'] adds the active doc's cloud version "
                  "history (newest-first, capped); include=['xref_tree'] adds the recursive freshness "
                  "rollup for referenced components (kind='xref') AND derive links (kind='derive') "

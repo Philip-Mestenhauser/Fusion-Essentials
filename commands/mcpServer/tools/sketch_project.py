@@ -74,7 +74,7 @@ def _new_refs(before: dict, after: dict) -> list:
 
 
 def handler(entities="", sketch_name: str = "", link: bool = True) -> dict:
-    """Project existing geometry into a sketch (Fusion's Project); report the created entity refs."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")

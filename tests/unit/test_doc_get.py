@@ -87,10 +87,20 @@ class TestOpenList:
         out = _payload(dg.handler())
         assert out["open_count"] == 2
         rows = {r["name"]: r for r in out["open_documents"]}
-        # B is healthy + not active -> collapses to just its name (no is_visible/is_saved noise)
-        assert rows["B"] == {"name": "B"}
+        # B is healthy + not active -> collapses to its name + open_index (the addressing key stays)
+        assert rows["B"] == {"name": "B", "open_index": 1}
         # A is active -> keeps the is_active flag
         assert rows["A"]["is_active"] is True
+        assert rows["A"]["open_index"] == 0
+
+    def test_open_index_on_every_row_addresses_unsaved_twins(self):
+        # open_index is the STABLE session address doc_activate/doc_close accept as 'open:N' - the only
+        # handle for an UNSAVED doc that shares a name ('Untitled') and has no URN.
+        u1 = _Doc("Untitled", saved=False, data_file=None)
+        u2 = _Doc("Untitled", saved=False, data_file=None)
+        _install(u1, [u1, u2])
+        rows = _payload(dg.handler())["open_documents"]
+        assert [r["open_index"] for r in rows] == [0, 1]
 
     def test_summary_leads_with_unsaved_exceptions(self):
         # the summary names the docs with unsaved work (what close-all would lose) before the

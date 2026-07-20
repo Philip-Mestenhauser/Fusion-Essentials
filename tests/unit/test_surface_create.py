@@ -556,3 +556,30 @@ class TestSurfacePatch:
         assert out["patched"] == 0 and out["requested"] == 2 and out["failed"] == 2
         assert out["result_bodies"] == []
         assert "Some loops failed" in out["note"]
+
+    def test_boundaries_accepts_composite_handles_without_comma_shredding(self):
+        # A find_geometry handle is COMPOSITE ('<token>|@<kind>:x,y,z') - its locator carries commas.
+        # The plural 'boundaries' path passes each element as a bare STRING, so a naive comma-split
+        # shreds ONE handle into broken fragments ('2.000000','3.000000') that resolve as stale - the
+        # reported bug where 'boundaries' rejected fresh handles while singular 'boundary' accepted
+        # them. Each composite handle must resolve as ONE edge.
+        e0, e1 = FakeEdge(), FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"TOK0": e0, "TOK1": e1})
+        h0 = "TOK0|@circular_edge:1.000000,2.000000,3.000000"
+        h1 = "TOK1|@circular_edge:4.000000,5.000000,6.000000"
+        out = _payload(sc.patch_handler(boundaries=[h0, h1]))
+        assert out["patched"] == 2 and out["failed"] == 0
+
+    def test_singular_boundary_composite_handle_string_not_shredded(self):
+        # The same root fix makes a lone composite handle passed as a STRING resolve to its ONE edge
+        # (the singular param's schema is an array, but a raw string must not be comma-shredded either).
+        e0 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"TOK0": e0})
+        h0 = "TOK0|@circular_edge:1.000000,2.000000,3.000000"
+        out = _payload(sc.patch_handler(boundary=h0))
+        assert out["patched"] is True
+        assert pf.last_input.boundary is e0     # the ONE edge, not a shredded fragment

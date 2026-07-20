@@ -6,9 +6,9 @@
 `_common.OPERATIONS` maps `new`/`new_body`/`join`/`cut`/`intersect` to the `FeatureOperations` enum
 member NAMES (a tool does `getattr(adsk.fusion.FeatureOperations, OPERATIONS[op_key])`). A tool that
 keeps its own such dict - `_OPERATIONS`, `_SURFACE_OPS`, `_OFFSET_OPS`, ... - diverges the moment the
-shared map changes: local copies drift to different key subsets. `test_helper_duplication` only
-matched the exact name `OPERATIONS =`, so these leading-`_` copies slipped through; this catches them
-by VALUE SHAPE: any dict literal outside _common whose values name a `FeatureOperations` member
+shared map changes: local copies drift to different key subsets. `test_helper_duplication` matches
+only the exact name `OPERATIONS`, so a leading-`_` copy slips past it; this lint catches those by
+VALUE SHAPE: any dict literal outside _common whose values name a `FeatureOperations` member
 (`...FeatureOperation`).
 """
 

@@ -64,14 +64,14 @@ and pointer-bearing payloads exist so an agent spends context on decisions, not 
    where it lives, its health, units/mode, the major pieces, whether CAM data exists, and
    *pointers* to the right narrow tool for each area. The workspace/product decides
    which environment you're in and which deep read is meaningful.
-2. **Read state with the right tool** before reasoning — `assembly_probe` (kinematics: positions,
+2. **Read state with the right tool** before reasoning — `assembly_get` (kinematics: positions,
    ground flags, joint wiring), `design_get` (mode/tree/timeline/health/configs in one read — default
    for orientation, `include=['timeline']` for build intent), `cam_get` (CAM setups/operations/tools
    in one read), `param_get` (the parametric skeleton), `sketch_get` (one sketch's
    structure). These give STRUCTURED STATE.
 3. **Verify with numbers, not pixels.** A screenshot of an assembly is the least reliable input —
    parts overlap at the origin and the active component greys the rest out. Reach for it last, and
-   only on a single **isolated, oriented** component (`view_inspect` snapshot → isolate → orient →
+   only on a single **isolated, oriented** component (`view_set` snapshot → isolate → orient →
    `view_screenshot` → restore). Re-read the state tool after any structural change.
 
 **Know the blind spots** — places a read looks authoritative but isn't, so you draw a silent wrong
@@ -99,10 +99,10 @@ are predictable: `<family>_<verb>`, so the family prefix tells you the area —
 | `sketch_` | 2D sketching | `sketch_create`, `sketch_add_geometry`, `sketch_constrain` |
 | `model_` | solid features | `model_extrude`, `model_revolve`, `model_fillet`, `model_pattern_circular` |
 | `joint_` | joints & joint origins | `joint_create`, `joint_at_geometry`, `joint_create_origin` |
-| `assembly_` | positioning & kinematic state | `assembly_probe`, `assembly_ground`, `assembly_move` |
+| `assembly_` | positioning & kinematic state | `assembly_get`, `assembly_ground`, `assembly_move` |
 | `param_` | parameters | `param_get`, `param_set`, `param_add` |
 | `find_` | geometry queries returning handles | `find_geometry` |
-| `view_` | workspace & viewport (screenshots, isolate, section) | `view_screenshot`, `view_inspect`, `view_section` |
+| `view_` | workspace & viewport (screenshots, isolate, section) | `view_screenshot`, `view_set`, `view_section` |
 | `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get`, `cam_generate`, `cam_get_status` |
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
 | `drawing_` / `workspace_` / `save_` | 2D drawings, orientation, save-as-mesh | `drawing_create`, `workspace_orient`, `save_as_mesh` |
@@ -119,12 +119,12 @@ here when learning the surface:
 - **`workspace_orient`** — the cold-boot read. One call reports what's open, its health,
   whether CAM data exists, the major pieces, and *pointers* to the right narrow tool next.
   Call it first.
-- **`assembly_probe`** — kinematic state as JSON: every occurrence's world position, ground
+- **`assembly_get`** — kinematic state as JSON: every occurrence's world position, ground
   flags, and joint wiring. The numbers you reason about instead of a cluttered screenshot.
 - **`find_geometry`** → **`joint_at_geometry`** — the geometry-as-values pair. `find_geometry`
   returns stable *handles* to faces/edges (filterable by radius/proximity); you pass a handle
   to a consumer like `joint_at_geometry`, which lands the joint AT that exact geometry.
-- **`view_inspect`** + **`view_screenshot`** — the agent's "eyes": isolate/orient a single
+- **`view_set`** + **`view_screenshot`** — the agent's "eyes": isolate/orient a single
   component, then capture it (a screenshot of a whole assembly is the least reliable input).
 - **`sys_execute_script`** — the gated escape hatch: arbitrary Fusion Python, off by default
   (see Security). The typed tool surface exists so this is rarely needed.

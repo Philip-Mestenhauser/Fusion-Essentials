@@ -95,7 +95,7 @@ def _refresh_one(ref, label, only_out_of_date, use_setter=False):
 
 
 def handler(name: str = "", only_out_of_date: bool = True) -> dict:
-    """Refresh external references to their latest version; see TOOL_DESCRIPTION."""
+    """See TOOL_DESCRIPTION."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return error("No active document.")

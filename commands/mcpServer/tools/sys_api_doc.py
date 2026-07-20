@@ -85,7 +85,7 @@ def _signature(member):
 
 def handler(searchPattern: str = "", apiCategory: str = "all",
             filter: str = "", max_results: int = _MAX_RESULTS) -> dict:
-    """Search the live Fusion API docs by regex."""
+    """See TOOL_DESCRIPTION."""
     if not searchPattern:
         return error("Provide 'searchPattern' (a regex matched against API names/docs).")
     try:

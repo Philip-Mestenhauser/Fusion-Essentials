@@ -1,17 +1,14 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Measurement: handler docstrings that merely restate the wire description.
+"""Lint: a handler docstring must not merely restate the tool's wire description.
 
 The house rule (tools/CLAUDE.md "Module docstrings"): a handler docstring that only restates the
 tool's wire description should be one line or omitted - the agent already reads the description, so a
-paraphrase of it adds context cost without information. This sizes how many handler docstrings are
-mostly a paraphrase of their `*_DESCRIPTION`, as input to a one-time cleanup.
-
-It is deliberately a RATCHET (count <= _BASELINE), not a zero gate: the cleanup is a human pass the
-owner has not yet green-lit, so this measures and blocks REGRESSION without forcing that pass now.
-Drive _BASELINE down as docstrings are trimmed; it may never rise. A single-`handler`-per-module
-shape is measured; grandfathered multi-tool modules (no lone top-level `handler`) are skipped.
+paraphrase of it adds context cost without information. A handler whose docstring shares >= _OVERLAP_MIN
+of its words with its `*_DESCRIPTION` (over _MIN_WORDS words) is an offender; the count is a ratchet at
+_BASELINE and may never rise. A single top-level `handler` is measured; a module with no lone `handler`
+(a multi-tool module) is skipped.
 """
 
 import ast
@@ -21,9 +18,8 @@ import re
 from conftest import TOOLS_DIR
 
 _WORD = re.compile(r"[a-z0-9]+")
-# Count of handler docstrings currently mostly-restating their description. Ratchet DOWN only - this
-# is a measured backlog (a deferred human cleanup the owner has not green-lit), not an accepted state.
-_BASELINE = 62
+# Handler docstrings that paraphrase their wire description. Ratchet: may never rise.
+_BASELINE = 0
 _OVERLAP_MIN = 0.6      # fraction of the docstring's words also in the description to call it a restatement
 _MIN_WORDS = 5          # ignore a terse one-liner - too short to carry independent information anyway
 
@@ -68,5 +64,5 @@ class TestDocstringRestatement:
         offenders = _restatements()
         assert len(offenders) <= _BASELINE, (
             f"handler docstrings mostly restating the wire description: {len(offenders)} "
-            f"(baseline {_BASELINE}). Trim to one line or omit, then lower _BASELINE:\n  "
+            f"(baseline {_BASELINE}). Trim each to one line ('See TOOL_DESCRIPTION.') or omit:\n  "
             + "\n  ".join(f"{fn} overlap={ov} :: {first}" for fn, ov, first in offenders))

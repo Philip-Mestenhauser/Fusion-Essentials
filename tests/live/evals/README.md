@@ -12,13 +12,19 @@ user hits them.
 
 ## How to run one
 
-Pipeline-tier scenarios embed an `AGENT PROMPT (verbatim)` block: stage the fixture per the
-frontmatter, then hand that block to the executing agent BYTE-IDENTICAL - compose nothing around
-it, so every run of a scenario is the same experiment and runs compare cleanly. Declared
-{{placeholders}} in frontmatter are the only permitted substitution; everything outside the block
-is grader-only and never reaches the agent. Legacy scenarios instead say "Execute
-`tests/live/evals/scenarios/<name>.md`" and embed the contract in the body; this README is the full
-statement of that contract.
+Scenarios embed an `AGENT PROMPT (verbatim)` block: stage the fixture per the frontmatter, then
+run the block through `tests/live/evals/run_eval.py` - a context-isolated headless executor
+(empty scratch cwd, sterile config, only the fusion-essentials MCP server on its wire, source
+tools hard-denied). The block reaches the executor BYTE-IDENTICAL - compose nothing around it, so
+every run of a scenario is the same experiment and runs compare cleanly. Declared {{placeholders}}
+in frontmatter are the only permitted substitution; everything outside the block is grader-only
+and never reaches the agent. Executor tool calls are audited from the transcript: the runner's
+count GOVERNS the budget; the executor's self-reported count is graded for honesty, not
+arithmetic. The ORCHESTRATOR grades by re-issuing every postcondition read itself - the
+executor's self-report is evidence, never the verdict. Budgets are set from each scenario's first
+measured run + 25% headroom. Staging, grading, and cleanup address documents BY URN (same-name
+lineages accumulate across runs), and run hygiene is scoped strictly to EVAL-CREATED documents -
+never close_all, never a user document.
 
 ## Recording results (the historical ledger lives in the hub)
 
@@ -37,8 +43,11 @@ capture what the driving agent had to DISCOVER mid-run, because that discovery i
 1. **One agent, one Fusion thread.** There is a single live Fusion session. Run the ENTIRE scenario
    yourself, one tool call at a time. NEVER call the Agent/Task tool or spawn, delegate to, or wait
    on another agent - two agents on one session mutate each other's state and corrupt the run.
-2. **Only the Fusion tools.** Use `mcp__fusion-essentials__*` only (deferred - load a schema with
-   ToolSearch before calling it). No local files, no shell.
+2. **Only the Fusion tools.** Use `mcp__fusion-essentials__*` only - the runner loads them all and
+   hard-denies everything else: source access (shell/file tools), harness utilities
+   (ToolSearch/TodoWrite), the irreversible cloud deletes, and interactive UI prompts
+   (`sys_request_selection`). An eval NEVER puts a human in the loop - a step that seems to need a
+   user pick is a scenario defect to SURFACE, not a prompt to fire. No local files, no shell.
 3. **Cold start.** Call `sys_capability_map`, then `workspace_orient`, before reaching for specific
    tools. Drill with the family's tools; do not fish blindly.
 4. **Stage per the scenario's `fixture`, then stay in that document.** The active design is the

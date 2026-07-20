@@ -19,29 +19,29 @@ app = adsk.core.Application.get()
 _ACTIONS = ("list", "create", "rename", "move")
 
 
-def _walk_container(container, out):
-    """Collect (name, object) for operations + folders + patterns under a container, recursively.
-    allOperations omits folders/patterns, so walk .folders/.patterns explicitly (same pattern as
-    cam_delete/cam_reorder) - a folder-into-folder move needs folders to resolve too."""
-    ops = safe(lambda: container.operations)
+def _walk_parent(parent, out):
+    """Collect (name, object) for operations + folders + patterns under a parent (setup or folder),
+    recursively. allOperations omits folders/patterns, so walk .folders/.patterns explicitly (same
+    pattern as cam_delete/cam_reorder) - a folder-into-folder move needs folders to resolve too."""
+    ops = safe(lambda: parent.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
         o = safe(lambda i=i: ops.item(i))
         if o is not None:
             out.append((safe(lambda o=o: o.name) or "", o))
-    for getter in (lambda: container.folders, lambda: container.patterns):
+    for getter in (lambda: parent.folders, lambda: parent.patterns):
         coll = safe(getter)
         for i in range(safe(lambda: coll.count, 0) or 0):
             c = safe(lambda i=i: coll.item(i))
             if c is not None:
                 out.append((safe(lambda c=c: c.name) or "", c))
-                _walk_container(c, out)
+                _walk_parent(c, out)
 
 
 def _find_op(setup, name):
     """Find an operation/folder/pattern by name anywhere in the setup tree, including nested folders
     (allOperations omits folders/patterns entirely, so a folder-into-folder move can't resolve through it)."""
     named = []
-    _walk_container(setup, named)
+    _walk_parent(setup, named)
     for nm, o in named:
         if (nm or "").lower() == (name or "").lower():
             return o
@@ -126,11 +126,7 @@ def _do_move(setup, folder, operations):
 
 def handler(action: str = "list", setup: str = "", name: str = "", folder: str = "",
             new_name: str = "", operations=None) -> dict:
-    """CAM folders. action: list / create / rename / move.
-
-    list: the setup's folders + counts. create: a folder ('name'). rename: 'folder' -> 'new_name'.
-    move: 'operations' (names) INTO 'folder'. 'setup' is the setup name throughout. WRITES (except list).
-    """
+    """See TOOL_DESCRIPTION."""
     action = (action or "list").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use one of: {', '.join(_ACTIONS)}.")

@@ -193,11 +193,16 @@ class _FakeJointOriginInput:
         self.primaryAxisVector = SimpleNamespace(x=0.0, y=0.0, z=1.0)
         self.secondaryAxisVector = SimpleNamespace(x=1.0, y=0.0, z=0.0)
         self.thirdAxisVector = SimpleNamespace(x=0.0, y=1.0, z=0.0)
+        self.offsetX = self.offsetY = self.offsetZ = None   # set by the handler for anchor=coordinates
 
 
 class _FakeJointOrigin:
     def __init__(self):
         self.name = "JointOrigin1"
+        # offsetX/Y/Z ModelParameters (each carries .value in cm) - populated by add() from the input.
+        self.offsetX = SimpleNamespace(value=0.0)
+        self.offsetY = SimpleNamespace(value=0.0)
+        self.offsetZ = SimpleNamespace(value=0.0)
 
 
 class _FakeJointOrigins:
@@ -209,7 +214,14 @@ class _FakeJointOrigins:
 
     def add(self, jo_input):
         self.count += 1
-        return _FakeJointOrigin()
+        origin = _FakeJointOrigin()
+        # Model the offset parameters: the created JO reports back whatever offsets the input carried
+        # (createByReal wraps the cm value as ._real). This is what the honesty read-back verifies.
+        for ax in ("offsetX", "offsetY", "offsetZ"):
+            vi = getattr(jo_input, ax, None)
+            if vi is not None:
+                setattr(origin, ax, SimpleNamespace(value=getattr(vi, "_real", 0.0)))
+        return origin
 
 
 class _FakeComp:
@@ -217,6 +229,7 @@ class _FakeComp:
         self.name = "Comp1"
         self.sketches = _FakeSketches()
         self.xYConstructionPlane = object()
+        self.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
         self.jointOrigins = _FakeJointOrigins()
 
 
@@ -242,6 +255,9 @@ def _install_handler(monkeypatch, design=None):
     monkeypatch.setattr(adsk.core.Point3D, "create", staticmethod(_create))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByPoint",
                         staticmethod(lambda pt: SimpleNamespace(anchor_point=pt)))
+    # createByReal wraps a cm value; the coordinate-anchor path uses it for offsetX/Y/Z.
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
+                        staticmethod(lambda v: SimpleNamespace(_real=v)))
     return d, calls
 
 
@@ -273,18 +289,45 @@ class TestHandlerGuards:
 
 
 class TestHandlerCoordinateAnchor:
-    def test_coordinates_at_scales_by_the_unit_factor(self, monkeypatch):
+    # The honesty repair (run-07b): anchor='coordinates' anchors on the MODEL ORIGIN and holds the
+    # position in REAL parametric offsetX/Y/Z - not an undimensioned point floating in a hidden sketch
+    # (which read plausibly while spawning 0.00mm parameters). The reported location is the read-back
+    # offsets, so it is verifiable and recompute-robust.
+
+    def test_coordinates_held_in_parametric_offsets_not_a_floating_point(self, monkeypatch):
         _, calls = _install_handler(monkeypatch)
         out = _payload(jo.handler(anchor="coordinates", target="at", x=10, y=0, z=0, units="mm"))
-        assert calls[-1] == (1.0, 0.0, 0.0)          # 10 mm * 0.1 cm/mm
-        assert out["location"] == {"x": 10, "y": 0, "z": 0, "units": "mm"}
+        # NO floating sketch point is created for the anchor (that path is gone).
+        assert calls == []
+        # location is the READ-BACK offset parameters: 10 mm on X (1.0 cm internal, reported in mm).
+        assert out["location"] == {"x": 10.0, "y": 0.0, "z": 0.0, "units": "mm"}
+        assert out["held_by"] == "parametric offsetX/Y/Z from the model origin"
+        assert out["offset_parameters"] == {"x": 10.0, "y": 0.0, "z": 0.0, "units": "mm"}
 
-    def test_target_origin_ignores_xyz_and_reports_zero_location(self, monkeypatch):
+    def test_target_origin_reports_zero_offsets(self, monkeypatch):
         _, calls = _install_handler(monkeypatch)
         out = _payload(jo.handler(anchor="coordinates", target="origin",
-                                          x=99, y=99, z=99, units="mm"))
-        assert calls[-1] == (0.0, 0.0, 0.0)
+                                  x=99, y=99, z=99, units="mm"))
+        # target=origin ignores x/y/z; the offsets are a genuine 0 (the JO IS at the origin), not fake.
         assert out["location"] == {"x": 0.0, "y": 0.0, "z": 0.0, "units": "mm"}
+        assert out["offset_parameters"] == {"x": 0.0, "y": 0.0, "z": 0.0, "units": "mm"}
+
+    def test_mismatched_offset_readback_errors_and_rolls_back(self, monkeypatch):
+        # If the offsets don't stick (the JO reports a different position than asked), that is a
+        # mislocated origin - a hard error with a rollback, never a false success.
+        d, _ = _install_handler(monkeypatch)
+        orig_add = d.rootComponent.jointOrigins.add
+        rolled = {"back": False}
+
+        def _bad_add(jo_input):
+            origin = orig_add(jo_input)
+            origin.offsetX = SimpleNamespace(value=9.9)      # asked 1.0 cm, reports 9.9 cm
+            origin.deleteMe = lambda: rolled.__setitem__("back", True) or True
+            return origin
+        monkeypatch.setattr(d.rootComponent.jointOrigins, "add", _bad_add)
+        res = jo.handler(anchor="coordinates", target="at", x=10, y=0, z=0, units="mm")
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert rolled["back"] is True                        # the mislocated origin was rolled back
 
     def test_creates_joint_origin_and_reports_frame_axes(self, monkeypatch):
         d, _ = _install_handler(monkeypatch)

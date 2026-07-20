@@ -52,24 +52,38 @@ def _is_ortho_face(view):
     return _view_common.is_ortho_face(view)
 
 
+def _keep_visible(o_path, target_path):
+    """Keep an occurrence visible during a fit-to isolate if it IS the target, an ANCESTOR of it, or a
+    DESCENDANT of it. Hiding an ancestor hides the nested target (BLANK image); hiding a descendant
+    drops part of the target's own subtree. Nesting is by fullPathName ('Frame:1+Pedestal:1', '+' per
+    level). Comparison is by PATH, never Python `is` - the API mints a fresh occurrence proxy on each
+    access, so `o is target` is never true across two walks and would hide the target itself."""
+    if not o_path or not target_path:
+        return False
+    return (o_path == target_path
+            or target_path.startswith(o_path + "+")     # o is an ancestor of the target
+            or o_path.startswith(target_path + "+"))     # o is a descendant of the target
+
+
 def _isolate_for_fit(name):
-    """Temporarily hide every other occurrence so vp.fit() frames just the named one.
-    Returns (restore_callable, error_or_None) - error is set (and restore is None) when the
-    occurrence didn't resolve (including an ambiguous name, which names the candidates).
-    Best-effort + non-destructive."""
+    """Temporarily hide every occurrence that is NOT the named one, its ancestors, or its descendants,
+    so vp.fit() frames just the named one. Returns (restore_callable, error_or_None) - error is set (and
+    restore is None) when the occurrence didn't resolve (including an ambiguous name, which names the
+    candidates). Best-effort + non-destructive."""
     design = _common.design()
     root = safe(lambda: design.rootComponent) if design else None
     if not root:
         return None, f"fit_to: no active design to resolve '{name}' against."
-    occs = safe(lambda: list(root.allOccurrences)) or []
     # Resolve via the shared OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
     # ambiguous name doesn't silently frame the wrong instance.
     target, err = _FIT_TO.resolve(name)
     if target is None:
         return None, err
+    target_path = safe(lambda: target.fullPathName)
+    occs = safe(lambda: list(root.allOccurrences)) or []
     prev = []
     for o in occs:
-        if o is target:
+        if _keep_visible(safe(lambda o=o: o.fullPathName), target_path):
             continue
         was = safe(lambda o=o: o.isLightBulbOn)
         if was:
@@ -99,7 +113,7 @@ def _active_component_note(design):
 
 def handler(view: str = "current", width: int = 800, height: int = 600,
             zoom: float = 1.0, fit_to: str = "") -> dict:
-    """Capture the active viewport and return it as a base64 PNG image block."""
+    """See TOOL_DESCRIPTION."""
     view = (view or "current").strip().lower()
     if view not in _VIEWS:
         return error(f"Unknown view '{view}'. Valid: {', '.join(_VIEWS)}")
@@ -166,6 +180,9 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     try:
         fd, temp_path = tempfile.mkstemp(prefix="fe_mcp_shot", suffix=".png")
         os.close(fd)
+        # Force the viewport to render the visibility/camera changes before the grab - otherwise the
+        # capture can race an un-refreshed frame (an isolate that hasn't drawn yet reads as blank).
+        safe(lambda: vp.refresh())
         did = vp.saveAsImageFile(temp_path, width, height)
         if not did or not os.path.exists(temp_path):
             return error("Viewport capture failed (saveAsImageFile returned false).")

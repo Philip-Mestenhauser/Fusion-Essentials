@@ -157,7 +157,7 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
             sheet_size: str = "default", orientation: str = "landscape", sheet_scope: str = "all_levels",
             sheet_types=None, auto_dimension: str = "default", omit_fasteners: bool = False,
             fastener_keywords: str = "", view_style: str = "default") -> dict:
-    """Create an automatic 2D drawing from the active design, configuring the auto-generator."""
+    """See TOOL_DESCRIPTION."""
     std, e = _STANDARD.resolve(standard)
     if e:
         return error(e)

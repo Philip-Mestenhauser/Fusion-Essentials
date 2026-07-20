@@ -47,12 +47,7 @@ def _set_param(ncp, internal_name, value):
 
 
 def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
-    """Set the comment (and optionally name) on NC programs.
-
-    comment: the text to put in the NC program's Comment field. program: the name of one NC
-    program to edit (omit to edit ALL programs). set_name: optional - also set the NC program's
-    Name field to this. WRITES to the CAM data; reports before/after per program.
-    """
+    """See TOOL_DESCRIPTION."""
     # Guard against the silent wipe-all: refuse when there's genuinely nothing to write - an
     # empty/whitespace comment AND no set_name. (An empty comment WITH a set_name is fine: the
     # caller is renaming, not clearing comments; an explicit non-empty comment is fine.)

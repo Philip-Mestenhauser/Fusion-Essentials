@@ -1,9 +1,11 @@
 """Wire-level tests for SimpleMCPServer's JSON-RPC protocol behavior.
 
-Covers protocol version negotiation on initialize, and the tools/call contract: an unknown
-tool name is a JSON-RPC protocol error, but an unknown/missing argument or a handler exception
-comes back as a normal result with isError=true (per the MCP spec, a tool EXECUTION failure is
-not a protocol-level failure) so the calling agent can read it and self-correct.
+Covers protocol version negotiation on initialize; the non-object-body guard (a batch ARRAY or any
+other non-dict body -> one clean -32600 error object, never a raise); and the tools/call contract:
+an unknown tool name is a JSON-RPC protocol error, but an unknown/missing argument, an out-of-enum
+argument value, or a handler exception comes back as a normal result with isError=true (per the MCP
+spec, a tool EXECUTION failure is not a protocol-level failure) so the calling agent can read it
+and self-correct.
 """
 
 import asyncio
@@ -59,6 +61,28 @@ def _ok():
     return {"content": [{"type": "text", "text": "ok"}], "isError": False}
 
 
+def _enum_tool_item(name, handler, run_on_main_thread=False):
+    """A tool with one scalar enum prop ('kind'), one array-of-enum prop ('include'), and one free
+    string prop ('target') - the three shapes the server-side enum gate distinguishes."""
+    from mcpServer.mcp_primitives.item import Item
+    from mcpServer.mcp_primitives.tool import Tool
+
+    tool = Tool.create_simple(name=name, description="synthetic enum tool")
+    tool.add_input_property("kind", {"type": "string", "enum": ["cylinder_face", "planar_face"]})
+    tool.add_input_property("include", {"type": "array",
+                                        "items": {"type": "string", "enum": ["versions", "xref_tree"]}})
+    tool.add_input_property("target", {"type": "string"})
+    tool.strict_schema()
+    return Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=run_on_main_thread)
+
+
+def _call(server, name, arguments):
+    return asyncio.run(server.handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }))
+
+
 class TestInitializeProtocolVersionNegotiation:
     def test_initialize_with_supported_version_echoes_it(self, server):
         response = asyncio.run(server.handle_request({
@@ -79,6 +103,37 @@ class TestInitializeProtocolVersionNegotiation:
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
         }))
         assert response["result"]["protocolVersion"] == "2025-03-26"
+
+
+class TestNonObjectRequestBody:
+    def test_batch_array_body_returns_clean_32600_not_a_raise(self, server):
+        # a JSON-RPC batch (a list of requests) is not implemented; it must come back as ONE
+        # well-formed error object, not an AttributeError -> HTTP 500.
+        response = asyncio.run(server.handle_request([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        ]))
+        assert response["error"]["code"] == -32600
+        assert response["id"] is None                       # a batch has no single id to echo
+        assert "batch" in response["error"]["message"].lower()
+        assert "result" not in response
+
+    def test_empty_array_body_returns_clean_32600(self, server):
+        response = asyncio.run(server.handle_request([]))
+        assert response["error"]["code"] == -32600
+        assert response["id"] is None
+
+    def test_non_dict_scalar_body_returns_clean_32600(self, server):
+        response = asyncio.run(server.handle_request("ping"))
+        assert response["error"]["code"] == -32600
+        assert response["id"] is None
+        assert "request object" in response["error"]["message"]
+
+    def test_dict_body_is_unaffected_by_the_guard(self, server):
+        response = asyncio.run(server.handle_request({
+            "jsonrpc": "2.0", "id": 7, "method": "ping",
+        }))
+        assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
 
 
 class TestToolsCallUnknownTool:
@@ -212,6 +267,72 @@ class TestToolsCallArgumentValidation:
         }))
         assert response["result"]["isError"] is False
         assert seen["kwargs"] == {}
+
+
+class TestToolsCallEnumValidation:
+    def test_out_of_enum_value_is_a_named_error_and_handler_not_called(self, server):
+        # a permissive client sends kind="faces" (not in the enum) and, without this gate, gets
+        # silent wrong behavior (match_count:0) instead of a correction.
+        calls = {"n": 0}
+
+        def handler(**kwargs):
+            calls["n"] += 1
+            return _ok()
+
+        server.register(_enum_tool_item("x", handler))
+        result = _call(server, "x", {"kind": "faces"})["result"]
+        assert result["isError"] is True
+        assert calls["n"] == 0                              # a doomed call never dispatches
+        assert "'kind'" in result["message"]                # names the property
+        assert "'faces'" in result["message"]               # names the offending value
+        assert "cylinder_face" in result["message"] and "planar_face" in result["message"]
+        assert result["content"][0]["text"] == result["message"]
+
+    def test_valid_enum_value_passes_through(self, server):
+        seen = {}
+        server.register(_enum_tool_item("x", lambda **kw: seen.update(kw) or _ok()))
+        result = _call(server, "x", {"kind": "planar_face"})["result"]
+        assert result["isError"] is False
+        assert seen == {"kind": "planar_face"}
+
+    def test_array_of_enum_prop_rejects_a_bad_element(self, server):
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        result = _call(server, "x", {"include": ["versions", "bogus_slice"]})["result"]
+        assert result["isError"] is True
+        assert "'include'" in result["message"] and "'bogus_slice'" in result["message"]
+        assert "versions" in result["message"]              # the valid values are listed
+
+    def test_array_of_enum_prop_accepts_all_valid_elements(self, server):
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        assert _call(server, "x", {"include": ["versions", "xref_tree"]})["result"]["isError"] is False
+
+    def test_non_enum_property_is_not_gated(self, server):
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        assert _call(server, "x", {"target": "anything at all"})["result"]["isError"] is False
+
+    def test_tool_without_enums_is_unaffected(self, server):
+        # the default fixture tool declares no enum anywhere; every value passes the gate.
+        server.register(_make_tool_item("plain", lambda **kw: _ok()))
+        assert _call(server, "plain", {"a": "faces"})["result"]["isError"] is False
+
+    def test_none_for_an_optional_enum_prop_is_not_rejected(self, server):
+        # an explicit null = unset; the handler's default applies, same as omitting the key.
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        assert _call(server, "x", {"kind": None})["result"]["isError"] is False
+
+    def test_unhashable_value_for_an_enum_prop_is_a_named_error_not_a_typeerror(self, server):
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        result = _call(server, "x", {"kind": ["planar_face"]})["result"]
+        assert result["isError"] is True
+        assert "'kind'" in result["message"]
+
+    def test_enum_specs_are_precomputed_at_registration(self, server):
+        # per-call cost is a dict lookup: the specs exist before any call is made.
+        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        specs = server._enum_specs["x"]
+        assert specs["kind"]["set"] == frozenset({"cylinder_face", "planar_face"})
+        assert specs["include"]["array"] is True
+        assert "target" not in specs                        # free strings carry no enum spec
 
 
 class TestToolsCallHandlerExceptions:

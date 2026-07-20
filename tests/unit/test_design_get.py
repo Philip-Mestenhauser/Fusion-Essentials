@@ -1,6 +1,6 @@
 """Tests for `design_get` - the first RICH READ (one tool, default slice + include= deeper slices).
 
-CANONICAL EXAMPLE for a rich-read tool (see tests/README.md "The canonical examples"). The pattern,
+CANONICAL EXAMPLE for a rich-read tool (see tests/CLAUDE.md "The canonical pattern"). The pattern,
 and the one rule that makes it leak-free: a `@pytest.fixture` stubs the tool's `_slice_*` seams with
 `monkeypatch.setattr` (pytest undoes every patch after the test - no module state is left poked), then
 each test asserts the ROUTER's composition. The slices DELEGATE to source handlers; that cross-tool
@@ -155,6 +155,23 @@ class TestFingerprint:
         fp = dg._fingerprint(self._design(bodies=1))
         assert fp == {"bodies": 1}                 # no joints/sketches/components/parameters when zero
 
+    def test_bodies_and_sketches_are_design_wide_not_root_only(self):
+        # Regression: bodies/sketches must be summed across every component (via the shared
+        # _common.design_wide_counts, the same one workspace_orient uses), not read off the root
+        # alone - a design whose geometry lives in sub-components would otherwise under-report (a
+        # sketch-only-in-sub-components doc reading sketches:0 despite having 2).
+        c = lambda n: SimpleNamespace(count=n)
+        root = SimpleNamespace(bRepBodies=c(0), sketches=c(0),
+                               allOccurrences=c(2), joints=c(0), asBuiltJoints=c(0))
+        subs = [SimpleNamespace(bRepBodies=c(1), sketches=c(1)),
+                SimpleNamespace(bRepBodies=c(2), sketches=c(1))]
+        items = [root] + subs
+        design = SimpleNamespace(rootComponent=root, userParameters=c(0),
+                                 allComponents=SimpleNamespace(count=len(items), item=lambda i: items[i]))
+        fp = dg._fingerprint(design)
+        assert fp["bodies"] == 3      # 0 (root) + 1 + 2, NOT the root-only 0
+        assert fp["sketches"] == 2    # 0 (root) + 1 + 1, NOT the root-only 0
+
 
 class TestContentPointers:
     """`_content_pointers` - the inbound breadcrumb: a present content class names the tool acting on it."""
@@ -171,7 +188,7 @@ class TestContentPointers:
 
     def test_only_present_classes_pointed(self):
         p = dg._content_pointers({"joints": 3})
-        assert set(p) == {"joints"} and "assembly_probe" in p["joints"]
+        assert set(p) == {"joints"} and "assembly_get" in p["joints"]
 
     def test_empty_contents_no_pointers(self):
         assert dg._content_pointers({}) == {} and dg._content_pointers(None) == {}

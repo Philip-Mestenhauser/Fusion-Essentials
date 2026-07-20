@@ -12,17 +12,18 @@ Replace the model in a template and have toolpaths regenerate; switch fixtures o
 a configuration table -- all while keeping joints and CAM selections intact. The structures
 below exist to make that possible.
 
-## Component Containers
+## Components as slots (the AU class's "Component Containers")
 
-A Component is a container for CAD. A CAM setup's Model selection points at the *container*,
-not the geometry inside it -- so the setup keeps its selection even when the container's
-contents are replaced. A Body is just geometry and must live inside a Component; a Component
-can be empty (only its origin planes/axes).
+A Component holds the CAD; the AU class names this slot role a "Component Container". A CAM
+setup's Model selection points at the *component*, not the geometry inside it -- so the setup
+keeps its selection even when the component's contents are replaced. A Body is just geometry and
+must live inside a Component; a Component can be empty (only its origin planes/axes).
 
 Consequence for crawling: a setup's `models` / `fixtures` / `stockSolids` entries are usually
-**container Occurrences** (named like `Model Component`, `Fixture Container`, `Stock
-Container`). Reading only the top level shows the container, not its contents. You MUST
-descend `Occurrence.childOccurrences` to find the real parts.
+**component Occurrences** playing that slot role (in shipped templates named like `Model
+Component`, `Fixture Container`, `Stock Container`). Reading only the top level shows the slot
+component, not its contents. You MUST descend `Occurrence.childOccurrences` to find the real
+parts.
 
 ## Joint Origin Containers (JOC) and joint survival
 
@@ -33,7 +34,7 @@ replaceable fixtures are often named like "...Save-as and replace to make a new 
 
 ## The Replaceable Fixturing Assembly (RFA) - what to expect inside a setup
 
-A setup's Model selection is a Container nesting three standardized typed files:
+A setup's Model selection is a component nesting three standardized typed files:
 
 | Typed file | Role |
 |---|---|
@@ -41,21 +42,21 @@ A setup's Model selection is a Container nesting three standardized typed files:
 | **Clamping Unit / Pallet Type** | Mounts the vise to the machine; defines the Machine Model Attachment point used in simulation. |
 | **WCS Type** | A **simple cube** that explicitly defines the Z and X directions for the CAM setup, so the WCS is always accurately located. |
 
-So when `design_get_tree` descends a setup's model/fixture container, expect: a Clamping
+So when `design_get_tree` descends a setup's model/fixture component, expect: a Clamping
 Unit/Pallet + a Vise + a WCS cube + the machined model.
 
 ## Two common mistakes to avoid
 
-1. **Treating a container as one opaque object.** An early automated crawl read `Fixture
-   Container` as a single part. Wrong -- descend it; the structure only becomes legible when
-   you read the nesting.
+1. **Treating a slot component as one opaque object.** An early automated crawl read a
+   `Fixture Container` occurrence as a single part. Wrong -- descend it; the structure only
+   becomes legible when you read the nesting.
 2. **Calling the WCS cube a placeholder.** A lone cube referenced by a setup is almost
    certainly the WCS Type -- it defines the WCS orientation. Do not label it a placeholder;
    descend and label it correctly.
 
 ## Selectionless toolpaths and parametric stock
 
-- **Selectionless toolpaths** (e.g. 3D Adaptive, Bore) point at the Model Container and use
+- **Selectionless toolpaths** (e.g. 3D Adaptive, Bore) point at the model component and use
   geometry recognition + diameter ranges, so they regenerate automatically when a new part is
   inserted. This is the property Phase 3 checks for.
 - **Parametric stock** is driven by user parameters; jaws adjust to the workpiece via
@@ -65,7 +66,7 @@ Unit/Pallet + a Vise + a WCS cube + the machined model.
 
 ## How this maps to the Fusion API (for the building blocks)
 
-- A CAM setup's `models` / `fixtures` / `stockSolids` are typically container Occurrences;
+- A CAM setup's `models` / `fixtures` / `stockSolids` are typically component Occurrences;
   `design_get_tree` descends them and resolves external references.
 - An external reference is `Occurrence.isReferencedComponent == True`; it resolves via
   `Occurrence.documentReference.dataFile` -> `.id` (lineage UID / URN), `.name`,
@@ -101,10 +102,10 @@ older, more conservative refuse-to-open mode; the save-as path above avoids need
 
 ## Why an inserted part must be UN-GROUNDED before a positioning joint
 
-An occurrence inserted into a container is `ground_to_parent = TRUE` by default — rigidly locked to
+An occurrence inserted into a parent component is `ground_to_parent = TRUE` by default — rigidly locked to
 its parent. A rigid joint that needs the part to MOVE to mate then can't resolve: the joint computes
 as a failed/warning state ("Can't resolve component positions — conflicts with assembly
-relationships") and `assembly_probe` reports its `occurrence_two` as null. Setting
+relationships") and `assembly_get` reports its `occurrence_two` as null. Setting
 `ground_to_parent = false` on the inserted occurrence frees it, and the identical joint then computes
 healthy. (A healthy joint to a ROOT-level joint origin still reports `occurrence_two = null` — that is
 normal for a root-anchored JO; trust the `healthy` flag and the part's measured position, not that

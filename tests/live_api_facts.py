@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2704.1.23"
-VERIFIED_ON = "2026-07-11"
+FUSION_VERSION = "2704.1.36"
+VERIFIED_ON = "2026-07-19"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -74,6 +74,14 @@ ENUMS = {
         "Arrange2DRectangularSolverType": 1,
         "Arrange3DSolverType": 2,
     },
+    "fusion.BoundingBoxEntityTypes": {
+        "AllEntitiesBoundingBoxEntityType": 0,
+        "SolidBRepBodyBoundingBoxEntityType": 1,
+        "SurfaceBodyBoundingBoxEntityType": 2,
+        "MeshBodyBoundingBoxEntityType": 4,
+        "SketchBoundingBoxEntityType": 8,
+        "ConstructionBoundingBoxEntityType": 16,
+    },
     "fusion.DesignIntentTypes": {
         "PartDesignIntentType": 0,
         "AssemblyDesignIntentType": 1,
@@ -107,6 +115,20 @@ ENUMS = {
         "MiddleKeyPoint": 1,
         "EndKeyPoint": 2,
         "CenterKeyPoint": 3,
+    },
+    "fusion.JointMotionTypes": {
+        "BallJointPitchMotionType": 0,
+        "BallJointRollMotionType": 1,
+        "BallJointYawMotionType": 2,
+        "CylindricalJointRotateMotionType": 3,
+        "CylindricalJointSlideMotionType": 4,
+        "PinSlotJointRotateMotionType": 5,
+        "PinSlotJointSlideMotionType": 6,
+        "PlanarJointRotateMotionType": 7,
+        "PlanarJointSlideOneMotionType": 8,
+        "PlanarJointSlideTwoMotionType": 9,
+        "RevoluteJointRotateMotionType": 10,
+        "SliderJointSlideMotionType": 11,
     },
     "fusion.JointTypes": {
         "RigidJointType": 0,
@@ -291,6 +313,11 @@ SHAPES = {
         "saveCopyAs", "sketches", "tangentRelationships", "this", "thisown", "transformOccurrences",
         "userCoordinateSystems", "xConstructionAxis", "xYConstructionPlane", "xZConstructionPlane", "yConstructionAxis", "yZConstructionPlane",
         "zConstructionAxis",
+    ],
+    "Cone": [
+        "axis", "cast", "classType", "copy", "create", "evaluator",
+        "getData", "halfAngle", "isValid", "objectType", "origin", "radius",
+        "set", "surfaceType", "this", "thisown", "transformBy",
     ],
     "Cylinder": [
         "axis", "cast", "classType", "copy", "create", "evaluator",

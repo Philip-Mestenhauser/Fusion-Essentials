@@ -32,7 +32,7 @@ _REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
 def handler(document_id: str = "", into_component: str = "",
             remove_existing: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
-    """Insert a saved cloud document into the active design as an occurrence; see TOOL_DESCRIPTION."""
+    """See TOOL_DESCRIPTION."""
     raw = (document_id or "").strip()
     if not raw:
         return error("Provide 'document_id' - the lineage URN (or web URL) of the saved cloud "

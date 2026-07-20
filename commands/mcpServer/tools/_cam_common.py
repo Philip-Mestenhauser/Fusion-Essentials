@@ -4,6 +4,7 @@
 """Shared CAM substrate: resolves the active document's CAM product and judges job health, for
 cam_get and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) to reuse."""
 
+import json
 import re
 
 import adsk.core
@@ -16,9 +17,22 @@ from ._common import ok, error, safe
 MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / "
              "find_operation (resolve a setup/operation by name, case-insensitive, returning the object "
              "+ available names) over setups / walk_operations (the shared setup + operation walks) + "
-             "live_readiness (the one CAM job-health signal)")
+             "expression_error (the post-set CAMParameter evaluation read-back every CAM param editor "
+             "gates on) + live_readiness (the one CAM job-health signal)")
 
 app = adsk.core.Application.get()
+
+
+def expression_error(p):
+    """Read a just-set CAM parameter BACK to confirm its expression EVALUATED - the CAM param store is
+    NOT the CAD one. A CAMParameter exposes .error / .warning message strings; a broken expression
+    ('NoSuchParamXyz * 2') is STORED verbatim (.expression echoes it) and its .value.value even reads
+    back a finite 0.0, so ONLY .error reveals it - live it reads 'Failed to evaluate expression.'.
+    A .warning ('stock less than the model width') fires on VALID expressions too, so it never gates.
+    Returns (error_message_or_None, warning_message_or_None)."""
+    err = (safe(lambda: p.error) or "").strip()
+    warn = (safe(lambda: p.warning) or "").strip()
+    return (err or None), (warn or None)
 
 
 def get_cam():
@@ -37,6 +51,36 @@ def get_cam():
                       "one on first entry: call view_switch_workspace('manufacture') once, then "
                       "retry this call.")
     return cam, None
+
+
+def tool_holder(t):
+    """A CAM Tool's assigned HOLDER identity, or None when it carries no holder. adsk.cam.Tool exposes
+    NO holder accessor (verified via sys_get_api_doc), so the holder is read from the tool's JSON, where
+    it lives as a 'holder' sub-doc ({description, product-id, vendor, segments}). Returns only the fields
+    that are actually present ({name, product_id, vendor, segment_count}) - claim only what reads back.
+    Shared by cam_get(include=['tool']) and the cam_edit_tools library listing so a holder reads back
+    the same way everywhere."""
+    raw = safe(lambda: t.toJson())
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return None
+    h = d.get("holder") if isinstance(d, dict) else None
+    if not isinstance(h, dict):
+        return None
+    out = {}
+    if h.get("description"):
+        out["name"] = h["description"]
+    if h.get("product-id"):
+        out["product_id"] = h["product-id"]
+    if h.get("vendor"):
+        out["vendor"] = h["vendor"]
+    segs = h.get("segments")
+    if isinstance(segs, list) and segs:
+        out["segment_count"] = len(segs)
+    return out or None
 
 
 def _iter_collection(coll):
@@ -76,7 +120,7 @@ def find_setup(cam, name):
 
 def walk_operations(cam):
     """Every real Operation across every setup, folder/pattern-nested ops INCLUDED (setup.allOperations
-    flattens them; it drops the folder/pattern CONTAINER objects, which an operation walk doesn't want).
+    flattens them; it drops the folder/pattern PARENT objects, which an operation walk doesn't want).
     Operation.cast skips any non-operation the collection yields. The ONE operation walk - find_operation
     resolves a name over it - so 'which operations exist' is answered the same way everywhere."""
     out = []
@@ -109,12 +153,73 @@ def first_error_line(obj):
     return msg[0] if msg else ""
 
 
+def _op_state_facts(op) -> dict:
+    """ONE safe read of the raw per-op lifecycle state Fusion exposes, so every op-state tally
+    (cam_get's per-setup op_states via _op_primary_state, cam_get_status's live_states via
+    op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
+    isSuppressed/isGenerating/hasWarning independently. operationState: 0=valid, 1=out_of_date,
+    2=suppressed, 3=no_toolpath (see _OP_STATE_NAMES in cam_generate.py)."""
+    return {
+        "name": safe(lambda: op.name),
+        "has_error": bool(safe(lambda: op.hasError, False)),
+        "has_warning": bool(safe(lambda: op.hasWarning, False)),
+        "is_suppressed": bool(safe(lambda: op.isSuppressed, False)),
+        "is_generating": bool(safe(lambda: op.isGenerating, False)),
+        "operation_state": safe(lambda: op.operationState),
+        "generating_progress": safe(lambda: op.generatingProgress),
+    }
+
+
+def op_state_tally(ops) -> dict:
+    """The valid/out_of_date/errored/generating/suppressed tally that live_readiness (the WHOLE
+    document) and a scoped-target poll (cam_generate's poller, one setup/operation/folder) both need -
+    the ONE per-op walk both share, classifying every op from the same _op_state_facts. An ERRORED op
+    is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating, so counting
+    it as out_of_date/generating would make a poller wait forever. 'generating' is an independent
+    OVERLAY bit (an op can be valid/out_of_date AND generating).
+
+    Returns {valid, out_of_date, errored, generating, suppressed, total, active, op_sample} -
+    op_sample is the first errored op's {name, error}, or None. Each caller layers its OWN payload
+    shape on top (live_readiness adds setup-/program-level errors + a readiness verdict; the scoped
+    poller adds setups_errored=0/programs_errored=0). This is a DIFFERENT tally from cam_get's
+    op_states (a per-SETUP, mutually-exclusive-bucket rollup via _op_primary_state) - same raw facts,
+    different shape for a different question ("what's live right now" vs "this setup's state mix)."""
+    valid = ood = errored = generating = suppressed = total = 0
+    active = None
+    op_sample = None
+    for raw in (ops or []):
+        op = adsk.cam.Operation.cast(raw)
+        if op is None:
+            continue
+        facts = _op_state_facts(op)
+        total += 1
+        if facts["has_error"]:
+            errored += 1                             # FAILED, not pending - its own bucket
+            if op_sample is None:
+                op_sample = {"name": facts["name"], "error": first_error_line(op)}
+            continue
+        state = facts["operation_state"]
+        if state == 0:
+            valid += 1
+        elif state == 2:
+            suppressed += 1
+        elif state in (1, 3):
+            ood += 1
+        if facts["is_generating"]:
+            generating += 1
+            prog = facts["generating_progress"]
+            if active is None or (prog and prog not in ("Pending", "0.0%")):
+                active = {"op": facts["name"], "progress": prog}
+    return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
+            "suppressed": suppressed, "total": total, "active": active, "op_sample": op_sample}
+
+
 def live_readiness():
     """The SINGLE CAM health/readiness signal for the active document, read live - the home for
     'is this job postable'. cam_get exposes it; cam_get_status (the generation poller) CALLS it instead
-    of re-deriving its own op scan. Walks every setup's operations PLUS the setup- and NC-program-level
-    errors (a faulted setup/program blocks the job even with clean ops; Setup and NCProgram expose the
-    same hasError/error as Operation).
+    of re-deriving its own op scan. Walks every setup's operations (via walk_operations + the shared
+    op_state_tally) PLUS the setup- and NC-program-level errors (a faulted setup/program blocks the job
+    even with clean ops; Setup and NCProgram expose the same hasError/error as Operation).
 
     Returns (signal, None) or (None, reason). signal:
       {valid, out_of_date, errored, generating, suppressed, total, active,
@@ -127,41 +232,17 @@ def live_readiness():
     cam, err = get_cam()
     if err:
         return None, err
-    valid = ood = errored = generating = suppressed = total = 0
-    active = None
     samples = {"op": None, "setup": None, "program": None}
     try:
+        tally = op_state_tally(walk_operations(cam))
+        samples["op"] = tally["op_sample"]
+        setups_errored = 0
         for i in range(safe(lambda: cam.setups.count, 0) or 0):
             s = safe(lambda i=i: cam.setups.item(i))
-            if s is None:
-                continue
-            if safe(lambda s=s: s.hasError, False) and samples["setup"] is None:
-                samples["setup"] = {"name": safe(lambda s=s: s.name), "error": first_error_line(s)}
-            for op in (safe(lambda s=s: s.allOperations) or []):
-                o = adsk.cam.Operation.cast(op)
-                if not o:
-                    continue
-                total += 1
-                if safe(lambda o=o: o.hasError, False):
-                    errored += 1                     # FAILED, not pending - its own bucket
-                    if samples["op"] is None:
-                        samples["op"] = {"name": safe(lambda o=o: o.name), "error": first_error_line(o)}
-                    continue
-                st = safe(lambda o=o: o.operationState)
-                if st == 0:
-                    valid += 1
-                elif st == 2:
-                    suppressed += 1
-                elif st in (1, 3):
-                    ood += 1
-                if safe(lambda o=o: o.isGenerating, False):
-                    generating += 1
-                    prog = safe(lambda o=o: o.generatingProgress)
-                    if active is None or (prog and prog not in ("Pending", "0.0%")):
-                        active = {"op": safe(lambda o=o: o.name), "progress": prog}
-        setups_errored = sum(
-            1 for i in range(safe(lambda: cam.setups.count, 0) or 0)
-            if safe(lambda i=i: cam.setups.item(i).hasError, False))
+            if s is not None and safe(lambda s=s: s.hasError, False):
+                setups_errored += 1
+                if samples["setup"] is None:
+                    samples["setup"] = {"name": safe(lambda s=s: s.name), "error": first_error_line(s)}
         programs_errored = 0
         progs = safe(lambda: cam.ncPrograms)
         for i in range(safe(lambda: progs.count, 0) if progs else 0):
@@ -172,6 +253,7 @@ def live_readiness():
                     samples["program"] = {"name": safe(lambda p=p: p.name), "error": first_error_line(p)}
     except Exception as e:
         return None, str(e)
+    valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
     active_total = valid + ood + errored          # active = everything not suppressed
     if errored or setups_errored or programs_errored:
         readiness = ("BLOCKER: "
@@ -186,8 +268,8 @@ def live_readiness():
         readiness = f"{valid} of {active_total} active ops valid - run cam_generate to finish the rest."
     else:
         readiness = "no active operations to assess."
-    return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
-            "suppressed": suppressed, "total": total, "active": active,
+    return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
+            "suppressed": tally["suppressed"], "total": tally["total"], "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
             "readiness": readiness, "samples": samples}, None
 
@@ -323,17 +405,18 @@ def get_cam_setups_handler() -> dict:
 
     return ok({"setup_count": len(setups), "setups": setups, "truncated": setups_truncated})
 
-def _op_primary_state(op) -> str:
+def _op_primary_state(facts: dict) -> str:
     """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once and the tally
     sums to the op total: suppressed > error > generating > no_toolpath > out_of_date > valid. (A
-    warning is an OVERLAY, counted separately - it coexists with any of these.)"""
-    if safe(lambda: op.isSuppressed, False):
+    warning is an OVERLAY, counted separately - it coexists with any of these.) Classifies from the
+    _op_state_facts dict (the same raw facts op_state_tally shares) rather than re-reading the op."""
+    if facts["is_suppressed"]:
         return "suppressed"
-    if safe(lambda: op.hasError, False):
+    if facts["has_error"]:
         return "error"
-    if safe(lambda: op.isGenerating, False):
+    if facts["is_generating"]:
         return "generating"
-    state = safe(lambda: op.operationState)
+    state = facts["operation_state"]
     if state == 3:
         return "no_toolpath"
     if state == 1:
@@ -376,9 +459,10 @@ def _attach_setup_invalidation(rec, setup):
             op = adsk.cam.Operation.cast(o)
             if op is None:
                 continue
-            st = _op_primary_state(op)
+            facts = _op_state_facts(op)
+            st = _op_primary_state(facts)
             tally[st] = tally.get(st, 0) + 1
-            if safe(lambda op=op: op.hasWarning, False):
+            if facts["has_warning"]:
                 warnings += 1
             if st == "out_of_date":
                 op_reasons, _, op_machine = _invalidation_reasons(op)
@@ -705,11 +789,11 @@ def get_tool_list_handler() -> dict:
 
     return ok({"distinct_tool_count": len(tool_list), "tools": tool_list})
 
-def _has_valid_toolpath(container) -> bool:
-    """True if any operation under `container` has a valid generated toolpath (the precondition
+def _has_valid_toolpath(setup) -> bool:
+    """True if any operation under `setup` has a valid generated toolpath (the precondition
     getMachiningTime needs; without it the API fails uncatchably)."""
     try:
-        for op in container.allOperations:
+        for op in setup.allOperations:
             o = adsk.cam.Operation.cast(op)
             if o and safe(lambda: o.isToolpathValid, False):
                 return True

@@ -348,10 +348,10 @@ class TestMove:
         # it MOVED (pose path is allowed)
         assert out["moved"] is True
         assert _occ(occs, "Block:1").transform.rotation is not None
-        # and it WARNED, naming the joints + the capture/probe next step
+        # and it WARNED, naming the joints + the capture/health-check next step
         assert "Flywheel_Spin" in out["jointed_joints"]
         assert "capture_position" in out["jointed_warning"]
-        assert "probe" in out["jointed_warning"].lower()
+        assert "assembly_get" in out["jointed_warning"]
 
     def test_quiet_suppresses_the_jointed_warning(self):
         _, occs, _ = _install(["Block:1"])

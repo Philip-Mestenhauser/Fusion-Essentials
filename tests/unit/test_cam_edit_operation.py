@@ -2,7 +2,9 @@
 
 This closes the 'feeds/speeds/depths/tool are unreachable' gap: it sets named operation parameters by
 expression. Covers param dispatch (dict + 'name=value' string forms), before/after reporting, the
-unknown-param guard, the unknown-operation guard, and that nothing is set when a value is invalid.
+unknown-param guard, the unknown-operation guard, that nothing is set when a value is invalid, and
+the evaluation read-back: a stored-but-unevaluated expression (.error set, .value.value a finite 0.0)
+rolls back ALL params in the call; .warning fires on valid input and never gates.
 Verified against the live adsk.cam API (op.parameters.itemByName(name).expression is settable). No
 live Fusion here — fakes mimic CAMParameters.
 """
@@ -19,9 +21,10 @@ class FakeValue:
 
 
 class FakeParam:
-    def __init__(self, name, expr):
+    def __init__(self, name, expr, warning=""):
         self.name = name
         self._expr = expr
+        self.warning = warning
     @property
     def expression(self):
         return self._expr
@@ -31,16 +34,22 @@ class FakeParam:
             raise RuntimeError("invalid expression")
         self._expr = v
     @property
+    def error(self):
+        # Mirror the live CAMParameter contract: a broken expression is STORED (expression echoes it,
+        # value.value reads a finite 0.0) and ONLY .error reveals the failure.
+        return "Failed to evaluate expression." if "NoSuchParam" in self._expr else ""
+    @property
     def value(self):
         try:
             return FakeValue(float(self._expr.split()[0]))
         except Exception:
-            return FakeValue(None)
+            return FakeValue(0.0 if "NoSuchParam" in self._expr else None)
 
 
 class FakeParams:
     def __init__(self, d):
-        self._d = {k: FakeParam(k, v) for k, v in d.items()}
+        # values are expression strings, or pre-built FakeParams (for a warning-bearing param).
+        self._d = {k: (v if isinstance(v, FakeParam) else FakeParam(k, v)) for k, v in d.items()}
     def itemByName(self, n):
         return self._d.get(n)
 
@@ -146,6 +155,34 @@ class TestEditOperation:
         _install(monkeypatch)
         res = ce.handler(operation="   ", parameters={"tool_stepover": "1"})
         assert res["isError"] is True and "operation" in res["message"]
+
+    def test_broken_expression_rolls_back_all_params_in_call(self, monkeypatch):
+        # The platform STORES a non-evaluating expression silently (expression echoes it, value.value
+        # reads a finite 0.0) - only .error reveals it. The tool must error naming the offending value
+        # and Fusion's reason, and roll back EVERY param set in the call, not just the broken one.
+        op = _install(monkeypatch)
+        res = ce.handler(operation="Adaptive1",
+                         parameters={"tool_stepover": "1.5",
+                                     "maximumStepdown": "NoSuchParamXyz * 2"})
+        assert res["isError"] is True
+        assert "maximumStepdown" in res["message"]
+        assert "NoSuchParamXyz * 2" in res["message"]
+        assert "Failed to evaluate" in res["message"]
+        assert "Rolled back" in res["message"]
+        # ALL-or-nothing: the valid first param is rolled back too, the op left exactly as found.
+        assert op.parameters.itemByName("tool_stepover").expression == "2."
+        assert op.parameters.itemByName("maximumStepdown").expression == "2.0483"
+
+    def test_warning_on_valid_expression_never_gates(self, monkeypatch):
+        # .warning fires on VALID input too (live fact) - it must be reported, never turned into an
+        # error/rollback.
+        _install(monkeypatch, params={"tool_feedCutting": FakeParam("tool_feedCutting", "1000.",
+                                                                    warning="feed near limit")})
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters={"tool_feedCutting": "3000"}))
+        assert out["updated_count"] == 1
+        assert out["changed"][0]["warning"] == "feed near limit"
+        assert out["changed"][0]["after"] == "3000"
 
     def test_changed_records_evaluated_value(self, monkeypatch):
         # changed[].value is the EVALUATED number (FakeParam.value parses the expr),

@@ -46,7 +46,7 @@ def _open_document(data_file):
 
 def handler(file_id: str = "", is_cam_template: bool = False,
             force_api_open: bool = False) -> dict:
-    """Open the document identified by file_id; see TOOL_DESCRIPTION for the declare-intent contract."""
+    """See TOOL_DESCRIPTION."""
     raw = (file_id or "").strip()
     if not raw:
         return error("Provide 'file_id' - a DataFile id or URL from the data-model tools: "

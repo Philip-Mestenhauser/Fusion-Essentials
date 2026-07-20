@@ -93,6 +93,28 @@ class TestGuards:
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
 
 
+class TestBodyAabb:
+    """The default bbox spans BODIES only (solid+surface+mesh), so an orphaned construction plane /
+    sketch does not inflate it (item-4 defect: a datum pushed an occurrence's Z 4x)."""
+
+    def test_occurrence_uses_boundingBox2_with_body_types(self):
+        class _Occ:
+            def __init__(self):
+                self.calls = []
+            def boundingBox2(self, types):
+                self.calls.append(types); return "body_box"
+            boundingBox = "whole_box"    # the inflated box that counts construction geometry
+        e = _Occ()
+        assert mi._body_aabb(e) == "body_box"        # NOT the construction-inclusive whole_box
+        assert e.calls == [mi._BODY_BBOX_TYPES]
+
+    def test_plain_body_falls_back_to_boundingBox(self):
+        # a BRepBody has no boundingBox2; its own .boundingBox is already body-only.
+        class _Body:
+            boundingBox = "solid_box"    # no boundingBox2 attribute -> AttributeError -> fallback
+        assert mi._body_aabb(_Body()) == "solid_box"
+
+
 class TestNormalizeInclude:
     def test_comma_string(self):
         assert mi._normalize_include("mass") == ["mass"]

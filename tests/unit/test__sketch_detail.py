@@ -612,6 +612,41 @@ class TestXrayCaps:
         assert out["dimension_count"] == sd._XRAY_CAP + 5
 
 
+# ── 3D lines: an OFF-plane endpoint carries z; on-plane 2D geometry omits it ─────────────────────
+
+class _OffPlaneLine:
+    def __init__(self, tok, s, e):          # s, e are (x, y, z) in cm
+        self.entityToken = tok
+        self.isConstruction = False
+        self.startSketchPoint = type("P", (), {"geometry": _Pt(*s), "entityToken": tok + "_s"})()
+        self.endSketchPoint = type("P", (), {"geometry": _Pt(*e), "entityToken": tok + "_e"})()
+
+
+class TestOffPlane3DLine:
+    def test_off_plane_endpoint_reports_z(self):
+        # a vertical 3D line (end at z=3 cm) must report z=30 mm, not collapse to (0,0) - the item-5 bug.
+        ln = _OffPlaneLine("t3d", (0, 0, 0), (0, 0, 3))
+        _install(FakeSketch("Skel", lines=[ln]))
+        out = _payload(sd.handler(sketch_name="Skel", include_entities=True))
+        e = next(x for x in out["entities"] if x["id"] == "line:0")
+        assert e["start"] == {"x": 0, "y": 0}              # on-plane start: no z key
+        assert e["end"] == {"x": 0, "y": 0, "z": 30}       # off-plane end carries z (mm)
+
+    def test_on_plane_line_omits_z(self):
+        ln = _OffPlaneLine("t2d", (0, 0, 0), (1, 2, 0))
+        _install(FakeSketch("Flat", lines=[ln]))
+        out = _payload(sd.handler(sketch_name="Flat", include_entities=True))
+        e = next(x for x in out["entities"] if x["id"] == "line:0")
+        assert e["end"] == {"x": 10, "y": 20} and "z" not in e["end"]
+
+    def test_off_plane_sketch_point_reports_z(self):
+        p = type("P3", (), {"entityToken": "p3", "geometry": _Pt(0.0, 0.0, 3.0)})()
+        _install(FakeSketch("Pk", points=[p]))
+        out = _payload(sd.handler(sketch_name="Pk", include_entities=True))
+        pt = next(x for x in out["entities"] if x["id"] == "point:0")
+        assert pt["position"] == {"x": 0, "y": 0, "z": 30}
+
+
 # ── unit scaling: geometry/areas/dimension values report in DISPLAY units, never raw cm ─────────
 #
 # Every fake's geometry is set up in cm (the API's own unit); each assertion is the SCALED

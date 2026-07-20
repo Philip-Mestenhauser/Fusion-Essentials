@@ -38,7 +38,7 @@ def _normalize_include(include):
 
 def handler(project: str = "", project_id: str = "", folder: str = "", recursive: bool = True,
             include=None, max_depth: int = 4) -> dict:
-    """Read the cloud data model at the scope requested (project/folder/include); see TOOL_DESCRIPTION."""
+    """See TOOL_DESCRIPTION."""
     inc = _normalize_include(include)
     bad = [s for s in inc if s not in _SLICES]
     if bad:

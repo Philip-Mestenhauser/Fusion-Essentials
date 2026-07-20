@@ -40,14 +40,15 @@ don't edit between the markers.
 | `EdgeLoopRef` | a closed/open edge-loop boundary from edge handles |
 | `GeometryHandle` | one face/edge/vertex by find_geometry handle (require=face/edge/...), not a coordinate |
 | `GeometryHandleList` | several faces/edges by handles (fillet/drill THESE) |
+| `JointOriginRef` | a Joint Origin by assembly_get handle OR name (bare if unique, else '<occ>:<JO name>'); refuses ambiguity |
 | `OccurrenceRef` | an assembly occurrence by fullPathName (refuses ambiguous names) |
 | `OccurrenceRefList` | several occurrences (fullPathNames/names) |
 | `PlaneRef` | a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle |
 | `ProfileRef` | a sketch profile by stable handle, not sketch_name+profile_index |
 | `ProfileRefList` | an ORDERED list of profiles (loft - order is load-bearing) |
 | `TargetRef` | a thing to measure/colour: handle (body/face/mesh; edge+construction when allowed) OR occurrence/component/body name; ''=whole design |
-| `TargetRefList` | several machinable targets: bodies (handles/names) and/or container occurrences (names) |
-| `UnitField` | the 'units' selector (mm/cm/in enum) for a Distance |
+| `TargetRefList` | several body-or-occurrence targets: bodies (handles/names) and/or component occurrences (names) |
+| `UnitField` | the 'units' selector (mm/cm/in enum, mm default) for a Distance; every geometry-reporting read takes one and scales its output via CM_TO_UNIT |
 
 | Helper | Provides (import from here - never re-implement) |
 |---|---|
@@ -56,9 +57,9 @@ don't edit between the markers.
 | `_outputs` | RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once |
 | `_holder` | holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries |
 | `_data_common` | cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN) |
-| `_cam_common` | get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / find_operation (resolve a setup/operation by name, case-insensitive, returning the object + available names) over setups / walk_operations (the shared setup + operation walks) + live_readiness (the one CAM job-health signal) |
+| `_cam_common` | get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / find_operation (resolve a setup/operation by name, case-insensitive, returning the object + available names) over setups / walk_operations (the shared setup + operation walks) + expression_error (the post-set CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness (the one CAM job-health signal) |
 | `_export` | sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export |
-| `_joints` | build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk - joints AND asBuiltJoints, root and every sub-component - that the health rollups count broken joints over) + find_joint (resolve ONE by name over those same scopes) |
+| `_joints` | build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk - joints AND asBuiltJoints, root and every sub-component - that the health rollups count broken joints over) + find_joint (resolve ONE by name over those same scopes) + all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) |
 | `_view_common` | camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set |
 <!-- END GENERATED CATALOG -->
 
@@ -166,8 +167,7 @@ A poller that only advances an already-authorized async operation (`cam_get_stat
 `write="read"` — the write guard on the call that kicked it off already covers what it advances. A
 read-style-verb tool whose own actions instead mutate or delete PERSISTENT state must be
 `write="write"` instead, via an explicit exemption in `test_tool_naming.py`'s
-`_WRITE_VERB_EXEMPT` (not a silent mislabeling). Today's exemptions: `view_inspect` (`save_view`
-persists/overwrites a Named View; other actions mutate camera/visibility state), `view_section`
+`_WRITE_VERB_EXEMPT` (not a silent mislabeling). Today's exemptions: `view_section`
 (`clear` deletes user-created section analyses), `sys_request_selection` (clears the user's current
 Fusion selection). Adding a new one means adding an entry there with a one-line reason naming the
 observed mutation, not just flipping `write=` locally.

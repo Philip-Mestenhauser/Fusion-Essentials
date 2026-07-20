@@ -101,6 +101,36 @@ class TestFindByName:
         assert [o.name for o in hits] == ["Fillet1"]      # exact only, not Fillet10
 
 
+class TestAtIndexForm:
+    """'name@index' - the disambiguation target the ambiguity error advertises (e.g. 'Extrude1@9') -
+    parses and resolves to the object at that exact timeline index (index == list position, live)."""
+
+    def test_at_index_targets_that_timeline_index(self):
+        tl = FakeTimeline([FakeTLObject("Extrude1", 0), FakeTLObject("Sketch1", 1),
+                           FakeTLObject("Extrude1", 2)])
+        hits = df._find_objects_by_name(tl, "Extrude1@2")
+        assert len(hits) == 1 and hits[0].index == 2      # the SECOND Extrude1, not the first
+
+    def test_at_index_out_of_range_refused(self):
+        tl = FakeTimeline([FakeTLObject("Extrude1", 0)])
+        assert df._find_objects_by_name(tl, "Extrude1@5") == []
+
+    def test_at_index_name_mismatch_refused(self):
+        # index 0 is Sketch1, not Extrude1 - a stale pairing is refused, never widened to a name match
+        tl = FakeTimeline([FakeTLObject("Sketch1", 0), FakeTLObject("Extrude1", 1)])
+        assert df._find_objects_by_name(tl, "Extrude1@0") == []
+
+    def test_handler_deletes_the_indexed_duplicate(self):
+        # end-to-end: two features share a name; the @index form deletes exactly the RIGHT one
+        a = FakeTLObject("Extrude1", 0, entity_type="ExtrudeFeature")
+        s = FakeTLObject("Sketch1", 1)
+        b = FakeTLObject("Extrude1", 2, entity_type="ExtrudeFeature")
+        _install([a, s, b])
+        out = _payload(df.handler(feature="Extrude1@2"))
+        assert out["deleted"] is True and out["index"] == 2
+        assert b.entity._deleted is True and a.entity._deleted is False
+
+
 # ── happy path ───────────────────────────────────────────────────────────────
 
 class TestDelete:

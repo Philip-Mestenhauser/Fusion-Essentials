@@ -17,6 +17,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -50,7 +51,7 @@ def _resolve_target(design, target):
     to scan exactly one instance instead.
 
     Scans root.allOccurrences (the flattened, RECURSIVE list - so a NESTED occurrence is reachable by
-    its fullPathName, the same key design_get(include=['tree'])/assembly_probe emit) plus root-level bodies. This
+    its fullPathName, the same key design_get(include=['tree'])/assembly_get emit) plus root-level bodies. This
     keeps find_geometry's reach consistent with the self-heal path (_inputs._refind_by_locator), which
     also scans allOccurrences - otherwise a deep occurrence resolves on re-find but not on the initial
     query."""
@@ -86,46 +87,6 @@ def _dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
-def _face_normal(face, point):
-    """Outward unit normal at 'point' on the face, as [x,y,z] (4dp), or None if not evaluable.
-
-    A planar face has a CONSTANT normal; a curved face (cylinder/cone/sphere/torus) gets the normal
-    SAMPLED at 'point' (the reported centroid), so it varies across the surface. getNormalAtPoint needs
-    a point ON the surface - a curved face whose centroid lies off the surface yields no normal (None),
-    which safe() degrades to an omitted field rather than a fabricated value. Normals are directions,
-    so they are NOT unit-scaled like positions."""
-    if point is None:
-        return None
-    ev = safe(lambda: face.evaluator)
-    if ev is None:
-        return None
-    # The bool-return + output-normal signature comes back as (success, normal) in Python.
-    res = safe(lambda: ev.getNormalAtPoint(point))
-    if not (isinstance(res, (list, tuple)) and len(res) == 2):
-        return None
-    okflag, nrm = res
-    if not okflag or nrm is None:
-        return None
-    nx = safe(lambda: nrm.x); ny = safe(lambda: nrm.y); nz = safe(lambda: nrm.z)
-    if nx is None or ny is None or nz is None:
-        return None
-    return [round(nx, 4), round(ny, 4), round(nz, 4)]
-
-
-def _line_direction(g):
-    """Unit direction [x,y,z] (4dp) of a straight edge from its Line3D end-start, or None. Dimensionless."""
-    sp = safe(lambda: g.startPoint); ep = safe(lambda: g.endPoint)
-    if sp is None or ep is None:
-        return None
-    dx = safe(lambda: ep.x - sp.x); dy = safe(lambda: ep.y - sp.y); dz = safe(lambda: ep.z - sp.z)
-    if dx is None or dy is None or dz is None:
-        return None
-    n = (dx * dx + dy * dy + dz * dz) ** 0.5
-    if n <= 1e-12:
-        return None
-    return [round(dx / n, 4), round(dy / n, 4), round(dz / n, 4)]
-
-
 def _face_record(face, inv_k):
     g = safe(lambda: face.geometry)
     st = safe(lambda: g.surfaceType)
@@ -142,7 +103,7 @@ def _face_record(face, inv_k):
             "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
             "area": round(safe(lambda: face.area, 0) * inv_k * inv_k, 3)}
     # Outward normal at the reported position (constant for planar, sampled at that point for curved).
-    nrm = _face_normal(face, c)
+    nrm = _geom.evaluator_normal_at(face, c, decimals=4)
     if nrm is not None:
         rec["normal"] = nrm
     if kind == "cylinder_face":
@@ -172,7 +133,7 @@ def _edge_record(edge, inv_k):
         if ctr:
             rec["position"] = [round(ctr.x * inv_k, 3), round(ctr.y * inv_k, 3), round(ctr.z * inv_k, 3)]
     if kind == "line_edge":
-        d = _line_direction(g)
+        d = _geom.unit_vector_between(safe(lambda: g.startPoint), safe(lambda: g.endPoint), decimals=4)
         if d is not None:
             rec["direction"] = d
     return rec
@@ -180,7 +141,7 @@ def _edge_record(edge, inv_k):
 
 def handler(target: str = "", kind: str = "", radius: float = None,
             nearest_to=None, units: str = "mm", max_results: int = 20) -> dict:
-    """Find geometry on a part and return stable handles. Read-only."""
+    """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -193,7 +154,7 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     pairs, target_label = _resolve_target(design, target)
     if not pairs:
         return error(f"Could not resolve target '{target}'. Use an occurrence/component name, a "
-    "body name, or '' for the whole design (see assembly_probe / design_get(include=['tree'])).")
+    "body name, or '' for the whole design (see assembly_get / design_get(include=['tree'])).")
 
     knd = (kind or "").strip().lower()
     want_faces = (not knd) or knd in _FACE_KINDS
@@ -202,25 +163,34 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
     matches = []
     for occ, body in pairs:
+        # Omit-when-default visibility signal: BRepBody.isVisible is the EFFECTIVE state (it rolls up
+        # the body's own bulb AND every ancestor occurrence's - isLightBulbOn alone does not), so a
+        # hidden body's matches carry hidden:true and a visible body's records stay unchanged.
+        hidden = safe(lambda body=body: body.isVisible, True) is False
+        recs = []
         if want_faces:
             for f in (safe(lambda body=body: list(body.faces)) or []):
                 rec = _face_record(f, inv_k)
                 if knd in _FACE_KINDS and rec["kind"] != knd:
                     continue
-                matches.append(rec)
+                recs.append(rec)
         if want_edges:
             for e in (safe(lambda body=body: list(body.edges)) or []):
                 rec = _edge_record(e, inv_k)
                 if knd in _EDGE_KINDS and rec["kind"] != knd:
                     continue
-                matches.append(rec)
+                recs.append(rec)
         if want_verts:
             for v in (safe(lambda body=body: list(body.vertices)) or []):
                 p = safe(lambda v=v: v.geometry)
                 vh = _inputs.make_handle(v, "vertex", (p.x, p.y, p.z)) if p else safe(lambda v=v: v.entityToken)
-                matches.append({"handle": vh, "kind": "vertex",
+                recs.append({"handle": vh, "kind": "vertex",
         "position": [round(p.x * inv_k, 3), round(p.y * inv_k, 3),
                                              round(p.z * inv_k, 3)] if p else None})
+        if hidden:
+            for rec in recs:
+                rec["hidden"] = True
+        matches.extend(recs)
 
     # radius filter (cylinder faces / circular edges)
     if radius is not None:
@@ -246,7 +216,8 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         # Producer prose generated from the RETURNS declaration (the chain is declared once, not
         # hand-typed here and paraphrased in every consumer). Plus the one tool-specific tip.
         "note": _outputs.produces_block(RETURNS) + "\nNarrow with kind / radius / nearest_to "
-        "when a part has many similar faces.",
+        "when a part has many similar faces. A match on a body that is not visible carries "
+        "hidden:true (visible bodies' records omit it).",
     })
 
 

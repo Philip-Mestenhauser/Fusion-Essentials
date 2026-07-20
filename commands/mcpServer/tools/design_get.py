@@ -323,13 +323,19 @@ def _slice_configurations(design):
 def _fingerprint(design):
     """The cheap 'what IS this model' digest for the default: counts of bodies / sketches / components /
     occurrences / joints / parameters, so an agent learns the model's SHAPE without include=tree. The
-    field the thin mode+health summary was missing."""
+    field the thin mode+health summary was missing.
+
+    bodies/sketches are DESIGN-WIDE (every component, not just root) via the shared
+    _common.design_wide_counts - the same count workspace_orient reports, so the two agree on one
+    design instead of this fingerprint under-reporting a multi-component doc whose geometry lives in
+    sub-components."""
     root = safe(lambda: design.rootComponent)
     if root is None:
         return None
+    body_total, sketch_total = _common.design_wide_counts(design)
     fp = {
-        "bodies": safe(lambda: root.bRepBodies.count, 0),
-        "sketches": safe(lambda: root.sketches.count, 0),
+        "bodies": body_total,
+        "sketches": sketch_total,
         "components": safe(lambda: root.allOccurrences.count, 0),   # 0 = single-component design
         # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
         "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
@@ -345,8 +351,8 @@ def _fingerprint(design):
 # breadcrumb from a read an agent actually starts with.
 _CONTENT_TOOLS = {
     "parameters": "param_get (list/read), param_set / param_add (change or create)",
-    "joints": "assembly_probe (wiring + health), joint_drive (pose by value)",
-    "components": "design_get(include=['tree']) for the full tree; assembly_probe for positions",
+    "joints": "assembly_get (wiring + health), joint_drive (pose by value)",
+    "components": "design_get(include=['tree']) for the full tree; assembly_get for positions",
 }
 
 
@@ -369,15 +375,7 @@ def _has_cam(design):
 
 def handler(include=None, max_depth: int = 3, component: str = "",
             include_suppressed: bool = True, group: str = "") -> dict:
-    """Read the active design at the right zoom level (rich read - see CLAUDE.md "Reads are RICH").
-
-    Default (no 'include'): the ORIENTATION slice - modelling mode summary + a shallow component-tree
-    summary + timeline_healthy (timeline-only; not stale refs). Cheap, safe to call blind. 'include'
-    widens to deeper slices:
-    'tree' (full component tree; 'max_depth'/'component' scope it), 'timeline' (the feature list;
-    'include_suppressed'/'group' scope it), 'mode' (the full capability map), 'configurations' (the
-    config table - read only). Read-only.
-    """
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")

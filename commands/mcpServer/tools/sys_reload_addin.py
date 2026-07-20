@@ -176,16 +176,19 @@ def handler() -> dict:
     # flush before the server is torn down by the reload.
     threading.Timer(_RELOAD_DELAY_SECONDS, _fire).start()
 
+    # The note teaches the reconnect protocol: the client reconnects AUTOMATICALLY, so the right
+    # next step is simply the next tool call - never a shell poll of /health.
     return {
     "content": [{
             "type": "text",
         "text": (
-                "Reload scheduled. The Fusion-Essentials add-in will stop and restart "
-                f"in ~{_RELOAD_DELAY_SECONDS}s. The MCP server will briefly go offline; "
-                "reconnect after a moment to pick up the reloaded add-in."
+                "Reload scheduled. Make your next tool call after ~3 seconds - the connection "
+                "reconnects automatically (a cheap confirmation read: sys_capability_map). "
+                "Do not poll /health from a shell."
             ),
         }],
     "isError": False,
+    "next": "sys_capability_map",
     }
 
 
@@ -197,7 +200,10 @@ TOOL_DESCRIPTION = (
     "IMPORTANT: this restarts the MCP server itself. The reload is deferred so this "
     "call returns successfully first; the server then goes offline for ~1-2 seconds "
     "while it restarts. After calling this, wait briefly, then re-fetch the tool list "
-    "/ reconnect so updated tool schemas are picked up before issuing further calls."
+    "/ reconnect so updated tool schemas are picked up before issuing further calls. "
+    "CAUTION: a client still holding the pre-reload cached schema can silently corrupt a "
+    "json-array argument for any property absent from that cache (a scalar still passes; an "
+    "array gets comma-mangled) - reconnect the client before calling a tool whose inputs changed."
 )
 
 tool = Tool.create_simple(name="sys_reload_addin", description=TOOL_DESCRIPTION).strict_schema()

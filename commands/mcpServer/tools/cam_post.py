@@ -374,15 +374,7 @@ def _operations_collection(cam, target):
 
 def handler(scope: str = "", post: str = "", post_scope: str = "local", output_folder: str = "",
             program_name: str = "", units: str = "document", program_comment: str = "") -> dict:
-    """Create-or-reuse an NC Program for the scope, then post it to an NC file on disk.
-
-    scope: omit (or 'document') for the whole document, else a setup/folder/operation NAME. post: a
-    post processor. post_scope: local (a .cps full path or a name in the personal/installed post
-    folder - default) | cloud | hub (a NAME in the team post library; network-slow). output_folder:
-    where the NC file(s) land. program_name: the NC Program name (also its browser name). units:
-    document/inch/mm. WRITES: creates/updates a persistent NC Program, then posts it; success is gated
-    on the file actually appearing on disk.
-    """
+    """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)

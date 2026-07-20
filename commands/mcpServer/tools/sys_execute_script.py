@@ -25,7 +25,7 @@ app = adsk.core.Application.get()
 
 
 def handler(script: str) -> dict:
-    """Execute a Fusion API Python script string. Returns an MCP tool result dict."""
+    """See TOOL_DESCRIPTION."""
     # Require a `run` function taking a single argument (the Fusion script idiom).
     if not re.search(r'def\s+run\s*\(\s*(\w+)\s*\):', script):
         return _error_result("Script must define a 'run' function taking one argument, e.g. def run(context):")

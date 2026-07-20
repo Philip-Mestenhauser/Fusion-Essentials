@@ -82,6 +82,56 @@ class FakeDesign:
         self.intent_sets.append(self._intent)
 
 
+class FakeChildProxy:
+    """The assembly-context proxy createForAssemblyContext returns - its fullPathName shows nesting."""
+    def __init__(self, native, parent):
+        self.component = native.component
+        self.name = native.name
+        self.fullPathName = f"{parent.fullPathName}+{native.name}"
+        self.activated = False
+    def activate(self):
+        self.activated = True
+        return True
+
+
+class FakeChildOcc:
+    """The NATIVE child occurrence addNewComponent returns on the parent's component - its own
+    fullPathName shows only the child; createForAssemblyContext proxies it into the parent's context."""
+    def __init__(self, proxy=True):
+        self.name = "Child:1"
+        self.fullPathName = "Child:1"
+        self.component = FakeComponent()
+        self.activated = False
+        self._proxy = proxy
+    def activate(self):
+        self.activated = True
+        return True
+    def createForAssemblyContext(self, parent):
+        return FakeChildProxy(self, parent) if self._proxy else None
+
+
+class FakeParentOccurrences:
+    def __init__(self):
+        self.last_transform = None
+        self._child = FakeChildOcc()
+    def addNewComponent(self, transform):
+        self.last_transform = transform
+        return self._child
+
+
+class FakeParentComponent:
+    def __init__(self):
+        self.name = "Frame"
+        self.occurrences = FakeParentOccurrences()
+
+
+class FakeParentOcc:
+    def __init__(self):
+        self.name = "Frame:1"
+        self.fullPathName = "Frame:1"
+        self.component = FakeParentComponent()
+
+
 def _install(intent=None):
     # Give the mock its DesignIntentTypes enum (distinct sentinel objects).
     import adsk.fusion, adsk.core
@@ -249,3 +299,54 @@ class TestDesignIntentPromotion:
         out = _payload(cc.handler(name="Model"))
         assert out["created"] is True
         assert "design_intent_promoted" not in out
+
+
+# ── parent= : nest the new component INSIDE an existing occurrence (occurrences.addNewComponent on the
+# PARENT component). Omitted = root (back-compat). The read-back's full_path shows the nesting.
+
+def _install_with_parent(intent=None):
+    design = _install(intent=intent)
+    parent = FakeParentOcc()
+    design.rootComponent.allOccurrences = [parent]     # what OccurrenceRef resolves 'parent' against
+    return design, parent
+
+
+class TestNestedParent:
+    def test_nests_inside_the_parent_not_root(self):
+        design, parent = _install_with_parent()
+        out = _payload(cc.handler(name="Child", parent="Frame:1"))
+        assert out["created"] is True
+        # created via the PARENT component's occurrences, and root was NOT touched
+        assert parent.component.occurrences.last_transform is not None
+        assert design.rootComponent.occurrences.count == 0
+        assert out["nested_in"] == "Frame:1"
+        assert out["full_path"] == "Frame:1+Child:1"    # the proxy's nested fullPathName
+        assert out["component"] == "Child"
+
+    def test_root_when_parent_omitted_is_back_compat(self):
+        design = _install()
+        out = _payload(cc.handler(name="Top"))
+        assert design.rootComponent.occurrences.count == 1   # the original root path
+        assert out["nested_in"] is None
+
+    def test_missing_parent_is_refused_with_its_value(self):
+        _install_with_parent()          # only 'Frame:1' exists
+        res = cc.handler(name="Child", parent="Nonexistent")
+        assert res["isError"] is True
+        assert "Nonexistent" in res["message"]
+        # nothing was created on root as a fallback
+        assert cc.app.activeProduct.rootComponent.occurrences.count == 0
+
+    def test_nested_path_constructed_when_proxy_unavailable(self):
+        # If createForAssemblyContext yields no proxy, the handler still reports the nested path by
+        # constructing 'Parent:1+Child:1' (Fusion joins fullPathName segments with '+').
+        design, parent = _install_with_parent()
+        parent.component.occurrences._child = FakeChildOcc(proxy=False)
+        out = _payload(cc.handler(name="Child", parent="Frame:1"))
+        assert out["full_path"] == "Frame:1+Child:1"
+
+    def test_activate_targets_the_nested_proxy(self):
+        design, parent = _install_with_parent()
+        _payload(cc.handler(name="Child", parent="Frame:1", activate=True))
+        # the proxy (assembly-context), not the native child, is what gets activated as the edit target
+        assert parent.component.occurrences._child.activated is False

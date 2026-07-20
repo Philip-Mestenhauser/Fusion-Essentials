@@ -234,8 +234,10 @@ def _slice_tool(cam, operation, preset):
     pnames = []
     for i in range(safe(lambda: presets.count, 0) if presets else 0):
         pnames.append(safe(lambda i=i: presets.item(i).name))
+    from . import _cam_common as _cc
     out = {"operation": safe(lambda: op.name),
            "tool": safe(lambda: t.description),
+           "holder": _cc.tool_holder(t),          # assigned holder identity (None if the tool has none)
            "preset_names": pnames, "preset_count": len(pnames)}
     want_preset = (preset or "").strip()
     if want_preset:
@@ -262,7 +264,7 @@ def _slice_tool(cam, operation, preset):
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
             scope: str = "", library: str = "", tool_type: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0) -> dict:
-    """Route to the requested slice(s); default is the setups orientation slice."""
+    """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if not cam:
         return error(cerr)

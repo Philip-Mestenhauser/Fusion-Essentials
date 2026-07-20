@@ -25,6 +25,17 @@ def family_of(name):
 # server's initialize instructions - so those stay always-on.
 GATEABLE_FAMILIES = ("appearance", "cam", "data", "drawing", "mesh", "save", "surface")
 
+# Tools the auto-discovery sweep SKIPS ENTIRELY unless a specific settings checkbox allows them
+# (see entry.py's _GATED_TOOL_MODULES / _collect_items - the module is never even imported by the
+# sweep until the setting reads True). tool name -> the exact checkbox label entry.py assigns that
+# setting; entry.py's own DEFAULT_SETTINGS reuses this same string as the checkbox "label" instead
+# of a second hand-typed copy, so the two can never drift apart. sys_capability_map reports this
+# map (cross-checked against the LIVE registry via has_tool) so an agent that gets a bare "tool not
+# found" for one of these has a discoverable next step instead of a dead end.
+GATED_TOOLS = {
+    "sys_execute_script": "Allow AI to execute arbitrary Fusion API scripts (advanced; security risk)",
+}
+
 
 class Registry:
     """Holds Tool Items keyed by name."""

@@ -40,8 +40,8 @@ class _Coll:
         return self._i[i]
 
 
-class _Container:
-    """A setup/folder/pattern: has operations / folders / patterns collections. CRITICAL: allOperations
+class _Parent:
+    """A setup/folder/pattern parent: has operations / folders / patterns collections. CRITICAL: allOperations
     returns ONLY operations (NOT folders/patterns) — modelling the live behavior the tool must work around."""
     def __init__(self, ops=(), folders=(), patterns=()):
         self.operations = _Coll(list(ops))
@@ -56,10 +56,10 @@ class _Container:
         return _Coll(flat)
 
 
-class Setup(_Entity, _Container):
+class Setup(_Entity, _Parent):
     def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
         _Entity.__init__(self, name, "setup", can_delete)
-        _Container.__init__(self, ops, folders, patterns)
+        _Parent.__init__(self, ops, folders, patterns)
 
 
 class Operation(_Entity):
@@ -67,16 +67,16 @@ class Operation(_Entity):
         super().__init__(name, "operation", can_delete)
 
 
-class CAMFolder(_Entity, _Container):
+class CAMFolder(_Entity, _Parent):
     def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
         _Entity.__init__(self, name, "folder", can_delete)
-        _Container.__init__(self, ops, folders, patterns)
+        _Parent.__init__(self, ops, folders, patterns)
 
 
-class CAMPattern(_Entity, _Container):
+class CAMPattern(_Entity, _Parent):
     def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
         _Entity.__init__(self, name, "pattern", can_delete)
-        _Container.__init__(self, ops, folders, patterns)
+        _Parent.__init__(self, ops, folders, patterns)
 
 
 class _Setups:

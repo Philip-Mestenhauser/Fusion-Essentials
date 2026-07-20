@@ -61,7 +61,7 @@ def _parse_views(views):
 
 
 def handler(views=None, width: int = 600, height: int = 500) -> dict:
-    """Capture several views of the model in one call; the camera is restored afterward."""
+    """See TOOL_DESCRIPTION."""
     names, err = _parse_views(views)
     if err:
         return error(err)

@@ -17,8 +17,8 @@
   ],
   "permissions": {
     "allow": [
-      "mcp__fusion-essentials__assembly_interference",
-      "mcp__fusion-essentials__assembly_probe",
+      "mcp__fusion-essentials__assembly_get",
+      "mcp__fusion-essentials__assembly_inspect_interference",
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",

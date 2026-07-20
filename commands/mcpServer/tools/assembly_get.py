@@ -1,8 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Probes the active assembly's kinematic state as clean JSON: each top-level occurrence's world
-position, ground flags, and joints, plus a design-level joint list and health rollup. Read-only.
+"""RICH READ: assembly_get - the active assembly's kinematic state as clean JSON: each top-level
+occurrence's world position, ground flags, and joints, plus a design-level joint list and health
+rollup. Read-only.
 """
 
 import adsk.core
@@ -106,19 +107,127 @@ def _joint_record(j):
     return rec
 
 
-def handler(units: str = "mm", include_joints: bool = True,
-            max_occurrences: int = 50, max_joints: int = 100) -> dict:
-    """Probe the active assembly's kinematic state.
+# ── joint_origins slice: each Joint Origin (a reusable WCS frame) as a referenceable, handle-bearing row ──
 
-    units: display units for positions/sizes (mm default / cm / in). include_joints: also list every
-    joint (type, DOF, the two occurrences it connects) and annotate each occurrence with its joints.
-    max_occurrences / max_joints cap the returned arrays (default 50 / 100); occurrences_truncated /
-    joints_truncated report whether the cap was hit. Read-only.
-    """
+_SLICES = ("joint_origins",)
+
+
+def _jo_consumers(design):
+    """{JointOrigin name: [joint names]} - which joints CONSUME each JO as an input. A joint's
+    geometryOrOriginOne/Two can be a JointOrigin (an inferred joint returns null there - skipped);
+    matched by NAME (a JO name is unique within its occurrence, and grip joints name distinct JOs, so a
+    name key is unambiguous in practice). Best-effort read over the ONE joint walk - never raises."""
+    out = {}
+    for j in _joints.all_joints(design):
+        jname = safe(lambda j=j: j.name)
+        if not jname:
+            continue
+        for attr in ("geometryOrOriginOne", "geometryOrOriginTwo"):
+            ref = safe(lambda j=j, a=attr: getattr(j, a))
+            if ref is not None and _joints.is_joint_origin(ref):
+                rn = safe(lambda ref=ref: ref.name)
+                if rn:
+                    out.setdefault(rn, []).append(jname)
+    return out
+
+
+def _jo_instances(design, jo, comp):
+    """Yield (reference_name, jo_in_context) per INSTANCE of a JointOrigin: the native JO for a root JO
+    (its bare name is the reference); the assembly-context proxy per occurrence for a sub-component JO
+    (its '<occurrence>:<name>' is the reference, and its world frame differs per instance)."""
+    root = safe(lambda: design.rootComponent)
+    root_name = safe(lambda: root.name)
+    nm = safe(lambda: jo.name) or "?"
+    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+        yield nm, jo
+        return
+    occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
+    if not occs:
+        yield nm, jo
+        return
+    for o in occs:
+        fp = safe(lambda o=o: o.fullPathName)
+        proxy = safe(lambda o=o: jo.createForAssemblyContext(o)) or jo
+        yield (f"{fp}:{nm}" if fp else nm), proxy
+
+
+def _jo_world_origin(jo, xa, ya, za, inv_k):
+    """The JO frame's world origin (units-scaled): the base geometry origin PLUS its offsetX/Y/Z
+    parameters projected along the frame's X/Y/Z axes. A coordinate-anchored JO carries its position in
+    those offsets (geometry.origin stays at the base anchor point, e.g. the model origin), so reading
+    geometry.origin ALONE under-reports - verified live: a JO offset +45mm in Z reads geometry.origin
+    (0,0,0). offsetX/Y/Z default to 0, so a face/sketch/bbox-anchored JO reports geometry.origin as-is."""
+    o = safe(lambda: jo.geometry.origin)
+    if o is None:
+        return None
+    ox, oy, oz = safe(lambda: o.x, 0.0), safe(lambda: o.y, 0.0), safe(lambda: o.z, 0.0)
+    dx = safe(lambda: jo.offsetX.value, 0.0) or 0.0     # cm along the frame X (secondary axis)
+    dy = safe(lambda: jo.offsetY.value, 0.0) or 0.0     # cm along the frame Y (third axis)
+    dz = safe(lambda: jo.offsetZ.value, 0.0) or 0.0     # cm along the frame Z (primary axis)
+    xa = xa or [1.0, 0.0, 0.0]
+    ya = ya or [0.0, 1.0, 0.0]
+    za = za or [0.0, 0.0, 1.0]
+    wx = ox + dx * xa[0] + dy * ya[0] + dz * za[0]
+    wy = oy + dx * xa[1] + dy * ya[1] + dz * za[1]
+    wz = oz + dx * xa[2] + dy * ya[2] + dz * za[2]
+    return [round(wx * inv_k, 3), round(wy * inv_k, 3), round(wz * inv_k, 3)]
+
+
+def _jo_row(jo, ref, comp, inv_k, consumers):
+    """One joint_origins row: name + the qualified reference (feed to joint_create / joint_at_geometry /
+    cam_edit_setup wcs), owning component, world position (units-scaled) + frame axes (Z/X/Y unit
+    vectors, dimensionless), the joints that consume it, and a HANDLE (entityToken; round-trips through
+    JointOriginRef)."""
+    nm = safe(lambda: jo.name)
+    row = {"name": nm, "qualified_name": ref, "component": safe(lambda: comp.name)}
+    z = _axis_vec(safe(lambda: jo.primaryAxisVector))
+    x = _axis_vec(safe(lambda: jo.secondaryAxisVector))
+    y = _axis_vec(safe(lambda: jo.thirdAxisVector))
+    wp = _jo_world_origin(jo, x, y, z, inv_k)
+    if wp is not None:
+        row["world_position"] = wp
+    if z or x or y:
+        row["frame"] = {"z_axis": z, "x_axis": x, "y_axis": y}
+    row["consumed_by"] = consumers.get(nm, [])
+    tok = safe(lambda: jo.entityToken)
+    if tok:
+        row["handle"] = tok
+    return row
+
+
+def _joint_origin_rows(design, inv_k, cap):
+    """The joint_origins slice: a row per JointOrigin instance over the ONE JO walk
+    (_joints.all_joint_origins). Bounded by cap; returns (rows, total)."""
+    consumers = _jo_consumers(design)
+    rows, total = [], 0
+    for jo, comp in _joints.all_joint_origins(design):
+        for ref, ctx_jo in _jo_instances(design, jo, comp):
+            total += 1
+            if len(rows) < cap:
+                rows.append(_jo_row(ctx_jo, ref, comp, inv_k, consumers))
+    return rows, total
+
+
+def _normalize_include(include):
+    if include in (None, "", []):
+        return []
+    if isinstance(include, str):
+        return [s.strip().lower() for s in include.split(",") if s.strip()]
+    return [str(s).strip().lower() for s in include]
+
+
+def handler(units: str = "mm", include=None, include_joints: bool = True,
+            max_occurrences: int = 50, max_joints: int = 100, max_joint_origins: int = 50) -> dict:
+    """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     inv_k = 1.0 / k
+
+    inc = _normalize_include(include)
+    bad = [s for s in inc if s not in _SLICES]
+    if bad:
+        return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES)}.")
 
     design = _common.design()
     if not design:
@@ -201,7 +310,13 @@ def handler(units: str = "mm", include_joints: bool = True,
         if not healthy:
             timeline_problems.append({"name": safe(lambda o=o: o.name), "error": msg})
 
-    is_healthy = not broken_joints and not timeline_problems
+    # A ROLLED-BACK marker means features after it (downstream joints included) are NOT in the current
+    # model - they revert to home while still reading healthy, so the joint state below is INCOMPLETE.
+    # markerPosition exposes exactly the state a non-restoring joint_edit once left behind; surface it.
+    marker_pos, marker_count = _common.timeline_marker(design)
+    rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
+
+    is_healthy = not broken_joints and not timeline_problems and not rolled_back
 
     # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place edit
     # (joint_edit/param change) that hasn't been recomputed - so broken_joints can disagree with the
@@ -214,6 +329,7 @@ def handler(units: str = "mm", include_joints: bool = True,
     "is_healthy": is_healthy,
     "broken_joints": broken_joints,
     "timeline_problems": timeline_problems,
+    "timeline_rolled_back": rolled_back,
     "occurrence_count": occ_total,
     "grounded_occurrences": grounded_names,
     "joint_count": joint_total,
@@ -226,8 +342,29 @@ def handler(units: str = "mm", include_joints: bool = True,
     "FAILED TO COMPUTE (the 'Compute Failed' a user sees in the timeline before any "
     "test; a wired-but-mis-axised joint over-constrains the assembly). broken_joints / "
     "timeline_problems name them. Then reason about grounding/positions/joint-wiring from "
-    "these NUMBERS rather than a cluttered screenshot; pair with view_inspect(isolate).",
+    "these NUMBERS rather than a cluttered screenshot; pair with view_set(isolate).",
     }
+
+    # joint_origins slice (opt-in): each Joint Origin (WCS frame) as a referenceable, handle-bearing row.
+    if "joint_origins" in inc:
+        cap_jo = max(1, int(max_joint_origins))
+        jo_rows, jo_total = _joint_origin_rows(design, inv_k, cap_jo)
+        out["joint_origins"] = jo_rows
+        out["joint_origin_count"] = jo_total
+        out["joint_origins_truncated"] = jo_total > len(jo_rows)
+        if out["joint_origins_truncated"]:
+            out["note"] += (f" joint_origins was capped at {cap_jo} of {jo_total}; raise "
+                            "max_joint_origins to see the rest.")
+    else:
+        out["note"] += (" include=['joint_origins'] lists each Joint Origin (a reusable WCS frame) - its "
+                        "qualified name + a handle to reference it by (feed joint_create / joint_at_geometry "
+                        "/ cam_edit_setup wcs), world position + frame axes, and which joints consume it.")
+
+    if rolled_back:
+        out["note"] += (f" WARNING: the timeline marker is at {marker_pos}/{marker_count} - features "
+                        "AFTER it (downstream joints included) are ROLLED BACK and reverted to home, so "
+                        "the joint state here is INCOMPLETE. Run design_recompute (or roll the marker to "
+                        "the end) to restore the full model, then re-read.")
     if joints_broke_but_timeline_clean:
         out["health_may_be_stale"] = True
         out["note"] += (" WARNING: broken_joints is non-empty but the TIMELINE shows no errored feature - "
@@ -246,28 +383,32 @@ def handler(units: str = "mm", include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
+    "Read the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
     "interpreting a cluttered screenshot. For every TOP-LEVEL occurrence: its world position (origin + "
     "bbox center/size in 'units'), its rotation as three basis axes (x_axis / y_axis / z_axis unit "
     "vectors), ground flags (grounded / ground_to_parent), and the joints it "
     "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "
     "each connects) and which occurrences are grounded. Use it to verify grounding (is the block "
     "fixed, the crank free?), joint wiring (did it connect the right parts?), and part positions "
-    "from NUMBERS. include_joints=false for just positions/grounding. occurrences/joints are capped "
-    "(max_occurrences default 50, max_joints default 100); occurrences_truncated/joints_truncated flag "
-    "when the cap was hit."
+    "from NUMBERS. include_joints=false for just positions/grounding. include=['joint_origins'] adds each "
+    "Joint Origin (WCS frame): qualified name + handle (feed joint_create / cam_edit_setup wcs), world "
+    "position/axes, consuming joints. occurrences/joints capped (max_occurrences 50, max_joints 100); "
+    "*_truncated flags a hit cap."
 )
 
-probe_tool = (
-    Tool.create_simple(name="assembly_probe", description=TOOL_DESCRIPTION)
+tool = (
+    Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
+    .add_input_property("include", {"type": ["array", "string"],
+            "description": "Deeper slice: 'joint_origins' (each Joint Origin WCS frame + handle). Omit for kinematic state only."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
     .add_input_property("max_occurrences", {"type": "integer", "description": "Cap on the 'occurrences' array returned (default 50)."})
     .add_input_property("max_joints", {"type": "integer", "description": "Cap on the 'joints' array returned (default 100)."})
+    .add_input_property("max_joint_origins", {"type": "integer", "description": "Cap on the 'joint_origins' array (default 50)."})
     .strict_schema()
 )
-probe_item = Item.create_tool_item(tool=probe_tool, write="read", handler=handler, run_on_main_thread=True)
+item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
 
 
 def register_tool():
-    register(probe_item)
+    register(item)

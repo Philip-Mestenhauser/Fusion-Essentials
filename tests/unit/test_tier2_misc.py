@@ -147,8 +147,10 @@ def _coll(items):
 
 def _cam_with(ops, setup_error=None, programs=()):
     """Fake CAM with a single setup holding the given operations. setup_error makes the SETUP itself
-    hasError; programs is a list of NC programs (each a SimpleNamespace with hasError/error/name)."""
-    setup = SimpleNamespace(allOperations=list(ops), name="Setup1",
+    hasError; programs is a list of NC programs (each a SimpleNamespace with hasError/error/name).
+    allOperations is the count/item collection shape (_coll) - the measured live protocol
+    _cam_common.walk_operations reads (live_readiness's op walk), not a plain Python list."""
+    setup = SimpleNamespace(allOperations=_coll(list(ops)), name="Setup1",
                             hasError=setup_error is not None, error=setup_error or "")
     return SimpleNamespace(setups=_coll([setup]), ncPrograms=_coll(list(programs)))
 

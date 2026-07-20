@@ -119,7 +119,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
     JOINTED PARTS: moving an occurrence that participates in JOINTS is how you POSE a mechanism along
     its free DOF (e.g. spin a part on its revolute axis) - this is the sanctioned path. AFTER the move,
     call assembly_capture_position to record the pose into the timeline (otherwise it is transient), and
-    assembly_probe to confirm the joints stayed healthy: a move that FIGHTS the joints (e.g. rotating a
+    assembly_get to confirm the joints stayed healthy: a move that FIGHTS the joints (e.g. rotating a
     rigidly-jointed member off its mate) over-constrains the solve. When the target is jointed, the
     result includes a 'jointed_warning' naming the joints + this next step (set quiet=true to suppress).
     """
@@ -211,8 +211,10 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
                              "y": round(after.translation.y / k, 4),
                              "z": round(after.translation.z / k, 4)}) if after is not None else None
 
-    note = ("Occurrence repositioned (free move, no joint). Pair with view_screenshot to view, and "
-            "assembly_interference to check the new position doesn't clash with other parts.")
+    note = ("Occurrence repositioned (free move, no joint). This pose is UNCAPTURED - creating a joint "
+            "ANYWHERE in the assembly (even on other parts) or a recompute can silently REVERT it; call "
+            "assembly_capture_position to bake it into the timeline. Pair with view_screenshot / "
+            "assembly_inspect_interference to check the new position.")
     result = {
     "moved": True,
     "occurrence": safe(lambda: occ.name),
@@ -228,7 +230,7 @@ def move_handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: flo
         result["jointed_warning"] = (
             f"'{safe(lambda: occ.name)}' is in {len(joint_names)} joint(s) "
             f"({', '.join(joint_names[:6])}): this pose is TRANSIENT - call assembly_capture_position "
-            "to keep it, and assembly_probe to confirm the joints stayed healthy (a move that fights "
+            "to keep it, and assembly_get to confirm the joints stayed healthy (a move that fights "
             "the joints over-constrains the solve).")
         note = "Occurrence posed (jointed - see jointed_warning). Pair with view_screenshot to view."
     result["note"] = note
@@ -287,15 +289,14 @@ ground_tool = (
 ground_item = Item.create_tool_item(tool=ground_tool, write="write", handler=ground_handler, run_on_main_thread=True)
 
 _MOVE_DESC = (
-"Move an occurrence by editing its transform - a free reposition with NO joint/relationship "
-"created (use joint_create/assembly_constrain for a maintained relationship). 'dx'/'dy'/'dz' translate "
-"in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) optionally rotate about a world "
-"axis through the current position. The occurrence must be free to move (see assembly_ground: "
-"ground_to_parent=false). Moving a JOINTED occurrence POSES it (allowed) but the pose is transient "
-"- the result warns to assembly_capture_position it + assembly_probe its health. A pattern/mirror "
-"FEATURE re-derives its instances' placement on every timeline recompute, silently overwriting a "
-"free move of a patterned/mirrored occurrence - position those parts through their geometry or the "
-"owning feature instead."
+"Move an occurrence by editing its transform - a free reposition with NO joint created (use "
+"joint_create/assembly_constrain for a maintained relationship). 'dx'/'dy'/'dz' translate "
+"in 'units' (mm default); 'rotate_deg' + 'rotate_axis' (x/y/z) rotate about a world "
+"axis through the current position. The part must be free to move (assembly_ground: "
+"ground_to_parent=false). The new pose is TRANSIENT, jointed or not - a later joint creation ANYWHERE "
+"or a recompute silently REVERTS an uncaptured move, so assembly_capture_position it to bake the pose "
+"into the timeline. A pattern/mirror FEATURE also re-derives its instances every recompute, "
+"overwriting a free move of that occurrence - position those through the owning feature instead."
 )
 move_tool = (
     Tool.create_simple(name="assembly_move", description=_MOVE_DESC)
@@ -309,7 +310,7 @@ move_tool = (
     .add_input_property("rotate_y", {"type": "number", "description": "Multi-axis: degrees about world Y."})
     .add_input_property("rotate_z", {"type": "number", "description": "Multi-axis: degrees about world Z."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence (default false). The warning reminds you to assembly_capture_position the transient pose + assembly_probe its health."})
+    .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence (default false). The warning reminds you to assembly_capture_position the transient pose + assembly_get its health."})
     .strict_schema()
 )
 move_item = Item.create_tool_item(tool=move_tool, write="write", handler=move_handler, run_on_main_thread=True)

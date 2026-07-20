@@ -1,7 +1,7 @@
 """Unit tests for ``_view_common.py`` - the shared camera-orientation table for the standard
-named views. view_screenshot and view_inspect must produce the SAME camera for a given named
+named views. view_screenshot and view_set must produce the SAME camera for a given named
 view even though they consume opposite sign conventions (view_screenshot's look_direction is the
-negation of view_inspect's view_direction); this pins that relationship so the two can't silently
+negation of view_set's view_direction); this pins that relationship so the two can't silently
 desync.
 """
 
@@ -51,8 +51,8 @@ class TestLookDirection:
 
 
 class TestSignRelationship:
-    """The relationship view_screenshot and view_inspect both rely on: for every named view,
-    view_screenshot's applied look-direction is the exact negation of view_inspect's applied
+    """The relationship view_screenshot and view_set both rely on: for every named view,
+    view_screenshot's applied look-direction is the exact negation of view_set's applied
     view-direction. Pinned here so a future edit to either side can't silently desync the two."""
 
     def test_look_direction_is_negated_view_direction_for_every_named_view(self):

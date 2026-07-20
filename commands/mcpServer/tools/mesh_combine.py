@@ -54,7 +54,7 @@ _ALGORITHMS = {
 
 def handler(target: str = "", tools=None, operation: str = "join",
             algorithm: str = "enhanced") -> dict:
-    """Boolean-combine MESH tool bodies into a MESH target body."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")

@@ -17,9 +17,9 @@ is covered (verified with `coverage --branch`) and mutation-checked. The only li
 in these two handlers are the `except Exception: return error(str(e))` wrappers around raw SDK
 calls (findFileById / saveAs / dataFolders.add throwing) — they hold no logic, only stringify the
 error, so they are intentionally not unit-tested. The tree-walk helper `_find_file_by_name`
-(doc_lifecycle.py) is exercised here only through the copy-by-name handler (one match + two miss
-paths); its bound (5000 nodes) and deep-nesting traversal are not directly unit-tested — a worthwhile
-future addition if that helper grows.
+(doc_lifecycle.py) is exercised through the copy-by-name handler (one match, an ambiguous
+same-name-in-two-folders refusal, two miss paths) and directly for its hard folder budget
+(truncation refusal with escape paths, breadth-first order, source_folder scoping).
 """
 
 import json
@@ -261,6 +261,33 @@ class TestSaveDocumentAs:
             name="X", project_id="p-cam"))
         assert out["destination_project"] == "CAM"
 
+    def test_same_name_in_target_folder_refuses_by_default(self):
+        # A same-name file in the target folder is a fork risk - refuse by default (consistent with
+        # doc_copy), naming the existing URN + the flag, and DO NOT save.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:existing"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        res = _doc_lifecycle.save_document_as_handler(name="PartA_CAM", project="CAM")
+        assert res["isError"] is True
+        assert "already exists" in res["message"]
+        assert "urn:existing" in res["message"]           # the version-in-place remedy handle
+        assert "allow_duplicate_name" in res["message"]   # the deliberate opt-in
+        assert doc.saveas_args is None                    # refused BEFORE saving - no fork created
+
+    def test_allow_duplicate_name_forks_and_keeps_the_collision_warning(self):
+        # With the explicit opt-in, the fork proceeds AND the name_collision block still fires.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("PartA_CAM", fid="urn:existing"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:newfork")
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(
+            name="PartA_CAM", project="CAM", allow_duplicate_name=True))
+        assert out["saved"] is True
+        assert doc.saveas_args is not None                # the fork actually saved
+        assert out["name_collision"]["existing_document_id"] == "urn:existing"
+        assert "NAME COLLISION" in out["note"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # copy_document_handler  (DataFile.copy — cloud-to-cloud copy of a saved file)
@@ -359,8 +386,25 @@ class TestCopyDocument:
         res = _doc_lifecycle.copy_document_handler(
             name="Template", source_project="Library", project="CAM")
         assert res["isError"] is True
-        assert "not found in source project" in res["message"]
+        # the miss names the searched scope (project root vs a source_folder subtree)
+        assert "not found under (project root) of source project" in res["message"]
         assert "OtherFile" in res["message"]      # surfaces what it DID see
+
+    def test_copy_by_name_ambiguous_source_refuses_with_candidates(self):
+        # Fusion allows same-name files in DIFFERENT folders - a bare name is not a unique address, so
+        # the copy source must REFUSE, listing each twin's folder path + URN, never first-match.
+        lib = FakeProject("Library", pid="p-lib")
+        lib.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:a"))
+        sub = lib.rootFolder._add_child("Sub")
+        sub._files.append(FakeFile("Template", fid="urn:adsk.file:b"))
+        _install([lib, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "ambiguous" in res["message"]
+        # both lineage URNs surfaced so the caller can pass one exactly
+        assert "urn:adsk.file:a" in res["message"] and "urn:adsk.file:b" in res["message"]
+        assert "Sub" in res["message"]            # names the nested twin's folder path
 
     # --- post-copy failure branches (lines 175-176, 181-186, 207) ---
 
@@ -382,6 +426,111 @@ class TestCopyDocument:
         assert "rename to 'PartA_CAM' failed" in out["rename_warning"]
         # the copy still carries the SOURCE name (caller is warned, not silently misled)
         assert out["copied_name"] == "Template"
+
+
+class TestCopyByNameWalkBound:
+    """The by-name folder walk is HARD-bounded (_WALK_FOLDER_BUDGET): every folder visited costs two
+    cloud fetches on Fusion's MAIN thread (~0.5 s/folder measured live), so an unbounded project-wide
+    walk stalls the UI for minutes on a folder-heavy project. A budget-cut walk must REFUSE - a
+    partial search cannot prove a name unique - naming what was searched and the walk-free paths
+    (document_id URN; a narrower source_folder)."""
+
+    def test_truncated_walk_refuses_naming_budget_and_both_escape_paths(self, monkeypatch):
+        monkeypatch.setattr(_doc_lifecycle, "_WALK_FOLDER_BUDGET", 3)
+        proj = FakeProject("Library", pid="p-lib")
+        for i in range(6):                       # root + 6 subfolders > budget 3
+            proj.rootFolder._add_child(f"F{i}")
+        _install([proj, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "visited 3 folders" in res["message"]
+        assert "budget" in res["message"]
+        assert "document_id" in res["message"]           # escape path 1: the URN
+        assert "source_folder" in res["message"]         # escape path 2: scope the walk
+
+    def test_truncated_walk_lists_matches_found_so_far_with_urns(self, monkeypatch):
+        # A match found BEFORE the budget hit is still refused (an unsearched folder could hold a
+        # same-name twin) but its URN is listed so the caller can re-issue by document_id directly.
+        monkeypatch.setattr(_doc_lifecycle, "_WALK_FOLDER_BUDGET", 2)
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:root"))
+        for i in range(4):
+            proj.rootFolder._add_child(f"F{i}")
+        _install([proj, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True
+        assert "matches so far" in res["message"]
+        assert "urn:adsk.file:root" in res["message"]
+
+    def test_walk_within_budget_copies_normally(self):
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._files.append(FakeFile("Template", fid="urn:adsk.file:src"))
+        proj.rootFolder._add_child("Sub")
+        _install([proj, FakeProject("CAM")])
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM"))
+        assert out["copied"] is True
+
+    def test_walk_is_breadth_first_shallow_folders_before_deep(self):
+        # BFS spends the budget where files usually live: the root and shallow folders, before deep
+        # run/archive subtrees. Pinned via the file-visit order a name-miss records in 'seen'.
+        proj = FakeProject("Library", pid="p-lib")
+        a = proj.rootFolder._add_child("A")
+        a._files.append(FakeFile("fa", fid="urn:fa"))
+        deep = a._add_child("A-sub")
+        deep._files.append(FakeFile("fsub", fid="urn:fsub"))
+        b = proj.rootFolder._add_child("B")
+        b._files.append(FakeFile("fb", fid="urn:fb"))
+        _matches, seen, visited, truncated = _doc_lifecycle._find_file_by_name(
+            proj.rootFolder, "NoSuchName")
+        assert seen == ["fa", "fb", "fsub"]      # DFS would visit B (fb) before A (fa)
+        assert visited == 4 and truncated is False
+
+    def test_source_folder_scopes_the_walk_under_budget(self, monkeypatch):
+        # Many noise folders at root would blow a tiny budget; source_folder starts the walk at the
+        # named subtree instead, so the copy fits the budget and succeeds.
+        monkeypatch.setattr(_doc_lifecycle, "_WALK_FOLDER_BUDGET", 2)
+        proj = FakeProject("Library", pid="p-lib")
+        for i in range(8):
+            proj.rootFolder._add_child(f"Noise{i}")
+        parts = proj.rootFolder._add_child("Parts")
+        parts._files.append(FakeFile("Template", fid="urn:adsk.file:p"))
+        _install([proj, FakeProject("CAM")])
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", source_folder="Parts", project="CAM"))
+        assert out["copied"] is True
+
+    def test_unknown_source_folder_lists_root_folders(self):
+        proj = FakeProject("Library", pid="p-lib")
+        proj.rootFolder._add_child("Parts")
+        _install([proj, FakeProject("CAM")])
+        res = _doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", source_folder="Ghost", project="CAM")
+        assert res["isError"] is True
+        assert "source_folder" in res["message"] and "Parts" in res["message"]
+
+
+class TestCopyDocumentSchema:
+    """The WIRE schema must match the handler's contract: document_id is OPTIONAL (the by-name path
+    lives behind it), so a blind agent copying by name must NOT be forced to pass document_id=''.
+    Bites if doc_copy reverts to create_with_string_input (which marks the primary input required)."""
+
+    def test_document_id_is_not_required(self):
+        schema = _doc_lifecycle._copy_document_tool.to_dict()["inputSchema"]
+        assert "document_id" in schema["properties"]      # still offered (preferred path)
+        assert "document_id" not in schema.get("required", [])   # but NOT forced
+
+    def test_by_name_source_is_reachable_without_document_id(self):
+        # the handler proves the schema is honest: a name-only copy succeeds, no document_id passed.
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        lib = FakeProject("Library", pid="p-lib")
+        lib.rootFolder._files.append(src)
+        _install([lib, FakeProject("CAM", pid="p-cam")])
+        out = _payload(_doc_lifecycle.copy_document_handler(
+            name="Template", source_project="Library", project="CAM"))
+        assert out["copied"] is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,6 +761,150 @@ class TestCloseDocument:
         res = _doc_lifecycle.close_document_handler()
         assert res["isError"] is True
         assert "No documents are open" in res["message"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 6: doc_save_as folder-resolution retry on the cloud eventual-consistency self-contradiction
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FlakyRoot:
+    """A project root whose dataFolders enumeration lags (eventual-consistency): the first read returns
+    an empty list (so the first resolve MISSES the child) but every later read includes it - the exact
+    self-contradiction observed during a cloud outage, where the folder appeared in its own
+    available-folders list yet would not resolve until a retry."""
+    def __init__(self, child_name, empty_calls=1):
+        self._child = FakeFolder(child_name)
+        self._calls = 0
+        self._empty_calls = empty_calls
+        self.isRoot = True
+        self.name = "Root"
+
+    @property
+    def dataFolders(self):
+        outer = self
+
+        class _DF:
+            def asArray(self_inner):
+                outer._calls += 1
+                return [] if outer._calls <= outer._empty_calls else [outer._child]
+        return _DF()
+
+
+class TestFolderResolveEventual:
+    def test_retries_on_self_contradiction(self):
+        # first resolve misses; the child IS in the (now-fresh) sibling list -> ONE retry resolves it.
+        root = _FlakyRoot("Pipeline-v1", empty_calls=1)
+        target, missing, retried = _doc_lifecycle._resolve_folder_eventual(root, ["Pipeline-v1"])
+        assert retried is True
+        assert missing is None
+        assert target is root._child
+
+    def test_genuine_miss_is_not_retried(self):
+        # a folder truly absent from the siblings must NOT be retried (only the self-contradiction is).
+        root = FakeFolder("Root", is_root=True)          # no children at all
+        target, missing, retried = _doc_lifecycle._resolve_folder_eventual(root, ["Ghost"])
+        assert target is None
+        assert missing == "Ghost"
+        assert retried is False
+
+    def test_first_read_success_is_not_retried(self):
+        root = FakeFolder("Root", is_root=True)
+        root._add_child("Pipeline-v1")
+        target, missing, retried = _doc_lifecycle._resolve_folder_eventual(root, ["Pipeline-v1"])
+        assert target is not None and retried is False   # resolved on the first read, no retry
+
+    def test_saveas_recovers_and_notes_eventual_consistency(self):
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
+        proj = FakeProject("CAM")
+        proj.rootFolder = _FlakyRoot("Pipeline-v1", empty_calls=1)
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(
+            name="P5", project="CAM", folder="Pipeline-v1"))
+        assert out.get("folder_resolve_retried") is True
+        assert "eventual-consistency" in out["note"]
+        # it actually saved INTO the recovered folder
+        _, target, _, _ = doc.saveas_args
+        assert target.name == "Pipeline-v1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 4: unsaved-doc addressability (open:N) + close_all skipping dead reference proxies
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _NamedDoc:
+    def __init__(self, name, urn=None):
+        self.name = name
+        self._urn = urn
+
+    @property
+    def dataFile(self):
+        return type("DF", (), {"id": self._urn})()
+
+
+def _install_open(docs):
+    class _App:
+        documents = _CloseableDocs(docs)
+        activeDocument = docs[0] if docs else None
+    _doc_lifecycle.app = _App()
+
+
+class TestOpenIndexAddressing:
+    def test_open_index_addresses_an_unsaved_twin(self):
+        u1, u2 = _NamedDoc("Untitled"), _NamedDoc("Untitled")
+        _install_open([u1, u2])
+        d, names, ambiguous = _doc_lifecycle._find_open_document("open:1")
+        assert d is u2 and ambiguous is False
+
+    def test_open_index_out_of_range_is_clean_miss(self):
+        _install_open([_NamedDoc("Untitled")])
+        d, names, ambiguous = _doc_lifecycle._find_open_document("open:5")
+        assert d is None and ambiguous is False
+
+    def test_open_index_non_integer_is_clean_miss(self):
+        _install_open([_NamedDoc("Untitled")])
+        d, names, ambiguous = _doc_lifecycle._find_open_document("open:abc")
+        assert d is None and ambiguous is False
+
+    def test_shared_name_without_index_is_still_refused(self):
+        # two unsaved 'Untitled' (no URN) -> a bare name is ambiguous; open:N is the only handle.
+        _install_open([_NamedDoc("Untitled"), _NamedDoc("Untitled")])
+        d, names, ambiguous = _doc_lifecycle._find_open_document("Untitled")
+        assert d is None and ambiguous is True
+
+
+class TestCloseAllSkipsDeadProxies:
+    def test_already_invalid_proxy_is_skipped_not_errored(self):
+        good = _CloseableDoc("Good")
+        dead = _CloseableDoc("Dead")
+        dead.isValid = False                     # an already-invalidated reference-doc proxy
+        class _App:
+            documents = _CloseableDocs([good, dead])
+            activeDocument = good
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == ["Good"]
+        assert out["skipped_invalid"] == 1
+        assert out["errors"] == []               # a dead proxy is NOT a close failure
+        assert dead.close_called_with is None    # never even attempted
+        assert "Skipped 1 already-invalidated" in out["note"]
+
+    def test_close_that_invalidates_is_counted_skipped_not_errored(self):
+        # a proxy whose close() RAISES but is invalid afterward -> counted skipped, not a hard error.
+        class _RaiseThenInvalid(_CloseableDoc):
+            def close(self, save_changes):
+                self.isValid = False
+                raise RuntimeError("already gone")
+        good = _CloseableDoc("Good")
+        weird = _RaiseThenInvalid("Weird")
+        weird.isValid = True
+        class _App:
+            documents = _CloseableDocs([good, weird])
+            activeDocument = good
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.close_document_handler(close_all=True))
+        assert out["closed"] == ["Good"]
+        assert out["skipped_invalid"] == 1
+        assert out["errors"] == []
 
 
 class TestNewDocument:

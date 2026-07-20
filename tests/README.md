@@ -116,69 +116,11 @@ test and is the reason `conftest.py` carries a large snapshot/restore fixture to
 compensate. It's the anti-pattern, not the model. (Same "extend the kind, don't
 copy it" rule the tools themselves follow.)
 
-## Adding tests for a new tool
+## Adding or updating a test
 
-### The canonical examples — copy one of these
-
-Pick the closest and copy its shape. Each is kept clean on purpose; a new test
-should be indistinguishable in structure from its model.
-
-- **A rich read (`<domain>_get`, or a router with its own `_slice_*`/measurement-core helpers)** →
-  copy **`test_design_get.py`** or **`test_model_inspect.py`**. A `@pytest.fixture` stubs the
-  router's internal slice seams with `monkeypatch`; tests assert the router's composition (default =
-  orientation slice only; each `include=` adds its slice; the note advertises the rest) rather than
-  re-mocking the Fusion calls each slice delegates to. `test_cam_get.py` is the same shape.
-- **A tool needing a fuller fake object model (bodies / occurrences / components)** → copy
-  **`test_model_mirror.py`**. It builds a design with the shared `make_design`/`MakeComp` fakes and
-  wires it into the tool with `install`, all set up inside a `@pytest.fixture` — no local `Fake*`
-  classes, no imperative seam-poking.
-- **A pure function (parse / encode / convert)** → copy **`test_quoting.py`**.
-  No Fusion at all; just call it and round-trip the result.
-
-Most of the suite still carries the bespoke `_install(` shape (the anti-pattern below); the newest
-test files use the shared `make_design`/`install` pair. Don't take the bespoke majority as license
-to keep writing bespoke tests — it means most of the suite predates the shared fakes, not that the
-bespoke shape is preferred. See [tests/CLAUDE.md](CLAUDE.md) for the mandatory pattern for anything
-new.
-
-Then:
-
-1. Read the tool. List its `_helper` functions and the `handler`. Find the pure
-   logic: unit math, parsing, the 0/1/N branches, validation gates, the
-   `_ok`/`_error` shape.
-2. `tool = load_tool("<module_name>")` at the top of `tests/unit/test_<tool>.py`.
-3. Write **one test per specific, plausible bug**, not one per function. The
-   name should read like a spec line (`test_picks_largest_body_by_volume`), it
-   ends up in `TEST_SPEC.md`.
-4. Assert on concrete values. Cover sizes **0, 1, 2, N** for anything taking a
-   collection. Round-trip any encode/decode pair (see `test_quoting.py`).
-5. **Set up state with `monkeypatch` or a `@pytest.fixture`, never an imperative
-   `mod.app = …` poke.** Both undo themselves after the test, so no state leaks
-   into the next one. Use the shared `make_design`/`install` fakes; if they lack a
-   surface, **extend them in `conftest.py`** rather than forking a local `Fake*`
-   hierarchy (see "Fakes" above).
-6. If a tool needs an `adsk` attribute that isn't modelled, add it to
-   `install_mock_adsk()` (or a `.cast` pass-through) — once, in the harness.
-
-### Prove a test actually bites
-
-A test that can't fail is decoration. After writing one, sanity-check it by
-temporarily breaking the code it covers (flip a comparison, change a constant)
-and confirming the right test goes red — then restore. Examples done this way:
-the "largest body by volume" tiebreak and the `_scale` mm factor.
-
-> Note: the harness sets `sys.dont_write_bytecode = True`. The tool loader
-> spec-loads source files, and mtime-keyed `.pyc` caches can otherwise go stale
-> when you edit-then-restore a tool quickly during a regression check, masking
-> the restored source.
-
-## Updating tests as behavior changes
-
-**The test changes in the same commit as the behavior it describes.** A red test
-after a code change is the suite telling you a promise changed — confirm you
-meant it, then update the test. Never edit a test purely to make it pass without
-understanding why it broke (refactor that changed behavior → fix the code; test
-asserting an implementation detail → fix the test).
+See [CLAUDE.md](CLAUDE.md) for the recipe - which pattern to copy (a rich read, a fuller fake object
+model, or a pure function), the mandatory test shape, and how to update a test when the behavior it
+pins changes.
 
 ## The behavior spec (`TEST_SPEC.md`)
 

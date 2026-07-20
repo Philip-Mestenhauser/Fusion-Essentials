@@ -1,60 +1,65 @@
 # Scenario coverage map
 
-Which scenario drives which tool DOMAIN, and the behavior each grades. Coverage is a DIAGNOSTIC (which
-tools a run happens to touch), never the target - the scenarios are GOAL-SHAPED and grade outcome +
-honesty, not path (see README.md). A cold agent may reach a correct outcome via a different tool than
-the ones listed; that is fine, and a wall the agent CAN'T get around is itself the most valuable
-finding (an over-specified task hides such walls; a goal-shaped one exposes them).
+Which scenario drives which tool DOMAIN, and the behavior each grades. Coverage is a DIAGNOSTIC
+(which tools a run happens to touch), never the target - the scenarios are GOAL-SHAPED and grade
+outcome + honesty, not path (see README.md). A cold agent may reach a correct outcome via a
+different tool than the ones listed; that is fine, and a wall the agent CANNOT get around is
+itself the most valuable finding.
 
-## The pipeline (T1 -> T6): one artifact chain, each test a tool domain
+## The pipeline (S1 -> S9): one artifact chain from parametric plan to posted NC
 
-Each pipeline test builds on the prior test's saved artifact (P1-Gimbal -> ... -> P4-Gimbal), so the
-chain exercises a full CAD/CAM lifecycle. Staged/addressed by lineage URN (documents can share a name).
+Each scenario builds on the prior artifact, staged/addressed by lineage URN (documents share
+names across runs). Immutability: P1-P5 artifacts are never re-versioned by later scenarios; the
+two MUTABLE artifacts are P6-Vise (S7 edits it to prove x-ref staleness) and P7-Template (S8
+advances it with the CAM layer). S9 forks the template (RING-CAM) and leaves it untouched.
 
 | Scenario | Domain | Tool families it naturally drives | Behavior the postconditions grade |
 |---|---|---|---|
-| `T1_Sketch-Eval` | sketch + parameters | param (add/set/favorite/delete), sketch (create/add_geometry/constrain/dimension/get), model_create_component, doc_save_as, screenshots | a parametric multi-component foundation; expressions REFERENCE shared parameters; changing one driving parameter PROPAGATES to >=2 parts (read fresh); the P1-Gimbal artifact lands |
-| `T2_Model-Eval` | solid modeling | model_extrude (+ profile handles), sketch_get (multi-profile region pick), model_inspect, find_geometry, doc_save_as | each sketch becomes a body OWNED by its component; rings are hollow bands not discs; the outer ring's pivots are through-holes; the multi-profile region trap is navigated |
-| `T3_Joints-Assembly-Eval` | joints + assembly kinematics | assembly_ground, joint-create tools, joint_drive, assembly_probe, screenshots | a working two-axis gimbal - two perpendicular pivots wired to the right pairs, jointed WITHOUT disturbing rest; drives articulate correctly and restore; the frame stays fixed |
-| `T4_Detail-Features-Eval` | detail features | model_hole, model_fillet, model_chamfer, find_geometry, model_inspect, assembly_probe, screenshots | detail features land on the RIGHT geometry (the wrong-edge fillet trap - screenshot/volume catches it); the mechanism stays alive (joints healthy after recompute) |
-| `T5_Data-Xref-Eval` | data model + xrefs | doc_copy, doc_insert_occurrence, doc_open/activate (async, by URN), doc_get(xref_tree), doc_update_xref, param_set, data_get | associativity: a reference goes stale on a source edit, updating brings the change through; version isolation (the original stays put); same-name/async-activation hazards navigated |
-| `T6_CAM-Eval` | CAM template document | model_create_component (auto-promotes intent), param, joints (work-holding), cam_create_setup / cam_edit_setup (CONTAINER selection), cam_create_operation, cam_generate, cam_save_template | the shop-template pattern: container components + parametric stock + a vise + a CAM setup that selects the CONTAINERS (not bodies) + valid toolpaths; a self-centering-vise gap is a first-class finding |
+| `S1_Foundation` | sketch + parameters + construction | param (add/set/favorite), sketch (create/geometry/constrain/dimension/get incl. the origin:true anchor + construction LINES), model_create_component (incl. a NESTED sub-component), construction planes (the rotor sketch is perpendicular to the ring plane), doc_save_as, screenshots | the topology-A cast (frame+pedestal, CARRIER, two rings, rotor+shaft, CRANK) anchored to a SHARED SKELETON; 3D-STRUCTURE graded - axis perpendicularity by dot product, ring coplanarity by plane normals, containment by radii chain, pin circles ON-axis by distance-to-line; >=8 expression dims across >=4 parts; propagation incl. a pin center; the UNBODIED handoff (body_count 0 graded) |
+| `S2a_Hardware-Structure` | solid modeling (split 1/2 - fits the harness task cap) | model_extrude (multi-profile handles + symmetric extents), model_inspect, assembly_inspect_interference, find_geometry, sketch_get, doc_save_as | the eight primary bodies owned by the right components; rings as coplanar hollow BANDS proven by volume-vs-filled arithmetic + midplane reads; ZONE DISCIPLINE graded binary - a fresh interference check must report ZERO pairs (no pins exist yet); predecessor version isolation |
+| `S2b_Hardware-Interfaces` | solid modeling (split 2/2) | model_extrude (THROUGH-ALL bores, target_bodies-scoped cuts), model_inspect, find_geometry, assembly_inspect_interference, doc_save_as | pins COLLINEAR with the skeleton axes THREADING both joined parts; through bores + shaft bearing seats with read pin-vs-bore clearance; FINAL state = only pins/shaft touch their bores (the exact state S3 assumes); predecessor version isolation |
+| `S3_Motion` | joints + kinematics + interference | joint tools (revolutes on pin geometry), joint_motion_link (cross-chain), joint_drive, assembly_get, assembly_inspect_interference, screenshots | a 4-axis mechanism (yaw carrier on the post, pinned ring pivots, rotor spin, frame crank); joint AXIS DIRECTIONS graded against the skeleton (pairwise dots); the CRANK motion-linked to the ROTOR SPIN across independent chains at a declared ratio (Fusion refuses same-chain links); no-teleport joints; interference graded at rest AND posed with expected contacts named |
+| `S4_Details` | detail features | model_hole, model_fillet, model_chamfer, find_geometry, model_inspect, assembly_get, assembly_inspect_interference | features on the LIVING mechanism (swing-clear hole placement graded via the posed interference check); shape-neutral instruction interpretation; volume deltas reconcile; mechanism healthy after |
+| `S5_Derive` | scoped derive + local edits + surfacing + datums | doc_insert_derive (source_components scoping; requires the source open), doc_open, doc_get (derive-kind reference rows), model_fillet (ON the derived body), surface_patch, surface_offset (zero + nonzero), sketch_project, joint_create_origin (bbox_center), model_inspect, doc_save_as | the machining-prep model: a linked one-way derive of EXACTLY one component, detail features edited locally on the derived body, prep layer + joint origin at the MEASURED bbox center; params-import reported as an honest diagnostic (live-measured platform no-op); source untouched despite the local edits |
+| `S6_Vise` | parametric mechanism design | model + sketch + param families, assembly_inspect_interference, doc_save_as | a self-centering vise where ONE parameter drives BOTH jaws symmetric about center (midpoint math read fresh at two openings) - parametric by design (the API refuses 2-slider motion links) |
+| `S7_Template-Skeleton` | template architecture + xref lifecycle | model_create_component (components), param + joint_create_origin (offset-EXPRESSION self-centering stock origin), doc_insert_occurrence (fixture x-ref), doc_open/activate (async, by URN), doc_get(xref_tree), doc_update_xref, joint tools, doc_save_as | component architecture; the stock origin FOLLOWS parametric resizes (two sizes read); the FULL xref lifecycle graded live (insert -> stale after source edit -> update -> current, versions read each step); stock gripped by the jaws |
+| `S8_CAM-Tooling` | CAM tools + setups + operations | cam_edit_tools (4 tools with holders/presets), cam_create_setup (COMPONENT selection, WCS on the stock origin), cam_create_operation (4 tool types), cam_generate + cam_get_status, cam_activate_setup, cam_save_template, doc_save | the manufacturing layer: tools built through the wire; setups select COMPONENTS (implicit consumption); all operations compute healthy; setup activation round-trip; persisted as document AND template artifact |
+| `S9_Consume` | the insert-into-template dataset | doc_save_as (fork), design_delete_occurrence (placeholder), doc_insert_occurrence (model x-ref into the component), joint to a named JO across references, model_inspect (POST-SEATING), param_set (stock), cam_generate/cam_get_status, cam_post, sim start (bonus) | the finale: template fork isolates P7; the real model seats at the stock center; STOCK SIZED FROM POST-SEATING MEASUREMENT (the ride-proven reorientation trap - pre-join numbers in the arithmetic = FAIL); regeneration healthy; NC posted with file evidence |
 
-## The fuzzy counterparts (unaided-wire measurement)
-
-| Scenario | Domain | What it measures |
-|---|---|---|
-| `fuzzy_f1_gimbal_foundation` | sketch + parameters | the SAME territory as T1 with a 3-5 sentence goal - the delta vs T1 measures the wire's unaided teaching power (decomposition, activation, expression-driven dimensions) |
-| `fuzzy_f2_gimbal_mechanism` | joints + kinematics | the SAME territory as T3, goal-shaped - whether the wire alone carries an agent to a working mechanism |
-
-The pipeline tests are now themselves goal-shaped (specific WHAT + full-tool-surface encouragement, no
-dictated HOW), so the scripted-vs-fuzzy distinction has narrowed to the fuzzy tests being TERSER; both
-grade outcome + honesty. Keep the fuzzy pair as the minimal-guidance control per territory.
+Fuzzy variants: deferred entirely in v2 (owner decision); reintroduce as terse-goal controls per
+territory once the pipeline is stable.
 
 ## Tools whose behavior is guaranteed by the mock suite rather than a live scenario
 
-Some paths are impractical to force in an outcome-graded cold-agent task (they need a specific object
-graph, or they are a rare branch). These are pinned by the mock unit suite instead:
+Some paths are impractical to force in an outcome-graded cold-agent task (they need a specific
+object graph, or they are a rare branch). These are pinned by the mock unit suite instead:
 
-- **result-body read-back on the mesh + offset/trim/untrim/reverse-normal surface tools** - the shared
-  read-back the surface/mesh tools use; the mesh path needs an imported mesh fixture. Pinned by
-  `test_common.py` (the shared reader) + each tool's unit test.
-- **joint-health over a broken SUB-COMPONENT joint** - needs a nested assembly with a deliberately
-  faulted joint; grading it would use the very tools under test. Pinned by `test_joint_motion_link.py`
-  (the full joint walk collects sub-component + as-built joints and de-duplicates the root).
-- **the design_export ambiguity REFUSAL and the design_get ambiguous-occurrence REFUSAL** - a refusal
-  is hard to force without constraining the path. Pinned by `test_design_export.py` / `test_design_get.py`.
-- **the template-generation-mode and library-location enums** - an invalid value is a refusal, not a
-  happy path. Pinned by `test_cam_templates.py`.
-- **the CAM setup CONTAINER-selection kind** (occurrence/component vs body, component->occurrence
-  mapping with ambiguity refusal) - pinned by `test_inputs.py::TestTargetRefList`; T6 exercises it live.
-- **the design-intent auto-promote** (a fresh Part-intent doc -> Hybrid so multi-component builds
-  work) - pinned by `test_model_create_component.py::TestDesignIntentPromotion`; every multi-component
-  scenario exercises it live.
+- **result-body read-back on the mesh + offset/trim/untrim/reverse-normal surface tools** - the
+  shared read-back the surface/mesh tools use; the mesh path needs an imported mesh fixture.
+  Pinned by `test_common.py` (the shared reader) + each tool's unit test.
+- **joint-health over a broken SUB-COMPONENT joint** - needs a nested assembly with a
+  deliberately faulted joint; grading it would use the very tools under test. Pinned by
+  `test_joint_motion_link.py` (the full joint walk).
+- **the design_export ambiguity REFUSAL and the design_get ambiguous-occurrence REFUSAL** -
+  pinned by `test_design_export.py` / `test_design_get.py`.
+- **the template-generation-mode and library-location enums** - pinned by `test_cam_templates.py`.
+- **the CAM setup COMPONENT-selection kind** (ambiguity refusal) - pinned by
+  `test_inputs.py::TestTargetRefList`; S8 exercises the happy path live.
+- **the design-intent auto-promote** - pinned by
+  `test_model_create_component.py::TestDesignIntentPromotion`; every multi-component scenario
+  exercises it live.
+- **derive staleness + refresh-refusal** - staging it in the pipeline would re-version the
+  immutable P4 artifact; live-verified at the tool level (doc_get derive rows, doc_update_xref's
+  honest per-reference refusal + delete-and-re-derive fallback) and pinned by the doc_get /
+  doc_update_xref unit tests.
+- **sys_request_selection** - interactive by design: it holds for a HUMAN pick, and an eval never
+  puts a human in the loop (run_eval.py hard-denies it; that affordance belongs to skills a human
+  invoked). Its guards (nothing-to-select, wait bounds, single-pending) are pinned by
+  test_sys_selection.py; the pick path is verified owner-present at the tool level.
 
 ## Running
 
-Point a capable agent at a scenario file; it self-executes per `README.md` (one agent, cold start,
-grade by direct reads, no sub-agents, no document-switching). The pipeline chain runs T1 -> T6 in order
-(each consumes the prior artifact by URN); a scenario whose fixture the environment cannot provide is
-reported SKIP, not a tool failure.
+Stage the fixture per each scenario's frontmatter, then run the AGENT PROMPT block through
+`run_eval.py` (blind executor; audited counts; see README.md). The chain runs S1 -> S9 in order,
+each consuming the prior artifact by URN; a scenario whose fixture the environment cannot provide
+is reported SKIP, not a tool failure.

@@ -95,26 +95,26 @@ def create_folder_handler(folder_name: str = "", project: str = "", project_id: 
     parent_segments = _split_path(parent_folder)
     auto_created = []
     try:
-        container, auto_created = _ensure_folder_path(root, parent_segments)
+        parent, auto_created = _ensure_folder_path(root, parent_segments)
     except Exception as e:
         return error(f"Could not prepare parent path '{parent_folder}': {e}")
 
     # Duplicate guard scoped to the resolved parent (a same-named folder elsewhere is fine).
-    existing = _child_folder_by_name(container, folder_name)
+    existing = _child_folder_by_name(parent, folder_name)
     if existing:
         return error(f"A folder named '{folder_name}' already exists at "
-                      f"'{_folder_path_string(container) or '(project root)'}' "
+                      f"'{_folder_path_string(parent) or '(project root)'}' "
                       f"(id {safe(lambda: existing.id)}).")
 
     try:
-        folder = container.dataFolders.add(folder_name)
+        folder = parent.dataFolders.add(folder_name)
     except Exception as e:
         return error(f"Failed to create folder '{folder_name}': {e}")
     if not folder:
         return error(f"Folder creation returned nothing for '{folder_name}'.")
-    if _child_folder_by_name(container, folder_name) is None:
+    if _child_folder_by_name(parent, folder_name) is None:
         return error(f"dataFolders.add returned a folder but '{folder_name}' does not appear when "
-                     f"'{_folder_path_string(container) or '(project root)'}' is re-listed - the "
+                     f"'{_folder_path_string(parent) or '(project root)'}' is re-listed - the "
                      "creation did not land.")
     return ok({"created": True, "name": safe(lambda: folder.name),
         "id": safe(lambda: folder.id),

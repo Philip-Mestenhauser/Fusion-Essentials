@@ -37,7 +37,7 @@ agree with `write=`** — a read-verb (`get`/`find`/`probe`/…) is read-only; a
 name *is* the type: `cam_get` reads, `model_compute_holder` acquires, `cam_edit_tools` writes; a name
 that disagrees with `write=` is a mislabeled tool. Enforced by `test_tool_naming.py` (also the source of
 the verb vocabulary). The exemptions (a poller like `cam_get_status`; a read-verb tool that still mutates,
-e.g. `view_inspect`) and Edit packaging (`action=` dispatch, one-verb-per-file) live in
+e.g. `view_section`) and Edit packaging (`action=` dispatch, one-verb-per-file) live in
 [commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md).
 
 ## Honesty contract (the rule that matters most)

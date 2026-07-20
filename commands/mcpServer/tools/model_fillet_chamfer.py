@@ -29,6 +29,12 @@ _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
 
 app = adsk.core.Application.get()
 
+# edge_filter caveat (shared by both tools): convex/concave classify each edge by its LOCAL dihedral
+# only, so on a plate with holes every hole rim matches exactly like the outer perimeter - the filter
+# cannot mean "outer edges only". The 'edges' handle list is the precise path when the set matters.
+_EDGE_FILTER_DESC = ("all/convex/concave (with body_name), by per-edge dihedral - hole rims match "
+    "like the outer perimeter, so use 'edges' handles to isolate a specific set.")
+
 
 def _resolve_body(comp, body_name):
     """Resolve the body to fillet/chamfer ALL edges of. A given value (a find_geometry handle OR a
@@ -158,17 +164,15 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
 _FILLET_DESC = (
     "Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs. "
-    "TARGET via 'edges' = edge handles from find_geometry (SPECIFIC edges), OR 'body_name' (a "
-    "handle, body name, or single-body component name; omit = most recent body) + optional "
-    "'edge_filter' (convex/concave) for all/filtered edges of a body. 'radius' is in 'units' (mm "
-    "default). 'edges' takes precedence."
+    "TARGET via 'edges' = find_geometry edge handles (SPECIFIC edges; takes precedence), OR "
+    "'body_name' (handle/name; omit = most recent) + optional 'edge_filter' for all/filtered edges "
+    "of a body (see the edge_filter caveat). 'radius' is in 'units' (mm default)."
 )
 _CHAMFER_DESC = (
 "Bevel (chamfer) edges with a constant distance - an angled edge break. TARGET via 'edges' = "
-"edge handles from find_geometry (specific edges), OR 'body_name' (a handle, body name, or "
-"single-body component name) + optional "
-"'edge_filter' (convex/concave) for all/filtered edges of a body. 'distance' is in 'units' (mm "
-"default). 'edges' takes precedence."
+"find_geometry edge handles (SPECIFIC edges; takes precedence), OR 'body_name' (handle/name) + "
+"optional 'edge_filter' for all/filtered edges of a body (see the edge_filter caveat). 'distance' "
+"is in 'units' (mm default)."
 )
 
 fillet_tool = (
@@ -178,7 +182,7 @@ fillet_tool = (
     .add_input_property("radius", {"type": "number", "description": "Fillet radius in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.Choice("edge_filter", ["all", "convex", "concave"], default="all",
-        description="Which edges to affect (used only with body_name).").as_property())
+        description=_EDGE_FILTER_DESC).as_property())
     .strict_schema()
 )
 fillet_item = Item.create_tool_item(tool=fillet_tool, write="write", handler=_fillet_handler, run_on_main_thread=True,
@@ -192,7 +196,7 @@ chamfer_tool = (
     .add_input_property("distance_two", {"type": "number", "description": "Second distance for an ASYMMETRIC two-distance chamfer (in 'units'); omit/0 = equal-distance."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.Choice("edge_filter", ["all", "convex", "concave"], default="all",
-        description="Which edges to affect (used only with body_name).").as_property())
+        description=_EDGE_FILTER_DESC).as_property())
     .strict_schema()
 )
 chamfer_item = Item.create_tool_item(tool=chamfer_tool, write="write", handler=_chamfer_handler, run_on_main_thread=True,

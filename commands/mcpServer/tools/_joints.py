@@ -12,11 +12,23 @@ import adsk.fusion
 
 from ._common import safe
 
+
+def is_joint_origin(x):
+    """isinstance(x, adsk.fusion.JointOrigin) that degrades to False when the type isn't a real class
+    (an un-modelled Mock attribute under test) instead of raising - the one JO type check every tool
+    that branches on 'is this resolved handle a JointOrigin?' shares."""
+    try:
+        return isinstance(x, adsk.fusion.JointOrigin)
+    except TypeError:
+        return False
+
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type "
              "dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk "
              "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
-             "broken joints over) + find_joint (resolve ONE by name over those same scopes)")
+             "broken joints over) + find_joint (resolve ONE by name over those same scopes) + "
+             "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
+             "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on)")
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
 # passing a custom_entity to apply_motion instead).
@@ -131,12 +143,40 @@ def current_joint_type(joint):
     return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
 
 
+# JointMotion subclass -> the single JointMotionTypes DOF a MotionLink.setMotionData couples. This is
+# the DEGREE OF FREEDOM enum (RevoluteJointRotateMotionType, ...), a DIFFERENT enum from JointTypes:
+# jointMotion.jointType returns a JointTypes value (RevoluteJointType == 1), which setMotionData
+# REJECTS as "BAD_JOINT_DOF - Motion Link joint DOF is wrong type" - verified live, along with the
+# accepted DOF values below. Cylindrical exposes both a rotate and a slide DOF (both accepted live);
+# rotation is the gear/belt coupling default. Rigid (no DOF) and the multi-DOF ball/planar/pin_slot
+# joints have no single DOF this tool can pick unambiguously, so they map to None.
+def motion_link_dof(joint):
+    """The JointMotionTypes DOF that MotionLink.setMotionData couples for `joint`, as (value, None), or
+    (None, reason) when the joint has no single linkable rotate/slide DOF (rigid, or a multi-DOF
+    ball/planar/pin_slot). setMotionData wants this DOF, NOT the joint's JointTypes value."""
+    JMT = adsk.fusion.JointMotionTypes
+    table = {
+        "RevoluteJointMotion": JMT.RevoluteJointRotateMotionType,
+        "SliderJointMotion": JMT.SliderJointSlideMotionType,
+        "CylindricalJointMotion": JMT.CylindricalJointRotateMotionType,
+    }
+    jm = safe(lambda: joint.jointMotion)
+    cls = type(jm).__name__ if jm else ""
+    if cls in table:
+        return table[cls], None
+    kw = _MOTION_CLASS_TO_TYPE.get(cls, "") or "unknown"
+    if kw == "rigid":
+        return None, "is a rigid joint (no motion to link)"
+    return None, (f"is a '{kw}' joint - motion links couple single-DOF joints "
+                  "(revolute, slider, or cylindrical)")
+
+
 def all_joints(design):
     """Every Joint AND AsBuiltJoint in the design, as a flat list of the joint objects: the root
     component plus every sub-component (both are SEPARATE collections, and a joint internal to a
     sub-component lives on that component - a root-only walk under-reports, so a broken sub-component or
     as-built joint would be invisible to a health rollup). The ONE joint walk: find_joint resolves a
-    name over it, and the assembly_probe / workspace_orient health rollups count broken joints over it,
+    name over it, and the assembly_get / workspace_orient health rollups count broken joints over it,
     so 'which joints exist' is answered the same way everywhere. Joints are de-duplicated by
     entityToken: design.allComponents includes the root as a proxy DISTINCT from
     design.rootComponent, so the root's joints are reached twice - counting them once each would
@@ -182,3 +222,82 @@ def find_joint(design, name):
         if cand:
             return cand
     return None
+
+
+def all_joint_origins(design):
+    """Every JointOrigin in the design as a flat list of (jo, owning_component): the root component plus
+    every sub-component (a JO internal to a sub-component lives on that component, so a root-only walk
+    under-reports). The ONE JointOrigin walk - the same shape as all_joints - that the three JO leaf ops
+    share: collect-names (joint_create's available-JO list), read-axes (model_inspect's oriented bbox
+    frame), and resolve-one-by-name (find_joint_origins_by_name, under the JointOriginRef kind). Joints
+    know 'which joints exist' one way; this answers 'which joint origins exist' the same way everywhere.
+    De-duplicated by entityToken: design.allComponents includes the root as a proxy DISTINCT from
+    design.rootComponent, so a root JO is reached twice - counting it once each would double-list it (the
+    token is stable across the two root proxies, verified live for all_joints; id() falls back for fakes)."""
+    out, seen = [], set()
+    scopes = [safe(lambda: design.rootComponent)] + list(safe(lambda: design.allComponents, []) or [])
+    for c in scopes:
+        if c is None:
+            continue
+        jos = safe(lambda c=c: c.jointOrigins)
+        for i in range(safe(lambda: jos.count, 0) or 0 if jos else 0):
+            jo = safe(lambda i=i: jos.item(i))
+            if jo is None:
+                continue
+            token = safe(lambda jo=jo: jo.entityToken)
+            key = token if token is not None else id(jo)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((jo, c))
+    return out
+
+
+def find_joint_origins_by_name(design, name):
+    """Every (jo, owning_component) whose JointOrigin name EXACTLY matches `name`, over all_joint_origins
+    - a LIST, because a JO name is only component-locally unique (two sub-assemblies can each carry a
+    'Center of Model'). The caller decides: one hit resolves, several REFUSE with candidates (the house
+    rule for a non-unique name space); never grab the first."""
+    want = (name or "").strip()
+    if not want:
+        return []
+    return [(jo, c) for jo, c in all_joint_origins(design)
+            if (safe(lambda jo=jo: jo.name) or "") == want]
+
+
+def jo_assembly_proxy(design, jo, comp):
+    """Return `jo` usable in ASSEMBLY CONTEXT: the native JO when it's on the root component (already in
+    context), else its proxy in the SINGLE occurrence of its owning component (a native sub-component JO
+    yields Fusion's 'Provided input paths for joint are not valid' - it must be proxied). Returns
+    (obj, error): an owning component instanced MORE THAN ONCE is ambiguous which instance carries the
+    frame, so it refuses and names the '<occurrence>:<JO name>' form that picks one."""
+    root = safe(lambda: design.rootComponent)
+    root_name = safe(lambda: root.name)
+    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+        return jo, None
+    occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
+    if len(occs) == 1:
+        proxy = safe(lambda: jo.createForAssemblyContext(occs[0]))
+        return (proxy or jo), None
+    if not occs:
+        return jo, None                       # not instanced in the assembly; native is the only form
+    nm = safe(lambda: jo.name) or "?"
+    return None, (f"Joint Origin '{nm}' is instanced {len(occs)} times - address it as "
+                  f"'<occurrence>:{nm}' to pick which instance (assembly_get(include=['joint_origins']) "
+                  "lists the qualified names).")
+
+
+def jo_reference_names(design, jo, comp):
+    """The resolvable reference string(s) for a JointOrigin: its BARE name when it's on the root
+    component (unique there), else '<occurrence fullPathName>:<name>' for EACH occurrence of its owning
+    component. A JointOriginRef / joint tool accepts any of these; the qualified form is what
+    disambiguates a name shared across components or instanced several times. Shared by the
+    assembly_get JO slice (its qualified_name field) and the JointOriginRef ambiguity candidate list."""
+    nm = safe(lambda: jo.name) or "?"
+    root = safe(lambda: design.rootComponent)
+    root_name = safe(lambda: root.name)
+    if comp is root or (comp is not None and safe(lambda: comp.name) == root_name):
+        return [nm]
+    occs = list(safe(lambda: root.allOccurrencesByComponent(comp)) or []) if root else []
+    out = [f"{safe(lambda o=o: o.fullPathName)}:{nm}" for o in occs if safe(lambda o=o: o.fullPathName)]
+    return out or [nm]

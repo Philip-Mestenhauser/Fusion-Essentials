@@ -6,11 +6,12 @@
 An Edit tool declares ``postconditions=[...]`` at registration (Item.create_tool_item); the kernel
 runs capture -> handler -> verify and converts an ok() whose declared effect did not take into an
 error - the platform can return success while changing nothing. Severities: "hard" (reason ->
-isError) and "soft" (payload marked unconfirmed, for effects that legitimately lag the call).
-Evidence a verify reads is folded into the payload via setdefault, so a declared RETURNS key can be
-SUPPLIED by its postcondition rather than computed twice. A Postcondition NEVER mutates:
-capture/verify are safe() reads, and a verify that cannot read ground truth reports "could not
-confirm", never a false "". See tools/CLAUDE.md for the authoring rule.
+isError; and a capture/verify that RAISES fails CLOSED - the honest "mutation may have succeeded,
+verification could not run" error, never a possible no-op passed as ok) and "soft" (payload marked
+unconfirmed, for effects that legitimately lag the call). Evidence a verify reads is folded into
+the payload via setdefault, so a declared RETURNS key can be SUPPLIED by its postcondition rather
+than computed twice. A Postcondition NEVER mutates: capture/verify are safe() reads. See
+tools/CLAUDE.md for the authoring rule.
 """
 
 import json
@@ -33,6 +34,10 @@ class Postcondition:
 
     name = "postcondition"
     severity = "hard"
+    # The MCP read tool that re-reads THIS postcondition's ground truth, if one exists. Named in the
+    # honest error when verification itself could not run (capture/verify raised) so the caller knows
+    # where to re-check the state. None = no single read tool reveals it (e.g. a file on disk).
+    read_tool = None
 
     def capture(self, kwargs):
         """Ground truth BEFORE the handler runs (kwargs = the handler's arguments). Return any value;
@@ -56,6 +61,7 @@ class VersionAdvanced(Postcondition):
     e.g. a design open behind its drawing, or a stale duplicate instance)."""
 
     name = "version_advanced"
+    read_tool = "doc_get"        # active.is_modified + include=['versions'] re-read the save state
 
     def capture(self, kwargs):
         return bool(safe(lambda: app.activeDocument.isModified, False))
@@ -80,6 +86,7 @@ class ReferencesFresh(Postcondition):
     a reference is stale (observed live), so it is deliberately not consulted."""
 
     name = "references_fresh"
+    read_tool = "doc_get"        # include=['xref_tree'] re-reads per-reference freshness/stale_count
 
     def _stale_count(self):
         refs = safe(lambda: app.activeDocument.documentReferences)
@@ -180,6 +187,7 @@ class FeatureHealthy(Postcondition):
     evidence rather than failing the call."""
 
     name = "feature_healthy"
+    read_tool = "design_get"      # the default projection carries the timeline health rollup
 
     _ERROR, _WARNING = 2, 1        # timeline healthState convention (same values design_get labels)
 
@@ -219,16 +227,45 @@ class FeatureHealthy(Postcondition):
         return "", evidence
 
 
+def _verification_failed(post, ex):
+    """The HONEST fail-closed result when a HARD postcondition's capture or verify RAISED, so the
+    effect could not be checked. The mutation may have taken; its VERIFICATION did not run - reported
+    as an error (never a possible no-op passed as ok), naming the exception and, when the kind knows
+    one, the read tool that re-reads the state."""
+    detail = str(ex)[:160]
+    tool = getattr(post, "read_tool", None)
+    reread = (f"Re-read with {tool} and retry only if the change did not take."
+              if tool else "Re-read the affected state and retry only if the change did not take.")
+    note = (f"The mutation may have succeeded, but its verification could not run ({detail}). "
+            f"Reporting failure rather than a possible no-op passed as success. " + reread)
+    return {"content": [{"type": "text", "text": json.dumps(
+                {"postcondition": post.name, "verification_error": detail, "note": note}, indent=2)}],
+            "isError": True,
+            "message": f"{post.name}: verification could not run - {detail}"}
+
+
 def wrap(handler, postconditions):
     """Wrap an Edit handler with capture -> handler -> verify. Runs verify only on a JSON ok() result;
     error results and non-JSON payloads pass through untouched. Applied INSIDE _write_guard.wrap (the
-    guard stamps acted_on on whatever this returns)."""
+    guard stamps acted_on on whatever this returns).
+
+    Fail-CLOSED for HARD postconditions: a capture that RAISED (so the before/after baseline is gone)
+    or a verify that RAISED (so ground truth is unreadable) means verification is IMPOSSIBLE - the call
+    returns isError with honest wording, never a possible no-op passed as ok. SOFT postconditions keep
+    the non-fatal annotation. The mutation is never rolled back - the error reports the uncertainty
+    honestly and points at the re-read instead."""
     posts = list(postconditions or [])
     if not posts:
         return handler
 
+    def _capture(p, kwargs):
+        try:
+            return p.capture(kwargs), None
+        except Exception as ex:     # a raising capture leaves no baseline - recorded, not swallowed
+            return None, ex
+
     def asserted(**kwargs):
-        before = [safe(lambda p=p: p.capture(kwargs)) for p in posts]
+        before = [_capture(p, kwargs) for p in posts]
         result = handler(**kwargs)
         if not isinstance(result, dict) or result.get("isError"):
             return result
@@ -243,15 +280,26 @@ def wrap(handler, postconditions):
         if not isinstance(payload, dict):
             return result
 
-        for p, b in zip(posts, before):
-            reason, evidence = "", {}
+        for p, (b, cap_ex) in zip(posts, before):
+            soft = (p.severity == "soft")
+            # A capture that raised makes verification impossible; a HARD one fails closed.
+            if cap_ex is not None:
+                if soft:
+                    payload.setdefault(p.name + "_confirmed", False)
+                    payload.setdefault("verify_error", ("capture failed: " + str(cap_ex))[:120])
+                    continue
+                return _verification_failed(p, cap_ex)
             try:
                 reason, evidence = p.verify(kwargs, payload, b)
             except Exception as ex:
-                reason, evidence = "", {p.name + "_confirmed": False,
-                                        "verify_error": str(ex)[:120]}
+                # A raising verify cannot read ground truth: HARD fails closed, SOFT annotates.
+                if soft:
+                    payload.setdefault(p.name + "_confirmed", False)
+                    payload.setdefault("verify_error", str(ex)[:120])
+                    continue
+                return _verification_failed(p, ex)
             if reason:
-                if p.severity == "soft":
+                if soft:
                     payload.setdefault("verified", {})[p.name] = {"confirmed": False,
                                                                   "reason": reason}
                     continue

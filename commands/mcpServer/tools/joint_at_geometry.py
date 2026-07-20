@@ -17,12 +17,13 @@ from ._common import ok, error, safe
 from . import _common
 from . import _inputs
 from . import _outputs
-from ._joints import AXES as _AXES, apply_motion, build_joint_geometry as _joint_geometry_for
+from ._joints import (AXES as _AXES, apply_motion, build_joint_geometry as _joint_geometry_for,
+                      is_joint_origin as _is_joint_origin)
 
 app = adsk.core.Application.get()
 
 # What this tool RETURNS: the joint name (a consumer key) + the AUTHORITATIVE health verdict (read from
-# the joint's own state - no separate assembly_probe needed to know if it computed).
+# the joint's own state - no separate assembly_get needed to know if it computed).
 RETURNS = [
     _outputs.ReturnsName("joint_name", of="joint", consumers=["joint_edit", "joint_motion_link"]),
     _outputs.ReturnsValue("healthy", "whether the joint actually COMPUTES (added != working)"),
@@ -37,10 +38,50 @@ _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
 # path, not hand-rolled here.
 _HANDLE_ONE = _inputs.GeometryHandle(
     "handle_one", require="any", required=True,
-    description="The FIRST (moving) part's geometry to joint at.")
+    description="The FIRST part's geometry to joint at (whichever part is FREE moves).")
 _HANDLE_TWO = _inputs.GeometryHandle(
     "handle_two", require="any", required=True,
-    description="The SECOND (fixed) part's geometry to joint at.")
+    description="The SECOND part's geometry to joint at.")
+
+
+def _joint_input_for(entity):
+    """A joint input from a resolved handle: a JOINT ORIGIN (assembly_get(include=['joint_origins'])
+    mints those handles) is used DIRECTLY - it IS a joint input; any other entity (face/edge/vertex/
+    point) becomes a JointGeometry AT that geometry. Returns (input, label, error)."""
+    if _is_joint_origin(entity):
+        return entity, "joint_origin", None
+    return _joint_geometry_for(entity)
+
+
+def _occ_origin(occ):
+    """The moving occurrence's origin as (x,y,z) cm, from its transform. Parent-relative, which for a
+    root-level part is world; the DISTANCE it moves is frame-invariant either way. None if unreadable."""
+    m = safe(lambda: occ.transform)
+    t = safe(lambda: m.translation) if m is not None else None
+    if t is None:
+        return None
+    return (safe(lambda: t.x, 0.0) or 0.0, safe(lambda: t.y, 0.0) or 0.0, safe(lambda: t.z, 0.0) or 0.0)
+
+
+# Above this the reposition is reported as moved_by. 0.005 cm = 0.05 mm - below it the move is joint
+# solver noise, not a teleport worth flagging.
+_MOVE_TOL_CM = 0.005
+
+
+def _move_delta(before, after):
+    """{distance_mm, direction} if the moving occurrence shifted more than _MOVE_TOL_CM, else None.
+    joint_at aligns the two picked KEYPOINTS (a planar face's CENTROID, an edge's MIDPOINT), so pairing
+    a small feature with a large one repositions the moving part by the keypoint gap - real joint
+    behavior, but it must not be silent (a 10mm face on a 60mm face moved a part ~75mm, live)."""
+    if before is None or after is None:
+        return None
+    dx, dy, dz = after[0] - before[0], after[1] - before[1], after[2] - before[2]
+    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+    if dist <= _MOVE_TOL_CM:
+        return None
+    inv = 1.0 / dist
+    return {"distance_mm": round(dist * 10.0, 3),
+            "direction": [round(dx * inv, 4), round(dy * inv, 4), round(dz * inv, 4)]}
 
 
 def _axis_entity(entity):
@@ -91,10 +132,10 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     if err2:
         return error(err2)
 
-    g1, l1, err1 = _joint_geometry_for(e1)
+    g1, l1, err1 = _joint_input_for(e1)
     if err1:
         return error(f"handle_one: {err1}")
-    g2, l2, err2 = _joint_geometry_for(e2)
+    g2, l2, err2 = _joint_input_for(e2)
     if err2:
         return error(f"handle_two: {err2}")
 
@@ -114,6 +155,13 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
         return error(f"Could not set {mot} motion: {merr or 'rejected'}. "
     "(For a world axis pass axis=x/y/z; 'auto' needs a cylinder face / round edge "
     "to derive the axis from.)")
+
+    # capture BOTH occurrences' origins BEFORE add() - the joint repositions parts to align the picked
+    # keypoints, and that move must be reported, not silent (see _move_delta). Either side can be the
+    # one that moves (grounding / an existing joint on one part decides), so watch both.
+    occ_one = safe(lambda: e1.assemblyContext)
+    occ_two = safe(lambda: e2.assemblyContext)
+    before_one, before_two = _occ_origin(occ_one), _occ_origin(occ_two)
 
     try:
         joint = root.joints.add(ji)
@@ -145,23 +193,38 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "occurrence_one": o1,
     "occurrence_two": o2,
     "note": "Joint created AT the geometry. axis='auto' derived the motion axis from the "
-    "geometry itself. Verify with assembly_probe (is_healthy + positions).",
+    "geometry itself. Verify with assembly_get (is_healthy + positions).",
     }
     if not healthy:
         msg = (safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
                                  + (msg[:200] or "conflicts with assembly relationships"))
+
+    # Report how far a part was repositioned to align the keypoints. The move is legitimate joint
+    # behavior (keypoints align at a face CENTROID / edge MIDPOINT) - flagging it just ends the silence
+    # that let a mismatched-size pair teleport a part unnoticed. Whichever occurrence moved more wins.
+    candidates = [(o1, _move_delta(before_one, _occ_origin(occ_one))),
+                  (o2, _move_delta(before_two, _occ_origin(occ_two)))]
+    moved_name, moved = max(((n, m) for n, m in candidates if m),
+                            key=lambda nm: nm[1]["distance_mm"], default=(None, None))
+    if moved:
+        out["moved_by"] = moved
+        out["move_warning"] = (
+            f"'{moved_name}' moved {moved['distance_mm']} mm to align the picked keypoints (a planar "
+            "face aligns at its CENTROID, an edge at its MIDPOINT) - so pairing differently sized "
+            "features repositions the part. Expected joint behavior; restore an intended offset with "
+            "joint_edit(offset) if this was not wanted.")
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
                                  "Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part "
                                  "origins like an ':origin' snap. handle_one/handle_two are find_geometry handles (not "
-                                 "names/snap-strings; re-find if stale after a model edit). ORDER MATTERS: the tool MOVES "
-                                 "handle_one's occurrence so its picked feature COINCIDES with handle_two's (edges align at "
-                                 "midpoints) - a deliberately placed part gets REPOSITIONED by the joint; restore a wanted "
-                                 "offset afterward with joint_edit(offset). handle_one must be the FREE part and handle_two the "
-                                 "fixed one (a grounded handle_one fails). motion: revolute/slider/cylindrical/ball/rigid. axis: "
+                                 "names/snap-strings; re-find if stale after a model edit). The joint ALIGNS the picked "
+                                 "keypoints (face CENTROID, edge MIDPOINT) and MOVES whichever occurrence is FREE "
+                                 "(grounding wins; 'moved_by' names the actual mover). A placed part gets REPOSITIONED "
+                                 "(restore offsets with joint_edit). motion: "
+                                 "revolute/slider/cylindrical/ball/rigid. axis: "
                                  "'auto' (from the geometry) unless forcing a world x/y/z. If it can't solve in the current pose "
                                  "the joint is still added with healthy=false - the returned 'healthy' flag is authoritative.\n"
                                  + _outputs.produces_block(RETURNS)
@@ -174,7 +237,7 @@ joint_at_tool = (
     .add_input_property(*_inputs.joint_motion(
         "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
         default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
-    .add_input_property("axis", {"type": "string", "description": "auto (default - derive axis from the geometry, e.g. a cylinder face's axis) | x | y | z (force a world axis). WARNING: forcing an axis ROTATES the moving occurrence (handle_one) to align with it - it can swing a positioned part out of place. Prefer auto; correct position separately if needed."})
+    .add_input_property("axis", {"type": "string", "description": "auto (default - derive axis from the geometry, e.g. a cylinder face's axis) | x | y | z (force a world axis). WARNING: forcing an axis ROTATES the free occurrence to align - it can swing a positioned part out of place. Prefer auto."})
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()
 )

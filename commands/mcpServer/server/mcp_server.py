@@ -90,6 +90,37 @@ _SCHEMA_OMITTED_ARGS = {
 }
 
 
+def _in_set(value: Any, allowed: frozenset) -> bool:
+    """value in allowed, but an unhashable value (a list/dict where a string enum is expected) is
+    simply not a member rather than a TypeError."""
+    try:
+        return value in allowed
+    except TypeError:
+        return False
+
+
+def _enum_specs(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Precompute the enum-constrained properties of one tool's input schema, so the per-call check is
+    a dict lookup + set membership (never a re-walk). Returns {prop_name: {"values": [...], "set":
+    frozenset, "array": bool}}. A property carries an enum either directly ({type:string, enum:[...]})
+    or as array items ({type:array, items:{enum:[...]}}) - the latter validates each element."""
+    specs: Dict[str, Dict[str, Any]] = {}
+    props = (schema or {}).get("properties") or {}
+    for pname, pschema in props.items():
+        if not isinstance(pschema, dict):
+            continue
+        enum = pschema.get("enum")
+        if isinstance(enum, list) and enum:
+            specs[pname] = {"values": list(enum), "set": frozenset(enum), "array": False}
+            continue
+        if pschema.get("type") == "array":
+            items = pschema.get("items")
+            if isinstance(items, dict) and isinstance(items.get("enum"), list) and items["enum"]:
+                specs[pname] = {"values": list(items["enum"]),
+                                "set": frozenset(items["enum"]), "array": True}
+    return specs
+
+
 class SimpleMCPServer:
     """Routes MCP JSON-RPC requests to registered tool handlers."""
 
@@ -99,6 +130,8 @@ class SimpleMCPServer:
         # response. Generated lazily so each server instance has a stable id.
         self.session_id = uuid.uuid4().hex
         self.tools: Dict[str, Item] = {}
+        # tool name -> {prop: enum spec}, precomputed at registration so enum validation is O(1) per arg.
+        self._enum_specs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.server_info = {"name": name, "version": __version__}
 
     def register(self, item: Item):
@@ -108,9 +141,22 @@ class SimpleMCPServer:
         if item_type != "tool":
             raise ValueError(f"Only Tool items can be registered, got type: {item_type}")
         self.tools[item.primitive.name] = item
+        self._enum_specs[item.primitive.name] = _enum_specs(item.primitive.input_schema)
         futil.log(f"MCP tool registered: {item.primitive.name}")
 
     async def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        # A JSON-RPC request MUST be a single object. A LIST body is a batch (this server does not
+        # implement batching); any other non-object body is malformed. Either way return ONE
+        # well-formed error object (id:null) instead of raising - the .get() calls below assume a
+        # dict, and a raw raise here would surface as an opaque HTTP 500 (a list raised twice: once
+        # here, again in the except handler's request.get).
+        if not isinstance(request, dict):
+            if isinstance(request, list):
+                message = ("This server does not support JSON-RPC batching (an array of requests). "
+                           "Send one request object per HTTP POST.")
+            else:
+                message = "Invalid Request: expected a single JSON-RPC request object."
+            return self._error(None, -32600, message)
         try:
             method = request.get("method")
             request_id = request.get("id")
@@ -133,7 +179,10 @@ class SimpleMCPServer:
             else:
                 return self._error(request_id, -32601, f"Method not found: {method}")
         except Exception as e:
-            return self._error(request.get("id"), -32603, str(e))
+            # Defensive: only a dict body has an id to echo (the entry guard above already rejects a
+            # non-dict, but never call .get on something that might not be a dict).
+            request_id = request.get("id") if isinstance(request, dict) else None
+            return self._error(request_id, -32603, str(e))
 
     def _handle_initialize(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
         # Honor the client's requested protocol version only if we actually implement it;
@@ -207,13 +256,15 @@ class SimpleMCPServer:
                                  arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Check `arguments` against item.primitive.input_schema before dispatch.
 
-        Only argument NAMES are checked (the typed input kinds validate values). Unknown keys
-        are rejected ONLY when the tool's wire schema declares additionalProperties=false - a
-        lenient schema stays lenient, so the schema never promises what the server then refuses.
-        Keys a handler deliberately accepts off-schema pass through (_SCHEMA_OMITTED_ARGS).
-        Failures come back as isError TOOL results rather than JSON-RPC protocol errors - a
-        deliberate deviation from the spec's invalid-params bucket: an in-band result is what a
-        calling agent can actually read and self-correct from.
+        Argument NAMES are checked here, and any argument whose schema property declares an `enum`
+        is checked against it: a permissive client that sends an out-of-enum value (e.g.
+        find_geometry kind="faces") would otherwise get silent wrong behavior (match_count:0) instead
+        of a correction. Unknown keys are rejected ONLY when the tool's wire schema declares
+        additionalProperties=false - a lenient schema stays lenient, so the schema never promises what
+        the server then refuses. Keys a handler deliberately accepts off-schema pass through
+        (_SCHEMA_OMITTED_ARGS). Failures come back as isError TOOL results rather than JSON-RPC
+        protocol errors - a deliberate deviation from the spec's invalid-params bucket: an in-band
+        result is what a calling agent can actually read and self-correct from.
         """
         schema = item.primitive.input_schema or {}
         properties = schema.get("properties") or {}
@@ -237,6 +288,34 @@ class SimpleMCPServer:
                     f"Missing required argument for tool '{tool_name}': '{name}'. "
                     f"Required: {required}.")
 
+        enum_error = self._validate_enums(tool_name, arguments)
+        if enum_error is not None:
+            return enum_error
+
+        return None
+
+    def _validate_enums(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Reject an out-of-enum argument value against the precomputed enum sets. A scalar enum prop
+        must equal one of its values; an array-of-enum prop must have every element in the set. The
+        error names the property, the offending value, and the valid values so the agent can correct."""
+        for pname, spec in self._enum_specs.get(tool_name, {}).items():
+            if pname not in arguments:
+                continue
+            value = arguments[pname]
+            if value is None:
+                continue                          # absent/unset - the handler's default applies
+            if spec["array"]:
+                if not isinstance(value, list):
+                    continue                      # a non-list for an array prop is a shape error, not ours
+                bad = [v for v in value if not _in_set(v, spec["set"])]
+                if bad:
+                    return self._tool_error_result(
+                        f"Invalid value(s) for '{pname}' in tool '{tool_name}': "
+                        f"{', '.join(repr(v) for v in bad)}. Valid values: {spec['values']}.")
+            elif not _in_set(value, spec["set"]):
+                return self._tool_error_result(
+                    f"Invalid value for '{pname}' in tool '{tool_name}': {value!r}. "
+                    f"Valid values: {spec['values']}.")
         return None
 
     async def _execute_on_main_thread(self, handler_func, arguments: Dict[str, Any],
@@ -249,19 +328,19 @@ class SimpleMCPServer:
         """
         import time
 
-        result_container = {'result': None, 'exception': None, 'completed': False}
+        result_holder = {'result': None, 'exception': None, 'completed': False}
         result_lock = threading.Lock()
 
         def callback(data):
             try:
                 result = handler_func(**data['arguments'])
                 with result_lock:
-                    result_container['result'] = result
-                    result_container['completed'] = True
+                    result_holder['result'] = result
+                    result_holder['completed'] = True
             except Exception as e:
                 with result_lock:
-                    result_container['exception'] = e
-                    result_container['completed'] = True
+                    result_holder['exception'] = e
+                    result_holder['completed'] = True
 
         if not TaskManager.is_running():
             TaskManager.start()
@@ -274,10 +353,10 @@ class SimpleMCPServer:
         start_time = time.time()
         while enforce_timeout is False or (time.time() - start_time < timeout):
             with result_lock:
-                if result_container['completed']:
-                    if result_container['exception'] is not None:
-                        raise result_container['exception']
-                    return result_container['result']
+                if result_holder['completed']:
+                    if result_holder['exception'] is not None:
+                        raise result_holder['exception']
+                    return result_holder['result']
             await asyncio.sleep(0.01)
 
         # Timed out. Try to cancel the still-pending task so it never runs after we've given up.
@@ -288,11 +367,11 @@ class SimpleMCPServer:
         # not lie that it was "cancelled before running" - that invites a blind retry -> double-apply.
         cancelled = TaskManager.cancel(task_id)
         with result_lock:
-            if result_container['completed']:
+            if result_holder['completed']:
                 # Finished in the cancel window - honor the real result, don't fake a timeout.
-                if result_container['exception'] is not None:
-                    raise result_container['exception']
-                return result_container['result']
+                if result_holder['exception'] is not None:
+                    raise result_holder['exception']
+                return result_holder['result']
         if cancelled:
             raise Exception(
                 f"Handler execution timed out ({timeout}s); the operation was cancelled before it "

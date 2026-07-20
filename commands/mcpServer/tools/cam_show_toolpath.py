@@ -92,12 +92,7 @@ def _fit_operation():
 
 
 def handler(action: str = "", operation: str = "", folder: str = "", fit: bool = False) -> dict:
-    """Show/hide CAM toolpaths so you can study one operation's path at a time.
-
-    action: show | hide | isolate | show_folder | hide_all | list. operation: op name (show/hide/
-    isolate). folder: folder or setup name (show_folder). fit: fit the camera after showing
-    (show/isolate). Toolpaths render only in the Manufacture workspace. Pair with view_screenshot.
-    """
+    """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")

@@ -31,7 +31,7 @@ _B = _inputs.TargetRef("b", required=True, allow=("body", "face", "occurrence", 
 
 
 def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm") -> dict:
-    """Measure the distance or angle between two targets (read-only)."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")

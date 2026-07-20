@@ -18,22 +18,22 @@ from ._cam_common import get_cam
 app = adsk.core.Application.get()
 
 
-def _walk_container(container, out):
+def _walk_parent(parent, out):
     """Recursively collect (name, object) for a setup/folder/pattern's operations, folders, and patterns.
     NB: `allOperations` returns ONLY operations - NOT folders/patterns (verified live) - so folders and
     patterns must be walked explicitly via .folders / .patterns, recursing because they nest."""
-    ops = safe(lambda: container.operations)
+    ops = safe(lambda: parent.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
         o = safe(lambda i=i: ops.item(i))
         if o is not None:
             out.append((safe(lambda o=o: o.name), o))
-    for coll_getter in (lambda: container.folders, lambda: container.patterns):
+    for coll_getter in (lambda: parent.folders, lambda: parent.patterns):
         coll = safe(coll_getter)
         for i in range(safe(lambda: coll.count, 0) or 0):
             c = safe(lambda i=i: coll.item(i))
             if c is not None:
                 out.append((safe(lambda c=c: c.name), c))
-                _walk_container(c, out)   # folders/patterns nest
+                _walk_parent(c, out)   # folders/patterns nest
 
 
 def _all_named(cam):
@@ -45,12 +45,12 @@ def _all_named(cam):
         if s is None:
             continue
         out.append((safe(lambda s=s: s.name), s))
-        _walk_container(s, out)
+        _walk_parent(s, out)
     return out
 
 
 def handler(entity: str = "") -> dict:
-    """Delete a CAM entity (setup / operation / folder / pattern) by name."""
+    """See TOOL_DESCRIPTION."""
     want = (entity or "").strip()
     if not want:
         return error("Provide 'entity' - the CAM item name to delete (see cam_get / "

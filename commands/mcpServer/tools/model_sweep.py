@@ -167,7 +167,7 @@ def _build_path(comp, path_raw):
 
 def handler(profile=None, path=None, operation: str = "new", orientation: str = "perpendicular",
             as_surface: bool = False, target_bodies=None) -> dict:
-    """Sweep a sketch profile along a path into a solid (or, for an open profile, a surface)."""
+    """See TOOL_DESCRIPTION."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _common.OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")

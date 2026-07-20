@@ -399,7 +399,7 @@ def _rel_touching(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):
     if passed and d_cm <= 1e-6:
         # measureMinimumDistance reports 0 for touching AND for interpenetration - do not claim a
         # clean touch when it could be an overlap. Point at the tool that actually measures overlap.
-        note += (" NOTE: a 0 distance means the parts touch OR overlap - use assembly_interference to "
+        note += (" NOTE: a 0 distance means the parts touch OR overlap - use assembly_inspect_interference to "
                  "confirm there is no interpenetration.")
     return ok({
         "relation": "touching",
@@ -425,7 +425,7 @@ _DISPATCH = {
 
 def handler(entity_a: str = "", entity_b: str = "", relation: str = "",
             tolerance=None, tolerance_deg=None, units: str = "mm") -> dict:
-    """Assert a named geometric relation between two entities, returning pass/fail + evidence. Read-only."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")

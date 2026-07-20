@@ -14,7 +14,7 @@ The runner EXECUTES and RECORDS; it never grades. Grading stays with the orchest
 re-issues each postcondition read itself (evals/README.md) - the executor's self-report is
 evidence, not verdict.
 
-Run:  py -3 tests/live/evals/run_eval.py scenarios/T1_Sketch-Eval.md --model sonnet
+Run:  py -3 tests/live/evals/run_eval.py scenarios/S1_Foundation.md --model sonnet
       (requires Fusion running + the add-in's MCP server on 127.0.0.1:27182, and the scenario's
       fixture already staged by the orchestrator)
 
@@ -30,6 +30,14 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
+
+# Executor reports are agent prose and legitimately non-ASCII (run 02's contained a pi); the
+# Windows console default (cp1252) cannot encode that, and a crashed final print looks like a
+# failed RUN when the run dir is actually complete. Print lossy rather than die.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _RESULTS = os.path.join(_HERE, "results")
@@ -40,17 +48,53 @@ ALLOWED = "mcp__fusion-essentials__*"
 # transcript shows MCP calls only.
 SOURCE_ACCESS = {"Bash", "PowerShell", "Read", "Grep", "Glob", "Edit", "Write", "NotebookEdit",
                  "WebFetch", "WebSearch", "Task", "Agent"}
-DISALLOWED = ",".join(sorted(SOURCE_ACCESS | {"TodoWrite", "ToolSearch"}))
+# Irreversible cloud deletes: the scratch config does not inherit the repo's local permission
+# posture, and ALLOWED would otherwise auto-approve them for a blind executor. No scenario
+# legitimately deletes cloud data; hygiene is the orchestrator's job, not the executor's.
+CLOUD_DELETES = {"mcp__fusion-essentials__data_delete_file",
+                 "mcp__fusion-essentials__data_delete_folder"}
+# Interactive UI prompts: an eval executor is headless and blind, so a selection prompt can only
+# time out - or hijack the owner's live Fusion session. A human in the loop belongs to skills a
+# human invoked, never to an eval; a step that seems to need a user pick is a scenario defect.
+INTERACTIVE_PROMPTS = {"mcp__fusion-essentials__sys_request_selection"}
+# The arbitrary-script hatch: when the owner's settings checkbox has it enabled, it would let a
+# blind executor bypass every denial above AND paper over typed-wire capability gaps (run 01 used
+# it to nest a component - masking a real model_create_component gap). The eval exists to prove
+# the TYPED wire suffices; a needed step with no typed path must surface as a WALL.
+SCRIPT_HATCH = {"mcp__fusion-essentials__sys_execute_script"}
+DISALLOWED = ",".join(sorted(
+    SOURCE_ACCESS | {"TodoWrite", "ToolSearch"} | CLOUD_DELETES | INTERACTIVE_PROMPTS
+    | SCRIPT_HATCH))
 
 
-def extract_prompt(scenario_path):
-    """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical."""
+def extract_prompt(scenario_path, run_tag):
+    """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical except the one
+    sanctioned token: {{RUN_FOLDER}} becomes this invocation's run tag, so every eval run saves
+    its cloud artifacts into its OWN fresh subfolder (owner rule - same-name collisions with
+    prior chains' artifacts are structurally impossible). prompt.txt records the substituted
+    bytes actually sent."""
     text = open(scenario_path, encoding="utf-8").read()
     m = re.search(r"^## AGENT PROMPT \(verbatim\)\s*\n+```\n(.*?)\n```", text,
                   re.S | re.M)
     if not m:
         sys.exit(f"{scenario_path}: no '## AGENT PROMPT (verbatim)' fenced block found")
-    return m.group(1)
+    return m.group(1).replace("{{RUN_FOLDER}}", run_tag)
+
+
+def preflight_server():
+    """The MCP server must answer BEFORE the executor spawns: a dead or momentarily busy server
+    yields an executor with an EMPTY tool set that can only report BLOCKED (observed live twice,
+    2026-07-14/15 - 0 MCP calls, 1 turn). Cheap gate, clear message."""
+    health = MCP_URL.rsplit("/", 1)[0] + "/health"
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(health, timeout=5) as resp:
+                if resp.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    sys.exit(f"MCP server not reachable at {health} - is Fusion running with the add-in loaded?")
 
 
 def scenario_budget(scenario_path):
@@ -126,6 +170,9 @@ def audit(transcript_path, run_dir, budget_calls):
     mcp_calls = len(calls) - len(outside)
     report = {
         "tool_calls_mcp": mcp_calls,
+        # Zero MCP calls means the executor never even oriented (every scenario opens with
+        # sys_capability_map) - the spawn-flake signature, not a scenario outcome.
+        "spawn_flake_suspected": mcp_calls == 0,
         "budget_max_tool_calls": budget_calls,
         "within_call_budget": (budget_calls is None or mcp_calls <= budget_calls),
         "harness_utility_calls": [c for c in outside if c not in SOURCE_ACCESS],
@@ -146,27 +193,54 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scenario", help="path to a scenarios/*.md file")
     ap.add_argument("--model", default="sonnet", help="executor model (default sonnet)")
-    ap.add_argument("--max-turns", type=int, default=120,
-                    help="hard runaway backstop, well above any scenario budget")
+    ap.add_argument("--max-turns", type=int, default=None,
+                    help="hard runaway backstop (default: max(120, 2x the scenario's max_tool_calls) - "
+                         "so a big-budget scenario is not severed mid-report; pass a value to override)")
     args = ap.parse_args()
 
     scenario = os.path.abspath(args.scenario)
     stem = os.path.splitext(os.path.basename(scenario))[0]
-    os.makedirs(_RESULTS, exist_ok=True)
-    n = 1
-    while os.path.exists(os.path.join(_RESULTS, f"run_{stem}_{n:02d}")):
-        n += 1
-    run_dir = os.path.join(_RESULTS, f"run_{stem}_{n:02d}")
-    os.makedirs(run_dir)
+    # Every run lands inside a DATED batch folder (owner rule) - one folder per eval day,
+    # holding the run dirs plus the orchestrator's grades/INDEX for that batch.
+    batch_dir = os.path.join(_RESULTS, "Eval-" + time.strftime("%Y-%m-%d"))
+    os.makedirs(batch_dir, exist_ok=True)
+    # Per-RUN cloud subfolder tag (owner rule): each invocation's saves land under
+    # Pipeline-v1/<run_tag> via the {{RUN_FOLDER}} token, so a run's artifacts can never
+    # name-collide with a prior chain's. Chains still hand artifacts forward BY URN.
+    run_tag = time.strftime("Eval-%Y%m%d-%H%M")
 
-    prompt = extract_prompt(scenario)
     budget_calls, _ = scenario_budget(scenario)
-    print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls")
-    transcript = launch(prompt, run_dir, args.model, args.max_turns)
-    report, final = audit(transcript, run_dir, budget_calls)
+    # --max-turns default is DERIVED from the scenario's own call budget when not passed explicitly:
+    # 120 sat below several scenario budgets (S1 154, S2a 130, S7 138) and severed a run at turn 121
+    # pre-report. 2x the budget leaves headroom for the report turns; the explicit flag still wins.
+    max_turns = args.max_turns
+    if max_turns is None:
+        max_turns = max(120, 2 * budget_calls) if budget_calls else 120
+    prompt = extract_prompt(scenario, run_tag)
+    preflight_server()
+
+    # A spawn whose executor makes ZERO MCP calls never connected to the server (observed live:
+    # honest BLOCKED at 0 calls, 1 turn). That is a harness flake, not a scenario result - retry
+    # once in a fresh run dir; both dirs stay on disk as the honest record.
+    report = final = run_dir = None
+    for attempt in (1, 2):
+        n = 1
+        while os.path.exists(os.path.join(batch_dir, f"run_{stem}_{n:02d}")):
+            n += 1
+        run_dir = os.path.join(batch_dir, f"run_{stem}_{n:02d}")
+        os.makedirs(run_dir)
+        print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls"
+              f"  max_turns: {max_turns}  cloud folder tag: {run_tag}")
+        transcript = launch(prompt, run_dir, args.model, max_turns)
+        report, final = audit(transcript, run_dir, budget_calls)
+        if not report["spawn_flake_suspected"] or attempt == 2:
+            break
+        print("SPAWN FLAKE suspected (0 MCP calls) - retrying once in a fresh run dir...")
+        time.sleep(5)
+        preflight_server()
     print(json.dumps({k: report[k] for k in
-                      ("tool_calls_mcp", "within_call_budget", "blind", "source_access_calls",
-                       "harness_utility_calls", "num_turns")}, indent=1))
+                      ("tool_calls_mcp", "spawn_flake_suspected", "within_call_budget", "blind",
+                       "source_access_calls", "harness_utility_calls", "num_turns")}, indent=1))
     print("\n== executor's final report ==\n" + final)
     return 0
 

@@ -95,7 +95,7 @@ class ReturnsValue(OutputKind):
 class ReturnsVerdict(OutputKind):
     """The ASSERTION-READ contract: a named check that returns a boolean verdict WITH the evidence
     that justifies it - never a bare boolean. One shape across every assertion read
-    (model_measure_relation, assembly_interference): 'relation' names the check, 'passed' is the
+    (model_measure_relation, assembly_inspect_interference): 'relation' names the check, 'passed' is the
     verdict, 'measured' holds the observed numbers, 'tolerance_used' what it was judged against.
     assert_present enforces ALL FOUR keys, that 'passed' is a real bool, and - when the declaring
     tool names its relations - that 'relation' is one of them."""

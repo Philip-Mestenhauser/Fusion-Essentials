@@ -65,14 +65,7 @@ def _strategy_names(setup):
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             tool_index: int = -1, tool_scope: str = "", generate: bool = True) -> dict:
-    """Create a CAM milling operation in a setup.
-
-    setup: the setup name (from cam_get). strategy: e.g. face / adaptive / pocket2d / drill /
-    bore / contour2d (validated against the setup's compatible strategies). The TOOL is either
-    tool_scope='document' + tool_index (this doc's library - what cam_edit_tools scope='document'
-    writes; no URL needed), OR tool_library_url + tool_index (a shared library). generate: generate the
-    toolpath after creating (default True). WRITES.
-    """
+    """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if not cam:
         return error(cerr)

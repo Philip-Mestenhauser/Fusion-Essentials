@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 139  |  **Input-kinds:** 16  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 139  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -18,13 +18,14 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `EdgeLoopRef` | A boundary defined by edge handles from find_geometry. |
 | `GeometryHandle` | A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken). |
 | `GeometryHandleList` | A LIST of geometry handles (e.g. the specific edges to fillet, the bodies to mirror). Accepts a |
+| `JointOriginRef` | A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the |
 | `OccurrenceRef` | A reference to an assembly OCCURRENCE (a component instance), by its `fullPathName` (unambiguous, |
 | `OccurrenceRefList` | A list of occurrence references (JSON list or comma-separated), each resolved via OccurrenceRef's |
 | `PlaneRef` | A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply: |
 | `ProfileRef` | A reference to a sketch PROFILE - a stable 'handle' (entityToken, order-stable across rebuilds) |
 | `ProfileRefList` | An ORDERED list of profile references - for loft, where profile ORDER is load-bearing (the loft |
 | `TargetRef` | A reference to a THING to measure/colour, resolved from any of several shapes: |
-| `TargetRefList` | A LIST of machinable targets - each a BODY (handle/name) or a container OCCURRENCE (name/ |
+| `TargetRefList` | A LIST of targets - each a BODY (handle/name) or a component OCCURRENCE (name/fullPathName), |
 | `UnitField` | The 'units' selector. resolve() returns the cm-per-unit scale factor. |
 
 ## Tools by family
@@ -41,7 +42,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_construction` | Add construction geometry (reference datums) in the active component |
 | ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (... |
 | ✎ | `model_draft` | Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part needs so it releases from its tooling |
-| ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid - the back half of modelling, paired with sketch_create / sketch_add_geometry |
+| ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid (via sketch_create / sketch_add_geometry) |
 | ✎ | `model_fillet` | Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs |
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
 | · | `model_inspect` | Measure a target - size, mass, or mesh stats - in one read |
@@ -51,7 +52,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_mirror` | Mirror solid BODIES across a plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
 | ✎ | `model_pattern_circular` | Pattern component OCCURRENCES evenly around an axis |
 | ✎ | `model_pattern_rectangular` | Pattern component OCCURRENCES in a rectangular grid |
-| ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part: shaft, piston, pulley, bottle) |
+| ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part) |
 | ✎ | `model_set_material` | Assign a PHYSICAL material (density-bearing) to a body, occurrence, component (all its bodies), or the whole design (empty target), so model_inspect's mass/dens... |
 | ✎ | `model_shell` | Hollow a solid body into a thin-walled shell (Fusion's Shell feature) |
 | ✎ | `model_split` | Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / SplitFace feature |
@@ -132,10 +133,10 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `assembly_capture_position` | Capture / revert / report the assembly's flexible POSITION in the timeline |
 | ✎ | `assembly_constrain` | Constrain component occurrences' geometry - Constrain Components (flush / coincident / concentric / at an angle, INFERRED from the geometry) |
+| · | `assembly_get` | Read the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to interpreting a cluttered screenshot |
 | ✎ | `assembly_ground` | Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag |
-| · | `assembly_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^... |
-| ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint/relationship created (use joint_create/assembly_constrain for a maintained relatio... |
-| · | `assembly_probe` | Probe the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to interpreting a cluttered screenshot |
+| · | `assembly_inspect_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^... |
+| ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint created (use joint_create/assembly_constrain for a maintained relationship) |
 | ✎ | `assembly_rigid_group` | Lock two or more component occurrences together as a single rigid unit (Rigid Group) |
 
 ### joint
@@ -215,11 +216,11 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | | Tool | Summary |
 |---|---|---|
-| ✎ | `view_inspect` | View-state verbs to inspect the model from different angles, then restore - no geometry changes |
 | · | `view_list_workspaces` | List the Fusion workspaces the user can switch to (e.g |
 | · | `view_screenshot` | Capture a screenshot of the current Fusion viewport and return it as an image so you can visually inspect the model and verify your work |
 | · | `view_screenshot_multi` | Capture SEVERAL views of the model in ONE call - front/top/right/iso etc |
 | ✎ | `view_section` | Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall thickness, how a part nests in a fixture, where a void sits - that a so... |
+| ✎ | `view_set` | View-state verbs to inspect the model from different angles, then restore - no geometry changes |
 | ✎ | `view_switch_workspace` | Switch the active Fusion workspace |
 
 ### find
@@ -256,5 +257,5 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings |
 | · | `sys_get_selection` | Read the user's CURRENT selection in Fusion and describe each selected entity so you can intuit what they meant |
 | ✎ | `sys_reload_addin` | Reload the Fusion-Essentials add-in to pick up code changes (developer tool) |
-| ✎ | `sys_request_selection` | Hand control to the USER to pick an entity in Fusion |
+| ✎ | `sys_request_selection` | Hand control to the USER to pick an entity in Fusion, then HOLD the call until they do or it times out - no poll loop needed |
 

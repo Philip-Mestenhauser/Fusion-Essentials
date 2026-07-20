@@ -359,6 +359,33 @@ class TestSurfaceTrim:
         out = _payload(se.trim_handler(surface="S", trim_tool="T", keep="garbage"))
         assert out["cells_kept"] == [1]                   # fell back to largest
 
+    def test_phantom_cell_kept_area_exceeds_input_aborts(self):
+        # A coincident/overlapping surface injects a cell LARGER than the target's own area (the compute
+        # spans every visible surface the tool crosses). 'keep larger' would latch onto it: kept_area >
+        # surf.area is impossible for a real subset of the target -> abort BEFORE add(), cancel the txn.
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 16.0
+        tf = FakeTrimFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
+                              cell_areas=(4.0, 20.0, 6.0))   # largest cell (20) exceeds the 16 input
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        res = se.trim_handler(surface="S", trim_tool="T")
+        assert res["isError"] is True
+        assert "larger than" in res["message"] and "HIDE" in res["message"]
+        assert tf.last_input.cancelled is True          # transaction aborted, no feature landed
+
+    def test_kept_area_within_input_still_trims(self):
+        # The same scene without the phantom: the kept cell is smaller than the input -> a normal trim.
+        surf = FakeBRepBody("Surf1", is_solid=False)
+        surf.area = 16.0
+        rb = FakeBody("Surf1", is_solid=False)
+        rb.area = 12.0
+        tf = FakeTrimFeatures(result_bodies=[rb], cell_areas=(4.0, 12.0, 6.0))
+        comp = FakeComp(FakeFeatures(trim=tf))
+        _wire(comp, handle_map={"S": surf, "T": FakeFace()})
+        out = _payload(se.trim_handler(surface="S", trim_tool="T"))
+        assert out["trimmed"] is True and out["kept_area"] == 12.0
+
     def test_no_cells_cancels_and_reports_no_intersection(self):
         surf = FakeBRepBody("Surf1", is_solid=False)
         tf = FakeTrimFeatures(cell_areas=())              # createInput divided nothing

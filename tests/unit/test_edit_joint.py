@@ -141,6 +141,7 @@ class _FakeTLItem:
 class _FakeTimeline:
     def __init__(self, items):
         self._i = list(items)
+        self.markerPosition = 1   # somewhere mid-history to start; the edit must restore it to count
     @property
     def count(self):
         return len(self._i)
@@ -152,14 +153,15 @@ class FakeDesign:
     def __init__(self, joints, timeline_items=None):
         self.rootComponent = FakeRoot(joints)
         self.computeAll_called = False
-        self._timeline_items = timeline_items or [_FakeTLItem("Joint1", 0)]
+        # ONE stable timeline instance so the handler's markerPosition restore is observable.
+        self._timeline = _FakeTimeline(timeline_items or [_FakeTLItem("Joint1", 0), _FakeTLItem("Pattern1", 0)])
 
     def computeAll(self):
         self.computeAll_called = True
 
     @property
     def timeline(self):
-        return _FakeTimeline(self._timeline_items)
+        return self._timeline
 
 
 def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
@@ -199,12 +201,14 @@ class TestFindAndGuards:
 # ── rollTo orchestration ─────────────────────────────────────────────────────
 
 class TestRollTo:
-    def test_rolls_before_then_after(self):
-        _, joint = _install(["BoomPivot"])
+    def test_rolls_before_then_restores_marker_to_end(self):
+        design, joint = _install(["BoomPivot"])
         _payload(jt.edit_handler(joint_name="BoomPivot", flip=True))
-        # first rollTo(True) before editing, then rollTo(False) to restore
+        # rolls the marker BEFORE the joint to edit its geometry...
         assert joint.timelineObject.rolls[0] is True
-        assert joint.timelineObject.rolls[-1] is False
+        # ...then restores the marker to the TIMELINE END (markerPosition = count), NOT rollTo(False)
+        # which stops just past the joint and leaves downstream features (Pattern1) rolled out.
+        assert design.timeline.markerPosition == design.timeline.count
 
 
 # ── flip ─────────────────────────────────────────────────────────────────────
@@ -375,11 +379,15 @@ class TestReselectInputs:
         # they are assigned to geometryOrOriginOne/Two.
         design, joint = _install(["BoomPivot"])
 
-        # add named joint origins the resolver can find
+        # add named joint origins the resolver can find - the JO-name path (JointOriginRef) walks the
+        # collection by count/item, so the fake must expose those (not just itemByName).
         class _JO:
             def __init__(self, name): self.name = name
         class _JOs:
             def __init__(self, items): self._i = items
+            @property
+            def count(self): return len(self._i)
+            def item(self, i): return self._i[i]
             def itemByName(self, n):
                 for j in self._i:
                     if j.name == n:

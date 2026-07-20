@@ -376,7 +376,7 @@ ROWS = [
     {
         "id": "enum-joint-types",
         "claim": "JointTypes ints: Rigid=0 Revolute=1 Slider=2 Cylindrical=3 PinSlot=4 Planar=5 Ball=6 (Inferred=7 also exists)",
-        "encoded_in": "tests/unit/test_assembly_probe.py joint-type labels",
+        "encoded_in": "tests/unit/test_assembly_get.py joint-type labels",
         "body": """
     J = adsk.fusion.JointTypes
     dump_enum("fusion.JointTypes", J)
@@ -385,6 +385,21 @@ ROWS = [
          and J.PlanarJointType == 5 and J.BallJointType == 6,
          "enum-joint-types: rigid=" + str(J.RigidJointType) + " ... ball=" + str(J.BallJointType)
          + " inferred=" + str(J.InferredJointType))
+""",
+    },
+    {
+        "id": "enum-joint-motion-types",
+        "claim": "JointMotionTypes (the per-DOF motion enum setMotionData wants, DISTINCT from JointTypes) ints: RevoluteJointRotateMotionType=10, SliderJointSlideMotionType=11, CylindricalJointRotateMotionType=3, CylindricalJointSlideMotionType=4 - jointMotion.jointType returns a JointTypes value (Revolute==1), which setMotionData REJECTS as BAD_JOINT_DOF",
+        "encoded_in": "tests/unit/test_joint_motion_link.py; _joints.py motion_link_dof map; joint_motion_link.py",
+        "body": """
+    M = adsk.fusion.JointMotionTypes
+    dump_enum("fusion.JointMotionTypes", M)
+    emit(M.RevoluteJointRotateMotionType == 10 and M.SliderJointSlideMotionType == 11
+         and M.CylindricalJointRotateMotionType == 3 and M.CylindricalJointSlideMotionType == 4,
+         "enum-joint-motion-types: revolute_rotate=" + str(M.RevoluteJointRotateMotionType)
+         + " slider_slide=" + str(M.SliderJointSlideMotionType)
+         + " cyl_rotate=" + str(M.CylindricalJointRotateMotionType)
+         + " cyl_slide=" + str(M.CylindricalJointSlideMotionType))
 """,
     },
     {
@@ -404,7 +419,7 @@ ROWS = [
     {
         "id": "enum-feature-health-states",
         "claim": "FeatureHealthStates ints: Healthy=0, Warning=1, Error=2, Suppressed=3 (RolledBack=4, Unknown=5 exist and are ignored by the rollups)",
-        "encoded_in": "tests/unit/test_assembly_probe.py; _common.timeline_health; assembly_probe.py health thresholds",
+        "encoded_in": "tests/unit/test_assembly_get.py; _common.timeline_health; assembly_get.py health thresholds",
         "body": """
     H = adsk.fusion.FeatureHealthStates
     dump_enum("fusion.FeatureHealthStates", H)
@@ -477,7 +492,7 @@ ROWS = [
     {
         "id": "camera-returns-copy",
         "claim": "Viewport.camera returns a COPY - mutating it moves nothing until viewport.camera is reassigned",
-        "encoded_in": "tests/unit/test_view_inspect.py FakeViewport/FakeCamera (models a shared mutable object, the opposite, so only this row checks the real semantics)",
+        "encoded_in": "tests/unit/test_view_set.py FakeViewport/FakeCamera (models a shared mutable object, the opposite, so only this row checks the real semantics)",
         "facts_on_pass": {"behavior.viewport_camera_returns_copy": True},
         "body": """
     vp = app.activeViewport
@@ -590,17 +605,20 @@ ROWS = [
         if type(cyl.edges.item(i).geometry).__name__ == "Circle3D":
             circ_edge = cyl.edges.item(i)
     counts.append(dump_shape("Circle3D", circ_edge.geometry))
-    emit(len(counts) == 19 and all(c > 0 for c in counts),
+    counts.append(dump_shape("Cone", adsk.core.Cone.create(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+        0.5, 0.3)))
+    emit(len(counts) == 20 and all(c > 0 for c in counts),
          "shape-dump-design-world: " + str(len(counts)) + " types, min attrs " + str(min(counts)))
 """,
     },
     {
         "id": "cam-alloperations-shape",
-        "claim": "Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder container objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders",
+        "claim": "Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders",
         "encoded_in": "tests/unit/test_cam_delete.py (matches); test_cam_show_toolpath.py + test_cam_edit_folders.py (contradictory encodings); _cam_common.walk_operations",
         "needs": "cam",
         "facts_on_pass": {"behavior.alloperations_flattens_folder_children": True,
-                          "behavior.alloperations_drops_folder_containers": True},
+                          "behavior.alloperations_drops_folder_objects": True},
         "body": """
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
     setup = None
@@ -712,7 +730,7 @@ ROWS = [
     },
     {
         "id": "cam-children-tree",
-        "claim": "Setup.children interleaves top-level Operations and folder containers whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
+        "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
         "encoded_in": "tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; cam_show_toolpath._find_folder_ops type-name branch",
         "needs": "cam",
         "body": """

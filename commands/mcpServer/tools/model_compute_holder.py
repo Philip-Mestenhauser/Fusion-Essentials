@@ -37,7 +37,7 @@ _END = _inputs.GeometryHandle("end_datum", require="any", required=True,
 
 def handler(body: str = "", axis: str = "", end_datum: str = "",
             name: str = "", product_id: str = "", product_link: str = "", vendor: str = "") -> dict:
-    """Compute a CAM tool-holder profile + library JSON from three geometry handles. Read-only."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Open the holder model first (see doc_open).")

@@ -178,7 +178,7 @@ def _split_face(comp, faces, cutter, extend_tool):
 
 def handler(split: str = "body", target: str = "", faces=None, split_plane: str = "",
             split_tool_body: str = "", extend_tool: bool = True) -> dict:
-    """Split a body or its faces with a plane or another body/surface."""
+    """See TOOL_DESCRIPTION."""
     kind, kerr = _SPLIT.resolve(split)
     if kerr:
         return error(kerr)

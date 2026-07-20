@@ -15,7 +15,7 @@ Delegating means calling `_inputs._resolve_occurrence` directly, OR going throug
 `OccurrenceRef`/`OccurrenceRefList` kind (which calls it internally) - both count.
 
 Deliberately NOT flagged (justified substring matches, different shape/domain):
-  - view_inspect: MULTI-match isolate/show/hide ("hide all bolts") — returns a
+  - view_set: MULTI-match isolate/show/hide ("hide all bolts") — returns a
     LIST of every match, not one guessed instance.
   - cam_show_toolpath: matches CAM operations (not occurrences).
   - doc_lifecycle: matches documents by name (not occurrences).

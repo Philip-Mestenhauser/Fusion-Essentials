@@ -318,7 +318,7 @@ def _as_cam_template(result):
 
     The live API annotation is list[Operation] but the docstring claims a CAMTemplate - so be robust:
       - already a CAMTemplate (or casts to one) -> use it directly;
-      - a list/collection -> try its single element, else CAMTemplate.cast on the container;
+      - a list/collection -> try its single element, else CAMTemplate.cast on the collection;
       - anything else -> None (caller reports it honestly rather than crashing on .name later).
       """
     cast = safe(lambda: adsk.cam.CAMTemplate.cast(result))

@@ -34,6 +34,7 @@ _FAKE_TO_LIVE = {
     "_NamedCollection": "BRepBodies",
     "Plane": "Plane",
     "Cylinder": "Cylinder",
+    "Cone": "Cone",
     "Line3D": "Line3D",
     "Circle3D": "Circle3D",
 }

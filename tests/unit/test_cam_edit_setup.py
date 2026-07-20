@@ -36,6 +36,16 @@ class _Param:
         self.expression = expr
         # a WCS geometry param carries a CadObjectParameterValue; a plain one an expression value.
         self.value = _CadVal() if cad else _Val(expr)
+        self.warning = ""
+
+    @property
+    def error(self):
+        # Live signal: an expression referencing a missing parameter is STORED verbatim but its .error
+        # reads 'Failed to evaluate expression.' (its .value.value even comes back a finite 0.0, so only
+        # .error reveals the failure). Model that by keying off a missing-reference marker.
+        if isinstance(self.expression, str) and "NoSuch" in self.expression:
+            return "Failed to evaluate expression."
+        return ""
 
 
 class _Params:
@@ -145,7 +155,7 @@ _DEFAULT_PARAMS = {
 def _install(monkeypatch, setups=("Setup1",), require_enable=True):
     cam = _CAM([_Setup(n, dict(_DEFAULT_PARAMS), require_enable=require_enable) for n in setups])
     monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
-    ces._object_collection = _ObjColl.create
+    monkeypatch.setattr(ces, "_object_collection", _ObjColl.create)
     # the SolidStock enum member the handler reads must equal 6 (the live value) for the fake's
     # stockMode gate to accept the switch.
     monkeypatch.setattr(ces.adsk.cam.SetupStockModes, "SolidStock", 6, raising=False)
@@ -158,16 +168,17 @@ def _install(monkeypatch, setups=("Setup1",), require_enable=True):
                 return None, "no body '%s'" % n
             out.append(bodies[n])
         return out, None
-    ces._resolve_bodies = _resolve_bodies
+    monkeypatch.setattr(ces, "_resolve_bodies", _resolve_bodies)
     cam._bodies = bodies
     # machine resolver seam: a known 'vendor|model' -> a fake Machine, anything else -> a refusal.
+    # (Patched so it auto-restores - TestMachineResolver exercises the REAL _resolve_machine.)
     known = {"Haas|VF-2": _Machine("Haas VF-2")}
     def _resolve_machine(name):
         m = known.get(name)
         if not m:
             return None, None, "no machine '%s'" % name
         return m, m.description, None
-    ces._resolve_machine = _resolve_machine
+    monkeypatch.setattr(ces, "_resolve_machine", _resolve_machine)
     cam._machines = known
     # WCS handle resolver seam: a known handle string -> a fake entity; unknown -> a refusal. The
     # apply logic (mode-set + in-place bind + read-back) still runs against the fake setup params.
@@ -185,7 +196,7 @@ def _install(monkeypatch, setups=("Setup1",), require_enable=True):
                 return None, "wcs.%s: no entity '%s'" % (k, h)
             out[k] = entities[h]
         return out, None
-    ces._resolve_wcs = _resolve_wcs
+    monkeypatch.setattr(ces, "_resolve_wcs", _resolve_wcs)
     cam._wcs_entities = entities
     return cam
 
@@ -250,6 +261,40 @@ class TestParameters:
         assert sp.itemByName("wcs_orientation_mode").expression == "'axesXZ'"
 
 
+class TestParameterEvaluation:
+    """A stock/setup expression that fails to EVALUATE (a typo'd parameter reference) is stored verbatim
+    by the platform and reported as success - only .error reveals it. The tool re-reads .error post-set,
+    rolls back, and fails. A .warning is NOT an evaluation failure and never gates."""
+
+    def test_unevaluated_expression_rolls_back_and_errors(self, monkeypatch):
+        cam = _install(monkeypatch)
+        res = ces.handler(setup="Setup1", parameters={"stockZHigh": "NoSuchParamXyz * 2"})
+        assert res["isError"] is True
+        assert "did not evaluate" in res["message"] and "NoSuchParamXyz" in res["message"]
+        # NOT left storing the broken text: rolled back to the prior expression
+        assert cam.setups.item(0).parameters.itemByName("stockZHigh").expression == "0.0"
+
+    def test_rollback_is_all_or_nothing(self, monkeypatch):
+        # a VALID param set alongside a broken one is ALSO rolled back (params apply before bodies/wcs)
+        cam = _install(monkeypatch)
+        res = ces.handler(setup="Setup1", parameters={
+            "wcs_origin_boxPoint": "'top left'", "stockZHigh": "NoSuchParamXyz"})
+        assert res["isError"] is True
+        sp = cam.setups.item(0).parameters
+        assert sp.itemByName("wcs_origin_boxPoint").expression == "'top center'"   # rolled back
+        assert sp.itemByName("stockZHigh").expression == "0.0"                     # rolled back
+
+    def test_valid_expression_still_passes_and_surfaces_warning(self, monkeypatch):
+        # a platform warning ('stock less than model width') fires on VALID expressions - it must NOT
+        # gate, but it IS surfaced on the changed record.
+        cam = _install(monkeypatch)
+        cam.setups.item(0).parameters.itemByName("stockZHigh").warning = "stock less than model width"
+        out = _payload(ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"}))
+        assert out["updated_count"] == 1
+        rec = out["changed"][0]
+        assert rec["after"] == "2.5" and rec["warning"] == "stock less than model width"
+
+
 # ── set body collections (models / fixtures / stock) ────────────────────────
 
 class TestBodies:
@@ -305,7 +350,8 @@ class TestMachine:
         # never a false ok.
         cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS), machine_sticks=False)])
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
-        ces._resolve_machine = lambda name: (_Machine("Haas VF-2"), "Haas VF-2", None)
+        monkeypatch.setattr(ces, "_resolve_machine",
+                            lambda name: (_Machine("Haas VF-2"), "Haas VF-2", None))
         res = ces.handler(setup="Setup1", machine="Haas|VF-2")
         assert res["isError"] is True and "did not take" in res["message"].lower()
 
@@ -317,6 +363,100 @@ class TestMachine:
 
 
 # ── bind the WCS to geometry (the associative, from-selection WCS) ──────────
+
+# ── machine RESOLUTION: exact-match-first beats a shared prefix (the real _resolve_machine) ─────────
+#
+# The tests above patch the _resolve_machine seam; these exercise the REAL resolver against a
+# SimpleNamespace machine library whose query PREFIX-matches the model (the live behaviour: 'VF-2'
+# returns the plain machine AND its 'VF-2 with TRT100/160' variants).
+
+from types import SimpleNamespace
+
+
+def _machine(vendor, model, description=None):
+    return SimpleNamespace(vendor=vendor, model=model, description=description)
+
+
+def _machine_lib(machines):
+    def create_query(loc, vendor, model):
+        pool = machines if loc == "LOCAL" else []       # only the Local location holds machines here
+        matched = [m for m in pool
+                   if (not vendor or (m.vendor or "").lower() == vendor.lower())
+                   and (not model or (m.model or "").lower().startswith(model.lower()))]
+        return SimpleNamespace(execute=lambda: matched)
+    return SimpleNamespace(createQuery=create_query)
+
+
+def _install_machine_lib(monkeypatch, machines):
+    holder = SimpleNamespace(libraryManager=SimpleNamespace(machineLibrary=_machine_lib(machines)))
+    monkeypatch.setattr(ces.adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
+    monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "LocalLibraryLocation", "LOCAL", raising=False)
+    monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "Fusion360LibraryLocation", "F360", raising=False)
+
+
+_VF2_FAMILY = [
+    _machine("Haas", "VF-2"),
+    _machine("Haas", "VF-2 with TRT100"),
+    _machine("Haas", "VF-2 with TRT160"),
+]
+
+
+class TestMachineResolver:
+    def test_exact_model_beats_prefix_siblings(self, monkeypatch):
+        # 'Haas|VF-2' prefix-matches all three; exact-match-first must select the model that is
+        # exactly 'VF-2', NOT refuse as ambiguous. (Flip the exact pass off and this goes red.)
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces._resolve_machine("Haas|VF-2")
+        assert err is None
+        assert m.model == "VF-2" and label == "Haas VF-2"
+
+    def test_bare_label_is_selectable(self, monkeypatch):
+        # The name an agent SEES is the label 'Haas VF-2'; passed bare it must resolve (label-recovery
+        # re-splits it to vendor|model), not miss because no model literally starts with 'Haas VF-2'.
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces._resolve_machine("Haas VF-2")
+        assert err is None and m.model == "VF-2"
+
+    def test_doubled_vendor_label_is_selectable(self, monkeypatch):
+        # 'Haas|Haas VF-2' (vendor accidentally repeated in the model) resolves via the same recovery.
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces._resolve_machine("Haas|Haas VF-2")
+        assert err is None and m.model == "VF-2"
+
+    def test_no_exact_is_still_ambiguous(self, monkeypatch):
+        # A prefix that matches several with NO exact winner stays refused, listing the distinct LABELS.
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces._resolve_machine("Haas|VF")
+        assert m is None and "Ambiguous" in err
+        assert "Haas VF-2 with TRT100" in err and "exact names" in err
+
+    def test_same_model_variants_select_by_description(self, monkeypatch):
+        # The LIVE shape: three machines share vendor|model 'HAAS|VF-2' and differ ONLY by description.
+        # The exact full DESCRIPTION selects one; the bare vendor|model stays ambiguous, listing them.
+        fam = [_machine("Haas", "VF-2", "Haas VF-2"),
+               _machine("Haas", "VF-2", "Haas VF-2 with TRT100"),
+               _machine("Haas", "VF-2", "Haas VF-2 with TRT160")]
+        _install_machine_lib(monkeypatch, fam)
+        m, label, err = ces._resolve_machine("Haas VF-2 with TRT100")
+        assert err is None and label == "Haas VF-2 with TRT100"       # the exact variant, not the base
+        # the base description also resolves to the base, not a TRT variant
+        m2, label2, err2 = ces._resolve_machine("Haas VF-2")
+        assert err2 is None and label2 == "Haas VF-2"
+        # vendor|model alone can't pick one -> ambiguous, listing the three descriptions
+        m3, _l3, err3 = ces._resolve_machine("Haas|VF-2")
+        assert m3 is None and "Haas VF-2 with TRT160" in err3
+
+    def test_unique_prefix_resolves(self, monkeypatch):
+        # A single match needs no exact tie-break.
+        _install_machine_lib(monkeypatch, [_machine("Tormach", "1100MX")])
+        m, label, err = ces._resolve_machine("Tormach|1100")
+        assert err is None and m.model == "1100MX"
+
+    def test_no_match_names_the_input(self, monkeypatch):
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces._resolve_machine("Okuma|Genos")
+        assert m is None and "No machine matches" in err
+
 
 class TestWCS:
     def test_binds_origin_to_geometry_and_sets_mode(self, monkeypatch):
@@ -363,3 +503,46 @@ class TestWCS:
         _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1", wcs={"origin": "vtx-1"}))
         assert "wcs_set" in out
+
+
+class TestResolveWcsValue:
+    """_resolve_wcs_value: a WCS binding value is a JOINT ORIGIN (handle or name, via JointOriginRef)
+    OR a find_geometry handle. JO is tried first (it also recognises a JO token); a non-JO handle falls
+    back to the geometry handle. Proven live: a JointOrigin binds into wcs_origin_point (bound_entities=1,
+    mode='point') - the associative live-reference binding a self-centering template WCS needs."""
+
+    def test_joint_origin_is_tried_first(self, monkeypatch):
+        jo = object()
+        monkeypatch.setattr(ces._WCS_JO, "resolve", lambda v: (jo, None))
+        ent, is_jo, err = ces._resolve_wcs_value("Stock_Center")
+        assert ent is jo and is_jo is True and err is None
+
+    def test_non_jo_falls_back_to_geometry_handle(self, monkeypatch):
+        face = object()
+        monkeypatch.setattr(ces._WCS_JO, "resolve", lambda v: (None, "not a Joint Origin"))
+        monkeypatch.setattr(ces._WCS_HANDLE, "resolve", lambda v: (face, None))
+        ent, is_jo, err = ces._resolve_wcs_value("H_FACE")
+        assert ent is face and is_jo is False and err is None
+
+    def test_name_shaped_value_surfaces_the_jo_error(self, monkeypatch):
+        # a bare NAME that resolves to neither: the JO error (which lists available JOs) is the useful
+        # one, not the 'stale handle' error (is_handle('SomeName') is False).
+        monkeypatch.setattr(ces._WCS_JO, "resolve", lambda v: (None, "no Joint Origin named 'SomeName'"))
+        monkeypatch.setattr(ces._WCS_HANDLE, "resolve", lambda v: (None, "handle did not resolve"))
+        ent, is_jo, err = ces._resolve_wcs_value("SomeName")
+        assert ent is None and "Joint Origin" in err
+
+    def test_token_shaped_value_surfaces_the_handle_error(self, monkeypatch):
+        # a long token-shaped value that fails both: the handle error is the relevant one.
+        tok = "/v" + "A" * 60
+        monkeypatch.setattr(ces._WCS_JO, "resolve", lambda v: (None, "not a Joint Origin"))
+        monkeypatch.setattr(ces._WCS_HANDLE, "resolve", lambda v: (None, "handle is stale"))
+        ent, is_jo, err = ces._resolve_wcs_value(tok)
+        assert ent is None and "stale" in err
+
+    def test_resolve_wcs_routes_each_value_through_the_combined_resolver(self, monkeypatch):
+        # the dict resolver delegates per-value to _resolve_wcs_value (JO OR handle).
+        jo = object()
+        monkeypatch.setattr(ces, "_resolve_wcs_value", lambda v: (jo, True, None))
+        resolved, err = ces._resolve_wcs({"origin": "Stock_Center"})
+        assert err is None and resolved == {"origin": jo}

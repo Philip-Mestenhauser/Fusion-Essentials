@@ -14,6 +14,9 @@ SHRINKS (an entry is deleted by declaring postconditions); adding a new write to
 same deliberation as adding a naming-vocabulary verb.
 """
 
+import inspect
+import re
+
 from conftest import load_tool, register_all_tools
 
 
@@ -33,7 +36,8 @@ def _postconditions_of(item):
 # Write tools WITHOUT a kernel declaration. Format: name -> the audited reason it lacks one.
 # Each reason carries its class from a per-handler audit of the actual verify code:
 #   inline: - real verification lives in the handler because it constructs payload fields or
-#             authors error text (the inseparability rule). Appropriate permanently.
+#             authors error text (the inseparability rule). Appropriate permanently. Machine-checked:
+#             TestInlineExemptionsActuallyReadBack requires the read-back SHAPE in the handler source.
 #   effect: - the payload's own claim IS a live read-back of the mutated state; nothing further
 #             to independently verify.
 #   gap:    - NO effective read-back exists; the platform can report success while changing
@@ -53,8 +57,8 @@ _EXEMPT = {
     'cam_create_setup': 'inline: cam.setups is re-listed after add() to confirm the setup landed',
     'cam_delete': 'inline: deleteMe() bool is read at the call site and authors the named decline error',
     'cam_edit_folders': 'inline: rename/move gate on read-backs; create trusts addFolder returning a live object',
-    'cam_edit_operation': 'inline: each parameter expression is re-read post-set; the observed value is the payload',
-    'cam_edit_setup': 'inline: machine/stock/fixture/wcs writes are each re-read and gated; a zero read-back errors',
+    'cam_edit_operation': 'inline: params re-read for .error post-set (unevaluated -> rollback+error); the observed value is the payload',
+    'cam_edit_setup': 'inline: params re-read for .error post-set (unevaluated -> rollback+error); machine/stock/fixture/wcs writes each re-read and gated',
     'cam_edit_tools': 'inline: add/remove/create re-fetch the library from its url after persist',
     'cam_generate': 'effect: the launch handle is the effect; cam_get_status confirms completion separately',
     'cam_reorder': 'inline: moveBefore/moveAfter bool is read and reported as a named error on false',
@@ -85,7 +89,7 @@ _EXEMPT = {
     'doc_save_as': 'inline: the cloud id is ASYNC; the urn prefix check builds document_id in the handler',
     'doc_update_xref': 'inline: each ref isOutOfDate is re-read after refresh; a still-stale ref is an error',
     'drawing_create': 'inline: df.id is read back and a missing file_id authors the specific failure text',
-    'joint_at_geometry': 'inline: joint healthState/errorOrWarningMessage build the healthy flag and health_warning',
+    'joint_at_geometry': 'inline: joint healthState/errorOrWarningMessage build the healthy flag and health_warning, and the moving occurrence origin is diffed before/after to author moved_by',
     'joint_create_origin': 'inline: a computed anchor is read back and rolled back via deleteMe() past 0.001cm error',
     'joint_drive': 'inline: rotationValue/slideValue are re-read so value_now reports the clamped actual',
     'joint_edit': 'inline: post-edit computeAll() + a timeline health walk build timeline_errors_after and note',
@@ -98,7 +102,7 @@ _EXEMPT = {
     'mesh_remesh': 'inline: triangle counts are diffed before/after; an unchanged count is flagged in the payload',
     'mesh_to_brep': 'inline: BRep body tokens are diffed before/after and author the no-body-produced error',
     'model_base_feature': 'inline: startEdit/finishEdit bools are checked; a failed start deletes the orphan scope',
-    'model_construction': 'effect: the created datum name is read live; construction geometry has no healthState',
+    'model_construction': 'effect: the created datum name + its real geometry (normal/direction/position, read back per kind) are live; construction geometry has no healthState',
     'model_create_component': 'inline: rename mismatch is read back as name_warning; activate() bool reported as-is',
     'model_draft': 'inline: healthState is re-read post-add to author the error; faces_drafted reads the feature',
     'model_set_material': 'inline: each body material name is read back; mismatches land in failed, all-fail errors',
@@ -125,7 +129,7 @@ _EXEMPT = {
     'sys_execute_script': 'arbitrary user code - there is no declared effect to verify',
     'sys_reload_addin': 'restarts the server itself - nothing left in-process to verify',
     'sys_request_selection': 'effect is a user interaction, not a model mutation',
-    'view_inspect': 'camera/visibility state actions - inline read-backs; not model mutations',
+    'view_set': 'camera/visibility state actions - inline read-backs; not model mutations',
     'view_section': 'section analyses are view state; clear() has inline count read-back',
     'view_switch_workspace': 'workspace state read-back is inline; camera/UI state, not model state',
 }
@@ -170,3 +174,108 @@ class TestPostconditionsDeclared:
             for p in posts or []:
                 assert isinstance(p, kernel.Postcondition), (
                     f"{it.get_name()}: postconditions must be _assert.Postcondition kinds, got {type(p)}")
+
+
+# ── the inline: shape check - an 'inline:' claim is machine-checked, not taken on faith ─────────
+#
+# An entry classed 'inline:' asserts the handler verifies its effect in its own body. The check
+# below requires the READ-BACK SHAPE in the handler's source (plus the same-module helpers it
+# directly calls - action= dispatchers put the verify in _do_*/_slice_* helpers): BOTH
+#   (a) an error(...) call - a gate that can convert the read-back into a failure, AND
+#   (b) a state re-read idiom - a safe() read, a live-object property re-read (.count/.healthState/
+#       .isValid/.value/.expression/...), a timeline_health diff, or a deleteMe() rollback.
+# Deliberately simple, reviewable text heuristics (the no-first-match lint's approach), not AST
+# guessing: every one of these tokens is a read of MUTATED state feeding either a comparison that
+# can error(...) or a payload field. A tool the detector cannot confirm is either reclassified to
+# 'gap:' (with a named defect) or gets a real read-back - the detector is never weakened to pass it.
+
+_ERROR_CALL = re.compile(r"\berror\(")
+_READBACK = re.compile(
+    r"\bsafe\(|\.count\b|\.healthState\b|timeline_health|\.isValid\b|\.isOutOfDate\b|"
+    r"\.isActive\b|\.isGroundToParent\b|\.isLightBulbOn\b|\.isFavorite\b|\.isReferencedComponent\b|"
+    r"\.deleteMe\(\)|computeAll|\.appearance\b|\.expression\b|\.value\b|\.name\b|"
+    r"verify_written|latestVersionNumber|versionNumber|\.area\b|\.volume\b|entityToken")
+_CALLED_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _original_handler(item):
+    """Unwrap the write-guard/assert chain (__wrapped__) to the tool module's own handler."""
+    h = item.handler
+    seen = set()
+    while h is not None and id(h) not in seen:
+        seen.add(id(h))
+        nxt = getattr(h, "__wrapped__", None)
+        if nxt is None:
+            return h
+        h = nxt
+    return h
+
+
+def _handler_surface(item):
+    """The source text the shape check scans: the handler itself PLUS every same-module function it
+    directly calls (depth 1). Dispatch handlers (action= routers) verify inside their _do_*/leaf
+    helpers, so the handler body alone would under-read them. Returns None when no source exists."""
+    h = _original_handler(item)
+    try:
+        handler_src = inspect.getsource(h)
+    except (OSError, TypeError):
+        return None
+    module_globals = getattr(h, "__globals__", {})
+    parts = [handler_src]
+    for called in set(_CALLED_NAME.findall(handler_src)):
+        fn = module_globals.get(called)
+        if (callable(fn) and getattr(fn, "__module__", None) == h.__module__
+                and called != h.__name__):
+            try:
+                parts.append(inspect.getsource(fn))
+            except (OSError, TypeError):
+                pass
+    return "\n".join(parts)
+
+
+def _has_readback_shape(surface):
+    """True when the source surface carries the read-back SHAPE: a post-mutation state re-read AND an
+    error(...) gate that can fail the call on it."""
+    return (surface is not None
+            and bool(_ERROR_CALL.search(surface))
+            and bool(_READBACK.search(surface)))
+
+
+class TestInlineExemptionsActuallyReadBack:
+    def test_every_inline_entry_has_the_readback_shape(self):
+        items = {it.get_name(): it for it in register_all_tools()}
+        unconfirmed = []
+        for name, reason in _EXEMPT.items():
+            if not reason.startswith("inline:"):
+                continue
+            item = items.get(name)
+            if item is None:
+                continue    # test_exemptions_only_name_real_undeclared_write_tools reports it
+            if not _has_readback_shape(_handler_surface(item)):
+                unconfirmed.append(name)
+        assert not unconfirmed, (
+            "these _EXEMPT entries are classed 'inline:' (the handler verifies its effect in its own "
+            "body), but the detector CANNOT confirm a read-back shape - no error(...) gate plus a "
+            "post-mutation state re-read in the handler or its directly-called helpers. For each: "
+            "either make the read-back real, or reclassify the entry to 'gap:' with a named defect. "
+            "Do NOT weaken this detector to pass it:\n  " + "\n  ".join(sorted(unconfirmed)))
+
+    def test_the_shape_check_bites(self):
+        # (a) against a REAL registered handler with no read-back: sys_reload_addin restarts the
+        # server and reads nothing back - if it were classed 'inline:' the lint must fire.
+        items = {it.get_name(): it for it in register_all_tools()}
+        assert not _has_readback_shape(_handler_surface(items["sys_reload_addin"])), (
+            "sys_reload_addin has no read-back, yet the detector confirmed one - the shape check "
+            "no longer bites")
+        # (b) the two halves are independently required: an error() gate alone, or a re-read alone,
+        # is NOT the shape.
+        assert not _has_readback_shape("def handler():\n    return error('bad input')\n")
+        assert not _has_readback_shape("def handler():\n    n = safe(lambda: body.count)\n")
+        assert _has_readback_shape(
+            "def handler():\n"
+            "    feature.deleteMe()\n"
+            "    n = safe(lambda: body.count)\n"
+            "    if n == before:\n"
+            "        return error('nothing was deleted')\n")
+        # (c) missing source (a builtin) is never confirmed.
+        assert not _has_readback_shape(None)

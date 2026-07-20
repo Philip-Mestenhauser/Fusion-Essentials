@@ -1,8 +1,11 @@
 """Tests for the write-document binding guard (_write_guard) - the concurrency targeting fix.
 
 The guard wraps every WRITE handler: an optional expect_document REFUSES the write if the active doc
-moved (active_document_changed), and every successful write result is stamped with acted_on={name,urn}.
-Read tools are untouched. We patch the guard's _active_identity seam to a known (name, urn).
+moved (active_document_changed) OR if a bare NAME is shared by several open documents
+(ambiguous_document_name, candidates listed - name-equality alone cannot prove the active doc is the
+one the agent read; a URN match is always exact). Every successful write result is stamped with
+acted_on={name,urn}. Read tools are untouched. We patch the guard's _active_identity and
+_open_documents seams.
 """
 
 import json
@@ -92,6 +95,78 @@ class TestExpectDocumentGuard:
         h = wg.wrap(lambda **kw: _ok({"opened": True}))
         out = _decode(h())
         assert out["acted_on"] == {"name": "NewDoc", "document_id": "urn:new"}
+
+
+class TestNameCollisionRefusal:
+    """expect_document as a bare NAME is honored only when that name is unique among open docs."""
+
+    def _docs(self, monkeypatch, rows):
+        monkeypatch.setattr(wg, "_open_documents", lambda: rows)
+
+    def test_unique_name_still_passes(self, monkeypatch):
+        _set_active("Bracket", "urn:lineage:abc")
+        self._docs(monkeypatch, [
+            {"name": "Bracket", "document_id": "urn:lineage:abc", "open_index": 0, "is_active": True},
+            {"name": "Other", "document_id": "urn:lineage:zzz", "open_index": 1, "is_active": False},
+        ])
+        called = {"n": 0}
+        h = wg.wrap(lambda **kw: called.update(n=1) or _ok({"created": True}))
+        out = _decode(h(expect_document="Bracket"))
+        assert called["n"] == 1 and out["created"] is True
+
+    def test_duplicate_names_refuse_listing_each_candidate(self, monkeypatch):
+        # two open docs named "Bracket": one saved (URN), one unsaved (open_index only) - the
+        # unsaved-twin case doc_get's open_index convention exists for.
+        _set_active("Bracket", "urn:lineage:abc")
+        self._docs(monkeypatch, [
+            {"name": "Bracket", "document_id": "urn:lineage:abc", "open_index": 0, "is_active": True},
+            {"name": "Bracket", "document_id": None, "open_index": 2, "is_active": False},
+        ])
+        called = {"n": 0}
+        h = wg.wrap(lambda **kw: called.update(n=1) or _ok({"created": True}))
+        res = h(expect_document="Bracket")
+        assert called["n"] == 0                              # REFUSED - no handler call, no mutation
+        assert res["isError"] is True
+        payload = _decode(res)
+        assert payload["blocked_by"] == ["ambiguous_document_name"]
+        assert payload["expected"] == "Bracket"
+        assert len(payload["candidates"]) == 2
+        saved = payload["candidates"][0]
+        unsaved = payload["candidates"][1]
+        assert saved == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+        assert unsaved["document_id"] is None
+        assert unsaved["open_index"] == 2                    # the unsaved twin's session address
+        assert "URN" in payload["note"]                      # instructs passing the URN
+
+    def test_urn_match_is_exact_even_when_names_collide(self, monkeypatch):
+        _set_active("Bracket", "urn:lineage:abc")
+        self._docs(monkeypatch, [
+            {"name": "Bracket", "document_id": "urn:lineage:abc", "open_index": 0, "is_active": True},
+            {"name": "Bracket", "document_id": None, "open_index": 1, "is_active": False},
+        ])
+        h = wg.wrap(lambda **kw: _ok({"created": True}))
+        out = _decode(h(expect_document="urn:lineage:abc"))   # URN pins ONE doc; collision irrelevant
+        assert out["created"] is True
+
+    def test_name_not_matching_active_doc_still_refuses_as_changed(self, monkeypatch):
+        # the collision check only runs when the name DOES match the active doc; a plain mismatch
+        # keeps the original active_document_changed refusal.
+        _set_active("OtherDoc", "urn:other")
+        self._docs(monkeypatch, [
+            {"name": "Bracket", "document_id": "urn:b1", "open_index": 0, "is_active": False},
+            {"name": "Bracket", "document_id": "urn:b2", "open_index": 1, "is_active": False},
+        ])
+        res = wg.wrap(lambda **kw: _ok({}))(expect_document="Bracket")
+        assert res["isError"] is True
+        assert _decode(res)["blocked_by"] == ["active_document_changed"]
+
+    def test_unreadable_session_degrades_to_the_single_doc_pass(self, monkeypatch):
+        # _open_documents returns [] on any read failure; the guard must not invent a false
+        # ambiguity out of an unreadable session - the name match stands as before.
+        _set_active("Bracket", "urn:lineage:abc")
+        self._docs(monkeypatch, [])
+        out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
+        assert out["created"] is True
 
 
 class TestIntegrationThroughItem:

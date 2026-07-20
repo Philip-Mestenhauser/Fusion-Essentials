@@ -16,10 +16,11 @@ from .registry import (
     get_tools,
     family_of,
     GATEABLE_FAMILIES,
+    GATED_TOOLS,
 )
 
 __all__ = [
     'Annotations', 'Tool', 'Item', 'Registry',
     'get_registry', 'reset_registry', 'register', 'unregister', 'has_tool',
-    'get_tools', 'family_of', 'GATEABLE_FAMILIES',
+    'get_tools', 'family_of', 'GATEABLE_FAMILIES', 'GATED_TOOLS',
 ]

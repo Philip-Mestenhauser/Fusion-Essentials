@@ -22,8 +22,8 @@ class _OpBase:
     def __init__(self, name):
         self.name = name
         self.moved_into = None
-    def moveInto(self, container):
-        self.moved_into = container
+    def moveInto(self, parent):
+        self.moved_into = parent
         return True
 
 
@@ -214,7 +214,7 @@ class TestMove:
 
 class _RefusingOp(_OpBase):
     """moveInto() returns False - Fusion refused the move (e.g. not allowed for this op type)."""
-    def moveInto(self, container):
+    def moveInto(self, parent):
         return False
 
 

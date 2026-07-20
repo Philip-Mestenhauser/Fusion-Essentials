@@ -57,7 +57,7 @@ def _resolve_body(comp, body_name):
 
 def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
             direction: str = "inside", remove_faces=None) -> dict:
-    """Hollow a solid body into a thin-walled shell, optionally opening it by removing faces."""
+    """See TOOL_DESCRIPTION."""
     scale_factor, uerr = _inputs.UNITS.resolve(units)
     if uerr:
         return error(uerr)

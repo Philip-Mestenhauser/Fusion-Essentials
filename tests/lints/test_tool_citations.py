@@ -45,7 +45,6 @@ _INLINE_CODE = re.compile(r"`([^`]+)`")
 _NOT_A_TOOL = {
     "find_setup": "a _cam_common helper that resolves a CAM setup by exact name, not a tool",
     "find_operation": "a _cam_common helper that resolves a CAM operation by exact name, not a tool",
-    "save_view": "an action= value of view_inspect, not a standalone tool",
 }
 
 

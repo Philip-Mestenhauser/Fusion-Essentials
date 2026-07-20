@@ -23,16 +23,23 @@ from . import _inputs
 from . import _assert
 from ._joints import (
     AXES as _AXES,
+    all_joint_origins as _all_joint_origins,
     apply_motion as _apply_motion,
     build_joint_geometry as _jg_from_entity,
     current_joint_type as _current_joint_type,
     find_joint as _find_joint,
+    is_joint_origin as _is_joint_origin,
 )
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
 # since a joint can land on a face/edge/vertex/point). Not required at the kind level - a non-token spec
 # (a JO name or a '<occ>:<snap>') just fails to resolve as a handle and falls through in _resolve_input.
 _HANDLE = _inputs.GeometryHandle("input", require="any")
+
+# A joint input may also be a JOINT ORIGIN, by the handle assembly_get(include=['joint_origins']) mints
+# OR by name (bare when unique, else '<occurrence>:<JO name>'; ambiguity refused). This ONE kind is the
+# resolve-one leaf over the shared _joints.all_joint_origins walk (the JO-name path).
+_JO_REF = _inputs.JointOriginRef("input")
 
 # joint_type -> (label, needs_axis). The setter is dispatched in _apply_motion. pin_slot needs_axis is
 # True for its ROTATION axis; its perpendicular SLIDE direction comes from 'slide_axis' (defaulting to
@@ -58,52 +65,6 @@ def _fmt_num(v):
     return str(int(f)) if f == int(f) else str(f)
 
 
-def _find_joint_origin(design, name):
-    """Resolve a joint input by joint-origin name. Returns a JointOrigin usable as a joint input.
-
-    A joint origin that lives inside a child/referenced OCCURRENCE must be supplied to the joint
-    as its ASSEMBLY-CONTEXT PROXY (jo.createForAssemblyContext(occurrence)), NOT the native JO -
-    the native one yields "Provided input paths for joint are not valid". So: a JO on the root
-    component is returned as-is; a JO that belongs to a sub-component is resolved through the
-    occurrence that brings it into the assembly, as a proxy.
-    """
-    name = (name or "").strip()
-    if not name:
-        return None
-    root = design.rootComponent
-
-    # On the root component -> native JO is fine (it is already in assembly context).
-    jo = safe(lambda: root.jointOrigins.itemByName(name))
-    if jo:
-        return jo
-
-    # Otherwise find the native JO's owning component, then the occurrence that instances it,
-    # and return the JO's proxy in that occurrence's context.
-    native = None
-    for c in safe(lambda: design.allComponents, []) or []:
-        cand = safe(lambda c=c: c.jointOrigins.itemByName(name))
-        if cand:
-            native = cand
-            break
-    if not native:
-        return None
-    owner_name = safe(lambda: native.parentComponent.name)
-    if not owner_name:
-        return native
-    # Find an occurrence of the owning component and proxy the JO into it. NOTE: match by NAME,
-    # not `is` - the Fusion API returns fresh wrapper objects for the same component, so identity
-    # comparison (occ.component is owner) is unreliable and silently fails.
-    try:
-        for occ in root.allOccurrences:
-            if (safe(lambda occ=occ: occ.component.name) or "") == owner_name:
-                proxy = safe(lambda occ=occ: native.createForAssemblyContext(occ))
-                if proxy:
-                    return proxy
-    except Exception:
-        pass
-    return native  # last resort (will likely error on add, but better than nothing)
-
-
 def _find_occurrence(design, name):
     """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
     logic - refuses an ambiguous substring instead of grabbing the first instance. Returns
@@ -111,60 +72,19 @@ def _find_occurrence(design, name):
     return _inputs._resolve_occurrence(name, name)
 
 
-def _resolve_occurrence_scoped_jo(design, spec):
-    """Resolve '<occurrence>:<JO name>' - a joint origin addressed THROUGH the occurrence that
-    carries it (e.g. 'SculpturalTower:1:Center of Model', the form agents naturally write for a JO
-    inside an inserted/referenced part). Also the unambiguous form when several instances of the
-    same component each carry the JO. Returns the JO proxied into that occurrence's assembly
-    context, or None when the spec doesn't parse as occurrence+JO."""
-    s = (spec or "").strip()
-    if ":" not in s:
-        return None
-    head, _, tail = s.rpartition(":")
-    tail = tail.strip()
-    if not head or not tail:
-        return None
-    occ, _err = _find_occurrence(design, head)
-    if not occ:
-        return None
-    native = safe(lambda: occ.component.jointOrigins.itemByName(tail))
-    if not native:
-        return None
-    return safe(lambda: native.createForAssemblyContext(occ)) or native
-
-
-def _iter_names(coll):
-    """Yield each item's .name from a Fusion collection, tolerating both iteration styles
-    (a live adsk collection iterates; a count/item-only one is walked by index)."""
-    if not coll:
-        return
-    try:
-        for it in coll:
-            nm = safe(lambda it=it: it.name)
-            if nm:
-                yield nm
-    except TypeError:
-        for i in range(safe(lambda: coll.count, 0) or 0):
-            nm = safe(lambda i=i: coll.item(i).name)
-            if nm:
-                yield nm
-
-
 def _available_joint_origins(design, limit=8):
     """List the design's joint-origin names with where each lives - so a resolve failure can be
-    corrected from the error alone instead of the agent guessing or dropping to a raw script.
-    Returns (listed, overflow_count)."""
+    corrected from the error alone instead of the agent guessing or dropping to a raw script. The
+    collect-names leaf over the ONE JO walk (_joints.all_joint_origins). Returns (listed, overflow)."""
+    root_name = safe(lambda: design.rootComponent.name)
     found = []
-    root = design.rootComponent
-    root_name = safe(lambda: root.name)
-    for nm in _iter_names(safe(lambda: root.jointOrigins)):
-        found.append(f"'{nm}' (root)")
-    for c in safe(lambda: design.allComponents, []) or []:
-        cname = safe(lambda c=c: c.name)
-        if not cname or cname == root_name:  # root's JOs already listed (name-match: see proxy note)
+    for jo, comp in _all_joint_origins(design):
+        nm = safe(lambda jo=jo: jo.name)
+        if not nm:
             continue
-        for nm in _iter_names(safe(lambda c=c: c.jointOrigins)):
-            found.append(f"'{nm}' (in component '{cname}')")
+        cname = safe(lambda comp=comp: comp.name)
+        where = "root" if cname == root_name else f"in component '{cname}'"
+        found.append(f"'{nm}' ({where})")
     return found[:limit], max(len(found) - limit, 0)
 
 
@@ -232,28 +152,34 @@ def _resolve_snap_input(design, occ_name, snap):
 
 
 def _resolve_input(design, spec):
-    """Resolve one joint input, in order: (1) a find_geometry 'handle' (entity token) -> a JointGeometry
-    AT that real geometry; (2) a geometry snap '<occ>:<snap>'; (3) a joint-origin name; (4) an
-    occurrence-scoped joint-origin '<occ>:<JO name>'. On failure the error lists the design's JOs.
-    Returns (input_object_or_None, label, error_or_None)."""
-    # (1) handle first: a find_geometry token resolves to a live entity. Distinguished from a JO name
-    # by RESOLVING - if findEntityByToken yields nothing, fall through to snap/name (a JO name is never
-    # a valid token). This is the geometry-as-values path: joint AT the geometry, not at a collapsed origin.
+    """Resolve one joint input, in order: (1) a find_geometry 'handle' -> a JointGeometry AT that real
+    geometry, OR - when the handle points at a JOINT ORIGIN (assembly_get mints those) - the JO itself;
+    (2) a geometry snap '<occ>:<snap>'; (3) a Joint Origin by name (bare when unique, else qualified
+    '<occ>:<JO name>'; an ambiguous name is refused with candidates). On failure the error lists the
+    design's JOs. Returns (input_object_or_None, label, error_or_None)."""
+    # (1) handle first: a find_geometry / assembly_get token resolves to a live entity. A JOINT ORIGIN
+    # handle is a first-class joint input; a face/edge/vertex handle becomes a JointGeometry AT the
+    # geometry (joint at the geometry, not at a collapsed origin). A JO NAME is never a valid token, so
+    # it falls through to the name path below.
     ent, herr = _HANDLE.resolve(spec)
     if ent is not None:
+        if _is_joint_origin(ent):
+            return ent, "handle:joint_origin", None
         g, label, gerr = _jg_from_entity(ent)
         return (g, f"handle:{label}", None) if g else (None, spec, gerr)
+    # (2) geometry snap
     occ_name, snap = _parse_snap(spec)
     if snap:
         g, err = _resolve_snap_input(design, occ_name, snap)
         return g, f"{occ_name}:{snap}", err
-    jo = _find_joint_origin(design, spec)
-    if jo:
+    # (3) a Joint Origin by name - the ONE resolver (bare/qualified/ambiguity), shared with cam WCS bind.
+    jo, jerr = _JO_REF.resolve(spec)
+    if jo is not None:
         return jo, spec, None
-    jo = _resolve_occurrence_scoped_jo(design, spec)
-    if jo:
-        return jo, spec, None
-    msg = (f"'{spec}' is not a find_geometry handle, a Joint Origin name, or a recognized "
+    if jerr and "ambiguous" in jerr.lower():
+        return None, spec, jerr        # surface the disambiguation candidates verbatim
+    # (4) nothing matched - the comprehensive form-guide + the available JOs (self-correction data)
+    msg = (f"'{spec}' is not a find_geometry handle, a Joint Origin (handle or name), or a recognized "
     "'<occurrence>:<snap>' spec (snap = origin/center/top/bottom/left/right/front/back/cylinder). "
     "A Joint Origin may be passed bare ('Center of Model') or scoped through the occurrence that "
     "carries it ('<occurrence>:<JO name>').")
@@ -432,16 +358,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             axis: str = "z", slide_axis: str = "", offset: float = 0.0, angle: float = 0.0,
             units: str = "mm", flip: bool = False, name: str = "", min_deg=None, max_deg=None,
             rest_deg=None, min_mm=None, max_mm=None, rest_mm=None) -> dict:
-    """Create a joint between two joint inputs (resolved by joint-origin name).
-
-    occurrence_one / occurrence_two: the two joint inputs - names of Joint Origins to join.
-    joint_type: rigid (default) | revolute | slider | cylindrical | planar | ball | pin_slot. axis
-    (x/y/z): the motion axis for types that need one (for pin_slot it is the ROTATION axis). slide_axis
-    (x/y/z): the pin_slot SLIDE direction (default = the next frame axis; must differ from axis).
-    offset (in 'units') and angle (degrees) position the joint; flip reverses it. min_deg/max_deg/
-    rest_deg set rotation limits (revolute/cylindrical); min_mm/max_mm/rest_mm set linear/slide limits
-    (slider/cylindrical, in 'units'). WRITES.
-    """
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design (open a document with assembly geometry).")
@@ -559,17 +476,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                  flip=None, offset=None, angle=None, units: str = "mm",
                  rotation_deg=None, min_deg=None, max_deg=None, rest_deg=None,
                  min_mm=None, max_mm=None, rest_mm=None) -> dict:
-    """Edit an EXISTING joint in place - no remaking. Re-select snap inputs, change motion type/axis,
-    toggle flip, drive/limit the rotation.
-
-    joint_name: the joint to edit. Any subset of: input_one/input_two (new snap inputs - a Joint
-    Origin name OR '<occurrence>:<snap>'); joint_type (rigid/revolute/slider/cylindrical/planar/ball)
-    + axis (x/y/z) to redefine the motion; flip (true/false) to toggle direction; min_deg/max_deg to
-    set rotation limits. WRITES. To pose a joint to a rotation value, use joint_drive.
-
-    The Fusion API requires the timeline marker be positioned just before the joint to edit its
-    geometry/flip/motion, so this rolls the marker before, applies the edits, then rolls it back.
-    """
+    """See EDIT_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -708,7 +615,16 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         return error(f"Edit failed: {e}")
     finally:
         if rolled:
-            safe(lambda: joint.timelineObject.rollTo(False))  # restore marker to the end
+            # Roll the marker to the TRUE END of the timeline, not just past THIS joint. rollTo(False)
+            # stops immediately AFTER the edited joint, leaving downstream features (patterns, later
+            # joints) rolled OUT - they silently revert to home while still reading healthy. Setting
+            # markerPosition = timeline.count restores the full model so the recompute below settles it.
+            tl = safe(lambda: design.timeline)
+            n = safe(lambda: tl.count, 0) or 0
+            if tl is not None and n:
+                safe(lambda: setattr(tl, "markerPosition", n))
+            else:
+                safe(lambda: joint.timelineObject.rollTo(False))
 
     # Editing a joint rolls the timeline marker, which can leave DOWNSTREAM features (patterns, later
     # joints) in a stale compute-failed state until a full recompute. Do it here so the caller gets a

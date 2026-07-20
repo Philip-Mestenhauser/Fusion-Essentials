@@ -65,11 +65,28 @@ def _build_token_map(sketch):
     return tok2id
 
 
+_Z_EPS = 1e-6   # cm; a sketch point within this of the plane is on-plane and its z is omitted
+
+
+def _xy(geo, f):
+    """{x, y} for a sketch point's geometry in display units, PLUS 'z' when the point sits OFF the
+    sketch plane (a 3D sketch line's endpoint - sketch_add_3d_line). z is the sketch-LOCAL height along
+    the plane normal; it is omitted for ordinary on-plane 2D geometry so the common case is not widened.
+    Without this an off-plane endpoint collapses to its (x,y) projection - a vertical 3D line read as
+    (0,0)->(0,0)."""
+    if geo is None:
+        return None
+    z = safe(lambda: geo.z, 0.0) or 0.0
+    rec = {"x": _round(geo.x, f), "y": _round(geo.y, f)}
+    if abs(z) > _Z_EPS:
+        rec["z"] = _round(z, f)
+    return rec
+
+
 def _line_geo(ln, f):
     s = safe(lambda: ln.startSketchPoint.geometry)
     e = safe(lambda: ln.endSketchPoint.geometry)
-    return {"start": {"x": _round(s.x, f), "y": _round(s.y, f)} if s else None,
-    "end": {"x": _round(e.x, f), "y": _round(e.y, f)} if e else None}
+    return {"start": _xy(s, f), "end": _xy(e, f)}
 
 
 def _entities(sketch, f):
@@ -95,7 +112,7 @@ def _entities(sketch, f):
         construction += 1 if con else 0
         c = safe(lambda: a.centerSketchPoint.geometry)
         out.append({"id": f"arc:{i}", "type": "arc", "construction": con,
-        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "center": _xy(c, f),
         "radius": _round(safe(lambda: a.radius), f)})
 
     circles = safe(lambda: curves.sketchCircles)
@@ -105,7 +122,7 @@ def _entities(sketch, f):
         construction += 1 if con else 0
         c = safe(lambda: cc.centerSketchPoint.geometry)
         out.append({"id": f"circle:{i}", "type": "circle", "construction": con,
-        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "center": _xy(c, f),
         "radius": _round(safe(lambda: cc.radius), f)})
 
     ellipses = safe(lambda: curves.sketchEllipses)
@@ -115,7 +132,7 @@ def _entities(sketch, f):
         construction += 1 if con else 0
         c = safe(lambda: el.centerSketchPoint.geometry)
         out.append({"id": f"ellipse:{i}", "type": "ellipse", "construction": con,
-        "center": {"x": _round(c.x, f), "y": _round(c.y, f)} if c else None,
+        "center": _xy(c, f),
         "major_radius": _round(safe(lambda: el.majorAxisRadius), f),
         "minor_radius": _round(safe(lambda: el.minorAxisRadius), f)})
 
@@ -124,7 +141,7 @@ def _entities(sketch, f):
     for i in range(safe(lambda: pts.count, 0) if pts else 0):
         g = safe(lambda i=i: pts.item(i).geometry)
         rec = {"id": f"point:{i}", "type": "point", "construction": False,
-        "position": {"x": _round(g.x, f), "y": _round(g.y, f)} if g else None}
+        "position": _xy(g, f)}
         # the sketch ORIGIN is a real, addressable point entity - flag it so an agent anchoring a
         # constraint to the origin does not have to infer which (0,0) point it is. Proxy equality
         # (not `is`) is the sanctioned entity comparison.
@@ -332,9 +349,10 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
 
     entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch, f)
     note = ("Full X-ray, lengths in 'units'. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
-                 "/ extrude refs. The point flagged origin:true is the sketch ORIGIN (anchor origin-pinned "
-                 "constraints to it). is_fully_constrained=false means free DOF remain; a dimension "
-                 "driving=true locks geometry, driving=false only measures.")
+                 "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
+                 "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "
+                 "is the sketch ORIGIN (anchor origin-pinned constraints to it). is_fully_constrained=false "
+                 "means free DOF remain; a dimension driving=true locks geometry, driving=false only measures.")
     if truncated:
         note += (f" entities/constraints/dimensions each capped at {_XRAY_CAP}; counts above "
                  "(constraint_count/dimension_count/counts) are the full, uncapped totals.")

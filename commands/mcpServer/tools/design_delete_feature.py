@@ -24,10 +24,21 @@ from ._common import timeline_health as _timeline_health
 
 
 def _find_objects_by_name(timeline, want):
-    """All timeline objects whose name matches `want` (exact first; else case-insensitive substring).
-    Returns a list - the caller refuses when it is not exactly one (ambiguity guard)."""
+    """All timeline objects whose name matches `want`. Accepts the exact 'name@index' form the
+    ambiguity error prints (name@timelineIndex) - targets the object at that timeline index when its
+    name matches, so two same-named features are individually deletable. Otherwise: exact name matches
+    first, else case-insensitive substring. Returns a list - the caller refuses when it is not exactly
+    one (ambiguity guard)."""
     n = safe(lambda: timeline.count, 0) or 0
     objs = [timeline.item(i) for i in range(n)]
+    # 'name@index' - the disambiguation target (e.g. 'Extrude1@4'): the object at that exact timeline
+    # index, confirmed by name. A stale/wrong pairing is refused (empty), never widened to a name match.
+    base, at, idx = want.rpartition("@")
+    if at and base.strip() and idx.strip().isdigit():
+        i = int(idx.strip())
+        if 0 <= i < n and (safe(lambda o=objs[i]: o.name) or "").lower() == base.strip().lower():
+            return [objs[i]]
+        return []
     exact = [o for o in objs if (safe(lambda o=o: o.name) or "") == want]
     if exact:
         return exact
@@ -112,17 +123,17 @@ def handler(feature: str = "") -> dict:
 
 _DESC = (
 "Delete ONE timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched pattern/mirror, "
-"which removes all the instances it created (the way to clear a pattern/mirror child occurrence). "
-"An ambiguous name is refused (candidates listed); a timeline GROUP is refused; the result reports if "
-"the delete left a downstream feature in error. DESTRUCTIVE - undo in Fusion if unintended. "
-"(Direct-modelling designs have no timeline.)"
+"which removes all the instances it created. An ambiguous name is refused (candidates listed; pick one "
+"with the 'name@index' form, e.g. 'Extrude1@4'); a timeline GROUP is refused; the result reports if "
+"the delete left a downstream feature in error. DESTRUCTIVE - undo in Fusion if unintended."
 )
 
 tool = (
     Tool.create_simple(name="design_delete_feature", description=_DESC)
     .add_input_property("feature", {"type": "string",
             "description": "Timeline object name to delete (from design_get(include=['timeline'])). An ambiguous "
-            "name is refused; a timeline group is refused."})
+            "name is refused - pick one instance with the 'name@index' form the error lists (e.g. 'Extrude1@4'). "
+            "A timeline group is refused."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True)

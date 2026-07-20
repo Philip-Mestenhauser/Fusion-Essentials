@@ -49,13 +49,13 @@ def _find_operation(cam, name):
     name = (name or "").strip()
     found = []
 
-    def walk(container):
-        ops = safe(lambda: container.operations)
+    def walk(parent):
+        ops = safe(lambda: parent.operations)
         for i in range(safe(lambda: ops.count, 0) or 0):
             o = safe(lambda i=i: ops.item(i))
             if o is not None:
                 found.append(o)
-        for getter in (lambda: container.folders, lambda: container.patterns):
+        for getter in (lambda: parent.folders, lambda: parent.patterns):
             coll = safe(getter)
             for i in range(safe(lambda: coll.count, 0) or 0):
                 c = safe(lambda i=i: coll.item(i))
@@ -207,13 +207,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
             units: str = "mm", generate: bool = True) -> dict:
-    """Select machining geometry on a CAM operation (+ optional heights), then optionally regenerate.
-
-    operation: op name (cam_get(include=['operations'])). selection: chain/pocket/face/silhouette/holes.
-    handles: find_geometry handles (edges for chain, faces for pocket/face/holes). is_open/reverted:
-    chain knobs. min_diameter/max_diameter: filter cylinder faces (mm) for 'holes'. top_*/bottom_*:
-    height mode+offset. generate: regenerate after (default true), gated on the async future. WRITES.
-    """
+    """See TOOL_DESCRIPTION."""
     selection = (selection or "").strip().lower()
     if selection not in _SELECTIONS:
         return error(f"selection must be one of {', '.join(_SELECTIONS)}; got '{selection}'.")

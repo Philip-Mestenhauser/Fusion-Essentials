@@ -1470,7 +1470,7 @@ def _install_target(*, handle_map=None, occurrences=(), components=(), brep_name
         def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
     comp_objs = [_Comp(n) for n in components]
     comp_coll = _CompColl([_Comp("Root")] + comp_objs)
-    # component -> its occurrences (for TargetRefList's container mapping). A component named "X"
+    # component -> its occurrences (for TargetRefList's component->occurrence mapping). A component named "X"
     # maps to the occurrence(s) in `occurrences` whose component.name == "X"; an occurrence carries a
     # .component back-pointer here so allOccurrencesByComponent can match it.
     for occ in occurrences:
@@ -1565,8 +1565,8 @@ class TestTargetRef:
 
 
 class TestTargetRefList:
-    """The CAM-setup selector: a list of bodies AND/OR container occurrences/components. A component
-    maps to its single occurrence (the CAM API wants Occurrence for a container, not the Component)."""
+    """The CAM-setup selector: a list of bodies AND/OR component occurrences/components. A component
+    maps to its single occurrence (the CAM API wants the Occurrence, not the Component)."""
 
     def test_body_handles_pass_through(self):
         b1 = FakeBRep("Body1", is_solid=True)
@@ -1575,11 +1575,11 @@ class TestTargetRefList:
         val, err = inp.TargetRefList("models").resolve(["H1", "H2"])
         assert err is None and val == [b1, b2]
 
-    def test_container_occurrence_selected_as_occurrence(self):
-        # the RFA pattern: selecting the CONTAINER occurrence, not a body inside it.
-        occ = _FakeOcc("Model Container:1", "Model Container:1")
+    def test_component_occurrence_selected_as_occurrence(self):
+        # the RFA pattern: selecting the COMPONENT occurrence, not a body inside it.
+        occ = _FakeOcc("Model Component:1", "Model Component:1")
         _install_target(occurrences=[occ])
-        val, err = inp.TargetRefList("models").resolve(["Model Container:1"])
+        val, err = inp.TargetRefList("models").resolve(["Model Component:1"])
         assert err is None and val == [occ]        # the Occurrence itself, ready for Setup.models
 
     def test_component_name_maps_to_its_occurrence(self):
@@ -1609,11 +1609,11 @@ class TestTargetRefList:
         val, err = inp.TargetRefList("models").resolve(["JawDef"])
         assert val is None and "ambiguous" in err.lower() and "fullPathName" in err
 
-    def test_mixed_body_and_container(self):
+    def test_mixed_body_and_component_occurrence(self):
         b = FakeBRep("StockBody", is_solid=True)
-        occ = _FakeOcc("Model Container:1", "Model Container:1")
+        occ = _FakeOcc("Model Component:1", "Model Component:1")
         _install_target(handle_map={"H": b}, occurrences=[occ])
-        val, err = inp.TargetRefList("models").resolve(["H", "Model Container:1"])
+        val, err = inp.TargetRefList("models").resolve(["H", "Model Component:1"])
         assert err is None and val == [b, occ]
 
     def test_empty_optional_is_empty_list(self):
@@ -1702,3 +1702,181 @@ class TestTargetRefEdgeAndConstruction:
         _install_target_ext({"H": b})
         (ent, kind), err = inp.TargetRef("t").resolve("H")
         assert err is None and kind == "body" and ent is b
+
+
+# ── JointOriginRef: a Joint Origin by handle OR name (bare/qualified), ambiguity refused ─────────────
+#
+# The resolve-one leaf of the JOINT-ORIGIN SEAM. It composes the shared _joints JO walk: a bare name is
+# unique-or-refused, a qualified '<occ>:<JO name>' proxies into that occurrence, and a handle round-trips
+# a JointOrigin entityToken. Non-unique JO names (two components sharing one) MUST refuse with the
+# qualified candidates - the house rule OccurrenceRef enforces for the occurrence name space.
+
+class _JOColl:
+    """A JointOrigins collection: count/item (the shared walk) + itemByName (scoped lookups)."""
+    def __init__(self, jos):
+        self._jos = list(jos)
+
+    @property
+    def count(self):
+        return len(self._jos)
+
+    def item(self, i):
+        return self._jos[i]
+
+    def itemByName(self, name):
+        return next((j for j in self._jos if j.name == name), None)
+
+
+class _JO:
+    """A JointOrigin fake: name + a createForAssemblyContext that returns a DISTINCT proxy tagged with
+    its occurrence, so a test can tell a proxy apart from the native and confirm the right occurrence."""
+    def __init__(self, name, token=None):
+        self.name = name
+        self.entityToken = token
+
+    def createForAssemblyContext(self, occ):
+        p = _JO(self.name)
+        p.native = self
+        p.context = occ
+        return p
+
+
+class _Comp:
+    def __init__(self, name, jos=()):
+        self.name = name
+        self.jointOrigins = _JOColl(jos)
+
+
+class _OccJO:
+    def __init__(self, full, comp):
+        self.fullPathName = full
+        self.name = full
+        self.component = comp
+
+
+class _RootJO(_Comp):
+    def __init__(self, name="Root", jos=(), occ_by_comp=None):
+        super().__init__(name, jos)
+        self._occ_by_comp = occ_by_comp or {}
+
+    def allOccurrencesByComponent(self, comp):
+        return self._occ_by_comp.get(getattr(comp, "name", None), [])
+
+    @property
+    def allOccurrences(self):
+        return [o for lst in self._occ_by_comp.values() for o in lst]
+
+
+class _DesignJO:
+    def __init__(self, root, subs=(), token_map=None):
+        self.rootComponent = root
+        self._subs = list(subs)
+        self._tokens = token_map or {}
+
+    @property
+    def allComponents(self):
+        # like the live API: the root appears here too (as a proxy), so the walk must de-dup it.
+        return [self.rootComponent] + self._subs
+
+    def findEntityByToken(self, token):
+        e = self._tokens.get(token)
+        return [e] if e is not None else []
+
+
+def _install_jo(design):
+    """Point the _inputs design seam at `design` and make adsk.fusion.JointOrigin a real type so
+    is_joint_origin() works. JointOriginRef fetches design via _inputs._common.design() then passes it
+    explicitly to the _joints walk / _resolve_occurrence, so ONE seam covers it. Returns the ref."""
+    import adsk.fusion
+    adsk.fusion.JointOrigin = _JO
+    inp._common.design = lambda: design
+    return inp.JointOriginRef("jo")
+
+
+class TestJointOriginRef:
+    def test_bare_unique_root_name_resolves(self):
+        target = _JO("Stock_Center")
+        design = _DesignJO(_RootJO(jos=[target]))
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Stock_Center")
+        assert err is None and jo is target
+
+    def test_miss_lists_available_names(self):
+        design = _DesignJO(_RootJO(jos=[_JO("Stock_Center"), _JO("Vise_Center")]))
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Nope")
+        assert jo is None
+        assert "no Joint Origin named 'Nope'" in err
+        assert "Stock_Center" in err and "Vise_Center" in err        # self-correction data
+
+    def test_ambiguous_bare_name_is_refused_with_qualified_candidates(self):
+        # two sub-components each carry 'Center' -> a bare 'Center' must REFUSE, listing the qualified
+        # '<occ>:Center' forms - never silently grab the first (the non-unique-name-space house rule).
+        a, b = _Comp("A", [_JO("Center")]), _Comp("B", [_JO("Center")])
+        occ_a, occ_b = _OccJO("A:1", a), _OccJO("B:1", b)
+        root = _RootJO(jos=[], occ_by_comp={"A": [occ_a], "B": [occ_b]})
+        design = _DesignJO(root, subs=[a, b])
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Center")
+        assert jo is None
+        assert "ambiguous" in err.lower()
+        assert "A:1:Center" in err and "B:1:Center" in err
+
+    def test_qualified_name_proxies_into_the_named_occurrence(self):
+        native = _JO("Center")
+        sub = _Comp("Tower", [native])
+        occ = _OccJO("Tower:1", sub)
+        root = _RootJO(jos=[], occ_by_comp={"Tower": [occ]})
+        design = _DesignJO(root, subs=[sub])
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Tower:1:Center")
+        assert err is None
+        assert getattr(jo, "native", None) is native      # a PROXY, not the native
+        assert jo.context is occ                            # proxied into the RIGHT occurrence
+
+    def test_bare_name_on_single_instance_subcomponent_is_proxied(self):
+        # a UNIQUE bare name whose owning component has ONE occurrence resolves - proxied into it.
+        native = _JO("Stock_Center")
+        sub = _Comp("Stock", [native])
+        occ = _OccJO("Stock:1", sub)
+        root = _RootJO(jos=[], occ_by_comp={"Stock": [occ]})
+        design = _DesignJO(root, subs=[sub])
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Stock_Center")
+        assert err is None and getattr(jo, "native", None) is native and jo.context is occ
+
+    def test_multi_instance_subcomponent_bare_name_is_refused(self):
+        # a unique NAME but the owning component is instanced twice -> which instance's frame? Refuse.
+        native = _JO("Grip")
+        sub = _Comp("Jaw", [native])
+        occ1, occ2 = _OccJO("Jaw:1", sub), _OccJO("Jaw:2", sub)
+        root = _RootJO(jos=[], occ_by_comp={"Jaw": [occ1, occ2]})
+        design = _DesignJO(root, subs=[sub])
+        ref = _install_jo(design)
+        jo, err = ref.resolve("Grip")
+        assert jo is None and "instanced 2 times" in err
+
+    def test_handle_resolves_to_the_joint_origin(self):
+        target = _JO("Stock_Center", token="JO_TOKEN")
+        design = _DesignJO(_RootJO(jos=[target]), token_map={"JO_TOKEN": target})
+        ref = _install_jo(design)
+        jo, err = ref.resolve("JO_TOKEN")
+        assert err is None and jo is target
+
+    def test_handle_pointing_at_non_jo_is_rejected(self):
+        face = FakePlanarFace()
+        design = _DesignJO(_RootJO(jos=[]), token_map={"FACE_TOKEN": face})
+        ref = _install_jo(design)
+        jo, err = ref.resolve("FACE_TOKEN")
+        assert jo is None and "not a Joint Origin" in err
+
+    def test_walk_finds_a_subcomponent_jo_the_root_walk_would_miss(self):
+        # the consolidation regression: a JO living ONLY in a sub-component must be found (a root-only
+        # walk under-reports). find_joint_origins_by_name is the resolve-one leaf over all_joint_origins.
+        native = _JO("Deep_Frame")
+        sub = _Comp("Inner", [native])
+        root = _RootJO(jos=[], occ_by_comp={"Inner": [_OccJO("Inner:1", sub)]})
+        design = _DesignJO(root, subs=[sub])
+        _install_jo(design)
+        matches = inp._joints.find_joint_origins_by_name(design, "Deep_Frame")
+        assert len(matches) == 1 and matches[0][0] is native and matches[0][1] is sub

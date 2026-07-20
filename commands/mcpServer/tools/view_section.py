@@ -4,7 +4,7 @@
 """MCP building block: cut the model with a section plane so the agent can see INSIDE.
 
 view_section(action=cut|list|clear) creates/lists/removes a non-destructive Section Analysis (Inspect >
-Section Analysis) and auto-aims the camera at the exposed cut face. Pair with view_inspect
+Section Analysis) and auto-aims the camera at the exposed cut face. Pair with view_set
 (orient/isolate) and view_screenshot.
 """
 
@@ -78,7 +78,7 @@ def _aim_at_cut(normal, flipped):
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
             units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
-    """Cut the model with a section plane to see inside. Non-destructive."""
+    """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
@@ -197,9 +197,9 @@ TOOL_DESCRIPTION = (
     "'plane' OR by 'through' (an occurrence, cut through its center). NON-DESTRUCTIVE: a cutaway view, "
     "not a geometry edit; 'clear' fully undoes it. Camera is auto-aimed at the exposed cut face by "
     "default (auto_view=false keeps your camera) - otherwise it may sit on the solid side where the "
-    "model looks uncut. Pair with view_inspect "
+    "model looks uncut. Pair with view_set "
     "(orient/isolate) and view_screenshot. Typical: view_section(cut, through='<OccurrenceName>:1', "
-    "plane='front') -> view_inspect(orient, orientation='front') -> view_screenshot -> "
+    "plane='front') -> view_set(orient, orientation='front') -> view_screenshot -> "
     "view_section(clear)."
 )
 

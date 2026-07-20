@@ -43,7 +43,7 @@ def _param_summary(p) -> dict:
 
 
 def handler(name: str = "", include_model_parameters: bool = False) -> dict:
-    """Return design parameters (user only by default; see 'name' / include_model_parameters)."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design (open a document with design geometry).")

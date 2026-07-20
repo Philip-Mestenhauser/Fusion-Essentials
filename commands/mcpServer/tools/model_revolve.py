@@ -73,7 +73,7 @@ def _axis_entity(comp, sketch, axis):
 def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             angle_deg: float = 360.0, operation: str = "new", symmetric: bool = False,
             second_angle_deg: float = 0.0) -> dict:
-    """Revolve a sketch profile about an axis into a solid."""
+    """See TOOL_DESCRIPTION."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _common.OPERATIONS:
         return error(f"Unknown operation '{operation}'. Use: new, join, cut, intersect.")
@@ -181,17 +181,16 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
 
 
 TOOL_DESCRIPTION = (
-"Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part: shaft, "
-"piston, pulley, bottle). The companion to model_extrude. 'sketch_name' selects the sketch "
-"(omit = most recent); 'profile_index' picks the region (0-based index, OR a profile 'handle' from "
-"sketch_get to target one region of a multi-profile sketch). 'axis' is x | y | z "
-"(the component origin axis), a straight-edge 'handle' from find_geometry, OR 'line:<index>' to "
-"revolve about a straight line you drew in the sketch. 'angle_deg' is the sweep (360 = full "
-"revolve). 'operation': new | join | cut | "
-"intersect. 'symmetric' splits the angle both ways about the profile plane. The feature and its "
-"body land in the component OWNING the sketch (not the active component); the result reports it "
-"as 'component'. WRITES; returns the "
-"resulting body names."
+"Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part). The companion "
+"to model_extrude. 'sketch_name' selects the sketch "
+"(omit = most recent); 'profile_index' picks the region (0-based index, OR a sketch_get profile "
+"'handle' for a multi-profile sketch). 'axis' is x|y|z "
+"(component origin), a find_geometry straight-edge 'handle', OR 'line:<index>' for a sketch line. "
+"The profile must NOT CROSS the axis - a full-width section self-intersects and is refused; sketch "
+"one half and revolve that. 'angle_deg' is "
+"the sweep (360 = full revolve). 'operation': new | join | cut | "
+"intersect. 'symmetric' splits the angle both ways. The feature/body land in "
+"the sketch's OWNING component (reported as 'component'). WRITES; returns body names."
 )
 
 revolve_tool = (

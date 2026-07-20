@@ -1,4 +1,4 @@
-"""Unit tests for ``assembly_probe.py`` — structured kinematic state of an assembly.
+"""Unit tests for ``assembly_get.py`` — structured kinematic state of an assembly.
 
 This is the read tool that lets the agent reason about grounding/position/joint-wiring from NUMBERS
 instead of a cluttered screenshot. Pinned: units scaling on positions, the joint-type -> friendly +
@@ -7,10 +7,11 @@ occurrence<->joint cross-index.
 """
 
 import json
+from types import SimpleNamespace
 
 from conftest import load_tool
 
-ap = load_tool("assembly_probe")
+ap = load_tool("assembly_get")
 
 
 class _Pt:
@@ -95,13 +96,15 @@ class FakeRoot:
 
 
 class FakeDesign:
-    def __init__(self, occs, joints, timeline=None, root_bodies=(), asbuilt=()):
+    def __init__(self, occs, joints, timeline=None, root_bodies=(), asbuilt=(), marker=None):
         self.rootComponent = FakeRoot(occs, joints, root_bodies, asbuilt)
         self.timeline = _Coll(timeline or [])
+        if marker is not None:                 # marker < count = a rolled-back timeline
+            self.timeline.markerPosition = marker
 
 
-def _install(occs, joints, timeline=None, root_bodies=(), asbuilt=()):
-    design = FakeDesign(occs, joints, timeline, root_bodies, asbuilt)
+def _install(occs, joints, timeline=None, root_bodies=(), asbuilt=(), marker=None):
+    design = FakeDesign(occs, joints, timeline, root_bodies, asbuilt, marker)
     ap.app = type("A", (), {"activeProduct": design})()
     ap._common.app = ap.app
     import adsk.fusion
@@ -118,6 +121,28 @@ class TestGuards:
         _install([], [])
         res = ap.handler(units="furlong")
         assert res["isError"] is True and "Unknown units" in res["message"]
+
+
+class TestRolledBackTimeline:
+    """A rolled-back marker (markerPosition < count) means features after it - downstream joints
+    included - are reverted to home while still reading healthy; assembly_get must surface that and
+    NOT report is_healthy over an incomplete model. (The state a non-restoring joint_edit once left.)"""
+
+    def test_rolled_back_marker_is_incomplete_and_unhealthy(self):
+        _install([FakeOcc("A:1", "A")],
+                 [FakeJoint("J1", 1, "A:1", "B:1")],
+                 timeline=[FakeTimelineObj("J1", 0), FakeTimelineObj("Pattern1", 0)], marker=1)
+        out = _payload(ap.handler())
+        assert out["timeline_rolled_back"] is True
+        assert out["is_healthy"] is False              # would be True without the rolled-back guard
+        assert "ROLLED BACK" in out["note"]
+
+    def test_marker_at_end_is_not_rolled_back(self):
+        _install([FakeOcc("A:1", "A")], [FakeJoint("J1", 1, "A:1", "B:1")],
+                 timeline=[FakeTimelineObj("J1", 0)], marker=1)
+        out = _payload(ap.handler())
+        assert out["timeline_rolled_back"] is False
+        assert out["is_healthy"] is True
 
 
 class TestProbe:
@@ -400,3 +425,157 @@ class TestCaps:
         out = _payload(ap.handler())
         assert out["occurrences_truncated"] is False
         assert out["joints_truncated"] is False
+
+
+# ── include=['joint_origins']: each Joint Origin as a referenceable, handle-bearing row ──────────────
+#
+# The JOINT-ORIGIN SEAM read. The default omits it (and advertises it); include= adds a row per JO
+# INSTANCE: name + qualified reference (bare, or '<occ>:<name>'), owning component, world position +
+# frame axes, the joints that CONSUME it, and a handle. A sub-component JO is reported per occurrence.
+
+class _JOPt:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+
+class _SliceJO:
+    def __init__(self, name, pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 0.0), token=None):
+        self.name = name
+        self.geometry = SimpleNamespace(origin=_JOPt(*pos))   # the BASE anchor point (cm)
+        self.primaryAxisVector = _JOPt(0.0, 0.0, 1.0)     # Z
+        self.secondaryAxisVector = _JOPt(1.0, 0.0, 0.0)   # X
+        self.thirdAxisVector = _JOPt(0.0, 1.0, 0.0)       # Y
+        # offsetX/Y/Z ModelParameters (cm) - a coordinate-anchored JO carries its position here.
+        self.offsetX = SimpleNamespace(value=offsets[0])
+        self.offsetY = SimpleNamespace(value=offsets[1])
+        self.offsetZ = SimpleNamespace(value=offsets[2])
+        self.entityToken = token
+        self._pos, self._offsets = pos, offsets
+
+    def createForAssemblyContext(self, occ):
+        p = _SliceJO(self.name, pos=self._pos, offsets=self._offsets, token=self.entityToken)
+        p.context = occ
+        return p
+
+
+class _SliceComp:
+    def __init__(self, name, jos=()):
+        self.name = name
+        self.jointOrigins = _Coll(list(jos))
+
+
+class _SliceOcc:
+    def __init__(self, full, comp):
+        self.fullPathName = full
+        self.name = full
+        self.component = comp
+
+
+class _SliceJoint:
+    """A joint whose geometryOrOriginOne/Two may reference a JointOrigin (drives consumed_by)."""
+    def __init__(self, name, origin_one=None, origin_two=None):
+        self.name = name
+        self.geometryOrOriginOne = origin_one
+        self.geometryOrOriginTwo = origin_two
+        self.entityToken = "J:" + name
+
+
+class _SliceRoot:
+    def __init__(self, name="Root", jos=(), joints=(), occ_by_comp=None):
+        self.name = name
+        self.jointOrigins = _Coll(list(jos))
+        self.joints = _Coll(list(joints))
+        self.asBuiltJoints = _Coll([])
+        self._occ_by_comp = occ_by_comp or {}
+
+    def allOccurrencesByComponent(self, comp):
+        return self._occ_by_comp.get(getattr(comp, "name", None), [])
+
+    @property
+    def allOccurrences(self):
+        return [o for lst in self._occ_by_comp.values() for o in lst]
+
+
+class _SliceDesign:
+    def __init__(self, root, subs=()):
+        self.rootComponent = root
+        self._subs = list(subs)
+
+    @property
+    def allComponents(self):
+        return [self.rootComponent] + self._subs
+
+
+def _install_slice(design):
+    import adsk.fusion
+    adsk.fusion.JointOrigin = _SliceJO
+    ap.app = type("A", (), {"activeProduct": design})()
+    ap._common.app = ap.app
+    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _SliceDesign) else None
+
+
+class TestJointOriginsSlice:
+    def test_default_omits_slice_and_advertises_it(self):
+        _install_slice(_SliceDesign(_SliceRoot(jos=[_SliceJO("Stock_Center", token="T")])))
+        out = _payload(ap.handler())                       # no include
+        assert "joint_origins" not in out
+        assert "include=['joint_origins']" in out["note"]  # a flag is invisible unless advertised
+
+    def test_unknown_include_errors(self):
+        _install_slice(_SliceDesign(_SliceRoot()))
+        res = ap.handler(include=["bogus"])
+        assert res["isError"] is True and "bogus" in res["message"]
+
+    def test_root_jo_row_has_handle_position_axes_and_bare_name(self):
+        jo = _SliceJO("Stock_Center", pos=(0.0, 0.0, 4.5), token="JO_TOKEN")
+        _install_slice(_SliceDesign(_SliceRoot(jos=[jo])))
+        out = _payload(ap.handler(include=["joint_origins"], units="mm"))
+        rows = out["joint_origins"]
+        assert len(rows) == 1 and out["joint_origin_count"] == 1
+        r = rows[0]
+        assert r["name"] == "Stock_Center" and r["qualified_name"] == "Stock_Center"  # bare on root
+        assert r["world_position"] == [0.0, 0.0, 45.0]     # 4.5 cm -> 45 mm
+        assert r["frame"]["z_axis"] == [0.0, 0.0, 1.0] and r["frame"]["x_axis"] == [1.0, 0.0, 0.0]
+        assert r["handle"] == "JO_TOKEN"
+
+    def test_coordinate_jo_world_position_adds_offsets_to_the_base(self):
+        # a coordinate-anchored JO holds its position in offsetX/Y/Z (geometry.origin stays at the base,
+        # e.g. the model origin). world_position must ADD the offsets along the frame axes - reading
+        # geometry.origin alone reports the base (the live bug this closes: a +45mm-Z JO read [0,0,0]).
+        jo = _SliceJO("Stock_Center", pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 4.5), token="T")
+        _install_slice(_SliceDesign(_SliceRoot(jos=[jo])))
+        r = _payload(ap.handler(include=["joint_origins"], units="mm"))["joint_origins"][0]
+        assert r["world_position"] == [0.0, 0.0, 45.0]     # base (0,0,0) + offsetZ 4.5cm along +Z
+
+    def test_consumed_by_names_the_joints_that_reference_the_jo(self):
+        # the grip joint names the JO via geometryOrOriginOne -> consumed_by lists it.
+        stock = _SliceJO("Stock_Center", token="S")
+        vise = _SliceJO("Vise_Center", token="V")
+        grip = _SliceJoint("Stock_Gripped_By_Vise", origin_one=stock, origin_two=vise)
+        _install_slice(_SliceDesign(_SliceRoot(jos=[stock, vise], joints=[grip])))
+        rows = {r["name"]: r for r in _payload(ap.handler(include=["joint_origins"]))["joint_origins"]}
+        assert rows["Stock_Center"]["consumed_by"] == ["Stock_Gripped_By_Vise"]
+        assert rows["Vise_Center"]["consumed_by"] == ["Stock_Gripped_By_Vise"]
+
+    def test_unconsumed_jo_has_empty_consumed_by(self):
+        _install_slice(_SliceDesign(_SliceRoot(jos=[_SliceJO("Lonely", token="L")])))
+        r = _payload(ap.handler(include=["joint_origins"]))["joint_origins"][0]
+        assert r["consumed_by"] == []
+
+    def test_subcomponent_jo_reported_per_occurrence_with_qualified_name(self):
+        native = _SliceJO("Center", pos=(1.0, 0.0, 0.0), token="C")
+        sub = _SliceComp("Tower", jos=[native])
+        occ = _SliceOcc("Tower:1", sub)
+        root = _SliceRoot(jos=[], occ_by_comp={"Tower": [occ]})
+        _install_slice(_SliceDesign(root, subs=[sub]))
+        rows = _payload(ap.handler(include=["joint_origins"]))["joint_origins"]
+        assert len(rows) == 1
+        assert rows[0]["qualified_name"] == "Tower:1:Center"     # the resolver-accepted form
+        assert rows[0]["component"] == "Tower"
+
+    def test_joint_origins_cap_and_truncated(self):
+        jos = [_SliceJO(f"JO{i}", token=f"T{i}") for i in range(5)]
+        _install_slice(_SliceDesign(_SliceRoot(jos=jos)))
+        out = _payload(ap.handler(include=["joint_origins"], max_joint_origins=3))
+        assert len(out["joint_origins"]) == 3
+        assert out["joint_origin_count"] == 5 and out["joint_origins_truncated"] is True

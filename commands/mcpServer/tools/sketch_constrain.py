@@ -39,7 +39,7 @@ _CONSTRAINTS = {
 
 def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
             entity_two: str = "", symmetry_line: str = "") -> dict:
-    """Apply a geometric constraint to sketch entities (referenced '<type>:<index>')."""
+    """See TOOL_DESCRIPTION."""
     cname = (constraint or "").strip().lower()
     if cname not in _CONSTRAINTS:
         return error(f"Unknown constraint '{constraint}'. Valid: {', '.join(_CONSTRAINTS)}.")

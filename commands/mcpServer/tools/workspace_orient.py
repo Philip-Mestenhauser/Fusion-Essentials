@@ -65,19 +65,6 @@ def _design_mode(design):
     return _inputs.current_design_type(design)
 
 
-def _design_wide_counts(design):
-    """(bodies, sketches) summed across every component (root + sub-components) via the shared
-    _common.all_components walk. bRepBodies/sketches are per-COMPONENT collections: reading them off
-    the root alone reports only root-component geometry, so a design whose bodies/sketches live in
-    sub-components (the normal multi-part workflow) under-reports - a sketch-only-in-sub-components doc
-    reads sketches:0. all_components enumerates the DESIGN's components (Component has no such walk)."""
-    bodies = sketches = 0
-    for comp in _common.all_components(design):
-        bodies += safe(lambda c=comp: c.bRepBodies.count, 0) or 0
-        sketches += safe(lambda c=comp: c.sketches.count, 0) or 0
-    return bodies, sketches
-
-
 def _data_identity(doc):
     """WHERE the active document lives in the data model: its lineage URN + version + web URL, and the
     hub / project / folder that contain it - so an orienting agent knows its place in the data model
@@ -205,13 +192,16 @@ def _selection_echo():
 
 
 def _timeline_rollup(design):
-    """(errors, warnings, suppressed, total) feature COUNTS from the parametric timeline (2 error /
-    1 warning / 3 suppressed) - the orientation rollup. Distinct from _common.timeline_health,
-    which returns feature NAMES for the before/after edit guard. Empty errors == nothing broken."""
-    errors = warnings = suppressed = total = 0
+    """(errors, warnings, suppressed, markers, total) feature COUNTS from the parametric timeline
+    (2 error / 1 warning / 3 suppressed) - the orientation rollup. A null/other healthState is a
+    non-computing MARKER (a Snapshot has no health state - it reads null, neither healthy nor error);
+    counted DISTINCTLY so it is not silently folded into an implied 'healthy' (the total reconciles as
+    errors+warnings+suppressed+markers+healthy). Distinct from _common.timeline_health, which returns
+    feature NAMES for the before/after edit guard. Empty errors == nothing broken."""
+    errors = warnings = suppressed = markers = total = 0
     tl = safe(lambda: design.timeline)
     if tl is None:
-        return errors, warnings, suppressed, total      # direct-mode designs have no timeline
+        return errors, warnings, suppressed, markers, total   # direct-mode designs have no timeline
     for i in range(safe(lambda: tl.count, 0) or 0):
         total += 1
         hs = safe(lambda i=i: tl.item(i).healthState)
@@ -221,7 +211,9 @@ def _timeline_rollup(design):
             warnings += 1
         elif hs == 3:
             suppressed += 1
-    return errors, warnings, suppressed, total
+        elif hs != 0:                                          # null/unknown health -> a Snapshot-like marker
+            markers += 1
+    return errors, warnings, suppressed, markers, total
 
 
 def _joint_rollup(design):
@@ -229,7 +221,7 @@ def _joint_rollup(design):
     sub-component, joints AND asBuiltJoints) - a root-only count would hide a broken sub-component or
     as-built joint. A joint is BROKEN only when it failed to COMPUTE: healthState 1 (warning) or 2
     (error). healthState 3 (SUPPRESSED) is intentional - the author parked it (e.g. an alternate joint
-    in a fixture template) - so it is NOT broken. Same signal assembly_probe surfaces, rolled to a
+    in a fixture template) - so it is NOT broken. Same signal assembly_get surfaces, rolled to a
     count + names here."""
     broken = []
     joints = _joints.all_joints(design)
@@ -318,7 +310,7 @@ def _cam_summary(doc):
 
 
 def handler() -> dict:
-    """Cold-boot orientation: one read that situates the agent in the open document. Read-only."""
+    """See TOOL_DESCRIPTION."""
     out = {
     "fusion_version": safe(lambda: app.version),
     "document": None,
@@ -371,10 +363,12 @@ def handler() -> dict:
     # Bodies and sketches are design-wide (every component, not just root): a sub-component's sketch or
     # body must count, or a multi-part doc under-reports (a doc whose only sketches live in
     # sub-components reads sketches:0 from a root-only count).
-    body_total, sketch_total = _design_wide_counts(design)
+    body_total, sketch_total = _common.design_wide_counts(design)
     param_total = safe(lambda: design.userParameters.count, 0) or 0
 
-    errors, warnings, suppressed, tl_total = _timeline_rollup(design)
+    errors, warnings, suppressed, markers, tl_total = _timeline_rollup(design)
+    marker_pos, marker_count = _common.timeline_marker(design)
+    rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
     joint_count, broken_joints = _joint_rollup(design)
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root)
@@ -399,13 +393,19 @@ def handler() -> dict:
     "timeline_errors": errors,
     "timeline_warnings": warnings,
     "timeline_suppressed": suppressed,
+    # Snapshot-like markers read null health (neither healthy nor error) - counted distinctly so the
+    # total reconciles and they are not folded into an implied 'healthy'.
+    "timeline_markers": markers,
         "joint_count": joint_count,
         "broken_joints": broken_joints,
         "grounded_occurrences": grounded,
+        # A rolled-back marker means features after it are NOT in the current model (they revert to
+        # home) - the state a non-restoring in-place edit leaves behind; a health problem, surfaced.
+        "timeline_rolled_back": rolled_back,
         # Out-of-date references are a HEALTH problem - a template with stale parts shows the wrong
         # geometry - so they count against is_healthy, alongside timeline errors and broken joints.
         "out_of_date_references": out_of_date,
-        "is_healthy": (errors == 0 and not broken_joints and not out_of_date),
+        "is_healthy": (errors == 0 and not broken_joints and not out_of_date and not rolled_back),
     }
     out["references"] = {"count": xref_count, "out_of_date": out_of_date}
     out["has_cam"] = has_cam
@@ -428,7 +428,7 @@ def handler() -> dict:
         if body_total > _BIG_BODIES else
         "find_geometry(target='<part>', kind=...) to get stable handles for jointing/filleting.")
     if joint_count or grounded:
-        pointers["kinematics"] = "assembly_probe() for full per-occurrence position/ground/joint state."
+        pointers["kinematics"] = "assembly_get() for full per-occurrence position/ground/joint state."
     if param_total:
         pointers["parameters"] = (
             f"param_get() to read the {param_total} user parameter(s); param_set / param_add to change them.")
@@ -436,9 +436,15 @@ def handler() -> dict:
         pointers["selection"] = (
             f"sys_get_selection() for full detail (geometry + direction vectors + handles) on the "
             f"{sel_count} entity(ies) the user has selected - likely what they mean by 'this'.")
-    if broken_joints or errors:
-        pointers["fix_health"] = ("design_recompute() then re-orient - there are "
-                                  f"{errors} timeline error(s) and {len(broken_joints)} broken joint(s).")
+    if broken_joints or errors or rolled_back:
+        parts = []
+        if errors:
+            parts.append(f"{errors} timeline error(s)")
+        if broken_joints:
+            parts.append(f"{len(broken_joints)} broken joint(s)")
+        if rolled_back:
+            parts.append(f"a rolled-back marker ({marker_pos}/{marker_count} - features after it are reverted)")
+        pointers["fix_health"] = "design_recompute() then re-orient - " + ", ".join(parts) + "."
     if out_of_date:
         pointers["fix_references"] = (
             f"doc_update_xref() - {len(out_of_date)} external reference(s) are OUT OF DATE "
@@ -454,7 +460,7 @@ def handler() -> dict:
     # verdict. is_healthy is a conservative OR; on a deliberately-configured doc (a fixture/CAM template
     # with parked joints or pinned references) these conditions can be by design, so let the agent
     # judge whether it's a problem here.
-    if errors or broken_joints or out_of_date:
+    if errors or broken_joints or out_of_date or rolled_back:
         bits = []
         if errors:
             bits.append(f"{errors} timeline error(s)")
@@ -462,11 +468,18 @@ def handler() -> dict:
             bits.append(f"{len(broken_joints)} joint(s) failed to compute")
         if out_of_date:
             bits.append(f"{len(out_of_date)} out-of-date reference(s)")
+        if rolled_back:
+            bits.append(f"timeline rolled back to {marker_pos}/{marker_count} (features after the marker are reverted)")
         verdict = (f"Attention ({', '.join(bits)}) - see health + the fix_* pointer(s). These CAN be "
-                   "intentional on a fixture/CAM template (parked alternates, pinned refs); confirm "
-                   "before treating as broken. ")
+                   "intentional on a fixture/CAM template (parked alternates, pinned refs) or a "
+                   "deliberate mid-history roll; confirm before treating as broken. ")
     else:
         verdict = "No compute errors, failed joints, or stale references. "
+    # Warnings are surfaced DISTINCTLY (never folded into a clean 'all good') - a timeline warning is
+    # real and shows in the UI, but is softer than an error, so it is stated, not counted as unhealthy.
+    if warnings:
+        verdict += (f"{warnings} timeline WARNING(s) present (not errors) - "
+                    "design_get(include=['timeline']) lists which. ")
     out["note"] = (
         verdict +
         "Use 'pointers' to drill down with scoped calls instead of whole-design dumps."
@@ -484,7 +497,7 @@ TOOL_DESCRIPTION = (
     "URN), overall bounding box, camera state, current selection, content counts + a depth-1 browser "
     "digest, a health rollup (timeline errors, broken joints, out-of-date references -> is_healthy), CAM "
     "presence, and a 'pointers' block naming the targeted tool to refine each area (design_get(include=['tree']), "
-    "find_geometry, assembly_probe, cam_get). Orient here, then drill down with those scoped calls."
+    "find_geometry, assembly_get, cam_get). Orient here, then drill down with those scoped calls."
 )
 
 tool = Tool.create_simple(name="workspace_orient", description=TOOL_DESCRIPTION).strict_schema()

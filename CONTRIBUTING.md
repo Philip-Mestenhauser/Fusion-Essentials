@@ -23,7 +23,7 @@ a tool — they are what make an agent able to drive Fusion *deterministically*,
 blind spots.
 
 - **Tools are building blocks; skills compose them.** A tool is one verb (`model_extrude`,
-  `assembly_probe`). A *skill* (`.claude/skills/`) is a markdown procedure that chains tools into a
+  `assembly_get`). A *skill* (`.claude/skills/`) is a markdown procedure that chains tools into a
   repeatable workflow — the sentence built from the verbs. Reliability comes from each step being a
   tested tool with its own guards, not from a brittle macro. If a workflow needs a capability no tool
   provides, that is the signal to **add a tool**, not to hand-roll `sys_execute_script` inside a skill.
@@ -32,19 +32,19 @@ blind spots.
   and reading an entire large design does not scale. So the posture is: one cheap broad read first
   (`workspace_orient` — what's open, its health, whether CAM exists, the major pieces, and *pointers* to
   the right narrow tool), then scoped refinement on demand (`design_get` scoped to a component,
-  `find_geometry(target=…)`, `assembly_probe`). A new read tool should fit this shape: cheap and broad,
+  `find_geometry(target=…)`, `assembly_get`). A new read tool should fit this shape: cheap and broad,
   or scoped and deep — and say which.
 
 - **Geometry-as-values.** An agent has no eyes, so selecting geometry by a magic snap-string is
   ambiguous the moment a part has two cylinders. Instead, `find_geometry` returns each face/edge/vertex
   as a stable `entityToken` *handle* (filterable by radius/proximity — numbers, not pixels), and
   consumers take that handle via the `GeometryHandle` input kind. Geometry becomes a first-class **value
-  that flows between calls** rather than tribal knowledge re-derived each time. `assembly_probe` is the
+  that flows between calls** rather than tribal knowledge re-derived each time. `assembly_get` is the
   same idea for kinematic state (positions/grounding/joints as JSON, not a cluttered render).
 
 - **Return the IDs the next call needs — unprompted.** A tool that creates or identifies something
   should put its stable id in the result even when not asked: `find_geometry` returns a handle,
-  `doc_get` a data-model URN, `assembly_probe` exact occurrence names, `model_inspect`
+  `doc_get` a data-model URN, `assembly_get` exact occurrence names, `model_inspect`
   measured extents. This is what makes a chain deterministic — the next target is an id the previous step
   *minted*, not a name the agent hopes resolves.
 

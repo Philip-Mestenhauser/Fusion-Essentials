@@ -311,38 +311,15 @@ def _status_future(entry: dict, key: str, include_operations: bool, pump_seconds
 
 
 def _op_tally(ops) -> dict:
-    """Walk a list of operations into a live_readiness-shaped tally, scoped to just these ops. An
-    ERRORED op is its OWN bucket (parameter/geometry fault - it will NEVER finish generating, so
-    counting it as out_of_date/generating would make a poller wait forever)."""
-    valid = ood = errored = generating = suppressed = total = 0
-    active = None
-    op_sample = None
-    for op in (ops or []):
-        o = adsk.cam.Operation.cast(op)
-        if not o:
-            continue
-        total += 1
-        if safe(lambda o=o: o.hasError, False):
-            errored += 1
-            if op_sample is None:
-                op_sample = {"name": safe(lambda o=o: o.name),
-                             "error": _cam_common.first_error_line(o)}
-            continue
-        st = safe(lambda o=o: o.operationState)
-        if st == 0:
-            valid += 1
-        elif st == 2:
-            suppressed += 1
-        elif st in (1, 3):
-            ood += 1
-        if safe(lambda o=o: o.isGenerating, False):
-            generating += 1
-            if active is None:
-                active = {"op": safe(lambda o=o: o.name)}
-    return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
-            "suppressed": suppressed, "total": total, "active": active,
-            "setups_errored": 0, "programs_errored": 0,
-            "samples": {"op": op_sample, "setup": None, "program": None}}
+    """A live_readiness-shaped tally scoped to just these ops, via the shared _cam_common.op_state_tally
+    (the ONE per-op walk live_readiness's whole-document scan also uses) - this scoped poll just adds
+    the setups_errored/programs_errored/samples shape a document-level poll carries (always 0/None
+    here: a single setup/operation target has no setup- or program-level error of its own to report)."""
+    t = _cam_common.op_state_tally(ops)
+    return {"valid": t["valid"], "out_of_date": t["out_of_date"], "errored": t["errored"],
+            "generating": t["generating"], "suppressed": t["suppressed"], "total": t["total"],
+            "active": t["active"], "setups_errored": 0, "programs_errored": 0,
+            "samples": {"op": t["op_sample"], "setup": None, "program": None}}
 
 
 def _scope_readiness(t: dict) -> str:

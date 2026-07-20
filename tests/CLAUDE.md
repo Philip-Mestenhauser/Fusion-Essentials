@@ -22,7 +22,7 @@ Pick the shape that matches what you're testing:
   router's internal slice functions with `monkeypatch.setattr`; tests assert the ROUTER's
   composition (default = the orientation slice only, each `include=` adds exactly its slice, the
   note advertises the rest) — not the underlying Fusion calls, which are covered by live validation,
-  not re-mocked here.
+  not re-mocked here. `test_cam_get.py` is the same shape.
 - **A tool that needs a fuller fake object model** (bodies, occurrences, components) → copy
   **`test_model_mirror.py`**. It builds a design with conftest's shared `make_design(...)` /
   `MakeComp` / `MakeDesign` fakes and wires it into the tool module with `install(mod, design)`,
@@ -39,7 +39,9 @@ specific, plausible bug (not one per function) — the name should read like a s
 (`test_picks_largest_body_by_volume`); it ends up in `TEST_SPEC.md`. Assert on concrete values (`adsk.*`
 mocks return a truthy child `Mock` for anything unmodeled, so `assert result is not None` proves
 nothing). Cover sizes 0, 1, 2, N for anything taking a collection, and the guards (bad units, no
-active design, missing/ambiguous target) alongside the happy path.
+active design, missing/ambiguous target) alongside the happy path. If a tool reads an `adsk`
+attribute the mocks don't model yet, add it to `install_mock_adsk()` (or a `.cast` pass-through)
+once, in the harness, rather than re-mocking it per test.
 
 For each test ask: **what specific, plausible bug would this catch?** If the only answer is "the
 function was deleted," it is decoration — assert the value that would change if the logic were wrong.
@@ -88,6 +90,17 @@ A test that can't fail is decoration. After writing one, sanity-check it by temp
 code it covers (flip a comparison, change a constant) and confirming the right test goes red — then
 restore the code. Do this especially for a new guard or cap: a `truncated` flag or an ambiguity
 refusal is easy to write in a way that always passes.
+
+The harness sets `sys.dont_write_bytecode = True` for exactly this workflow: the tool loader
+spec-loads source files, and mtime-keyed `.pyc` caches can otherwise go stale when you edit-then-
+restore a tool quickly during that same break/confirm-red/restore cycle, masking the restored source.
+
+## Updating tests as behavior changes
+
+**The test changes in the same commit as the behavior it describes.** A red test after a code change
+is the suite telling you a promise changed - confirm you meant it, then update the test. Never edit a
+test purely to make it pass without understanding why it broke (refactor that changed behavior ->
+fix the code; test asserting an implementation detail -> fix the test).
 
 ## Regenerating docs
 

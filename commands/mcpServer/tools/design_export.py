@@ -253,15 +253,7 @@ def _export_dxf_face(design, dxf_face, path):
 
 def handler(format: str = "step", file_path: str = "", target: str = "",
             split_by_component: bool = False, dxf_sketch: str = "", dxf_face: str = "") -> dict:
-    """Export 'target' (body/component/occurrence, or whole design) to 'file_path' in 'format'.
-
-    split_by_component=true exports EACH top-level occurrence to its own file (one per part - what 3D
-    printing wants) into the directory 'file_path', named '<part><ext>'; 'target' is ignored in that mode.
-
-    format=dxf is a different shape: a 2D export of a SKETCH ('dxf_sketch', by name) or a planar
-    FACE's projected outline ('dxf_face', a find_geometry handle) - not a body. 'target' and
-    'split_by_component' are ignored in that mode.
-    """
+    """See TOOL_DESCRIPTION."""
     fmt, ferr = _FORMAT.resolve(format)
     if ferr:
         return error(ferr)

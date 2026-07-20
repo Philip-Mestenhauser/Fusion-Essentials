@@ -11,21 +11,21 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, expression_error
 
 app = adsk.core.Application.get()
 
 
-def _walk_operations(container, out):
+def _walk_operations(parent, out):
     """Recursively collect (name, operation) for every OPERATION under a setup/folder/pattern.
-    `.operations` only lists what's directly in the container - folder/pattern-nested operations are
+    `.operations` only lists what's directly in the parent - folder/pattern-nested operations are
     reached by recursing into `.folders` / `.patterns` (same walk cam_delete/cam_reorder use)."""
-    ops = safe(lambda: container.operations)
+    ops = safe(lambda: parent.operations)
     for i in range(safe(lambda: ops.count, 0) or 0):
         o = safe(lambda i=i: ops.item(i))
         if o is not None:
             out.append((safe(lambda o=o: o.name) or "", o))
-    for coll_getter in (lambda: container.folders, lambda: container.patterns):
+    for coll_getter in (lambda: parent.folders, lambda: parent.patterns):
         coll = safe(coll_getter)
         for i in range(safe(lambda: coll.count, 0) or 0):
             c = safe(lambda i=i: coll.item(i))
@@ -80,7 +80,7 @@ def _parse_parameters(parameters):
 
 
 def handler(operation: str = "", parameters=None) -> dict:
-    """Set named parameters on a CAM operation. parameters = {name: expression} or 'name=value,...'."""
+    """See TOOL_DESCRIPTION."""
     if not (operation or "").strip():
         return error("Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).")
 
@@ -115,6 +115,7 @@ def handler(operation: str = "", parameters=None) -> dict:
     "Read the operation's parameter names first (the tool only sets existing ones).")
 
     changed = []
+    eval_failures = []
     for name, expr in wanted.items():
         p = resolved[name]
         before = safe(lambda p=p: p.expression)
@@ -123,9 +124,28 @@ def handler(operation: str = "", parameters=None) -> dict:
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
                           f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)")
-        after = safe(lambda p=p: p.expression)
-        changed.append({"name": name, "before": before, "after": after,
-        "value": safe(lambda p=p: p.value.value)})
+        # Read the parameter BACK for its evaluation state: the platform stores an unresolvable
+        # expression silently (.expression echoes it, .value.value reads a finite 0.0) - only .error
+        # exposes it (see _cam_common.expression_error).
+        eval_err, eval_warn = expression_error(p)
+        rec = {"name": name, "before": before, "after": safe(lambda p=p: p.expression),
+               "value": safe(lambda p=p: p.value.value)}
+        if eval_warn:
+            rec["warning"] = eval_warn
+        changed.append(rec)
+        if eval_err:
+            eval_failures.append((name, str(expr), eval_err))
+
+    # A stored-but-unevaluated expression is a swallowed no-op the platform reports as success. Roll
+    # EVERY parameter set in this call back to its prior expression and fail, naming each offending
+    # value and Fusion's own reason, so the operation is left exactly as found.
+    if eval_failures:
+        for rec in changed:
+            safe(lambda rec=rec: setattr(resolved[rec["name"]], "expression", rec["before"]))
+        detail = "; ".join(f"'{n}' = '{e}' ({why})" for n, e, why in eval_failures)
+        return error(f"Operation '{operation}': expression did not evaluate - {detail}. Rolled back "
+                     f"all {len(changed)} parameter(s); no change was applied. (An operation expression "
+                     "must reference existing parameters and resolve to a value - check names and units.)")
 
     return ok({
         "edited": True,
@@ -143,9 +163,9 @@ TOOL_DESCRIPTION = (
     "can't reach. 'operation' is the operation name (see cam_get(include=['operations'])). 'parameters' is an "
     "object {name: expression} or a 'name=value, name=value' string; each expression is set on the "
     "named parameter (e.g. tool_feedCutting='3000', tool_spindleSpeed='12000', maximumStepdown='1.5', "
-    "tool_stepover='2.', tolerance='0.025'). Every named parameter must EXIST (validated before any "
-    "is applied, so a typo can't half-edit the op). After editing, the toolpath is out of date - "
-    "regenerate with cam_generate. WRITES CAM data."
+    "tool_stepover='2.', tolerance='0.025'). Every parameter must EXIST and every expression "
+    "EVALUATE (read back; a failure rolls back ALL params in the call). After editing, the toolpath "
+    "is out of date - regenerate with cam_generate. WRITES CAM data."
 )
 
 tool = (

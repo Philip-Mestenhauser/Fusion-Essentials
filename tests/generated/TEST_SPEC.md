@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 155  |  **Behaviors pinned:** 2734
+**Tools with a test file:** 159  |  **Behaviors pinned:** 3061
 
 ## `_cam_common`
 
@@ -50,6 +50,12 @@ after changing tests._
 - tool change time is 1 5 seconds
 - total seconds sums across setups
 - setup without a valid toolpath reports an error not a crash
+**ToolHolder**
+- reads full identity
+- none when no holder key
+- none when holder empty
+- partial fields only what is present
+- bad json is none not a raise
 
 ## `_data_read`
 
@@ -114,6 +120,32 @@ after changing tests._
 - failure lands in errors not files
 - empty occurrence list yields nothing
 
+## `_geom`
+
+> Unit tests for ``_geom.py`` - the direction-vector math find_geometry and sys_get_selection share: normalizing a Vector3D (``unit_vector``), the unit direction between two points (``unit_vector_between``), and a face's evaluator-sampled normal (``evaluator_normal_at``).
+
+**UnitVector**
+- normalizes to length one
+- arbitrary vector normalized
+- zero vector returns none
+- none input returns none
+- decimals controls rounding
+- already unit vector is unchanged
+**UnitVectorBetween**
+- axis aligned direction
+- diagonal direction is normalized
+- direction is independent of translation
+- same point returns none
+- none endpoints return none
+- decimals controls rounding
+**EvaluatorNormalAt**
+- returns the sampled normal
+- none point returns none
+- missing evaluator returns none
+- evaluator raising returns none
+- failed okflag returns none
+- decimals controls rounding
+
 ## `_sketch_detail`
 
 > Unit tests for ``sketch_detail.py`` — read the full structure of one sketch.
@@ -171,6 +203,10 @@ after changing tests._
 - entities at cap truncates and flags
 - constraints at cap truncates and flags
 - dimensions at cap truncates and flags
+**OffPlane3DLine**
+- off plane endpoint reports z
+- on plane line omits z
+- off plane sketch point reports z
 **UnitsScaling**
 - default mm scales positions 10x
 - units field named in overview
@@ -186,7 +222,7 @@ after changing tests._
 
 ## `_view_common`
 
-> Unit tests for ``_view_common.py`` - the shared camera-orientation table for the standard named views. view_screenshot and view_inspect must produce the SAME camera for a given named view even though they consume opposite sign conventions (view_screenshot's look_direction is the negation of view_inspect's view_direction); this pins that relationship so the two can't silently desync.
+> Unit tests for ``_view_common.py`` - the shared camera-orientation table for the standard named views. view_screenshot and view_set must produce the SAME camera for a given named view even though they consume opposite sign conventions (view_screenshot's look_direction is the negation of view_set's view_direction); this pins that relationship so the two can't silently desync.
 
 **ViewDirection**
 - known views return unit vectors
@@ -263,9 +299,61 @@ after changing tests._
 **BaseAppearanceFallback**
 - falls back to material library when design has none
 
-## `assembly_interference`
+## `assembly_get`
 
-> Unit tests for assembly_interference — the physical-fit 'check my work' tool.
+> Unit tests for ``assembly_get.py`` — structured kinematic state of an assembly.
+
+**Guards**
+- unknown units
+**RolledBackTimeline**
+- rolled back marker is incomplete and unhealthy
+- marker at end is not rolled back
+**Probe**
+- reports root bodies not just occurrences
+- no root bodies is empty and no note
+- positions scaled to display units
+- ground flags and grounded list
+- joint type and dof mapping
+- rigid and cylindrical dof
+- all motion types and dof
+- unknown motion type is question mark with null dof
+- positions scaled to cm and inch
+- occurrence joint cross index
+- include joints false skips
+- as built joints are visible
+- broken as built joint breaks health
+**Orientation**
+- identity rotation reads axis aligned basis
+- 90deg z rotation basis
+- axes omitted when coordinate system unavailable
+**Health**
+- all healthy
+- broken joint surfaced
+- suppressed joint is not broken
+- unknown rollup state is not a problem
+- stale joint health flagged when timeline is clean
+- no stale flag when timeline also shows the error
+- timeline problem surfaced
+- health message deduped
+**Caps**
+- occurrences under cap untruncated and unchanged
+- occurrences at cap truncates and flags
+- joints under cap untruncated and unchanged
+- joints at cap truncates and flags
+- default caps are generous enough for a normal model
+**JointOriginsSlice**
+- default omits slice and advertises it
+- unknown include errors
+- root jo row has handle position axes and bare name
+- coordinate jo world position adds offsets to the base
+- consumed by names the joints that reference the jo
+- unconsumed jo has empty consumed by
+- subcomponent jo reported per occurrence with qualified name
+- joint origins cap and truncated
+
+## `assembly_inspect_interference`
+
+> Unit tests for assembly_inspect_interference — the physical-fit 'check my work' tool.
 
 **OwningOccurrence**
 - prefers parent component name
@@ -322,46 +410,6 @@ after changing tests._
 - angle uses deg string not offset
 - zero offset is real zero
 
-## `assembly_probe`
-
-> Unit tests for ``assembly_probe.py`` — structured kinematic state of an assembly.
-
-**Guards**
-- unknown units
-**Probe**
-- reports root bodies not just occurrences
-- no root bodies is empty and no note
-- positions scaled to display units
-- ground flags and grounded list
-- joint type and dof mapping
-- rigid and cylindrical dof
-- all motion types and dof
-- unknown motion type is question mark with null dof
-- positions scaled to cm and inch
-- occurrence joint cross index
-- include joints false skips
-- as built joints are visible
-- broken as built joint breaks health
-**Orientation**
-- identity rotation reads axis aligned basis
-- 90deg z rotation basis
-- axes omitted when coordinate system unavailable
-**Health**
-- all healthy
-- broken joint surfaced
-- suppressed joint is not broken
-- unknown rollup state is not a problem
-- stale joint health flagged when timeline is clean
-- no stale flag when timeline also shows the error
-- timeline problem surfaced
-- health message deduped
-**Caps**
-- occurrences under cap untruncated and unchanged
-- occurrences at cap truncates and flags
-- joints under cap untruncated and unchanged
-- joints at cap truncates and flags
-- default caps are generous enough for a normal model
-
 ## `assembly_transform`
 
 > Unit tests for ``assembly_transform.py`` - occurrence ground/move + rigid group.
@@ -415,7 +463,12 @@ after changing tests._
 - soft reason marks unconfirmed not error
 - error results pass through unverified
 - capture value reaches verify
-- verify crash degrades to unconfirmed never false pass
+- hard verify crash fails closed with honest wording
+- soft verify crash stays an annotation
+- hard capture crash fails closed
+- soft capture crash stays an annotation
+- capture crash does not block the handler
+- handler error passes through even when capture crashed
 - no postconditions returns handler unwrapped
 - wrapper exposes declaration for the lint
 **VersionAdvanced**
@@ -457,6 +510,29 @@ after changing tests._
 
 **AxisVectorsShared**
 - no local world axis vector map
+- the lint bites
+
+## `banned_vocabulary`
+
+> Lint: no BANNED VOCABULARY word appears in any agent-facing wire string.
+
+**NoBannedVocabularyOnTheWire**
+- no tool description uses a banned word
+- no input description uses a banned word
+**NoBannedVocabularyInDescriptionConstants**
+- no description constant uses a banned word
+**NoBannedVocabularyInSkillFiles**
+- no skill markdown uses a banned word
+**TheLintBites**
+- it fires on a doctored string
+- the skill scan bites and the quoted phrases pass
+
+## `bespoke_fake_ratchet`
+
+> Ratchet: bespoke per-file fake classes in tests/unit/ do not grow.
+
+**BespokeFakeRatchet**
+- bespoke fake class count does not regress
 - the lint bites
 
 ## `cam_activate_setup`
@@ -603,6 +679,8 @@ after changing tests._
 - invalid value reports and does not partially apply
 - no parameters errors
 - no operation name errors
+- broken expression rolls back all params in call
+- warning on valid expression never gates
 - changed records evaluated value
 **ParseParameters**
 - string without equals errors
@@ -626,6 +704,10 @@ after changing tests._
 **Parameters**
 - sets wcs and stock params
 - parameters accept string form
+**ParameterEvaluation**
+- unevaluated expression rolls back and errors
+- rollback is all or nothing
+- valid expression still passes and surfaces warning
 **Bodies**
 - sets models
 - sets fixtures and stock
@@ -637,6 +719,14 @@ after changing tests._
 - unknown machine is error
 - assignment that does not take is error
 - machine counts as something to do
+**MachineResolver**
+- exact model beats prefix siblings
+- bare label is selectable
+- doubled vendor label is selectable
+- no exact is still ambiguous
+- same model variants select by description
+- unique prefix resolves
+- no match names the input
 **WCS**
 - binds origin to geometry and sets mode
 - binds axes for orientation
@@ -644,6 +734,12 @@ after changing tests._
 - bad wcs handle is error
 - bind that reads back empty is error
 - wcs counts as something to do
+**ResolveWcsValue**
+- joint origin is tried first
+- non jo falls back to geometry handle
+- name shaped value surfaces the jo error
+- token shaped value surfaces the handle error
+- resolve wcs routes each value through the combined resolver
 
 ## `cam_edit_tools`
 
@@ -688,6 +784,11 @@ after changing tests._
 - refuses document scope
 - requires name
 - bad seed before import
+**PresetFeedParam**
+- mill uses tool feed cutting
+- drill falls back to plunge feed
+- no known feed names what exists
+- no feed params at all
 
 ## `cam_generate`
 
@@ -1129,6 +1230,7 @@ after changing tests._
 **SaveDocumentAs**
 - reports written lineage urn
 - name collision is flagged with existing urn
+- same name refused by default
 - no collision when same name absent
 - saveas declined is an error
 - requires name and project
@@ -1164,6 +1266,7 @@ after changing tests._
 **NoUnreferencedDefinitions**
 - every module level definition is referenced somewhere
 - definition exempt table matches reality
+- the staleness check bites
 - every test file definition is referenced in its file
 
 ## `design_configure`
@@ -1216,6 +1319,11 @@ after changing tests._
 - none timeline empty
 **FindByName**
 - exact match preferred over substring
+**AtIndexForm**
+- at index targets that timeline index
+- at index out of range refused
+- at index name mismatch refused
+- handler deletes the indexed duplicate
 **Delete**
 - deletes named feature
 - substring match
@@ -1327,6 +1435,7 @@ after changing tests._
 - as built only still counts
 - counts user parameters
 - zero counts omitted
+- bodies and sketches are design wide not root only
 **ContentPointers**
 - parameters present points at param tools
 - obvious classes get no pointer
@@ -1456,6 +1565,7 @@ after changing tests._
 - modified doc flags stale urn
 **OpenList**
 - terse healthy doc collapses
+- open index on every row addresses unsaved twins
 - summary leads with unsaved exceptions
 - modified dependency doc keeps its flag
 **Guards**
@@ -1498,32 +1608,54 @@ after changing tests._
 
 ## `doc_insert_derive`
 
-> Unit tests for ``doc_insert_derive.py``: guards, the open-or-reuse-source-document bookkeeping, and the inline verify (healthState / documentReference.isOutOfDate / isDerived / parameter delta).
+> Unit tests for ``doc_insert_derive.py``: the source-open precondition, the SOURCE-side name resolvers (component/body - exact match, miss lists names, ambiguity refused), the scoping that turns names into sourceEntities, the landed read-back (derived_components + body counts, empty-landing is an error), and the inline verify (healthState / documentReference.isOutOfDate / isDerived / params).
 
 **Guards**
 - empty document id errors
 - no active design
 - direct mode refused
 - unresolvable document id
-**SourceDocumentBookkeeping**
-- opens when not already open then closes on success
-- reuses already open document and leaves it open
-- open returning nothing errors
-- source with no design product errors and closes
+**SourceOpenPrecondition**
+- source not open errors with doc open guidance
+- source open is used
+**SourceComponentResolver**
+- exact match case insensitive
+- miss lists available names
+- ambiguous name refused not first match
+- size zero returns empty
+- size two resolves both in order
+**SourceBodyResolver**
+- body by name
+- ambiguous body name refused
+- component slash body scopes to owner
+- missing body named
+**CollectSourceEntities**
+- component contributes its occurrences
+- two components both occurrences
+- naming the root derives whole design
+- component without occurrence errors
+**ReadBackWalk**
+- subtree body count sums descendants
+- new derived occurrence diff excludes preexisting
+**ScopingHandler**
+- no selector derives whole design
+- scoped components forward occurrences
+- bad scope name errors before add
+- exclude components set excluded entities
+**ReadBackHonesty**
+- nothing landed is an error
+- geometry without derived marker is an error
+- direct derived bodies reported
+- derived occurrence reported with body count
+- preexisting derived occurrence not counted
 **AddFailures**
 - null add errors not false ok
 - add raising errors
 - missing derive features collection errors
-**HealthStateVerify**
+**HealthAndReferenceVerify**
 - error health state bites
 - warning health state does not error
-**DocumentReferenceVerify**
 - out of date at creation errors
-**IsDerivedVerify**
-- no derived body or occurrence errors
-- derived body reported in payload
-- occurrence fallback when no bodies
-- preexisting occurrence not counted as newly derived
 **ParameterVerify**
 - warns when flags set and zero landed
 - no warning when both flags false
@@ -1591,6 +1723,8 @@ after changing tests._
 - document id surfaced when urn
 - saveas false return is an error
 - resolves project by id
+- same name in target folder refuses by default
+- allow duplicate name forks and keeps the collision warning
 **CopyDocument**
 - requires a source
 - requires destination project
@@ -1603,8 +1737,19 @@ after changing tests._
 - copy by name resolves source in named project
 - copy by name unknown source project errors
 - copy by name missing file lists seen
+- copy by name ambiguous source refuses with candidates
 - copy returning nothing is an error
 - rename failure surfaces warning not error
+**CopyByNameWalkBound**
+- truncated walk refuses naming budget and both escape paths
+- truncated walk lists matches found so far with urns
+- walk within budget copies normally
+- walk is breadth first shallow folders before deep
+- source folder scopes the walk under budget
+- unknown source folder lists root folders
+**CopyDocumentSchema**
+- document id is not required
+- by name source is reachable without document id
 **DeleteDocument**
 - requires document id
 - requires confirm name
@@ -1628,6 +1773,19 @@ after changing tests._
 - close returning false is now an error
 - close all partial failure reports ok with errors
 - no open documents errors
+**FolderResolveEventual**
+- retries on self contradiction
+- genuine miss is not retried
+- first read success is not retried
+- saveas recovers and notes eventual consistency
+**OpenIndexAddressing**
+- open index addresses an unsaved twin
+- open index out of range is clean miss
+- open index non integer is clean miss
+- shared name without index is still refused
+**CloseAllSkipsDeadProxies**
+- already invalid proxy is skipped not errored
+- close that invalidates is counted skipped not errored
 **NewDocument**
 - creates and reports active
 - add returning nothing is an error
@@ -1694,7 +1852,7 @@ after changing tests._
 
 ## `docstring_restatement`
 
-> Measurement: handler docstrings that merely restate the wire description.
+> Lint: a handler docstring must not merely restate the tool's wire description.
 
 **DocstringRestatement**
 - restatement count does not regress
@@ -1779,7 +1937,7 @@ after changing tests._
 - unknown joint errors
 - no edits requested errors
 **RollTo**
-- rolls before then after
+- rolls before then restores marker to end
 **Flip**
 - set flip
 - unset flip
@@ -1860,6 +2018,9 @@ after changing tests._
 **EntrySettingsKeyContract**
 - family enabled keys match gateable families exactly
 - default settings defaults every family key to true
+**GatedToolsSourcedFromSharedMap**
+- gated tool modules derived from gated tools keys
+- settings label references gated tools not a second literal
 
 ## `find_geometry`
 
@@ -1874,6 +2035,9 @@ after changing tests._
 - radius filter
 - nearest to sorts
 - every match has a handle
+- hidden body matches carry hidden true
+- visible body matches omit hidden field
+- mixed visibility flags only the hidden bodys matches
 **NestedAssembly**
 - nested occurrence resolved by full path
 - nested also reachable by local name
@@ -2097,11 +2261,11 @@ after changing tests._
 - ambiguous occurrence name errors with candidates
 **TargetRefList**
 - body handles pass through
-- container occurrence selected as occurrence
+- component occurrence selected as occurrence
 - component name maps to its occurrence
 - component with no occurrence errors
 - component with multiple occurrences refused
-- mixed body and container
+- mixed body and component occurrence
 - empty optional is empty list
 - one bad element fails whole list
 **TargetRefEdgeAndConstruction**
@@ -2110,6 +2274,16 @@ after changing tests._
 - construction axis resolves when allowed
 - construction plane resolves when allowed
 - original body kind unaffected by the extension
+**JointOriginRef**
+- bare unique root name resolves
+- miss lists available names
+- ambiguous bare name is refused with qualified candidates
+- qualified name proxies into the named occurrence
+- bare name on single instance subcomponent is proxied
+- multi instance subcomponent bare name is refused
+- handle resolves to the joint origin
+- handle pointing at non jo is rejected
+- walk finds a subcomponent jo the root walk would miss
 
 ## `joint_at_geometry`
 
@@ -2137,17 +2311,15 @@ after changing tests._
 - auto axis with no geometry axis falls back to world z
 - unknown axis keyword errors
 - circular edge is an axis entity for auto
+- reports moved by when part repositioned
+- reports moved by when the fixed side moves
+- no moved by when part stays put
 - motion setter failure reports error
 
 ## `joint_create_edit`
 
 > Unit tests for ``joint_create_edit.py`` pure logic.
 
-**FindJointOrigin**
-- empty name returns none
-- root jo returned directly
-- name is trimmed before lookup
-- not found anywhere returns none
 **ApplyMotion**
 - rigid
 - slider uses axis index
@@ -2178,12 +2350,8 @@ after changing tests._
 **ResolveInputHandle**
 - handle resolves to joint geometry at real face
 - non token falls through to jo name
+- joint origin handle used directly
 - unresolvable spec errors naming all paths
-**OccurrenceScopedJO**
-- scoped spec resolves to proxy
-- resolve input falls through to scoped jo
-- plain occurrence name is not treated as scoped
-- missing occurrence returns none
 **ResolveErrorListsJointOrigins**
 - error names each jo and owner
 - listing is capped with overflow count
@@ -2253,8 +2421,9 @@ after changing tests._
 - unknown keypoint errors
 - unknown units errors
 **HandlerCoordinateAnchor**
-- coordinates at scales by the unit factor
-- target origin ignores xyz and reports zero location
+- coordinates held in parametric offsets not a floating point
+- target origin reports zero offsets
+- mismatched offset readback errors and rolls back
 - creates joint origin and reports frame axes
 - custom name is applied to the new joint origin
 **BboxCenterGeometry**
@@ -2320,13 +2489,16 @@ after changing tests._
 **LinkCreation**
 - createInput gets two joints not a collection
 - ratio flows through setMotionData
+- slider maps to slide dof
+- rigid joint refused before any link
 - default ratio is one
 - negative ratio links reversed with magnitude
 - zero ratio rejected
 - non numeric ratio rejected
 - numeric string ratio accepted
 - ratio failure rolls back link and errors
-- bad joint dof gets actionable hint
+- setmotiondata failure reports platform refusal
+- setmotiondata false return is failure
 
 ## `joint_snaps`
 
@@ -2399,6 +2571,11 @@ after changing tests._
 - initialize with supported version echoes it
 - initialize with unsupported version responds with supported version
 - initialize with no protocol version responds with default
+**NonObjectRequestBody**
+- batch array body returns clean 32600 not a raise
+- empty array body returns clean 32600
+- non dict scalar body returns clean 32600
+- dict body is unaffected by the guard
 **ToolsCallUnknownTool**
 - unknown tool is a protocol error with code 32602
 **ToolsCallArgumentValidation**
@@ -2410,6 +2587,16 @@ after changing tests._
 - valid call with optional argument omitted succeeds
 - empty schema tool with no arguments succeeds
 - omitted arguments default to empty dict
+**ToolsCallEnumValidation**
+- out of enum value is a named error and handler not called
+- valid enum value passes through
+- array of enum prop rejects a bad element
+- array of enum prop accepts all valid elements
+- non enum property is not gated
+- tool without enums is unaffected
+- none for an optional enum prop is not rejected
+- unhashable value for an enum prop is a named error not a typeerror
+- enum specs are precomputed at registration
 **ToolsCallHandlerExceptions**
 - handler exception becomes iserror result not protocol error
 **NotificationsAndPing**
@@ -2703,6 +2890,67 @@ after changing tests._
 - point at coord works in direct
 - edge axis uses setByEdge and works in parametric
 - offset plane works in parametric
+**ModeKindValidation**
+- mode invalid for kind is refused
+- unknown mode is refused
+- two edges mode routes to the right collection per kind
+**PlaneAtAngle**
+- calls setByAngle with radians and reports normal changed
+- needs exactly one edge
+- setByAngle false is reported
+**PlaneThreePoints**
+- calls setByThreePoints
+- needs exactly three points
+- setByThreePoints false is reported
+**PlaneMidplane**
+- calls setByTwoPlanes
+- needs plane2
+**PlaneTangentAtPoint**
+- calls setByTangentAtPoint
+- rejects planar face
+- needs face
+**PlaneTwoEdges**
+- calls setByTwoEdges
+- needs exactly two edges
+**AxisCircularFace**
+- calls setByCircularFace and reports alignment
+- rejects planar face
+- accepts conical face
+- needs face
+**AxisTwoPoints**
+- calls setByTwoPoints
+- needs exactly two points
+- setByTwoPoints false is reported
+**AxisTwoPlanes**
+- calls setByTwoPlanes
+- needs plane2
+**AxisPerpendicularAtPoint**
+- calls setByPerpendicularAtPoint and reports alignment
+- needs exactly one point
+**PointCircleCenter**
+- calls setByCenter
+- rejects straight edge
+**PointTwoEdges**
+- calls setByTwoEdges
+- needs exactly two edges
+**PointThreePlanes**
+- calls setByThreePlanes
+- needs plane3
+**PointEdgePlane**
+- calls setByEdgePlane
+- needs exactly one edge
+**GeometryReadback**
+- reports geometry when available
+- missing geometry degrades to empty dict
+**OffsetExpression**
+- string expression uses createByString not scaled real
+- expression references a parameter
+- numeric string is a literal scaled via createByReal
+- unresolvable expression refused by name
+**OffsetModelParameter**
+- names the offset model parameter
+- note advertises the model parameter
+- absent when no offset parameter exists
 
 ## `model_create_component`
 
@@ -2729,6 +2977,12 @@ after changing tests._
 - hybrid intent is left alone
 - assembly intent is left alone
 - intent absent is untouched
+**NestedParent**
+- nests inside the parent not root
+- root when parent omitted is back compat
+- missing parent is refused with its value
+- nested path constructed when proxy unavailable
+- activate targets the nested proxy
 
 ## `model_draft`
 
@@ -2803,6 +3057,55 @@ after changing tests._
 - target bodies by handle
 - target bodies rejected on new
 - bad target body errors
+**ExtentGuards**
+- unknown extent value
+- to object rejected with through all
+- to object rejected with two side
+- to face without to object errors
+- to face alias behaves like to object
+**ThroughAll**
+- default direction is positive
+- negative distance picks negative direction
+- positive distance picks positive direction
+- symmetric picks symmetric direction regardless of distance sign
+- rejects taper
+- setAllExtent false is reported
+**ThroughAllVolumeCheck**
+- target bodies scoped volume removed is reported
+- solo body in component is the implied target
+- no volume change is reported as error
+- several bodies with no target bodies skips the check
+- new operation skips the check
+**TwoSide**
+- calls setTwoSidesDistanceExtent with scaled distances
+- rejects taper
+- rejects symmetric
+- needs both distances nonzero
+- setTwoSidesDistanceExtent false is reported
+**ExpressionDistance**
+- string expression uses createByString not scaled real
+- expression references a parameter
+- numeric string is a literal scaled via createByReal
+- unresolvable expression refused by name
+- two side accepts expression per side
+**ModelParameterLinkage**
+- names the distance and taper model parameters
+- two side names both side parameters
+- note advertises the model parameters
+- absent when no distance parameter exists
+**AffectedBodies**
+- reports only bodies that lost volume
+- consumed body reported with none removed
+**CrossComponentCut**
+- unscoped cut bleeding into other component warns
+- component field names where material landed not sketch owner
+- same component cut gets no warning
+- scoped cut never warns even when other component changed
+- hidden colocated body is spared so no warning
+- scoped cut to other component body lands there no warning
+**ThroughAllDirectionTeaching**
+- body not found teaches negative distance
+- generic add failure keeps the plain hint
 
 ## `model_fillet_chamfer`
 
@@ -2874,6 +3177,9 @@ after changing tests._
 **Guards**
 - unresolvable target errors
 - unknown include errors
+**BodyAabb**
+- occurrence uses boundingBox2 with body types
+- plain body falls back to boundingBox
 **NormalizeInclude**
 - comma string
 - none empty
@@ -3273,6 +3579,15 @@ after changing tests._
 **AddFavorite**
 - favorite reported from param state
 
+## `permission_posture`
+
+> Lint: the generated permission presets NEVER auto-allow a hard-to-reverse tool.
+
+**PermissionPostureNeverAutoAllowsDestructive**
+- no preset auto allows a destructive tool or the script hatch
+- the script hatch is denied in every preset
+- the check bites on a doctored allow list
+
 ## `polyline`
 
 > Unit tests for the polyline / closed_path sketch kind in sketch_core.py.
@@ -3292,6 +3607,9 @@ after changing tests._
 - every write tool declares or is exempt
 - exemptions only name real undeclared write tools
 - declared postconditions are postcondition kinds
+**InlineExemptionsActuallyReadBack**
+- every inline entry has the readback shape
+- the shape check bites
 
 ## `quoting`
 
@@ -3449,6 +3767,27 @@ after changing tests._
 **PointOf**
 - line uses start sketch point
 - point returns itself
+**ParseAnchorRef**
+- no anchor
+- valid line anchor
+- center anchor
+- unknown anchor errors
+**PointAtAnchor**
+- line end and start
+- circle center
+- circle start rejected
+- line center rejected
+- mid on line creates constrained point
+- mid on arc rejected
+**AnchorHandler**
+- end anchor uses end point
+- center anchor on circle
+- anchor rejected on radius
+- unknown anchor is error
+**NegativeDistance**
+- negative distance warns
+- positive distance no warning
+- negative radius not flagged
 **Guards**
 - unknown dim type
 - bad entity one
@@ -3578,6 +3917,8 @@ after changing tests._
 - continuity set failure surfaces as error
 - continuity tangent set on input
 - boundaries all fail reports zero patched
+- boundaries accepts composite handles without comma shredding
+- singular boundary composite handle string not shredded
 
 ## `surface_delete_face`
 
@@ -3606,6 +3947,8 @@ after changing tests._
 - keep int index keeps that cell
 - keep out of range index falls back to larger
 - bad keep falls back to larger default
+- phantom cell kept area exceeds input aborts
+- kept area within input still trims
 - no cells cancels and reports no intersection
 - cancels open transaction when add raises
 - cancels when add returns null feature
@@ -3734,6 +4077,12 @@ after changing tests._
 - note cross links to find tool
 **FamilyOf**
 - prefix split
+**GatedTools**
+- lists a gated tool with its enable path
+- enabled now reflects the live registry not a settings read
+- empty gated tools yields an empty list not a hardcoded entry
+- multiple gated tools are all listed sorted
+- gated note teaches the client side deny case
 
 ## `sys_execute_script`
 
@@ -3775,16 +4124,15 @@ after changing tests._
 - keeps a module with no file attribute
 - skips none entries without raising
 - return value counts only the purged modules
+**StaleCachedSchemaWarning**
+- description warns about stale client schema corrupting arrays
+**ReloadResponseTeachesReconnect**
+- note teaches next tool call not health polling
 
 ## `sys_selection`
 
 > Unit tests for the ``sys_selection.py`` MCP tool's pure logic.
 
-**Unit**
-- normalizes to length one
-- arbitrary vector normalized
-- zero vector returns none
-- none input returns none
 **FaceDirection**
 - planar face returns normal
 - cylindrical face returns axis
@@ -3803,6 +4151,53 @@ after changing tests._
 **SelectionCap**
 - under cap untruncated and unchanged
 - at cap truncates and flags
+**GeometryHandle**
+- face handle uses centroid and token
+- edge handle uses point on edge and token
+- vertex handle uses geometry point
+- body kind mints no handle
+- component kind mints no handle
+- missing point falls back to bare token
+**SelectionRecordHandle**
+- face selection record carries handle
+- body selection record has no handle key
+- get user selection handler output includes handle
+**OnSelectionChanged**
+- pick captures result and sets done
+- empty selection keeps waiting
+**ValidateWaitSeconds**
+- zero is valid
+- default is valid
+- max bound is valid
+- negative is rejected naming the value
+- above max is rejected naming the value
+- non numeric is rejected
+- handler surfaces the guard as an honest error
+**RequestSelectionFireAndReturn**
+- wait seconds zero behaves like legacy fire and return
+- clear current false with nothing selected still awaits
+**RequestSelectionImmediatePick**
+- already selected short circuits without waiting
+**RequestSelectionCompletedPick**
+- pick during wait returns handle and classification in one call
+**RequestSelectionTimeout**
+- timeout is an honest non error ok
+**RequestSelectionPendingGuard**
+- second request refused while one is pending
+- pending flag clears after a timeout
+**RequestSelectionExpectDocument**
+- mismatched expect document refuses without touching selection
+- ambiguous expect document name refuses with candidates
+**CallOnMainThread**
+- post failure reports an error without raising
+- marshal timeout cancels the task and reports
+- a raised exception propagates to the caller
+**NothingToSelect**
+- no open design refuses before prompting
+- empty design refuses naming the zero counts
+- empty design refuses the fire and return path too
+- sketch only design is pickable
+- pickable counts walks the design and is none without one
 
 ## `tier2_misc`
 
@@ -3910,6 +4305,8 @@ after changing tests._
 
 **UnitsAreTyped**
 - numeric input naming a unit has a units selector
+- units reporting read wires the units kind
+- the reporting lint bites
 
 ## `version`
 
@@ -3918,47 +4315,6 @@ after changing tests._
 - version is semver shaped
 - changelog top entry matches version
 - server info version comes from version module
-
-## `view_inspect`
-
-> Unit tests for ``view_inspect.py`` — the agent's view verbs.
-
-**Guards**
-- unknown action
-- no design
-**Visibility**
-- hide turns bulb off
-- isolate sets flag
-- isolate requires single match
-- ambiguous substring refused not first match
-- exact name beats substring
-- show lights ancestor chain
-- clear isolation resets all
-- unmatched target errors
-- missing target errors
-**Style**
-- wireframe sets visual style
-- unknown style errors
-**Orient**
-- unknown orientation errors
-- focus unknown occurrence errors
-- front orientation sets up vector
-- front eye placed on minus y at preserved distance
-- top orientation uses plus y up
-- focus only translates eye by target delta
-**NamedViews**
-- save view adds
-- save view overwrites same name
-- save view requires name
-- apply view moves camera
-- apply unknown view lists available
-- list views reports builtin flag
-**SnapshotRestore**
-- restore without snapshot errors
-- snapshot then restore puts bulbs back
-- restore reinstates isolation
-- restore counts missing occurrences
-- same named documents do not collide
 
 ## `view_screenshot`
 
@@ -3982,6 +4338,13 @@ after changing tests._
 - iso vectors are unit length
 - current and unknown return none
 - only the six faces force orthographic
+**KeepVisible**
+- target itself kept
+- ancestor kept
+- descendant kept
+- sibling hidden
+- string prefix is not a path boundary
+- missing path is hidden
 
 ## `view_screenshot_multi`
 
@@ -4028,6 +4391,60 @@ after changing tests._
 **ListClear**
 - list reports sections
 - clear removes all
+
+## `view_set`
+
+> Unit tests for ``view_set.py`` — the agent's view verbs.
+
+**Guards**
+- unknown action
+- no design
+**Visibility**
+- hide turns bulb off
+- isolate sets flag
+- isolate requires single match
+- ambiguous substring refused not first match
+- exact name beats substring
+- show lights ancestor chain
+- clear isolation resets all
+- unmatched target errors
+- missing target errors
+**BodyVisibility**
+- hide one root body leaves the other lit
+- show body turns bulb on and reads back
+- body bulb write that does not take errors
+- shown but still invisible body is named in the note
+- mixed occurrence and body hide
+- hide via face handle walks to owning body
+- isolate refuses a body target
+**Style**
+- wireframe sets visual style
+- unknown style errors
+**Orient**
+- unknown orientation errors
+- focus unknown occurrence errors
+- front orientation sets up vector
+- front eye placed on minus y at preserved distance
+- top orientation uses plus y up
+- focus only translates eye by target delta
+**NamedViews**
+- save view adds
+- save view overwrites same name
+- save view requires name
+- apply view moves camera
+- apply unknown view lists available
+- list views reports builtin flag
+**SnapshotRestore**
+- restore without snapshot errors
+- snapshot then restore puts bulbs back
+- restore reinstates isolation
+- restore counts missing occurrences
+- same named documents do not collide
+**RequestTracer**
+- trace advances seq and echoes received args
+- with trace injects into ok payload
+- with trace is noop on error
+- handler stamps the echo
 
 ## `view_workspaces`
 
@@ -4101,6 +4518,11 @@ after changing tests._
 - direct mode has no timeline
 - browser digest is depth one
 - digest capped for wide assemblies
+**TimelineHonesty**
+- null health marker counted distinctly
+- rolled back marker is unhealthy and surfaced
+- marker at end is not rolled back
+- warning surfaced distinctly even when otherwise healthy
 **DesignWideCounts**
 - sketches in sub components are counted with empty root
 - bodies summed across root and sub components
@@ -4148,6 +4570,12 @@ after changing tests._
 - mismatch refuses without calling handler
 - omitted expect document proceeds
 - doc switching write reports the new doc
+**NameCollisionRefusal**
+- unique name still passes
+- duplicate names refuse listing each candidate
+- urn match is exact even when names collide
+- name not matching active doc still refuses as changed
+- unreadable session degrades to the single doc pass
 **IntegrationThroughItem**
 - write tool gains expect document read does not
 

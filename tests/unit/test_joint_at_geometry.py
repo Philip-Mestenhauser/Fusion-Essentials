@@ -56,6 +56,21 @@ class FakeBRepVertex:
     geometry = None
 
 
+class _MovingOcc:
+    """An occurrence whose transform.translation tracks a mutable origin (cm) - lets a test move it
+    across joint creation and assert the reported moved_by delta."""
+    def __init__(self, name, pos):
+        self.name = name
+        self._pos = list(pos)
+    def move_to(self, pos):
+        self._pos = list(pos)
+    @property
+    def transform(self):
+        pos = self._pos
+        vec = type("V", (), {"x": pos[0], "y": pos[1], "z": pos[2]})()
+        return type("M", (), {"translation": vec})()
+
+
 def _install():
     rec = _Recorder()
     # JointGeometry factory -> our recorder
@@ -260,6 +275,48 @@ class TestHandler:
         m = joints.last_input.motion
         assert m[0] == "revolute" and m[1] == _JD.CustomJointDirection and m[2] is not None
         assert out["axis"] == "auto(geometry)"
+
+    def test_reports_moved_by_when_part_repositioned(self):
+        # joint_at aligns the picked keypoints, repositioning handle_one's occurrence; a real move
+        # must surface as moved_by + move_warning, not silently (the item-6 teleport defect).
+        moving = _MovingOcc("Rod:1", (10.0, 0.0, 0.0))    # cm - the moving occurrence's origin
+        face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
+        face_b = FakeBRepFace(_ST.PlaneSurfaceType)
+        joints = _install_design({"a": face_a, "b": face_b})
+        orig_add = joints.add
+        def moving_add(ji):                                # add() repositions the occurrence
+            j = orig_add(ji); moving.move_to((2.5, 0.5, 0.0)); return j
+        joints.add = moving_add
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "moved_by" in out
+        # delta (-7.5, 0.5, 0) cm -> 75.17 mm; direction points -X
+        assert 75.0 < out["moved_by"]["distance_mm"] < 75.3
+        assert out["moved_by"]["direction"][0] < 0
+        assert "move_warning" in out and "keypoints" in out["move_warning"].lower()
+
+    def test_reports_moved_by_when_the_fixed_side_moves(self):
+        # grounding / an existing joint can make the solver move occurrence_TWO instead of one - both
+        # sides are watched, and the mover is named (a live case moved handle_two, not handle_one).
+        moving = _MovingOcc("Crank:1", (0.0, 0.0, 0.0))
+        face_a = FakeBRepFace(_ST.PlaneSurfaceType)                        # handle_one stays put
+        face_b = FakeBRepFace(_ST.PlaneSurfaceType); face_b.assemblyContext = moving
+        joints = _install_design({"a": face_a, "b": face_b})
+        orig_add = joints.add
+        def moving_add(ji):
+            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j    # 3 cm = 30 mm
+        joints.add = moving_add
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "moved_by" in out and out["moved_by"]["distance_mm"] == 30.0
+        assert "Crank:1" in out["move_warning"]
+
+    def test_no_moved_by_when_part_stays_put(self):
+        # a well-matched pair whose keypoints already coincide does not move -> no moved_by / warning.
+        still = _MovingOcc("Rod:1", (4.0, 1.0, 0.0))
+        face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = still
+        face_b = FakeBRepFace(_ST.PlaneSurfaceType)
+        _install_design({"a": face_a, "b": face_b})       # add() leaves the position unchanged
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "moved_by" not in out and "move_warning" not in out
 
     def test_motion_setter_failure_reports_error(self):
         # if the motion setter raises (e.g. incompatible geometry), the handler returns an error

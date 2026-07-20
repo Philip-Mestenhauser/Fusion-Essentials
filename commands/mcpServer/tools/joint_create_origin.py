@@ -121,16 +121,6 @@ def _anchor_direction_line(comp, center_cm, dir_vec, length=1.0):
     return line
 
 
-def _anchor_sketch_point(comp, x_cm, y_cm, z_cm):
-    """Create a helper sketch point at model coordinates (cm); returns the SketchPoint."""
-    sketch = comp.sketches.add(comp.xYConstructionPlane)
-    try:
-        sketch.name = "JointOriginAnchor"
-    except Exception:
-        pass
-    return sketch.sketchPoints.add(adsk.core.Point3D.create(x_cm, y_cm, z_cm))
-
-
 def _find_sketch(design, name):
     # Whole-design resolve (active component first), so a JO can anchor on a sketch line/point drawn in
     # an activated sub-component - not only one in the root component.
@@ -207,13 +197,20 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
         return None, None, "geometry handle is not a face/edge/vertex."
 
     if anchor == "coordinates":
-        try:
-            pt = _anchor_sketch_point(comp, x_cm, y_cm, z_cm)
-        except Exception as e:
-            return None, None, f"Could not create the anchor point: {e}"
-        g = safe(lambda: JG.createByPoint(pt))
+        # Anchor on the component ORIGIN (a fixed, always-present point) and carry the target as the JO's
+        # own offsetX/Y/Z PARAMETERS (applied on the input in the handler). This makes the reported
+        # location REAL and recompute-robust - NOT an undimensioned point floating in a hidden auto-sketch
+        # (which reads plausibly but drifts on recompute and spawns 0.00mm parameters). The frame stays
+        # world-aligned, so the offsets map straight to world X/Y/Z.
+        origin_pt = safe(lambda: comp.originConstructionPoint)
+        if origin_pt is None:
+            return None, None, "coordinates: the component has no origin construction point to anchor on."
+        g = safe(lambda: JG.createByPoint(origin_pt))
+        if meta is not None:
+            meta["coordinate_offsets_cm"] = (x_cm, y_cm, z_cm)
+            meta["anchor_cm"] = (x_cm, y_cm, z_cm)
         return g, ("model origin" if target == "origin" else "coordinates"), \
-            (None if g else "JointGeometry.createByPoint returned nothing.")
+            (None if g else "coordinates: JointGeometry.createByPoint(origin) returned nothing.")
 
     if anchor in ("sketch_line", "sketch_point"):
         if not (sketch_name or "").strip():
@@ -261,16 +258,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             sketch_name: str = "", entity_index: int = 0, keypoint: str = "start",
             geometry: str = "", name: str = "",
             bbox_target: str = "", orient_axis: str = "z", flip: bool = False) -> dict:
-    """Create a joint origin, position-only or oriented.
-
-    anchor='coordinates' (default): at x,y,z (target='at') or the model origin (target='origin') -
-    world-aligned frame. anchor='sketch_line': anchor on a sketch line (sketch_name + entity_index,
-    'keypoint' = start/middle/end/center) so Z runs ALONG the line - use sketch_add_3d_line first to set
-    the direction. anchor='sketch_point': anchor on an existing sketch point. anchor='bbox_center': at
-    the world bounding-box center of 'bbox_target' (a body/occurrence), frame Z aligned to 'orient_axis'
-    ('flip' reverses it). anchor='face_center': at a planar 'geometry' face's centroid, Z = its normal.
-    'name' names the origin.
-    """
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
@@ -315,6 +303,19 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     if not jo_input:
         return error("createInput returned nothing for this geometry.")
 
+    # anchor='coordinates': place the frame with the JO's own parametric offsets from the model origin
+    # (createByReal is cm). NOT safe()-swallowed - a failure to place the frame where asked must surface,
+    # not silently ship a mislocated origin. Read back off the created JO below to prove they took.
+    coord_off = meta.get("coordinate_offsets_cm")
+    if coord_off is not None:
+        ox, oy, oz = coord_off
+        try:
+            jo_input.offsetX = adsk.core.ValueInput.createByReal(ox)
+            jo_input.offsetY = adsk.core.ValueInput.createByReal(oy)
+            jo_input.offsetZ = adsk.core.ValueInput.createByReal(oz)
+        except Exception as e:
+            return error(f"Could not set the coordinate offsets on the joint origin: {e}")
+
     # Resulting frame axes (Z primary, X secondary, Y third) - confirms orientation took.
     axes = {
     "primary_axis_Z": _vec(safe(lambda: jo_input.primaryAxisVector)),
@@ -335,6 +336,27 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             joint_origin.name = new_name
         except Exception:
             pass
+
+    # anchor='coordinates': prove the parametric offsets took by reading them BACK off the created JO -
+    # a value that didn't stick (or a 0 where a coordinate was asked) is a mislocated origin, not
+    # success. The offset parameters ARE the reported location (a real value per axis), so a
+    # plausible-looking report cannot hide an unconstrained point that drifts on recompute.
+    offset_params = None
+    if coord_off is not None:
+        ox, oy, oz = coord_off
+        got = (safe(lambda: joint_origin.offsetX.value), safe(lambda: joint_origin.offsetY.value),
+               safe(lambda: joint_origin.offsetZ.value))
+        if None not in got:
+            dist = ((got[0] - ox) ** 2 + (got[1] - oy) ** 2 + (got[2] - oz) ** 2) ** 0.5
+            if dist > 1e-3:                        # > 0.001 cm: the offsets did not take
+                safe(lambda: joint_origin.deleteMe())
+                return error(
+                    f"Coordinate offsets did not take: asked "
+                    f"{[round(v, 4) for v in (ox, oy, oz)]} cm but the joint origin reports "
+                    f"{[round(v, 4) for v in got]} cm. Rolled the origin back; nothing changed.")
+            inv = (1.0 / scale) if scale else 1.0
+            offset_params = {"x": round(got[0] * inv, 6), "y": round(got[1] * inv, 6),
+                             "z": round(got[2] * inv, 6), "units": units}
 
     # For a COMPUTED anchor, read the created origin back and prove it landed on the point we computed.
     # A wrong landing is a failure, not a false success - roll the origin back and error.
@@ -370,13 +392,20 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
     "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented "
         "frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch "
-        "line (draw it with sketch_add_3d_line). A point-anchored origin is world-aligned. A computed "
-        "anchor reports computed_anchor + origin_readback to verify. View with view_screenshot."),
+        "line (draw it with sketch_add_3d_line). anchor='coordinates' is world-aligned and PARAMETRIC - "
+        "the location is held by real offsetX/Y/Z parameters from the model origin (offset_parameters, "
+        "read back to verify), so it survives recompute. A computed anchor reports computed_anchor + "
+        "origin_readback. View with view_screenshot."),
     }
     if anchor == "coordinates":
-        payload["location"] = {"x": (0.0 if target == "origin" else x),
+        # The authoritative, read-back location (the verified offset parameters); falls back to the
+        # requested values only if the read-back was unavailable.
+        payload["location"] = offset_params or {"x": (0.0 if target == "origin" else x),
     "y": (0.0 if target == "origin" else y),
     "z": (0.0 if target == "origin" else z), "units": units}
+        payload["held_by"] = "parametric offsetX/Y/Z from the model origin"
+        if offset_params is not None:
+            payload["offset_parameters"] = offset_params
     if computed is not None:
         payload["computed_anchor"] = computed
         if readback is not None:
@@ -388,17 +417,19 @@ TOOL_DESCRIPTION = (
     "Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user "
     "click. Orientation follows the anchor:\n"
     "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
-    "World-aligned (Z = world Z).\n"
+    "World-aligned; the location is held by real parametric offsetX/Y/Z from the model origin (not a "
+    "floating sketch point), read back as offset_parameters (survives recompute).\n"
     "- anchor='sketch_line': on a sketch line (sketch_name + entity_index + 'keypoint') - frame Z "
     "runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
     "- anchor='sketch_point': on a sketch point (position only).\n"
     "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
     "- anchor='bbox_center': at the world bbox CENTER of 'bbox_target' (a body/occurrence/component), "
-    "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it). The "
-    "measured center and the created origin are reported back to verify.\n"
+    "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it).\n"
     "- anchor='face_center': at a planar FACE's centroid (the 'geometry' handle), Z = the face normal.\n"
-    "Optional 'name'. WRITES. The result's 'frame_axes' reports the Z/X/Y vectors to confirm orientation."
+    "Optional 'name'. WRITES; 'frame_axes' reports the resulting Z/X/Y vectors. The origin lands on "
+    "the ROOT component (not the active one) and tracks its anchor parametrically, not via occurrence "
+    "transforms."
 )
 
 tool = (

@@ -14,7 +14,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
-from ._joints import find_joint, all_joints
+from ._joints import find_joint, all_joints, motion_link_dof
 
 app = adsk.core.Application.get()
 
@@ -27,13 +27,7 @@ def _joint_names(design):
 
 
 def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dict:
-    """Link two joints' motion with a ratio (the Motion Link command). WRITES.
-
-    joint_one / joint_two: the names of two EXISTING joints to couple (see assembly_probe for names).
-    ratio: how much joint_two moves per unit of joint_one (e.g. 2 = joint_two turns twice as fast;
-    a gear ratio). Driving either joint (assembly_move + capture) then moves the other proportionally.
-    Both joints must allow motion (revolute / slider / cylindrical) - a rigid joint has nothing to link.
-    """
+    """See TOOL_DESCRIPTION."""
     j1name, j2name = (joint_one or "").strip(), (joint_two or "").strip()
     if not j1name or not j2name:
         return error("Provide 'joint_one' and 'joint_two' - the two joints to link.")
@@ -59,14 +53,24 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     reversed_link = r < 0
     mag = abs(r)
 
+    # setMotionData couples ONE JointMotionTypes DOF per joint (RevoluteJointRotateMotionType, ...) -
+    # resolve each joint's linkable DOF BEFORE creating anything, so an unlinkable joint (rigid, or a
+    # multi-DOF ball/planar/pin_slot) fails cleanly without leaving a stray link to roll back.
+    m1, err1 = motion_link_dof(j1)
+    m2, err2 = motion_link_dof(j2)
+    for jname, mdof, merr in ((j1name, m1, err1), (j2name, m2, err2)):
+        if mdof is None:
+            return error(f"Joint '{jname}' {merr}. Link two joints that permit motion "
+                         "(revolute/slider/cylindrical).")
+
     try:
         mls = root.motionLinks
         # createInput takes the TWO joints directly, NOT an ObjectCollection.
         inp = mls.createInput(j1, j2)
         ml = mls.add(inp)
     except Exception as e:
-        return error(f"Could not create the motion link: {e}. (Both joints must permit motion - a "
-    "rigid joint has nothing to link.)")
+        return error(f"Could not create the motion link: {e}. (Two joints already coupled through the "
+                     "same kinematic chain cannot be linked - the platform refuses them here.)")
     if not ml:
         return error("Motion link creation returned nothing - check that both joints permit motion "
     "(revolute/slider/cylindrical); a rigid joint cannot be linked.")
@@ -77,29 +81,24 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     # than claim a ratio we didn't set.
     ratio_error = None
     try:
-        # setMotionData wants JointMotionTypes ENUMS (jointMotion.jointType), NOT the JointMotion
-        # objects - confirmed live: passing the objects raises "Wrong number or type of arguments".
-        m1 = j1.jointMotion.jointType
-        m2 = j2.jointMotion.jointType
+        # setMotionData wants a JointMotionTypes DOF per joint (from motion_link_dof), NOT the joint's
+        # JointTypes value that jointMotion.jointType returns - passing that raises BAD_JOINT_DOF.
         v1 = adsk.core.ValueInput.createByReal(1.0)
         v2 = adsk.core.ValueInput.createByReal(mag)
-        ml.setMotionData(m1, v1, m2, v2, reversed_link)
+        ok_set = ml.setMotionData(m1, v1, m2, v2, reversed_link)
+        if not ok_set:
+            ratio_error = "setMotionData returned False"
     except Exception as e:
         ratio_error = str(e)
 
     if ratio_error:
-        # The link was added but the ratio could not be applied - most often BAD_JOINT_DOF, i.e.
-        # these two joints can't be motion-linked (e.g. they're already coupled through the same
-        # rigid chain, so there's no independent DOF to relate). The added link is now a
-        # COMPUTE-FAILED feature; roll it back so we don't leave
-        # a broken 1:1 link the user never asked for, and return an honest error.
+        # The link was added but the ratio could not be applied. With the correct DOF passed, a
+        # remaining BAD_JOINT_DOF is a genuine platform incompatibility for THIS motion pair (e.g. two
+        # sliders). The added link is now a COMPUTE-FAILED feature; roll it back so we don't leave a
+        # broken 1:1 link the user never asked for, and return an honest error.
         safe(lambda: ml.deleteMe())
-        hint = ("the two joints can't be motion-linked. This usually means they're already coupled "
-                "through the same kinematic chain (no independent degree of freedom to relate). Link "
-                "two INDEPENDENT motion joints - e.g. the inputs of two separate gear/belt trains."
-                if "BAD_JOINT_DOF" in ratio_error or "DOF" in ratio_error else
-                "the ratio could not be applied to these joints.")
-        return error(f"Created the link but could not apply the ratio: {hint} (Fusion: {ratio_error})")
+        return error("Created the link but could not apply the ratio: the platform will not couple "
+                     f"these two joints' motion. (Fusion: {ratio_error})")
 
     out = {
                 "linked": True,
@@ -110,7 +109,7 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     "ratio_applied": True,
     "reversed": reversed_link,
     "note": ("Joints linked - driving one (assembly_move + assembly_capture_position) now moves "
-        "the other proportionally. Verify with assembly_probe."),
+        "the other proportionally. Verify with assembly_get."),
     }
     return ok(out)
 
@@ -118,7 +117,7 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
 TOOL_DESCRIPTION = (
     "Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives "
     "the other proportionally - a gear pair, belt/chain drive, or coupling (e.g. wheel-spin to "
-    "crank-rotation). joint_one/joint_two are joint names (see assembly_probe); ratio is joint_two's "
+    "crank-rotation). joint_one/joint_two are joint names (see assembly_get); ratio is joint_two's "
     "motion per unit of joint_one (2 = twice as fast). Both joints must permit motion "
     "(revolute/slider/cylindrical)."
 )

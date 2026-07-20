@@ -15,6 +15,7 @@ import adsk.core
 import adsk.fusion
 
 from . import _common
+from . import _joints   # the JointOrigin walk (all_joint_origins / find_joint_origins_by_name / proxy)
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = "the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool"
@@ -144,7 +145,17 @@ class GeometryHandleList(GeometryHandle):
                 return None, (f"'{self.name}' needs a list of geometry handles from find_geometry "
                               f"({_GEOMETRY_REQUIREMENTS[self.require][0]}).")
             return (self.default if self.default is not None else []), None
-        items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
+        if isinstance(raw, (list, tuple)):
+            items = list(raw)
+        elif isinstance(raw, str) and _HANDLE_SEP in raw:
+            # A COMPOSITE find_geometry handle ('<token>|@<kind>:x,y,z') carries commas INSIDE its
+            # locator, so comma-splitting a lone handle string would shred it into broken fragments -
+            # the surface_patch 'boundaries' bug, where a plural loop element (one composite handle
+            # string) resolved as stale while the singular 'boundary' (schema type=array, so a list)
+            # did not. A '|@' string is ONE handle; never comma-split it.
+            items = [raw.strip()]
+        else:
+            items = [s.strip() for s in str(raw).split(",") if s.strip()]
         ents = []
         for i, h in enumerate(items):
             # reuse the single-handle resolve (validation + staleness) per item
@@ -1017,7 +1028,8 @@ class UnitField(InputKind):
     their own `_common.scale()` call on the raw string."""
 
     _UNITS = ["mm", "cm", "in"]
-    MAP_HINT = "the 'units' selector (mm/cm/in enum) for a Distance"
+    MAP_HINT = ("the 'units' selector (mm/cm/in enum, mm default) for a Distance; every "
+                "geometry-reporting read takes one and scales its output via CM_TO_UNIT")
 
     def __init__(self, name="units", **kw):
         super().__init__(name, default="mm", **kw)
@@ -1171,6 +1183,98 @@ class OccurrenceRefList(InputKind):
         return out, None
 
 
+# ── joint-origin reference (a reusable WCS frame, by handle OR name; ambiguity refused) ───────────────
+#
+# A Joint Origin is the self-centering coordinate frame a template ships so a machining WCS (or a joint)
+# binds to it by NAME instead of a fragile box-point. JointOrigin.entityToken round-trips through
+# findEntityByToken (verified via the API doc), so a JO is a first-class handle like a face/edge - the
+# read (assembly_get(include=['joint_origins'])) mints one, and this kind resolves it. It also accepts a
+# name: bare when the JO is unique, else the qualified '<occurrence>:<JO name>' form. A bare name shared
+# across components (or an owning component instanced several times) is REFUSED with the qualified
+# candidates - the same non-unique-name-space discipline OccurrenceRef enforces. Composes the ONE JO
+# walk in _joints (all_joint_origins / find_joint_origins_by_name / jo_assembly_proxy) - it never
+# re-rolls the traversal.
+
+class JointOriginRef(InputKind):
+    """A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the
+    entityToken assembly_get(include=['joint_origins']) mints) OR a name - bare when the name is unique
+    across the design and its owning component is a single instance, else the qualified
+    '<occurrence>:<JO name>' form (also from that read) picking the exact instance. An ambiguous bare
+    name is refused with the qualified candidates, never first-matched. Resolves to the JointOrigin in
+    assembly context (usable as a joint input or a WCS reference)."""
+
+    MAP_HINT = "a Joint Origin by assembly_get handle OR name (bare if unique, else '<occ>:<JO name>'); refuses ambiguity"
+
+    def contract_note(self) -> str:
+        return ("A Joint Origin: a 'handle' from assembly_get(include=['joint_origins']) or its name "
+                "(bare if unique, else '<occurrence>:<JO name>'; an ambiguous name is refused).")
+
+    def resolve(self, raw):
+        s = (raw or "").strip() if isinstance(raw, str) else raw
+        if not s:
+            if self.required:
+                return None, f"'{self.name}' is required (a Joint Origin handle or name)."
+            return self.default, None
+        if not isinstance(s, str):
+            return None, (f"'{self.name}': expected a Joint Origin handle or name string, got "
+                          f"{type(raw).__name__}.")
+        des = _common.design()
+        if not des:
+            return None, "No active design to resolve the Joint Origin against."
+        # 1) a handle (entityToken) -> a JointOrigin. findEntityByToken round-trips a JO (its own doc
+        # says so); a non-token name simply yields nothing and falls through to the name paths.
+        ent = _resolve_token_entity(des, s)
+        if ent is not None:
+            if _joints.is_joint_origin(ent):
+                return ent, None
+            return None, (f"'{self.name}': that handle points at a {type(ent).__name__}, not a Joint "
+                          "Origin. Use assembly_get(include=['joint_origins']) for a JO handle.")
+        # 2) a qualified '<occurrence>:<JO name>' (the disambiguating form)
+        jo, qerr = self._resolve_qualified(des, s)
+        if jo is not None:
+            return jo, None
+        if qerr:
+            return None, qerr
+        # 3) a bare name - resolve only when unique, else refuse with the qualified candidates
+        return self._resolve_bare(des, s)
+
+    def _resolve_qualified(self, des, spec):
+        """Resolve '<occurrence>:<JO name>' to the JO proxied into that occurrence's context. Returns
+        (jo, err): (None, None) when spec is not a qualified form (so bare-name resolution still runs),
+        (None, err) when the occurrence matched but carries no such JO, (jo, None) on success."""
+        if ":" not in spec:
+            return None, None
+        head, _, tail = spec.rpartition(":")
+        head, tail = head.strip(), tail.strip()
+        if not head or not tail:
+            return None, None
+        occ, _occ_err = _resolve_occurrence(self.name, head)
+        if occ is None:
+            return None, None                 # head isn't an occurrence - let the bare-name path try
+        native = _common.safe(lambda: occ.component.jointOrigins.itemByName(tail))
+        if native is None:
+            return None, (f"'{self.name}': occurrence '{head}' has no Joint Origin named '{tail}'.")
+        return (_common.safe(lambda: native.createForAssemblyContext(occ)) or native), None
+
+    def _resolve_bare(self, des, name):
+        matches = _joints.find_joint_origins_by_name(des, name)
+        if len(matches) == 1:
+            jo, comp = matches[0]
+            return _joints.jo_assembly_proxy(des, jo, comp)
+        if len(matches) > 1:
+            cands = []
+            for jo, comp in matches:
+                cands.extend(_joints.jo_reference_names(des, jo, comp))
+            return None, (f"'{self.name}': '{name}' is ambiguous - {len(matches)} Joint Origins share "
+                          f"that name ({', '.join(cands[:8])}). Pass one of these qualified names, or a "
+                          "handle from assembly_get(include=['joint_origins']).")
+        avail = [n for n in (_common.safe(lambda jo=jo: jo.name)
+                             for jo, _ in _joints.all_joint_origins(des)) if n][:8]
+        hint = (" Available: " + ", ".join(f"'{n}'" for n in avail)) if avail else ""
+        return None, (f"'{self.name}': no Joint Origin named '{name}'.{hint} "
+                      "Use assembly_get(include=['joint_origins']) to list them.")
+
+
 # ── target reference (MULTI-SOURCE: a thing to MEASURE/COLOUR - body/face/mesh/occurrence/component/design) ──
 #
 # model_inspect / appearance_set need "the thing the user named", which can be a body, a face, a mesh
@@ -1224,6 +1328,14 @@ class TargetRef(InputKind):
                           f"{', '.join(self.allow)}.")
         return (ent, kind), None
 
+    def _owning_body(self, ent, kind):
+        """A face/edge handle passed to a body-consuming caller resolves to the entity's OWNING body
+        when 'body' is allowed; otherwise the precise wrong-kind refusal (naming `kind`) stands."""
+        owner = _common.safe(lambda: ent.body)
+        if owner is not None and "body" in self.allow:
+            return self._check(owner, "mesh" if _is_mesh(owner) else "body")
+        return self._check(ent, kind)
+
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
         des = _common.design()
@@ -1243,9 +1355,16 @@ class TargetRef(InputKind):
         ent = _resolve_token_entity(des, s)
         if ent is not None:
             if _isinstance(ent, adsk.fusion.BRepFace):
-                return self._check(ent, "face")
+                if "face" in self.allow:
+                    return self._check(ent, "face")
+                # find_geometry mints only face/edge/vertex handles - never a body handle - so for a
+                # body-consuming caller (CAM model/stock lists, body hide/show) a face handle NAMES its
+                # owning body: walk to it (the same owner-walk _resolve_any_body does).
+                return self._owning_body(ent, "face")
             if _isinstance(ent, adsk.fusion.BRepEdge):
-                return self._check(ent, "edge")
+                if "edge" in self.allow:
+                    return self._check(ent, "edge")
+                return self._owning_body(ent, "edge")
             if _isinstance(ent, adsk.fusion.ConstructionAxis):
                 return self._check(ent, "construction_axis")
             if _isinstance(ent, adsk.fusion.ConstructionPlane):
@@ -1279,23 +1398,29 @@ class TargetRef(InputKind):
 
 
 class TargetRefList(InputKind):
-    """A LIST of machinable targets - each a BODY (handle/name) or a container OCCURRENCE (name/
-    fullPathName), resolved via TargetRef. For a CAM setup's models/fixtures/stock: selecting the
-    CONTAINER occurrence (not the body inside it) is what lets the setup KEEP its selection when the
-    container's contents are replaced (the reconfiguring-not-reprogramming property - see the RFA
+    """A LIST of targets - each a BODY (handle/name) or a component OCCURRENCE (name/fullPathName),
+    resolved via TargetRef. For a CAM setup's models/fixtures/stock (the default prose): selecting the
+    COMPONENT occurrence (not the body inside it) is what lets the setup KEEP its selection when the
+    component's contents are replaced (the reconfiguring-not-reprogramming property - see the RFA
     template methodology). The CAM API's Setup.models/fixtures/stockSolids accept Occurrence, BRepBody,
     or MeshBody, so this yields exactly those. A bare COMPONENT name maps to its single occurrence
     (0 or >1 occurrences is a hard error - never guess which instance). Kind-checks EVERY element
-    before returning, so a wrong-kind target fails the call before any mutation."""
+    before returning, so a wrong-kind target fails the call before any mutation.
+
+    'contract' overrides the CAM-flavored contract note for a non-CAM consumer (view_set's body-level
+    hide/show); 'with_kinds' returns (entity, kind) pairs - kind body/mesh/occurrence - so a consumer
+    that treats bodies and occurrences differently can branch without re-sniffing types."""
 
     json_type = "array"
-    MAP_HINT = "several machinable targets: bodies (handles/names) and/or container occurrences (names)"
+    MAP_HINT = "several body-or-occurrence targets: bodies (handles/names) and/or component occurrences (names)"
 
-    # CAM consumes bodies and occurrences; a component resolves to its occurrence, mesh is allowed.
+    # Bodies and occurrences; a component resolves to its occurrence, mesh is allowed.
     _CAM_KINDS = ("body", "mesh", "occurrence", "component")
 
-    def __init__(self, name, **kw):
+    def __init__(self, name, contract="", with_kinds=False, **kw):
         super().__init__(name, **kw)
+        self._contract = contract
+        self._with_kinds = with_kinds
         # One owned TargetRef does the per-item resolution (trait #5: no second resolver).
         self._ref = TargetRef(name, allow=self._CAM_KINDS)
 
@@ -1303,9 +1428,10 @@ class TargetRefList(InputKind):
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
-        return ("A list of machinable targets, each a body (find_geometry 'handle' or name) OR a "
-                "CONTAINER occurrence/component name. A container selects the whole component (so the "
-                "setup keeps its selection when the container's contents change), not one body.")
+        return self._contract or (
+            "A list of machinable targets, each a body (find_geometry 'handle' or name) OR a "
+            "COMPONENT occurrence name. Selecting the occurrence selects the whole component (so the "
+            "setup keeps its selection when the component's contents change), not one body.")
 
     def _component_occurrence(self, comp):
         """The single occurrence referencing `comp`, or (None, error) on 0 or >1 (never guess)."""
@@ -1313,7 +1439,7 @@ class TargetRefList(InputKind):
         root = _common.safe(lambda: des.rootComponent) if des else None
         occs = _common.safe(lambda: list(root.allOccurrencesByComponent(comp))) or [] if root else []
         if not occs:
-            return None, (f"component '{_common.safe(lambda: comp.name)}' has no occurrence to machine "
+            return None, (f"component '{_common.safe(lambda: comp.name)}' has no occurrence "
                           "(it is not instanced in the assembly).")
         if len(occs) > 1:
             return None, (f"component '{_common.safe(lambda: comp.name)}' has {len(occs)} occurrences - "
@@ -1323,7 +1449,7 @@ class TargetRefList(InputKind):
     def resolve(self, raw):
         if raw in (None, "", []):
             if self.required:
-                return None, f"'{self.name}' needs at least one target (a body or container name)."
+                return None, f"'{self.name}' needs at least one target (a body or component name)."
             return [], None
         items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
         out = []
@@ -1333,12 +1459,12 @@ class TargetRefList(InputKind):
                 return None, f"'{self.name}'[{i}]: {err}"
             ent, kind = resolved
             if kind == "component":
-                # CAM wants the occurrence for a container, not the Component definition.
+                # The consumer wants the occurrence for a component, not the Component definition.
                 occ, occ_err = self._component_occurrence(ent)
                 if occ_err:
                     return None, f"'{self.name}'[{i}]: {occ_err}"
-                ent = occ
-            out.append(ent)
+                ent, kind = occ, "occurrence"
+            out.append((ent, kind) if self._with_kinds else ent)
         if not out:
             return None, f"'{self.name}': no valid targets resolved."
         return out, None

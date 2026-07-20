@@ -6,9 +6,16 @@ input guards (both names required, distinct, must resolve) plus the ratio plumbi
 
 import json
 
+import adsk.fusion
+
 from conftest import load_tool
 
 jml = load_tool("joint_motion_link")
+
+# The DOF values setMotionData actually wants, straight from the measured enum (never hand-typed).
+JMT = adsk.fusion.JointMotionTypes
+REVOLUTE_DOF = JMT.RevoluteJointRotateMotionType
+SLIDER_DOF = JMT.SliderJointSlideMotionType
 
 
 def _payload(result):
@@ -17,11 +24,12 @@ def _payload(result):
 
 
 class FakeJoint:
-    def __init__(self, name):
+    def __init__(self, name, motion="RevoluteJointMotion"):
         self.name = name
-        # jointType is the JointMotionTypes ENUM the API actually wants in setMotionData (NOT the
-        # JointMotion object). Use a recognisable sentinel so the test can assert it's what's passed.
-        self.jointMotion = type("JM", (), {"jointType": f"{name}_TYPE"})()
+        # The JointMotion SUBCLASS name is what motion_link_dof maps to a JointMotionTypes DOF;
+        # jointType returns a JointTypes value, which is the WRONG enum for setMotionData - the
+        # tool must not pass it. jointType carries a sentinel so a regression that passes it is caught.
+        self.jointMotion = type(motion, (), {"jointType": f"{name}_JOINTTYPE"})()
 
 
 class FakeJoints:
@@ -193,11 +201,34 @@ class TestLinkCreation:
         assert md["v1"] == ("real", 1.0)
         assert md["v2"] == ("real", 2.0)      # valueTwo carries the ratio magnitude
         assert md["reversed"] is False
-        # motionOne/Two must be the jointType ENUM, not the JointMotion object (passing the object
-        # raises "Wrong number or type of arguments").
-        assert md["m1"] == "Wheel_Spin_TYPE"
-        assert md["m2"] == "Crank1_to_Wheel_TYPE"
+        # motionOne/Two must be the JointMotionTypes DOF (RevoluteJointRotateMotionType for a
+        # revolute), NOT the JointTypes value jointMotion.jointType returns - passing that raises
+        # "BAD_JOINT_DOF - Motion Link joint DOF is wrong type".
+        assert md["m1"] == REVOLUTE_DOF
+        assert md["m2"] == REVOLUTE_DOF
+        assert md["m1"] != "Wheel_Spin_JOINTTYPE"      # the wrong-enum regression
         assert out["ratio"] == 2.0 and out["ratio_applied"] is True
+
+    def test_slider_maps_to_slide_dof(self):
+        # a slider joint's linkable DOF is SliderJointSlideMotionType, not its jointType.
+        des = _install(["A", "B"])
+        des.rootComponent.joints._j[1].jointMotion = type("SliderJointMotion", (),
+                                                          {"jointType": "B_JOINTTYPE"})()
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
+        md = des.rootComponent.motionLinks.last_link.motion_data
+        assert md["m1"] == REVOLUTE_DOF and md["m2"] == SLIDER_DOF
+        assert out["ratio_applied"] is True
+
+    def test_rigid_joint_refused_before_any_link(self):
+        # a rigid joint has no DOF to link; the tool must refuse BEFORE creating a link (nothing to
+        # roll back), naming the offending joint.
+        des = _install(["A", "B"])
+        des.rootComponent.joints._j[1].jointMotion = type("RigidJointMotion", (),
+                                                          {"jointType": "B_JOINTTYPE"})()
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True
+        assert "'B'" in res["message"] and "rigid" in res["message"]
+        assert des.rootComponent.motionLinks.added is None   # no link created to roll back
 
     def test_default_ratio_is_one(self):
         des = _install(["A", "B"])
@@ -247,14 +278,29 @@ class TestLinkCreation:
         assert "could not apply the ratio" in res["message"]
         assert des.rootComponent.motionLinks.last_link.deleted is True   # rolled back
 
-    def test_bad_joint_dof_gets_actionable_hint(self):
+    def test_setmotiondata_failure_reports_platform_refusal(self):
+        # With the correct DOF passed, a remaining setMotionData failure is a genuine platform
+        # refusal for this motion pair - the error says so honestly (no wrong-enum guess).
         des = _install(["A", "B"])
         des.rootComponent.motionLinks.add = (
             lambda inp: _link_that_raises(des.rootComponent.motionLinks,
                                           "Compute Failed // BAD_JOINT_DOF - wrong type"))
         res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
         assert res["isError"] is True
-        assert "independent" in res["message"]      # explains the same-chain cause
+        assert "platform will not couple" in res["message"]
+        assert des.rootComponent.motionLinks.last_link.deleted is True   # rolled back
+
+    def test_setmotiondata_false_return_is_failure(self):
+        # setMotionData returning False (not raising) is still a failure - the tool must not claim a
+        # ratio it did not set; it rolls back and errors.
+        des = _install(["A", "B"])
+        link = FakeMotionLink()
+        link.setMotionData = lambda *a, **k: False
+        des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)
+        res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
+        assert res["isError"] is True
+        assert "could not apply the ratio" in res["message"]
+        assert link.deleted is True
 
 
 def _link_that_raises(mls, msg="joint motion type cannot be linked"):
@@ -264,3 +310,10 @@ def _link_that_raises(mls, msg="joint motion type cannot be linked"):
     link.setMotionData = boom
     mls.last_link = link
     return link
+
+
+def _bind_link(mls, link):
+    def add(inp):
+        mls.last_link = link
+        return link
+    return add

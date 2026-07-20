@@ -15,6 +15,7 @@ class FakeParam:
     def __init__(self):
         self.name = "d1"
         self.expression = "10 mm"
+        self.value = 1.0            # cm, signed - a negative distance is the mirror-trap signal
 
 
 class FakeDim:
@@ -38,6 +39,7 @@ class FakeDims:
 
 class FakeLine:
     startSketchPoint = "sp"
+    endSketchPoint = "ep"
 
 
 class FakeCircle:
@@ -188,6 +190,149 @@ class TestPointOf:
             startSketchPoint = None
         p = _Pt()
         assert sd._point_of(p) is p
+
+
+# ── entity-anchored POSITION references (append ':start'/':end'/':mid'/':center' to a ref) ──────────
+
+class TestParseAnchorRef:
+    def test_no_anchor(self):
+        assert sd._parse_anchor_ref("line:0") == ("line:0", None, None)
+
+    def test_valid_line_anchor(self):
+        assert sd._parse_anchor_ref("line:0:end") == ("line:0", "end", None)
+
+    def test_center_anchor(self):
+        assert sd._parse_anchor_ref("circle:2:center") == ("circle:2", "center", None)
+
+    def test_unknown_anchor_errors(self):
+        base, anchor, err = sd._parse_anchor_ref("line:0:bogus")
+        assert base is None and anchor is None and "unknown anchor" in err
+
+
+class _GP:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _RichPoint:
+    def __init__(self, tag, x=0.0, y=0.0, z=0.0):
+        self.tag = tag
+        self.geometry = _GP(x, y, z)
+
+
+class _RichLine:
+    def __init__(self):
+        self.startSketchPoint = _RichPoint("start", 0.0, 0.0, 0.0)
+        self.endSketchPoint = _RichPoint("end", 4.0, 0.0, 0.0)
+
+
+class _RichCircle:
+    def __init__(self):
+        self.centerSketchPoint = _RichPoint("center", 1.0, 1.0, 0.0)
+
+
+class _RichArc:
+    def __init__(self):
+        self.startSketchPoint = _RichPoint("astart")
+        self.endSketchPoint = _RichPoint("aend")
+        self.centerSketchPoint = _RichPoint("acenter")
+
+
+class _MidSketch:
+    """Records the midpoint SketchPoint + constraint the mid anchor creates."""
+    def __init__(self):
+        self.added = []
+        self.midpoints = []
+        self.sketchPoints = self
+        self.geometricConstraints = self
+    def add(self, p):
+        self.added.append(p); return _RichPoint("midpoint")
+    def addMidPoint(self, pt, line):
+        self.midpoints.append((pt, line)); return True
+
+
+class TestPointAtAnchor:
+    def setup_method(self):
+        import adsk.core
+        adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
+
+    def test_line_end_and_start(self):
+        assert sd._point_at_anchor(None, _RichLine(), "end")[0].tag == "end"
+        assert sd._point_at_anchor(None, _RichLine(), "start")[0].tag == "start"
+
+    def test_circle_center(self):
+        assert sd._point_at_anchor(None, _RichCircle(), "center")[0].tag == "center"
+
+    def test_circle_start_rejected(self):
+        pt, err = sd._point_at_anchor(None, _RichCircle(), "start")
+        assert pt is None and "line or arc" in err
+
+    def test_line_center_rejected(self):
+        pt, err = sd._point_at_anchor(None, _RichLine(), "center")
+        assert pt is None and "circle or arc" in err
+
+    def test_mid_on_line_creates_constrained_point(self):
+        sk = _MidSketch()
+        pt, err = sd._point_at_anchor(sk, _RichLine(), "mid")
+        assert err is None and pt.tag == "midpoint"
+        assert len(sk.midpoints) == 1              # welded parametrically with a midpoint constraint
+
+    def test_mid_on_arc_rejected(self):
+        # an arc has a center, so 'mid' (a line-only addMidPoint target) is refused, not mis-applied
+        pt, err = sd._point_at_anchor(None, _RichArc(), "mid")
+        assert pt is None and "LINE" in err
+
+
+class TestAnchorHandler:
+    def test_end_anchor_uses_end_point(self):
+        s = _install()
+        _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0:end", entity_two="line:1"))
+        _kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
+        assert p1 == "ep" and p2 == "sp"          # entity_one END, entity_two default START
+
+    def test_center_anchor_on_circle(self):
+        s = _install()
+        _payload(sd.handler(dim_type="distance", entity_one="circle:0:center", entity_two="line:0"))
+        _kind, _orient, p1, _p2 = s.sketchDimensions.calls[-1]
+        assert p1 == "center_sp"
+
+    def test_anchor_rejected_on_radius(self):
+        _install()
+        res = sd.handler(dim_type="radius", entity_one="circle:0:center")
+        assert res["isError"] is True and "anchor" in res["message"].lower()
+
+    def test_unknown_anchor_is_error(self):
+        _install()
+        res = sd.handler(dim_type="distance", entity_one="line:0:bogus", entity_two="line:1")
+        assert res["isError"] is True and "unknown anchor" in res["message"].lower()
+
+
+class TestNegativeDistance:
+    """A negative DISTANCE does not mirror - the solver places the point at the signed offset. The
+    handler flags it from the read-back evaluated value's sign (live-verified: value stores negative)."""
+
+    def test_negative_distance_warns(self):
+        s = _install()
+        neg = FakeDim("distance")
+        neg.parameter.value = -2.0
+        s.sketchDimensions.addDistanceDimension = lambda p1, p2, orient, tp: neg
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1", value="-20 mm"))
+        assert "negative_distance_warning" in out
+        assert "mirror" in out["negative_distance_warning"].lower()
+
+    def test_positive_distance_no_warning(self):
+        s = _install()   # FakeParam.value defaults positive
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1", value="20 mm"))
+        assert "negative_distance_warning" not in out
+
+    def test_negative_radius_not_flagged(self):
+        # radius is not a distance-family type - a negative value there is not the mirror trap
+        s = _install()
+        neg = FakeDim("radius")
+        neg.parameter.value = -5.0
+        s.sketchDimensions.addRadialDimension = lambda c, tp: neg
+        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0", value="-5 mm"))
+        assert "negative_distance_warning" not in out
 
 
 class TestGuards:

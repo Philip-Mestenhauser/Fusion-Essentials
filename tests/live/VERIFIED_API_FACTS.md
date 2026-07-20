@@ -6,7 +6,7 @@ leaning on it) does not match the platform: update the fake and its consumers, t
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2704.1.23 | verified 2026-07-11
+Stamp: Fusion 2704.1.36 | verified 2026-07-19
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|
@@ -26,15 +26,16 @@ Stamp: Fusion 2704.1.23 | verified 2026-07-11
 | PASS | enum-cam-operation-states | OperationStates ints: IsValid=0, IsInvalid=1 (surfaced as out_of_date by the CAM layer), Suppressed=2, NoToolpath=3 | tests/unit/test__cam_common.py state-label map; _cam_common.py operationState reads |
 | PASS | enum-setup-stock-modes | SetupStockModes.SolidStock == 6 (the literal the stock-assignment gate keys on) | tests/unit/test_cam_edit_setup.py; cam_edit_setup.py SetupStockModes.SolidStock |
 | PASS | enum-design-types | DesignTypes ints: DirectDesignType=0, ParametricDesignType=1 | tests/unit/test_design_mode.py; _inputs.py current_design_type/ModeGuard |
-| PASS | enum-joint-types | JointTypes ints: Rigid=0 Revolute=1 Slider=2 Cylindrical=3 PinSlot=4 Planar=5 Ball=6 (Inferred=7 also exists) | tests/unit/test_assembly_probe.py joint-type labels |
+| PASS | enum-joint-types | JointTypes ints: Rigid=0 Revolute=1 Slider=2 Cylindrical=3 PinSlot=4 Planar=5 Ball=6 (Inferred=7 also exists) | tests/unit/test_assembly_get.py joint-type labels |
+| PASS | enum-joint-motion-types | JointMotionTypes (the per-DOF motion enum setMotionData wants, DISTINCT from JointTypes) ints: RevoluteJointRotateMotionType=10, SliderJointSlideMotionType=11, CylindricalJointRotateMotionType=3, CylindricalJointSlideMotionType=4 - jointMotion.jointType returns a JointTypes value (Revolute==1), which setMotionData REJECTS as BAD_JOINT_DOF | tests/unit/test_joint_motion_link.py; _joints.py motion_link_dof map; joint_motion_link.py |
 | PASS | enum-joint-directions | JointDirections ints: XAxis=0, YAxis=1, ZAxis=2, Custom=3 | tests/unit/test_edit_joint.py; _joints.py JointDirections mapping |
-| PASS | enum-feature-health-states | FeatureHealthStates ints: Healthy=0, Warning=1, Error=2, Suppressed=3 (RolledBack=4, Unknown=5 exist and are ignored by the rollups) | tests/unit/test_assembly_probe.py; _common.timeline_health; assembly_probe.py health thresholds |
+| PASS | enum-feature-health-states | FeatureHealthStates ints: Healthy=0, Warning=1, Error=2, Suppressed=3 (RolledBack=4, Unknown=5 exist and are ignored by the rollups) | tests/unit/test_assembly_get.py; _common.timeline_health; assembly_get.py health thresholds |
 | PASS | enum-upload-states | UploadStates ints: UploadProcessing=0, UploadFinished=1, UploadFailed=2 | tests/unit/test_data_get_upload_status.py; data_get_upload_status.py uploadState read |
 | PASS | enum-sweep | Every adsk enum family the tools reference resolves to its live integer members - the catch-all that measures all families into live_api_facts.ENUMS, not just the value-pinned few. FAILs if a referenced family dumps no members (a stale/renamed enum reference in a tool) | commands/mcpServer/tools/*.py enum references; tests/conftest.py seeds ENUMS onto the mocks |
 | PASS | enum-joint-keypoint-types | JointKeyPointTypes ints: Start=0, Middle=1, End=2, Center=3 | tests/unit/test_joint_at_geometry.py sentinel installer; _joints.py keypoint factory |
 | PASS | enum-surface-types | SurfaceTypes ints: Plane=0, Cylinder=1, Cone=2, Sphere=3, Torus=4 (Nurbs=7 also exists) | tests/unit/test_joint_at_geometry.py sentinel installer; _joints.py surface branch |
 | PASS | enum-curve3d-types | Curve3DTypes ints: Line=0, Arc=1, Circle=2 (Ellipse=3.. Polyline=7 also exist) | tests/unit/test_joint_at_geometry.py sentinel installer; _inputs.py axis curveType checks |
-| PASS | camera-returns-copy | Viewport.camera returns a COPY - mutating it moves nothing until viewport.camera is reassigned | tests/unit/test_view_inspect.py FakeViewport/FakeCamera (models a shared mutable object, the opposite, so only this row checks the real semantics) |
+| PASS | camera-returns-copy | Viewport.camera returns a COPY - mutating it moves nothing until viewport.camera is reassigned | tests/unit/test_view_set.py FakeViewport/FakeCamera (models a shared mutable object, the opposite, so only this row checks the real semantics) |
 | PASS | basefeature-edit-scope | An open base-feature edit scope is INVISIBLE: baseFeatures.count reads 0 and Design.timeline raises while open; finishEdit makes it appear (count 1) | tests/unit/test_design_mode.py; design_mode.py _OPEN_BASE_FEATURES comment |
 | PASS | export-arg-orders | ExportManager arg orders differ by format: createSTLExportOptions(geometry, path) vs createSTEPExportOptions(path) - both land a file on execute() | tests/unit/test_design_export.py; design_export.py/_export.py |
 | PASS | shape-dump-design-world | Every design-side adsk type a SHARED fake impersonates exposes its live public attribute set (dir() membership) - the fake-shape lint checks fakes against these | tests/conftest.py shared fakes (BRepBody/BRepFace/BRepEdge/MakeComp/MakeDesign/FakeVector3D/FakePoint/...) |

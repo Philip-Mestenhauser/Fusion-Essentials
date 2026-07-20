@@ -820,9 +820,9 @@ class TestListFolders:
 # ── doc_save_as: lineage-URN reporting + name-collision detection (F38) ───────────
 #
 # Fusion PERMITS same-name documents; identity is the lineage URN. doc_save_as must (a) report the
-# URN of the file it wrote (it resolves asynchronously post-save), and (b) when a DIFFERENT file with
-# the same name already sits in the target folder, flag the fork as a name_collision rather than let
-# the agent be blind to it. These pin both, plus that a fresh (non-colliding) save carries no warning.
+# URN of the file it wrote (it resolves asynchronously post-save), and (b) REFUSE a same-name file
+# already in the target folder by default (a fork risk), only forking - and flagging name_collision -
+# when allow_duplicate_name=true is passed. These pin both, plus that a fresh save carries no warning.
 
 class _SaveAsFile:
     """A DataFile already in the destination folder (has name + id, the collision-guard fields)."""
@@ -868,15 +868,28 @@ class TestSaveDocumentAs:
         assert doc.saved_as[0] == "P1-Gimbal"
 
     def test_name_collision_is_flagged_with_existing_urn(self):
-        # a DIFFERENT file named 'P1-Gimbal' already sits in the folder -> the save forks; warn + name it.
+        # a DIFFERENT file named 'P1-Gimbal' already sits in the folder. The fork is refused by default,
+        # so allow_duplicate_name=true is the deliberate opt-in that reaches the warn+name path.
         existing = _SaveAsFile("P1-Gimbal", "urn:adsk.wipprod:dm.lineage:OLD")
         doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
         _install_saveas(doc, folder_files=[existing])
-        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
+        out = _payload(dm.save_document_as_handler(
+            name="P1-Gimbal", project="MCP Test Project", allow_duplicate_name=True))
         assert out["saved"] is True
         assert out["name_collision"]["existing_document_id"] == "urn:adsk.wipprod:dm.lineage:OLD"
         assert out["document_id"] == "urn:adsk.wipprod:dm.lineage:NEW"   # the fork's URN
         assert "collision" in out["note"].lower()
+
+    def test_same_name_refused_by_default(self):
+        # without the opt-in, a same-name file in the folder REFUSES - no saveAs, existing URN named.
+        existing = _SaveAsFile("P1-Gimbal", "urn:adsk.wipprod:dm.lineage:OLD")
+        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
+        _install_saveas(doc, folder_files=[existing])
+        res = dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project")
+        assert res["isError"] is True
+        assert "urn:adsk.wipprod:dm.lineage:OLD" in res["message"]
+        assert "allow_duplicate_name" in res["message"]
+        assert doc.saved_as is None            # refused BEFORE the saveAs call
 
     def test_no_collision_when_same_name_absent(self):
         # a same-named file in a DIFFERENT context must not false-trigger: only the target folder counts.

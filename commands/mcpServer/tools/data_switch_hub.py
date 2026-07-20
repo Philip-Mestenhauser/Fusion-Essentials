@@ -35,7 +35,7 @@ def _all_hubs(data):
 
 
 def handler(action: str = "list", hub: str = "") -> dict:
-    """List data hubs, or switch the active one; see TOOL_DESCRIPTION."""
+    """See TOOL_DESCRIPTION."""
     act = (action or "list").strip().lower()
     if act not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use: list, switch.")

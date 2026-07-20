@@ -19,6 +19,7 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 _DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", "diameter", "angle")
+_DISTANCE_TYPES = ("distance", "horizontal_distance", "vertical_distance")  # sign is a signed placement
 _DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance",
                           description="What kind of dimension to add.")
 
@@ -48,6 +49,70 @@ def _point_of(entity):
     return entity   # a sketch point itself
 
 
+# Entity-anchored POSITION references: pinning a distance to an ENTITY's own point (a line end, a
+# circle center) instead of a bare 'point:N' avoids the silent mis-attach when two entities share
+# coordinates and each mints its own point index. A ref may carry an anchor as a third colon-segment.
+_ANCHORS = ("start", "end", "mid", "midpoint", "center")
+
+
+def _parse_anchor_ref(ref):
+    """Split '<type>:<index>[:<anchor>]' -> (entity_ref, anchor_or_None, error). The optional third
+    colon-segment names WHICH point of the entity (start/end/mid for a line, center for a circle/arc).
+    An unrecognized third segment errors, naming the valid anchors, rather than silently mis-resolving."""
+    s = (ref or "").strip()
+    parts = s.split(":")
+    if len(parts) <= 2:
+        return s, None, None
+    anchor = parts[-1].strip().lower()
+    if anchor not in _ANCHORS:
+        return None, None, (f"'{ref}': unknown anchor '{parts[-1]}'. Valid: {', '.join(_ANCHORS)} "
+                            "(e.g. 'line:0:end', 'circle:2:center').")
+    return ":".join(parts[:-1]), anchor, None
+
+
+def _midpoint_sketch_point(sketch, line):
+    """A SketchPoint welded to a line's MIDPOINT (created at the geometric midpoint, then constrained
+    with addMidPoint so it tracks the line parametrically). Returns (point, None) or (None, error)."""
+    sp = safe(lambda: line.startSketchPoint.geometry)
+    ep = safe(lambda: line.endSketchPoint.geometry)
+    if sp is None or ep is None:
+        return None, "anchor 'mid' needs a line with two endpoints."
+    mid = adsk.core.Point3D.create((sp.x + ep.x) / 2.0, (sp.y + ep.y) / 2.0,
+                                   ((safe(lambda: sp.z, 0.0) or 0.0) + (safe(lambda: ep.z, 0.0) or 0.0)) / 2.0)
+    pt = sketch.sketchPoints.add(mid)               # MUTATION - let a failure raise into the handler
+    if pt is None:
+        return None, "could not create a midpoint anchor point."
+    safe(lambda: sketch.geometricConstraints.addMidPoint(pt, line))  # best-effort parametric weld
+    return pt, None
+
+
+def _point_at_anchor(sketch, entity, anchor):
+    """The SketchPoint a distance dimension pins for an explicit anchor. start/end need a line's
+    endpoint; center needs a circle/arc; mid builds a constrained midpoint on a line. Returns
+    (point, None) or (None, error)."""
+    start = safe(lambda: entity.startSketchPoint)
+    end = safe(lambda: entity.endSketchPoint)
+    center = safe(lambda: entity.centerSketchPoint)
+    if anchor == "start":
+        return (start, None) if start is not None else (None, "anchor 'start' needs a line or arc.")
+    if anchor == "end":
+        return (end, None) if end is not None else (None, "anchor 'end' needs a line or arc.")
+    if anchor == "center":
+        return (center, None) if center is not None else (None, "anchor 'center' needs a circle or arc.")
+    # mid / midpoint - a line only (a well-defined addMidPoint target; a circle/arc uses 'center')
+    if center is not None or start is None or end is None:
+        return None, "anchor 'mid' applies to a LINE (line:N:mid); for a circle/arc use 'center'."
+    return _midpoint_sketch_point(sketch, entity)
+
+
+def _dim_point(sketch, entity, anchor):
+    """The SketchPoint for a distance dimension: the default _point_of when no anchor is given, else
+    the explicit anchor point. Returns (point, None) or (None, error)."""
+    if anchor is None:
+        return _point_of(entity), None
+    return _point_at_anchor(sketch, entity, anchor)
+
+
 def _radial_text_point(curve):
     """A valid text-point for a radial/diameter dimension: a point OFFSET from the arc/circle CENTER
     by one radius (in sketch space). addRadialDimension/addDiameterDimension derive the dimension's
@@ -67,7 +132,7 @@ def _radial_text_point(curve):
 
 def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str = "",
             entity_two: str = "", value: str = "") -> dict:
-    """Add a dimensional constraint and drive its value."""
+    """See TOOL_DESCRIPTION."""
     dt = (dim_type or "distance").strip().lower()
     if dt not in _DIM_TYPES:
         return error(f"Unknown dim_type '{dim_type}'. Valid: {', '.join(_DIM_TYPES)}.")
@@ -80,14 +145,21 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         return error(f"No sketch named '{requested}'." if requested else
     "No sketch to dimension. Create one first with sketch_create.")
 
-    e1 = _common.resolve_entity_ref(sketch, entity_one)
+    base1, anchor1, aerr1 = _parse_anchor_ref(entity_one)
+    if aerr1:
+        return error(aerr1)
+    e1 = _common.resolve_entity_ref(sketch, base1)
     if e1 is None:
         return error(f"entity_one '{entity_one}' did not resolve. Use '<type>:<index>' "
-    "(line/arc/circle/point), e.g. 'line:0'.")
+    "(line/arc/circle/point), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.")
     need_two = dt in ("distance", "horizontal_distance", "vertical_distance", "angle")
     e2 = None
+    anchor2 = None
     if need_two:
-        e2 = _common.resolve_entity_ref(sketch, entity_two)
+        base2, anchor2, aerr2 = _parse_anchor_ref(entity_two)
+        if aerr2:
+            return error(aerr2)
+        e2 = _common.resolve_entity_ref(sketch, base2)
         if e2 is None:
             return error(f"'{dt}' needs entity_two ('<type>:<index>'). '{entity_two}' did not resolve.")
 
@@ -98,6 +170,18 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     # OFFSET from the curve's center (see _radial_text_point) - (0,0,0) is degenerate at an
     # origin-centered curve and the add raises "Some input argument is invalid".
     tp = P(0, 0, 0)
+    # Anchors pin one point of an entity for a DISTANCE dim; radius/diameter/angle take the whole entity.
+    if anchor1 and dt not in ("distance", "horizontal_distance", "vertical_distance"):
+        return error(f"'{dt}' takes a whole entity, not a point anchor - drop the ':{anchor1}' from entity_one.")
+    if anchor2 and dt == "angle":
+        return error("angle takes two whole lines, not point anchors - drop the anchor from entity_two.")
+    if dt in ("distance", "horizontal_distance", "vertical_distance"):
+        p1, perr1 = _dim_point(sketch, e1, anchor1)
+        if perr1:
+            return error(f"entity_one: {perr1}")
+        p2, perr2 = _dim_point(sketch, e2, anchor2)
+        if perr2:
+            return error(f"entity_two: {perr2}")
     try:
         if dt in ("distance", "horizontal_distance", "vertical_distance"):
             orient = {
@@ -105,7 +189,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             "horizontal_distance": adsk.fusion.DimensionOrientations.HorizontalDimensionOrientation,
             "vertical_distance": adsk.fusion.DimensionOrientations.VerticalDimensionOrientation,
             }[dt]
-            dim = dims.addDistanceDimension(_point_of(e1), _point_of(e2), orient, tp)
+            dim = dims.addDistanceDimension(p1, p2, orient, tp)
         elif dt == "radius":
             dim = dims.addRadialDimension(e1, _radial_text_point(e1))
         elif dt == "diameter":
@@ -126,7 +210,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         except Exception as e:
             return error(f"Dimension added but could not set value '{value}': {e}.")
 
-    return ok({
+    out = {
     "dimensioned": True,
     "dim_type": dt,
     "sketch": safe(lambda: sketch.name),
@@ -135,18 +219,30 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     "value": safe(lambda: dim.parameter.expression),
     "driven": set_value is not None,
     "note": "Dimensional constraint added. Drive it later by name via param_set.",
-    })
+    }
+    # A negative DISTANCE does not mirror: the solver places the point at the SIGNED offset, flipping it
+    # to the other side of its reference (and, when that flipped spot lands on another point, silently
+    # merging geometry). Detect it from the read-back EVALUATED value's sign - reliable and cheap, where
+    # a profile-count check is not (overlapping circles can ADD intersection regions). Live-verified 2704.
+    eval_cm = safe(lambda: dim.parameter.value)
+    if dt in _DISTANCE_TYPES and eval_cm is not None and eval_cm < -1e-9:
+        out["negative_distance_warning"] = (
+            "This distance evaluated NEGATIVE - the solver does not mirror it. It placed the point at "
+            "the signed offset, flipping it across its reference; if that spot coincides with another "
+            "point the two merge silently. For a reflection use sketch_constrain symmetry; for a "
+            "magnitude use a positive value. Re-read sketch_get to confirm the geometry.")
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (
 "Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of "
 "parametric sketching (sketch_constrain does the geometric half). distance/horizontal_distance/"
-"vertical_distance need BOTH entity refs (points or lines; to dimension one line's length, pass "
-"its two endpoints; a circle ref anchors at its CENTER point); radius/diameter need one "
-"arc/circle; angle needs two lines. 'entity_one'/'entity_two' are '<type>:<index>' refs (line/arc/circle/point, "
-"e.g. 'line:0') - the same scheme as sketch_constrain. 'value' drives the dimension by expression "
-"('25 mm', '90 deg', 'StockX/2'); omit to keep the auto-measured value. The created dimension "
-"becomes a model parameter you can later drive with param_set."
+"vertical_distance take TWO refs; radius/diameter one arc/circle; angle two lines. 'entity_one'/"
+"'entity_two' are '<type>:<index>' refs (line/arc/circle/point, e.g. 'line:0') - the sketch_constrain "
+"scheme. To pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
+"mis-attaches when points share coordinates): append ':start'/':end'/':mid' (line) or ':center' "
+"(circle/arc), e.g. 'line:0:end'. 'value' drives it by expression ('25 mm', '90 deg', 'StockX/2'); "
+"omit to keep the measured value. The dimension becomes a param drivable with param_set."
 )
 
 tool = (
@@ -154,8 +250,8 @@ tool = (
     .add_input_property(*_DIM_TYPE.as_property())
     .add_required_input("dim_type")
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>' (e.g. 'line:0')."})
-    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (distance/angle need two)."})
+    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional position anchor ':start/:end/:mid/:center' (e.g. 'line:0:end')."})
+    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (distance/angle need two); same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', '90 deg', 'StockX/2'); omit to keep measured."})
 )
 

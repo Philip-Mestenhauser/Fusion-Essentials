@@ -244,33 +244,36 @@ class TestInvalidationReasons:
 
 
 # ── _op_primary_state: one bucket per op, priority-ordered ────────────────────────────────────────
+# _op_primary_state classifies from the _op_state_facts dict (the same raw facts op_state_tally
+# shares) rather than a live op, so each test builds the raw op then reads it through _op_state_facts
+# first - exercising the two functions exactly as every real caller composes them.
 
 class TestOpPrimaryState:
-    def _op(self, **kw):
+    def _facts(self, **kw):
         base = dict(isSuppressed=False, hasError=False, isGenerating=False, operationState=0)
         base.update(kw)
-        return SimpleNamespace(**base)
+        return cc._op_state_facts(SimpleNamespace(**base))
 
     def test_suppressed_outranks_error_generating_and_state(self):
-        op = self._op(isSuppressed=True, hasError=True, isGenerating=True, operationState=1)
-        assert cc._op_primary_state(op) == "suppressed"
+        facts = self._facts(isSuppressed=True, hasError=True, isGenerating=True, operationState=1)
+        assert cc._op_primary_state(facts) == "suppressed"
 
     def test_error_outranks_generating_and_state(self):
-        op = self._op(hasError=True, isGenerating=True, operationState=3)
-        assert cc._op_primary_state(op) == "error"
+        facts = self._facts(hasError=True, isGenerating=True, operationState=3)
+        assert cc._op_primary_state(facts) == "error"
 
     def test_generating_outranks_operation_state(self):
-        op = self._op(isGenerating=True, operationState=3)
-        assert cc._op_primary_state(op) == "generating"
+        facts = self._facts(isGenerating=True, operationState=3)
+        assert cc._op_primary_state(facts) == "generating"
 
     def test_state_3_is_no_toolpath(self):
-        assert cc._op_primary_state(self._op(operationState=3)) == "no_toolpath"
+        assert cc._op_primary_state(self._facts(operationState=3)) == "no_toolpath"
 
     def test_state_1_is_out_of_date(self):
-        assert cc._op_primary_state(self._op(operationState=1)) == "out_of_date"
+        assert cc._op_primary_state(self._facts(operationState=1)) == "out_of_date"
 
     def test_state_0_is_valid(self):
-        assert cc._op_primary_state(self._op(operationState=0)) == "valid"
+        assert cc._op_primary_state(self._facts(operationState=0)) == "valid"
 
 
 # ── _hms: seconds -> h:m:s ─────────────────────────────────────────────────────────────────────
@@ -354,3 +357,36 @@ class TestMachiningTimeConstants:
         assert "error" in out["setups"][0]
         assert cam.calls == []                 # never called getMachiningTime for it
         assert out["total_machining_time_seconds"] == 0.0
+
+
+# ── tool_holder: a CAM tool's assigned HOLDER identity, read from its JSON (adsk.cam.Tool has no ──
+# ── holder accessor). Shared by cam_get(include=['tool']) and the cam_edit_tools library listing. ──
+
+class _HolderTool:
+    def __init__(self, json_str):
+        self._j = json_str
+    def toJson(self):
+        return self._j
+
+
+class TestToolHolder:
+    def test_reads_full_identity(self):
+        j = json.dumps({"description": "flat 10mm", "holder": {
+            "description": "CAT40-ER32", "product-id": "H-123", "vendor": "Acme",
+            "segments": [{}, {}, {}]}})
+        assert cc.tool_holder(_HolderTool(j)) == {
+            "name": "CAT40-ER32", "product_id": "H-123", "vendor": "Acme", "segment_count": 3}
+
+    def test_none_when_no_holder_key(self):
+        assert cc.tool_holder(_HolderTool(json.dumps({"description": "flat 10mm"}))) is None
+
+    def test_none_when_holder_empty(self):
+        # a default/empty holder sub-doc carries nothing meaningful -> None (not a bag of empties)
+        assert cc.tool_holder(_HolderTool(json.dumps({"holder": {}}))) is None
+
+    def test_partial_fields_only_what_is_present(self):
+        j = json.dumps({"holder": {"description": "Basic Holder"}})   # a name but no product-id/vendor
+        assert cc.tool_holder(_HolderTool(j)) == {"name": "Basic Holder"}
+
+    def test_bad_json_is_none_not_a_raise(self):
+        assert cc.tool_holder(_HolderTool("{not json")) is None

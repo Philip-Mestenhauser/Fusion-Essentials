@@ -151,6 +151,21 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         cell_info = {"cells_total": total, "cells_kept": kept,
     "cells_removed": [i for i in range(total) if i not in set(kept)],
     "kept_area": kept_area}
+        # PHANTOM-CELL GATE (pre-commit). createInput takes only the tool, not the target, so its cells
+        # span every VISIBLE surface the tool crosses - a coincident/overlapping surface injects extra
+        # cells and 'keep larger' can latch onto one that isn't part of the target at all. A kept area
+        # LARGER than the target's own area proves that (a subset of the target can never exceed it).
+        # Cancel BEFORE add so no wrong feature lands. Live-verified: HIDING the overlapping surface
+        # drops the phantom cells and the trim is correct (the cell compute is visibility-governed).
+        if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
+            safe(lambda: trim_input.cancel())
+            return error(
+                f"Trim aborted: the kept cell(s) total {round(kept_area * 100.0, 1)} mm2, larger than "
+                f"the target surface's own {round(area_before * 100.0, 1)} mm2 - so 'keep larger' latched "
+                "onto a cell from another surface that overlaps or touches this one (the trim computes "
+                "cells over every VISIBLE surface the tool crosses, not just the target). HIDE the "
+                "overlapping surface body, then trim again; or pass 'keep' with the explicit cell index. "
+                "The surface was left unchanged.")
         feature = comp.features.trimFeatures.add(trim_input)
     except Exception as e:
         if trim_input is not None:
@@ -348,7 +363,8 @@ _TRIM_DESC = (
 "Trim an OPEN surface body against a tool that intersects it - remove the unwanted cell(s). "
 "'surface' is the surface (isSolid==false, validated); 'trim_tool' is a face / patch body that "
 "intersects and divides it; 'keep' optionally picks which cell(s) to keep (default the larger "
-"remainder). A failed trim leaves the surface unchanged - never a partial cut."
+"remainder). Cells span every VISIBLE surface the tool crosses - HIDE overlapping surfaces first "
+"(a kept area above the target's is rejected). A failed trim leaves the surface unchanged."
 )
 surface_trim_tool = (
     Tool.create_simple(name="surface_trim", description=_TRIM_DESC)

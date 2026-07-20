@@ -41,7 +41,7 @@ class _Coll:
         return self._i[i]
 
 
-class _Container(_Entity):
+class _Parent(_Entity):
     def __init__(self, name, ops=(), folders=(), patterns=(), allow=True):
         super().__init__(name, allow)
         self.operations = _Coll(ops)
@@ -53,11 +53,11 @@ class Operation(_Entity):
     pass
 
 
-class Setup(_Container):
+class Setup(_Parent):
     pass
 
 
-class CAMFolder(_Container):
+class CAMFolder(_Parent):
     pass
 
 

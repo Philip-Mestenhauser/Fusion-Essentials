@@ -549,12 +549,12 @@ sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", hand
 _CREATE_DESC = (
                                         "Create a new sketch on a plane OR on an existing planar face. Use 'plane' = xy / xz / yz "
                                         "(origin planes; aliases top/front/right) or a construction-plane name; OR 'on_face' = a "
-                                        "planar-face handle from find_geometry to sketch directly ON a part's face (e.g. the top of a "
-                                        "boss) - on_face takes precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges "
-                                        "into it, so the sketch starts with profiles you did not draw - after drawing, re-read "
-                                        "sketch_get and pick the region by its area/centroid handle, never by a guessed index. "
-                                        "Optional 'name' renames the sketch. WRITES; then draw on it "
-                                        "with sketch_add_geometry. Requires an open design (see doc_new)."
+                                        "planar-face handle from find_geometry to sketch directly ON a part's face - on_face takes "
+                                        "precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges into it, so re-read "
+                                        "sketch_get and pick the region by its area/centroid handle, not a guessed index. "
+                                        "Optional 'name' renames the sketch. For a sketch in a nested or offset component, the "
+                                        "returned 'frame' is component-LOCAL, not world. WRITES; then draw on it with "
+                                        "sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
     Tool.create_simple(name="sketch_create", description=_CREATE_DESC)
@@ -570,15 +570,14 @@ create_sketch_item = Item.create_tool_item(tool=create_sketch_tool, write="write
                                            run_on_main_thread=True)
 
 _ADD_DESC = (
-                                           "Draw one geometry entity on a sketch. Provide the params for the chosen 'kind' "
-                                           "(coordinates/sizes in 'units' = mm "
-                                           "[default], cm, or in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
+                                           "Draw one geometry entity on a sketch. Params per 'kind' (coords/sizes in 'units' = mm "
+                                           "[default]/cm/in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
                                            "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
-                                           "chain whose segments SHARE endpoints (coincident) so the shape is continuous + parametric "
-                                           "(drags as one shape, unlike independent 'line' calls) - use 'closed_path' for a custom closed "
-                                           "boundary. Targets 'sketch_name', or the most recently created sketch if omitted. WRITES to the "
-                                           "design. Pair with view_screenshot to view it."
+                                           "chain whose segments SHARE endpoints (coincident) so the shape is continuous + parametric - "
+                                           "use 'closed_path' for a custom closed "
+                                           "boundary. Targets 'sketch_name' (else the most recent sketch). WRITES; pair with "
+                                           "view_screenshot to view it."
 )
 add_geometry_tool = (
     Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
@@ -593,8 +592,8 @@ add_geometry_tool = (
     .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
     .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle); center_rectangle: HALF-width from center."})
     .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle); center_rectangle: HALF-height from center."})
-    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle)."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle)."})
+    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle); point X for kind='point'."})
+    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle); point Y for kind='point'."})
     .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot half-width."})
     .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
     .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})
@@ -607,9 +606,10 @@ add_geometry_item = Item.create_tool_item(tool=add_geometry_tool, write="write",
 _3DLINE_DESC = (
                                           "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0). "
                                           "Unlike sketch_add_geometry (which keeps geometry on the sketch x-y plane), this places true "
-                                          "3D points, so a non-zero z lifts that end off the plane. The start defaults to the origin "
-                                          "(0,0,0); set coincident_start_to_origin=true to also lock the start point to the sketch "
-                                          "origin with a coincident constraint. Coordinates in 'units' (mm default). Reports each "
+                                          "3D points, so a non-zero z lifts that end off the plane, measured along the sketch's "
+                                          "LOCAL normal (not world Z). The start defaults to the origin; "
+                                          "coincident_start_to_origin=true locks it there with a coincident constraint. "
+                                          "Coordinates in 'units' (mm default). Reports each "
                                           "endpoint's resolved coordinates and whether the end is off-plane. WRITES to the design. "
                                           "View from an iso angle with view_screenshot (a top view hides the out-of-plane component)."
 )

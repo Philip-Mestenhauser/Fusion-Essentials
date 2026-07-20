@@ -71,3 +71,36 @@ class TestPurgeAddinModules:
         assert under_name not in ra.sys.modules
         assert outside_name in ra.sys.modules
         assert before >= 1
+
+
+class TestStaleCachedSchemaWarning:
+    """Task D: one warning sentence about a stale CLIENT schema corrupting json-array arguments
+    (scalars still pass) after a reload - live-proven, so it belongs on the wire, not just in a
+    comment."""
+
+    def test_description_warns_about_stale_client_schema_corrupting_arrays(self):
+        desc = ra.TOOL_DESCRIPTION
+        assert "json-array" in desc
+        assert "comma-mangled" in desc
+        assert "reconnect" in desc.lower()
+        # the claim distinguishes scalar (safe) from array (unsafe) - not a blanket "reconnect always".
+        assert "scalar" in desc.lower()
+
+
+class TestReloadResponseTeachesReconnect:
+    """The reload response is the moment an agent decides what to do while the server restarts. The
+    truth: the client reconnects AUTOMATICALLY, so the right move is simply the next tool call - the
+    note must teach that (and name a cheap confirmation read), never send agents to shell-poll
+    /health."""
+
+    def test_note_teaches_next_tool_call_not_health_polling(self, monkeypatch):
+        monkeypatch.setattr(ra.threading, "Timer",
+                            lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+        res = ra.handler()
+        assert res["isError"] is False
+        text = res["content"][0]["text"]
+        assert "reconnects automatically" in text
+        assert "sys_capability_map" in text
+        assert "Do not poll /health" in text
+        # machine-readable pointer for clients that read fields, not prose
+        assert res["next"] == "sys_capability_map"

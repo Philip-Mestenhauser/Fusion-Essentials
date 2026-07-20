@@ -135,6 +135,20 @@ def _local_mentions(tree, name, skip_import_alias=True):
     return n
 
 
+def _stale_definition_exemptions(table, counts, defined):
+    """Both staleness directions for a _DEFINITION_EXEMPT-shaped table: an entry must still NAME a
+    module-level definition (`defined`), and that definition must still be corpus-unreferenced
+    (`counts`) - either miss returns a remove-the-entry message."""
+    stale = []
+    for name, reason in table.items():
+        assert str(reason).strip(), f"_DEFINITION_EXEMPT: {name} needs a plain-English reason"
+        if name not in defined:
+            stale.append(f"{name}: no such module-level definition - drop the entry")
+        elif counts.get(name, 0) > 1:
+            stale.append(f"{name}: referenced now - drop the exemption")
+    return stale
+
+
 def _fixture_decorated(node):
     """True when a function is a pytest fixture (injected by argument name, not called)."""
     for dec in getattr(node, "decorator_list", []):
@@ -213,15 +227,25 @@ class TestNoUnreferencedDefinitions:
                                + "\n".join(offenders))
 
     def test_definition_exempt_table_matches_reality(self):
-        # empty today, armed for its first entry: an exemption must carry a reason and must still
-        # be corpus-unreferenced - a name that gained a reference does not need exempting anymore.
+        # empty today, armed for its first entry: both staleness directions - an entry naming a
+        # definition that no longer exists fails, and one whose definition gained a reference fails.
         counts = _mention_counts()
-        stale = []
-        for name, reason in _DEFINITION_EXEMPT.items():
-            assert str(reason).strip(), f"_DEFINITION_EXEMPT: {name} needs a plain-English reason"
-            if counts.get(name, 0) > 1:
-                stale.append(f"{name}: referenced now - drop the exemption")
+        defined = set()
+        for path in _py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]:
+            defined |= {name for name, _, _ in _module_definitions(_parse(path))}
+        stale = _stale_definition_exemptions(_DEFINITION_EXEMPT, counts, defined)
         assert not stale, "stale _DEFINITION_EXEMPT entries:\n  " + "\n  ".join(stale)
+
+    def test_the_staleness_check_bites(self):
+        # both directions against synthetic entries: a vanished definition trips, a referenced one
+        # trips, a live-but-unreferenced one (the only legitimate resident) passes clean.
+        counts = {"quiet_helper": 0, "busy_helper": 3}
+        defined = {"quiet_helper", "busy_helper"}
+        assert not _stale_definition_exemptions({"quiet_helper": "framework seam"}, counts, defined)
+        gone = _stale_definition_exemptions({"vanished_helper": "reason"}, counts, defined)
+        assert gone and "no such module-level definition" in gone[0]
+        hot = _stale_definition_exemptions({"busy_helper": "reason"}, counts, defined)
+        assert hot and "referenced now" in hot[0]
 
     def test_every_test_file_definition_is_referenced_in_its_file(self):
         # Test files are self-contained, so deadness is decidable PER FILE - and must be, since

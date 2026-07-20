@@ -9,6 +9,8 @@ does not reliably move the eye/target in this API flow. The snapshot stack is mo
 survives between MCP calls (one session).
 """
 
+import json
+
 import adsk.core
 import adsk.fusion
 
@@ -22,12 +24,26 @@ from . import _view_common
 
 app = adsk.core.Application.get()
 
+# Monotonic call counter -> a per-response 'request_echo' tracer. A once-observed failure had view_set
+# replay an OLD payload verbatim across 7 consecutive calls; this tracer makes the next occurrence
+# diagnosable: a REPEATED seq means the handler never re-ran (a cached/replayed response, client-side),
+# while an advancing seq whose 'received' echo is stale under new inputs means the wrong args reached the
+# server. Cleared on reload (like _SNAPSHOTS).
+_CALL_SEQ = 0
+
 _ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation",
     "style", "restore", "save_view", "apply_view", "list_views")
 _MAX_OCC = 1000  # cap occurrence snapshot/restore for huge assemblies
 
 _TARGET = _inputs.OccurrenceRefList("target",
         description="Occurrence(s) to isolate/show/hide - a fullPathName/name, or a list of them.")
+# hide/show also reach single BODIES (a root-level body, one body of a multi-body component) -
+# occurrence-granular visibility can't. Same 'target' property; isolate stays occurrence-only
+# (Fusion isolates occurrences, not bodies). with_kinds so the handler branches occurrence-vs-body.
+_VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
+        description="Target(s) to isolate/show/hide.",
+        contract=("A list of occurrences (fullPathName/name) and/or - hide/show only - bodies "
+                  "(find_geometry 'handle' or body name); ambiguous names are refused."))
 _FOCUS = _inputs.OccurrenceRef("focus",
         description="Occurrence to fit the view to (orient).")
 
@@ -118,7 +134,7 @@ def _do_snapshot(design):
         "occurrences_saved": len(occ_state),
         "visual_style": int(safe(lambda: vp.visualStyle, 0)),
         "note": "Current camera, visual style, and all occurrence visibility saved. "
-        "Explore freely; call view_inspect(restore) to put it all back."})
+        "Explore freely; call view_set(restore) to put it all back."})
 
 
 def _do_orient(design, orientation, focus, fit):
@@ -188,32 +204,72 @@ def _do_visibility(design, action, target):
         return ok({"action": action, "cleared_count": cleared})
     if not target:
         return error(f"Provide 'target' for {action}.")
-    matches, target_err = _TARGET.resolve(target)
-    if target_err:
-        return error(target_err)
-    if action == "isolate" and len(matches) > 1:
-        return error(f"'{target}' matched {len(matches)} occurrences; isolate needs exactly one. "
-                      "Use a fuller name/path.")
+    if action == "isolate":
+        # isolate is occurrence-granular in Fusion (Occurrence.isIsolated; a body has no isolate).
+        matches, target_err = _TARGET.resolve(target)
+        if target_err:
+            return error(target_err)
+        if len(matches) > 1:
+            return error(f"'{target}' matched {len(matches)} occurrences; isolate needs exactly one. "
+                          "Use a fuller name/path.")
+        pairs = [(o, "occurrence") for o in matches]
+    else:
+        # hide/show also reach single BODIES - the only lever for a ROOT-level body or one body of a
+        # multi-body component, which occurrence visibility cannot address.
+        pairs, target_err = _VIS_TARGET.resolve(target)
+        if target_err:
+            return error(target_err)
     affected = []
     ancestors_lit = []
-    for o in matches:
-        try:
-            if action == "isolate":
-                o.isIsolated = True
-            elif action == "show":
-                # An occurrence stays hidden if any ANCESTOR occurrence's bulb is off - so turning
-                # on a nested child alone does nothing visible. Light up the whole ancestor chain.
-                lit = _show_with_ancestors(o)
-                ancestors_lit.extend(a for a in lit if a != safe(lambda o=o: o.name))
-            elif action == "hide":
-                o.isLightBulbOn = False
-        except Exception as e:
-            return error(f"Failed to {action} '{safe(lambda o=o: o.name)}': {e}")
-        affected.append(safe(lambda o=o: o.name))
+    body_states = []
+    for ent, kind in pairs:
+        nm = safe(lambda ent=ent: ent.name)
+        if kind == "occurrence":
+            try:
+                if action == "isolate":
+                    ent.isIsolated = True
+                elif action == "show":
+                    # An occurrence stays hidden if any ANCESTOR occurrence's bulb is off - so turning
+                    # on a nested child alone does nothing visible. Light up the whole ancestor chain.
+                    lit = _show_with_ancestors(ent)
+                    ancestors_lit.extend(a for a in lit if a != nm)
+                elif action == "hide":
+                    ent.isLightBulbOn = False
+            except Exception as e:
+                return error(f"Failed to {action} '{nm}': {e}")
+        else:
+            # A BODY's browser bulb. isLightBulbOn is the body's OWN bulb; isVisible is the effective
+            # state (ancestor bulbs roll up into it) - gate the claim on the bulb read-back, report both.
+            want = action == "show"
+            try:
+                ent.isLightBulbOn = want
+            except Exception as e:
+                return error(f"Failed to {action} body '{nm}': {e}")
+            if want:
+                # A shown body stays invisible while an ancestor occurrence is dark - light the chain,
+                # the same teaching 'show' applies to a nested occurrence.
+                occ = safe(lambda ent=ent: ent.assemblyContext)
+                if occ is not None:
+                    ancestors_lit.extend(a for a in _show_with_ancestors(occ))
+            got = safe(lambda ent=ent: ent.isLightBulbOn)
+            if got is not want:
+                return error(f"Set {action} on body '{nm}' but isLightBulbOn reads back {got} - "
+                             "the change did not take.")
+            body_states.append({"body": nm, "light_bulb_on": bool(got),
+                                "visible": bool(safe(lambda ent=ent: ent.isVisible, want))})
+        affected.append(nm)
     out = {"action": action, "target": target, "affected": affected,
-    "note": "Visibility changed. view_screenshot to view; view_inspect(restore) to undo."}
+    "note": "Visibility changed. view_screenshot to view; view_set(restore) to undo."}
+    if body_states:
+        out["bodies"] = body_states
+        # snapshot/restore records OCCURRENCE bulbs only - be honest about the undo path for bodies.
+        out["note"] = ("Visibility changed. view_screenshot to view. Body bulbs are NOT captured by "
+                       "snapshot/restore - undo a body with the opposite hide/show.")
+        if any(b["light_bulb_on"] and not b["visible"] for b in body_states):
+            out["note"] += (" A body reads light_bulb_on but visible:false - an ancestor occurrence "
+                            "is hidden; show that occurrence too.")
     if ancestors_lit:
-        out["ancestors_also_shown"] = sorted(set(ancestors_lit))
+        out["ancestors_also_shown"] = sorted(set(a for a in ancestors_lit if a))
     return ok(out)
 
 
@@ -232,7 +288,7 @@ def _do_restore(design):
     key = _doc_key()
     snap = _SNAPSHOTS.get(key)
     if not snap:
-        return error(f"No snapshot saved for '{key}'. Call view_inspect(snapshot) first. "
+        return error(f"No snapshot saved for '{key}'. Call view_set(snapshot) first. "
     "(Snapshots are held in memory for this session only - reloading the add-in "
     "clears them. To recover a clean state without a snapshot, use "
     "clear_isolation then show the components you want.)")
@@ -342,35 +398,63 @@ def _do_list_views(design):
     return ok({"action": "list_views", "count": len(views), "named_views": views})
 
 
+def _trace(action, target, orientation, focus, style, view_name):
+    """A fresh per-call tracer: a monotonic seq + an echo of the args the handler received."""
+    global _CALL_SEQ
+    _CALL_SEQ += 1
+    echo = {"action": action}
+    for k, v in (("target", target), ("orientation", orientation), ("focus", focus),
+                 ("style", style), ("view_name", view_name)):
+        if v:
+            echo[k] = v
+    return {"seq": _CALL_SEQ, "received": echo}
+
+
+def _with_trace(result, trace):
+    """Inject the request tracer into a successful ok() result's JSON payload; a no-op on an error."""
+    if result.get("isError"):
+        return result
+    try:
+        payload = json.loads(result["content"][0]["text"])
+        payload["request_echo"] = trace
+        result["content"][0]["text"] = json.dumps(payload, indent=2)
+    except Exception:
+        pass
+    return result
+
+
 def handler(action: str = "", target=None, orientation: str = "", focus: str = "",
             style: str = "", fit: bool = True, view_name: str = "") -> dict:
-    """The agent's eyes: aim the camera, isolate/show/hide, toggle wireframe, and restore. VIEW state only."""
+    """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
     design = _common.design()
     if not design:
         return error("No active design. Open a document with design geometry first.")
+    trace = _trace(action, target, orientation, focus, style, view_name)
     try:
         if action == "snapshot":
-            return _do_snapshot(design)
-        if action == "orient":
-            return _do_orient(design, orientation, focus, fit)
-        if action in ("isolate", "show", "hide", "clear_isolation"):
-            return _do_visibility(design, action, target)
-        if action == "style":
-            return _do_style(style)
-        if action == "restore":
-            return _do_restore(design)
-        if action == "save_view":
-            return _do_save_view(design, view_name)
-        if action == "apply_view":
-            return _do_apply_view(design, view_name)
-        if action == "list_views":
-            return _do_list_views(design)
+            result = _do_snapshot(design)
+        elif action == "orient":
+            result = _do_orient(design, orientation, focus, fit)
+        elif action in ("isolate", "show", "hide", "clear_isolation"):
+            result = _do_visibility(design, action, target)
+        elif action == "style":
+            result = _do_style(style)
+        elif action == "restore":
+            result = _do_restore(design)
+        elif action == "save_view":
+            result = _do_save_view(design, view_name)
+        elif action == "apply_view":
+            result = _do_apply_view(design, view_name)
+        elif action == "list_views":
+            result = _do_list_views(design)
+        else:
+            result = error("unreachable")
     except Exception as e:
-        return error(f"view_inspect({action}) failed: {e}")
-    return error("unreachable")
+        return error(f"view_set({action}) failed: {e}")
+    return _with_trace(result, trace)
 
 
 TOOL_DESCRIPTION = (
@@ -378,18 +462,19 @@ TOOL_DESCRIPTION = (
     "'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
     "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=fit to a named "
     "occurrence) | 'isolate'/'show'/'hide'/'clear_isolation' "
-    "('target'=occurrence(s), ambiguous names refused; 'show' lights the whole ancestor chain) | "
+    "('target'=occurrence(s); hide/show also take BODIES (root-level / one of a multi-body "
+    "component); ambiguous names refused; 'show' lights ancestors) | "
     "'style' (visual style) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent "
     "Named View, camera only). snapshot/restore is in-memory (cleared on reload). Pair with "
     "view_screenshot; for section views use view_section (a named view won't restore a cut)."
 )
 
 tool = (
-    Tool.create_simple(name="view_inspect", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="view_set", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.Choice("action", _ACTIONS, required=True,
             description="The view verb to perform.").as_property())
     .add_required_input("action")
-    .add_input_property(*_TARGET.as_property())
+    .add_input_property(*_VIS_TARGET.as_property())
     .add_input_property("view_name", {"type": "string",
             "description": "Name for save_view / apply_view (a persistent document Named View)."})
     .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),

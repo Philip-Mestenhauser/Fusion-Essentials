@@ -54,7 +54,7 @@ def _reference_state(dd):
 
 
 def handler() -> dict:
-    """Refresh the active drawing's out-of-date references, verifying the stale state actually clears."""
+    """See TOOL_DESCRIPTION."""
     dd = _active_drawing_doc()
     if dd is None or safe(lambda: dd.drawing) is None:
         return error("No drawing to update: the active document is not a drawing. Open the drawing "

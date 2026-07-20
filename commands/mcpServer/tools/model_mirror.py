@@ -28,7 +28,7 @@ app = adsk.core.Application.get()
 
 
 def handler(bodies=None, plane: str = "yz", join: bool = False) -> dict:
-    """Mirror solid bodies across a plane."""
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")

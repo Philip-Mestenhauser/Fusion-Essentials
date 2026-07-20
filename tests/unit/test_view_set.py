@@ -1,11 +1,12 @@
-"""Unit tests for ``view_inspect.py`` — the agent's view verbs.
+"""Unit tests for ``view_set.py`` — the agent's view verbs.
 
 Camera math (eye/target/up per orientation) is a live-viewport side-effect best
 left to a real session, but the surrounding LOGIC is pure and worth pinning:
-action validation, occurrence resolution via the shared OccurrenceRef/OccurrenceRefList kinds
-(exact fullPathName/name beats substring; an ambiguous substring is REFUSED, never grabbed
-first-match; isolate needs exactly one resolved match), the visibility verbs (isolate flag,
-hide bulb, clear_isolation, show lighting the whole ancestor chain), style validation, the
+action validation, occurrence resolution via the shared typed kinds (exact fullPathName/name beats
+substring; an ambiguous substring is REFUSED, never grabbed first-match; isolate needs exactly one
+resolved match and stays occurrence-only), the visibility verbs (isolate flag, hide bulb,
+clear_isolation, show lighting the whole ancestor chain, body-level hide/show with a per-body
+bulb read-back), style validation, the
 named-view library (save overwrites same name, apply errors with a list, list
 reports built-ins), and the snapshot -> mutate -> restore round-trip that puts
 bulbs/isolation/style back. Fakes expose the real attributes the tool sets so we
@@ -14,9 +15,9 @@ can assert on them.
 
 import json
 
-from conftest import load_tool
+from conftest import load_tool, BRepBody, _NamedCollection
 
-iv = load_tool("view_inspect")
+iv = load_tool("view_set")
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -45,8 +46,10 @@ class FakeOcc:
 
 
 class FakeRoot:
-    def __init__(self, occurrences):
+    def __init__(self, occurrences, bodies=()):
         self.allOccurrences = list(occurrences)
+        # root-level bodies (conftest.BRepBody instances) - the body-level hide/show targets.
+        self.bRepBodies = _NamedCollection(bodies)
 
 
 class FakeNamedView:
@@ -95,8 +98,8 @@ class FakeNamedViews:
 
 
 class FakeDesign:
-    def __init__(self, occurrences, named_views=None):
-        self.rootComponent = FakeRoot(occurrences)
+    def __init__(self, occurrences, named_views=None, bodies=()):
+        self.rootComponent = FakeRoot(occurrences, bodies)
         self.namedViews = named_views if named_views is not None else FakeNamedViews()
 
 
@@ -136,8 +139,13 @@ class FakeApp:
         self.activeViewport = FakeViewport()
 
 
-def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None):
-    design = FakeDesign(list(occurrences), named_views)
+def _body(name, bulb=True, hidden_by_ancestor=False):
+    """A conftest BRepBody: own settable bulb; isVisible = bulb AND not hidden_by_ancestor."""
+    return BRepBody(name=name, light_bulb=bulb, hidden_by_ancestor=hidden_by_ancestor)
+
+
+def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=()):
+    design = FakeDesign(list(occurrences), named_views, bodies)
     app = FakeApp(design, doc_name, doc_id=doc_id)
     monkeypatch.setattr(iv, "app", app)
     monkeypatch.setattr(iv._common, "app", app)
@@ -245,14 +253,91 @@ class TestVisibility:
         assert a.isIsolated is False and b.isIsolated is False
 
     def test_unmatched_target_errors(self, monkeypatch):
+        # hide resolves through the occurrence-or-body kind, so a full miss reports the whole contract
+        # (not just occurrences).
         _install(monkeypatch, [FakeOcc("A")])
         res = iv.handler(action="hide", target="Ghost")
-        assert res["isError"] is True and "no occurrence matching" in res["message"].lower()
+        assert res["isError"] is True and "did not resolve" in res["message"].lower()
 
     def test_missing_target_errors(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("A")])
         res = iv.handler(action="hide")
         assert res["isError"] is True and "Provide 'target'" in res["message"]
+
+
+class TestBodyVisibility:
+    """hide/show reach single BODIES (root-level bodies / one body of a multi-body component) -
+    the granularity occurrence bulbs cannot address. The bulb write is READ BACK per body."""
+
+    def test_hide_one_root_body_leaves_the_other_lit(self, monkeypatch):
+        b1, b2 = _body("Body1"), _body("Body2")
+        _install(monkeypatch, bodies=[b1, b2])
+        out = _payload(iv.handler(action="hide", target=["Body1"]))
+        assert b1.isLightBulbOn is False
+        assert b2.isLightBulbOn is True          # the sibling body is untouched
+        assert out["affected"] == ["Body1"]
+        assert out["bodies"] == [{"body": "Body1", "light_bulb_on": False, "visible": False}]
+
+    def test_show_body_turns_bulb_on_and_reads_back(self, monkeypatch):
+        b = _body("Body1", bulb=False)
+        _install(monkeypatch, bodies=[b])
+        out = _payload(iv.handler(action="show", target=["Body1"]))
+        assert b.isLightBulbOn is True
+        assert out["bodies"][0]["light_bulb_on"] is True
+
+    def test_body_bulb_write_that_does_not_take_errors(self, monkeypatch):
+        # Honesty gate: a bulb set the platform swallows must be an error, never a false ok.
+        class _StubbornBody:
+            name = "Body1"
+            entityToken = "Body1"
+            isVisible = True
+            @property
+            def isLightBulbOn(self):
+                return True
+            @isLightBulbOn.setter
+            def isLightBulbOn(self, v):
+                pass                             # silently ignores the write
+        _install(monkeypatch, bodies=[_StubbornBody()])
+        res = iv.handler(action="hide", target=["Body1"])
+        assert res["isError"] is True and "reads back" in res["message"]
+
+    def test_shown_but_still_invisible_body_is_named_in_the_note(self, monkeypatch):
+        # bulb ON but isVisible False (an ancestor occurrence is dark) - report it, don't claim done.
+        b = _body("Body1", bulb=False, hidden_by_ancestor=True)
+        _install(monkeypatch, bodies=[b])
+        out = _payload(iv.handler(action="show", target=["Body1"]))
+        assert out["bodies"][0] == {"body": "Body1", "light_bulb_on": True, "visible": False}
+        assert "visible:false" in out["note"]
+
+    def test_mixed_occurrence_and_body_hide(self, monkeypatch):
+        occ = FakeOcc("Bracket", bulb=True)
+        b = _body("Body1")
+        _install(monkeypatch, [occ], bodies=[b])
+        out = _payload(iv.handler(action="hide", target=["Bracket", "Body1"]))
+        assert occ.isLightBulbOn is False and b.isLightBulbOn is False
+        assert out["affected"] == ["Bracket", "Body1"]
+        assert [r["body"] for r in out["bodies"]] == ["Body1"]   # read-back rows are bodies only
+
+    def test_hide_via_face_handle_walks_to_owning_body(self, monkeypatch):
+        # find_geometry mints only face/edge/vertex handles - never a body handle - so a body target
+        # arrives as a FACE handle and must resolve to the face's OWNING body (TargetRef's owner-walk;
+        # also how an ambiguous body NAME is disambiguated, per the refusal's own advice).
+        b = _body("Body1")
+        face = type("F", (), {})()
+        face.body = b
+        design = _install(monkeypatch, bodies=[b])
+        design.findEntityByToken = lambda tok: [face] if tok == "TOK_FACE" else []
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "BRepFace", type(face), raising=False)
+        out = _payload(iv.handler(action="hide", target=["TOK_FACE"]))
+        assert b.isLightBulbOn is False
+        assert out["bodies"][0]["body"] == "Body1"
+
+    def test_isolate_refuses_a_body_target(self, monkeypatch):
+        # isolate stays occurrence-granular (Fusion has no body isolate) - a body name must not resolve.
+        _install(monkeypatch, bodies=[_body("Body1")])
+        res = iv.handler(action="isolate", target=["Body1"])
+        assert res["isError"] is True and "no occurrence matching" in res["message"].lower()
 
 
 # ── style ────────────────────────────────────────────────────────────────────
@@ -433,3 +518,34 @@ class TestSnapshotRestore:
         assert res["isError"] is True and "No snapshot saved" in res["message"]
         # the first document's snapshot is untouched
         assert "urn:doc-one" in iv._SNAPSHOTS
+
+
+# ── request tracer: a per-response 'request_echo' (monotonic seq + the args the handler received) so ──
+# ── a REPLAYED response (the once-seen 7x-identical-replay failure) is diagnosable next time. ────────
+
+class TestRequestTracer:
+    def test_trace_advances_seq_and_echoes_received_args(self):
+        t1 = iv._trace("orient", None, "front", "", "", "")
+        t2 = iv._trace("hide", "Gear:1", "", "", "", "")
+        assert t2["seq"] == t1["seq"] + 1                       # monotonic - a repeat means a replay
+        assert t1["received"] == {"action": "orient", "orientation": "front"}
+        assert t2["received"] == {"action": "hide", "target": "Gear:1"}
+
+    def test_with_trace_injects_into_ok_payload(self):
+        res = iv.ok({"action": "orient", "note": "aimed"})
+        out = iv._with_trace(res, {"seq": 7, "received": {"action": "orient"}})
+        payload = json.loads(out["content"][0]["text"])
+        assert payload["request_echo"] == {"seq": 7, "received": {"action": "orient"}}
+        assert payload["note"] == "aimed"                      # original payload preserved
+
+    def test_with_trace_is_noop_on_error(self):
+        err = iv.error("boom")
+        out = iv._with_trace(err, {"seq": 1, "received": {}})
+        assert out is err and out["isError"] is True
+
+    def test_handler_stamps_the_echo(self, monkeypatch):
+        # end-to-end: a successful view_set call carries request_echo reflecting its action
+        monkeypatch.setattr(iv._common, "design", lambda: object())
+        monkeypatch.setattr(iv, "_do_list_views", lambda design: iv.ok({"action": "list_views"}))
+        out = json.loads(iv.handler(action="list_views")["content"][0]["text"])
+        assert out["request_echo"]["received"]["action"] == "list_views"

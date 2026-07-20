@@ -162,7 +162,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             cbore_diameter: str = "", cbore_depth: str = "",
             csink_diameter: str = "", csink_angle: str = "",
             tap: str = "", fastener: str = "", fit: str = "normal", units: str = "mm") -> dict:
-    """Drill holes with the real Hole command."""
+    """See TOOL_DESCRIPTION."""
     hole_type = (hole_type or "simple").strip().lower()
     if hole_type not in _TYPES:
         return error(f"Unknown hole_type '{hole_type}'. Use one of: {', '.join(_TYPES)}.")

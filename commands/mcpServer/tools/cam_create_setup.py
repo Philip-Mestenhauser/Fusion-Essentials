@@ -23,11 +23,11 @@ _OP_TYPES = {"milling": "MillingOperation", "turning": "TurningOperation"}
 
 _OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="milling",
                           description="The machining operation type for the setup.")
-# models: bodies (handle/name) OR container occurrences/components (name); omitted -> all root bodies.
-# A container OCCURRENCE is what a shop template selects, so the setup keeps its selection when the
-# container's contents are replaced (Setup.models accepts Occurrence, BRepBody, or MeshBody).
+# models: bodies (handle/name) OR component occurrences (name); omitted -> all root bodies.
+# A component OCCURRENCE is what a shop template selects, so the setup keeps its selection when the
+# component's contents are replaced (Setup.models accepts Occurrence, BRepBody, or MeshBody).
 _MODELS = _inputs.TargetRefList("models", required=False,
-                                description="Bodies OR container occurrences to machine (omit = all solid bodies).")
+                                description="Bodies OR component occurrences to machine (omit = all solid bodies).")
 
 
 def _all_root_bodies(design):
@@ -39,7 +39,7 @@ def _all_root_bodies(design):
 
 
 def handler(operation_type: str = "milling", models=None, name: str = "") -> dict:
-    """Create a CAM setup of 'operation_type' over 'models' (or all root bodies)."""
+    """See TOOL_DESCRIPTION."""
     op_key, oerr = _OP_TYPE.resolve(operation_type)
     if oerr:
         return error(oerr)
@@ -100,8 +100,8 @@ TOOL_DESCRIPTION = (
     "Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since "
     "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. 'operation_type' "
     "is milling (default) | turning. 'models' selects what to machine - find_geometry HANDLES, body "
-    "NAMES, OR a CONTAINER occurrence/component name (a list) - or omit for ALL root solid bodies. "
-    "Selecting a CONTAINER (not the body inside) keeps the setup's selection when its contents are "
+    "NAMES, OR a COMPONENT occurrence name (a list) - or omit for ALL root solid bodies. "
+    "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its contents are "
     "swapped - the shop-template pattern. 'name' optionally names the setup. After this, add "
     "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "
     "cam_generate. The CAM product must exist (when it does not, the error names the next call). "

@@ -26,7 +26,7 @@ _READ = {"get"}
 # NB 'select' is NOT here: cam_select_geometry SETS an op's machining geometry (an Edit). The user-pick
 # acquisition uses 'request'/'get' (sys_request_selection / sys_get_selection).
 _ACQUIRE = {"find", "measure", "probe", "inspect", "screenshot", "section", "compare",
-            "list", "status", "capability", "interference", "request", "physical", "compute"}
+            "list", "status", "capability", "interference", "request", "compute"}
 # Edit: mutates state or runs an async op. The open-ended action set.
 _EDIT = {"create", "edit", "delete", "set", "add", "remove", "move", "apply", "generate", "export",
          "convert", "recompute", "activate", "show", "hide", "constrain", "ground", "drive", "arrange",
@@ -47,8 +47,6 @@ _SHAPE_EXEMPT = {"workspace_orient"}
 # readOnlyHint client must not auto-approve them. Each reason is the observed behavior that makes
 # read-only wrong for this tool - not every read-verb tool qualifies, only these three.
 _WRITE_VERB_EXEMPT = {
-    "view_inspect": "save_view persists a Named View (and deletes/overwrites any existing view of "
-                    "the same name); other actions mutate camera/visibility state.",
     "view_section": "its clear action deletes user-created section analyses.",
     "sys_request_selection": "it clears the user's current Fusion selection.",
 }

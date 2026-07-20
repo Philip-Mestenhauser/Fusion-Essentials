@@ -42,7 +42,7 @@ def _find_version(df, version_number, version_id):
 
 
 def handler(version_number=None, version_id: str = "") -> dict:
-    """Promote a prior version of the active document to be the latest; see TOOL_DESCRIPTION."""
+    """See TOOL_DESCRIPTION."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return error("No active document to restore a version of.")

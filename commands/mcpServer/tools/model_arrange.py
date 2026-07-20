@@ -49,7 +49,7 @@ _SHAPES = _inputs.OccurrenceRefList("shapes", required=False,
 
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
             spacing: float = 0.0, units: str = "mm") -> dict:
-    """Arrange (nest) component occurrences within a sketch-profile boundary."""
+    """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")

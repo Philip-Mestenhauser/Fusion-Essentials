@@ -3,7 +3,8 @@
 This is the QUERY half of geometry-as-values: it must return each match's handle (entityToken),
 kind, position, and shape data, and filter by kind / radius / nearest_to. Pinned here (no live
 Fusion): the units scaling on positions/radii, the kind filter, the radius filter (5% tol), the
-nearest_to sort, and that every match carries a handle.
+nearest_to sort, that every match carries a handle, and the omit-when-default visibility signal
+(a hidden body's matches carry hidden:true; visible bodies' records omit the key).
 """
 
 import json
@@ -70,10 +71,12 @@ class FakeFace:
 
 
 class FakeBody:
-    def __init__(self, faces=(), edges=(), vertices=()):
+    def __init__(self, faces=(), edges=(), vertices=(), visible=True):
         self.faces = list(faces)
         self.edges = list(edges)
         self.vertices = list(vertices)
+        # BRepBody.isVisible is the EFFECTIVE state (own bulb AND ancestor occurrence bulbs rolled up).
+        self.isVisible = visible
 
 
 class FakeOcc:
@@ -224,10 +227,37 @@ class TestFind:
         out = _payload(fg.handler(target="X:1"))
         assert all(m.get("handle") for m in out["matches"])
 
+    def test_hidden_body_matches_carry_hidden_true(self):
+        # Omit-when-default visibility signal: every match from a body whose isVisible is False (own
+        # bulb OR a hidden ancestor - isVisible rolls both up) carries hidden:true, so an agent that
+        # hid a body before a trim/cut can CONFIRM it.
+        hidden_body = FakeBody(faces=[_cyl("HID", 0.8, (0, 0, 0))],
+                               edges=[FakeEdge("HE", _LineGeo((0, 0, 0), (1, 0, 0)), (0.5, 0, 0))],
+                               visible=False)
+        _install([FakeOcc("X:1", "X", [hidden_body])])
+        out = _payload(fg.handler(target="X:1"))
+        assert out["matches"], "expected matches from the hidden body"
+        assert all(m["hidden"] is True for m in out["matches"])
+
+    def test_visible_body_matches_omit_hidden_field(self):
+        # The default (visible) case stays byte-identical: no 'hidden' key at all.
+        body = FakeBody(faces=[_cyl("VIS", 0.8, (0, 0, 0))])
+        _install([FakeOcc("X:1", "X", [body])])
+        out = _payload(fg.handler(target="X:1"))
+        assert all("hidden" not in m for m in out["matches"])
+
+    def test_mixed_visibility_flags_only_the_hidden_bodys_matches(self):
+        shown = FakeBody(faces=[_cyl("SHOWN", 0.8, (0, 0, 0))])
+        hidden = FakeBody(faces=[_cyl("HIDDEN", 0.8, (1, 0, 0))], visible=False)
+        _install([FakeOcc("X:1", "X", [shown, hidden])])
+        out = _payload(fg.handler(target="X:1"))
+        flags = {m["handle"].split("|@")[0]: m.get("hidden") for m in out["matches"]}
+        assert flags == {"SHOWN": None, "HIDDEN": True}
+
 
 # ── NESTED sub-assembly reach (scan allOccurrences, target by fullPathName) ─────────────────────
 # find_geometry must scan allOccurrences (not just root.occurrences), so a nested occurrence that
-# design_get(tree)/assembly_probe report by fullPathName resolves here too, agreeing with the
+# design_get(tree)/assembly_get report by fullPathName resolves here too, agreeing with the
 # self-heal path (_refind_by_locator also scans allOccurrences).
 
 class TestNestedAssembly:

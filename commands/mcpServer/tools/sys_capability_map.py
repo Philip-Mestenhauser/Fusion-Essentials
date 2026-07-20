@@ -11,7 +11,7 @@ within a family. Read-only, no adsk.*.
 from ._common import ok
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
-from ..mcp_primitives.registry import register, get_tools, family_of
+from ..mcp_primitives.registry import register, get_tools, family_of, has_tool, GATED_TOOLS
 
 # Per-family FACTS: a one-line factual summary + the entry-point tool (the tool that starts that
 # family's workflow - a fact about the family, not advice). Families not listed here still appear,
@@ -21,7 +21,7 @@ _FAMILY = {
     "model":     ("Solid feature modeling: extrude/revolve/fillet/hole/pattern/combine + inspect/measure.", "model_extrude"),
     "surface":   ("Open (non-solid) surface modeling: extrude/revolve/patch/trim/thicken.", "surface_extrude"),
     "mesh":      ("Mesh bodies (STL/OBJ/3MF): import, edit, reduce/remesh, convert to BRep.", "mesh_insert"),
-    "assembly":  ("Assembly kinematics: joints, grounding, move/capture, interference, probe.", "assembly_probe"),
+    "assembly":  ("Assembly kinematics: joints, grounding, move/capture, interference, probe.", "assembly_get"),
     "joint":     ("Joints between components: create/edit/drive joints and joint origins.", "joint_create"),
     "cam":       ("Manufacture (CAM): setups, operations, templates, tool libraries, generate toolpaths.", "cam_create_setup"),
     "data":      ("Cloud data model: hubs, projects, folders, files (create/list/upload/delete).", "data_get"),
@@ -43,7 +43,7 @@ _family_of = family_of
 
 
 def handler() -> dict:
-    """Read the live per-family tool index."""
+    """See TOOL_DESCRIPTION."""
     families = {}
     for item in get_tools():
         prim = getattr(item, "primitive", None)
@@ -69,10 +69,26 @@ def handler() -> dict:
         }
         out.append(rec)
 
+    # GATED tools: registered-but-disabled unless a specific settings checkbox allows them, derived
+    # from GATED_TOOLS (the same map entry.py's sweep acts on - see its _GATED_TOOL_MODULES) rather
+    # than a hand-maintained list here, so this can't drift stale. 'enabled_now' is a live registry
+    # check (has_tool), not a settings-file read, so it never needs a second source of truth either.
+    gated_tools = [
+        {"tool": name, "enabled_now": has_tool(name),
+         "enable_path": f"Fusion Essentials Settings command -> MCP Server tab -> '{label}' checkbox"}
+        for name, label in sorted(GATED_TOOLS.items())
+    ]
+
     return ok({
         "family_count": len(out),
         "tool_count": sum(f["tool_count"] for f in out),
         "families": out,
+        "gated": {
+            "tools": gated_tools,
+            "note": ("A tool this map names that the client reports as 'No such tool available' is "
+                     "hidden by CLIENT permission config (a deny rule), not missing from the server - "
+                     "check the client's permissions."),
+        },
         "note": ("The BREADTH map (what families exist + each one's entry tool). To go deeper, search "
                  "within a family with sys_find_tool (e.g. sys_find_tool('surface')). Facts about the "
                  "registry, not a recommended order."),

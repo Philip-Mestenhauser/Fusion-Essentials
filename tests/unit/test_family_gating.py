@@ -217,3 +217,25 @@ class TestEntrySettingsKeyContract:
                 src)
             assert m, f"family_enabled_{fam} block not found in entry.py"
             assert m.group(1) == "True", f"family_enabled_{fam} must default to True"
+
+
+# ── GATED_TOOLS: entry.py's gate must be DERIVED from the shared map, not a second hand-typed copy
+# (sys_capability_map reports this same map - see test_sys_capability_map.py's TestGatedTools) ────
+
+class TestGatedToolsSourcedFromSharedMap:
+    def test_gated_tool_modules_derived_from_gated_tools_keys(self):
+        src = _entry_source()
+        assert "_GATED_TOOL_MODULES = frozenset(GATED_TOOLS)" in src, (
+            "entry.py must derive its skip-set from mcp_primitives.GATED_TOOLS, not a separate "
+            "hand-typed frozenset literal (the shape sys_capability_map's gated report depends on)")
+
+    def test_settings_label_references_gated_tools_not_a_second_literal(self):
+        src = _entry_source()
+        assert 'GATED_TOOLS["sys_execute_script"]' in src, (
+            "entry.py's DEFAULT_SETTINGS label must reference GATED_TOOLS, not hand-type its own copy")
+        # the raw label text itself must appear NOWHERE ELSE in entry.py - a second hand-typed copy
+        # is exactly the drift sys_capability_map's gated report is meant never to have.
+        label = registry.GATED_TOOLS["sys_execute_script"]
+        assert src.count(label) == 0, (
+            f"entry.py hand-types the GATED_TOOLS label text ({label!r}) a second time - "
+            "reference GATED_TOOLS[...] instead so the two can't drift apart")

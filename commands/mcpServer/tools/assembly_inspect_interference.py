@@ -38,12 +38,7 @@ def _owning_occurrence_name(body):
 
 
 def handler(include_coincident_faces: bool = False) -> dict:
-    """Analyze the active design for interference between its occurrences. Read-only.
-
-    include_coincident_faces: include parts that merely TOUCH flush (default false - flush mates are
-    usually intended, not interference). Returns each interfering pair by occurrence name + the
-    overlap volume (cm^3), and a 'clear' flag when nothing interferes.
-    """
+    """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
         return error("No active design to analyze.")
@@ -106,14 +101,14 @@ def handler(include_coincident_faces: bool = False) -> dict:
 TOOL_DESCRIPTION = (
     "Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each "
     "interfering PAIR by occurrence name with its overlap volume (cm^3), in measured.interferences. "
-    "The physical-fit 'check my work' tool (assembly_probe checks joint wiring; this checks that "
+    "The physical-fit 'check my work' tool (assembly_get checks joint wiring; this checks that "
     "nothing clips through anything). Coincident/flush faces are excluded by default (set "
     "include_coincident_faces=true to include intended mates). passed=true when nothing interferes.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 interference_tool = (
-    Tool.create_simple(name="assembly_interference", description=TOOL_DESCRIPTION)
+    Tool.create_simple(name="assembly_inspect_interference", description=TOOL_DESCRIPTION)
     .add_input_property("include_coincident_faces", {"type": "boolean",
             "description": "Include parts that merely TOUCH flush (default false - flush mates are usually intended)."})
     .strict_schema()

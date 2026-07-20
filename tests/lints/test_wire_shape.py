@@ -77,7 +77,7 @@ class TestToolsListWireFormat:
         ]
         assert strict_schema_tools, (
             "No strict-schema tools found with additionalProperties=false. "
-            "Expected at least one from assembly_transform.py or assembly_probe.py"
+            "Expected at least one from assembly_transform.py or assembly_get.py"
         )
         tool_names = [t["name"] for t in strict_schema_tools]
         assert any(

@@ -41,7 +41,7 @@ def _active_drawing_doc():
 
 def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
             line_weights: bool = True) -> dict:
-    """Export the ACTIVE drawing to 'file_path' as PDF, gating success on the file landing on disk."""
+    """See TOOL_DESCRIPTION."""
     fmt, e = _FORMAT.resolve(format)
     if e:
         return error(e)

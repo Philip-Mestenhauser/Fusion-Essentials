@@ -2,8 +2,10 @@
 
 Covers the wrap() contract (verify runs only on JSON ok results; a hard reason converts ok into
 isError; a soft reason marks the payload unconfirmed; evidence merges via setdefault so handler
-values win; error results and non-JSON pass through untouched; a verify() crash degrades to
-unconfirmed, never a false pass) and each shipped kind against fakes: VersionAdvanced (the
+values win; error results and non-JSON pass through untouched; a capture()/verify() crash on a HARD
+postcondition fails CLOSED - verification impossible is an honest error naming the exception and
+the kind's read_tool, never a pass - while a soft one annotates) and each shipped kind against
+fakes: VersionAdvanced (the
 Document.save() false-success), ReferencesFresh (the lying isUpToDate), FileLanded (export wrote
 nothing), FeatureHealthy (a feature add()ed but computed with an error health state). Every gate is
 proven to BITE (the failure case goes red through the wrapper).
@@ -30,16 +32,21 @@ class Fixed(kernel.Postcondition):
     """A postcondition scripted per-test: returns the queued (reason, evidence)."""
     name = "fixed"
 
-    def __init__(self, reason="", evidence=None, severity="hard", capture_value=None, boom=False):
+    def __init__(self, reason="", evidence=None, severity="hard", capture_value=None, boom=False,
+                 capture_boom=False, read_tool=None):
         self._reason = reason
         self._evidence = evidence or {}
         self.severity = severity
         self._capture_value = capture_value
         self._boom = boom
+        self._capture_boom = capture_boom
+        self.read_tool = read_tool
         self.saw_before = None
         self.saw_kwargs = None
 
     def capture(self, kwargs):
+        if self._capture_boom:
+            raise RuntimeError("capture exploded")
         return self._capture_value
 
     def verify(self, kwargs, payload, before):
@@ -83,11 +90,57 @@ class TestWrapContract:
         assert p.saw_before == {"was": 3}
         assert p.saw_kwargs == {"x": 1}
 
-    def test_verify_crash_degrades_to_unconfirmed_never_false_pass(self):
-        wrapped = kernel.wrap(lambda **kw: _ok({"done": True}), [Fixed(boom=True)])
-        out = _payload(wrapped())
-        assert out["fixed_confirmed"] is False          # surfaced, not swallowed into silence
+    def test_hard_verify_crash_fails_closed_with_honest_wording(self):
+        # verification IMPOSSIBLE on a hard postcondition = an error, never a possible no-op as ok.
+        wrapped = kernel.wrap(lambda **kw: _ok({"done": True}),
+                              [Fixed(boom=True, read_tool="design_get")])
+        res = wrapped()
+        assert res["isError"] is True
+        assert "verification could not run" in res["message"]
+        assert "verify exploded" in res["message"]              # the raising exception is named
+        body = json.loads(res["content"][0]["text"])
+        assert "may have succeeded" in body["note"]             # honest: the mutation is NOT claimed undone
+        assert "design_get" in body["note"]                     # the kind's read tool is the next step
+
+    def test_soft_verify_crash_stays_an_annotation(self):
+        wrapped = kernel.wrap(lambda **kw: _ok({"done": True}),
+                              [Fixed(boom=True, severity="soft")])
+        out = _payload(wrapped())                               # still ok - soft never fails the call
+        assert out["fixed_confirmed"] is False
         assert "verify exploded" in out["verify_error"]
+
+    def test_hard_capture_crash_fails_closed(self):
+        # a raising capture leaves no baseline, so verify can never run - same fail-closed error.
+        wrapped = kernel.wrap(lambda **kw: _ok({"done": True}), [Fixed(capture_boom=True)])
+        res = wrapped()
+        assert res["isError"] is True
+        assert "verification could not run" in res["message"]
+        assert "capture exploded" in res["message"]
+
+    def test_soft_capture_crash_stays_an_annotation(self):
+        wrapped = kernel.wrap(lambda **kw: _ok({"done": True}),
+                              [Fixed(capture_boom=True, severity="soft")])
+        out = _payload(wrapped())
+        assert out["fixed_confirmed"] is False
+        assert "capture exploded" in out["verify_error"]
+
+    def test_capture_crash_does_not_block_the_handler(self):
+        # fail-closed applies to the RESULT, not the mutation: the handler still runs - the kernel
+        # never rolls back or pre-empts the work, it reports the unverifiable outcome honestly.
+        calls = {"n": 0}
+
+        def handler(**kw):
+            calls["n"] += 1
+            return _ok({"done": True})
+
+        res = kernel.wrap(handler, [Fixed(capture_boom=True)])()
+        assert calls["n"] == 1 and res["isError"] is True
+
+    def test_handler_error_passes_through_even_when_capture_crashed(self):
+        # an error result carries its own honest failure; the verification-impossible error must not
+        # replace it (the mutation did NOT claim success, so there is nothing to fail closed about).
+        err = {"content": [], "isError": True, "message": "handler refused"}
+        assert kernel.wrap(lambda **kw: err, [Fixed(capture_boom=True)])() is err
 
     def test_no_postconditions_returns_handler_unwrapped(self):
         h = lambda **kw: _ok({})

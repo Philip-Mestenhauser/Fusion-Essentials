@@ -501,3 +501,45 @@ class TestCreateLibrary:
                          add_tools=[{"library_url": "u", "index": 99}])
         assert res["isError"] is True and "99" in res["message"]
         assert len(libs.imported) == 0
+
+
+# ── _preset_feed_param: the {feed} preset value maps per tool CLASS (a drill preset has no ──────
+# ── 'tool_feedCutting'); the resolver falls through to the plunge feed, and names what exists ───
+# ── when nothing matches instead of asserting the mill-only parameter. ──────────────────────────
+
+class _PParams:
+    def __init__(self, names):
+        self._names = list(names)
+    def itemByName(self, name):
+        return _Param(name, "0") if name in self._names else None
+    @property
+    def count(self):
+        return len(self._names)
+    def item(self, i):
+        return _Param(self._names[i], "0")
+
+
+def _preset_with(names):
+    """A ToolPreset whose parameters collection carries exactly `names` (no bespoke fake class)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(parameters=_PParams(names))
+
+
+class TestPresetFeedParam:
+    def test_mill_uses_tool_feed_cutting(self):
+        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedCutting"]))
+        assert p is not None and p.name == "tool_feedCutting" and avail is None
+
+    def test_drill_falls_back_to_plunge_feed(self):
+        # a drill preset carries NO tool_feedCutting - the {feed} value goes to its plunge feed
+        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedPlunge"]))
+        assert p is not None and p.name == "tool_feedPlunge"
+
+    def test_no_known_feed_names_what_exists(self):
+        # nothing from the candidate list -> refuse, naming the feed-ish params actually present
+        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedGizmo"]))
+        assert p is None and avail == ["tool_feedGizmo"]
+
+    def test_no_feed_params_at_all(self):
+        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed"]))
+        assert p is None and avail == []

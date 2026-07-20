@@ -259,14 +259,19 @@ def _tp(tool, name, default=None):
 
 
 def _tool_summary(tool, index):
+    from ._cam_common import tool_holder
     dia = _tp(tool, "tool_diameter")
-    return {
+    summ = {
         "index": index,
         "type": _tp(tool, "tool_type"),
         "diameter_mm": round(dia * 10.0, 4) if isinstance(dia, (int, float)) else None,
         "flutes": _tp(tool, "tool_numberOfFlutes"),
         "description": _tp(tool, "tool_description"),
     }
+    holder = tool_holder(tool)   # assigned holder identity - shown only when the tool carries one
+    if holder:
+        summ["holder"] = holder
+    return summ
 
 
 # ── actions ──────────────────────────────────────────────────────────────────
@@ -292,6 +297,33 @@ def _do_list_libraries(scope):
     return ok({"scope": scope, "library_count": len(entries), "libraries": entries,
                "note": "Pass 'library' = one of these (name or url) to list/manage its tools. Tool "
                        "references are (library_url, index)."})
+
+
+# The preset 'feed' parameter name varies by tool CLASS: a mill preset carries 'tool_feedCutting', but a
+# drill / hole-making preset does NOT (it exposes plunge/drilling feeds instead). So the {feed} preset
+# shape maps to the FIRST of these the preset actually carries; the error names what IS there otherwise.
+_FEED_PARAM_CANDIDATES = ("tool_feedCutting", "tool_feedPlunge", "tool_feedRamp",
+                          "tool_feedRetract", "tool_feedEntry", "tool_feedTransition")
+
+
+def _preset_feed_param(preset):
+    """The preset ModelParameter that the 'feed' value should drive, or (None, available_feed_names).
+    Tries the known cutting/plunge feed names in order (so a mill keeps using tool_feedCutting and a
+    drill falls through to its plunge feed); on a miss it returns the feed-named params the preset DOES
+    have, so the error can name the right drill path instead of asserting a mill-only parameter."""
+    params = safe(lambda: preset.parameters)
+    if params is None:
+        return None, []
+    for nm in _FEED_PARAM_CANDIDATES:
+        p = safe(lambda nm=nm: params.itemByName(nm))
+        if p is not None:
+            return p, None
+    feed_names = []
+    for i in range(safe(lambda: params.count, 0) or 0):
+        nm = safe(lambda i=i: params.item(i).name) or ""
+        if "feed" in nm.lower():
+            feed_names.append(nm)
+    return None, feed_names
 
 
 def _build_entry(ref):
@@ -358,9 +390,12 @@ def _build_entry(ref):
                 return None, "The preset has no 'tool_spindleSpeed' parameter - the requested spindle_speed cannot apply."
             sp.expression = str(ps["spindle_speed"])
         if ps.get("feed") is not None:
-            fp = safe(lambda: preset.parameters.itemByName("tool_feedCutting"))
+            fp, feed_avail = _preset_feed_param(preset)
             if fp is None:
-                return None, "The preset has no 'tool_feedCutting' parameter - the requested feed cannot apply."
+                avail = ", ".join(feed_avail) if feed_avail else "(no feed parameters)"
+                return None, ("This tool's preset has no mill cutting-feed parameter (tool_feedCutting) - "
+                              "a drill/hole-making preset uses a different feed. Feed parameters on this "
+                              f"preset: {avail}. Set the right one via action='edit'.")
             fp.expression = str(ps["feed"])
     return tool, None
 
@@ -538,11 +573,7 @@ def read_library(scope: str = "document", library: str = "", tool_type: str = ""
 def handler(action: str = "list", scope: str = "document", library: str = "",
             add_tools=None, remove_indices=None, tool=None, parameters=None,
             tool_type: str = "") -> dict:
-    """Manage CAM tools + libraries. action: list/add/remove/edit/where_used. scope: document/local/
-    cloud/hub. library: shared-library name/url - OMIT with action='list' (shared scope) to LIST the
-    libraries. add_tools: [{library_url,index}]. remove_indices: [int]. tool: a tool index
-    (edit/where_used). parameters: {name: expression} (edit). tool_type: list filter. WRITES (except
-    list/where_used)."""
+    """See TOOL_DESCRIPTION."""
     action = (action or "list").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Use one of: {', '.join(_ACTIONS)}.")

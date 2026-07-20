@@ -47,7 +47,7 @@ app = adsk.core.Application.get()
 
 def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
             symmetric: bool = False, tangent_chain: bool = True, flip: bool = False) -> dict:
-    """Taper the given faces to a pull direction (Draft)."""
+    """See TOOL_DESCRIPTION."""
     try:
         angle = float(angle_deg)
     except Exception:

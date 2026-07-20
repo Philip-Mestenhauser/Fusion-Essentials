@@ -1,4 +1,4 @@
-"""Unit tests for assembly_interference — the physical-fit 'check my work' tool.
+"""Unit tests for assembly_inspect_interference — the physical-fit 'check my work' tool.
 
 The live analyzeInterference call needs Fusion, but the logic worth pinning is pure: mapping an
 interfering body back to its OWNING occurrence (so the report is by part, not 'Body1'), aggregating
@@ -9,7 +9,7 @@ import json
 
 from conftest import load_tool
 
-ai = load_tool("assembly_interference")
+ai = load_tool("assembly_inspect_interference")
 
 
 def _payload(result):

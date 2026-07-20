@@ -26,7 +26,7 @@ from ... import shared_state
 from .server import mcp_server
 from .server.task_manager import TaskManager
 from .mcp_primitives import registry
-from .mcp_primitives import GATEABLE_FAMILIES, family_of, unregister
+from .mcp_primitives import GATEABLE_FAMILIES, GATED_TOOLS, family_of, unregister
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -49,16 +49,19 @@ PORT = 27182
 SETTINGS_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_MCP'
 _ALLOW_EXECUTE_KEY = 'allow_execute_api_script'
 
-# Tool modules that are NOT auto-registered by the pkgutil sweep in _collect_items(): the gated
-# arbitrary-script tool (registered only when the user opts in) is handled explicitly afterward.
-_GATED_TOOL_MODULES = frozenset({'sys_execute_script'})
+# Tool modules that are NOT auto-registered by the pkgutil sweep in _collect_items(): each is
+# registered explicitly, only when the user opts in, elsewhere in this file. Derived from
+# mcp_primitives.GATED_TOOLS (the single source of truth also read by sys_capability_map) rather
+# than a second hand-typed set here.
+_GATED_TOOL_MODULES = frozenset(GATED_TOOLS)
 
 DEFAULT_SETTINGS = {
     _ALLOW_EXECUTE_KEY: {
         "type": "checkbox",
         # High-risk: lets a connected AI run arbitrary Python in the live session.
-        # The "security risk" label IS the consent signal (no separate dialog).
-        "label": "Allow AI to execute arbitrary Fusion API scripts (advanced; security risk)",
+        # The "security risk" label IS the consent signal (no separate dialog). Sourced from
+        # GATED_TOOLS so sys_capability_map's gated-tool report can never quote a stale label.
+        "label": GATED_TOOLS["sys_execute_script"],
         "default": False,
     },
     # One checkbox per GATEABLE_FAMILIES member, default True so an existing user's tool surface is

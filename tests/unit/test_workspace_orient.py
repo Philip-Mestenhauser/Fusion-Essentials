@@ -98,9 +98,12 @@ class FakeSubComp:
 
 
 class FakeDesign:
-    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0, sub_components=()):
+    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0, sub_components=(),
+                 marker=None):
         self.rootComponent = root
         self.timeline = _Coll(timeline)
+        if marker is not None:                 # a rolled-back marker (< count) means features after it are reverted
+            self.timeline.markerPosition = marker
         self.unitsManager = _UnitsMgr(units)
         self.designType = design_type        # 1 = parametric, 0 = direct
         self.userParameters = type("UP", (), {"count": parameters})()
@@ -361,6 +364,48 @@ class TestOrientation:
         out = _payload(wo.handler())
         assert len(out["browser_digest"]) == wo._DIGEST_LIMIT      # capped, not all 40
         assert out["design"]["top_level_occurrences"] == 40        # but the true count is reported
+
+
+# ── timeline markers (null health) + rolled-back marker + warnings surfaced distinctly ────────────
+
+class TestTimelineHonesty:
+    def _des(self, timeline, marker=None):
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], joints=[])
+        return FakeDesign(root, timeline=timeline, marker=marker)
+
+    def test_null_health_marker_counted_distinctly(self):
+        # a Snapshot reads NULL health (neither healthy nor error) - counted as a marker, not silently
+        # folded into an implied 'healthy'. Flip the elif off and timeline_markers goes to 0 (red).
+        des = self._des([FakeTL(0), FakeTL(None), FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["timeline_markers"] == 1
+        assert h["timeline_errors"] == 0 and h["timeline_warnings"] == 0
+        assert h["is_healthy"] is True                  # a marker alone is not unhealthy
+
+    def test_rolled_back_marker_is_unhealthy_and_surfaced(self):
+        des = self._des([FakeTL(0), FakeTL(0), FakeTL(0)], marker=1)   # marker at 1 of 3 = rolled back
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["timeline_rolled_back"] is True
+        assert out["health"]["is_healthy"] is False
+        assert "rolled back" in out["note"]
+        assert "fix_health" in out["pointers"] and "rolled-back" in out["pointers"]["fix_health"]
+
+    def test_marker_at_end_is_not_rolled_back(self):
+        des = self._des([FakeTL(0), FakeTL(0)], marker=2)             # marker at the end
+        _install(active_product=des, doc=FakeDoc(design=des))
+        assert _payload(wo.handler())["health"]["timeline_rolled_back"] is False
+
+    def test_warning_surfaced_distinctly_even_when_otherwise_healthy(self):
+        # errors 0 -> is_healthy stays True, but a timeline WARNING must be STATED in the note, never
+        # folded into a clean 'no problems'. This is the 13c honesty fix.
+        des = self._des([FakeTL(0), FakeTL(1)])                       # one warning, no error
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["timeline_warnings"] == 1
+        assert out["health"]["is_healthy"] is True
+        assert "WARNING" in out["note"]
 
 
 # ── design-wide counts: sketches + bodies span sub-components, not just root (F25) ────────────────
