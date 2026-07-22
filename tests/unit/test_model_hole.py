@@ -50,15 +50,53 @@ class FakeHoleInput:
         self.clearance = chi; return True
 
 
+class _Axis:
+    def __init__(self, x=0.0, y=0.0, z=1.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _CylGeo:
+    """A created face's geometry (Cylinder/Cone duck-type): origin + axis, the drill-line pair the
+    per-point verify reads back."""
+    def __init__(self, origin):
+        self.origin = origin
+        self.axis = _Axis()          # holes drill along Z in these tests
+
+
+class _FaceColl:
+    def __init__(self, faces):
+        self._f = list(faces)
+    @property
+    def count(self):
+        return len(self._f)
+    def item(self, i):
+        return self._f[i]
+
+
 class FakeHoleFeature:
-    def __init__(self, inp):
+    """Mirrors the live partial-failure shape: a point that misses the body creates NO faces, yet
+    add() still returns the feature with only a warning ('N Reference Failures' - live-verified)."""
+    def __init__(self, inp, miss_indices=()):
         self.name = "Hole1"
         self._inp = inp
+        self.deleted = False
+        pts = inp.placed[1] if inp.placed[0] == "points" else [inp.placed[1]]
+        made = [sp for i, sp in enumerate(pts) if i not in miss_indices]
+        self.faces = _FaceColl([type("F", (), {"geometry": _CylGeo(sp.geometry)})()
+                                for sp in made])
+        n_missed = len(pts) - len(made)
+        self.errorOrWarningMessage = (
+            "No target body!<b>%d Reference Failures</b><br/>No target body!Hole1" % n_missed
+            if n_missed else "")
+    def deleteMe(self):
+        self.deleted = True
+        return True
 
 
 class FakeHoleFeatures:
     def __init__(self):
         self.added = []
+        self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
     def __bool__(self):
         # a real Fusion collection is FALSY when empty (count==0). The tool must test `is None`,
         # not `not holes`, or an empty-but-valid HoleFeatures collection is wrongly rejected.
@@ -74,7 +112,7 @@ class FakeHoleFeatures:
     def add(self, inp):
         if inp.placed is None or inp.extent is None:
             raise RuntimeError("InternalValidationError : logicalSelection")
-        f = FakeHoleFeature(inp); self.added.append(f); return f
+        f = FakeHoleFeature(inp, miss_indices=self.miss_indices); self.added.append(f); return f
 
 
 class _ThreadInfo:
@@ -122,6 +160,15 @@ class _Sketch:
     def __init__(self, name="Sketch1"):
         self.name = name
         self.sketchPoints = _SketchPoints()
+        self.deleted = False
+
+    def sketchToModelSpace(self, p):
+        # identity: these test sketches sit on the XY plane at the origin
+        return p
+
+    def deleteMe(self):
+        self.deleted = True
+        return True
 
 
 class _Sketches:
@@ -263,6 +310,71 @@ class TestSimple:
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
         assert inp.placed[0] == "points" and len(inp.placed[1]) == 3
         assert out["points"] == 3
+
+
+# ── per-point verification: a point that misses the body cuts NOTHING while add() 'succeeds' ─────
+#
+# Live-verified: with 2 of 3 points off the target body, holes.add returned the feature with only a
+# garbled warning ('No target body!<b>1 Reference Failures</b>...') and the tool reported ok while
+# only 1 hole existed. The handler must read the created faces back, match each placement point to a
+# drilled axis, roll a partial feature back, and error naming the failed points.
+
+def _install_verified(monkeypatch):
+    """_install plus REAL point geometry (Point3D.create -> FakePoint) so the axis-match math runs."""
+    import adsk.core
+    from conftest import FakePoint
+    d = _install()
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+    return d
+
+
+class TestPerPointVerification:
+    def test_all_points_drilled_reports_verified_hole_count(self, monkeypatch):
+        d = _install_verified(monkeypatch)
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0], [5, 2, 0], [8, 2, 0]], extent="through"))
+        assert out["holes"] == 3                 # the VERIFIED count, not a constant 1
+        assert out["holes_verified"] is True
+
+    def test_partial_cut_errors_and_rolls_back(self, monkeypatch):
+        d = _install_verified(monkeypatch)
+        hf = d.rootComponent.features.holeFeatures
+        hf.miss_indices = (1, 2)                 # points 1+2 miss the body - like off-face coords
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[0, 0, 0], [100, 0, 0], [120, 0, 0]], extent="through")
+        assert res["isError"] is True
+        assert "2 of 3" in res["message"]
+        assert "[100" in res["message"]          # names the failed points, not just a count
+        assert "Reference Failures" in res["message"]      # the platform's reason, markup stripped
+        assert "<b>" not in res["message"] and "<br/>" not in res["message"]
+        # the partial feature AND its placement sketch were rolled back - nothing half-done remains
+        assert hf.added[0].deleted is True
+        assert d.rootComponent.sketches.created_on and \
+            d.rootComponent.sketches._byname[next(iter(d.rootComponent.sketches._byname))].deleted
+
+    def test_all_points_missing_errors(self, monkeypatch):
+        d = _install_verified(monkeypatch)
+        hf = d.rootComponent.features.holeFeatures
+        hf.miss_indices = (0, 1)
+        res = mh.handler(hole_type="simple", diameter="4 mm", face="h",
+                         points=[[50, 0, 0], [60, 0, 0]], extent="through")
+        assert res["isError"] is True and "2 of 2" in res["message"]
+
+    def test_unreadable_faces_skip_verification_without_false_alarm(self):
+        # feature.faces unreadable at all -> NOTHING was checked; the tool must not false-alarm, and
+        # must say so (holes_verified=false) instead of claiming a verified count.
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        orig_add = hf.add
+        def add_no_faces(inp):
+            f = orig_add(inp)
+            del f.faces                          # the faces read raises -> verified=False
+            return f
+        hf.add = add_no_faces
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0], [5, 2, 0]], extent="through"))
+        assert out["holes"] == 2 and out["holes_verified"] is False
 
 
 # ── counterbore / countersink ───────────────────────────────────────────────

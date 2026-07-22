@@ -72,6 +72,32 @@ class TestDistance:
         assert out["distance"] == 8.0
 
 
+class TestDegenerateOverlap:
+    """Interpenetrating solids: measureMinimumDistance returns 0 with BOTH closest points collapsed
+    to (0,0,0) - degenerate, not a contact location (live-verified). The handler must flag it."""
+
+    def test_zero_distance_with_both_points_at_origin_flagged(self, monkeypatch):
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(0.0, _Pt(0, 0, 0), _Pt(0, 0, 0)))
+        out = _payload(mb.handler(a="A", b="B"))
+        assert out["closest_points_degenerate"] is True
+        assert "OVERLAP" in out["note"]
+        assert "assembly_inspect_interference" in out["note"]
+
+    def test_zero_distance_at_a_real_contact_point_not_flagged(self, monkeypatch):
+        # touching at a NON-origin point is a real contact location - keep the normal payload
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(0.0, _Pt(2, 0, 0), _Pt(2, 0, 0)))
+        out = _payload(mb.handler(a="A", b="B"))
+        assert "closest_points_degenerate" not in out
+
+    def test_positive_distance_not_flagged(self, monkeypatch):
+        _resolve_both()
+        _install_mgr(monkeypatch, _Res(1.0, _Pt(0, 0, 0), _Pt(1, 0, 0)))
+        out = _payload(mb.handler(a="A", b="B"))
+        assert "closest_points_degenerate" not in out
+
+
 class TestAngle:
     def test_angle_returns_degrees(self, monkeypatch):
         _resolve_both("face")

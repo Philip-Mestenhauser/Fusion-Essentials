@@ -244,11 +244,18 @@ def upload_file_handler(file_path: str = "", project: str = "", project_id: str 
 # ---------------------------------------------------------------------------
 
 _LF_MAX_DEPTH = 12
-_LF_MAX_NODES = 2000
+
+# The folder walk's HARD budget, counting every dataFolders fetch (enumerating one folder's children).
+# Each fetch is a slow cloud round-trip on Fusion's MAIN thread (~0.45-0.8 s measured live; an
+# unbudgeted walk of a real project stalled past the 30 s handler cap, freezing the UI - the same
+# class doc_copy's by-name walk was bounded for, see _WALK_FOLDER_BUDGET there). 20 fetches keeps the
+# worst case around ~16 s; a bigger tree must be read shallow (max_depth) or a folder at a time
+# (data_get(project, folder=<path>)).
+_LF_FOLDER_BUDGET = 20
 
 
 def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4) -> dict:
-    """Return a project's folder tree (name, id, path) to a bounded depth."""
+    """Return a project's folder tree (name, id, path) to a bounded depth and folder budget."""
     if not (project or project_id):
         return error("Provide 'project' (name) or 'project_id'.")
     try:
@@ -266,41 +273,70 @@ def list_folders_handler(project: str = "", project_id: str = "", max_depth: int
     except Exception:
         depth = 4
 
-    counter = {"n": 0, "truncated": False}
     try:
         root = proj.rootFolder
-        tree = _folder_tree(root, "", 0, depth, counter)
+        tree, count, truncated = _folder_tree_bounded(root, depth)
     except Exception as e:
         return error(f"Could not read folder tree: {e}")
 
     return ok({"project": safe(lambda: proj.name), "max_depth": depth,
-        "folder_count": counter["n"], "truncated": counter["truncated"],
+        "folder_count": count, "truncated": truncated,
         "folders": tree})
 
 
-def _folder_tree(folder, parent_path, depth, max_depth, counter):
-    """Recursively summarize child folders of `folder` (bounded)."""
-    out = []
-    try:
-        children = folder.dataFolders.asArray()
-    except Exception:
-        return out
-    for f in children:
-        if counter["n"] >= _LF_MAX_NODES:
-            counter["truncated"] = True
-            break
-        counter["n"] += 1
-        name = safe(lambda: f.name)
-        path = (parent_path + "/" + name) if parent_path else name
-        node = {"name": name, "id": safe(lambda: f.id), "path": path}
-        if depth + 1 < max_depth:
-            kids = _folder_tree(f, path, depth + 1, max_depth, counter)
-            if kids:
-                node["folders"] = kids
-        elif safe(lambda: f.dataFolders.count, 0):
-            node["folders_truncated"] = True
-        out.append(node)
-    return out
+def _folder_tree_bounded(root, max_depth):
+    """The nested folder tree under `root`, walked BREADTH-FIRST (shallow folders land before deep
+    run/archive subtrees) and HARD-bounded by _LF_FOLDER_BUDGET fetches - every folder whose children
+    are enumerated costs one main-thread cloud round-trip, so nothing beyond the budget is fetched
+    (not even a has-children count). A node whose children were NOT fetched is marked:
+    folders_truncated=true when the BUDGET cut it, children_unknown=true at the depth cap.
+    `truncated` (returned) reports only the budget cut - the depth cap is caller-chosen and visible
+    as max_depth. Returns (tree, node_count, truncated)."""
+    tree = []
+    count = 0
+    fetches = 0
+    queue = [(root, tree, None, "", 0)]    # (folder, children-list in the output, its node, path, depth)
+    truncated = False
+    while queue:
+        folder, children_out, node, path, depth = queue.pop(0)
+        if fetches >= _LF_FOLDER_BUDGET:
+            # budget exhausted: this folder's children are NOT enumerated - flag it, never guess
+            truncated = True
+            if node is not None:
+                node.pop("folders", None)
+                node["folders_truncated"] = True
+            continue
+        fetches += 1
+        try:
+            children = folder.dataFolders.asArray()
+        except Exception:
+            continue
+        for f in children:
+            name = safe(lambda f=f: f.name)
+            child_path = (path + "/" + name) if path else name
+            child = {"name": name, "id": safe(lambda f=f: f.id), "path": child_path}
+            count += 1
+            children_out.append(child)
+            if depth + 1 < max_depth:
+                kids = []
+                child["folders"] = kids
+                queue.append((f, kids, child, child_path, depth + 1))
+            else:
+                # depth cap: whether this folder has subfolders is UNKNOWN (checking costs a
+                # round-trip) - say so instead of implying 'none'.
+                child["children_unknown"] = True
+    _prune_empty_folder_lists(tree)
+    return tree, count, truncated
+
+
+def _prune_empty_folder_lists(nodes):
+    """Drop empty 'folders' lists so a childless folder reads as a leaf, not an empty expansion."""
+    for n in nodes:
+        kids = n.get("folders")
+        if kids:
+            _prune_empty_folder_lists(kids)
+        elif kids is not None:
+            del n["folders"]
 
 
 # ---------------------------------------------------------------------------

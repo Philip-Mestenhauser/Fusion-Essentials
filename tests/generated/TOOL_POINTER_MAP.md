@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 139  |  **description breadcrumbs:** 533  |  **note/error breadcrumbs:** 253
+**Tools:** 139  |  **description breadcrumbs:** 534  |  **note/error breadcrumbs:** 255
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -965,6 +965,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create a placement sketch on the face (sketches.add returned nothing).
 - '. Use mm, cm, or in.
 - holeFeatures.add returned no feature.
+- hole point(s) cut NOTHING - the feature created
+- Points must lie ON the drilled face.
 - Could not create a placement sketch on the face:
 - Could not add a sketch point at
 - ; expected [x, y, z] in '
@@ -992,10 +994,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document first (see doc_new).
 - '. Use 'distance' or 'angle'.
 - '. Valid: mm, cm, in.
+- Minimum gap between the two targets (0 = touching/overlapping). closest_point_on_a/b are the nearest points; their separation IS the distance.
+- Distance 0 with both closest points at (0,0,0): the targets touch or OVERLAP and this point pair is degenerate - it does NOT locate the contact. Use assembly_inspect_interference on the pair to get...
 - MeasureManager unavailable.
 - measureAngle returned nothing for these two targets.
 - Angle between the two targets. Two planar faces give the angle between their planes; a face + an edge the angle between them.
-- Minimum gap between the two targets (0 = touching/overlapping). closest_point_on_a/b are the nearest points; their separation IS the distance.
 - Angle measurement failed:
 - . (Angle needs two entities with a defined direction - two planar faces, or a face and an edge; a whole occurrence may be rejected. Use find_geometry face/edge handles.)
 
@@ -1162,6 +1165,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide the end point: x2, y2, z2 (the start defaults to the origin, 0,0,0; set coincident_start_to_origin=true to lock it there).
 - '. Use sketch_get or sketch_create.
 - Failed to draw 3D line:
+- Line was drawn but could not be marked construction:
 
 ### `sketch_add_geometry`
 - '. Valid: mm, cm, in.
@@ -1189,6 +1193,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not resolve plane '
 - '. Use one of: xy, xz, yz (origin planes; aliases top/front/right), or the name of a construction plane, or pass 'on_face' = a planar-face handle from find_geometry.
 - Failed to create sketch on
+- ' instead - 'on_face' takes a planar-FACE handle from find_geometry.
+- ', which is a construction PLANE name, not a face handle. Pass it as plane='
 
 ### `sketch_delete_entity`
 - Provide 'target' as '<type>:<index>' - type = line | arc | circle | point | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.
@@ -1210,8 +1216,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' takes a whole entity, not a point anchor - drop the ':
 - angle takes two whole lines, not point anchors - drop the anchor from entity_two.
 - dimension returned nothing.
-- ' needs entity_two ('<type>:<index>'). '
+- ' dimensions the whole line's length - drop the ':
+- ' anchor, or give entity_two to pin two points.
+- ' with no entity_two dimensions a LINE's own length; '
+- ' is not a line. Give entity_two ('<type>:<index>').
 - . (Check the entity types match the dimension - radius/diameter need an arc/circle, angle needs two lines.)
+- ' needs entity_two ('<type>:<index>'). '
 - Dimension added but could not set value '
 
 ### `sketch_project`
@@ -1272,11 +1282,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use sketch_get or sketch_create.
 
 ### `surface_offset`
+- Faces offset into a new surface (isSolid=false).
 - '. Use mm, cm, or in.
 - '. Offset supports: new, new_component.
 - No active design. Create or open a document first (see doc_new).
 - Offset returned no feature.
-- Faces offset into a new surface (isSolid=false).
+- Offset reported success but created no faces - nothing was offset. The feature remains in the timeline; remove it with design_delete_feature.
 
 ### `surface_patch`
 - '. Patch supports: new, new_component.

@@ -199,10 +199,11 @@ class _FakeJointOriginInput:
 class _FakeJointOrigin:
     def __init__(self):
         self.name = "JointOrigin1"
-        # offsetX/Y/Z ModelParameters (each carries .value in cm) - populated by add() from the input.
-        self.offsetX = SimpleNamespace(value=0.0)
-        self.offsetY = SimpleNamespace(value=0.0)
-        self.offsetZ = SimpleNamespace(value=0.0)
+        # offsetX/Y/Z ModelParameters (each carries .value in cm + a dNN .name) - populated by add()
+        # from the input.
+        self.offsetX = SimpleNamespace(value=0.0, name="d5")
+        self.offsetY = SimpleNamespace(value=0.0, name="d6")
+        self.offsetZ = SimpleNamespace(value=0.0, name="d7")
 
 
 class _FakeJointOrigins:
@@ -217,10 +218,10 @@ class _FakeJointOrigins:
         origin = _FakeJointOrigin()
         # Model the offset parameters: the created JO reports back whatever offsets the input carried
         # (createByReal wraps the cm value as ._real). This is what the honesty read-back verifies.
-        for ax in ("offsetX", "offsetY", "offsetZ"):
+        for ax, dnn in (("offsetX", "d5"), ("offsetY", "d6"), ("offsetZ", "d7")):
             vi = getattr(jo_input, ax, None)
             if vi is not None:
-                setattr(origin, ax, SimpleNamespace(value=getattr(vi, "_real", 0.0)))
+                setattr(origin, ax, SimpleNamespace(value=getattr(vi, "_real", 0.0), name=dnn))
         return origin
 
 
@@ -341,6 +342,14 @@ class TestHandlerCoordinateAnchor:
         _install_handler(monkeypatch)
         out = _payload(jo.handler(anchor="coordinates", name="Anchor1"))
         assert out["joint_origin_name"] == "Anchor1"
+
+    def test_reports_dnn_names_for_the_offset_parameters(self, monkeypatch):
+        # the dNN names are what param_set needs to drive the frame with an expression (creation
+        # accepts numeric offsets only) - values alone leave the agent fishing through param_get
+        _install_handler(monkeypatch)
+        out = _payload(jo.handler(anchor="coordinates", target="at", x=10, y=0, z=0, units="mm"))
+        assert out["model_parameters"] == {"offset_x": "d5", "offset_y": "d6", "offset_z": "d7"}
+        assert "param_set" in out["note"]
 
 
 # ── anchor='bbox_center': computed center + oriented Z (geometry-building level) ─────────────────

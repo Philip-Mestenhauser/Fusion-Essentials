@@ -358,6 +358,17 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             offset_params = {"x": round(got[0] * inv, 6), "y": round(got[1] * inv, 6),
                              "z": round(got[2] * inv, 6), "units": units}
 
+    # Name the dNN model parameters holding the JO's offsetX/Y/Z (exemplar: model_extrude's
+    # model_parameters block) so an agent can drive the frame with param_set '<dNN>' '<expression>'
+    # - creation takes numeric offsets only. Read live off the created JO, never assumed.
+    param_names = {}
+    for key, getter in (("offset_x", lambda: joint_origin.offsetX.name),
+                        ("offset_y", lambda: joint_origin.offsetY.name),
+                        ("offset_z", lambda: joint_origin.offsetZ.name)):
+        nm = safe(getter)
+        if nm:
+            param_names[key] = nm
+
     # For a COMPUTED anchor, read the created origin back and prove it landed on the point we computed.
     # A wrong landing is a failure, not a false success - roll the origin back and error.
     computed = None
@@ -406,6 +417,10 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         payload["held_by"] = "parametric offsetX/Y/Z from the model origin"
         if offset_params is not None:
             payload["offset_parameters"] = offset_params
+    if param_names:
+        payload["model_parameters"] = param_names
+        payload["note"] += (" model_parameters names the dNN offset params - param_set one to an "
+                            "expression to drive this frame parametrically.")
     if computed is not None:
         payload["computed_anchor"] = computed
         if readback is not None:
@@ -417,10 +432,11 @@ TOOL_DESCRIPTION = (
     "Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user "
     "click. Orientation follows the anchor:\n"
     "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
-    "World-aligned; the location is held by real parametric offsetX/Y/Z from the model origin (not a "
-    "floating sketch point), read back as offset_parameters (survives recompute).\n"
+    "World-aligned; the location is held by real parametric offsetX/Y/Z from the model origin, read "
+    "back as offset_parameters; model_parameters names the dNN params (creation offsets are numeric "
+    "- param_set a dNN to an expression).\n"
     "- anchor='sketch_line': on a sketch line (sketch_name + entity_index + 'keypoint') - frame Z "
-    "runs along the line (draw it with sketch_add_3d_line for an arbitrary axis).\n"
+    "runs along the line (draw one with sketch_add_3d_line).\n"
     "- anchor='sketch_point': on a sketch point (position only).\n"
     "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
@@ -428,8 +444,7 @@ TOOL_DESCRIPTION = (
     "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it).\n"
     "- anchor='face_center': at a planar FACE's centroid (the 'geometry' handle), Z = the face normal.\n"
     "Optional 'name'. WRITES; 'frame_axes' reports the resulting Z/X/Y vectors. The origin lands on "
-    "the ROOT component (not the active one) and tracks its anchor parametrically, not via occurrence "
-    "transforms."
+    "the ROOT component (not the active one) and tracks its anchor parametrically."
 )
 
 tool = (

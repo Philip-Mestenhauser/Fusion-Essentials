@@ -7,6 +7,8 @@ Companion to model_extrude - use this for actual holes (bolt circles, tapped hol
 so the feature reads as a Hole in the timeline and carries hole/thread metadata.
 """
 
+import re
+
 import adsk.core
 import adsk.fusion
 
@@ -157,6 +159,68 @@ def _build_input(holes, hole_type, diameter, cbore_diameter, cbore_depth, csink_
     return None, f"Unknown hole_type '{hole_type}'."
 
 
+def _feature_warning(feature):
+    """The feature's error/warning text, stripped of the platform's markup (Fusion concatenates
+    fragments like 'No target body!<b>1 Reference Failures</b><br/>...' - live-verified)."""
+    msg = safe(lambda: feature.errorOrWarningMessage) or ""
+    msg = re.sub(r"<[^>]+>", " ", msg)
+    return re.sub(r"\s+", " ", msg).strip()[:200]
+
+
+# Axis-coincidence tolerance (cm) for the drill-axis read-back: dedupe + point matching.
+_AXIS_TOL_CM = 1e-3
+
+
+def _point_on_axis(px, py, pz, axis):
+    """Perpendicular distance of (px,py,pz) to the axis LINE <= _AXIS_TOL_CM."""
+    ox, oy, oz, ux, uy, uz = axis
+    wx, wy, wz = px - ox, py - oy, pz - oz
+    cx = wy * uz - wz * uy
+    cy = wz * ux - wx * uz
+    cz = wx * uy - wy * ux
+    return (cx * cx + cy * cy + cz * cz) ** 0.5 <= _AXIS_TOL_CM
+
+
+def _drill_axes(feature):
+    """The DISTINCT drill-axis lines among the faces the feature CREATED - each drilled point
+    contributes one axis line (bore cylinder / drill-point or countersink cone, all coaxial per
+    hole; a counterbore's two cylinders dedupe to one line). Coordinates are the parent component's
+    space (cm). Returns (axes, readable); readable=False means feature.faces could not be read at
+    all and NOTHING was checked. Never raises."""
+    faces = safe(lambda: feature.faces)
+    if faces is None:
+        return [], False
+    axes = []
+    for i in range(int(safe(lambda: faces.count, 0) or 0)):
+        geo = safe(lambda i=i: faces.item(i).geometry)
+        o = safe(lambda: geo.origin) if geo is not None else None
+        a = safe(lambda: geo.axis) if geo is not None else None
+        if o is None or a is None:
+            continue                       # planar/spherical face - carries no drill axis
+        try:
+            ox, oy, oz = float(o.x), float(o.y), float(o.z)
+            ax, ay, az = float(a.x), float(a.y), float(a.z)
+        except Exception:
+            continue
+        mag = (ax * ax + ay * ay + az * az) ** 0.5
+        if mag <= 1e-9:
+            continue
+        cand = (ox, oy, oz, ax / mag, ay / mag, az / mag)
+        # same LINE as an already-seen axis (parallel + origin on it, either direction) -> one hole
+        dup = False
+        for ex in axes:
+            dot = cand[3] * ex[3] + cand[4] * ex[4] + cand[5] * ex[5]
+            if abs(dot) >= 1.0 - 1e-6 and _point_on_axis(cand[0], cand[1], cand[2], ex):
+                dup = True
+                break
+        if not dup:
+            axes.append(cand)
+    if axes or int(safe(lambda: faces.count, 0) or 0) == 0:
+        return axes, True
+    # faces exist but none exposes a readable axis - inconclusive, never a guessed shortfall
+    return [], False
+
+
 def handler(hole_type: str = "simple", diameter: str = "", face: str = "", points: list = None,
             extent: str = "blind", depth: str = "",
             cbore_diameter: str = "", cbore_depth: str = "",
@@ -242,6 +306,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if factor is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     sketch_pts = []
+    scaled_pts = []            # the raw scaled (cm) coords, for best-effort naming of failed points
     for xyz in pts:
         try:
             p = adsk.core.Point3D.create(float(xyz[0]) * factor, float(xyz[1]) * factor,
@@ -252,6 +317,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         if not sp:
             return error(f"Could not add a sketch point at {xyz!r}.")
         sketch_pts.append(sp)
+        scaled_pts.append((float(xyz[0]) * factor, float(xyz[1]) * factor, float(xyz[2]) * factor))
 
     # Placement: single point vs. a co-planar set.
     if len(sketch_pts) == 1:
@@ -285,8 +351,38 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if not feature:
         return error("holeFeatures.add returned no feature.")
 
+    # READ THE EFFECT BACK: a point that misses the body cuts nothing while add() still 'succeeds'
+    # (only a warning on the feature). Count the DISTINCT drill axes the feature created - one per
+    # hole, in any frame - and require one per point; a position-based check is NOT reliable here
+    # (live: a trimmed face's sketch reported origin x=-20 cm while placement ignored it). On a
+    # shortfall, roll the partial feature back (plus its placement sketch) and error rather than
+    # reporting a partial cut as ok.
+    axes, verified = _drill_axes(feature)
+    n_pts = len(sketch_pts)
+    if verified and len(axes) < n_pts:
+        n_missing = n_pts - len(axes)
+        # best-effort naming: when the input coords read as component-space (every live sighting so
+        # far), the points on NO drilled axis are the failures - name them only if they account
+        # exactly for the shortfall, never guess.
+        unmatched = [pts[i] for i, sc in enumerate(scaled_pts)
+                     if not any(_point_on_axis(sc[0], sc[1], sc[2], ax) for ax in axes)]
+        named = f" No hole exists at {unmatched} (in '{units}')." if len(unmatched) == n_missing else ""
+        warn = _feature_warning(feature)
+        removed = bool(safe(lambda: feature.deleteMe(), False))
+        if removed:
+            safe(lambda: sketch.deleteMe())
+            tail = "The partial feature was rolled back; nothing was drilled."
+        else:
+            tail = (f"Rollback FAILED - the {len(axes)} drilled hole(s) remain "
+                    f"(feature '{safe(lambda: feature.name)}').")
+        return error(
+            f"{n_missing} of {n_pts} hole point(s) cut NOTHING - the feature created {len(axes)} "
+            f"hole(s).{named} Points must lie ON the drilled face. {tail}"
+            + (f" Fusion reported: {warn}" if warn else ""))
+
     result = {
-        "holes": 1,
+        "holes": min(len(axes), n_pts) if verified else n_pts,
+        "holes_verified": verified,
         "points": len(sketch_pts),
         "hole_type": hole_type,
         "extent": extent,

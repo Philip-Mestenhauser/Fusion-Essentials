@@ -149,6 +149,13 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
     if (on_face or "").strip():
         face, ferr = _ON_FACE.resolve(on_face)
         if ferr:
+            # A construction-plane NAME lands here (find_geometry never returns plane handles), and
+            # the generic stale-handle error would misdirect. Point at the 'plane' parameter instead.
+            named_plane, _ = _resolve_plane(design, on_face.strip())
+            if named_plane is not None:
+                return error(f"'on_face' got '{on_face.strip()}', which is a construction PLANE name, "
+                             "not a face handle. Pass it as plane='" + on_face.strip() + "' instead - "
+                             "'on_face' takes a planar-FACE handle from find_geometry.")
             return error(ferr)
         planar, desc = face, f"face {on_face[:12]}..."
     else:
@@ -459,7 +466,8 @@ def _xyz(sketch_point, k):
 def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
                          x1: float = 0.0, y1: float = 0.0, z1: float = 0.0,
                          x2: float = None, y2: float = None, z2: float = None,
-                         coincident_start_to_origin: bool = False) -> dict:
+                         coincident_start_to_origin: bool = False,
+                         is_construction: bool = False) -> dict:
     """Draw a line in 3D on a sketch - the end point may be off the sketch plane (z != 0)."""
     k = scale(units)
     if k is None:
@@ -487,6 +495,13 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
     if not line:
         return error("3D line creation returned no entity.")
 
+    if is_construction:
+        # MUTATION - a rejected set must surface (with the partial state named), not silently no-op
+        try:
+            line.isConstruction = True
+        except Exception as e:
+            return error(f"Line was drawn but could not be marked construction: {e}")
+
     constraint_added = False
     constraint_error = None
     if coincident_start_to_origin:
@@ -509,6 +524,7 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
     "start": start_xyz,
     "end": end_xyz,
     "end_is_off_plane": off_plane,
+    "is_construction": bool(safe(lambda: line.isConstruction, False)),
     "coincident_start_to_origin": constraint_added,
     "sketch": _sketch_summary(sketch),
     "note": ("Line drawn in 3D. The end point's non-zero z places it off the sketch's x-y "
@@ -574,10 +590,12 @@ _ADD_DESC = (
                                            "[default]/cm/in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
                                            "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
-                                           "chain whose segments SHARE endpoints (coincident) so the shape is continuous + parametric - "
-                                           "use 'closed_path' for a custom closed "
-                                           "boundary. Targets 'sketch_name' (else the most recent sketch). WRITES; pair with "
-                                           "view_screenshot to view it."
+                                           "chain sharing endpoints (continuous + parametric); 'closed_path' closes the boundary. "
+                                           "closed_path's constraint chain FAILS past "
+                                           "~48 points (sketch solver); for a larger outline use 'polyline' with the first point repeated "
+                                           "as the last - geometric closure still forms the profile (scales to 264+). center_rectangle "
+                                           "adds NO center/symmetry constraints (unlike native) - constrain/dimension it after. Targets "
+                                           "'sketch_name' (else the most recent sketch). WRITES; pair with view_screenshot to view it."
 )
 add_geometry_tool = (
     Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
@@ -604,13 +622,12 @@ add_geometry_item = Item.create_tool_item(tool=add_geometry_tool, write="write",
                                           run_on_main_thread=True)
 
 _3DLINE_DESC = (
-                                          "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0). "
-                                          "Unlike sketch_add_geometry (which keeps geometry on the sketch x-y plane), this places true "
-                                          "3D points, so a non-zero z lifts that end off the plane, measured along the sketch's "
-                                          "LOCAL normal (not world Z). The start defaults to the origin; "
+                                          "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): "
+                                          "z is measured along the sketch's LOCAL normal, not world Z (sketch_add_geometry stays on "
+                                          "the x-y plane). The start defaults to the origin; "
                                           "coincident_start_to_origin=true locks it there with a coincident constraint. "
                                           "Coordinates in 'units' (mm default). Reports each "
-                                          "endpoint's resolved coordinates and whether the end is off-plane. WRITES to the design. "
+                                          "endpoint's resolved coordinates and whether the end is off-plane. WRITES. "
                                           "View from an iso angle with view_screenshot (a top view hides the out-of-plane component)."
 )
 draw_3d_line_tool = (
@@ -625,6 +642,8 @@ draw_3d_line_tool = (
     .add_input_property("z2", {"type": "number", "description": "End Z (required; non-zero = off-plane)."})
     .add_input_property("coincident_start_to_origin", {"type": "boolean",
             "description": "Lock the start point to the sketch origin with a coincident constraint (default false)."})
+    .add_input_property("is_construction", {"type": "boolean",
+            "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
     .strict_schema()
 )
 draw_3d_line_item = Item.create_tool_item(tool=draw_3d_line_tool, write="write", handler=draw_3d_line_handler,

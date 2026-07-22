@@ -666,7 +666,9 @@ TOOL_DESCRIPTION = (
     "referenced part (either way the tool proxies it into assembly context; do NOT script this "
     "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
     "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
-    "the part origin (zero offset) - use a handle for a real offset. 'joint_type' = rigid (default)/"
+    "the part origin (zero offset) - use a handle for a real offset. Creating a joint MOVES the free "
+    "(ungrounded) part so its snap/JO point lands on the other input's location - do not pre-place "
+    "it. 'joint_type' = rigid (default)/"
     "revolute/slider/cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing "
     "one (for pin_slot it is the rotation axis, and 'slide_axis' sets the perpendicular slide "
     "direction). Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
@@ -680,7 +682,7 @@ tool = (
         input_param_description="First input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder).",
     )
     .add_input_property("occurrence_two", {"type": "string",
-            "description": "Second input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder)."})
+            "description": "Second input: same forms as occurrence_one."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
     .add_input_property(*_inputs.world_axis("axis", default="z",
             description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())

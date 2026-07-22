@@ -14,6 +14,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _joints
 
@@ -62,7 +63,10 @@ def _occ_world(occ, inv_k):
                 av = _axis_vec(vec)
                 if av is not None:
                     out[key] = av
-    bb = safe(lambda: occ.boundingBox)
+    # Bodies-only box (_geom.body_aabb): the plain occ.boundingBox also counts visible sketches +
+    # construction datums, so an orphaned oversized sketch mis-reported a 68x10 body as 120x120
+    # (live-verified). None (no bodies) -> bbox omitted, never a datum-inflated box.
+    bb = _geom.body_aabb(occ)
     if bb is not None:
         mn = safe(lambda: bb.minPoint); mx = safe(lambda: bb.maxPoint)
         if mn is not None and mx is not None:
@@ -383,9 +387,9 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Read the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to "
-    "interpreting a cluttered screenshot. For every TOP-LEVEL occurrence: its world position (origin + "
-    "bbox center/size in 'units'), its rotation as three basis axes (x_axis / y_axis / z_axis unit "
+    "Read the active assembly's KINEMATIC STATE as clean JSON. "
+    "For every TOP-LEVEL occurrence: its world position (origin + "
+    "bodies-only bbox center/size in 'units'), its rotation as three basis axes (x_axis / y_axis / z_axis unit "
     "vectors), ground flags (grounded / ground_to_parent), and the joints it "
     "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "
     "each connects) and which occurrences are grounded. Use it to verify grounding (is the block "

@@ -45,12 +45,18 @@ class _Matrix:
 
 
 class FakeOcc:
-    def __init__(self, name, comp, origin=(0, 0, 0), bbox=None,
+    def __init__(self, name, comp, origin=(0, 0, 0), bbox=None, body_bbox=None,
                  grounded=False, ground_to_parent=False, body_count=1, basis=None):
         self.name = name
         self.component = type("C", (), {"name": comp})()
         self.transform2 = _Matrix(origin, basis)
         self.boundingBox = _BBox(*bbox) if bbox else None
+        # body_bbox models the bodies-only boundingBox2(entityTypes) read; "empty" = no bodies (None).
+        # A FakeOcc WITHOUT body_bbox has no boundingBox2 attr - body_aabb then falls back to
+        # .boundingBox, like a BRepBody.
+        if body_bbox is not None:
+            self.boundingBox2 = (lambda types, bb=body_bbox:
+                                 None if bb == "empty" else _BBox(*bb))
         self.isGrounded = grounded
         self.isGroundToParent = ground_to_parent
         self.bRepBodies = type("B", (), {"count": body_count})()
@@ -171,6 +177,27 @@ class TestProbe:
         assert o["origin"] == [20.0, 0.0, 0.0]          # 2cm -> 20mm
         assert o["bbox_center"] == [0.0, 0.0, 0.0]
         assert o["bbox_size"] == [20.0, 20.0, 20.0]
+
+    def test_bbox_is_bodies_only_not_the_sketch_inflated_box(self):
+        # occ.boundingBox also counts visible sketches/construction datums - live-verified: an
+        # orphaned oversized sketch made a 68x10x10 body read 120x120x10 centered off the part. The
+        # bbox must come from the bodies-only boundingBox2 read, NEVER the polluted plain box.
+        occ = FakeOcc("Shaft:1", "Shaft",
+                      bbox=((-8, -3, 0), (4, 9, 1)),            # sketch-polluted 120x120x10 (cm/10)
+                      body_bbox=((-3.4, -0.5, 0), (3.4, 0.5, 1)))  # the body's true 68x10x10 mm
+        _install([occ], [])
+        o = _payload(ap.handler(units="mm"))["occurrences"][0]
+        assert o["bbox_size"] == [68.0, 10.0, 10.0]
+        assert o["bbox_center"] == [0.0, 0.0, 5.0]
+
+    def test_bbox_omitted_when_occurrence_has_no_body_geometry(self):
+        # no bodies -> boundingBox2 returns None. The bbox is OMITTED - falling back to the plain
+        # .boundingBox here would report a box made purely of sketches/datums.
+        occ = FakeOcc("Empty:1", "Empty", bbox=((-6, -6, 0), (6, 6, 0)), body_bbox="empty",
+                      body_count=0)
+        _install([occ], [])
+        o = _payload(ap.handler())["occurrences"][0]
+        assert "bbox_size" not in o and "bbox_center" not in o
 
     def test_ground_flags_and_grounded_list(self):
         block = FakeOcc("Block:1", "Block", grounded=True, ground_to_parent=True)

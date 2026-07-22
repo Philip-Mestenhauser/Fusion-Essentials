@@ -805,16 +805,58 @@ class TestListFolders:
     def test_max_depth_clamped_to_at_least_one(self):
         _install_proj_data([self._tree()])
         out = _payload(dm.list_folders_handler(project="Proj", max_depth=0))
-        # clamped to 1 -> top-level folders only, nested 'Fixtures' becomes a truncation flag
+        # clamped to 1 -> top-level folders only. Whether a depth-capped folder has children is
+        # UNKNOWN (checking would cost a cloud fetch) - flagged children_unknown, on every capped
+        # node, never a guessed 'no children'.
         assert out["max_depth"] == 1
         top = {n["name"]: n for n in out["folders"]}
-        assert top["Parts"].get("folders_truncated") is True
+        assert top["Parts"].get("children_unknown") is True
         assert "folders" not in top["Parts"]
 
     def test_invalid_max_depth_defaults(self):
         _install_proj_data([self._tree()])
         out = _payload(dm.list_folders_handler(project="Proj", max_depth="oops"))
         assert out["max_depth"] == 4
+
+    def test_within_budget_is_not_truncated(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is False
+
+    def test_folder_budget_cuts_the_walk_and_flags_it(self, monkeypatch):
+        # every dataFolders fetch is a slow MAIN-THREAD cloud round-trip (a real project's walk
+        # stalled Fusion past the 30 s handler cap, live-verified) - the walk must stop at the
+        # budget, report truncated=true, and mark each unexpanded node folders_truncated so the
+        # caller knows WHICH subtrees were cut, not just that something was.
+        root = FakeProjFolder("Root", is_root=True)
+        subs = [root._add_child(f"Sub{i}") for i in range(4)]
+        for s in subs:
+            s._add_child(s.name + "Deep")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+        monkeypatch.setattr(dm, "_LF_FOLDER_BUDGET", 2)   # root + Sub0 only
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is True
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Sub0", "Sub1", "Sub2", "Sub3"}   # breadth-first: all shallow nodes land
+        assert top["Sub0"]["folders"][0]["name"] == "Sub0Deep"  # the one budgeted fetch descended
+        # the three unexpanded siblings are each flagged - their subtrees were NOT searched
+        for name in ("Sub1", "Sub2", "Sub3"):
+            assert top[name].get("folders_truncated") is True
+            assert "folders" not in top[name]
+
+    def test_walk_is_breadth_first_shallow_before_deep(self, monkeypatch):
+        # a deep chain must not eat the budget before the shallow siblings are even listed.
+        root = FakeProjFolder("Root", is_root=True)
+        chain = root._add_child("A")
+        chain._add_child("A1")._add_child("A2")._add_child("A3")
+        root._add_child("B")
+        root._add_child("C")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+        monkeypatch.setattr(dm, "_LF_FOLDER_BUDGET", 3)   # root + A + B (never reaches A1's child)
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6))
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"A", "B", "C"}                # every shallow folder listed first
+        assert out["truncated"] is True
 
 
 # ── doc_save_as: lineage-URN reporting + name-collision detection (F38) ───────────

@@ -65,6 +65,21 @@ class TestScopeDispatch:
         assert out["scope"] == "folders"
         assert out["folder_count"] == 4
 
+    def test_truncated_folder_walk_gets_the_budget_note(self, stub, monkeypatch):
+        # a budget-cut walk must TEACH the narrower next step (lower max_depth / scope with
+        # 'folder'), not just flag truncated=true.
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
+            type("DO", (), {"list_folders_handler": staticmethod(
+                lambda **kw: _ok({"project": "P1", "folder_count": 20, "truncated": True,
+                                  "folders": []}))}))
+        out = _payload(dge.handler(project="P1", include=["folders"]))
+        assert "folder budget" in out["note"] and "folders_truncated" in out["note"]
+
+    def test_untruncated_folder_walk_has_no_budget_note(self, stub):
+        out = _payload(dge.handler(project="P1", include=["folders"]))
+        assert "folder budget" not in out["note"]
+
     def test_include_hubs_lists_hubs(self, stub):
         out = _payload(dge.handler(include=["hubs"]))
         assert out["scope"] == "hubs"

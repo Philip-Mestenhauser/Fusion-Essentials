@@ -10,6 +10,7 @@ No live Fusion — fake feature classes capture inputs and record cancel()/add()
 """
 
 import json
+import types
 
 from conftest import load_tool
 
@@ -36,9 +37,16 @@ class FakeBodies:
 
 
 class FakeFeature:
-    def __init__(self, name="Feat1", bodies=None):
+    def __init__(self, name="Feat1", bodies=None, faces=None):
         self.name = name
         self.bodies = FakeBodies(bodies if bodies is not None else [FakeBody()])
+        if faces is not None:
+            self.faces = FakeBodies(faces)      # a counted collection of created faces
+
+
+def _face_on(body):
+    """A face the feature CREATED, owned by `body` - the read _created_bodies walks."""
+    return types.SimpleNamespace(body=body)
 
 
 class FakeCellBody:
@@ -127,14 +135,15 @@ class FakeOffsetInput:
 
 
 class FakeOffsetFeatures:
-    def __init__(self, result_bodies=None):
+    def __init__(self, result_bodies=None, created_faces=None):
         self.last_input = None
         self._result = result_bodies
+        self._faces = created_faces
     def createInput(self, ents, dist, op, chain):
         self.last_input = FakeOffsetInput(ents, dist, op, chain)
         return self.last_input
     def add(self, inp):
-        return FakeFeature(name="Offset1", bodies=self._result)
+        return FakeFeature(name="Offset1", bodies=self._result, faces=self._faces)
 
 
 class FakeThickenInput:
@@ -486,14 +495,54 @@ class TestSurfaceExtend:
 
 class TestOffsetThickenKind:
     def test_offset_produces_a_surface(self):
+        # LIVE SHAPE: feature.bodies lists the pre-existing SOURCE solid alongside the new surface
+        # (verified live: [Body1, Body2]). is_solid/result_bodies must be read off the CREATED
+        # surface (via the created faces), never the source solid - an any_solid read over
+        # feature.bodies reports is_solid=true for a genuine open surface.
         f1 = FakeFace()
-        of = FakeOffsetFeatures(result_bodies=[FakeBody("Surf2", is_solid=False)])
+        surf = FakeBody("Surf2", is_solid=False)
+        of = FakeOffsetFeatures(result_bodies=[FakeBody("Body1", is_solid=True), surf],
+                                created_faces=[_face_on(surf)])
         comp = FakeComp(FakeFeatures(offset=of))
         _wire(comp, handle_map={"F1": f1})
         out = _payload(se.offset_handler(faces=["F1"], distance=2, units="mm"))
         assert out["offset"] is True
-        assert out["is_solid"] is False           # offset stays a surface
+        assert out["is_solid"] is False           # the CREATED surface, not the polluting source solid
+        assert out["result_bodies"] == ["Surf2"]  # source solid excluded
+        assert out["faces_requested"] == 1 and out["faces_offset"] == 1
         assert of.last_input.dist == ("real", 0.2)
+
+    def test_offset_default_chaining_is_off(self):
+        # chaining=true silently swept a filleted body's whole tangent-connected skin (live: one
+        # picked face -> a surface wrapping the entire box). The pick is explicit; expansion is opt-in.
+        f1 = FakeFace()
+        surf = FakeBody("Surf2", is_solid=False)
+        of = FakeOffsetFeatures(result_bodies=[surf], created_faces=[_face_on(surf)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": f1})
+        _payload(se.offset_handler(faces=["F1"], distance=2))
+        assert of.last_input.chain is False
+
+    def test_offset_chaining_expansion_is_reported(self):
+        # chaining=true: 1 face requested, 6 tangent-connected faces offset -> the result SAYS so.
+        f1 = FakeFace()
+        surf = FakeBody("Skin1", is_solid=False)
+        of = FakeOffsetFeatures(result_bodies=[surf],
+                                created_faces=[_face_on(surf) for _ in range(6)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.offset_handler(faces=["F1"], distance=2, chaining=True))
+        assert out["faces_requested"] == 1 and out["faces_offset"] == 6
+        assert "EXPANDED" in out["note"] and "chaining=false" in out["note"]
+
+    def test_offset_that_creates_no_faces_bites(self):
+        # add() 'succeeded' but the feature created NO faces -> error, never a silent ok
+        f1 = FakeFace()
+        of = FakeOffsetFeatures(result_bodies=[FakeBody("Body1", is_solid=True)], created_faces=[])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": f1})
+        res = se.offset_handler(faces=["F1"], distance=2)
+        assert res["isError"] is True and "created no faces" in res["message"]
 
     def test_thicken_produces_a_solid(self):
         f1 = FakeFace()

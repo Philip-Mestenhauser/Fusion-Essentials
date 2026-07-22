@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 159  |  **Behaviors pinned:** 3061
+**Tools with a test file:** 159  |  **Behaviors pinned:** 3093
 
 ## `_cam_common`
 
@@ -145,6 +145,11 @@ after changing tests._
 - evaluator raising returns none
 - failed okflag returns none
 - decimals controls rounding
+**BodyAabb**
+- occurrence uses boundingBox2 with body types
+- body types exclude sketch and construction
+- body falls back to plain boundingBox
+- no body geometry returns none
 
 ## `_sketch_detail`
 
@@ -282,6 +287,10 @@ after changing tests._
 - color a component applies to all bodies
 - opacity passed through
 - default appearance name from color
+**ReuseExistingAppearance**
+- second same color call reuses one shared appearance
+- reuse completes a half made appearance
+- different color still creates its own appearance
 **Guards**
 - bad color errors before touching design
 - bad opacity errors
@@ -312,6 +321,8 @@ after changing tests._
 - reports root bodies not just occurrences
 - no root bodies is empty and no note
 - positions scaled to display units
+- bbox is bodies only not the sketch inflated box
+- bbox omitted when occurrence has no body geometry
 - ground flags and grounded list
 - joint type and dof mapping
 - rigid and cylindrical dof
@@ -1126,6 +1137,8 @@ after changing tests._
 - default lists projects
 - project lists files
 - project with folders shows tree
+- truncated folder walk gets the budget note
+- untruncated folder walk has no budget note
 - include hubs lists hubs
 - folder path passed to files
 **Guards**
@@ -1227,6 +1240,9 @@ after changing tests._
 - lists tree with paths
 - max depth clamped to at least one
 - invalid max depth defaults
+- within budget is not truncated
+- folder budget cuts the walk and flags it
+- walk is breadth first shallow before deep
 **SaveDocumentAs**
 - reports written lineage urn
 - name collision is flagged with existing urn
@@ -2426,6 +2442,7 @@ after changing tests._
 - mismatched offset readback errors and rolls back
 - creates joint origin and reports frame axes
 - custom name is applied to the new joint origin
+- reports dnn names for the offset parameters
 **BboxCenterGeometry**
 - center is the bbox midpoint
 - z line runs along requested world axis
@@ -3148,6 +3165,11 @@ after changing tests._
 - simple blind
 - simple through uses positive direction
 - multiple points one feature
+**PerPointVerification**
+- all points drilled reports verified hole count
+- partial cut errors and rolls back
+- all points missing errors
+- unreadable faces skip verification without false alarm
 **CounterboreCountersink**
 - counterbore passes three dims
 - countersink passes angle
@@ -3178,8 +3200,7 @@ after changing tests._
 - unresolvable target errors
 - unknown include errors
 **BodyAabb**
-- occurrence uses boundingBox2 with body types
-- plain body falls back to boundingBox
+- default bbox reads via geom body aabb
 **NormalizeInclude**
 - comma string
 - none empty
@@ -3191,6 +3212,10 @@ after changing tests._
 **Distance**
 - distance default mode scales to mm
 - distance in cm
+**DegenerateOverlap**
+- zero distance with both points at origin flagged
+- zero distance at a real contact point not flagged
+- positive distance not flagged
 **Angle**
 - angle returns degrees
 **Guards**
@@ -3716,10 +3741,16 @@ after changing tests._
 - named sketch resolved
 - default is most recent
 - missing named sketch errors
+**OnFacePlaneNameMisuse**
+- construction plane name points at plane param
+- genuinely bad handle keeps the resolver error
 **Draw3dLine**
 - end off plane detected and scaled
 - on plane end not flagged
 - missing end point errors
+- is construction marks the line and reports it
+- default is not construction
+- is construction set failure is reported
 **SketchWorldFrame**
 - origin reported in mm
 - axes reported as world unit vectors
@@ -3788,10 +3819,14 @@ after changing tests._
 - negative distance warns
 - positive distance no warning
 - negative radius not flagged
+**LoneLineDistance**
+- lone line dimensions its own length
+- lone circle still needs entity two
+- lone line with anchor rejected
 **Guards**
 - unknown dim type
 - bad entity one
-- distance needs entity two
+- angle needs entity two
 - value optional
 - value set failure is reported
 - dimension returning nothing is error
@@ -3962,6 +3997,9 @@ after changing tests._
 - tangent extend type resolves enum
 **OffsetThickenKind**
 - offset produces a surface
+- offset default chaining is off
+- offset chaining expansion is reported
+- offset that creates no faces bites
 - thicken produces a solid
 - thicken that stays a surface bites
 - thicken symmetric passed

@@ -70,8 +70,10 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 - the x-ref lifecycle: reference present and CURRENT after insert; STALE after the source edit
   (fresh read shows it); CURRENT again after the update, with the jaw change visible (report the
   reference version numbers you read at each step).
-- the stock is gripped: a fresh assembly read shows the jaw joints healthy and the stock seated
-  at the vise center.
+- the stock is gripped AND the grip TRACKS: a fresh assembly read shows the jaw joints healthy
+  and the stock seated at the vise center - and AFTER the x-ref update (the jaws having moved),
+  a second fresh read shows the stock STILL seated at the vise center. A stock that stays put
+  while the jaws moved is a floating grip and a FAIL.
 - doc_get -> saved as "P7-Template", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
@@ -97,6 +99,11 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   (open source, edit, save, return), and joints against an x-ref's geometry.
 - The stale/update proof requires editing P6-Vise (version bump by design - the ONE mutable
   artifact in the chain; record its versions in the run record).
+- THE GRIP-TRACKS CLAUSE (owner-diagnosed 2026-07-20): the S9 chain failed because the stock
+  floated - joined to nothing that moved. S6 now guarantees jointed jaws whose occurrences move
+  under the opening parameter; this clause grades that the stock's joints RE-SOLVE with them
+  (geometry-anchored joints track their faces through an x-ref update). The post-update seating
+  read is the compounding-defect firewall for S9's CAM boundary.
 - Async trap (live-known): doc_open/doc_activate and post-save version metadata can lag - grade
   recovery-by-polling, not first-read luck; a false-stale first read honestly re-read is GOOD
   behavior.

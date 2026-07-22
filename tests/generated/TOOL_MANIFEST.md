@@ -93,7 +93,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | | Tool | Summary |
 |---|---|---|
-| ✎ | `sketch_add_3d_line` | Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0) |
+| ✎ | `sketch_add_3d_line` | Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): z is measured along the sketch's LOCAL normal, not world Z (sketch_add_... |
 | ✎ | `sketch_add_geometry` | Draw one geometry entity on a sketch |
 | ✎ | `sketch_constrain` | Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is parametric (captures design intent) |
 | ✎ | `sketch_create` | Create a new sketch on a plane OR on an existing planar face |
@@ -133,7 +133,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `assembly_capture_position` | Capture / revert / report the assembly's flexible POSITION in the timeline |
 | ✎ | `assembly_constrain` | Constrain component occurrences' geometry - Constrain Components (flush / coincident / concentric / at an angle, INFERRED from the geometry) |
-| · | `assembly_get` | Read the active assembly's KINEMATIC STATE as clean JSON - the reliable alternative to interpreting a cluttered screenshot |
+| · | `assembly_get` | Read the active assembly's KINEMATIC STATE as clean JSON |
 | ✎ | `assembly_ground` | Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag |
 | · | `assembly_inspect_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^... |
 | ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint created (use joint_create/assembly_constrain for a maintained relationship) |

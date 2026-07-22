@@ -118,6 +118,28 @@ def _result_bodies(feature):
     return names, any_solid
 
 
+def _created_bodies(feature):
+    """(bodies, created_face_count, readable) over the faces the feature CREATED. feature.bodies also
+    lists the pre-existing SOURCE solid (live-verified: offsetting one face of solid Body1 reports
+    bodies [Body1, Body2]), so an isSolid read over it calls a genuine open surface 'solid'. The
+    faces the feature created - and the bodies that own them - are the actual product. readable=False
+    means feature.faces could not be read at all (nothing was checked)."""
+    faces = safe(lambda: feature.faces)
+    if faces is None:
+        return [], 0, False
+    bodies, seen = [], set()
+    n = int(safe(lambda: faces.count, 0) or 0)
+    for i in range(n):
+        b = safe(lambda i=i: faces.item(i).body)
+        if b is None:
+            continue
+        key = safe(lambda b=b: b.entityToken) or id(b)
+        if key not in seen:
+            seen.add(key)
+            bodies.append(b)
+    return bodies, n, True
+
+
 # ── surface_trim (the cancel-hazard handler) ────────────────────────────────
 
 def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
@@ -258,7 +280,7 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
 # ── surface_offset (produces another surface) ───────────────────────────────
 
 def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
-                   chaining: bool = True, operation: str = "new") -> dict:
+                   chaining: bool = False, operation: str = "new") -> dict:
     """Offset faces by a distance into ANOTHER surface (positive = along the face normal)."""
     k = scale(units)
     if k is None:
@@ -289,16 +311,31 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     if not feature:
         return error("Offset returned no feature.")
 
-    names, any_solid = _result_bodies(feature)
+    # Read the CREATED surface back - feature.bodies also lists the pre-existing source solid, which
+    # made is_solid report true for a genuine open surface (live-verified).
+    created, faces_offset, readable = _created_bodies(feature)
+    if readable and faces_offset == 0:
+        return error("Offset reported success but created no faces - nothing was offset. The feature "
+                     "remains in the timeline; remove it with design_delete_feature.")
+    names = [safe(lambda b=b: b.name) for b in created]
+    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in created)
+    requested = len(face_ents)
+    note = "Faces offset into a new surface (isSolid=false)."
+    if faces_offset > requested:
+        note += (f" chaining=true EXPANDED the selection: {requested} face(s) requested, "
+                 f"{faces_offset} tangent-connected face(s) offset. Pass chaining=false to offset "
+                 "only the picked faces.")
     return ok({
         "offset": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "result_bodies": names,
-        "is_solid": any_solid,       # offset stays a surface -> false
+        "is_solid": any_solid,       # read off the CREATED surface bodies only
+        "faces_requested": requested,
+        "faces_offset": faces_offset,
         "distance": round(float(distance), 6),
         "units": units,
-        "note": "Faces offset into a new surface (isSolid=false).",
+        "note": note,
     })
 
 
@@ -404,7 +441,8 @@ surface_extend_item = Item.create_tool_item(tool=surface_extend_tool, write="wri
 
 _OFFSET_DESC = (
                                             "Offset faces by a distance into ANOTHER surface (positive = along the face normal). 'faces' need "
-                                            "not be one body; 'distance' in 'units'; 'chaining' selects the connected face set (default true); "
+                                            "not be one body; 'distance' in 'units'; chaining=true expands across TANGENT-connected faces "
+                                            "(reported as faces_offset); "
                                             "'operation': new | new_component. Produces a SURFACE (isSolid=false)."
 )
 surface_offset_tool = (
@@ -412,7 +450,7 @@ surface_offset_tool = (
     .add_input_property("faces", _OFFSET_FACES.schema())
     .add_input_property("distance", {"type": "number", "description": "Offset distance in 'units' (positive = along the normal)."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("chaining", {"type": "boolean", "description": "Select the connected face set (default true)."})
+    .add_input_property("chaining", {"type": "boolean", "description": "Expand across tangent-connected faces (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())
     .add_required_input("faces")
     .add_required_input("distance")

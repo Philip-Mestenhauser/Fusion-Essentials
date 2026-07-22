@@ -426,6 +426,32 @@ class TestTargetSketch:
         assert res["isError"] is True and "Ghost" in res["message"]
 
 
+# ── create_sketch_handler: a construction-plane NAME passed as on_face ──────
+# find_geometry never returns plane handles, so the generic stale-handle error would misdirect;
+# the handler detects the plane name and points at the 'plane' parameter instead.
+
+class TestOnFacePlaneNameMisuse:
+    def test_construction_plane_name_points_at_plane_param(self, monkeypatch):
+        s = FakeSketch(); _install_draw(s)
+        monkeypatch.setattr(sk._ON_FACE, "resolve",
+                            lambda raw: (None, "stale handle - re-run find_geometry"))
+        monkeypatch.setattr(sk, "_resolve_plane",
+                            lambda design, p: (SimpleNamespace(tag="cp"), f"construction plane '{p}'"))
+        res = sk.create_sketch_handler(on_face="MidPlane")
+        assert res["isError"] is True
+        assert "plane='MidPlane'" in res["message"]
+        assert "construction PLANE name" in res["message"]
+
+    def test_genuinely_bad_handle_keeps_the_resolver_error(self, monkeypatch):
+        s = FakeSketch(); _install_draw(s)
+        monkeypatch.setattr(sk._ON_FACE, "resolve",
+                            lambda raw: (None, "stale handle - re-run find_geometry"))
+        monkeypatch.setattr(sk, "_resolve_plane", lambda design, p: (None, None))
+        res = sk.create_sketch_handler(on_face="NOTAPLANE")
+        assert res["isError"] is True
+        assert "stale handle" in res["message"]
+
+
 # ── draw_3d_line_handler: off-plane scaling + readback ──────────────────────
 
 class TestDraw3dLine:
@@ -458,6 +484,34 @@ class TestDraw3dLine:
         s = self._line_sketch(); _install_draw(s)
         res = sk.draw_3d_line_handler(x1=0, y1=0, z1=0, x2=5, y2=5)   # z2 missing
         assert res["isError"] is True and "x2, y2, z2" in res["message"]
+
+    def test_is_construction_marks_the_line_and_reports_it(self):
+        s = self._line_sketch(); _install_draw(s)
+        out = _payload(sk.draw_3d_line_handler(x2=1, y2=1, z2=1, is_construction=True))
+        assert out["is_construction"] is True             # read BACK off the line, not echoed
+
+    def test_default_is_not_construction(self):
+        s = self._line_sketch(); _install_draw(s)
+        out = _payload(sk.draw_3d_line_handler(x2=1, y2=1, z2=1))
+        assert out["is_construction"] is False
+
+    def test_is_construction_set_failure_is_reported(self):
+        # the API rejecting the flag must surface (naming the drawn-but-unmarked state), not no-op
+        s = self._line_sketch(); _install_draw(s)
+
+        class _Locked:
+            def __init__(self, p1, p2):
+                self.startSketchPoint = type("SP", (), {"geometry": p1})()
+                self.endSketchPoint = type("SP", (), {"geometry": p2})()
+            @property
+            def isConstruction(self):
+                return False
+            @isConstruction.setter
+            def isConstruction(self, v):
+                raise RuntimeError("isConstruction locked")
+        s.sketchLines.addByTwoPoints = lambda p1, p2: _Locked(p1, p2)
+        res = sk.draw_3d_line_handler(x2=1, y2=1, z2=1, is_construction=True)
+        assert res["isError"] is True and "could not be marked construction" in res["message"]
 
 
 # ── _sketch_world_frame: the on-face/xz frame mapping ──

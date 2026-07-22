@@ -130,9 +130,10 @@ TOOL_DESCRIPTION = (
     "joint to a commanded angle and/or distance and the mechanism moves along that joint's DOF. "
     "'joint_name' is the joint (from assembly_get). 'angle_deg' = rotation in degrees (revolute or "
     "cylindrical); 'distance' = slide in 'units' (slider or cylindrical); give one, or both for a "
-    "cylindrical. Respects the joint's enabled limits (warns + reports the clamped value). The clean way "
-    "to POSE a mechanism by joint value instead of assembly_move + capture_position. Only revolute / "
-    "slider / cylindrical are drivable (rigid has no value; pose a ball joint with assembly_move). WRITES "
+    "cylindrical. Respects the joint's enabled limits (warns + reports the clamped value). Only revolute / "
+    "slider / cylindrical are drivable (rigid has no value; pose a ball joint with assembly_move). A "
+    "driven pose does NOT survive a timeline recompute - a later feature edit re-zeros it - so build "
+    "the mechanism interference-clean at the REST pose, not a driven one. WRITES "
     "(poses the model; adds no timeline feature)."
 )
 

@@ -19,6 +19,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _joints
 
@@ -38,26 +39,6 @@ _ACCURACY_NAME = {v: k for k, v in _ACCURACY.items()}   # for reporting the accu
 
 
 # ── small geometry helpers ───────────────────────────────────────────────────
-
-# The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
-# NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
-# is its VISIBLE portion (per the BoundingBoxEntityTypes docs), so the default box is visibility-
-# governed - an orphaned, shown offset plane pushed an occurrence's Z 4x (live-verified).
-_BODY_BBOX_TYPES = (adsk.fusion.BoundingBoxEntityTypes.SolidBRepBodyBoundingBoxEntityType
-                    | adsk.fusion.BoundingBoxEntityTypes.SurfaceBodyBoundingBoxEntityType
-                    | adsk.fusion.BoundingBoxEntityTypes.MeshBodyBoundingBoxEntityType)
-
-
-def _body_aabb(entity):
-    """The world AABB of an entity counting only its BODIES (solid+surface+mesh). An Occurrence /
-    Component expose boundingBox2(entityTypes) - the cheap bitwise AABB (not the tight-fit
-    preciseBoundingBox) - which drops sketch + construction datums; a BRepBody has no boundingBox2,
-    and its own .boundingBox is already body-only. Returns a BoundingBox3D, or None when there is no
-    measurable body geometry."""
-    bb2 = safe(lambda: entity.boundingBox2)   # a bound method on Occurrence/Component; absent on a body
-    if callable(bb2):
-        return safe(lambda: bb2(_BODY_BBOX_TYPES))
-    return safe(lambda: entity.boundingBox)
 
 
 def _vecxyz(v):
@@ -164,7 +145,7 @@ def _bbox(design, entity, desc, frame, units):
                     "these to param_set to drive stock size.",
         })
 
-    bb = _body_aabb(entity)
+    bb = _geom.body_aabb(entity)
     if not bb:
         return error(f"No bounding box available for {desc} (it may have no solid geometry).")
     mn = safe(lambda: bb.minPoint)

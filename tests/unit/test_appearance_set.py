@@ -113,7 +113,17 @@ class FakeAppearances:
     def item(self, i):
         return self._items[i]
 
+    def itemByName(self, n):
+        for a in self._items + [c[2] for c in self.copied]:
+            if a.name == n:
+                return a
+        return None
+
     def addByCopy(self, base, name):
+        # the real API refuses a duplicate name (returns nothing) - model that, so a handler that
+        # skips the lookup-first reuse path fails here the way it fails live
+        if self.itemByName(name) is not None:
+            return None
         a = FakeAppearance(name)
         self.copied.append((base, name, a))
         return a
@@ -325,6 +335,43 @@ class TestApply:
         _install(FakeRoot(bodies=[body]))
         out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
         assert out["appearance"] == "AgentColor_1E8E3E"
+
+
+class TestReuseExistingAppearance:
+    """addByCopy refuses a duplicate name (returns nothing, live-verified) - a second same-color call
+    or a retry after a half-made copy must LOOK UP and reuse the existing appearance, not fail."""
+
+    def test_second_same_color_call_reuses_one_shared_appearance(self):
+        b1, b2 = FakeBody("B1"), FakeBody("B2")
+        root = FakeRoot(bodies=[b1, b2])
+        design, apps = _install(root)
+        out1 = _payload(ap.handler(target="B1", color="#1E8E3E"))
+        assert out1["appearance_reused"] is False
+        out2 = _payload(ap.handler(target="B2", color="#1E8E3E"))
+        assert out2["appearance_reused"] is True
+        assert len(apps.copied) == 1                     # ONE shared appearance, not a second copy
+        assert b1.appearance is b2.appearance
+
+    def test_reuse_completes_a_half_made_appearance(self):
+        # the named appearance exists but its color was never set (a raced/aborted first call):
+        # the reuse path re-applies the requested color instead of trusting the stale one
+        root = FakeRoot(bodies=[FakeBody("B1")])
+        design, apps = _install(root, existing_appearances=("Base", "AgentColor_FF0000"))
+        out = _payload(ap.handler(target="B1", color="#FF0000"))
+        assert out["appearance_reused"] is True
+        assert apps.copied == []                         # no copy attempted
+        reused = apps.itemByName("AgentColor_FF0000")
+        assert reused.appearanceProperties.item(0).value == ("color", 255, 0, 0, 255)
+
+    def test_different_color_still_creates_its_own_appearance(self):
+        b1, b2 = FakeBody("B1"), FakeBody("B2")
+        root = FakeRoot(bodies=[b1, b2])
+        design, apps = _install(root)
+        _payload(ap.handler(target="B1", color="#1E8E3E"))
+        out = _payload(ap.handler(target="B2", color="#FF6D00"))
+        assert out["appearance_reused"] is False
+        assert len(apps.copied) == 2
+        assert b1.appearance is not b2.appearance
 
 
 # ── guards ─────────────────────────────────────────────────────────────────────

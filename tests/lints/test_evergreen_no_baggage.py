@@ -78,7 +78,7 @@ _PHASE_LABEL = re.compile(r"\bPhase [0-9]\b")
 _ALLOWLIST = {
     "tests/lints/test_generated_docs_current.py:7":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
-    "tests/unit/test_joint_create_origin.py:447":
+    "tests/unit/test_joint_create_origin.py:456":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
 }
 

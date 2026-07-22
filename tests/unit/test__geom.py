@@ -114,3 +114,44 @@ class TestEvaluatorNormalAt:
     def test_decimals_controls_rounding(self):
         face = _FakeFace(_FakeEvaluator(normal=(1, 2, 2)))
         assert geom.evaluator_normal_at(face, FakePoint(0, 0, 0), decimals=2) == [0.33, 0.67, 0.67]
+
+
+# ── body_aabb: the bodies-only AABB every occurrence/component size read shares ─────────────────
+#
+# An Occurrence/Component's plain .boundingBox also counts visible sketches + construction datums,
+# so an orphaned oversized sketch inflates the box (live-verified: a 68x10 body read 120x120).
+# body_aabb must call boundingBox2 with the SOLID|SURFACE|MESH body types instead; a BRepBody has no
+# boundingBox2 and its own .boundingBox is already body-only.
+
+class TestBodyAabb:
+    def test_occurrence_uses_boundingBox2_with_body_types(self):
+        class _Ent:
+            boundingBox = "whole_box"          # sketch/datum-inflated - must NOT be used
+            def __init__(self):
+                self.calls = []
+            def boundingBox2(self, types):
+                self.calls.append(types)
+                return "body_box"
+        e = _Ent()
+        assert geom.body_aabb(e) == "body_box"
+        assert e.calls == [geom._BODY_BBOX_TYPES]
+
+    def test_body_types_exclude_sketch_and_construction(self):
+        # the bitmask spans solid|surface|mesh only (1|2|4=7) - sketch(8)/construction bits are out.
+        import adsk.fusion
+        t = adsk.fusion.BoundingBoxEntityTypes
+        assert geom._BODY_BBOX_TYPES == (t.SolidBRepBodyBoundingBoxEntityType
+                                         | t.SurfaceBodyBoundingBoxEntityType
+                                         | t.MeshBodyBoundingBoxEntityType)
+        assert not (geom._BODY_BBOX_TYPES & t.SketchBoundingBoxEntityType)
+
+    def test_body_falls_back_to_plain_boundingBox(self):
+        class _Body:
+            boundingBox = "solid_box"          # no boundingBox2 attribute -> fallback
+        assert geom.body_aabb(_Body()) == "solid_box"
+
+    def test_no_body_geometry_returns_none(self):
+        class _Empty:
+            def boundingBox2(self, types):
+                return None                    # no measurable bodies
+        assert geom.body_aabb(_Empty()) is None

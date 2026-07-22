@@ -15,7 +15,7 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 4c1f0be8b87d138ca3b9775a490bf644ce31d70a2a3b248384f0d105e06f389d | Fusion 2704.1.36 | verified 2026-07-19
+Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 | Fusion 2704.1.36 | verified 2026-07-22
 
 114 covered / 25 skipped(reason) / 0 pending
 

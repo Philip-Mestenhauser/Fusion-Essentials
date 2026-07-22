@@ -8,14 +8,39 @@ SAME arithmetic - normalize a Vector3D (unit_vector), take the unit direction be
 Each caller keeps its own field semantics (find_geometry's cylinder 'normal' is the radial evaluator
 sample, reported alongside a separate 'axis'; sys_get_selection's cylinder 'direction' IS the axis)
 and its own judgment of what counts as a successful read - only the vector arithmetic is shared.
+Also home to body_aabb - the bodies-only bounding box every occurrence/component size read uses.
 """
+
+import adsk.fusion
 
 from ._common import safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-direction math "
              "find_geometry and sys_get_selection both need; evaluator_normal_at - the "
-             "evaluator.getNormalAtPoint sample find_geometry uses for every face's normal")
+             "evaluator.getNormalAtPoint sample find_geometry uses for every face's normal; "
+             "body_aabb - the bodies-only (solid+surface+mesh) AABB of an occurrence/component/"
+             "body that model_inspect and assembly_get size reads share")
+
+# The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
+# NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
+# is its VISIBLE portion (per the BoundingBoxEntityTypes docs), so the default box is visibility-
+# governed - an orphaned, shown offset plane pushed an occurrence's Z 4x (live-verified).
+_BODY_BBOX_TYPES = (adsk.fusion.BoundingBoxEntityTypes.SolidBRepBodyBoundingBoxEntityType
+                    | adsk.fusion.BoundingBoxEntityTypes.SurfaceBodyBoundingBoxEntityType
+                    | adsk.fusion.BoundingBoxEntityTypes.MeshBodyBoundingBoxEntityType)
+
+
+def body_aabb(entity):
+    """The world AABB of an entity counting only its BODIES (solid+surface+mesh). An Occurrence /
+    Component expose boundingBox2(entityTypes) - the cheap bitwise AABB (not the tight-fit
+    preciseBoundingBox) - which drops sketch + construction datums; a BRepBody has no boundingBox2,
+    and its own .boundingBox is already body-only. Returns a BoundingBox3D, or None when there is no
+    measurable body geometry."""
+    bb2 = safe(lambda: entity.boundingBox2)   # a bound method on Occurrence/Component; absent on a body
+    if callable(bb2):
+        return safe(lambda: bb2(_BODY_BBOX_TYPES))
+    return safe(lambda: entity.boundingBox)
 
 
 def unit_vector(v, decimals: int = 6):

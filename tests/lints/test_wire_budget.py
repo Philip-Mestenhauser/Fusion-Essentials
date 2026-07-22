@@ -49,6 +49,14 @@ own descriptions first: doc_copy's source_folder input (scopes the budget-bounde
 main-thread stall fix's cheap escape path), view_set's hide/show accepting BODY targets (root-level
 bodies / one body of a multi-body component, per-body bulb read-back), and cam_edit_operation's
 expression-evaluation read-back claim (a non-evaluating expression rolls back all params).
+
+The watch-build disclosure batch lands +533 bytes measured (228,017->228,550) after trimming the
+same tools' own prose first: sketch_add_geometry's closed_path ~48-point solver limit + the
+polyline/repeated-point workaround and center_rectangle's no-implicit-constraints fact,
+sketch_dimension's lone-line length + point:0-is-origin facts, sketch_add_3d_line's new
+is_construction input, joint_create's free-part-moves warning, joint_drive's poses-do-not-survive-
+recompute warning, design_delete_feature's indices-shift warning, and joint_create_origin's
+model_parameters (dNN names) read-back.
 """
 
 import json
@@ -57,10 +65,10 @@ import pytest
 
 from conftest import load_mcp_server, register_all_tools
 
-# Snug watermark: current real total is 228,017. Ratchet DOWN as prose moves to errors/notes or a
+# Snug watermark: current real total is 228,550. Ratchet DOWN as prose moves to errors/notes or a
 # description tightens; a new tool (or a tool whose capability genuinely grows) that needs the room
 # slims something else in the same change, or raises this by exactly its own measured weight.
-TOTAL_PAYLOAD_BUDGET_BYTES = 228_017
+TOTAL_PAYLOAD_BUDGET_BYTES = 228_550
 PER_TOOL_BUDGET_BYTES = 4_500
 
 # General per-description ceiling; a named override carries its own audited reason and is

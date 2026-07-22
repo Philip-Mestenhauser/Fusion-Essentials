@@ -56,17 +56,34 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         mr, derr = _common.min_distance(ent_a, ent_b)
         if derr:
             return derr
-        return ok({
+        dist_cm = safe(lambda: mr.value, 0.0)
+        pa = safe(lambda: mr.positionOne)
+        pb = safe(lambda: mr.positionTwo)
+        out = {
             "mode": "distance",
             "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",
             "b": f"{kind_b} '{safe(lambda: ent_b.name) or b}'",
             "units": units,
-            "distance": round(safe(lambda: mr.value, 0.0) * f, 6),
-            "closest_point_on_a": _common.ptxyz(safe(lambda: mr.positionOne), f),
-            "closest_point_on_b": _common.ptxyz(safe(lambda: mr.positionTwo), f),
+            "distance": round(dist_cm * f, 6),
+            "closest_point_on_a": _common.ptxyz(pa, f),
+            "closest_point_on_b": _common.ptxyz(pb, f),
             "note": "Minimum gap between the two targets (0 = touching/overlapping). closest_point_on_a/b "
                     "are the nearest points; their separation IS the distance.",
-        })
+        }
+        # Interpenetrating solids: measureMinimumDistance returns 0 with BOTH closest points collapsed
+        # to (0,0,0) - a degenerate pair, NOT a contact location (live-verified on two overlapping
+        # boxes whose overlap region is nowhere near the origin). Flag it rather than let the caller
+        # navigate to a meaningless point.
+        def _at_origin(p):
+            return p is not None and all(
+                abs(safe(lambda ax=ax: getattr(p, ax), 0.0) or 0.0) <= 1e-9 for ax in ("x", "y", "z"))
+        if dist_cm <= 1e-9 and _at_origin(pa) and _at_origin(pb):
+            out["closest_points_degenerate"] = True
+            out["note"] = ("Distance 0 with both closest points at (0,0,0): the targets touch or "
+                           "OVERLAP and this point pair is degenerate - it does NOT locate the "
+                           "contact. Use assembly_inspect_interference on the pair to get the overlap "
+                           "volume and where it sits.")
+        return ok(out)
 
     # angle
     mgr = safe(lambda: app.measureManager)

@@ -125,15 +125,16 @@ _DESC = (
 "Delete ONE timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched pattern/mirror, "
 "which removes all the instances it created. An ambiguous name is refused (candidates listed; pick one "
 "with the 'name@index' form, e.g. 'Extrude1@4'); a timeline GROUP is refused; the result reports if "
-"the delete left a downstream feature in error. DESTRUCTIVE - undo in Fusion if unintended."
+"the delete left a downstream feature in error. Timeline indices SHIFT after every delete - in a "
+"batch, re-read the timeline before each 'name@index' rather than reusing cached positions. "
+"DESTRUCTIVE - undo in Fusion if unintended."
 )
 
 tool = (
     Tool.create_simple(name="design_delete_feature", description=_DESC)
     .add_input_property("feature", {"type": "string",
-            "description": "Timeline object name to delete (from design_get(include=['timeline'])). An ambiguous "
-            "name is refused - pick one instance with the 'name@index' form the error lists (e.g. 'Extrude1@4'). "
-            "A timeline group is refused."})
+            "description": "Timeline object name to delete (from design_get(include=['timeline'])); an ambiguous "
+            "name is refused - use the 'name@index' form the error lists (e.g. 'Extrude1@4')."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True)

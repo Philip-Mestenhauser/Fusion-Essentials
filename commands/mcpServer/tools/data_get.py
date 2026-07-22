@@ -57,6 +57,11 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
             out["scope"] = "folders"
             out["note"] = ("Folder tree of the project. Pass a 'folder' path + drop include=['folders'] "
                            "to list that folder's FILES. (Cloud read - see 'truncated'.)")
+            if out.get("truncated"):
+                out["note"] += (" The walk hit its folder budget (each folder is a slow cloud fetch "
+                                "on Fusion's main thread): nodes flagged folders_truncated were not "
+                                "descended. Lower max_depth, or list one subtree's files directly "
+                                "with 'folder'=<path>.")
             return ok(out)
         out, e = _unwrap(data_read.list_project_files_handler(project=project, project_id=project_id,
                                                               folder=folder, recursive=recursive))

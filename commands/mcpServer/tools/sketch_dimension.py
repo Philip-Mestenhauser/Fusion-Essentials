@@ -155,7 +155,21 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     need_two = dt in ("distance", "horizontal_distance", "vertical_distance", "angle")
     e2 = None
     anchor2 = None
-    if need_two:
+    lone_line = False
+    if need_two and dt in _DISTANCE_TYPES and not (entity_two or "").strip():
+        # A lone LINE dimensions its OWN length (endpoint to endpoint) - the native behavior.
+        # Only a line qualifies: it has two endpoints and no center (an arc's endpoint span is
+        # not its length, so an arc/circle still needs an explicit entity_two).
+        if anchor1:
+            return error(f"A single-entity '{dt}' dimensions the whole line's length - drop the "
+                         f"':{anchor1}' anchor, or give entity_two to pin two points.")
+        has_ends = (safe(lambda: e1.startSketchPoint) is not None
+                    and safe(lambda: e1.endSketchPoint) is not None)
+        if not has_ends or safe(lambda: e1.centerSketchPoint) is not None:
+            return error(f"'{dt}' with no entity_two dimensions a LINE's own length; "
+                         f"'{entity_one}' is not a line. Give entity_two ('<type>:<index>').")
+        lone_line = True
+    elif need_two:
         base2, anchor2, aerr2 = _parse_anchor_ref(entity_two)
         if aerr2:
             return error(aerr2)
@@ -176,12 +190,16 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     if anchor2 and dt == "angle":
         return error("angle takes two whole lines, not point anchors - drop the anchor from entity_two.")
     if dt in ("distance", "horizontal_distance", "vertical_distance"):
-        p1, perr1 = _dim_point(sketch, e1, anchor1)
-        if perr1:
-            return error(f"entity_one: {perr1}")
-        p2, perr2 = _dim_point(sketch, e2, anchor2)
-        if perr2:
-            return error(f"entity_two: {perr2}")
+        if lone_line:
+            p1 = safe(lambda: e1.startSketchPoint)
+            p2 = safe(lambda: e1.endSketchPoint)
+        else:
+            p1, perr1 = _dim_point(sketch, e1, anchor1)
+            if perr1:
+                return error(f"entity_one: {perr1}")
+            p2, perr2 = _dim_point(sketch, e2, anchor2)
+            if perr2:
+                return error(f"entity_two: {perr2}")
     try:
         if dt in ("distance", "horizontal_distance", "vertical_distance"):
             orient = {
@@ -237,9 +255,11 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 TOOL_DESCRIPTION = (
 "Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of "
 "parametric sketching (sketch_constrain does the geometric half). distance/horizontal_distance/"
-"vertical_distance take TWO refs; radius/diameter one arc/circle; angle two lines. 'entity_one'/"
+"vertical_distance take TWO refs, or ONE lone line (dimensions its own length); radius/diameter one "
+"arc/circle; angle two lines. 'entity_one'/"
 "'entity_two' are '<type>:<index>' refs (line/arc/circle/point, e.g. 'line:0') - the sketch_constrain "
-"scheme. To pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
+"scheme; point:0 is ALWAYS the sketch ORIGIN, point:1..N are geometry points in creation order. To "
+"pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
 "mis-attaches when points share coordinates): append ':start'/':end'/':mid' (line) or ':center' "
 "(circle/arc), e.g. 'line:0:end'. 'value' drives it by expression ('25 mm', '90 deg', 'StockX/2'); "
 "omit to keep the measured value. The dimension becomes a param drivable with param_set."
@@ -251,7 +271,7 @@ tool = (
     .add_required_input("dim_type")
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
     .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional position anchor ':start/:end/:mid/:center' (e.g. 'line:0:end')."})
-    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (distance/angle need two); same anchor forms as entity_one."})
+    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (angle needs two; distance on a lone LINE may omit it = the line's length); same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', '90 deg', 'StockX/2'); omit to keep measured."})
 )
 

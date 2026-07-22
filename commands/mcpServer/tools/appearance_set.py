@@ -3,7 +3,8 @@
 
 """MCP building block: set the color/appearance of a body, occurrence, or component. WRITES.
 
-Copies a base appearance (Appearances.addByCopy) so the tool owns an editable instance, sets its
+Reuses the design's existing appearance of the target name (addByCopy refuses duplicate names) or
+copies a base appearance (Appearances.addByCopy) so the tool owns an editable instance, sets its
 ColorProperty, then assigns it to the resolved target - a component (or the whole design) colors all
 its bodies.
 """
@@ -71,15 +72,27 @@ def _base_appearance(design):
 
 
 def _make_colored_appearance(design, rgb, opacity, name):
-    """Copy a base appearance into the design and set its color. Returns (appearance, err)."""
-    base = _base_appearance(design)
-    if base is None:
-        return None, ("No base appearance available to copy (the design has none and no material "
-                      "library exposed one). Open a design with at least one appearance.")
+    """An appearance named `name` with the requested color set: REUSE one already in the design
+    (addByCopy refuses a duplicate name, so a second same-color call - or a retry after a half-made
+    copy - must find the existing one, not fail), else copy a base appearance in. The color is
+    (re)applied either way, so a reused appearance always ends up at the requested color.
+    Returns (appearance, reused, err)."""
     appearances = design.appearances
-    appr = safe(lambda: appearances.addByCopy(base, name))
-    if not appr:
-        return None, "Could not create an appearance copy (addByCopy returned nothing)."
+    appr = safe(lambda: appearances.itemByName(name))
+    reused = appr is not None
+    if appr is None:
+        base = _base_appearance(design)
+        if base is None:
+            return None, False, ("No base appearance available to copy (the design has none and no "
+                                 "material library exposed one). Open a design with at least one "
+                                 "appearance.")
+        appr = safe(lambda: appearances.addByCopy(base, name))
+        if not appr:
+            # a parallel call can land the name between the lookup and the copy - re-check once
+            appr = safe(lambda: appearances.itemByName(name))
+            reused = appr is not None
+        if not appr:
+            return None, False, "Could not create an appearance copy (addByCopy returned nothing)."
     color = adsk.core.Color.create(rgb[0], rgb[1], rgb[2], opacity)
     # Find the color-bearing property and set it. Most appearances expose one ColorProperty
     # (named 'Color' / 'Albedo' / etc.) - set every ColorProperty so the override takes regardless of
@@ -96,8 +109,8 @@ def _make_colored_appearance(design, rgb, opacity, name):
             except Exception:
                 pass  # some ColorProperties are read-only/texture-backed; try the next
     if not set_any:
-        return None, "The base appearance has no editable color property to override."
-    return appr, None
+        return None, False, "The base appearance has no editable color property to override."
+    return appr, reused, None
 
 
 def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "") -> dict:
@@ -126,7 +139,7 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
             if safe(lambda: entity.name) else kind)
 
     appr_name = (name or "").strip() or f"AgentColor_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
-    appr, aerr = _make_colored_appearance(design, rgb, opacity, appr_name)
+    appr, appr_reused, aerr = _make_colored_appearance(design, rgb, opacity, appr_name)
     if aerr:
         return error(aerr)
 
@@ -182,6 +195,7 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         "color_hex": f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}",
         "opacity": opacity,
         "appearance": safe(lambda: appr.name),
+        "appearance_reused": appr_reused,
         "applied_to": applied_to,
         "note": note,
     }

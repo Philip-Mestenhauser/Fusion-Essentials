@@ -335,6 +335,31 @@ class TestNegativeDistance:
         assert "negative_distance_warning" not in out
 
 
+class TestLoneLineDistance:
+    """distance with only entity_one and it a LINE dimensions the line's OWN length (its two
+    endpoints) - the native single-select behavior - instead of erroring "'' did not resolve"."""
+
+    def test_lone_line_dimensions_its_own_length(self):
+        s = _install()
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0"))
+        kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
+        assert kind == "distance"
+        assert (p1, p2) == ("sp", "ep")                  # the line's own start/end points
+        assert out["dimensioned"] is True
+
+    def test_lone_circle_still_needs_entity_two(self):
+        # a circle has no length to dimension alone - refused with the entity_two requirement named
+        _install()
+        res = sd.handler(dim_type="distance", entity_one="circle:0")
+        assert res["isError"] is True and "entity_two" in res["message"]
+
+    def test_lone_line_with_anchor_rejected(self):
+        # an anchored single ref is ambiguous (anchor pins ONE point; a length needs both) - refused
+        _install()
+        res = sd.handler(dim_type="distance", entity_one="line:0:end")
+        assert res["isError"] is True and "anchor" in res["message"].lower()
+
+
 class TestGuards:
     def test_unknown_dim_type(self):
         _install()
@@ -346,9 +371,9 @@ class TestGuards:
         res = sd.handler(dim_type="radius", entity_one="circle:9")
         assert res["isError"] is True and "entity_one" in res["message"]
 
-    def test_distance_needs_entity_two(self):
+    def test_angle_needs_entity_two(self):
         _install()
-        res = sd.handler(dim_type="distance", entity_one="line:0")
+        res = sd.handler(dim_type="angle", entity_one="line:0")
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_value_optional(self):

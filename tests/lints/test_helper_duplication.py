@@ -39,6 +39,7 @@ _DENYLIST = {
     "unit_vector": ("_geom", "def"),
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),
+    "body_aabb": ("_geom", "def"),
     "build_joint_geometry": ("_joints", "def"),
     "apply_motion": ("_joints", "def"),
     "find_joint": ("_joints", "def"),
