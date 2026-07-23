@@ -32,6 +32,11 @@ def expression_error(p):
     Returns (error_message_or_None, warning_message_or_None)."""
     err = (safe(lambda: p.error) or "").strip()
     warn = (safe(lambda: p.warning) or "").strip()
+    # Platform quirk (live): a .warning string can arrive with its template tokens uninterpolated
+    # ('${self.title}'). Tag it once here so every consumer's wire shows it as the cosmetic
+    # artifact it is, not a broken parameter reference to chase.
+    if "${" in warn:
+        warn += " [the ${...} token is an uninterpolated platform template - cosmetic]"
     return (err or None), (warn or None)
 
 

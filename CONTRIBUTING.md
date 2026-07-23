@@ -167,6 +167,11 @@ Fusion's Add-Ins dialog is only required if the add-in failed to start (so no se
 running to call `sys_reload_addin` against). Note: an MCP **client** may cache the tool list, so
 a newly registered tool can be invisible to the client until it reconnects — reconnect the
 server in your client (`/mcp` in Claude Code) to refresh, or drive it over raw HTTP meanwhile.
+The stale cache bites harder on an **edited** tool: the client serializes arguments against its
+old schema snapshot, so a property it does not know about (a newly added array input, say) can
+cross the wire silently mangled — a JSON array arriving as its string repr — while every other
+property works, which looks like a handler bug. After any schema change, reconnect the client
+before exercising the tool.
 
 ### Driving the server from outside Fusion (for testing)
 

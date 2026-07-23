@@ -23,12 +23,14 @@ from . import _inputs
 from . import _assert
 from ._joints import (
     AXES as _AXES,
+    OFFSET_PARAM_NOTE as _OFFSET_PARAM_NOTE,
     all_joint_origins as _all_joint_origins,
     apply_motion as _apply_motion,
     build_joint_geometry as _jg_from_entity,
     current_joint_type as _current_joint_type,
     find_joint as _find_joint,
     is_joint_origin as _is_joint_origin,
+    motion_param_names as _motion_param_names,
 )
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
@@ -455,7 +457,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             return error(lim_err)
         limits_out = lim_changed
 
-    return ok({
+    payload = {
         "created": True,
         "joint_name": safe(lambda: joint.name),
         "joint_type": jtype,
@@ -468,7 +470,12 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         "flipped": bool(flip),
         **limits_out,
         "note": "Joint created as a timeline feature. View it with view_screenshot.",
-    })
+    }
+    mp = _motion_param_names(joint)
+    if mp:
+        payload["model_parameters"] = mp
+        payload["note"] += _OFFSET_PARAM_NOTE
+    return ok(payload)
 
 
 def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
@@ -656,6 +663,10 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     else:
         out["note"] = ("Joint edited in place + full recompute (downstream features settled). "
                        "view_screenshot to view.")
+    mp = _motion_param_names(joint)
+    if mp:
+        out["model_parameters"] = mp
+        out["note"] += _OFFSET_PARAM_NOTE
     return ok(out)
 
 
@@ -730,7 +741,7 @@ edit_tool = (
     .add_input_property(*_inputs.world_axis("world_axis", default="",
             description="Re-point the motion to a TRUE WORLD axis via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted.").as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})
-    .add_input_property("offset", {"type": "number", "description": "Set the joint offset distance (in 'units'; the offset ModelParameter)."})
+    .add_input_property("offset", {"type": "number", "description": "Set the joint ANCHOR offset (the offset ModelParameter, in 'units') - along the joint FRAME'S Z axis; NOT a slider's slide value (joint_drive poses that)."})
     .add_input_property("angle", {"type": "number", "description": "Set the joint angle between the inputs (degrees)."})
     .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
     # rotation_deg is intentionally NOT exposed: the handler still accepts the kwarg and returns a

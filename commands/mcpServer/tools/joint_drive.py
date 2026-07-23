@@ -115,7 +115,10 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         "value_now": read_back,
         "units": units,
         "note": "Joint driven (the Drive Joints command) - the mechanism followed along this joint's "
-                "DOF. This poses the model; it does not add a timeline feature. Pair with assembly_get "
+                "DOF. This poses the model; it does not add a timeline feature, and a later recompute "
+                "can reset the pose. For a position that PERSISTS parametrically, param_set the "
+                "joint's 'offset' model parameter (named in joint_create/joint_edit results; it moves "
+                "along the joint frame's Z). Pair with assembly_get "
                 "to confirm the kinematics and view_screenshot to see it.",
     }
     if warnings:

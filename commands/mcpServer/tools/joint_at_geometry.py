@@ -17,8 +17,10 @@ from ._common import ok, error, safe
 from . import _common
 from . import _inputs
 from . import _outputs
-from ._joints import (AXES as _AXES, apply_motion, build_joint_geometry as _joint_geometry_for,
-                      is_joint_origin as _is_joint_origin)
+from . import _geom
+from ._joints import (AXES as _AXES, OFFSET_PARAM_NOTE, apply_motion,
+                      build_joint_geometry as _joint_geometry_for,
+                      is_joint_origin as _is_joint_origin, motion_param_names)
 
 app = adsk.core.Application.get()
 
@@ -84,6 +86,16 @@ def _move_delta(before, after):
             "direction": [round(dx * inv, 4), round(dy * inv, 4), round(dz * inv, 4)]}
 
 
+def _planar_outward_normal(entity):
+    """Outward unit normal of a PLANAR face (the shared evaluator sample), else None - detects the
+    flush face-to-face pick: two planar faces whose outward normals OPPOSE."""
+    if not isinstance(entity, adsk.fusion.BRepFace):
+        return None
+    if safe(lambda: entity.geometry.surfaceType) != adsk.core.SurfaceTypes.PlaneSurfaceType:
+        return None
+    return _geom.evaluator_normal_at(entity, safe(lambda: entity.pointOnFace))
+
+
 def _axis_entity(entity):
     """If 'entity' is a cylinder/cone face (or a circular edge), return it as an entity that can
     define the joint's rotation/slide axis (its own axis). Else None. A pin's joint must rotate about
@@ -100,7 +112,7 @@ def _axis_entity(entity):
 
 
 def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute",
-            axis: str = "auto", name: str = "") -> dict:
+            axis: str = "auto", name: str = "", flip: bool = False) -> dict:
     """Joint two parts at two geometry handles (from find_geometry).
 
     handle_one / handle_two: the entity-token handles to joint AT (e.g. a rod bore face and a crank
@@ -139,11 +151,22 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     if err2:
         return error(f"handle_two: {err2}")
 
+    # Sample the two outward normals BEFORE the joint moves anything - the flush face-to-face pick
+    # (normals opposing) is detected from the pre-joint pose.
+    n1, n2 = _planar_outward_normal(e1), _planar_outward_normal(e2)
+    normals_oppose = (n1 is not None and n2 is not None
+                      and (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]) < -0.9)
+
     root = design.rootComponent
     try:
         ji = root.joints.createInput(g1, g2)
     except Exception as e:
         return error(f"Could not create joint input from the two geometries: {e}")
+    if flip:
+        try:
+            ji.isFlipped = True
+        except Exception as e:
+            return error(f"Could not apply flip: {e}")
 
     # axis='auto' (default): derive the motion axis from the geometry itself (a cylinder face / round
     # edge), so a pin rotates about the PIN's axis - not a guessed world axis that would over-constrain
@@ -188,6 +211,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "motion": mot,
     "axis": ("auto(geometry)" if use_custom else ax_name) if mot != "rigid" else None,
     "healthy": healthy,
+    "flipped": bool(flip),
     "geometry_one": l1,
     "geometry_two": l2,
     "occurrence_one": o1,
@@ -195,6 +219,19 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "note": "Joint created AT the geometry. axis='auto' derived the motion axis from the "
     "geometry itself. Verify with assembly_get (is_healthy + positions).",
     }
+    mp = motion_param_names(joint)
+    if mp:
+        out["model_parameters"] = mp
+        out["note"] += OFFSET_PARAM_NOTE
+    # The flush face-to-face pick without flip: the joint aligns the two geometry frames Z-onto-Z
+    # (each planar face's frame Z = its OUTWARD normal), so opposing normals force a 180-deg rotation
+    # of the free part - live-verified, typically embedding it in the other part. Say so.
+    if normals_oppose and not flip:
+        out["flip_hint"] = (
+            "The two planar faces' outward normals OPPOSE (the flush face-to-face pick). A joint "
+            "aligns the two geometry frames Z-onto-Z, so the free part was ROTATED 180 deg to "
+            "satisfy that - typically embedding it. For the seated flush mate, re-run with "
+            "flip=true (or joint_edit flip).")
     if not healthy:
         msg = (safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "
@@ -225,7 +262,9 @@ TOOL_DESCRIPTION = (
                                  "(grounding wins; 'moved_by' names the actual mover). A placed part gets REPOSITIONED "
                                  "(restore offsets with joint_edit). motion: "
                                  "revolute/slider/cylindrical/ball/rigid. axis: "
-                                 "'auto' (from the geometry) unless forcing a world x/y/z. If it can't solve in the current pose "
+                                 "'auto' (from the geometry) unless forcing a world x/y/z. 'flip' seats two planar faces "
+                                 "whose normals OPPOSE flush (else the free part rotates 180 deg; flip_hint flags it). "
+                                 "If it can't solve in the current pose "
                                  "the joint is still added with healthy=false - the returned 'healthy' flag is authoritative.\n"
                                  + _outputs.produces_block(RETURNS)
 )
@@ -238,6 +277,7 @@ joint_at_tool = (
         "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
         default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
     .add_input_property("axis", {"type": "string", "description": "auto (default - derive axis from the geometry, e.g. a cylinder face's axis) | x | y | z (force a world axis). WARNING: forcing an axis ROTATES the free occurrence to align - it can swing a positioned part out of place. Prefer auto."})
+    .add_input_property("flip", {"type": "boolean", "description": "Reverse the alignment (default false): true seats two planar faces with OPPOSING normals flush."})
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()
 )

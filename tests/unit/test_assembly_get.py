@@ -263,6 +263,16 @@ class TestProbe:
         assert out["joints"] is None
         assert "joints" not in out["occurrences"][0]
 
+    def test_include_joints_false_still_counts_and_reports_broken(self):
+        # include_joints gates EMISSION only - joint_count and broken_joints come from the always-run
+        # walk (with the walk skipped they read 0/[] while joints existed, live-observed).
+        _install([FakeOcc("A:1", "A")],
+                 [FakeJoint("Good", 1, "A:1", None), FakeJoint("Bad", 1, "A:1", None, health_state=2)])
+        out = _payload(ap.handler(include_joints=False))
+        assert out["joint_count"] == 2
+        assert out["broken_joints"] == ["Bad"]
+        assert out["is_healthy"] is False
+
     def test_as_built_joints_are_visible(self):
         # as-built joints live in root.asBuiltJoints, a SEPARATE collection from root.joints. The probe
         # must read both, or a script-created as-built joint is invisible (joint_count undercounts and

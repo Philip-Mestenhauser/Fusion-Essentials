@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 139  |  **description breadcrumbs:** 534  |  **note/error breadcrumbs:** 255
+**Tools:** 139  |  **description breadcrumbs:** 534  |  **note/error breadcrumbs:** 259
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -97,12 +97,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document first (see doc_new).
 
 ### `assembly_ground`
+- ground_to_parent set (the stateless parent lock). true = locked rigidly to parent AT ITS TIMELINE-DEFINED PLACEMENT; false = freed to move/joint. To fix a part at a position: create its component a...
 - Specify 'ground_to_parent' (true/false). true locks the occurrence rigidly to its parent; false frees it to move/joint.
 - No active design with components.
 - Assignment was accepted but '
 - ' still reads isGroundToParent=
 - - the flag did not take.
-- ground_to_parent set (the stateless parent lock). true = locked rigidly to parent; false = freed to move/joint. To fix a part in space, keep it ground_to_parent=true and position it with assembly_m...
 - Could not set ground_to_parent on '
 
 ### `assembly_inspect_interference`
@@ -189,7 +189,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . Read the operation's parameter names first (the tool only sets existing ones).
 - ': expression did not evaluate -
 - parameter(s); no change was applied. (An operation expression must reference existing parameters and resolve to a value - check names and units.)
-- Parameters set. The toolpath is now OUT OF DATE - regenerate it with cam_generate (be in the Manufacture workspace).
+- Parameters set. changed[].value is the platform's evaluated read and can LAG a valid set (echoing the pre-set value); 'after' and the evaluation gate are the trustworthy signals. The toolpath is no...
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
@@ -665,8 +665,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create joint input from the two geometries:
 - Joint creation failed:
 - . (The two geometries may be incompatible, or one part may be over-constrained.)
+- Could not apply flip:
 
 ### `joint_create`
+- Joint created as a timeline feature. View it with view_screenshot.
 - No active design (open a document with assembly geometry).
 - '. Valid: mm, cm, in.
 - Provide 'occurrence_one' and 'occurrence_two' - each a Joint Origin name OR an autonomous geometry snap '<occurrence>:<snap>' (snap = origin/center/top/bottom/left/right/front/back/cylinder).
@@ -674,7 +676,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - createInput returned nothing for these inputs.
 - setter returned false
 - joints.add returned nothing.
-- Joint created as a timeline feature. View it with view_screenshot.
 - Could not create joint input:
 - Could not apply offset/angle/flip:
 - Limits requested but this joint type has no motion to limit (rigid/inferred). Use revolute/slider/cylindrical.
@@ -704,7 +705,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - cm). Rolled the origin back; nothing changed.
 
 ### `joint_drive`
-- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This poses the model; it does not add a timeline feature. Pair with assembly_get to confirm the kinematics a...
+- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This poses the model; it does not add a timeline feature, and a later recompute can reset the pose. For a po...
 - Provide 'angle_deg' (revolute/cylindrical) and/or 'distance' (slider/cylindrical) to drive the joint to.
 - '. Use mm, cm, or in.
 - No active design with components.

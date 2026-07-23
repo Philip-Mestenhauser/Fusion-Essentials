@@ -28,7 +28,30 @@ MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_mo
              "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
              "broken joints over) + find_joint (resolve ONE by name over those same scopes) + "
              "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
-             "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on)")
+             "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + "
+             "motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one "
+             "offset-is-frame-Z wire sentence every joint payload appends)")
+
+
+def motion_param_names(joint):
+    """The joint's OWN ModelParameter names: {'offset': dNN, 'angle': dNN}, absent ones omitted.
+    Joint.offset moves the anchor along the joint frame's TERTIARY (Z) axis (the API's own docstring;
+    live-verified) - it is the ONLY parametric position drive a joint has. A slider's slide VALUE has
+    no ModelParameter at all, even after joint_drive poses it (live-verified)."""
+    out = {}
+    for key in ("offset", "angle"):
+        nm = safe(lambda k=key: getattr(joint, k).name)
+        if nm:
+            out[key] = nm
+    return out
+
+
+# The one wire sentence appended wherever a payload carries model_parameters (single shared home -
+# three tools return the block; the teaching must not fork).
+OFFSET_PARAM_NOTE = (
+    " model_parameters are the joint's own dNN params: param_set 'offset' to an expression for a "
+    "PARAMETRIC position - it moves along the joint FRAME'S Z axis, not the motion axis. A slider's "
+    "slide VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute).")
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
 # passing a custom_entity to apply_motion instead).

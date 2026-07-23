@@ -57,6 +57,17 @@ sketch_dimension's lone-line length + point:0-is-origin facts, sketch_add_3d_lin
 is_construction input, joint_create's free-part-moves warning, joint_drive's poses-do-not-survive-
 recompute warning, design_delete_feature's indices-shift warning, and joint_create_origin's
 model_parameters (dNN names) read-back.
+
+The vise-eval joint batch lands +340 bytes measured (228,550->228,890) after trimming the same
+tools' own prose first: joint_at_geometry's new flip input (seats the flush face-to-face pick that
+otherwise rotates the free part 180 deg - live-verified) + its flip teaching, joint_edit's
+offset-is-the-anchor-not-the-slide-value fact, and joint_create_origin's coordinates-anchor
+ROOT-ABSOLUTE fact (never follows an occurrence's transform).
+
+assembly_ground's corrected contract lands +67 bytes measured (228,890->228,957) after trimming
+its own prose first: grounding RE-LOCKS at the timeline placement and discards free moves,
+captured or not (a ground-then-move recipe does not survive recompute - live-disproven); the
+snap-back is read back and reported as position_reset.
 """
 
 import json
@@ -65,10 +76,10 @@ import pytest
 
 from conftest import load_mcp_server, register_all_tools
 
-# Snug watermark: current real total is 228,550. Ratchet DOWN as prose moves to errors/notes or a
+# Snug watermark: current real total is 228,957. Ratchet DOWN as prose moves to errors/notes or a
 # description tightens; a new tool (or a tool whose capability genuinely grows) that needs the room
 # slims something else in the same change, or raises this by exactly its own measured weight.
-TOTAL_PAYLOAD_BUDGET_BYTES = 228_550
+TOTAL_PAYLOAD_BUDGET_BYTES = 228_957
 PER_TOOL_BUDGET_BYTES = 4_500
 
 # General per-description ceiling; a named override carries its own audited reason and is

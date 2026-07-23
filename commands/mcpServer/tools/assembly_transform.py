@@ -52,13 +52,23 @@ def _resolve_many(design, names):
 
 # ---------------------------------------------------------------------- ground
 
+def _occ_translation_mm(occ):
+    """The occurrence's transform translation as [x,y,z] mm, or None."""
+    t = safe(lambda: occ.transform.translation)
+    if t is None:
+        return None
+    return [round((safe(lambda: t.x, 0.0) or 0.0) * 10.0, 3),
+            round((safe(lambda: t.y, 0.0) or 0.0) * 10.0, 3),
+            round((safe(lambda: t.z, 0.0) or 0.0) * 10.0, 3)]
+
+
 def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     """Set an occurrence's STATELESS parent lock (isGroundToParent).
 
-    occurrence: the occurrence to change. 'ground_to_parent' (true/false): the default rigid-to-parent
-    lock - true holds the part fixed relative to its parent/assembly; set false to FREE a
-    fresh/patterned occurrence so it can be moved (assembly_move) or jointed. To fix a part in space,
-    ground_to_parent=true and position it with assembly_move. WRITES.
+    Setting true RE-LOCKS the part at its timeline-defined placement, DISCARDING any free move -
+    captured or not (live-verified: a moved+captured occurrence snapped back to its component
+    placement the moment the flag was set). The position read-back below turns that silent snap
+    into a reported one. WRITES.
     """
     if ground_to_parent is None:
         return error("Specify 'ground_to_parent' (true/false). true locks the occurrence rigidly to "
@@ -69,6 +79,7 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     occ, occ_err = _find_one(design, occurrence)
     if not occ:
         return error(occ_err)
+    pos_before = _occ_translation_mm(occ)
     try:
         occ.isGroundToParent = bool(ground_to_parent)
     except Exception as e:
@@ -77,13 +88,33 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     if now is not None and bool(now) != bool(ground_to_parent):
         return error(f"Assignment was accepted but '{safe(lambda: occ.name)}' still reads "
                      f"isGroundToParent={bool(now)} - the flag did not take.")
-    return ok({
+    out = {
         "occurrence": safe(lambda: occ.name),
         "isGroundToParent": bool(now) if now is not None else bool(ground_to_parent),
-        "note": "ground_to_parent set (the stateless parent lock). true = locked rigidly to parent; "
-                "false = freed to move/joint. To fix a part in space, keep it ground_to_parent=true "
-                "and position it with assembly_move.",
-    })
+        "note": "ground_to_parent set (the stateless parent lock). true = locked rigidly to parent "
+                "AT ITS TIMELINE-DEFINED PLACEMENT; false = freed to move/joint. To fix a part at a "
+                "position: create its component at that placement, or leave it FREE and "
+                "assembly_move + assembly_capture_position (re-grounding afterward discards the "
+                "move, captured or not).",
+    }
+    # Either direction can MOVE the part (live-verified): grounding snaps it back to its timeline
+    # placement (silently discarding free moves, captured included); freeing lets a captured pose
+    # re-assert. Report the move with numbers instead of letting the caller discover a teleported
+    # part later.
+    pos_after = _occ_translation_mm(occ)
+    if (pos_before is not None and pos_after is not None
+            and any(abs(a - b) > 0.01 for a, b in zip(pos_before, pos_after))):
+        out["position_reset"] = {"from_mm": pos_before, "to_mm": pos_after}
+        if ground_to_parent:
+            out["position_warning"] = (
+                f"Grounding SNAPPED '{safe(lambda: occ.name)}' back to its timeline placement "
+                f"({pos_after} mm, was {pos_before} mm) - the prior free move is discarded. To "
+                "keep a moved position, leave the part free and capture the position instead.")
+        else:
+            out["position_warning"] = (
+                f"Freeing '{safe(lambda: occ.name)}' re-applied its captured/solved pose "
+                f"({pos_after} mm, was {pos_before} mm at the parent lock).")
+    return ok(out)
 
 
 # -------------------------------------------------------------- assembly_move
@@ -275,10 +306,10 @@ def rigid_group_handler(occurrences: str = "", include_children: bool = False) -
 # ----------------------------------------------------------------------- tools
 
 _GROUND_DESC = (
-"Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag. true holds the "
-"part fixed relative to its parent/assembly; false FREES a fresh/patterned occurrence so it can be "
-"moved (assembly_move) or jointed. To fix a part IN SPACE, ground_to_parent=true and position it "
-"with assembly_move."
+"Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag. true RE-LOCKS "
+"the part at its TIMELINE placement, DISCARDING any free move, captured or not (the snap is "
+"reported as position_reset); false FREES a fresh/patterned occurrence to move (assembly_move) or "
+"joint. To fix a part at a position: create its component there, or move + capture while FREE."
 )
 ground_tool = (
     Tool.create_simple(name="assembly_ground", description=_GROUND_DESC)

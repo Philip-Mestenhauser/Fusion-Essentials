@@ -215,6 +215,38 @@ class TestGround:
         assert res["isError"] is True
         assert "did not take" in res["message"]
 
+    def test_grounding_snap_back_is_reported_with_numbers(self):
+        # Setting ground_to_parent=true snaps the part back to its timeline placement, discarding
+        # free moves captured or not (live-verified) - the payload must report the snap, not let the
+        # caller discover a teleported part later.
+        _, occs, _ = _install(["Block:1"])
+        o = _occ(occs, "Block:1")
+        o.transform._translation = _Vec(2.0, 0.0, 0.0)      # cm: the moved pose (20 mm)
+
+        class SnappingOcc(o.__class__):
+            @property
+            def isGroundToParent(self):
+                return object.__getattribute__(self, "_g2p")
+
+            @isGroundToParent.setter
+            def isGroundToParent(self, v):
+                object.__setattr__(self, "_g2p", v)
+                if v:                                        # the platform snap-back
+                    self.transform._translation = _Vec(0.0, 0.0, 0.0)
+
+        o.__class__ = SnappingOcc
+        o._g2p = False
+        out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
+        assert out["position_reset"] == {"from_mm": [20.0, 0.0, 0.0], "to_mm": [0.0, 0.0, 0.0]}
+        assert "SNAPPED" in out["position_warning"]
+
+    def test_no_snap_reports_no_reset(self):
+        _, occs, _ = _install(["Block:1"])
+        o = _occ(occs, "Block:1")
+        o.transform._translation = _Vec(2.0, 0.0, 0.0)       # position held through the flag set
+        out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
+        assert "position_reset" not in out and "position_warning" not in out
+
     def test_only_sets_ground_to_parent(self):
         # The tool sets ONLY isGroundToParent; it must never write isGrounded.
         _, occs, _ = _install(["Block:1"])

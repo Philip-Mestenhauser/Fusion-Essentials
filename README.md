@@ -22,6 +22,14 @@ how-to-drive-Fusion-well doctrine, demonstrated workflows, and security notes:
 [MCP Server README](commands/mcpServer/README.md). The authoritative per-tool inventory is
 generated from the live registry: [TOOL_MANIFEST.md](tests/generated/TOOL_MANIFEST.md).
 
+Permissions are first-class: every tool declares whether it reads, writes, or is destructive, and
+that machine-checked fact decides what an agent may run unattended. The repo ships a conservative
+default (`.claude/settings.json` auto-approves exactly the read-only tools; every write still
+prompts), plus a generated posture map with ready-to-paste presets:
+[PERMISSION_POSTURE.md](tests/generated/PERMISSION_POSTURE.md). A lint holds the shipped default
+equal to the registry's read set, and the arbitrary-code hatch (`sys_execute_script`) is never
+auto-approved in any preset.
+
 ## Installation
 
 You have a few options for installing Fusion Essentials. The easiest way is to download the repo as

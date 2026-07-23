@@ -153,7 +153,9 @@ def handler(operation: str = "", parameters=None) -> dict:
     "strategy": safe(lambda: op.strategy),
     "updated_count": len(changed),
     "changed": changed,
-    "note": ("Parameters set. The toolpath is now OUT OF DATE - regenerate it with cam_generate "
+    "note": ("Parameters set. changed[].value is the platform's evaluated read and can LAG a valid "
+            "set (echoing the pre-set value); 'after' and the evaluation gate are the trustworthy "
+            "signals. The toolpath is now OUT OF DATE - regenerate it with cam_generate "
             "(be in the Manufacture workspace)."),
     })
 

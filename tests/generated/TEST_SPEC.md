@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 159  |  **Behaviors pinned:** 3093
+**Tools with a test file:** 159  |  **Behaviors pinned:** 3106
 
 ## `_cam_common`
 
@@ -331,6 +331,7 @@ after changing tests._
 - positions scaled to cm and inch
 - occurrence joint cross index
 - include joints false skips
+- include joints false still counts and reports broken
 - as built joints are visible
 - broken as built joint breaks health
 **Orientation**
@@ -429,6 +430,8 @@ after changing tests._
 - lock to parent
 - unground from parent releases lock
 - stuck flag bites
+- grounding snap back is reported with numbers
+- no snap reports no reset
 - only sets ground to parent
 - no grounded param is rejected by strict schema
 - substring match
@@ -2331,6 +2334,16 @@ after changing tests._
 - reports moved by when the fixed side moves
 - no moved by when part stays put
 - motion setter failure reports error
+- flip sets isFlipped on the joint input
+- no flip leaves joint input unflipped
+**FlipHint**
+- opposing normals without flip flag the hint
+- opposing normals with flip no hint
+- agreeing normals no hint
+**ModelParameters**
+- payload names the joints own dnn params
+- motion param names omits absent params
+- motion param names reads both
 
 ## `joint_create_edit`
 
@@ -3612,6 +3625,9 @@ after changing tests._
 - no preset auto allows a destructive tool or the script hatch
 - the script hatch is denied in every preset
 - the check bites on a doctored allow list
+**CommittedSettingsMatchTheReadBucket**
+- committed allow list is exactly the read bucket
+- the diff bites both ways
 
 ## `polyline`
 

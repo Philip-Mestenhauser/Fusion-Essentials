@@ -13,10 +13,20 @@ FRESHNESS is already covered: ``gen_posture`` is registered in ``gen_all.py``'s 
 ``test_generated_docs_current.py`` shells ``gen_all.py --check`` - so a stale PERMISSION_POSTURE.md
 fails there, naming ``py -3 tests/gen_all.py`` to regenerate. This lint does NOT duplicate that gate;
 it enforces the one thing freshness cannot: that the generator's OWN output is safe.
+
+The COMMITTED ``.claude/settings.json`` (the team's default posture) is held to the same truth: its
+fusion-wire allow entries must be exactly the registry's read bucket - so adding a read tool forces
+the allow-list update its own comment asks for, and a write-kind tool can never sit auto-approved.
 """
+
+import json
+import os
 
 import gen_manifest
 import gen_posture
+
+_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              os.pardir, os.pardir, ".claude", "settings.json")
 
 
 def _must_never_auto_allow(tools):
@@ -73,3 +83,36 @@ class TestPermissionPostureNeverAutoAllowsDestructive:
 
         hatch_leak = {"modeling": {"allow": [gen_posture.WIRE_PREFIX + gen_posture.SCRIPT_HATCH]}}
         assert _auto_allow_violations(hatch_leak, banned) == [("modeling", gen_posture.SCRIPT_HATCH)]
+
+
+def _fusion_allow_diff(allow_entries, read_names):
+    """(missing, extra) between the committed allow list's fusion-wire entries and the registry's
+    read bucket. Non-fusion entries (another server's tools, shell rules) are out of scope - the
+    invariant governs only what THIS server auto-approves."""
+    prefix = gen_posture.WIRE_PREFIX
+    committed = {e[len(prefix):] for e in allow_entries if e.startswith(prefix)}
+    reads = set(read_names)
+    return sorted(reads - committed), sorted(committed - reads)
+
+
+class TestCommittedSettingsMatchTheReadBucket:
+    def test_committed_allow_list_is_exactly_the_read_bucket(self):
+        with open(_SETTINGS_PATH, encoding="utf-8") as fh:
+            allow = json.load(fh)["permissions"]["allow"]
+        reads = gen_posture.buckets(gen_manifest.collect()["tools"])["read"]
+        missing, extra = _fusion_allow_diff(allow, reads)
+        assert not missing, (
+            "read-kind tools missing from .claude/settings.json's allow list - add them (the "
+            "committed posture auto-approves exactly the read bucket): " + ", ".join(missing))
+        assert not extra, (
+            "non-read tools auto-approved in .claude/settings.json - an agent would run them "
+            "unattended; remove them (or fix the tool's write= kind if it truly reads): "
+            + ", ".join(extra))
+
+    def test_the_diff_bites_both_ways(self):
+        reads = ["cam_get", "doc_get"]
+        wire = [gen_posture.WIRE_PREFIX + n for n in reads]
+        assert _fusion_allow_diff(wire + ["Bash(git status)"], reads) == ([], [])
+        assert _fusion_allow_diff(wire[:1], reads) == (["doc_get"], [])
+        assert _fusion_allow_diff(wire + [gen_posture.WIRE_PREFIX + "cam_delete"], reads) == (
+            [], ["cam_delete"])

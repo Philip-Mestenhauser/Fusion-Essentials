@@ -6,7 +6,7 @@ fixture: P2-Gimbal (the S2b artifact - pins, bores, seats, only-pins-touch verif
   stage - the agent changes parameters but never saves; the cloud artifact must remain at the
   version staged. Missing fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 45
+  max_tool_calls: 43
   max_tokens: 32000
 substitutions: none
 perturbations: none (baseline)

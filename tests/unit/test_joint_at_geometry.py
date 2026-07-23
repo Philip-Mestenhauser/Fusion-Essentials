@@ -335,3 +335,80 @@ class TestHandler:
         res = jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="x")
         assert res["isError"] is True
         assert "Could not set revolute motion" in res["message"]
+
+    def test_flip_sets_isFlipped_on_the_joint_input(self):
+        # flip=true must reach the JointInput BEFORE add() - a dropped flag silently recreates the
+        # 180-deg flush-mate rotation the input exists to prevent.
+        joints = _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType),
+                                  "b": FakeBRepFace(_ST.PlaneSurfaceType)})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid", flip=True))
+        assert joints.last_input.isFlipped is True
+        assert out["flipped"] is True
+
+    def test_no_flip_leaves_joint_input_unflipped(self):
+        joints = _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType),
+                                  "b": FakeBRepFace(_ST.PlaneSurfaceType)})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert not getattr(joints.last_input, "isFlipped", False)
+        assert out["flipped"] is False
+
+
+class TestFlipHint:
+    """Two planar faces whose OUTWARD normals oppose (the flush face-to-face pick) rotate the free
+    part 180 deg unless flip is passed - the payload must flag exactly that case."""
+
+    def _faces(self, monkeypatch, n1, n2):
+        # route the normal sample through the face's own stub value, via monkeypatch so the real
+        # shared _geom module is restored (an imperative poke here leaks into test__geom /
+        # test_find_geometry); pointOnFace present so the real _planar_outward_normal path
+        # (isinstance + surfaceType + sample) runs.
+        monkeypatch.setattr(jg._geom, "evaluator_normal_at",
+                            lambda face, point, decimals=6: getattr(face, "unit_normal", None))
+        fa = FakeBRepFace(_ST.PlaneSurfaceType); fa.unit_normal = n1; fa.pointOnFace = object()
+        fb = FakeBRepFace(_ST.PlaneSurfaceType); fb.unit_normal = n2; fb.pointOnFace = object()
+        return fa, fb
+
+    def test_opposing_normals_without_flip_flag_the_hint(self, monkeypatch):
+        fa, fb = self._faces(monkeypatch, [0.0, 0.0, -1.0], [0.0, 0.0, 1.0])
+        _install_design({"a": fa, "b": fb})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "flip_hint" in out and "180" in out["flip_hint"] and "flip=true" in out["flip_hint"]
+
+    def test_opposing_normals_with_flip_no_hint(self, monkeypatch):
+        fa, fb = self._faces(monkeypatch, [0.0, 0.0, -1.0], [0.0, 0.0, 1.0])
+        _install_design({"a": fa, "b": fb})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid", flip=True))
+        assert "flip_hint" not in out
+
+    def test_agreeing_normals_no_hint(self, monkeypatch):
+        fa, fb = self._faces(monkeypatch, [0.0, 0.0, 1.0], [0.0, 0.0, 1.0])
+        _install_design({"a": fa, "b": fb})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "flip_hint" not in out
+
+
+class TestModelParameters:
+    def test_payload_names_the_joints_own_dnn_params(self):
+        # the created joint's offset/angle ModelParameter names must reach the payload (with the
+        # shared offset-is-frame-Z teaching) so an agent can param_set the right dNN.
+        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                  "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+        orig_add = joints.add
+        def add_with_params(ji):
+            j = orig_add(ji)
+            j.offset = type("P", (), {"name": "d8"})()
+            j.angle = type("P", (), {"name": "d5"})()
+            return j
+        joints.add = add_with_params
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert out["model_parameters"] == {"offset": "d8", "angle": "d5"}
+        assert "FRAME'S Z" in out["note"]
+
+    def test_motion_param_names_omits_absent_params(self):
+        j = type("J", (), {"offset": None, "angle": None})()
+        assert jg.motion_param_names(j) == {}
+
+    def test_motion_param_names_reads_both(self):
+        j = type("J", (), {"offset": type("P", (), {"name": "d12"})(),
+                           "angle": type("P", (), {"name": "d11"})()})()
+        assert jg.motion_param_names(j) == {"offset": "d12", "angle": "d11"}

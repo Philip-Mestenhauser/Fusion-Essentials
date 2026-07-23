@@ -9,7 +9,7 @@ fixture: the S6 artifact P6-Vise (verified BY URN) OPENED by the orchestrator as
   subfolders + legacy chains), so a by-name search x-refs and edits the wrong lineage (this bit S5
   live). Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 152
+  max_tool_calls: 162
   max_tokens: 78000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline - document opens/saves are async and CAN flap; grade recovery)
@@ -20,9 +20,9 @@ expected_refusals: none
 
 Goal-shaped. Build the reusable CAM template's skeleton: model/stock/fixture components, a
 parametric stock whose joint origin stays self-centered through resizes, the vise inserted as an
-EXTERNAL REFERENCE (then proven live: stale -> update -> current), jaws joined to the stock, and
-a placeholder part so CAM can compute downstream. Xref associativity is graded HERE, inside a real
-workflow.
+EXTERNAL REFERENCE (then proven live: stale -> update -> current), the stock gripped in the vise,
+and a placeholder part so CAM can compute downstream. Xref associativity is graded HERE, inside a
+real workflow.
 
 ## AGENT PROMPT (verbatim)
 
@@ -54,8 +54,9 @@ GOAL - the template skeleton a machining job drops into:
   copy). Then PROVE THE LINK IS ALIVE: open the vise source, change its jaw-opening parameter,
   save it; back in the template, a fresh reference read shows the vise STALE; update the
   reference; a fresh read shows it CURRENT and the jaws visibly moved.
-- JOIN the vise jaws to the stock so the stock sits held between them (your joint choice; the
-  stock must end up gripped at the vise center).
+- GRIP the stock in the vise so it sits held between the jaws at the vise center (your joint
+  choice - but note the vise is SELF-CENTERING: BOTH jaws move when the opening changes, so a
+  grip rigidly following one moving jaw will not stay centered).
 - In the model component: a PLACEHOLDER component with a simple solid (so CAM setups downstream
   have geometry to compute against).
 
@@ -70,10 +71,10 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 - the x-ref lifecycle: reference present and CURRENT after insert; STALE after the source edit
   (fresh read shows it); CURRENT again after the update, with the jaw change visible (report the
   reference version numbers you read at each step).
-- the stock is gripped AND the grip TRACKS: a fresh assembly read shows the jaw joints healthy
-  and the stock seated at the vise center - and AFTER the x-ref update (the jaws having moved),
-  a second fresh read shows the stock STILL seated at the vise center. A stock that stays put
-  while the jaws moved is a floating grip and a FAIL.
+- the stock is gripped AND the grip TRACKS: a fresh assembly read shows the grip joint(s) and
+  the vise's jaw joints healthy and the stock seated at the vise center - and AFTER the x-ref
+  update (the jaws having moved), a second fresh read shows the stock STILL seated at the vise
+  center. A stock with no joint into the vise is a floating grip and a FAIL.
 - doc_get -> saved as "P7-Template", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
@@ -100,10 +101,14 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - The stale/update proof requires editing P6-Vise (version bump by design - the ONE mutable
   artifact in the chain; record its versions in the run record).
 - THE GRIP-TRACKS CLAUSE (owner-diagnosed 2026-07-20): the S9 chain failed because the stock
-  floated - joined to nothing that moved. S6 now guarantees jointed jaws whose occurrences move
-  under the opening parameter; this clause grades that the stock's joints RE-SOLVE with them
-  (geometry-anchored joints track their faces through an x-ref update). The post-update seating
-  read is the compounding-defect firewall for S9's CAM boundary.
+  floated - joined to nothing. S6 guarantees jointed jaws whose occurrences move under the
+  opening parameter; this clause grades that the stock is JOINTED INTO the vise and stays
+  seated at the center through the x-ref update. The correct model (run-01-proven) is a grip
+  against the vise's FIXED body - the self-centering vise closes onto the stock; a rigid joint
+  to one MOVING jaw would drag the stock off-center, and joint_create_as_built rigid joints
+  drifted half the opening delta against an xref with internal DOF (C investigation) - the
+  stable mechanism was joint_create with an occurrence-tied ':origin' snap to a coordinate JO.
+  The post-update seating read is the compounding-defect firewall for S9's CAM boundary.
 - Async trap (live-known): doc_open/doc_activate and post-save version metadata can lag - grade
   recovery-by-polling, not first-read luck; a false-stale first read honestly re-read is GOOD
   behavior.
@@ -113,6 +118,5 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   (force_api_open, leave open); doc_new for the fresh empty active AFTER; verify twice; run the
   block. The pre-open removes the name-collision that x-ref'd/edited the wrong lineage - source
   IDENTITY is not a graded skill; the xref LIFECYCLE (insert/stale/update/current), self-centering
-  origin, and jaw-seating joints are. The runner auto-derives --max-turns from the budget (138 ->
-  276), well above the 200 this scenario needs. Budget from run 07b (COMPLETED 110 calls / 62k) +
-  25%; recalibrate to this batch's measured run.
+  origin, and the stock-gripping joints are. The runner auto-derives --max-turns from the budget.
+  Budget 162 = the 2026-07-22 measured run (130, PASS with two live defect detours) + 25%.

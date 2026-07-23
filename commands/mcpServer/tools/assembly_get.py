@@ -241,16 +241,18 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # The FULL joint walk (_joints.all_joints): root AND every sub-component, joints AND asBuiltJoints
     # (both are separate collections, and a joint internal to a sub-component lives there) - so a broken
     # sub-component/as-built joint is counted, not invisible. Indexed per occurrence below.
+    # ALWAYS walked: include_joints gates only what is EMITTED (the joints array + per-occurrence
+    # annotations) - joint_count and broken_joints must stay honest with it false (they read 0/[]
+    # while joints existed, live-observed).
     joints = []
     occ_joints = {}
-    if include_joints:
-        for j in _joints.all_joints(design):
-            rec = _joint_record(j)
-            joints.append(rec)
-            for key in ("occurrence_one", "occurrence_two"):
-                nm = rec.get(key)
-                if nm:
-                    occ_joints.setdefault(nm, []).append(rec["name"])
+    for j in _joints.all_joints(design):
+        rec = _joint_record(j)
+        joints.append(rec)
+        for key in ("occurrence_one", "occurrence_two"):
+            nm = rec.get(key)
+            if nm:
+                occ_joints.setdefault(nm, []).append(rec["name"])
 
     # Cap the JOINTS array reported to the caller; occ_joints (the cross-index) was built from the
     # FULL walk above, and broken_joints/health below reads the FULL 'joints' list, so capping here
