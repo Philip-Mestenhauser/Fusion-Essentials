@@ -99,6 +99,12 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   depth: the latter is a WIRE finding), bounded cuts (the unscoped-cut footgun bit a prior run
   for 9 features - watch for target_bodies discipline), clearance honesty, and the
   only-pins-touch final state.
+- REBUILT SKETCHES MUST STAY PARAMETRIC: a mid-build teardown/redraw ("_Clean" sketch) that
+  drops the driving dimensions severs the parameter chain at the sketch level while every
+  static read and health check stays green - a live P2 walk found exactly that (OuterRing_Clean:
+  literal radii, zero dimensions, vs Rotor_Disc's driving "d56 = RotorRadius"). Grade rebuilt
+  sketches by their DIMENSIONS (sketch_get dimensions[] expressions), not their shapes; S2c is
+  the downstream catch when this slips.
 - WHY THE SPLIT: one blind S2 run measured ~100+ min wall-clock, over the harness's ~60-min
   task cap (owner rule: split the task, never dodge the cap). S2a+S2b each fit with margin.
 - WHY ONLY-PINS-TOUCH: this is the exact state S3's interference postcondition assumes;
