@@ -156,14 +156,15 @@ class FakeThickenInput:
 
 
 class FakeThickenFeatures:
-    def __init__(self, result_bodies=None):
+    def __init__(self, result_bodies=None, created_faces=None):
         self.last_input = None
         self._result = result_bodies
+        self._faces = created_faces
     def createInput(self, faces, thick, sym, op, chain):
         self.last_input = FakeThickenInput(faces, thick, sym, op, chain)
         return self.last_input
     def add(self, inp):
-        return FakeFeature(name="Thicken1", bodies=self._result)
+        return FakeFeature(name="Thicken1", bodies=self._result, faces=self._faces)
 
 
 class FakeFeatures:
@@ -564,6 +565,35 @@ class TestOffsetThickenKind:
         res = se.thicken_handler(faces=["F1"], thickness=3)
         assert res["isError"] is True
         assert "did not close into a solid" in res["message"]
+
+    def test_thicken_beside_preexisting_solid_bites(self):
+        # feature.bodies can carry a PRE-EXISTING solid beside the failed wall (the same class as
+        # the offset read) - the gate must read the bodies owning the CREATED faces, or the source
+        # solid false-passes the closed-into-a-solid check.
+        f1 = FakeFace()
+        wall = FakeBody("Wall1", is_solid=False)
+        tf = FakeThickenFeatures(
+            result_bodies=[FakeBody("Source", is_solid=True), wall],
+            created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        res = se.thicken_handler(faces=["F1"], thickness=3)
+        assert res["isError"] is True
+        assert "CREATED body" in res["message"]
+
+    def test_thicken_gate_names_the_created_body(self):
+        # with created faces readable, result_bodies is the CREATED body - not the whole
+        # feature.bodies list with the source solid in it.
+        f1 = FakeFace()
+        wall = FakeBody("Wall1", is_solid=True)
+        tf = FakeThickenFeatures(
+            result_bodies=[FakeBody("Source", is_solid=True), wall],
+            created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
+        assert out["result_bodies"] == ["Wall1"]
+        assert out["is_solid"] is True
 
     def test_thicken_symmetric_passed(self):
         f1 = FakeFace()

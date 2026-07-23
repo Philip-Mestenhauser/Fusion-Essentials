@@ -376,9 +376,17 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     if not feature:
         return error("Thicken returned no feature.")
 
-    names, any_solid = _result_bodies(feature)
+    # Gate on the bodies owning the faces the feature CREATED, not feature.bodies - the latter also
+    # lists a pre-existing source solid (see _created_bodies), which would call a failed thicken
+    # beside a solid 'closed'. Fall back to the coarse read only if the faces are unreadable.
+    created, _face_count, readable = _created_bodies(feature)
+    if readable and created:
+        names = [safe(lambda b=b: b.name) for b in created]
+        any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in created)
+    else:
+        names, any_solid = _result_bodies(feature)
     if names and not any_solid:
-        return error("Thicken reported success but no result body reads isSolid=true - the wall "
+        return error("Thicken reported success but no CREATED body reads isSolid=true - the wall "
                      "did not close into a solid. The feature remains in the timeline; inspect it "
                      "with model_inspect or remove it with design_delete_feature.")
     return ok({
@@ -386,7 +394,7 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "result_bodies": names,
-        "is_solid": any_solid,       # thicken makes a solid wall -> true
+        "is_solid": any_solid,       # read off the CREATED bodies -> a failed closure errors above
         "thickness": round(float(thickness), 6),
         "units": units,
         "symmetric": bool(symmetric),

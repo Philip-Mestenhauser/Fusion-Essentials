@@ -1330,7 +1330,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Thicken supports: new, join, cut.
 - No active design. Create or open a document first (see doc_new).
 - Thicken returned no feature.
-- Thicken reported success but no result body reads isSolid=true - the wall did not close into a solid. The feature remains in the timeline; inspect it with model_inspect or remove it with design_del...
+- Thicken reported success but no CREATED body reads isSolid=true - the wall did not close into a solid. The feature remains in the timeline; inspect it with model_inspect or remove it with design_de...
 - Faces thickened into a SOLID wall (isSolid=true). The surface->solid bridge.
 
 ### `surface_trim`

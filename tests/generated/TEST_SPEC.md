@@ -4,7 +4,7 @@ _Auto-generated from the test suite by `tests/gen_spec.py`. Do not edit by
 hand — every line below is pinned by a passing test. Re-run the generator
 after changing tests._
 
-**Tools with a test file:** 159  |  **Behaviors pinned:** 3106
+**Tools with a test file:** 159  |  **Behaviors pinned:** 3108
 
 ## `_cam_common`
 
@@ -4018,6 +4018,8 @@ after changing tests._
 - offset that creates no faces bites
 - thicken produces a solid
 - thicken that stays a surface bites
+- thicken beside preexisting solid bites
+- thicken gate names the created body
 - thicken symmetric passed
 - thicken zero thickness guard
 - offset unknown operation rejected
