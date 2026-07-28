@@ -227,6 +227,110 @@ class FeatureHealthy(Postcondition):
         return "", evidence
 
 
+class ChildGeometryMoved(Postcondition):
+    """After a joint mutation: a part the joint REPOSITIONED carried its NESTED geometry with it. A
+    transform is a CLAIM; a body vertex/bbox corner is EVIDENCE. Per top-level occurrence, this captures
+    its transform translation plus a WORLD-space point on its DEEPEST owned body (the nested child if
+    one exists); after the mutation, an occurrence whose transform TRANSLATED while that geometry point
+    stayed frozen is a reposition that did not propagate into the nested geometry - failed, naming the
+    direct-':origin'-snap workaround. A part that did not move (expected-zero) passes trivially, so this
+    is a no-op on the overwhelming majority of joints. Reads geometry back, never a status flag or the
+    transform itself. NEVER mutates - capture/verify are safe() reads."""
+
+    name = "child_geometry_moved"
+    read_tool = "find_geometry"          # re-read the GEOMETRY (a vertex/bbox), not assembly_get's transform
+
+    _MOVE_TOL_CM = 0.01                   # 0.1 mm - below this a "move" is joint-solver noise
+
+    def _translation(self, occ):
+        m = safe(lambda: occ.transform)
+        t = safe(lambda: m.translation) if m is not None else None
+        if t is None:
+            return None
+        return (safe(lambda: t.x, 0.0) or 0.0, safe(lambda: t.y, 0.0) or 0.0,
+                safe(lambda: t.z, 0.0) or 0.0)
+
+    def _deep_body_point(self, occ):
+        """A WORLD-space bbox-min corner of a body on occ's DEEPEST descendant occurrence that owns one
+        (else occ's own first body). The nested child is the propagation the observed defect dropped, so
+        the deepest owned body is the discriminating sample; a world bbox corner registers a translation
+        OR a rotation as movement, so a legitimate reposition never reads frozen. None if no body is
+        reachable (nothing to gate)."""
+        best, best_depth = None, -1
+        stack = [(occ, 0)]
+        while stack:
+            cur, depth = stack.pop()
+            bodies = safe(lambda cur=cur: cur.bRepBodies)
+            bcount = (safe(lambda: bodies.count, 0) or 0) if bodies is not None else 0
+            if bcount and depth > best_depth:
+                best, best_depth = cur, depth
+            children = safe(lambda cur=cur: cur.childOccurrences)
+            ccount = (safe(lambda: children.count, 0) or 0) if children is not None else 0
+            for i in range(ccount):
+                ch = safe(lambda i=i, children=children: children.item(i))
+                if ch is not None:
+                    stack.append((ch, depth + 1))
+        if best is None:
+            return None
+        body = safe(lambda: best.bRepBodies.item(0))
+        bb = safe(lambda: body.boundingBox) if body is not None else None
+        mn = safe(lambda: bb.minPoint) if bb is not None else None
+        if mn is None:
+            return None
+        return (safe(lambda: mn.x, 0.0) or 0.0, safe(lambda: mn.y, 0.0) or 0.0,
+                safe(lambda: mn.z, 0.0) or 0.0)
+
+    def _top_occurrences(self):
+        from ._common import design
+        d = design()
+        root = safe(lambda: d.rootComponent) if d else None
+        occs = safe(lambda: root.occurrences) if root is not None else None
+        n = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+        return [safe(lambda i=i: occs.item(i)) for i in range(n)]
+
+    @staticmethod
+    def _dist(a, b):
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+
+    def capture(self, kwargs):
+        entries = []
+        for occ in self._top_occurrences():
+            if occ is None:
+                continue
+            tr = self._translation(occ)
+            pt = self._deep_body_point(occ)
+            if tr is None or pt is None:
+                continue
+            entries.append((occ, tr, pt))
+        return entries
+
+    def verify(self, kwargs, payload, before):
+        if not before:
+            return "", {}                     # no occurrence carried a body to gate
+        tol = self._MOVE_TOL_CM
+        for occ, tr0, pt0 in before:
+            tr1 = self._translation(occ)
+            pt1 = self._deep_body_point(occ)
+            if tr1 is None or pt1 is None:
+                continue                       # cannot re-read this one - inconclusive, skip
+            parent_moved = self._dist(tr0, tr1)
+            child_moved = self._dist(pt0, pt1)
+            if parent_moved > tol and child_moved <= tol:
+                nm = safe(lambda: occ.name) or "a repositioned part"
+                return (f"the joint reported success and repositioned '{nm}' by "
+                        f"{round(parent_moved * 10.0, 3)} mm (its transform moved) but its nested body "
+                        "geometry did NOT move - the reposition did not propagate into the nested "
+                        "occurrence (trigger: a nested occurrence left FREE/unconstrained inside the "
+                        "referenced design does not ride the wrapper's move; a timeline-locked one "
+                        "does). The transform is a CLAIM; the child body point is the EVIDENCE. The "
+                        "joint REMAINS in the timeline - delete it, then LOCK every nested free "
+                        "occurrence first (assembly_ground each ground_to_parent=true, deepest "
+                        "included), joint the WRAPPER, and recompute. Jointing the nested occurrence "
+                        "directly does not work - joint_create repositions the top-most free "
+                        "ancestor, stranding deeper geometry."), {}
+        return "", {"child_geometry_move_verified": True}
+
+
 def _verification_failed(post, ex):
     """The HONEST fail-closed result when a HARD postcondition's capture or verify RAISED, so the
     effect could not be checked. The mutation may have taken; its VERIFICATION did not run - reported

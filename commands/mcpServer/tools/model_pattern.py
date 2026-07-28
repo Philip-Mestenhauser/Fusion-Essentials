@@ -24,8 +24,6 @@ from . import _assert
 
 app = adsk.core.Application.get()
 
-_AXES = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstructionAxis"}
-
 # 'bodies' lets a pattern replicate solid BODIES (by handle/name) instead of occurrences -
 # the "pattern these holes/bosses" case. Empty -> fall back to 'occurrences'.
 _BODIES = _inputs.BodyRefList("bodies", required=False,
@@ -65,10 +63,7 @@ def _resolve_input_entities(design, occurrences, bodies):
 
 def _axis_entity(comp, axis_key):
     """The x/y/z construction axis of the given component (must own the pattern's input entities)."""
-    attr = _AXES.get((axis_key or "z").strip().lower())
-    if not attr:
-        return None
-    return safe(lambda: getattr(comp, attr))
+    return _inputs.world_construction_axis(comp, axis_key or "z")
 
 
 def _owning_component(design, coll, bodies):

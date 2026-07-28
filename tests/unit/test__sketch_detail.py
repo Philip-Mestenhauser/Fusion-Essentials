@@ -624,7 +624,7 @@ class _OffPlaneLine:
 
 class TestOffPlane3DLine:
     def test_off_plane_endpoint_reports_z(self):
-        # a vertical 3D line (end at z=3 cm) must report z=30 mm, not collapse to (0,0) - the item-5 bug.
+        # a vertical 3D line (end at z=3 cm) must report z=30 mm, not collapse to (0,0).
         ln = _OffPlaneLine("t3d", (0, 0, 0), (0, 0, 3))
         _install(FakeSketch("Skel", lines=[ln]))
         out = _payload(sd.handler(sketch_name="Skel", include_entities=True))

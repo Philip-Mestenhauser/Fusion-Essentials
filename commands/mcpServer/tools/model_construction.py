@@ -149,54 +149,6 @@ def _require_circular_edge(edge_ent, m):
     return None
 
 
-def _looks_like_expression(v) -> bool:
-    """True if v is a non-numeric string - a parameter EXPRESSION ('StockZ/2', '25 mm'), not a
-    literal number (a plain numeric string '25' is a literal). Mirrors model_extrude's distance
-    handling for the offset-plane value."""
-    if not isinstance(v, str):
-        return False
-    s = v.strip()
-    if not s:
-        return False
-    try:
-        float(s)
-        return False
-    except ValueError:
-        return True
-
-
-def _offset_value_input(raw, k, design):
-    """A ValueInput for an offset-plane distance that may be a literal number OR a parameter-expression
-    string. A number scales to internal cm (createByReal); a string is an EXPRESSION (createByString),
-    tying the plane's offset to a live parameter - validated through the design's units engine so an
-    unresolvable one (unknown parameter, bad syntax, non-length units) is refused BY NAME instead of
-    failing opaquely at add(). Returns (ValueInput, error)."""
-    if _looks_like_expression(raw):
-        expr = raw.strip()
-        um = safe(lambda: design.unitsManager)
-        try:
-            um.evaluateExpression(expr, safe(lambda: um.defaultLengthUnits) or "mm")
-        except Exception as e:
-            return None, (f"offset expression '{expr}' did not evaluate - use a length expression "
-                          f"like 'StockZ/2' or '25 mm' and confirm the parameter names exist "
-                          f"(param_get): {e}")
-        return adsk.core.ValueInput.createByString(expr), None
-    try:
-        return adsk.core.ValueInput.createByReal(float(raw) * k), None
-    except (TypeError, ValueError):
-        return None, "offset must be a number or a parameter-expression string."
-
-
-def _offset_report(offset):
-    """The 'offset' echoed back: an expression string as-is, else the rounded literal number."""
-    if _looks_like_expression(offset):
-        return offset.strip()
-    try:
-        return round(float(offset), 6)
-    except (TypeError, ValueError):
-        return offset
-
-
 def _offset_parameter(obj):
     """The model parameter (dNN) backing an offset construction plane, so the offset is retargetable
     with param_set WITHOUT fishing through param_get to guess which dNN it is. Read live off the
@@ -231,13 +183,13 @@ def _plane_datum(m, comp, design, k, plane_raw, plane2_raw, offset, edges_raw, a
         base, err = _PLANE.resolve(plane_raw)
         if err:
             return None, None, err
-        val, verr = _offset_value_input(offset, k, design)
+        val, verr = _inputs.length_value_input(offset, k, design, "offset")
         if verr:
             return None, None, verr
         cpi = comp.constructionPlanes.createInput()
         cpi.setByOffset(base, val)
         obj = comp.constructionPlanes.add(cpi)
-        extra = {"offset_from": (plane_raw or "xy").strip().lower(), "offset": _offset_report(offset)}
+        extra = {"offset_from": (plane_raw or "xy").strip().lower(), "offset": _inputs.expression_report(offset)}
         dparam = _offset_parameter(obj)
         if dparam:
             extra["model_parameters"] = {"offset": dparam}

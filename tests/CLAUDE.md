@@ -36,7 +36,7 @@ Pick the shape that matches what you're testing:
 
 Then: read the tool, list its `_helper` functions and the `handler`, and write one test per
 specific, plausible bug (not one per function) — the name should read like a spec line
-(`test_picks_largest_body_by_volume`); it ends up in `TEST_SPEC.md`. Assert on concrete values (`adsk.*`
+(`test_picks_largest_body_by_volume`). Assert on concrete values (`adsk.*`
 mocks return a truthy child `Mock` for anything unmodeled, so `assert result is not None` proves
 nothing). Cover sizes 0, 1, 2, N for anything taking a collection, and the guards (bad units, no
 active design, missing/ambiguous target) alongside the happy path. If a tool reads an `adsk`
@@ -104,6 +104,6 @@ fix the code; test asserting an implementation detail -> fix the test).
 
 ## Regenerating docs
 
-`py -3 tests/gen_all.py` rebuilds everything under `tests/generated/` (TEST_SPEC from test names,
-TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP from source); `--check` fails
-if anything is stale (also enforced by `test_generated_docs_current.py`).
+`py -3 tests/gen_all.py` rebuilds everything under `tests/generated/` (TOOL_MANIFEST + the
+CLAUDE.md maps from the registry, TOOL_POINTER_MAP from source, PERMISSION_POSTURE from the write
+annotations); `--check` fails if anything is stale (also enforced by `test_generated_docs_current.py`).

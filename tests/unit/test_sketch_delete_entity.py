@@ -1,6 +1,6 @@
 """Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point or constraint.
 
-The recovery tool for a wrong constraint (F39): delete just that entity instead of rebuilding the
+The recovery tool for a wrong constraint: delete just that entity instead of rebuilding the
 whole sketch. Pinned here (no live Fusion): the '<type>:<index>' dispatch to the right collection
 (line/arc/circle/point via the shared resolver + constraint via geometricConstraints), and the
 VERIFY-THE-EFFECT read-back - the collection count must actually drop, or the delete is an error

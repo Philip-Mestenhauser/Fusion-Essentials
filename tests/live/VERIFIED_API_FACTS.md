@@ -6,7 +6,7 @@ leaning on it) does not match the platform: update the fake and its consumers, t
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2704.1.36 | verified 2026-07-19
+Stamp: Fusion 2704.1.36 | verified 2026-07-26
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|
@@ -22,7 +22,7 @@ Stamp: Fusion 2704.1.36 | verified 2026-07-19
 | PASS | item-oor-brepbodies | BRepBodies.item(out-of-range) never returns None - it raises RuntimeError, and the raise can escape try/except and abort the script (catchability varies by session) | tests/conftest.py _NamedCollection.item |
 | PASS | item-oor-sketches | Sketches.item(out-of-range) never returns None - it raises, and the raise can escape try/except and abort the script (catchability varies by session) | tests/conftest.py _NamedCollection.item |
 | PASS | objectcollection-protocol | ObjectCollection.create() yields add / count / item(i) / iteration | tests/conftest.py _FakeObjectCollection |
-| PASS | meshbodies-no-itembyname | A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName | tests/unit/test_mesh_export.py + test_inputs.py (omit it, correct); test_surface_ops.py (wrongly provides it) |
+| PASS | meshbodies-no-itembyname | A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName | tests/unit/test_mesh_export.py + test_inputs.py + test_surface_ops.py (all omit it, correct) |
 | PASS | enum-cam-operation-states | OperationStates ints: IsValid=0, IsInvalid=1 (surfaced as out_of_date by the CAM layer), Suppressed=2, NoToolpath=3 | tests/unit/test__cam_common.py state-label map; _cam_common.py operationState reads |
 | PASS | enum-setup-stock-modes | SetupStockModes.SolidStock == 6 (the literal the stock-assignment gate keys on) | tests/unit/test_cam_edit_setup.py; cam_edit_setup.py SetupStockModes.SolidStock |
 | PASS | enum-design-types | DesignTypes ints: DirectDesignType=0, ParametricDesignType=1 | tests/unit/test_design_mode.py; _inputs.py current_design_type/ModeGuard |
@@ -39,9 +39,9 @@ Stamp: Fusion 2704.1.36 | verified 2026-07-19
 | PASS | basefeature-edit-scope | An open base-feature edit scope is INVISIBLE: baseFeatures.count reads 0 and Design.timeline raises while open; finishEdit makes it appear (count 1) | tests/unit/test_design_mode.py; design_mode.py _OPEN_BASE_FEATURES comment |
 | PASS | export-arg-orders | ExportManager arg orders differ by format: createSTLExportOptions(geometry, path) vs createSTEPExportOptions(path) - both land a file on execute() | tests/unit/test_design_export.py; design_export.py/_export.py |
 | PASS | shape-dump-design-world | Every design-side adsk type a SHARED fake impersonates exposes its live public attribute set (dir() membership) - the fake-shape lint checks fakes against these | tests/conftest.py shared fakes (BRepBody/BRepFace/BRepEdge/MakeComp/MakeDesign/FakeVector3D/FakePoint/...) |
-| PASS | cam-alloperations-shape | Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder container objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders | tests/unit/test_cam_delete.py (matches); test_cam_show_toolpath.py + test_cam_edit_folders.py (contradictory encodings); _cam_common.walk_operations |
+| PASS | cam-alloperations-shape | Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders | tests/unit/test_cam_delete.py (matches); test_cam_show_toolpath.py + test_cam_edit_folders.py (contradictory encodings); _cam_common.walk_operations |
 | PASS | cam-parameter-expressions | op.parameters.itemByName(name).expression is readable AND settable (readback returns what was written); string params carry single-quoted expressions | tests/unit/test_cam_edit_operation.py, test_cam_edit_setup.py, test_cam_set_nc_comment.py, test_cam_post.py, test_cam_edit_tools.py |
 | PASS | cam-machining-time-knobs | getMachiningTime on a generated op returns a positive estimate decomposing as totalFeedTime + totalRapidTime + totalToolChangeTime; the feedScale/rapidFeed/toolChangeTime arguments are INERT on this build (identical result across values) despite the API doc's percent / cm-per-s / s units | _cam_common.py get_machining_time_handler comment + constants; tests/unit/test__cam_common.py |
 | PASS | shape-dump-cam-world | Every CAM-side adsk type a fake impersonates exposes its live public attribute set (dir() membership) | tests/unit CAM fakes (FakeSetup/CAMFolder/op fakes) via the fake-shape lint's shared-fake scope |
-| PASS | cam-children-tree | Setup.children interleaves top-level Operations and folder containers whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents | tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; cam_show_toolpath._find_folder_ops type-name branch |
+| PASS | cam-children-tree | Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents | tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; cam_show_toolpath._find_folder_ops type-name branch |
 | PASS | cam-generate-future | A fresh op reads operationState NoToolpath (3) and hasToolpath False; isGenerationCompleted is the completion signal and the op then reads IsValid (0); numberOfOperations populates but numberOfCompleted is NOT a completion signal (observed 0 after a completed single-op generation) | tests/unit/test_cam_generate.py, test_cam_create_operation.py; cam_generate.py, cam_get_status.py |

@@ -74,7 +74,7 @@ class TestPurgeAddinModules:
 
 
 class TestStaleCachedSchemaWarning:
-    """Task D: one warning sentence about a stale CLIENT schema corrupting json-array arguments
+    """One warning sentence about a stale CLIENT schema corrupting json-array arguments
     (scalars still pass) after a reload - live-proven, so it belongs on the wire, not just in a
     comment."""
 

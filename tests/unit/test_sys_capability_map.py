@@ -69,7 +69,7 @@ class TestFamilyOf:
         assert cm._family_of("workspace_orient") == "workspace"
 
 
-# ── gated tools (Task C): derived from mcp_primitives.GATED_TOOLS, never hand-listed ─────────────
+# ── gated tools: derived from mcp_primitives.GATED_TOOLS, never hand-listed ──────────────────────
 #
 # The map's own 'gated' entry is built from cm.GATED_TOOLS (imported from mcp_primitives.registry,
 # the SAME map entry.py's auto-discovery sweep acts on to skip a tool's module until its setting

@@ -175,8 +175,7 @@ The naming schema (`<family>_<verb>`, with the verb's read/write kind linted aga
 write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by
 lints in `tests/`. The one command is `py -3 tests/check_all.py` (generator checks + the whole
 suite + the live gate). Generated inventories live in `tests/generated/`:
-[`TOOL_MANIFEST.md`](../../tests/generated/TOOL_MANIFEST.md) (per-tool),
-[`TEST_SPEC.md`](../../tests/generated/TEST_SPEC.md) (behavior ledger), and
+[`TOOL_MANIFEST.md`](../../tests/generated/TOOL_MANIFEST.md) (per-tool) and
 [`TOOL_POINTER_MAP.md`](../../tests/generated/TOOL_POINTER_MAP.md) (how tools point to each other, plus a
 self-audit of the guidance strings). Authoring conventions live in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) and the `CLAUDE.md` files beside the code.

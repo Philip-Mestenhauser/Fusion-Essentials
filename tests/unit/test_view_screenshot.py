@@ -110,49 +110,8 @@ class TestActiveComponentNote:
         assert gs._active_component_note(None) is None
 
 
-# ── true-orthographic camera vectors (square 'right'/'top' views) ──
-# The camera is set to EXACT world-axis vectors per named view, so an orthographic read is guaranteed
-# square ([±1,0,0] etc.) — not a rotate-toward that leaves a tilt and silently distorts the screenshot.
-
-class TestOrthoCameraVectors:
-    def _unit(self, v):
-        import math
-        return math.isclose(sum(c * c for c in v) ** 0.5, 1.0, abs_tol=1e-9)
-
-    def test_front_looks_along_plus_y_z_up(self):
-        look, up = gs._ortho_camera_vectors("front")
-        assert look == (0, 1, 0) and up == (0, 0, 1)
-
-    def test_right_looks_along_minus_x(self):
-        look, up = gs._ortho_camera_vectors("right")
-        assert look == (-1, 0, 0) and up == (0, 0, 1)
-
-    def test_top_looks_down_z(self):
-        look, up = gs._ortho_camera_vectors("top")
-        assert look == (0, 0, -1)
-
-    def test_all_six_faces_are_pure_world_axes(self):
-        # every orthographic FACE look-dir is a pure ±world-axis (exactly one nonzero == ±1)
-        for v in ("front", "back", "top", "bottom", "right", "left"):
-            look, _ = gs._ortho_camera_vectors(v)
-            nonzero = [c for c in look if c != 0]
-            assert len(nonzero) == 1 and abs(nonzero[0]) == 1, f"{v} look {look} not a pure axis"
-
-    def test_iso_vectors_are_unit_length(self):
-        for v in ("iso-top-right", "iso-top-left", "iso-bottom-right", "iso-bottom-left"):
-            look, up = gs._ortho_camera_vectors(v)
-            assert self._unit(look), f"{v} look not unit length"
-
-    def test_current_and_unknown_return_none(self):
-        assert gs._ortho_camera_vectors("current") is None
-        assert gs._ortho_camera_vectors("banana") is None
-
-    def test_only_the_six_faces_force_orthographic(self):
-        for v in ("front", "back", "top", "bottom", "right", "left"):
-            assert gs._is_ortho_face(v) is True
-        for v in ("iso-top-right", "current", "banana"):
-            assert gs._is_ortho_face(v) is False
-
+# The exact-world-axis camera math the handler orients with is _view_common.apply_named_view,
+# pinned in test__view_common.py.
 
 # ── _keep_visible: fit_to isolate keeps the target + its ancestors + descendants visible, matched ──
 # ── by fullPathName (NOT Python `is`, which never matches across fresh occurrence proxies and would ──

@@ -100,16 +100,17 @@ class FakeDesign:
         return [e] if e is not None else []
 
 
-def _install(bodies=None, comp_name="Root", occurrences=()):
+def _install(monkeypatch, bodies=None, comp_name="Root", occurrences=()):
     bodies = bodies if bodies is not None else [FakeBody("Body1")]
     comp = FakeComp(comp_name, bodies, occurrences)
     em = FakeExportManager()
     design = FakeDesign(comp, em)
-    dx.app = type("A", (), {"activeProduct": design})()
-    dx._common.app = dx.app
+    app = type("A", (), {"activeProduct": design})()
+    monkeypatch.setattr(dx, "app", app)
+    monkeypatch.setattr(dx._common, "app", app)
     import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.fusion.BRepBody = FakeBody
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", FakeBody)
     return design, em, comp
 
 
@@ -121,30 +122,30 @@ def _payload(res):
 # ── format dispatch ──────────────────────────────────────────────────────────
 
 class TestFormatDispatch:
-    def test_step_uses_step_options(self, tmp_path):
-        _, em, _ = _install()
+    def test_step_uses_step_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
         out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
         assert out["exported"] is True
         assert em.calls[-1]["kind"] == "step"
         assert em.executed is not None
 
-    def test_iges_uses_iges_options(self, tmp_path):
-        _, em, _ = _install()
+    def test_iges_uses_iges_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
         _payload(dx.handler(format="iges", file_path=str(tmp_path / "p.igs")))
         assert em.calls[-1]["kind"] == "iges"
 
-    def test_sat_uses_sat_options(self, tmp_path):
-        _, em, _ = _install()
+    def test_sat_uses_sat_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
         _payload(dx.handler(format="sat", file_path=str(tmp_path / "p.sat")))
         assert em.calls[-1]["kind"] == "sat"
 
-    def test_stl_uses_stl_options(self, tmp_path):
-        _, em, _ = _install()
+    def test_stl_uses_stl_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
         _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert em.calls[-1]["kind"] == "stl"
 
-    def test_unknown_format_errors(self, tmp_path):
-        _install()
+    def test_unknown_format_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
         res = dx.handler(format="dwg", file_path=str(tmp_path / "p.dwg"))
         assert res["isError"] is True and "format" in res["message"]
 
@@ -152,71 +153,72 @@ class TestFormatDispatch:
 # ── target resolution ────────────────────────────────────────────────────────
 
 class TestTargetResolution:
-    def test_whole_design_when_no_target(self, tmp_path):
-        _, em, comp = _install()
+    def test_whole_design_when_no_target(self, tmp_path, monkeypatch):
+        _, em, comp = _install(monkeypatch)
         out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
         # whole-design export passes the root component as the geometry
         assert em.calls[-1]["geom"] is comp
         assert "design" in out["target"].lower() or "root" in out["target"].lower()
 
-    def test_body_by_name(self, tmp_path):
-        _, em, _ = _install(bodies=[FakeBody("Widget")])
+    def test_body_by_name(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch, bodies=[FakeBody("Widget")])
         out = _payload(dx.handler(format="step", target="Widget", file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == "Widget"
         assert "Widget" in out["target"]
 
-    def test_body_by_handle(self, tmp_path):
-        design, em, _ = _install(bodies=[FakeBody("Body1")])
+    def test_body_by_handle(self, tmp_path, monkeypatch):
+        design, em, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
         h = "/v" + "X" * 70
         design._tokens[h] = FakeBody("FromHandle")
         out = _payload(dx.handler(format="step", target=h, file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == "FromHandle"
 
-    def test_long_body_name_not_mistaken_for_handle(self, tmp_path):
+    def test_long_body_name_not_mistaken_for_handle(self, tmp_path, monkeypatch):
         # A long body NAME is not a handle: _resolve_token_entity returns None for a non-token, so
         # resolution falls through to the name lookup and a long body name exports by NAME.
         long_name = "Left-Outrigger-Pivot-Bracket-Weldment-Subassembly-Body-Number-Seven"
         assert len(long_name) > 60
-        _, em, _ = _install(bodies=[FakeBody(long_name)])
+        _, em, _ = _install(monkeypatch, bodies=[FakeBody(long_name)])
         out = _payload(dx.handler(format="step", target=long_name, file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"].name == long_name
         assert long_name in out["target"]
 
-    def test_occurrence_by_name(self, tmp_path):
-        # occurrence resolution now goes through the shared _resolve_occurrence (exact name/fullPathName)
+    def test_occurrence_by_name(self, tmp_path, monkeypatch):
+        # occurrence resolution goes through the shared _resolve_occurrence (exact name/fullPathName)
         occ = FakeOcc("Gear:1")
-        _, em, _ = _install(occurrences=[occ])
+        _, em, _ = _install(monkeypatch, occurrences=[occ])
         out = _payload(dx.handler(format="step", target="Gear:1", file_path=str(tmp_path / "p.step")))
         assert em.calls[-1]["geom"] is occ
         assert "Gear:1" in out["target"]
 
-    def test_missing_named_target_errors(self, tmp_path):
-        _install(bodies=[FakeBody("Body1")])
+    def test_missing_named_target_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch, bodies=[FakeBody("Body1")])
         res = dx.handler(format="step", target="Nope", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "Nope" in res["message"]
 
     def test_ambiguous_name_refused_not_first_instance(self, tmp_path, monkeypatch):
-        # a name shared by several occurrences must REFUSE (via the shared ambiguity-refusing resolver),
-        # never export the first (wrong) instance. Drive the shared resolver's ambiguous verdict and
-        # assert the export surfaces it instead of falling through to a body.
-        _install()
-        monkeypatch.setattr(dx._inputs, "_resolve_occurrence", lambda name, raw: (
-            None, "'target': 'Bolt' is ambiguous - matches 2 occurrences (A:1+Bolt:1, B:1+Bolt:1)."))
+        # two instances share the local name "Bolt:1" under different sub-assemblies - the real
+        # shared resolver (_inputs._resolve_occurrence) must REFUSE the bare substring, naming both
+        # fullPathNames, never export the first (wrong) instance.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Bolt:1", "Sub-A:1+Bolt:1"),
+                                                      FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")])
         res = dx.handler(format="step", target="Bolt", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
+        assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
+        assert em.executed is None                        # nothing was exported
 
 
 # ── path handling ────────────────────────────────────────────────────────────
 
 class TestPathHandling:
-    def test_missing_path_errors(self):
-        _install()
+    def test_missing_path_errors(self, monkeypatch):
+        _install(monkeypatch)
         res = dx.handler(format="step")
         assert res["isError"] is True and "file_path" in res["message"]
 
-    def test_extension_auto_appended(self, tmp_path):
-        _, em, _ = _install()
+    def test_extension_auto_appended(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
         p = str(tmp_path / "noext")
         out = _payload(dx.handler(format="step", file_path=p))
         # the path handed to the exporter ends with the format extension
@@ -227,9 +229,9 @@ class TestPathHandling:
 # ── split_by_component (one file per top-level occurrence) ─────────────────────
 
 class TestSplitByComponent:
-    def test_one_file_per_occurrence(self, tmp_path):
+    def test_one_file_per_occurrence(self, tmp_path, monkeypatch):
         occs = [FakeOcc("Body:1"), FakeOcc("Cab:1"), FakeOcc("Wheels:1")]
-        _, em, _ = _install(occurrences=occs)
+        _, em, _ = _install(monkeypatch, occurrences=occs)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["split_by_component"] is True
         assert out["file_count"] == 3
@@ -237,33 +239,33 @@ class TestSplitByComponent:
         geoms = [c["geom"].name for c in em.calls]
         assert set(geoms) == {"Body:1", "Cab:1", "Wheels:1"}
 
-    def test_filenames_sanitized_and_extensioned(self, tmp_path):
-        _, _, _ = _install(occurrences=[FakeOcc("Loader Arm:1")])
+    def test_filenames_sanitized_and_extensioned(self, tmp_path, monkeypatch):
+        _, _, _ = _install(monkeypatch, occurrences=[FakeOcc("Loader Arm:1")])
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         fp = out["files"][0]["file_path"]
         # ':1' instance suffix dropped, space -> '_', extension applied
         assert fp.replace("\\", "/").endswith("/Loader_Arm.stl")
 
-    def test_duplicate_stems_disambiguated(self, tmp_path):
+    def test_duplicate_stems_disambiguated(self, tmp_path, monkeypatch):
         # two instances whose sanitized stem collides must not overwrite each other
-        _install(occurrences=[FakeOcc("Wheel:1"), FakeOcc("Wheel:2")])
+        _install(monkeypatch, occurrences=[FakeOcc("Wheel:1"), FakeOcc("Wheel:2")])
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         paths = [f["file_path"] for f in out["files"]]
         assert len(set(paths)) == 2                       # distinct files
         assert any(p.endswith("Wheel.stl") for p in paths)
         assert any(p.endswith("Wheel_2.stl") for p in paths)
 
-    def test_no_occurrences_errors(self, tmp_path):
-        _install(occurrences=[])
+    def test_no_occurrences_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch, occurrences=[])
         res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
         assert res["isError"] is True and "no top-level occurrences" in res["message"].lower()
 
-    def test_partial_failure_records_failed_list(self, tmp_path):
+    def test_partial_failure_records_failed_list(self, tmp_path, monkeypatch):
         # one occurrence exports, one fails -> exported=true, file_count counts only the good one,
         # and the failures land under a 'failed' key (not silently dropped).
         good = FakeOcc("Good:1")
         bad = FakeOcc("Bad:1")
-        _, em, _ = _install(occurrences=[good, bad])
+        _, em, _ = _install(monkeypatch, occurrences=[good, bad])
 
         real_exec = em.execute
         def selective(opts):
@@ -279,16 +281,16 @@ class TestSplitByComponent:
         assert "failed" in out
         assert out["failed"][0]["occurrence"] == "Bad:1"
 
-    def test_all_fail_exported_false(self, tmp_path):
-        _, em, _ = _install(occurrences=[FakeOcc("A:1")])
+    def test_all_fail_exported_false(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("A:1")])
         em.execute = lambda opts: False
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
         assert out["exported"] is False and out["file_count"] == 0
 
-    def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path):
+    def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path, monkeypatch):
         # execute() lying (True, but nothing landed on disk) must land the occurrence in 'failed',
         # not 'files' - the split path is gated on file existence the same as the single-target path.
-        _, em, _ = _install(occurrences=[FakeOcc("Ghost:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Ghost:1")])
 
         def lying_execute(opts):
             em.executed = opts
@@ -337,10 +339,10 @@ class TestExportOne:
 # ── file-existence gate (single-target export) ────────────────────────────────
 
 class TestFileExistenceGate:
-    def test_execute_true_but_no_file_written_is_a_failure(self, tmp_path):
+    def test_execute_true_but_no_file_written_is_a_failure(self, tmp_path, monkeypatch):
         # execute() returning true is NOT proof a file landed on disk - success is gated on
         # os.path.isfile + a non-zero size.
-        _, em, _ = _install()
+        _, em, _ = _install(monkeypatch)
 
         def lying_execute(opts):
             em.executed = opts
@@ -351,9 +353,9 @@ class TestFileExistenceGate:
         assert res["isError"] is True
         assert "no file was written" in res["message"].lower()
 
-    def test_empty_file_is_also_a_failure(self, tmp_path):
+    def test_empty_file_is_also_a_failure(self, tmp_path, monkeypatch):
         # a zero-byte file on disk is not a real export either.
-        _, em, _ = _install()
+        _, em, _ = _install(monkeypatch)
         target = str(tmp_path / "p.step")
 
         def empty_execute(opts):
@@ -370,17 +372,17 @@ class TestFileExistenceGate:
 # ── _resolve_target ordering ──────────────────────────────────────────────────
 
 class TestResolveTargetExtra:
-    def test_handle_resolving_to_non_body_is_not_found(self, tmp_path):
+    def test_handle_resolving_to_non_body_is_not_found(self, tmp_path, monkeypatch):
         # a long token that resolves to something that is NOT a BRepBody -> (None) -> handler error
-        design, _, _ = _install(bodies=[FakeBody("Body1")])
+        design, _, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
         h = "/v" + "Z" * 70
         design._tokens[h] = object()              # not a FakeBody (BRepBody)
         res = dx.handler(format="step", target=h, file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "not found" in res["message"].lower()
 
-    def test_no_active_design_errors(self, tmp_path):
+    def test_no_active_design_errors(self, tmp_path, monkeypatch):
         # design() returns None -> the no-design error, not a crash
-        dx._common.design = lambda: None
+        monkeypatch.setattr(dx._common, "design", lambda: None)
         res = dx.handler(format="step", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "no active design" in res["message"].lower()
 
@@ -458,7 +460,7 @@ class FakeFace:
 
 class TestDxfExport:
     def test_sketch_happy_path(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         sk = FakeSketch(lines=2)
         monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
@@ -468,34 +470,34 @@ class TestDxfExport:
         assert out["file_path"].lower().endswith(".dxf")
         assert sk.saved_path == out["file_path"]
 
-    def test_missing_sketch_and_face_errors(self, tmp_path):
-        _install()
+    def test_missing_sketch_and_face_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
         res = dx.handler(format="dxf", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True
         assert "dxf_sketch" in res["message"] and "dxf_face" in res["message"]
 
-    def test_both_sketch_and_face_errors(self, tmp_path):
-        _install()
+    def test_both_sketch_and_face_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
         res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_face="H" * 40,
                           file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "only one" in res["message"].lower()
 
     def test_empty_sketch_errors(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
         monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
         res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "empty" in res["message"].lower()
 
     def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: None)
         monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
         res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
         assert res["isError"] is True and "Nope" in res["message"]
 
     def test_face_happy_path_cleans_up_scratch_sketch(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         sk = FakeSketch(lines=0, project_adds=3)
         comp = FakeFaceComp(sk)
         face = FakeFace(comp)
@@ -508,7 +510,7 @@ class TestDxfExport:
         assert "removed" in out["note"].lower()
 
     def test_face_no_geometry_errors_and_cleans_up(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         sk = FakeSketch(lines=0, project_adds=0)
         comp = FakeFaceComp(sk)
         face = FakeFace(comp)
@@ -519,7 +521,7 @@ class TestDxfExport:
         assert sk.deleted is True
 
     def test_extension_auto_appended(self, tmp_path, monkeypatch):
-        _install()
+        _install(monkeypatch)
         sk = FakeSketch(lines=1)
         monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",

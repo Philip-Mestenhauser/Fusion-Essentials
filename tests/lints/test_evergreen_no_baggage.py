@@ -7,6 +7,9 @@ code does. A phrase like "used to", "previously", "the fix", or "until now" narr
 "for now", "revisit this", or a TODO marker admits the code is not its final form and points at a
 plan; "in one session" / "verified today" is an observation diary; a bare work-item label ("C7:",
 "WO-3", "Class B", "Phase 2") points at a planning document nobody outside that process ever saw.
+A calendar date ("verified live 2026-07-08"), a run reference ("run 01", "prior run"), a backlog
+item ("item-5", "# Item 6:"), or an attribution ("owner rule", "owner-picked") is the same diary
+smell in different clothes: the fact stands on its own or it does not belong.
 All of these rot the moment the plan is gone - the durable home for that content is the ledger
 (tests/live/VERIFIED_API_FACTS.md), the plan tree, or the author's memory, never the code.
 
@@ -27,12 +30,12 @@ _SWEPT_DIRS = (
 
 # This lint file necessarily quotes every denylisted phrase as data, and gen_wiring.py carries an
 # identical list of phrases as ITS OWN smell-detection pattern (for tool wire text, not this file) -
-# both would otherwise trip on their own pattern list. TEST_SPEC.md/TOOL_MANIFEST.md are GENERATED
-# digests of the test/registry source (test names, docstring summaries) - sweeping the source they
-# are built from already covers their content, so they are excluded rather than checked twice. CHANGELOG.md
+# both would otherwise trip on their own pattern list. TOOL_MANIFEST.md/TOOL_POINTER_MAP.md are
+# GENERATED digests of the registry/tool source - sweeping the source they are built from already
+# covers their content, so they are excluded rather than checked twice. CHANGELOG.md
 # is the one SANCTIONED history document (dated, additive, per-release): the evergreen rule keeps
 # history narrative out of living code and docs, not out of the changelog whose genre it is.
-_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "TEST_SPEC.md", "TOOL_MANIFEST.md",
+_EXCLUDED_FILES = {"test_evergreen_no_baggage.py", "gen_wiring.py", "TOOL_MANIFEST.md",
                    "TOOL_POINTER_MAP.md", "CHANGELOG.md"}
 
 # phrase -> case-insensitive denylist (history narrative + plan back-references naming a phrase).
@@ -57,6 +60,11 @@ _PHRASE_NAMES = (
     "came alive", "in one session", "last session", "next session", "across sessions",
     "earlier today", "this morning", "tonight", "yesterday", "verified today",
     "verified earlier", "verified yesterday", "as of now", "going red",
+    "prior run", "first run", "earlier run", "prior note", "prior scenario",
+    "the first pipeline", "this batch", "last batch",
+    # attribution - a rule stands (or falls) on its stated reason, never on who decreed it
+    "owner rule", "owner's rule", "owner-picked", "owner-diagnosed", "owner-calibrated",
+    "owner-requested", "owner decision",
     # plan artifacts by name - code never points into the planning tree
     "work order", "backlog", "claude/plans", "plan.md",
 )
@@ -74,9 +82,27 @@ _ITEM_LABEL = re.compile(r"#\s*[A-I][0-9]{1,2}\s*:")
 _TODO_MARKER = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
 # A plan-phase label ("Phase 2") - same rot as a work-item label once the plan is gone.
 _PHASE_LABEL = re.compile(r"\bPhase [0-9]\b")
+# A calendar date is an observation diary's timestamp: the fact is durable, the day it was learned
+# is not ("verified live" carries the same weight without the date). Files whose dates are DATA -
+# generated verification stamps the check_all gate compares, or fixtures that mimic a dated wire
+# format - are exempted by name below, and the MCP protocol version ids (dates by construction,
+# pinned by the spec) are stripped before the scan.
+_DATE = re.compile(r"\b20\d{2}-[01]\d(?:-[0-3]\d)?\b")
+_DATE_OK_TOKENS = ("2025-03-26", "2025-06-18")   # MCP protocol version ids (spec-pinned literals)
+_DATE_EXEMPT_FILES = {
+    "live_api_facts.py",           # generated: VERIFIED_ON stamp the check_all gate compares
+    "VERIFIED_API_FACTS.md",       # generated verification receipt - the stamp is its function
+    "VERIFIED_TOOLS.md",           # generated verification receipt - the stamp is its function
+    "test_tool_verify_receipt.py", # fixtures exercising the receipt writer's dated format
+    "test__cam_common.py",         # fixtures mimicking Fusion's dated messageLog format
+}
+# A numbered run/item reference ("run 01", "run-07b", "item-5", "# Item 6:") points at a session
+# log or backlog nobody outside that process ever saw - describe the defect, not its ticket.
+_RUN_NUMBER = re.compile(r"\brun[ -]\d")
+_ITEM_NUMBER = re.compile(r"\bitem[ -]\d+\b|#\s*item\s*\d*\s*:")
 
 _ALLOWLIST = {
-    "tests/lints/test_generated_docs_current.py:7":
+    "tests/lints/test_generated_docs_current.py:8":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
     "tests/unit/test_joint_create_origin.py:456":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
@@ -102,12 +128,23 @@ def _iter_files():
 
 def _line_offenders(path):
     offenders = []
+    date_exempt = os.path.basename(path) in _DATE_EXEMPT_FILES
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh, 1):
             low = line.lower()
             for phrase, phrase_re in _PHRASES:
                 if phrase_re.search(low):
                     offenders.append((i, phrase, line.strip()))
+            if not date_exempt:
+                undated = line
+                for tok in _DATE_OK_TOKENS:
+                    undated = undated.replace(tok, "")
+                if _DATE.search(undated):
+                    offenders.append((i, "calendar date", line.strip()))
+            if _RUN_NUMBER.search(low):
+                offenders.append((i, "run-number reference", line.strip()))
+            if _ITEM_NUMBER.search(low):
+                offenders.append((i, "item-number reference", line.strip()))
             if _BUG_LETTER.search(line):
                 offenders.append((i, "Bug <letter>", line.strip()))
             if _WO_DIGIT.search(line):
@@ -167,3 +204,25 @@ class TestNoHistoricalOrPlanBaggage:
         cool.write_text("# assert result matches the fixture output\n", encoding="utf-8")
         assert _line_offenders(str(hot)), "'for now' must trip the evergreen scan"
         assert not _line_offenders(str(cool)), "'the fixture' must NOT trip ('the fix' is word-bounded)"
+
+    def test_the_diary_patterns_bite(self, tmp_path):
+        # each newer diary shape trips; the sanctioned look-alikes do not.
+        cases = {
+            "# verified live 2026-07-08: the parameter lands\n": True,   # dated observation
+            "# fixed in run 01 of the pipeline\n": True,                 # run-number reference
+            "# the item-5 bug: z collapsed to (0,0)\n": True,            # backlog item reference
+            "# Item 6: folder-resolution retry\n": True,                 # backlog item label
+            "# owner-picked topology, do not change\n": True,            # attribution
+            "# verified live: the parameter lands\n": False,             # undated marker is house style
+            "# answers protocolVersion 2025-03-26 to older clients\n": False,  # spec-pinned id
+            "# the itemized report lists every body\n": False,           # word boundary: not 'item-N'
+        }
+        for text, should_trip in cases.items():
+            probe = tmp_path / "probe.py"
+            probe.write_text(text, encoding="utf-8")
+            hits = _line_offenders(str(probe))
+            assert bool(hits) == should_trip, f"{text.strip()!r}: expected trip={should_trip}, got {hits}"
+        # a date in an exempt receipt/fixture file is data, not diary.
+        stamp = tmp_path / "test_tool_verify_receipt.py"
+        stamp.write_text('LEDGER = "verified 2026-07-27"\n', encoding="utf-8")
+        assert not _line_offenders(str(stamp)), "date-exempt files must not trip on their stamp data"

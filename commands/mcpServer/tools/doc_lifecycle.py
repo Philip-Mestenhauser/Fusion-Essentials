@@ -505,11 +505,48 @@ def save_document_as_handler(name: str = "", project: str = "", project_id: str 
             "add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to "
             "deliberately create a same-name fork anyway, pass allow_duplicate_name=true.")
 
+    def _landed_after_error():
+        """saveAs can RAISE InternalValidationError (or return false) while the folder AND file DID
+        land. Read the GROUND TRUTH back before reporting a false negative: a same-name file now
+        present in the target that was NOT there before, or - for a never-saved doc - a settled lineage
+        urn on the doc. Returns the landed file's id/urn (or True
+        when present but id-less), else None. A pre-existing urn on an already-saved doc is deliberately
+        NOT trusted (it would false-positive an allow_duplicate_name fork)."""
+        now = _file_in_folder_by_name(target, name)
+        if now is not None and existing is None:
+            return safe(lambda: now.id) or True
+        if not was_saved:
+            urn = _settled_lineage_urn(doc)
+            if urn:
+                return urn
+        return None
+
+    def _landed_ok(file_id, how):
+        return ok({
+            "saved": True,
+            "name": name,
+            "was_previously_saved": was_saved,
+            "destination_project": safe(lambda: proj.name),
+            "destination_folder": (_folder_path_string(target) or "(project root)"),
+            "document_id": (file_id if isinstance(file_id, str) else _settled_lineage_urn(doc)),
+            "recovered_from_error": True,
+            "note": ("saveAs reported an error but the file DID land in the destination (verified by "
+                     "reading the saved document/folder back) - reporting success rather than a false "
+                     "negative, which would send a retry into a 'file already exists' collision. " + how),
+        })
+
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
+        # saveAs can raise (observed: InternalValidationError) AFTER the file landed - re-read before failing.
+        landed = _landed_after_error()
+        if landed:
+            return _landed_ok(landed, f"Original error: {str(e)[:160]}")
         return error(f"saveAs failed for '{name}': {e}")
     if not did:
+        landed = _landed_after_error()
+        if landed:
+            return _landed_ok(landed, "saveAs returned false.")
         return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
     # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
@@ -849,7 +886,10 @@ _save_document_as_tool = (
             "same-name file already in the target folder is REFUSED by default (identity is the "
             "lineage URN, not the name): pass allow_duplicate_name=true to fork a second lineage, or "
             "version the existing file by opening its URN and using doc_save. Result 'document_id' "
-            "is the new lineage URN (resolves asynchronously). WRITES to the cloud data model."
+            "is the new lineage URN (resolves asynchronously). A large assembly's saveAs can run "
+            "minutes and outlive a client timeout while still SUCCEEDING - on timeout verify "
+            "with doc_get before retrying (a retry forks a duplicate). WRITES to the cloud data "
+            "model."
         ),
         input_param_name="name",
         input_param_description="Name to save the active document as.",

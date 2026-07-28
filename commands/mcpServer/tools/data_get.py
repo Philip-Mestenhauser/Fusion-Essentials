@@ -62,6 +62,10 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
                                 "on Fusion's main thread): nodes flagged folders_truncated were not "
                                 "descended. Lower max_depth, or list one subtree's files directly "
                                 "with 'folder'=<path>.")
+            if out.get("time_truncated"):
+                out["note"] += (f" The walk stopped after its {int(data_ops._TIME_BUDGET_S)}s time "
+                                "budget (a network stall, not the fetch-count cap) - results are "
+                                "PARTIAL. Retry, or list one subtree with 'folder'=<path>.")
             return ok(out)
         out, e = _unwrap(data_read.list_project_files_handler(project=project, project_id=project_id,
                                                               folder=folder, recursive=recursive))
@@ -71,6 +75,11 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
         out["note"] = ("Files in the project (each with its lineage URN + openable fusionWebURL). "
                        "'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree "
                        "instead. (Cloud read - see 'truncated'.)")
+        if out.get("time_truncated"):
+            at = out.get("time_truncated_at") or "(project root)"
+            out["note"] += (f" The walk stopped after its {int(data_read._TIME_BUDGET_S)}s time "
+                            f"budget at folder '{at}' (a network stall, not the file/folder cap) - "
+                            "results are PARTIAL. Narrow with 'folder'=<path>, or retry.")
         # a file listing's dominant next action is to OPEN one - name doc_open so the breadcrumb from
         # 'here are the files' to 'open this one by id' is explicit (present-only: only when files exist).
         if out.get("files"):
@@ -96,6 +105,9 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
     out["note"] = ("Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to "
                    "scope, or include=['folders'] for the tree). include=['hubs'] lists all hubs. This is "
                    "the CLOUD data model (networked); for the open-document SESSION see doc_get.")
+    if out.get("time_truncated"):
+        out["note"] += (f" The listing stopped after its {int(data_read._TIME_BUDGET_S)}s time budget "
+                        "(a network stall, not a size cap) - results are PARTIAL. Retry.")
     return ok(out)
 
 

@@ -3,7 +3,7 @@
 The Fusion API is mocked; what we pin is the tool's OWN logic: the type dispatch (simple / counterbore /
 countersink) and which create*Input builder + value args each uses, placement by sketch points created
 on the target face, the extent choice (blind => setDistanceExtent, through => setAllExtent with the
-PositiveExtentDirection that the live spike proved is required), optional tapping (createThreadInfo +
+PositiveExtentDirection that is required, live-verified), optional tapping (createThreadInfo +
 setToTappedHole), and the guards (unknown type, missing diameters, no face/points, bad extent).
 
 The HoleFeatureInput fake RECORDS the calls so we can assert the exact builder path.
@@ -16,6 +16,11 @@ import pytest
 from conftest import load_tool
 
 mh = load_tool("model_hole")
+
+# The REAL _resolve_clearance, captured at import time before any _install() swaps in the test stub -
+# the unknown-fastener test drives it directly so the asserted error text is the PRODUCT's, not the
+# stub's echo.
+_REAL_RESOLVE_CLEARANCE = mh._resolve_clearance
 
 
 # ── fakes that record the hole-input construction ───────────────────────────
@@ -300,7 +305,7 @@ class TestSimple:
         _payload(mh.handler(hole_type="simple", diameter="8 mm", face="h",
                             points=[[2, 3, 0]], extent="through"))
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
-        # the live spike proved THROUGH must use PositiveExtentDirection (Negative fails)
+        # live-verified: THROUGH must use PositiveExtentDirection (Negative fails)
         assert inp.extent == ("all", "POS")
 
     def test_multiple_points_one_feature(self):
@@ -467,11 +472,26 @@ class TestClearanceFastener:
         assert res["isError"] is True and "M7" in res["message"]
 
     def test_unknown_fastener_type_errors(self):
+        # Drive the REAL _resolve_clearance (not _install's stub) against a fake live catalog, so the
+        # error text/shape asserted here is the product's own - including the available-types listing.
+        import adsk.fusion
         _install()
+        mh._resolve_clearance = _REAL_RESOLVE_CLEARANCE
+
+        class _Query:
+            allStandards = ("ANSI Metric M Profile",)
+            def allFastenerTypes(self, std):
+                return ("Socket Head Cap Screw", "Hex Head Bolt")
+            def allSizes(self, std, ftype):
+                return ("M6", "M8")
+
+        adsk.fusion.ClearanceHoleDataQuery = type("CQ", (), {"create": staticmethod(_Query)})
         res = mh.handler(hole_type="simple", face="h", points=[[2, 3, 0]], extent="through",
                          fastener="M6 Banana Bolt", fit="normal")
         assert res["isError"] is True
         assert "Unknown fastener type 'Banana Bolt'" in res["message"]
+        # the real error lists the catalog's available fastener types
+        assert "Available: Socket Head Cap Screw, Hex Head Bolt" in res["message"]
 
     def test_bad_fit_errors(self):
         _install()

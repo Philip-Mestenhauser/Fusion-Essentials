@@ -347,7 +347,10 @@ class TestStyle:
         _install(monkeypatch)
         out = _payload(iv.handler(action="style", style="wireframe"))
         assert out["style"] == "wireframe"
-        assert out["visual_style_after"] == iv.app.activeViewport.visualStyle
+        # 'wireframe' -> WireframeVisualStyle, seeded 2 in _install: the viewport must hold THAT
+        # enum and the payload must report it (not merely echo wherever the fake ended up)
+        assert iv.app.activeViewport.visualStyle == 2
+        assert out["visual_style_after"] == 2
 
     def test_unknown_style_errors(self, monkeypatch):
         _install(monkeypatch)
@@ -521,7 +524,7 @@ class TestSnapshotRestore:
 
 
 # ── request tracer: a per-response 'request_echo' (monotonic seq + the args the handler received) so ──
-# ── a REPLAYED response (the once-seen 7x-identical-replay failure) is diagnosable next time. ────────
+# ── a REPLAYED response (an identical-replay failure) is diagnosable next time. ─────────────────────
 
 class TestRequestTracer:
     def test_trace_advances_seq_and_echoes_received_args(self):

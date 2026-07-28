@@ -31,36 +31,61 @@ RETURNS = [
 _DOC_NOISE = {"is_active": False, "is_visible": True, "is_saved": True, "is_modified": False}
 
 
+def _doc_save_facts(doc):
+    """Authoritative save state, read from the DATA FILE - never from doc.isSaved.
+
+    doc.isSaved can read False on a document that carries a real cloud DataFile (URN, version,
+    unmodified) - live-observed - so deriving is_saved / never_saved from it makes the payload
+    contradict its own URN/version. The DataFile IS the ground truth: never-saved == no DataFile;
+    unsaved == in-session modifications. Returns (data_file_or_none, is_modified, is_saved) - the
+    DataFile is fetched ONCE here and handed back so a caller reuses it instead of re-reading
+    doc.dataFile (every doc.dataFile access is a cloud round-trip on the main thread). One
+    consistent source both the active block and the open-doc rows read, so they cannot disagree."""
+    df = safe(lambda: doc.dataFile)
+    is_modified = safe(lambda: doc.isModified)
+    is_saved = (df is not None) and (is_modified is not True)
+    return df, is_modified, is_saved
+
+
 def _active_identity():
     """The active document's name, save state, and data-model identity (URN/version/web URL)."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None
+    # is_saved / has_data_file / never-saved all derive from the DataFile (see _doc_save_facts),
+    # which is fetched ONCE here and reused below - the field reads never re-fetch doc.dataFile.
+    df, is_modified, is_saved = _doc_save_facts(doc)
+    has_df = df is not None
     info = {
         "name": safe(lambda: doc.name),
-        "is_saved": safe(lambda: doc.isSaved),
-        "is_modified": safe(lambda: doc.isModified),
+        "is_saved": is_saved,
+        "is_modified": is_modified,
         "fusion_version_saved_with": safe(lambda: doc.version),
         "document_id": None,        # lineage URN - the id doc_copy / doc_open use
         "version_id": None,
         "version_number": None,
         "latest_version_number": None,
         "fusion_web_url": None,
-        "has_data_file": False,
+        "has_data_file": has_df,
     }
-    # An UNSAVED document has no DataFile (the case to surface, not guess a URN for).
-    df = safe(lambda: doc.dataFile)
+    # An UNSAVED document has no DataFile (the case to surface, not guess a URN for). df was
+    # already resolved by _doc_save_facts above - reuse it, do not re-fetch doc.dataFile.
     if df:
-        info["has_data_file"] = True
         info["document_id"] = safe(lambda: df.id)
         info["version_id"] = safe(lambda: df.versionId)
         info["version_number"] = safe(lambda: df.versionNumber)
         info["latest_version_number"] = safe(lambda: df.latestVersionNumber)
         info["fusion_web_url"] = safe(lambda: df.fusionWebURL)
-    if not info["has_data_file"]:
+        # ONE lag sentence for BOTH version surfaces (this block's version_number/latest and
+        # xref_tree's current/latest): the numbered fields can trail a just-finished doc_save.
+        info["version_lag_note"] = (
+            "version_number / latest_version_number here (and current_version / latest_version in "
+            "xref_tree) can LAG a just-completed doc_save by a few seconds; version_id and the "
+            "version_confirmed doc_save returns are the authoritative post-save reads.")
+    if not has_df:
         info["save_state"] = ("never saved to the cloud - no document_id (URN) yet; save it first "
                               "(doc_save_as) before addressing it by id.")
-    elif info["is_modified"]:
+    elif is_modified:
         info["save_state"] = (f"unsaved changes - document_id is the latest SAVED cloud version "
                               f"(number {info['version_number']}); a cloud copy/open won't include "
                               "the in-session edits until saved.")
@@ -88,8 +113,10 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
     for i in range(total):
         d = docs.item(i)
         name = safe(lambda d=d: d.name)
-        is_modified = safe(lambda d=d: d.isModified)
-        is_saved = safe(lambda d=d: d.isSaved)
+        # never-saved / modified / saved all come from the DataFile, not doc.isSaved (which can read
+        # False on a doc that has a real URN) - so a row's is_saved and its exception status agree.
+        df, is_modified, is_saved = _doc_save_facts(d)
+        has_df = df is not None
         if i < cap:
             row = terse({
                 "name": name,
@@ -102,11 +129,11 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
             # doc_close - the only way to reach an UNSAVED doc that shares a name and has no URN.
             row["open_index"] = i
             rows.append(row)
-        # exception = unsaved work (never-saved OR modified-since-save) - what a close-all would lose.
-        # Computed over EVERY open document, not just the capped rows.
-        if is_saved is False or is_modified is True:
+        # exception = unsaved work: NEVER-SAVED (no DataFile) OR modified-since-save - what a
+        # close-all would lose. Computed over EVERY open document, not just the capped rows.
+        if not has_df or is_modified is True:
             exceptions.append({"name": name,
-                               "unsaved": [r for r, on in (("never_saved", is_saved is False),
+                               "unsaved": [r for r, on in (("never_saved", not has_df),
                                                            ("modified", is_modified is True)) if on]})
     summary = {"open_count": total, "exceptions": exceptions}
     return rows, summary, total > len(rows)

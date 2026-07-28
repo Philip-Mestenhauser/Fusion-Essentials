@@ -84,32 +84,33 @@ class FakeDesign:
         self.allComponents = []
 
 
-def _install(joint_names, asbuilt=()):
+def _install(monkeypatch, joint_names, asbuilt=()):
     des = FakeDesign(joint_names, asbuilt)
-    jml.app = type("A", (), {"activeProduct": des})()
-    jml._common.app = jml.app
+    app = type("A", (), {"activeProduct": des})()
+    monkeypatch.setattr(jml, "app", app)
+    monkeypatch.setattr(jml._common, "app", app)
     import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
     # ValueInput.createByReal echoes the real number it was given so a test can assert the ratio.
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: ("real", v)))
     return des
 
 
 class TestFindJoint:
-    def test_finds_root_joint_by_exact_name(self):
-        des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
+    def test_finds_root_joint_by_exact_name(self, monkeypatch):
+        des = _install(monkeypatch, ["Wheel_Spin", "Crank1_to_Wheel"])
         j = jml.find_joint(des, "Wheel_Spin")
         assert j.name == "Wheel_Spin"
 
-    def test_finds_as_built_joint(self):
+    def test_finds_as_built_joint(self, monkeypatch):
         # asBuiltJoints is a SEPARATE collection from joints - a joint living only there must still
-        # resolve (this is why joint_motion_link no longer forks its own root-only lookup).
-        des = _install(["Wheel_Spin"], asbuilt=["Spin_Link"])
+        # resolve (joint_motion_link must not fork its own root-only lookup).
+        des = _install(monkeypatch, ["Wheel_Spin"], asbuilt=["Spin_Link"])
         j = jml.find_joint(des, "Spin_Link")
         assert j is not None and j.name == "Spin_Link"
 
-    def test_unknown_name_returns_none(self):
-        des = _install(["Wheel_Spin"])
+    def test_unknown_name_returns_none(self, monkeypatch):
+        des = _install(monkeypatch, ["Wheel_Spin"])
         assert jml.find_joint(des, "Ghost") is None
 
 
@@ -119,7 +120,7 @@ class TestAllJoints:
                                 "asBuiltJoints": FakeJoints([FakeJoint(n) for n in asbuilt])})()
 
     def test_walks_root_and_subcomponents_and_asbuilt(self):
-        # a root-only walk would miss Sub_J / Sub_AB - the under-reporting bug this closes.
+        # a root-only walk would miss Sub_J / Sub_AB - the under-reporting failure mode this guards.
         root = FakeRoot(["Root_A"], asbuilt=["Root_AB"])
         sub = self._sub(joints=["Sub_J"], asbuilt=["Sub_AB"])
         des = type("D", (), {"rootComponent": root, "allComponents": [sub]})()
@@ -137,7 +138,7 @@ class TestAllJoints:
         # the live API returns the root from allComponents as a proxy that is NOT `is`-identical to
         # design.rootComponent, so identity de-dup misses it and the root's joints count twice. The
         # two proxies' joints share an entityToken, so de-dup by token holds across them. (Identity
-        # de-dup returned ["Root_A", "Root_A"] here - the joint_count:2-for-1-joint bug.)
+        # de-dup returned ["Root_A", "Root_A"] here - joint_count must not double-count one joint.)
         def tokened(name, token):
             return type("J", (), {"name": name, "entityToken": token})()
         def root_proxy():
@@ -152,8 +153,8 @@ class TestAllJoints:
 
 
 class TestHandlerGuards:
-    def test_requires_both_names(self):
-        _install(["A", "B"])
+    def test_requires_both_names(self, monkeypatch):
+        _install(monkeypatch, ["A", "B"])
         res1 = jml.handler(joint_one="A")
         assert res1["isError"] is True
         assert "Provide 'joint_one' and 'joint_two'" in res1["message"]
@@ -161,40 +162,41 @@ class TestHandlerGuards:
         assert res2["isError"] is True
         assert "Provide 'joint_one' and 'joint_two'" in res2["message"]
 
-    def test_rejects_same_joint(self):
-        _install(["A", "B"])
+    def test_rejects_same_joint(self, monkeypatch):
+        _install(monkeypatch, ["A", "B"])
         res = jml.handler(joint_one="A", joint_two="A")
         assert res["isError"] is True and "different" in res["message"]
 
-    def test_unknown_joint_lists_available(self):
-        _install(["Wheel_Spin", "Pedal1_Spin"])
+    def test_unknown_joint_lists_available(self, monkeypatch):
+        _install(monkeypatch, ["Wheel_Spin", "Pedal1_Spin"])
         res = jml.handler(joint_one="Wheel_Spin", joint_two="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"] and "Wheel_Spin" in res["message"]
 
-    def test_no_design(self):
-        jml.app = type("A", (), {"activeProduct": None})()
-        jml._common.app = jml.app
+    def test_no_design(self, monkeypatch):
+        app = type("A", (), {"activeProduct": None})()
+        monkeypatch.setattr(jml, "app", app)
+        monkeypatch.setattr(jml._common, "app", app)
         import adsk.fusion
-        adsk.fusion.Design.cast = lambda x: None
+        monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: None)
         res = jml.handler(joint_one="A", joint_two="B")
         assert res["isError"] is True
         assert "No active design" in res["message"]
 
 
 class TestLinkCreation:
-    def test_createInput_gets_two_joints_not_a_collection(self):
+    def test_createInput_gets_two_joints_not_a_collection(self, monkeypatch):
         # The real API is createInput(jointOne, jointTwo), not createInput(ObjectCollection).
         # Assert the two joints arrive as separate args.
-        des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
+        des = _install(monkeypatch, ["Wheel_Spin", "Crank1_to_Wheel"])
         _payload(jml.handler(joint_one="Wheel_Spin", joint_two="Crank1_to_Wheel", ratio=2.0))
         j1, j2 = des.rootComponent.motionLinks.created_with
         assert j1.name == "Wheel_Spin" and j2.name == "Crank1_to_Wheel"
 
-    def test_ratio_flows_through_setMotionData(self):
+    def test_ratio_flows_through_setMotionData(self, monkeypatch):
         # The ratio must reach MotionLink.setMotionData as valueOne=1, valueTwo=|ratio| - writing
         # a nonexistent property like inp.ratios is silently swallowed and leaves every link 1:1.
-        des = _install(["Wheel_Spin", "Crank1_to_Wheel"])
+        des = _install(monkeypatch, ["Wheel_Spin", "Crank1_to_Wheel"])
         out = _payload(jml.handler(joint_one="Wheel_Spin", joint_two="Crank1_to_Wheel", ratio=2.0))
         md = des.rootComponent.motionLinks.last_link.motion_data
         assert md is not None, "setMotionData was never called — ratio is a no-op"
@@ -209,9 +211,9 @@ class TestLinkCreation:
         assert md["m1"] != "Wheel_Spin_JOINTTYPE"      # the wrong-enum regression
         assert out["ratio"] == 2.0 and out["ratio_applied"] is True
 
-    def test_slider_maps_to_slide_dof(self):
+    def test_slider_maps_to_slide_dof(self, monkeypatch):
         # a slider joint's linkable DOF is SliderJointSlideMotionType, not its jointType.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         des.rootComponent.joints._j[1].jointMotion = type("SliderJointMotion", (),
                                                           {"jointType": "B_JOINTTYPE"})()
         out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=2.0))
@@ -219,10 +221,10 @@ class TestLinkCreation:
         assert md["m1"] == REVOLUTE_DOF and md["m2"] == SLIDER_DOF
         assert out["ratio_applied"] is True
 
-    def test_rigid_joint_refused_before_any_link(self):
+    def test_rigid_joint_refused_before_any_link(self, monkeypatch):
         # a rigid joint has no DOF to link; the tool must refuse BEFORE creating a link (nothing to
         # roll back), naming the offending joint.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         des.rootComponent.joints._j[1].jointMotion = type("RigidJointMotion", (),
                                                           {"jointType": "B_JOINTTYPE"})()
         res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
@@ -230,47 +232,47 @@ class TestLinkCreation:
         assert "'B'" in res["message"] and "rigid" in res["message"]
         assert des.rootComponent.motionLinks.added is None   # no link created to roll back
 
-    def test_default_ratio_is_one(self):
-        des = _install(["A", "B"])
+    def test_default_ratio_is_one(self, monkeypatch):
+        des = _install(monkeypatch, ["A", "B"])
         out = _payload(jml.handler(joint_one="A", joint_two="B"))
         md = des.rootComponent.motionLinks.last_link.motion_data
         assert md["v1"] == ("real", 1.0) and md["v2"] == ("real", 1.0)
         assert out["ratio"] == 1.0
 
-    def test_negative_ratio_links_reversed_with_magnitude(self):
-        des = _install(["A", "B"])
+    def test_negative_ratio_links_reversed_with_magnitude(self, monkeypatch):
+        des = _install(monkeypatch, ["A", "B"])
         out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=-3.0))
         md = des.rootComponent.motionLinks.last_link.motion_data
         assert md["v2"] == ("real", 3.0)      # magnitude only
         assert md["reversed"] is True
         assert out["reversed"] is True
 
-    def test_zero_ratio_rejected(self):
-        _install(["A", "B"])
+    def test_zero_ratio_rejected(self, monkeypatch):
+        _install(monkeypatch, ["A", "B"])
         res = jml.handler(joint_one="A", joint_two="B", ratio=0)
         assert res["isError"] is True and "non-zero" in res["message"]
 
-    def test_non_numeric_ratio_rejected(self):
+    def test_non_numeric_ratio_rejected(self, monkeypatch):
         # a ratio that won't float() must error cleanly (not crash), before any link is created.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         res = jml.handler(joint_one="A", joint_two="B", ratio="banana")
         assert res["isError"] is True and "must be a number" in res["message"]
         # and no link was ever added
         assert des.rootComponent.motionLinks.added is None
 
-    def test_numeric_string_ratio_accepted(self):
+    def test_numeric_string_ratio_accepted(self, monkeypatch):
         # "2" is a valid number string -> float() succeeds, magnitude reaches setMotionData.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         out = _payload(jml.handler(joint_one="A", joint_two="B", ratio="2"))
         md = des.rootComponent.motionLinks.last_link.motion_data
         assert md["v2"] == ("real", 2.0)
         assert out["ratio"] == 2.0
 
-    def test_ratio_failure_rolls_back_link_and_errors(self):
+    def test_ratio_failure_rolls_back_link_and_errors(self, monkeypatch):
         # If setMotionData fails (e.g. BAD_JOINT_DOF), the just-added link is a compute-failed
         # feature — the tool must DELETE it and return an error, NOT leave a broken 1:1 link or
         # claim success.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         des.rootComponent.motionLinks.add = (
             lambda inp: _link_that_raises(des.rootComponent.motionLinks))
         res = jml.handler(joint_one="A", joint_two="B", ratio=2.0)
@@ -278,10 +280,10 @@ class TestLinkCreation:
         assert "could not apply the ratio" in res["message"]
         assert des.rootComponent.motionLinks.last_link.deleted is True   # rolled back
 
-    def test_setmotiondata_failure_reports_platform_refusal(self):
+    def test_setmotiondata_failure_reports_platform_refusal(self, monkeypatch):
         # With the correct DOF passed, a remaining setMotionData failure is a genuine platform
         # refusal for this motion pair - the error says so honestly (no wrong-enum guess).
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         des.rootComponent.motionLinks.add = (
             lambda inp: _link_that_raises(des.rootComponent.motionLinks,
                                           "Compute Failed // BAD_JOINT_DOF - wrong type"))
@@ -290,10 +292,10 @@ class TestLinkCreation:
         assert "platform will not couple" in res["message"]
         assert des.rootComponent.motionLinks.last_link.deleted is True   # rolled back
 
-    def test_setmotiondata_false_return_is_failure(self):
+    def test_setmotiondata_false_return_is_failure(self, monkeypatch):
         # setMotionData returning False (not raising) is still a failure - the tool must not claim a
         # ratio it did not set; it rolls back and errors.
-        des = _install(["A", "B"])
+        des = _install(monkeypatch, ["A", "B"])
         link = FakeMotionLink()
         link.setMotionData = lambda *a, **k: False
         des.rootComponent.motionLinks.add = _bind_link(des.rootComponent.motionLinks, link)

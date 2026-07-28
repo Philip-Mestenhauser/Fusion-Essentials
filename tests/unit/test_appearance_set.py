@@ -308,10 +308,13 @@ class TestApply:
     def test_color_an_occurrence(self):
         occ = FakeOcc("Wheel:1")
         root = FakeRoot(occurrences=[occ])
-        _install(root)
+        design, apps = _install(root)
         out = _payload(ap.handler(target="Wheel:1", color="0,0,0"))
         assert out["kind"] == "occurrence"
-        assert occ.appearance is not None
+        # the occurrence got the copied, colored appearance (identity, not just any object)
+        assert occ.appearance is apps.copied[0][2]
+        cp = occ.appearance.appearanceProperties.item(0)
+        assert cp.value == ("color", 0, 0, 0, 255)
 
     def test_color_a_component_applies_to_all_bodies(self):
         b1, b2 = FakeBody("B1"), FakeBody("B2")

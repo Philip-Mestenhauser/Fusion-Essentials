@@ -14,7 +14,7 @@ rot silently when a file is renamed or moved. Two rules keep them honest:
   2. BARE - an inline-code file citation in the constitution docs is a bare basename, never a path
      (`test_tool_naming.py`, not `tests/lints/test_tool_naming.py`): a path breaks on every move, a
      basename survives it. Clickable markdown links `[text](path)` may keep their path - only inline
-     `code` citations are checked - and a command example (`py -3 tests/gen_spec.py`) is not a bare
+     `code` citations are checked - and a command example (`py -3 tests/gen_wiring.py`) is not a bare
      file citation, so it is left alone.
 
 A template placeholder (`test_<tool>.py`) is not a real reference - the `<` stops the regex - so it is

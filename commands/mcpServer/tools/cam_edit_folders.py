@@ -6,46 +6,16 @@ CAMFolders.addFolder / OperationBase.moveInto. Patterns (mirror/linear/rotary) c
 the API - only read and edited; create those in the Manufacture UI."""
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, find_setup
+from ._cam_common import get_cam, find_setup, resolve_cam_node
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("list", "create", "rename", "move")
-
-
-def _walk_parent(parent, out):
-    """Collect (name, object) for operations + folders + patterns under a parent (setup or folder),
-    recursively. allOperations omits folders/patterns, so walk .folders/.patterns explicitly (same
-    pattern as cam_delete/cam_reorder) - a folder-into-folder move needs folders to resolve too."""
-    ops = safe(lambda: parent.operations)
-    for i in range(safe(lambda: ops.count, 0) or 0):
-        o = safe(lambda i=i: ops.item(i))
-        if o is not None:
-            out.append((safe(lambda o=o: o.name) or "", o))
-    for getter in (lambda: parent.folders, lambda: parent.patterns):
-        coll = safe(getter)
-        for i in range(safe(lambda: coll.count, 0) or 0):
-            c = safe(lambda i=i: coll.item(i))
-            if c is not None:
-                out.append((safe(lambda c=c: c.name) or "", c))
-                _walk_parent(c, out)
-
-
-def _find_op(setup, name):
-    """Find an operation/folder/pattern by name anywhere in the setup tree, including nested folders
-    (allOperations omits folders/patterns entirely, so a folder-into-folder move can't resolve through it)."""
-    named = []
-    _walk_parent(setup, named)
-    for nm, o in named:
-        if (nm or "").lower() == (name or "").lower():
-            return o
-    return None
 
 
 def _do_list(setup):
@@ -102,17 +72,15 @@ def _do_move(setup, folder, operations):
     dest = safe(lambda: setup.folders.itemByName(folder))
     if not dest:
         return error(f"No folder named '{folder}' in setup '{safe(lambda: setup.name)}'.")
-    # resolve ALL operations before moving any
+    # Resolve ALL operations before moving any (setup-scoped: the shared resolver refuses a name
+    # duplicated within the setup and lists the available names on a miss - nothing has moved yet).
     resolved = []
-    missing = []
     for nm in operations:
-        o = _find_op(setup, nm)
-        if o is None:
-            missing.append(nm)
-        else:
-            resolved.append((nm, o))
-    if missing:
-        return error(f"Operation(s) not found in setup '{safe(lambda: setup.name)}': {', '.join(missing)}.")
+        node, rerr = resolve_cam_node(None, nm, kinds=("operation", "folder", "pattern"),
+                                      setup=setup, label="operation/folder/pattern")
+        if rerr:
+            return error(rerr)
+        resolved.append((nm, node.obj))
     moved = []
     for nm, o in resolved:
         okmove = safe(lambda o=o: o.moveInto(dest), False)

@@ -67,9 +67,9 @@ class FakePatchInput:
 
 
 class _ContinuityRejectingPatchInput:
-    """A patch input whose .continuity setter raises - models the API rejecting the value, so the
-    honesty fix (removing safe() around the set) must surface it as a patch failure, not a silent
-    no-op that still reports success."""
+    """A patch input whose .continuity setter raises - models the API rejecting the value. The set
+    must NOT be wrapped in safe(): a failed patch surfaces as an error, never a silent no-op that
+    reports success."""
     def __init__(self, boundary, op):
         self.boundary = boundary
         self.operation = op
@@ -104,14 +104,19 @@ class FakeRevolveFeatures:
 
 
 class FakePatchFeatures:
-    def __init__(self, result_bodies=None, feature=True):
+    def __init__(self, result_bodies=None, feature=True, raises=None):
+        # raises: add() raises this message - models the kernel refusing the patch
+        # (e.g. a tangent saddle opening the single-seed auto-complete cannot chain).
         self.last_input = None
         self._result = result_bodies
         self._feature = feature
+        self._raises = raises
     def createInput(self, boundary, op):
         self.last_input = FakePatchInput(boundary, op)
         return self.last_input
     def add(self, inp):
+        if self._raises:
+            raise RuntimeError(self._raises)
         if not self._feature:
             return None
         return FakeFeature(name="Patch1", bodies=self._result)
@@ -242,7 +247,7 @@ def _wire_adsk(handle_map=None):
 def _install_multi(active, sub_components=()):
     """Like _install but the design spans several components: `active` is the ACTIVE/root component and
     each sub-component carries its own sketches/features. resolve_sketch walks design.allComponents to
-    find a sketch owned by a sub-component (the F24/master-sketch shape)."""
+    find a sketch owned by a sub-component (the master-sketch shape)."""
     design = FakeDesign(active)
     design._all_components = [active] + list(sub_components)
     design.findEntityByToken = lambda t: []
@@ -379,7 +384,7 @@ class TestSurfaceExtrude:
     def test_surface_extrude_built_on_the_sketchs_owning_component(self):
         # The named sketch lives in a SUB-component (its parentComponent) while a DIFFERENT component
         # is active. Building the open profile + feature on the active component while the sketch is
-        # owned elsewhere is the F24 bSet trap, so both must be built on the sketch's OWNER. The active
+        # owned elsewhere raises bSet, so both must be built on the sketch's OWNER. The active
         # comp and the owner carry SEPARATE extrudeFeatures; the test proves the owner's got the call.
         owner_ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
         owned_sketch = FakeSketch("OwnedSketch")
@@ -436,7 +441,7 @@ class TestSurfaceRevolve:
     def test_surface_revolve_built_on_the_sketchs_owning_component(self):
         # Named sketch owned by a SUB-component while a different component is active. Both the profile
         # and the origin axis must come from the OWNER (an axis from the wrong component mixes contexts,
-        # and the profile-consuming feature raises bSet on the active component - F24). Proven by which
+        # and the profile-consuming feature raises bSet on the active component). Proven by which
         # revolveFeatures object got the call.
         owner_rf = FakeRevolveFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
         owned_sketch = FakeSketch("OwnedSketch")
@@ -483,6 +488,48 @@ class TestSurfacePatch:
         _install(comp, handle_map={"E1": e1})
         res = sc.patch_handler(boundary="E1")
         assert res["isError"] is True and "no feature" in res["message"]
+
+    def test_chain_failure_names_both_known_causes_not_just_tangent_saddle(self):
+        # a single-seed patch failure ('invalid argument chainOptions', live-verified) has TWO known
+        # causes that read identically from the exception string alone: a degenerate TANGENT saddle
+        # opening, OR an edge loop SPLIT into more segments by a later feature (e.g. a rim fillet).
+        # The message must name BOTH causes and both recipes, never assert tangent-saddle alone.
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(raises="3 : invalid argument chainOptions")
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1")
+        assert res["isError"] is True
+        msg = res["message"]
+        # cause 1: tangent saddle + its two-half-edge recipe
+        assert "TANGENT" in msg and "two half-edges" in msg
+        # cause 2: a fillet-split loop + its all-edges recipe
+        assert "SPLIT" in msg and "fillet" in msg and "ALL of the loop's edges" in msg
+        # the discriminating probe: find_geometry's edge count
+        assert "find_geometry" in msg and "exactly 2 means case (1), more means case (2)" in msg
+
+    def test_chain_failure_message_does_not_assert_tangent_as_sole_cause(self):
+        # regression guard for the exact misdiagnosis: the message must not present the tangent-saddle
+        # story as the ONLY explanation ("this looks like a TANGENT saddle opening") - it must frame
+        # it as one of two possibilities.
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(raises="3 : invalid argument chainOptions")
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1")
+        msg = res["message"]
+        assert "this looks like a tangent saddle opening" not in msg.lower()
+        assert "two known causes" in msg
+
+    def test_generic_patch_failure_keeps_the_plain_closed_loop_hint(self):
+        # a non-tangency failure keeps the existing closed-loop hint, not the tangency teaching.
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(raises="some other kernel error")
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1")
+        assert res["isError"] is True
+        assert "CLOSED loop" in res["message"] and "TANGENT" not in res["message"]
 
     def test_unknown_operation_rejected(self):
         e1 = FakeEdge()
@@ -560,9 +607,9 @@ class TestSurfacePatch:
     def test_boundaries_accepts_composite_handles_without_comma_shredding(self):
         # A find_geometry handle is COMPOSITE ('<token>|@<kind>:x,y,z') - its locator carries commas.
         # The plural 'boundaries' path passes each element as a bare STRING, so a naive comma-split
-        # shreds ONE handle into broken fragments ('2.000000','3.000000') that resolve as stale - the
-        # reported bug where 'boundaries' rejected fresh handles while singular 'boundary' accepted
-        # them. Each composite handle must resolve as ONE edge.
+        # shreds ONE handle into broken fragments ('2.000000','3.000000') that resolve as stale -
+        # 'boundaries' must accept the same fresh handles the singular 'boundary' accepts.
+        # Each composite handle must resolve as ONE edge.
         e0, e1 = FakeEdge(), FakeEdge()
         pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])
         comp = FakeComp(FakeFeatures(pf=pf))
@@ -573,7 +620,7 @@ class TestSurfacePatch:
         assert out["patched"] == 2 and out["failed"] == 0
 
     def test_singular_boundary_composite_handle_string_not_shredded(self):
-        # The same root fix makes a lone composite handle passed as a STRING resolve to its ONE edge
+        # A lone composite handle passed as a STRING resolves to its ONE edge
         # (the singular param's schema is an array, but a raw string must not be comma-shredded either).
         e0 = FakeEdge()
         pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])

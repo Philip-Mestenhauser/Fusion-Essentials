@@ -6,7 +6,7 @@ verifier, and the one-file-per-top-level-occurrence split orchestration."""
 
 import os
 
-from ._common import safe
+from ._common import safe, all_components
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk "
@@ -22,7 +22,10 @@ def sanitize(name):
 
 
 def component_by_name(design, name):
-    for c in (safe(lambda: design.allComponents) or []):
+    """A Component by EXACT name, or None. Walks _common.all_components (root + all sub-components,
+    root fallback when the collection is unreadable) so every by-name component lookup shares the
+    one design-wide walk."""
+    for c in all_components(design):
         if (safe(lambda c=c: c.name) or "") == name:
             return c
     return None

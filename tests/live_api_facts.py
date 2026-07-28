@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2704.1.36"
-VERIFIED_ON = "2026-07-19"
+VERIFIED_ON = "2026-07-26"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -212,7 +212,7 @@ ENUMS = {
 # Behavior flags the shared fakes consume.
 BEHAVIOR = {
     "allcomponents_on_design_only": True,
-    "alloperations_drops_folder_containers": True,
+    "alloperations_drops_folder_objects": True,
     "alloperations_flattens_folder_children": True,
     "collection_item_out_of_range_raises": True,
     "find_entity_token_empty_on_miss": True,

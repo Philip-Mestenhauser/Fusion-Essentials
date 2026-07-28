@@ -7,46 +7,14 @@ delete. An ambiguous name is refused rather than guessed; a deleteMe()==False re
 an error, never a false success."""
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, resolve_cam_node
 
 app = adsk.core.Application.get()
-
-
-def _walk_parent(parent, out):
-    """Recursively collect (name, object) for a setup/folder/pattern's operations, folders, and patterns.
-    NB: `allOperations` returns ONLY operations - NOT folders/patterns (verified live) - so folders and
-    patterns must be walked explicitly via .folders / .patterns, recursing because they nest."""
-    ops = safe(lambda: parent.operations)
-    for i in range(safe(lambda: ops.count, 0) or 0):
-        o = safe(lambda i=i: ops.item(i))
-        if o is not None:
-            out.append((safe(lambda o=o: o.name), o))
-    for coll_getter in (lambda: parent.folders, lambda: parent.patterns):
-        coll = safe(coll_getter)
-        for i in range(safe(lambda: coll.count, 0) or 0):
-            c = safe(lambda i=i: coll.item(i))
-            if c is not None:
-                out.append((safe(lambda c=c: c.name), c))
-                _walk_parent(c, out)   # folders/patterns nest
-
-
-def _all_named(cam):
-    """Every deletable CAM entity as (name, object): each setup plus all operations/folders/patterns
-    nested anywhere under it. (allOperations omits folders/patterns, so we walk the tree ourselves.)"""
-    out = []
-    for si in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda si=si: cam.setups.item(si))
-        if s is None:
-            continue
-        out.append((safe(lambda s=s: s.name), s))
-        _walk_parent(s, out)
-    return out
 
 
 def handler(entity: str = "") -> dict:
@@ -60,24 +28,12 @@ def handler(entity: str = "") -> dict:
     if cerr:
         return error(cerr)
 
-    named = _all_named(cam)
-    # case-insensitive, matching _cam_common.find_setup/find_operation and the other CAM tools.
-    matches = [(n, o) for (n, o) in named if (n or "").lower() == want.lower()]
-    if not matches:
-        available = [n for (n, o) in named if n]
-        return error(f"No CAM entity named '{want}'. Available: "
-                     f"{', '.join(available)[:300] or '(none)'}.")
-    if len(matches) > 1:
-        return error(f"'{want}' is ambiguous - {len(matches)} CAM items share that name. Rename so it's "
-                     "unique, then delete.")
+    node, rerr = resolve_cam_node(cam, want, kinds=("setup", "operation", "folder", "pattern"),
+                                  label="CAM entity")
+    if rerr:
+        return error(rerr)
 
-    _, obj = matches[0]
-    entity_type = safe(lambda: type(obj).__name__)
-    # human-friendly type label
-    label = {"Setup": "setup", "Operation": "operation", "CAMFolder": "folder",
-             "CAMPattern": "pattern"}.get(entity_type, entity_type)
-
-    did = safe(lambda: obj.deleteMe(), False)
+    did = safe(lambda: node.obj.deleteMe(), False)
     if not did:
         return error(f"Fusion declined to delete '{want}' (deleteMe returned false). It may be locked, "
                      "referenced, or not deletable in its current state.")
@@ -85,7 +41,7 @@ def handler(entity: str = "") -> dict:
     return ok({
         "deleted": True,
         "entity": want,
-        "entity_type": label,
+        "entity_type": node.kind,
         "note": "CAM entity removed. (design_delete_* don't reach CAM - this is the CAM-side delete.)",
     })
 

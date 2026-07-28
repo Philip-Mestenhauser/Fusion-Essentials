@@ -22,9 +22,9 @@ dm = load_tool("design_mode")
 
 # ── mode wiring (DesignTypes ints come seeded from live_api_facts) ──────────────────────────────
 
-def _wire_modes():
+def _wire_modes(monkeypatch):
     import adsk.fusion
-    adsk.fusion.BaseFeature = _FakeBaseFeature
+    monkeypatch.setattr(adsk.fusion, "BaseFeature", _FakeBaseFeature)
 
 
 class _FakeBaseFeature:
@@ -170,15 +170,16 @@ class FakeDesign:
         super().__setattr__(name, value)
 
 
-def _install(design):
+def _install(monkeypatch, design):
     """Point the tool's app + the shared _common.design/target_component at `design`."""
-    _wire_modes()
-    dm.app = type("A", (), {"activeProduct": design})()
-    dm._common.app = dm.app
+    _wire_modes(monkeypatch)
+    app = type("A", (), {"activeProduct": design})()
+    monkeypatch.setattr(dm, "app", app)
+    monkeypatch.setattr(dm._common, "app", app)
     import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    dm._inputs._common.design = lambda: design
-    dm._inputs._common.target_component = lambda d: d.rootComponent
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
+    monkeypatch.setattr(dm._inputs._common, "design", lambda: design)
+    monkeypatch.setattr(dm._inputs._common, "target_component", lambda d: d.rootComponent)
     return design
 
 
@@ -199,13 +200,13 @@ def _reset_open_scopes():
 # ── get_mode_handler (mode slice) ─────────────────────────────────────────────────────────
 
 class TestGetMode:
-    def test_no_active_design(self):
-        _install(None)
+    def test_no_active_design(self, monkeypatch):
+        _install(monkeypatch, None)
         res = dm.get_mode_handler()
         assert res["isError"] is True and "No active design" in res["message"]
 
-    def test_reports_parametric_and_capabilities(self):
-        _install(FakeDesign(design_type=1, timeline_count=4))
+    def test_reports_parametric_and_capabilities(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1, timeline_count=4))
         out = _payload(dm.get_mode_handler())
         assert out["design_type"] == "parametric"
         assert out["has_timeline"] is True
@@ -220,9 +221,9 @@ class TestGetMode:
         assert can["convert_to_direct"] is True
         assert can["convert_to_parametric"] is False
 
-    def test_reports_direct_and_capabilities(self):
+    def test_reports_direct_and_capabilities(self, monkeypatch):
         # direct design: no timeline attribute at all
-        _install(FakeDesign(design_type=0, no_timeline=True))
+        _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         out = _payload(dm.get_mode_handler())
         assert out["design_type"] == "direct"
         assert out["has_timeline"] is False
@@ -237,20 +238,20 @@ class TestGetMode:
         assert can["convert_to_direct"] is False
         assert can["convert_to_parametric"] is True
 
-    def test_counts_base_features(self):
+    def test_counts_base_features(self, monkeypatch):
         bf = _Coll([_FakeBaseFeature("BF1"), _FakeBaseFeature("BF2")])
-        _install(FakeDesign(design_type=1, timeline_count=2, base_features=bf))
+        _install(monkeypatch, FakeDesign(design_type=1, timeline_count=2, base_features=bf))
         out = _payload(dm.get_mode_handler())
         assert out["base_feature_count"] == 2
 
-    def test_in_base_feature_edit_true_when_editing(self):
-        _install(FakeDesign(design_type=1, edit_object=_FakeBaseFeature()))
+    def test_in_base_feature_edit_true_when_editing(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1, edit_object=_FakeBaseFeature()))
         out = _payload(dm.get_mode_handler())
         assert out["in_base_feature_edit"] is True
 
-    def test_capability_map_matches_modeguard(self):
+    def test_capability_map_matches_modeguard(self, monkeypatch):
         # the non-drift guarantee: the report's can{} is derived from the SAME reader the guards use.
-        des = _install(FakeDesign(design_type=1, timeline_count=1))
+        des = _install(monkeypatch, FakeDesign(design_type=1, timeline_count=1))
         out = _payload(dm.get_mode_handler())
         good, _ = dm._PARAMETRIC_GUARD.check(des)
         assert good is True and out["can"]["base_feature_scope"] is True
@@ -259,18 +260,18 @@ class TestGetMode:
 # ── design_set_mode ─────────────────────────────────────────────────────────
 
 class TestSetMode:
-    def test_no_active_design(self):
-        _install(None)
+    def test_no_active_design(self, monkeypatch):
+        _install(monkeypatch, None)
         res = dm.set_mode_handler(target="direct", confirm_history_loss=True)
         assert res["isError"] is True and "No active design" in res["message"]
 
-    def test_bad_target(self):
-        _install(FakeDesign(design_type=1))
+    def test_bad_target(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         res = dm.set_mode_handler(target="hologram")
         assert res["isError"] is True and "must be one of" in res["message"]
 
-    def test_parametric_to_direct_refused_without_confirm(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_parametric_to_direct_refused_without_confirm(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         res = dm.set_mode_handler(target="direct")            # no confirm
         assert res["isError"] is True
         assert "confirm_history_loss=true" in res["message"]
@@ -278,32 +279,32 @@ class TestSetMode:
         # and it must NOT have mutated the design
         assert des.designType == 1
 
-    def test_parametric_to_direct_succeeds_with_confirm(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_parametric_to_direct_succeeds_with_confirm(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.set_mode_handler(target="direct", confirm_history_loss=True))
         assert out["converted"] is True
         assert out["from"] == "parametric" and out["to"] == "direct"
         assert out["history_discarded"] is True
         assert des.designType == 0          # actually flipped to DirectDesignType
 
-    def test_direct_to_parametric_is_free(self):
+    def test_direct_to_parametric_is_free(self, monkeypatch):
         # the asymmetry: no confirm needed, no history discarded
-        des = _install(FakeDesign(design_type=0, no_timeline=True))
+        des = _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         out = _payload(dm.set_mode_handler(target="parametric"))
         assert out["converted"] is True
         assert out["from"] == "direct" and out["to"] == "parametric"
         assert out["history_discarded"] is False
         assert des.designType == 1
 
-    def test_idempotent_noop_when_already_target(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_idempotent_noop_when_already_target(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.set_mode_handler(target="parametric"))
         assert out["converted"] is False and "Already" in out["note"]
         assert des.designType == 1
 
-    def test_assignment_exception_surfaces_not_swallowed(self):
+    def test_assignment_exception_surfaces_not_swallowed(self, monkeypatch):
         # a real failure on the mutation is surfaced as an error (never safe()-swallowed to a false ok)
-        des = _install(FakeDesign(design_type=0, no_timeline=True, raise_on_set=True))
+        des = _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True, raise_on_set=True))
         res = dm.set_mode_handler(target="parametric")
         assert res["isError"] is True and "Could not convert" in res["message"]
 
@@ -311,26 +312,26 @@ class TestSetMode:
 # ── model_base_feature ──────────────────────────────────────────────────────
 
 class TestBaseFeature:
-    def test_no_active_design(self):
-        _install(None)
+    def test_no_active_design(self, monkeypatch):
+        _install(monkeypatch, None)
         res = dm.base_feature_handler(action="start")
         assert res["isError"] is True and "No active design" in res["message"]
 
-    def test_refused_in_direct_names_parametric(self):
+    def test_refused_in_direct_names_parametric(self, monkeypatch):
         # refusing in a direct design, the error names PARAMETRIC as the requirement (not the inverse).
-        _install(FakeDesign(design_type=0, no_timeline=True))
+        _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         res = dm.base_feature_handler(action="start")
         assert res["isError"] is True
         assert "needs parametric mode" in res["message"]
         assert "in direct mode" in res["message"]
 
-    def test_bad_action(self):
-        _install(FakeDesign(design_type=1))
+    def test_bad_action(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         res = dm.base_feature_handler(action="dance")
         assert res["isError"] is True and "must be one of" in res["message"]
 
-    def test_start_opens_a_scope(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_start_opens_a_scope(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.base_feature_handler(action="start"))
         assert out["editing"] is True
         bf = des.rootComponent.features.baseFeatures.added[-1]
@@ -340,14 +341,14 @@ class TestBaseFeature:
         assert out["open_scope_count"] == 1
         assert bf in dm._OPEN_BASE_FEATURES
 
-    def test_start_names_the_base_feature(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_start_names_the_base_feature(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.base_feature_handler(action="start", base_feature="MeshScope"))
         bf = des.rootComponent.features.baseFeatures.added[-1]
         assert bf.name == "MeshScope" and out["base_feature"] == "MeshScope"
 
-    def test_start_errors_and_cleans_up_when_startEdit_returns_false(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_start_errors_and_cleans_up_when_startEdit_returns_false(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         bf = _FakeBaseFeature()
         bf.start_returns = False
         des.rootComponent.features.baseFeatures.add_returns = bf
@@ -357,10 +358,10 @@ class TestBaseFeature:
         assert bf.deleted is True
         assert dm._OPEN_BASE_FEATURES == []
 
-    def test_finish_closes_the_captured_open_scope(self):
-        # THE REGRESSION TEST for the live wedge bug: start opens a scope (which the API then HIDES
-        # from enumeration), finish must close THAT captured object — not try to re-find it by name.
-        des = _install(FakeDesign(design_type=1))
+    def test_finish_closes_the_captured_open_scope(self, monkeypatch):
+        # start opens a scope (which the API then HIDES from enumeration), so finish must close
+        # THAT captured object — not try to re-find it by name.
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         start = _payload(dm.base_feature_handler(action="start"))
         bf = des.rootComponent.features.baseFeatures.added[-1]
         assert bf.editing is True
@@ -373,8 +374,8 @@ class TestBaseFeature:
         assert len(out["closed_scopes"]) == 1
         assert dm._OPEN_BASE_FEATURES == []
 
-    def test_finish_closes_multiple_captured_scopes(self):
-        des = _install(FakeDesign(design_type=1))
+    def test_finish_closes_multiple_captured_scopes(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         dm.base_feature_handler(action="start")
         dm.base_feature_handler(action="start")
         added = des.rootComponent.features.baseFeatures.added
@@ -383,30 +384,30 @@ class TestBaseFeature:
         assert all(bf.finish_count == 1 for bf in added)
         assert dm._OPEN_BASE_FEATURES == []
 
-    def test_finish_named_also_closes_an_enumerable_feature(self):
+    def test_finish_named_also_closes_an_enumerable_feature(self, monkeypatch):
         # a NOT-in-edit base feature named X (e.g. opened elsewhere and already closed) can still be
         # finished by name as a harmless no-op convenience.
         bf = _FakeBaseFeature("Scope1")
-        _install(FakeDesign(design_type=1, base_features=_Coll([bf])))
+        _install(monkeypatch, FakeDesign(design_type=1, base_features=_Coll([bf])))
         out = _payload(dm.base_feature_handler(action="finish", base_feature="Scope1"))
         assert out["editing"] is False and bf.finish_count == 1
 
-    def test_finish_unknown_name_is_not_an_error(self):
-        # finish must NEVER error on a missing name — erroring without closing was the original wedge.
+    def test_finish_unknown_name_is_not_an_error(self, monkeypatch):
+        # finish must NEVER error on a missing name — erroring without closing leaks the open scope.
         # An unknown name simply finds nothing to finish by name; it still closes captured scopes.
-        _install(FakeDesign(design_type=1))
+        _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.base_feature_handler(action="finish", base_feature="Ghost"))
         assert out["named_finished"] is None and out["open_scope_count"] == 0
 
-    def test_finish_no_open_scope_is_idempotent(self):
-        _install(FakeDesign(design_type=1))
+    def test_finish_no_open_scope_is_idempotent(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         out = _payload(dm.base_feature_handler(action="finish"))
         assert out["editing"] is False and out["closed_scopes"] == []
 
-    def test_finish_works_while_design_reads_direct(self):
+    def test_finish_works_while_design_reads_direct(self, monkeypatch):
         # while a scope is open the design READS direct; finish must NOT gate on mode. We simulate the
         # captured open scope on a design reading direct and confirm finish still closes it.
-        des = _install(FakeDesign(design_type=0, no_timeline=True))
+        des = _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         bf = _FakeBaseFeature("Open")
         bf._coll = des.rootComponent.features.baseFeatures
         dm._OPEN_BASE_FEATURES.append(bf)
@@ -417,8 +418,8 @@ class TestBaseFeature:
 # ── the leak-proof wrapper: finish-in-finally even when the inner op raises ──────────────────────
 
 class TestBaseFeatureWrapper:
-    def test_inner_op_runs_inside_scope_and_scope_finishes(self):
-        _install(FakeDesign(design_type=1))
+    def test_inner_op_runs_inside_scope_and_scope_finishes(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         bf = _FakeBaseFeature("W")
         seen = {}
 
@@ -434,10 +435,10 @@ class TestBaseFeatureWrapper:
         assert seen["editing_during_op"] is True      # the op saw an OPEN scope
         assert bf.finish_count == 1 and bf.editing is False  # and it was finished
 
-    def test_scope_finishes_in_finally_when_inner_raises(self):
+    def test_scope_finishes_in_finally_when_inner_raises(self, monkeypatch):
         # A raising inner op must still finish the scope (a leaked open base-feature edit corrupts later
         # tool calls), and the error must propagate.
-        _install(FakeDesign(design_type=1))
+        _install(monkeypatch, FakeDesign(design_type=1))
         bf = _FakeBaseFeature("W")
 
         def open_scope():
@@ -450,8 +451,8 @@ class TestBaseFeatureWrapper:
             dm.base_feature_run_wrapper(open_scope, inner)
         assert bf.finish_count == 1 and bf.editing is False   # finished despite the raise
 
-    def test_open_scope_error_short_circuits_before_any_scope(self):
-        _install(FakeDesign(design_type=1))
+    def test_open_scope_error_short_circuits_before_any_scope(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         err = dm.error("cannot open")
 
         def open_scope():
@@ -465,8 +466,8 @@ class TestBaseFeatureWrapper:
         out_bf, result = dm.base_feature_run_wrapper(open_scope, inner)
         assert out_bf is None and result is err and ran["inner"] is False
 
-    def test_startEdit_false_in_wrapper_errors_without_running_inner(self):
-        _install(FakeDesign(design_type=1))
+    def test_startEdit_false_in_wrapper_errors_without_running_inner(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
         bf = _FakeBaseFeature("W")
         bf.start_returns = False
         ran = {"inner": False}
@@ -485,9 +486,9 @@ class TestBaseFeatureWrapper:
 # ── run_in_base_feature: the BLESSED mode-aware helper mesh write tools import ────────────────────
 
 class TestRunInBaseFeature:
-    def test_direct_runs_inner_directly_with_no_scope(self):
+    def test_direct_runs_inner_directly_with_no_scope(self, monkeypatch):
         # DIRECT design: inner_op runs directly, gets None, and NO base feature is add()ed.
-        des = _install(FakeDesign(design_type=0, no_timeline=True))
+        des = _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         comp = des.rootComponent
         seen = {}
 
@@ -500,9 +501,9 @@ class TestRunInBaseFeature:
         assert seen["bf"] is None                                  # inner got None (no scope)
         assert comp.features.baseFeatures.added == []             # add() was NEVER called
 
-    def test_parametric_runs_inner_inside_atomic_scope(self):
+    def test_parametric_runs_inner_inside_atomic_scope(self, monkeypatch):
         # PARAMETRIC: a fresh base feature is add()ed, opened, inner runs inside it, then it finishes.
-        des = _install(FakeDesign(design_type=1))
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         comp = des.rootComponent
         seen = {}
 
@@ -516,9 +517,9 @@ class TestRunInBaseFeature:
         assert seen["editing_during_op"] is True                  # op saw an OPEN scope
         assert bf.finish_count == 1 and bf.editing is False       # and it was finished
 
-    def test_parametric_finishes_in_finally_when_inner_raises(self):
+    def test_parametric_finishes_in_finally_when_inner_raises(self, monkeypatch):
         # The helper must finish the scope even when the inner op raises, and propagate the error.
-        des = _install(FakeDesign(design_type=1))
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         comp = des.rootComponent
 
         def inner(bf):
@@ -529,9 +530,9 @@ class TestRunInBaseFeature:
         bf = comp.features.baseFeatures.added[-1]
         assert bf.finish_count == 1 and bf.editing is False       # finished despite the raise
 
-    def test_parametric_open_failure_returns_error_not_crash(self):
+    def test_parametric_open_failure_returns_error_not_crash(self, monkeypatch):
         # add() returning nothing surfaces as a ready-to-return error, and inner never runs.
-        des = _install(FakeDesign(design_type=1))
+        des = _install(monkeypatch, FakeDesign(design_type=1))
         comp = des.rootComponent
         comp.features.baseFeatures.add_returns = False             # add() yields a falsy value
         ran = {"inner": False}
@@ -600,64 +601,65 @@ class _ActivateDesign:
         return type("AC", (), {"name": "RootComp"})()
 
 
-def _install_activate(design):
-    dm.app = type("A", (), {"activeProduct": design})()
-    dm._common.app = dm.app
+def _install_activate(monkeypatch, design):
+    app = type("A", (), {"activeProduct": design})()
+    monkeypatch.setattr(dm, "app", app)
+    monkeypatch.setattr(dm._common, "app", app)
     import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, _ActivateDesign) else None
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, _ActivateDesign) else None)
     return design
 
 
 class TestActivateComponent:
-    def test_no_active_design(self):
-        _install_activate(None)
+    def test_no_active_design(self, monkeypatch):
+        _install_activate(monkeypatch, None)
         # cast(None) -> None
         import adsk.fusion
-        adsk.fusion.Design.cast = lambda x: None
+        monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: None)
         res = dm.activate_component_handler(occurrence="Chassis:1")
         assert res["isError"] is True and "No active design" in res["message"]
 
-    def test_activate_by_occurrence_name(self):
+    def test_activate_by_occurrence_name(self, monkeypatch):
         occ = _FakeOcc("Chassis:1", "Chassis")
-        _install_activate(_ActivateDesign([occ, _FakeOcc("Wheel:1", "Wheel")]))
+        _install_activate(monkeypatch, _ActivateDesign([occ, _FakeOcc("Wheel:1", "Wheel")]))
         out = _payload(dm.activate_component_handler(occurrence="Chassis:1"))
         assert occ.isActive is True
         assert out["activated"] == "Chassis:1" and out["component"] == "Chassis"
         assert out["active_component"] == "Chassis"
 
-    def test_activate_by_component_name(self):
+    def test_activate_by_component_name(self, monkeypatch):
         occ = _FakeOcc("Chassis:1", "Chassis")
-        _install_activate(_ActivateDesign([occ]))
+        _install_activate(monkeypatch, _ActivateDesign([occ]))
         out = _payload(dm.activate_component_handler(occurrence="Chassis"))   # component name
         assert occ.isActive is True and out["activated"] == "Chassis:1"
 
-    def test_activation_that_does_not_take_bites(self):
+    def test_activation_that_does_not_take_bites(self, monkeypatch):
         # activate() returns true but the active component still reads root -> error, not ok
         occ = _FakeOcc("Chassis:1", "Chassis")
         occ.activate = lambda: True                    # true returned, isActive never flips
-        _install_activate(_ActivateDesign([occ]))
+        _install_activate(monkeypatch, _ActivateDesign([occ]))
         res = dm.activate_component_handler(occurrence="Chassis:1")
         assert res["isError"] is True
         assert "did not take" in res["message"]
 
-    def test_unknown_component_errors_and_lists(self):
-        _install_activate(_ActivateDesign([_FakeOcc("Wheel:1", "Wheel")]))
+    def test_unknown_component_errors_and_lists(self, monkeypatch):
+        _install_activate(monkeypatch, _ActivateDesign([_FakeOcc("Wheel:1", "Wheel")]))
         res = dm.activate_component_handler(occurrence="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"] and "Wheel:1" in res["message"]
 
-    def test_ambiguous_name_refused_not_first_match(self):
+    def test_ambiguous_name_refused_not_first_match(self, monkeypatch):
         # two instances share local name "Bolt:1" under different sub-assemblies — a bare "Bolt"
         # substring must ERROR (naming both fullPathNames), NOT silently activate the first.
         a = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-A:1+Bolt:1")
         b = _FakeOcc("Bolt:1", "Bolt", full_path="Sub-B:1+Bolt:1")
-        _install_activate(_ActivateDesign([a, b]))
+        _install_activate(monkeypatch, _ActivateDesign([a, b]))
         res = dm.activate_component_handler(occurrence="Bolt")
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
         assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
         assert a.isActive is False and b.isActive is False
 
-    def test_activate_root_via_empty(self):
+    def test_activate_root_via_empty(self, monkeypatch):
         occ = _FakeOcc("Chassis:1", "Chassis")
         occ.isActive = True
         called = {"root": False}
@@ -665,26 +667,26 @@ class TestActivateComponent:
             called["root"] = True
             occ.isActive = False
             return True
-        _install_activate(_ActivateDesign([occ], root_activate=root_activate))
+        _install_activate(monkeypatch, _ActivateDesign([occ], root_activate=root_activate))
         out = _payload(dm.activate_component_handler(occurrence=""))
         assert out["activated"] == "root"
         assert called["root"] is True
 
-    def test_activate_root_falls_back_to_deactivate(self):
+    def test_activate_root_falls_back_to_deactivate(self, monkeypatch):
         # no activateRootComponent on the design → deactivate the active occurrence instead
         occ = _FakeOcc("Chassis:1", "Chassis")
         occ.isActive = True
-        _install_activate(_ActivateDesign([occ]))     # no root_activate provided
+        _install_activate(monkeypatch, _ActivateDesign([occ]))     # no root_activate provided
         out = _payload(dm.activate_component_handler(occurrence="root"))
         assert out["activated"] == "root" and occ.deactivated is True
 
-    def test_activate_returns_false_errors(self):
+    def test_activate_returns_false_errors(self, monkeypatch):
         occ = _FakeOcc("Chassis:1", "Chassis", activate_returns=False)
-        _install_activate(_ActivateDesign([occ]))
+        _install_activate(monkeypatch, _ActivateDesign([occ]))
         res = dm.activate_component_handler(occurrence="Chassis:1")
         assert res["isError"] is True and "returned false" in res["message"]
 
-    def test_deactivate_raises_surfaces_as_error(self):
+    def test_deactivate_raises_surfaces_as_error(self, monkeypatch):
         # A deactivate() failure must propagate as an error - reporting ok("root") when the
         # deactivate call failed would be a false success.
         class _RaisingOcc(_FakeOcc):
@@ -692,7 +694,7 @@ class TestActivateComponent:
                 raise RuntimeError("deactivate blew up")
         occ = _RaisingOcc("Chassis:1", "Chassis")
         occ.isActive = True
-        _install_activate(_ActivateDesign([occ]))    # no root_activate -> falls to deactivate()
+        _install_activate(monkeypatch, _ActivateDesign([occ]))    # no root_activate -> falls to deactivate()
         import pytest
         with pytest.raises(RuntimeError, match="deactivate blew up"):
             dm.activate_component_handler(occurrence="root")

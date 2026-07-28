@@ -29,12 +29,6 @@ app = adsk.core.Application.get()
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 _PROFILE = _inputs.ProfileRef("profile_index")
 
-# Axis keyword -> the active component's origin construction axis attribute.
-_AXES = {
-"x": "xConstructionAxis",
-"y": "yConstructionAxis",
-"z": "zConstructionAxis",
-}
 _VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
 
 # axis: world x/y/z, or a straight-edge/sketch-line 'handle' - resolved via the shared AxisRef kind.
@@ -65,7 +59,7 @@ def _axis_entity(comp, sketch, axis):
     kind, val = tagged
     if kind == "world":
         key = _VEC_TO_KEY.get(val)
-        ent = safe(lambda: getattr(comp, _AXES[key])) if key else None
+        ent = _inputs.world_construction_axis(comp, key) if key else None
         return ent, f"{key}-axis"
     return val, "edge handle"          # kind == "edge": a straight BRepEdge or sketch line
 
@@ -89,13 +83,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
 
-    # By NAME: the design-wide resolver (active component first) - a root master sketch stays
-    # reachable from an activated sub-component. Empty = most recent sketch in the ACTIVE component.
-    requested = (sketch_name or "").strip()
-    if requested:
-        sketch = _common.resolve_sketch(design, requested)
-    else:
-        sketch, _ = _common.target_sketch(comp, "")
+    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sketch:
         if requested:
             names = _common.all_sketch_names(design)

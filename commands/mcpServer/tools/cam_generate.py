@@ -8,7 +8,6 @@ _GENERATIONS - or Fusion abandons the in-progress generation."""
 import time
 
 import adsk.core
-import adsk.cam
 
 app = adsk.core.Application.get()
 
@@ -36,29 +35,6 @@ RETURNS = [
 _GENERATIONS = {}
 _HANDLE_SEQ = [0]
 
-_OP_STATE_NAMES = {0: "valid", 1: "invalid", 2: "suppressed", 3: "no_toolpath"}
-
-
-def _find_target(cam, target_name):
-    """Resolve a target NAME to a Setup / Folder / Operation, searching all setups.
-
-    Returns (target_object, kind) or (None, None). Matches by exact name (case-insensitive).
-    """
-    want = (target_name or "").strip().lower()
-    if not want:
-        return None, None
-    for i in range(safe(lambda: cam.setups.count, 0)):
-        s = cam.setups.item(i)
-        if (safe(lambda s=s: s.name) or "").lower() == want:
-            return s, "setup"
-        # search this setup's operations + folders
-        for op in safe(lambda s=s: s.allOperations, []) or []:
-            if (safe(lambda op=op: op.name) or "").lower() == want:
-                folder = adsk.cam.CAMFolder.cast(op)
-                operation = adsk.cam.Operation.cast(op)
-                return op, ("folder" if folder else "operation" if operation else "target")
-    return None, None
-
 
 def _collect_op_health():
     """Read warnings / errors from the LIVE document operations, with the message text.
@@ -75,19 +51,15 @@ def _collect_op_health():
     if err:
         return out
     try:
-        for i in range(cam.setups.count):
-            for op in cam.setups.item(i).allOperations:
-                o = adsk.cam.Operation.cast(op)
-                if not o:
-                    continue
-                name = safe(lambda o=o: o.name)
-                if safe(lambda o=o: o.hasError, False):
-                    out["errors"].append({"name": name, "error": (safe(lambda o=o: o.error) or "").strip()})
-                if safe(lambda o=o: o.hasWarning, False):
-                    wtext = (safe(lambda o=o: o.warning) or "").strip()
-                    out["warnings"].append({"name": name, "warning": wtext})
-                    if "empty" in wtext.lower():
-                        out["empty"].append(name)
+        for o in _cam_common.walk_operations(cam):
+            name = safe(lambda o=o: o.name)
+            if safe(lambda o=o: o.hasError, False):
+                out["errors"].append({"name": name, "error": (safe(lambda o=o: o.error) or "").strip()})
+            if safe(lambda o=o: o.hasWarning, False):
+                wtext = (safe(lambda o=o: o.warning) or "").strip()
+                out["warnings"].append({"name": name, "warning": wtext})
+                if "empty" in wtext.lower():
+                    out["empty"].append(name)
     except Exception:
         pass
     return out
@@ -117,11 +89,11 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
             scope = "document"
             target_desc = "all setups"
         else:
-            tgt, kind = _find_target(cam, want)
-            if not tgt:
-                return error(
-                    f"No setup/folder/operation named '{target}'. Use cam_get(include=['operations']) to list "
-                    "names. Omit 'target' to generate the whole document.")
+            node, rerr = _cam_common.resolve_cam_node(
+                cam, want, kinds=("setup", "folder", "operation"), label="setup/folder/operation")
+            if rerr:
+                return error(rerr + " Omit 'target' to generate the whole document.")
+            tgt, kind = node.obj, node.kind
             # generateToolpath has no skip_valid flag; it regenerates the given target. When the
             # caller asked to skip valid and this single target is already valid+current, short out.
             if skip_valid and kind == "operation" and safe(lambda: tgt.operationState) == 0:
@@ -276,7 +248,7 @@ def _status_future(entry: dict, key: str, include_operations: bool, pump_seconds
 
     total = safe(lambda: future.numberOfOperations, entry.get("total"))
     done_count = safe(lambda: future.numberOfCompleted, None)
-    completed = bool(safe(lambda: future.isGenerationCompleted, False))
+    future_done = bool(safe(lambda: future.isGenerationCompleted, False))
     elapsed = round(time.time() - entry["started_at"], 1)
 
     # Health/readiness is NOT re-derived here - it is the _cam_common domain (the single CAM-health
@@ -284,6 +256,12 @@ def _status_future(entry: dict, key: str, include_operations: bool, pump_seconds
     # tally + a ready-made readiness verdict. This path owns only the progress delta layered on top.
     live, _live_err = _cam_common.live_readiness()
     live = live or {}
+
+    # The Future flips isGenerationCompleted a poll BEFORE live op state settles (observed: completed
+    # while live_states still showed generating=3). Gate completed on BOTH agreeing - the Future is
+    # done AND nothing is still generating - so the caller never reads a premature done. An errored op
+    # is its own bucket (never counted as generating), so this can't hang on a fault.
+    completed = future_done and (live.get("generating", 0) == 0)
 
     payload = {
     "handle": key,
@@ -343,15 +321,15 @@ def _scope_state(cam, target: str):
     if not want or want.lower() in ("all", "document", "*"):
         live, err = _cam_common.live_readiness()
         return (live or {}), "document", err
-    tgt, kind = _find_target(cam, want)
-    if not tgt:
-        return None, None, (
-            f"No setup/folder/operation named '{target}'. Use cam_get(include=['operations']) to list "
-            "names, or omit 'target' to poll the whole document.")
-    ops = [tgt] if kind == "operation" else (safe(lambda: tgt.allOperations, []) or [])
+    node, rerr = _cam_common.resolve_cam_node(
+        cam, want, kinds=("setup", "folder", "operation"), label="setup/folder/operation")
+    if rerr:
+        return None, None, rerr + " Omit 'target' to poll the whole document."
+    tgt, kind = node.obj, node.kind
+    ops = [tgt] if kind == "operation" else _cam_common.operations_under(tgt)
     tally = _op_tally(ops)
     tally["readiness"] = _scope_readiness(tally)
-    return tally, f"{kind} '{safe(lambda: tgt.name) or want}'", None
+    return tally, f"{kind} '{node.name or want}'", None
 
 
 def _status_live(target: str, include_operations: bool, pump_seconds: float) -> dict:

@@ -18,7 +18,7 @@ Layout — the tree splits by KIND, and `test_layout.py` enforces it:
 py -3 tests/check_all.py                     # THE button: generator checks + suite + live gate
 py -3 tests/check_all.py --offline           # no Fusion here (skips the live gate, visibly)
 py -3 -m pytest tests/unit/test_sys_selection.py -v   # one tool, verbose (while iterating)
-py -3 tests/gen_spec.py                      # regenerate TEST_SPEC.md (the behavior spec)
+py -3 tests/gen_all.py                       # regenerate the docs under tests/generated/
 ```
 
 `check_all.py` runs everything in dependency order and fails loudly with the repair command per
@@ -121,15 +121,3 @@ copy it" rule the tools themselves follow.)
 See [CLAUDE.md](CLAUDE.md) for the recipe - which pattern to copy (a rich read, a fuller fake object
 model, or a pure function), the mandatory test shape, and how to update a test when the behavior it
 pins changes.
-
-## The behavior spec (`TEST_SPEC.md`)
-
-`tests/generated/TEST_SPEC.md` is **generated** from the test names by `gen_spec.py` — a
-per-tool checklist of every behavior currently pinned by a test. Use it to
-review scope ("what do my tools actually guarantee?") and to spot gaps. Don't
-edit it by hand; regenerate after changing tests:
-
-```bash
-py -3 tests/gen_spec.py           # rewrite TEST_SPEC.md
-py -3 tests/gen_spec.py --check   # exit 1 if stale (run by check_all / the commit hook)
-```

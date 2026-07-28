@@ -25,15 +25,25 @@ class FakeDim:
 
 
 class FakeDims:
+    """Mirrors live SketchDimensions: an add* handed the wrong entity kind raises at the API
+    boundary (radial/diameter need an arc/circle - centerSketchPoint; angular needs lines -
+    start/end points), it does not return a dimension."""
     def __init__(self):
         self.calls = []
     def addDistanceDimension(self, p1, p2, orient, tp):
         self.calls.append(("distance", orient, p1, p2)); return FakeDim("distance")
     def addRadialDimension(self, c, tp):
+        if getattr(c, "centerSketchPoint", None) is None:
+            raise TypeError("invalid argument: entity is not an arc or circle")
         self.calls.append(("radius",)); return FakeDim("radius")
     def addDiameterDimension(self, c, tp):
+        if getattr(c, "centerSketchPoint", None) is None:
+            raise TypeError("invalid argument: entity is not an arc or circle")
         self.calls.append(("diameter",)); return FakeDim("diameter")
     def addAngularDimension(self, l1, l2, tp):
+        if (getattr(l1, "startSketchPoint", None) is None
+                or getattr(l2, "startSketchPoint", None) is None):
+            raise TypeError("invalid argument: both entities must be lines")
         self.calls.append(("angle",)); return FakeDim("angle")
 
 
@@ -358,6 +368,29 @@ class TestLoneLineDistance:
         _install()
         res = sd.handler(dim_type="distance", entity_one="line:0:end")
         assert res["isError"] is True and "anchor" in res["message"].lower()
+
+
+class TestWrongKindRefusals:
+    """The live add* raises on a wrong entity kind; the tool must surface a clean error naming
+    the dimension and the kinds it needs - never crash or report a false success."""
+
+    def test_radius_on_a_line_is_a_clean_error(self):
+        _install()
+        res = sd.handler(dim_type="radius", entity_one="line:0")
+        assert res["isError"] is True
+        assert "radius" in res["message"] and "arc/circle" in res["message"]
+
+    def test_diameter_on_a_line_is_a_clean_error(self):
+        _install()
+        res = sd.handler(dim_type="diameter", entity_one="line:0")
+        assert res["isError"] is True
+        assert "diameter" in res["message"] and "arc/circle" in res["message"]
+
+    def test_angle_with_a_circle_is_a_clean_error(self):
+        _install()
+        res = sd.handler(dim_type="angle", entity_one="circle:0", entity_two="line:0")
+        assert res["isError"] is True
+        assert "angle" in res["message"] and "two lines" in res["message"]
 
 
 class TestGuards:

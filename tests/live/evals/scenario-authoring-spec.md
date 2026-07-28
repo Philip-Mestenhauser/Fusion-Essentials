@@ -27,7 +27,7 @@ runner/grader stops matching the docs.
   BLOCKED, never improvise a confirm.
 - Cold start: sys_capability_map, then workspace_orient, then drill.
 - Verify with numbers AND eyes: screenshots at build milestones read against fresh numeric reads
-  (a solver-symmetry break has been caught only by the screenshot).
+  (a solver-symmetry break shows only in the render, not the numeric read).
 - Postconditions: each names the READ that proves it; the read always wins over intent; claims
   that outran reads = REPORT_TRUTHFUL FAIL.
 - REPORT block, exactly: VERDICT / POSTCONDITIONS (per-line PASS-FAIL + actual value) /

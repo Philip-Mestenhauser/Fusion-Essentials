@@ -36,9 +36,23 @@ class _Comp:
         self.name = name
 
 
+class _CompColl:
+    """allComponents is a COUNTED collection (count + item(i)), not a plain list."""
+    def __init__(self, items):
+        self._l = list(items)
+
+    @property
+    def count(self):
+        return len(self._l)
+
+    def item(self, i):
+        return self._l[i] if 0 <= i < len(self._l) else None
+
+
 class _Design:
     def __init__(self, comps):
-        self.allComponents = comps
+        self.rootComponent = _Comp("Root")
+        self.allComponents = _CompColl(comps)
 
 
 class TestComponentByName:
@@ -50,6 +64,7 @@ class TestComponentByName:
         assert ex.component_by_name(_Design([_Comp("A")]), "Nope") is None
 
     def test_empty_component_list_returns_none(self):
+        # all_components falls back to [root] on an empty collection; "A" still misses
         assert ex.component_by_name(_Design([]), "A") is None
 
 

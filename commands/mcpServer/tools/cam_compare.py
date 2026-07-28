@@ -23,15 +23,15 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     if err:
         return error(err)
 
-    op_a, _ = find_operation(cam, operation_a)
-    op_b, _ = find_operation(cam, operation_b)
+    op_a, avail_a = find_operation(cam, operation_a)
+    op_b, avail_b = find_operation(cam, operation_b)
     if not op_a:
-        return error(f"Operation not found: '{operation_a}'.")
+        return _op_miss_error(operation_a, avail_a)
     if not op_b:
-        return error(f"Operation not found: '{operation_b}'.")
+        return _op_miss_error(operation_b, avail_b)
 
-    params_a = _operation_params(op_a)
-    params_b = _operation_params(op_b)
+    params_a, titles_a = _operation_params(op_a)
+    params_b, titles_b = _operation_params(op_b)
 
     all_keys = sorted(set(params_a) | set(params_b))
     differences = []
@@ -43,6 +43,7 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
             same_count += 1
         else:
             differences.append({"parameter": k,
+        "title": titles_a.get(k) or titles_b.get(k) or k,
         "operation_a": a if k in params_a else "(not present)",
         "operation_b": b if k in params_b else "(not present)"})
 
@@ -66,20 +67,37 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
     return ok(out)
 
 
-def _operation_params(op) -> dict:
-    """Read an operation's CAM parameters as {title-or-name: expression}."""
-    out = {}
+def _op_miss_error(name, available):
+    """Word find_operation's (None, available). A DUPLICATED name comes back as each duplicate's
+    'Setup / op' path (leaf == the searched name) - that is ambiguity, not absence, so say so and
+    list the paths; a true miss stays not-found."""
+    want = (name or "").strip().lower()
+    paths = [a for a in available if a and a.split(" / ")[-1].strip().lower() == want]
+    if paths:
+        return error(f"'{name}' is ambiguous - {len(paths)} operations share that name: "
+                     f"{', '.join(paths)}. Rename the target so its name is unique, then retry.")
+    return error(f"Operation not found: '{name}'.")
+
+
+def _operation_params(op):
+    """Read an operation's CAM parameters keyed by NAME: (values, titles) where values is
+    {name: expression} and titles is {name: title} for display. Keyed by NAME because a parameter's
+    NAME is scope-unique on an op but its TITLE is NOT - two parameters can share a title across an
+    op's groups, so keying by title would let a colliding title overwrite (and MASK) a real
+    difference. Title rides along only for readable display."""
+    values, titles = {}, {}
     try:
         params = op.parameters
         for i in range(params.count):
             p = params.item(i)
-            key = safe(lambda: p.title) or safe(lambda: p.name)
-            if not key:
+            name = safe(lambda: p.name)
+            if not name:
                 continue
-            out[key] = safe(lambda: p.expression)
+            values[name] = safe(lambda: p.expression)
+            titles[name] = safe(lambda: p.title) or name
     except Exception:
         pass
-    return out
+    return values, titles
 
 
 def _op_tool_desc(op):

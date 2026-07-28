@@ -62,17 +62,24 @@ def _occ_translation_mm(occ):
             round((safe(lambda: t.z, 0.0) or 0.0) * 10.0, 3)]
 
 
-def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
-    """Set an occurrence's STATELESS parent lock (isGroundToParent).
+# Only isGroundToParent is settable here. The other grounding flag, isGrounded (the UI Ground/Fix),
+# is deliberately NOT exposed: the platform deprecates it and the parent lock is the supported way
+# to fix a part. Consequence for reads: assembly_get's grounded_occurrences lists only the UI flag,
+# so an agent-grounded build reads it EMPTY by design - check the per-occurrence ground_to_parent
+# flag instead.
 
-    Setting true RE-LOCKS the part at its timeline-defined placement, DISCARDING any free move -
-    captured or not (live-verified: a moved+captured occurrence snapped back to its component
-    placement the moment the flag was set). The position read-back below turns that silent snap
-    into a reported one. WRITES.
+
+def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
+    """Set an occurrence's isGroundToParent flag (the stateless parent lock).
+
+    true RE-LOCKS the part at its timeline-defined placement, DISCARDING any free move - captured or
+    not (live-verified: a moved+captured occurrence snapped back the moment the flag was set); the
+    position read-back below turns that silent snap into a reported one. false frees the part to
+    move/joint. Both grounding flags are read back and reported. WRITES.
     """
     if ground_to_parent is None:
-        return error("Specify 'ground_to_parent' (true/false). true locks the occurrence rigidly to "
-                     "its parent; false frees it to move/joint.")
+        return error("Specify 'ground_to_parent' (true/false). true locks the occurrence to its "
+                     "timeline placement; false releases it.")
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -83,24 +90,25 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
     try:
         occ.isGroundToParent = bool(ground_to_parent)
     except Exception as e:
-        return error(f"Could not set ground_to_parent on '{safe(lambda: occ.name)}': {e}")
+        return error(f"Could not set isGroundToParent on '{safe(lambda: occ.name)}': {e}")
     now = safe(lambda: occ.isGroundToParent)
     if now is not None and bool(now) != bool(ground_to_parent):
         return error(f"Assignment was accepted but '{safe(lambda: occ.name)}' still reads "
                      f"isGroundToParent={bool(now)} - the flag did not take.")
+    # Report BOTH flags distinctly - isGrounded is read-only context (a human may have set it in the
+    # UI; this tool never writes it).
     out = {
         "occurrence": safe(lambda: occ.name),
-        "isGroundToParent": bool(now) if now is not None else bool(ground_to_parent),
-        "note": "ground_to_parent set (the stateless parent lock). true = locked rigidly to parent "
-                "AT ITS TIMELINE-DEFINED PLACEMENT; false = freed to move/joint. To fix a part at a "
-                "position: create its component at that placement, or leave it FREE and "
-                "assembly_move + assembly_capture_position (re-grounding afterward discards the "
-                "move, captured or not).",
+        "isGroundToParent": safe(lambda: occ.isGroundToParent),
+        "isGrounded": safe(lambda: occ.isGrounded),
+        "note": "Parent lock set. isGroundToParent relocks to the TIMELINE placement and discards "
+                "free moves. assembly_get's grounded_occurrences lists only the UI Ground/Fix flag "
+                "(not settable here), so it stays empty for agent-grounded builds - read the "
+                "per-occurrence ground_to_parent flag instead. To fix a part at a moved position, "
+                "leave it FREE and assembly_move + assembly_capture_position.",
     }
-    # Either direction can MOVE the part (live-verified): grounding snaps it back to its timeline
-    # placement (silently discarding free moves, captured included); freeing lets a captured pose
-    # re-assert. Report the move with numbers instead of letting the caller discover a teleported
-    # part later.
+    # Grounding to the parent lock snaps the part back to its timeline placement (live-verified),
+    # silently discarding free moves; report that move with numbers.
     pos_after = _occ_translation_mm(occ)
     if (pos_before is not None and pos_after is not None
             and any(abs(a - b) > 0.01 for a, b in zip(pos_before, pos_after))):
@@ -306,15 +314,17 @@ def rigid_group_handler(occurrences: str = "", include_children: bool = False) -
 # ----------------------------------------------------------------------- tools
 
 _GROUND_DESC = (
-"Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag. true RE-LOCKS "
-"the part at its TIMELINE placement, DISCARDING any free move, captured or not (the snap is "
-"reported as position_reset); false FREES a fresh/patterned occurrence to move (assembly_move) or "
-"joint. To fix a part at a position: create its component there, or move + capture while FREE."
+"Ground an occurrence via isGroundToParent - the STATELESS rigid-to-parent lock: true RE-LOCKS the "
+"part at its TIMELINE placement, DISCARDING any free move (the snap is reported as position_reset); "
+"false frees it to move/joint. The UI Ground/Fix flag (isGrounded) is NOT settable here - the "
+"platform treats it as legacy - so assembly_get's grounded_occurrences (which lists only that flag) "
+"stays EMPTY for agent-grounded builds; read the per-occurrence ground_to_parent flag instead. BOTH "
+"flags are reported back. To fix a part at a moved position: leave it FREE and assembly_move + capture."
 )
 ground_tool = (
     Tool.create_simple(name="assembly_ground", description=_GROUND_DESC)
     .add_input_property("occurrence", {"type": "string", "description": "Occurrence name (or full path) to change."})
-    .add_input_property("ground_to_parent", {"type": "boolean", "description": "Lock rigidly to parent (true), or free it to move/joint (false)."})
+    .add_input_property("ground_to_parent", {"type": "boolean", "description": "Set the parent lock on (true) or off (false)."})
     .strict_schema()
 )
 ground_item = Item.create_tool_item(tool=ground_tool, write="write", handler=ground_handler, run_on_main_thread=True)

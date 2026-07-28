@@ -67,24 +67,39 @@ class FakeChamferInput:
         self.two_distances = (val1, val2)
 
 
+class FakeCountingFeature:
+    """A created feature that ANSWERS .faces.count/.edges.count - what the measured read-back reads."""
+    def __init__(self, name, faces, edges):
+        self.name = name
+        self.faces = type("C", (), {"count": faces})()
+        self.edges = type("C", (), {"count": edges})()
+        self.deleted = False
+    def deleteMe(self):
+        self.deleted = True
+        return True
+
+
 class FakeFilletFeatures:
     def __init__(self):
         self.last = None
+        # default created feature answers only .name (no .faces/.edges - the attribute-silent case)
+        self.result = type("F", (), {"name": "Fillet1"})()
     def createInput(self):
         self.last = FakeFilletInput()
         return self.last
     def add(self, inp):
-        return type("F", (), {"name": "Fillet1"})()
+        return self.result
 
 
 class FakeChamferFeatures:
     def __init__(self):
         self.last = None
+        self.result = type("F", (), {"name": "Chamfer1"})()
     def createInput(self, edges, tangent):
         self.last = FakeChamferInput(edges, tangent)
         return self.last
     def add(self, inp):
-        return type("F", (), {"name": "Chamfer1"})()
+        return self.result
 
 
 class FakeComp:
@@ -106,13 +121,6 @@ def _install(bodies):
     design = FakeDesign(comp)
     fl.app = type("A", (), {"activeProduct": design})()
     fl._common.app = fl.app
-    # The handler calls the module-global `target_component` (imported from _common). The edge-handle
-    # install below REASSIGNS `fl.target_component`/`fl._design` to its own comp; the conftest seam-
-    # restore doesn't cover this module, so reset them to pristine here so this body-based install is
-    # order-independent (otherwise a prior TestEdgeHandles run leaks an empty-comp target_component and
-    # the handler builds onto the wrong fake -> cf.last stays None).
-    fl.target_component = fl._common.target_component
-    fl._design = fl._common.design
     # BodyRef (the 'body_name' kind) resolves through the _inputs._common seam — patch it to the SAME
     # design, else the body resolves against a stale/empty design (the documented dual-seam trap).
     fl._inputs._common.design = lambda: design
@@ -155,8 +163,25 @@ class TestGuards:
     def test_body_not_found(self):
         # BodyRef resolves the named body; an unknown name errors, naming the value + the handle path.
         _install([FakeBody("B", [True])])
-        res = fl._fillet_handler(body_name="X", radius=1)
+        res = fl._fillet_handler(body_name="X", radius=1, edge_filter="all")
         assert res["isError"] is True and "no body or component named 'X'" in res["message"]
+
+    def test_omitted_scope_refuses(self):
+        # No 'edges' and no 'edge_filter': REFUSED, naming both scoping paths. An omitted scope
+        # must never silently mean the whole body - implicit blanket rounding was every
+        # executor's default design language while 'all' was the default.
+        _install([FakeBody("B", [True, True])])
+        res = fl._fillet_handler(body_name="B", radius=1)
+        assert res["isError"] is True
+        assert "edges" in res["message"] and "edge_filter" in res["message"]
+        res2 = fl._chamfer_handler(body_name="B", distance=1)
+        assert res2["isError"] is True and "edge_filter" in res2["message"]
+
+    def test_blanket_filter_reports_blast_radius(self):
+        # An explicit filter sweep names how many of the body's edges it took.
+        _install([FakeBody("B", [True, False, True])])
+        out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="convex"))
+        assert "BLANKET" in out["note"] and "2 of the body's 3 edges" in out["note"]
 
     def test_bad_edge_filter(self):
         _install([FakeBody("B", [True])])
@@ -179,24 +204,24 @@ class TestGuards:
 class TestFillet:
     def test_fillet_all_edges_scaled(self):
         ff, _ = _install([FakeBody("Block", [True, True, False])])
-        out = _payload(fl._fillet_handler(body_name="Block", radius=2, units="mm"))
-        assert out["filleted"] is True and out["edges_affected"] == 3
+        out = _payload(fl._fillet_handler(body_name="Block", radius=2, units="mm", edge_filter="all"))
+        assert out["filleted"] is True and out["edges_requested"] == 3
         edges, val, tangent = ff.last.edge_set
         assert val == ("real", 0.2)        # 2mm -> 0.2cm
 
     def test_fillet_convex_filter(self):
         ff, _ = _install([FakeBody("B", [True, False, True])])
         out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="convex"))
-        assert out["edges_affected"] == 2  # only the two convex edges
+        assert out["edges_requested"] == 2  # only the two convex edges
 
     def test_fillet_concave_filter(self):
         ff, _ = _install([FakeBody("B", [True, False, True])])
         out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="concave"))
-        assert out["edges_affected"] == 1
+        assert out["edges_requested"] == 1
 
     def test_default_most_recent_body(self):
         _install([FakeBody("First", [True]), FakeBody("Last", [True, True])])
-        out = _payload(fl._fillet_handler(radius=1))
+        out = _payload(fl._fillet_handler(radius=1, edge_filter="all"))
         assert out["body"] == "Last"
 
     def test_unknown_convexity_included_under_filter(self):
@@ -204,26 +229,83 @@ class TestFillet:
         # under a convex/concave filter. Body: [convex, unknown] under 'convex' -> both pass.
         _install([FakeBody("B", [True, None])])
         out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="convex"))
-        assert out["edges_affected"] == 2
+        assert out["edges_requested"] == 2
 
     def test_radius_echoed_rounded_in_payload(self):
         _install([FakeBody("B", [True])])
-        out = _payload(fl._fillet_handler(body_name="B", radius=3.5, units="mm"))
+        out = _payload(fl._fillet_handler(body_name="B", radius=3.5, units="mm", edge_filter="all"))
         # the raw (un-scaled) radius is echoed under 'radius'
         assert out["radius"] == 3.5
         assert out["edge_selection"] == "filter"
+
+    def test_partial_edge_application_errors_and_rolls_back(self):
+        # The feature consumed FEWER edges than handed in: reporting filleted:true with the input
+        # echo as the "result" would be the honesty-contract cardinal sin (a fillet silently rounded
+        # fewer edges than requested). The read-back count must gate the call: error naming
+        # requested vs applied, and the inert/partial feature must be rolled back (deleteMe called).
+        ff, _ = _install([FakeBody("B", [True, True, True])])
+        ff.result = FakeCountingFeature("Fillet1", faces=2, edges=1)
+        res = fl._fillet_handler(body_name="B", radius=1, edge_filter="all")
+        assert res["isError"] is True
+        assert "PARTIALLY" in res["message"]
+        assert "3" in res["message"] and "1" in res["message"]   # requested vs applied, both named
+        assert ff.result.deleted is True
+
+    def test_measured_fields_omitted_when_feature_does_not_answer(self):
+        # safe() returning None means the attribute did not answer - the keys are OMITTED,
+        # never reported as null (the default fake feature carries only .name). The no-op guard is
+        # gated on faces_created == 0, so a None (unanswered) count does NOT trip it.
+        _install([FakeBody("B", [True])])
+        out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="all"))
+        assert "edges_measured" not in out and "faces_created" not in out
+        assert "read from the created feature" not in out["note"]
+
+    def test_fillet_no_op_on_tangent_edge_errors(self):
+        # A fillet whose feature reports ZERO created faces rounded nothing (a tangent edge - two
+        # faces meeting smoothly, e.g. a hole tangent to a face). filleted:true would be a false ok;
+        # the 0-face read-back must convert it to an error naming the tangent cause AND remove the
+        # inert feature.
+        ff, _ = _install([FakeBody("B", [True])])
+        ff.result = FakeCountingFeature("Fillet1", faces=0, edges=0)
+        res = fl._fillet_handler(body_name="B", radius=1, edge_filter="all")
+        assert res["isError"] is True
+        assert "rounded nothing" in res["message"] and "TANGENT" in res["message"]
+        assert ff.result.deleted is True          # the no-op feature was removed
+
+    def test_chamfer_zero_faces_not_treated_as_no_op(self):
+        # The fillet-specific TANGENT no-op guard (faces_created==0 alone) is fillet-only: a chamfer
+        # whose feature reports 0 faces is NOT auto-errored on that basis - its face read-back
+        # semantics differ. But the edge count still matches what was requested (1 of 1), so the
+        # separate partial-application guard (which prefers the edge count when available) does not
+        # fire either: a full, matched application succeeds even if faces_created reads 0.
+        _, cf = _install([FakeBody("B", [True])])
+        cf.result = FakeCountingFeature("Chamfer1", faces=0, edges=1)
+        out = _payload(fl._chamfer_handler(body_name="B", distance=1, edge_filter="all"))
+        assert out["chamfered"] is True
+
+    def test_chamfer_partial_edge_application_errors_and_rolls_back(self):
+        # The SAME partial-application guard applies to chamfer as to fillet: 2 edges requested, the
+        # feature's own edge count reads only 1 applied - error naming both counts, and the partial
+        # feature is rolled back.
+        _, cf = _install([FakeBody("B", [True, True])])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1, edges=1)
+        res = fl._chamfer_handler(body_name="B", distance=1, edge_filter="all")
+        assert res["isError"] is True
+        assert "PARTIALLY" in res["message"]
+        assert "2" in res["message"] and "1" in res["message"]
+        assert cf.result.deleted is True
 
 
 class TestChamfer:
     def test_chamfer_scales_distance(self):
         _, cf = _install([FakeBody("B", [True, True])])
-        out = _payload(fl._chamfer_handler(body_name="B", distance=1, units="in"))
+        out = _payload(fl._chamfer_handler(body_name="B", distance=1, units="in", edge_filter="all"))
         assert out["chamfered"] is True
         assert cf.last.distance == ("real", 2.54)
 
     def test_two_distance_chamfer(self):
         _, cf = _install([FakeBody("B", [True, True])])
-        out = _payload(fl._chamfer_handler(body_name="B", distance=2, distance_two=4, units="mm"))
+        out = _payload(fl._chamfer_handler(body_name="B", distance=2, distance_two=4, units="mm", edge_filter="all"))
         # setToTwoDistances used (not equal-distance), both scaled to cm
         assert cf.last.two_distances == (("real", 0.2), ("real", 0.4))
         assert cf.last.distance is None
@@ -231,13 +313,13 @@ class TestChamfer:
 
     def test_equal_distance_when_no_second(self):
         _, cf = _install([FakeBody("B", [True, True])])
-        out = _payload(fl._chamfer_handler(body_name="B", distance=2, units="mm"))
+        out = _payload(fl._chamfer_handler(body_name="B", distance=2, units="mm", edge_filter="all"))
         assert cf.last.two_distances is None
         assert cf.last.distance == ("real", 0.2)
         assert "distance_two" not in out
 
 
-# ── A1: fillet SPECIFIC edges via handles (the gap this rollout closes) ──────
+# ── A1: fillet SPECIFIC edges via handles ────────────────────────────────────
 
 class _FakeEdgeEnt:
     """A BRep edge resolved from a handle; carries .body.name for the result label."""
@@ -275,8 +357,10 @@ def _install_edge_handles(handle_map):
     d = FakeDesignWithTokens(comp)
     fl._inputs._common.design = lambda: d
     fl._inputs._common.target_component = lambda x: comp
-    fl._design = lambda: d        # the handler's own _design() (stays module-local)
-    fl.target_component = lambda x: comp   # fillet now imports target_component from _common
+    # Rebinding the handler's module-global (imported by value from _common) is safe across tests:
+    # conftest's autouse seam-restore reverts `target_component`/`app`/`design` on every loaded
+    # tools module after each test, so no install leaks into the next one.
+    fl.target_component = lambda x: comp
     return ff, cf
 
 
@@ -286,7 +370,7 @@ class TestEdgeHandles:
         ff, _ = _install_edge_handles({"E1": e1, "E2": e2})
         out = _payload(fl._fillet_handler(edges=["E1", "E2"], radius=2, units="mm"))
         assert out["filleted"] is True
-        assert out["edges_affected"] == 2           # only the 2 named edges, not a whole body
+        assert out["edges_requested"] == 2           # only the 2 named edges, not a whole body
         assert "handle" in out["edge_selection"]
         assert out["body"] == "Bracket"             # labelled from the edge's owning body
 
@@ -294,9 +378,39 @@ class TestEdgeHandles:
         e1 = _FakeEdgeEnt("X")
         ff, _ = _install_edge_handles({"E1": e1})
         out = _payload(fl._fillet_handler(edges=["E1"], body_name="ignored", radius=1))
-        assert out["edges_affected"] == 1           # used the handle, not body_name
+        assert out["edges_requested"] == 1           # used the handle, not body_name
 
     def test_bad_edge_handle_errors(self):
         _install_edge_handles({"E1": _FakeEdgeEnt()})   # E2 missing
         res = fl._fillet_handler(edges=["E1", "E2"], radius=1)
         assert res["isError"] is True and "edges" in res["message"]
+
+    def test_stale_handle_among_n_names_requested_count(self):
+        # A stale/unresolvable handle among N passed handles must refuse the WHOLE call before any
+        # feature is created (never silently fillet just the live ones) - and name how many handles
+        # were requested, plus point back at find_geometry for a fresh one.
+        _install_edge_handles({"E1": _FakeEdgeEnt()})   # E2 is stale/unresolvable
+        res = fl._fillet_handler(edges=["E1", "E2"], radius=1)
+        assert res["isError"] is True
+        assert "2 edge handle(s) were requested" in res["message"]
+        assert "find_geometry" in res["message"]
+
+
+# ── occurrence-qualified body name (two chamfers on different components stay distinct) ──
+
+class TestQualifiedBodyName:
+    def test_body_name_qualified_with_occurrence_path(self):
+        # a body reachable through an occurrence proxy reports '<occ fullPathName>/<name>', so the same
+        # local name in two components is distinguishable.
+        occ = type("Occ", (), {"fullPathName": "Gearbox:2"})()
+        body = type("Bdy", (), {"name": "Housing", "assemblyContext": occ,
+                                "parentComponent": type("C", (), {"name": "GearboxComp"})()})()
+        assert fl._qualified_body_name(body) == "Gearbox:2/Housing"
+
+    def test_body_name_unqualified_when_no_context(self):
+        # a root-owned body with no readable context degrades to the plain local name (no '?/name').
+        body = type("Bdy", (), {"name": "Plate"})()
+        assert fl._qualified_body_name(body) == "Plate"
+
+    def test_none_body_is_none(self):
+        assert fl._qualified_body_name(None) is None

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 139  |  **description breadcrumbs:** 534  |  **note/error breadcrumbs:** 259
+**Tools:** 139  |  **description breadcrumbs:** 536  |  **note/error breadcrumbs:** 260
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (4)** - higher concern, a check-your-work tool nothing points to:
   `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (24)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete`, `cam_post`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
+**Edit (23)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **35x** across 23 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -32,14 +32,14 @@ close orphans, factor duplicated guards into shared helpers.
 - `find_geometry`  <- 61  (desc 49, note 12)
 - `view_screenshot`  <- 46  (desc 20, note 26)
 - `sketch_create`  <- 30  (desc 19, note 11)
-- `cam_get`  <- 29  (desc 19, note 10)
+- `cam_get`  <- 28  (desc 19, note 9)
 - `data_get`  <- 27  (desc 16, note 11)
 - `model_extrude`  <- 23  (desc 21, note 2)
 - `design_get`  <- 22  (desc 11, note 11)
 - `sketch_get`  <- 19  (desc 8, note 11)
 - `doc_get`  <- 16  (desc 11, note 5)
+- `assembly_get`  <- 15  (desc 10, note 5)
 - `data_upload_file`  <- 15  (desc 12, note 3)
-- `assembly_get`  <- 14  (desc 10, note 4)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -97,13 +97,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document first (see doc_new).
 
 ### `assembly_ground`
-- ground_to_parent set (the stateless parent lock). true = locked rigidly to parent AT ITS TIMELINE-DEFINED PLACEMENT; false = freed to move/joint. To fix a part at a position: create its component a...
-- Specify 'ground_to_parent' (true/false). true locks the occurrence rigidly to its parent; false frees it to move/joint.
+- Parent lock set. isGroundToParent relocks to the TIMELINE placement and discards free moves. assembly_get's grounded_occurrences lists only the UI Ground/Fix flag (not settable here), so it stays e...
+- Specify 'ground_to_parent' (true/false). true locks the occurrence to its timeline placement; false releases it.
 - No active design with components.
 - Assignment was accepted but '
 - ' still reads isGroundToParent=
 - - the flag did not take.
-- Could not set ground_to_parent on '
+- Could not set isGroundToParent on '
 
 ### `assembly_inspect_interference`
 - No active design to analyze.
@@ -150,7 +150,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - differences was capped at
 - ; raise max_results to see the rest.
 - Provide both 'operation_a' and 'operation_b' (operation names).
-- Operation not found: '
 
 ### `cam_create_operation`
 - Pass generate=true (or call cam_generate) to compute the toolpath.
@@ -175,8 +174,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_delete`
 - Provide 'entity' - the CAM item name to delete (see cam_get / cam_get(include=['operations']) / cam_edit_folders).
-- No CAM entity named '
-- CAM items share that name. Rename so it's unique, then delete.
 - Fusion declined to delete '
 - ' (deleteMe returned false). It may be locked, referenced, or not deletable in its current state.
 - CAM entity removed. (design_delete_* don't reach CAM - this is the CAM-side delete.)
@@ -184,7 +181,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
 - Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}).
-- ' not found. Available:
 - ' has no parameter(s):
 - . Read the operation's parameter names first (the tool only sets existing ones).
 - ': expression did not evaluate -
@@ -208,6 +204,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' reads back empty after the set. The handle may not be a valid WCS reference for this setup.
 - Could not switch setup '
 - ' to from-solid stock (SolidStock mode):
+- Could not strip the simulation model from '
 - Could not set WCS mode '
 - Could not enable fixtures on setup '
 
@@ -215,8 +212,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Generation launch returned no future (nothing to generate?).
 - Generation is launched. Fusion advances it on the main-thread loop, which the POLL pumps - so call cam_get_status(handle) repeatedly until completed=true (each poll nudges it forward a bounded burs...
 - Failed to launch generation for
-- No setup/folder/operation named '
-- '. Use cam_get(include=['operations']) to list names. Omit 'target' to generate the whole document.
+- Omit 'target' to generate the whole document.
 - Pass skip_valid=false to force-regenerate it.
 
 ### `cam_get`
@@ -237,8 +233,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The NC Program has no '
 - ' parameter, so the output folder could not be set to '
 - '. Unresolved parameters:
-- No setup/folder/operation named '
-- '. Use cam_get(include=['operations']) to list names, or omit 'scope' to post the whole document.
+- Omit 'scope' to post the whole document.
 - Post processing raised:
 - ; check the post matches the machine/operations.)
 
@@ -258,6 +253,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - createFromOperations did not yield a usable CAMTemplate (got
 - ). The operation set may not be templatable together, or this Fusion build's API returns an unexpected shape - please report.
 - The created template is not in a valid state (the operation set may not be templatable together).
+- ' is not available in this Fusion build.
 - Could not resolve the '
 - importTemplate returned no URL (save may have failed).
 - importTemplate returned a URL but no template loads back from it - the save did not land.
@@ -268,13 +264,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `cam_select_geometry`
+- Selection applied; generation is launched. Fusion advances it on the main-thread loop, which the POLL pumps - so call cam_get_status(target='
+- ') repeatedly until completed=true (each poll nudges it forward a bounded burst and returns; it never blocks for the full compute). If it completes with has_toolpath False the op produced no path -...
 - Selection applied; pass generate=true (or cam_generate) to compute the toolpath.
-- Selection applied but generation errored:
+- Selection applied but generation failed to launch:
+- . The selection is saved - fix the cause, then run cam_generate(target='
 - selection must be one of
 - Selection applied but the operation reports 0 selections - the geometry was rejected. Check the handles match the strategy (edges for chain, the pocket floor face for pocket, cylinder faces for hol...
-- Selection applied and a valid toolpath generated.
-- Selection applied, but has_toolpath is False (the op produced no path) - the warning/error channels can be silent here. Candidate causes: the cut has zero depth (top & bottom resolve to the same Z ...
-- Selection applied; toolpath has a warning:
 - '. Use mm, cm, or in.
 - No cylinder faces left after the diameter filter.
 
@@ -296,13 +292,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Only this folder's generated toolpaths are shown.
 - operation(s) still read isLightBulbOn=false after the show - see toggle_failures.
 - Provide 'operation' - the operation name to
-- No operation matched '
+- Use cam_show_toolpath(list) to see every operation.
 - isLightBulbOn did not take for '
 - ' - it still reads hidden.
 - Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
 - Provide 'folder' - the folder or setup name to show.
-- No folder/setup named '
-- '. Use cam_show_toolpath(list) or cam_get(include=['operations']).
+- Use cam_show_toolpath(list) or cam_get(include=['operations']).
 - ' - it still reads shown.
 - This operation has no generated toolpath yet - nothing to display. Generate it first (cam_generate).
 
@@ -525,7 +520,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active document. Open or create one first (doc_open / doc_new).
 
 ### `doc_insert_derive`
-- One-way linked COPY: edits made here (a fillet, a patch, an offset) never travel back to the source, and the source itself was not modified. Build prep on top of the derived body/bodies.
+- One-way linked COPY of the source's last SAVED cloud version - unsaved in-session edits in the source are NOT derived (save the source, then doc_update_xref). Edits made here (a fillet, a patch, an...
 - Provide 'document_id' - the lineage URN (or web URL) of the saved cloud document to derive.
 - No active design. Open or create the host document first (see doc_new).
 - ' to a saved document. Tried:
@@ -543,6 +538,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Derive created a feature and geometry appeared, but nothing reports isDerived=true - the one-way link may not have formed correctly.
 - ' has no component to derive into.
 - Could not configure the derive:
+- ' to receive the derive (Occurrence.activate() returned false). Nothing was derived.
+- Derive landed at the ROOT component (
+- - the target activation did not take, so the nesting failed. The derive EXISTS at root: delete its feature (design_delete_feature) and retry, or keep it and move on.
 
 ### `doc_insert_occurrence`
 - Provide 'document_id' - the lineage URN (or web URL) of the saved cloud document to insert.
@@ -553,7 +551,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addByInsert returned nothing (the insert did not produce an occurrence).
 - addByInsert returned an occurrence but it reads isValid=false - the insert did not land.
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
-- Inserted at the requested placement. Refine with a joint (see joint_create) if it needs to mate to specific geometry. If an occurrence was removed, its joints went with it.
+- Inserted at the requested placement. This is the source's last SAVED cloud version - unsaved in-session edits in the source are NOT reflected here (save the source, then doc_update_xref). Refine wi...
 - ' has no component to insert into.
 - Failed to remove existing occurrence '
 - ' (deleteMe returned false). It may be referenced/locked.
@@ -607,6 +605,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' already existed in this folder (
 - ); this saveAs created a SECOND file with the same name (a new lineage - Fusion allows this). To add a version to the EXISTING file instead, open it (doc_open by that URN) and use doc_save; or dele...
 - Could not access destination project root:
+- saveAs reported an error but the file DID land in the destination (verified by reading the saved document/folder back) - reporting success rather than a false negative, which would send a retry int...
 - Destination folder path not found: '
 - '). Folders at project root:
 - . Pass create_path=true, or use data_get(include=['folders']) to see the structure.
@@ -705,7 +704,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - cm). Rolled the origin back; nothing changed.
 
 ### `joint_drive`
-- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This poses the model; it does not add a timeline feature, and a later recompute can reset the pose. For a po...
+- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This poses the model; it does not add a timeline feature, and a later recompute resets the pose. There is no...
 - Provide 'angle_deg' (revolute/cylindrical) and/or 'distance' (slider/cylindrical) to drive the joint to.
 - '. Use mm, cm, or in.
 - No active design with components.
@@ -714,7 +713,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' is a slider - it has no rotation. Use 'distance', not 'angle_deg'.
 - ' is a revolute - it has no slide. Use 'angle_deg', not 'distance'.
 - Could not read the motion of joint '
+- ' is motion-linked to '
+- ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process. The link ALREADY moved '
+- ) - read it back with assembly_get; do not re-drive it. Rebuilding '
+- ' (delete+recreate, a new token) clears this refusal.
 - Could not drive joint '
+- . PARTIALLY applied first (
+- ) - the joint (and any motion-linked partner) has moved; read the pose back with assembly_get.
 
 ### `joint_edit`
 - Joint edited + recomputed, but the timeline still has errored feature(s) (
@@ -727,13 +732,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - world_axis given but the joint's current motion type is not axis-based (rigid/ball have no single axis to re-point).
 - Could not resolve input_one '
 - Could not resolve input_two '
+- to that Joint Origin: the Joint Origin is LATER in the timeline (position
+- ) than the joint (position
+- ). Editing a joint rolls the timeline to just before it, where a later feature does not exist yet. Create the Joint Origin before the joint, or delete the joint and recreate it after the Joint Orig...
 - setter returned false
 - This joint has no offset parameter (rigid/inferred or already 0-DOF).
 - This joint has no angle parameter.
 - This joint has no editable motion (rigid/inferred has no limits).
 
 ### `joint_motion_link`
-- Joints linked - driving one (assembly_move + assembly_capture_position) now moves the other proportionally. Verify with assembly_get.
+- Joints linked - drive ONE member (joint_drive) and the link moves the other proportionally; read the partner's position back instead of driving it too (joint_drive REFUSES the second member for the...
 - Provide 'joint_one' and 'joint_two' - the two joints to link.
 - joint_one and joint_two must be different joints.
 - ratio must be non-zero (a 0 ratio links no motion).
@@ -878,11 +886,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible - that is the open scope, NOT a real...
 
 ### `model_combine`
+- Bodies combined. Pair with view_screenshot to view the result.
 - '. Use: join, cut, intersect.
 - No active design. Create or open a document first (see doc_new).
 - No valid tool bodies resolved.
 - Combine returned no feature.
-- Bodies combined. Pair with view_screenshot to view the result.
 - A tool body is the same as the target - pick distinct bodies.
 - . (Bodies must overlap for cut/intersect; all bodies must be solids in the same component.)
 
@@ -1397,7 +1405,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active viewport (is a document open?).
 - fit_to: no occurrence matched '
 - '. Use design_get(include=['tree']) to list.
-- Viewport capture failed (saveAsImageFile returned false).
 
 ### `view_screenshot_multi`
 - No active viewport (is a document open?).

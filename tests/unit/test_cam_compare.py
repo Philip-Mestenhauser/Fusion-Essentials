@@ -13,9 +13,9 @@ cc = load_tool("cam_compare")
 
 
 class FakeParam:
-    def __init__(self, title, expression):
+    def __init__(self, title, expression, name=None):
         self.title = title
-        self.name = title
+        self.name = name if name is not None else title
         self.expression = expression
 
 
@@ -96,6 +96,19 @@ class TestGuards:
         install([FakeOperation("Op1", {"p1": "1"})])
         res = cc.compare_operations_handler(operation_a="Op1", operation_b="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
+        assert "ambiguous" not in res["message"].lower()     # a true miss stays not-found
+
+    def test_duplicate_name_words_ambiguity_with_paths(self, monkeypatch, install):
+        # find_operation REFUSES a duplicated name, returning each duplicate's 'Setup / op' path as
+        # the available list - the error must say ambiguous and list the paths, not a plain miss.
+        install([FakeOperation("A", {"p": "1"})])
+        monkeypatch.setattr(cc, "find_operation",
+                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"])
+                            if name == "Drill1" else (cam.setups.item(0).allOperations.item(0), ["A"]))
+        res = cc.compare_operations_handler(operation_a="Drill1", operation_b="A")
+        assert res["isError"] is True
+        assert "ambiguous" in res["message"].lower()
+        assert "Setup1 / Drill1" in res["message"] and "Setup2 / Drill1" in res["message"]
 
 
 class TestDiffLogic:
@@ -126,6 +139,25 @@ class TestDiffLogic:
                  FakeOperation("B", {}, tool_desc="Flat 10mm")])
         out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B"))
         assert out["tool_a"] == "Ball 6mm" and out["tool_b"] == "Flat 10mm"
+
+    def test_colliding_titles_keyed_by_name_are_not_masked(self, install):
+        # two parameters share a TITLE ("Offset") but differ by NAME - keying the diff by title would
+        # let one overwrite the other and MASK a real difference. Keyed by name, BOTH surface: the
+        # matching topOffset is same, the differing bottomOffset is a difference. Title rides for display.
+        cam = install([FakeOperation("A", {}), FakeOperation("B", {})])
+        op_a = cam.setups.item(0).allOperations.item(0)
+        op_b = cam.setups.item(0).allOperations.item(1)
+        op_a.parameters = FakeParams([FakeParam("Offset", "1", name="topOffset"),
+                                      FakeParam("Offset", "2", name="bottomOffset")])
+        op_b.parameters = FakeParams([FakeParam("Offset", "1", name="topOffset"),
+                                      FakeParam("Offset", "9", name="bottomOffset")])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B"))
+        assert out["same_parameter_count"] == 1        # topOffset matched (not masked by the collision)
+        assert out["difference_count"] == 1
+        d = out["differences"][0]
+        assert d["parameter"] == "bottomOffset"        # keyed by the unique NAME
+        assert d["title"] == "Offset"                  # title still reported for display
+        assert d["operation_a"] == "2" and d["operation_b"] == "9"
 
 
 # ── BOUNDED READS: 'differences' is capped (CLAUDE.md "Bound it") ────────────────────────────────

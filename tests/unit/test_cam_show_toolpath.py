@@ -12,66 +12,22 @@ conftest), so the fake ops flow through unchanged.
 
 import json
 
-from conftest import load_tool
+from conftest import load_tool, _NamedCollection
+from conftest import FakeOperation as FakeOp, FakeSetup, FakeCAMFolder as CAMFolder
 
 st = load_tool("cam_show_toolpath")
 cc = load_tool("_cam_common")   # the shared get_cam seam st.get_cam is imported from
 
 
 # ── fakes mimicking adsk.cam ───────────────────────────────────────────────
-
-class FakeOp:
-    def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False):
-        self.name = name
-        self.hasToolpath = has_toolpath
-        self.isToolpathValid = valid
-        self.isSuppressed = suppressed
-        self.isLightBulbOn = shown
-
-
-class _Counted:
-    def __init__(self, items):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-
-class FakeSetup:
-    def __init__(self, name, ops, children=()):
-        self.name = name
-        self._ops = list(ops)
-        self.children = list(children)
-
-    @property
-    def allOperations(self):
-        # Live allOperations flattens folder-nested ops in and drops the folder objects
-        # (cam-alloperations-shape in tests/live/VERIFIED_API_FACTS.md).
-        out = list(self._ops)
-        for child in self.children:
-            if isinstance(child, CAMFolder):
-                out.extend(child.allOperations)
-        return out
-
-
-class CAMFolder:
-    """Named to match type(child).__name__ == 'CAMFolder' in _find_folder_ops (the live type name)."""
-    def __init__(self, name, ops):
-        self.name = name
-        self._ops = list(ops)
-
-    @property
-    def allOperations(self):
-        return list(self._ops)
-
+#
+# The CAM tree itself is conftest's shared FakeSetup/FakeCAMFolder/FakeOperation trio (the measured
+# allOperations flatten lives there once). Only the app/viewport plumbing get_cam and the fit-camera
+# path read stays local.
 
 class FakeCAM:
     def __init__(self, setups):
-        self.setups = _Counted(setups)
+        self.setups = _NamedCollection(setups)
 
 
 class FakeCamera:
@@ -201,7 +157,29 @@ class TestIsolate:
         _simple_world()
         res = st.handler(action="isolate", operation="Nonexistent")
         assert res["isError"] is True
-        assert "No operation matched" in res["message"]
+        assert "No operation named" in res["message"]
+
+    def test_duplicate_op_name_across_setups_is_refused_not_last_matched(self):
+        # Two setups each hold a "Drill1" - the shape where a non-breaking exact-match loop
+        # silently shows the LAST hit. The shared resolver must REFUSE, naming both setup paths -
+        # neither op's bulb may change.
+        d1 = FakeOp("Drill1", shown=False)
+        d2 = FakeOp("Drill1", shown=False)
+        _install([FakeSetup("Setup1", [d1]), FakeSetup("Setup2", [d2])])
+        res = st.handler(action="show", operation="Drill1")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "Setup1 / Drill1" in res["message"] and "Setup2 / Drill1" in res["message"]
+        assert d1.isLightBulbOn is False and d2.isLightBulbOn is False   # nothing was toggled
+
+    def test_list_disambiguates_duplicate_names_by_setup(self):
+        # 'list' is the duplicate-name escape hatch: each row carries its setup, so an agent seeing
+        # the refusal can tell the two "Drill1"s apart before renaming.
+        _install([FakeSetup("Setup1", [FakeOp("Drill1")]),
+                  FakeSetup("Setup2", [FakeOp("Drill1")])])
+        out = _payload(st.handler(action="list"))
+        assert out["operation_count"] == 2
+        assert [(r["setup"], r["op"]) for r in out["operations"]] == \
+            [("Setup1", "Drill1"), ("Setup2", "Drill1")]
 
 
 # ── show / hide ─────────────────────────────────────────────────────────────
@@ -287,7 +265,7 @@ class TestShowFolder:
         f_op = FakeOp("FOp1", shown=True)
         folder = CAMFolder("Drilling", [f_op])
         top = FakeOp("Top1")
-        _install([FakeSetup("S", [top], children=[folder])])
+        _install([FakeSetup("S", [top], folders=[folder])])
         out = _payload(st.handler(action="isolate", operation="Top1"))
         assert out["operation"] == "Top1"
         assert top.isLightBulbOn is True
@@ -299,7 +277,7 @@ class TestShowFolder:
         f_op = FakeOp("FOp1")
         folder = CAMFolder("Drilling", [f_op])
         setup_op = FakeOp("S1")
-        setup = FakeSetup("Setup1", [setup_op], children=[folder])
+        setup = FakeSetup("Setup1", [setup_op], folders=[folder])
         _install([setup])
         out = _payload(st.handler(action="show_folder", folder="drilling"))   # case-insensitive
         assert out["folder"] == "Drilling"

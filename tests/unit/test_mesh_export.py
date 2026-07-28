@@ -237,7 +237,18 @@ class FakeDesign:
 
     @property
     def allComponents(self):
-        return self._all
+        # a COUNTED collection (count + item(i)), the shape _common.all_components walks
+        class _Coll:
+            def __init__(self, items):
+                self._l = items
+
+            @property
+            def count(self):
+                return len(self._l)
+
+            def item(self, i):
+                return self._l[i] if 0 <= i < len(self._l) else None
+        return _Coll(self._all)
 
     @property
     def allOccurrences(self):
@@ -402,15 +413,29 @@ class TestExportTarget:
         assert out["file_exists"] is True and out["size_bytes"] > 0
 
     def test_component_name_fallback_target(self, tmp_path):
-        # a Component NAME (not a body) resolves to the whole component as the export geometry
+        # a MULTI-body component NAME falls back to the whole component: the shared BodyRef refuses
+        # to pick one of its bodies, so component_by_name resolves it as the export geometry
         _wire_adsk()
         root = FakeComp("Root", bodies=[BRepBody("Body1")])
-        sub = FakeComp("SubPart", bodies=[BRepBody("Inner")])
+        sub = FakeComp("SubPart", bodies=[BRepBody("Inner"), BRepBody("Outer")])
         des = _install(FakeDesign(root, all_comps=[root, sub]))
         out = _payload(mx.export_handler(format="obj", target="SubPart",
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is sub
         assert "component" in out["target"].lower() and "SubPart" in out["target"]
+
+    def test_single_body_component_name_exports_its_body(self, tmp_path):
+        # a SINGLE-body component name resolves through the shared BodyRef to that body (the
+        # component fallback never runs) - the export geometry is the body, reported as a body
+        _wire_adsk()
+        root = FakeComp("Root", bodies=[BRepBody("Body1")])
+        inner = BRepBody("Inner")
+        sub = FakeComp("SubPart", bodies=[inner])
+        des = _install(FakeDesign(root, all_comps=[root, sub]))
+        out = _payload(mx.export_handler(format="obj", target="SubPart",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert des.exportManager.calls[-1].geom is inner
+        assert "body" in out["target"].lower() and "Inner" in out["target"]
 
     def test_occurrence_by_name_target(self, tmp_path):
         # a name that is neither a body nor a component resolves via the allOccurrences scan

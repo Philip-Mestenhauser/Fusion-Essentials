@@ -8,7 +8,7 @@ the degrees → radians conversion handed to setAngleExtent, and the operation-n
 import json
 import math
 
-from conftest import load_tool
+from conftest import assert_no_active_design, load_tool
 
 rv = load_tool("model_revolve")
 
@@ -211,3 +211,29 @@ class TestRevolve:
         _payload(rv.handler(sketch_name="S", angle_deg=90, second_angle_deg=30, symmetric=True))
         assert rf.last_input.two_sides is None     # symmetric wins
         assert rf.last_input.angle_extent is not None
+
+
+# ── honesty: failed/absent mutation must surface as isError, never a false ok ─
+# (the paths test_model_mirror.py / test_model_shell.py treat as mandatory)
+
+class TestHonesty:
+    def test_add_returning_none_is_error(self):
+        rf = _install([FakeSketch("S")])
+        rf.add = lambda inp: None
+        res = rv.handler(sketch_name="S")
+        assert res["isError"] is True and "no feature" in res["message"].lower()
+
+    def test_add_raising_surfaces_as_error(self):
+        rf = _install([FakeSketch("S")])
+
+        def _boom(inp):
+            raise RuntimeError("axis intersects the profile")
+
+        rf.add = _boom
+        res = rv.handler(sketch_name="S")
+        assert res["isError"] is True
+        assert "Revolve failed" in res["message"] and "axis intersects the profile" in res["message"]
+
+    def test_no_active_design(self):
+        _install([FakeSketch("S")])
+        assert_no_active_design(rv, rv.handler, sketch_name="S")

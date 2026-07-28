@@ -261,10 +261,9 @@ class TestConstruction:
 
 # ── the direct-edit-only constraint ─────────────────────────────────────────────────────────────
 #
-# setByPoint(Point3D)/setByLine(InfiniteLine3D) FAIL in parametric mode (live API docstrings). The
-# old tool called them anyway then told the user to switch the WRONG way. These pin the corrected
-# behaviour: in parametric, refuse coordinate point/axis with an actionable message; the EDGE-axis
-# path uses parametric-legal setByEdge; an offset plane works in BOTH modes.
+# setByPoint(Point3D)/setByLine(InfiniteLine3D) FAIL in parametric mode (live API docstrings).
+# These pin the contract: in parametric, refuse coordinate point/axis with an actionable message;
+# the EDGE-axis path uses parametric-legal setByEdge; an offset plane works in BOTH modes.
 
 class TestParametricConstraint:
     def test_point_at_coord_refused_in_parametric(self):

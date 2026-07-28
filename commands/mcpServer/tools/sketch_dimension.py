@@ -12,7 +12,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, resolve_sketch, target_component
+from ._common import ok, error, safe
 from . import _common
 from . import _inputs
 
@@ -22,17 +22,6 @@ _DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", 
 _DISTANCE_TYPES = ("distance", "horizontal_distance", "vertical_distance")  # sign is a signed placement
 _DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance",
                           description="What kind of dimension to add.")
-
-
-def _target_sketch(design, name):
-    nm = (name or "").strip()
-    if nm:
-        # Resolve across the whole design (active component first), not just the root component - so a
-        # sketch drawn in an activated sub-component is dimensionable like one in the root.
-        return resolve_sketch(design, nm), nm
-    # No name -> most recent sketch in the ACTIVE component (where the agent is building), matching the
-    # active-component convention model_extrude/sketch_add_geometry already use.
-    return _common.target_sketch(target_component(design), "")
 
 
 def _point_of(entity):
@@ -140,7 +129,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
-    sketch, requested = _target_sketch(design, sketch_name)
+    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sketch:
         return error(f"No sketch named '{requested}'." if requested else
     "No sketch to dimension. Create one first with sketch_create.")

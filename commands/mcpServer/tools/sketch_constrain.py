@@ -19,6 +19,26 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 
+# The entity kinds each constraint requires - prefixed onto a wrong-kind API failure so the caller
+# sees what the constraint needs ahead of the raw SWIG text ("invalid argument entityOne", a signature
+# dump). These match the live-verified refusals pinned in test_sketch_constrain.py.
+_REQUIRES = {
+    "perpendicular": "two lines/curves",
+    "parallel": "two lines/curves",
+    "tangent": "two curves (line/arc/circle), not a point",
+    "equal": "two curves of the same type",
+    "concentric": "two circles/arcs (each has a center), not a line",
+    "collinear": "two lines",
+    "midpoint": "a POINT as entity_one and a line/curve as entity_two",
+    "coincident": "a POINT as entity_one (coincident onto a curve puts that point on it)",
+    "horizontal": "one line (not a circle/arc)",
+    "vertical": "one line (not a circle/arc)",
+    "symmetry": "two entities plus an axis line (symmetry_line)",
+    "fix": "one sketch entity",
+    "unfix": "one sketch entity",
+}
+
+
 # constraint -> ("kind", method-or-None). kinds: two_curve | point_curve | one_line | symmetry | fix
 _CONSTRAINTS = {
     "perpendicular": ("two_curve", "addPerpendicular"),
@@ -88,6 +108,11 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         else:
             return error(f"unsupported constraint kind '{kind}'.")
     except Exception as e:
+        # A wrong-kind entity makes the API raise raw SWIG text; lead with what the constraint needs,
+        # keep the raw text as the tail so nothing is lost.
+        req = _REQUIRES.get(cname)
+        if req:
+            return error(f"'{cname}' needs {req}. API rejected it: {e}")
         return error(f"Could not apply {cname}: {e}")
     if not result_obj:
         return error(f"Applying {cname} returned nothing (entities may be incompatible for it).")

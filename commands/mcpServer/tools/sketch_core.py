@@ -192,7 +192,9 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
         "frame": frame,
         "note": ("Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps "
             "sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along "
-            "frame.x_world, +Y along frame.y_world - place geometry from those, not by eye."),
+            "frame.x_world, +Y along frame.y_world - place geometry from those, not by eye. On the "
+            "xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z "
+            "(read frame.y_world for the exact per-plane axis directions)."),
     })
 
 
@@ -204,32 +206,20 @@ _KINDS = ("line", "rectangle", "center_rectangle", "circle", "ellipse", "arc", "
 _KIND = _inputs.Choice("kind", list(_KINDS), required=True, description="Which entity to draw.")
 
 
-def _target_sketch(design, sketch_name: str):
-    """Resolve the target sketch by name via the shared cross-component resolver (active component
-    first, then root, then every other component), or default to the ACTIVE component's most
-    recently created sketch when no name is given."""
-    name = (sketch_name or "").strip()
-    if name:
-        return _common.resolve_sketch(design, name), name
-    coll = target_component(design).sketches
-    if coll.count:
-        return coll.item(coll.count - 1), None
-    return None, None
-
-
-def _draw_polyline(sketch, points, k, close):
+def _draw_polyline(sketch, points, k):
     """Draw a connected chain of lines through 'points' (a list of (x,y) in user units * k = cm).
 
     Each segment STARTS at the previous segment's endSketchPoint (the same SketchPoint object), so
-    consecutive segments SHARE a point - the loop is continuous and parametric (drags as one shape),
-    not a set of independent segments. With close=True, a final segment connects the last point back
-    to the first and a coincident constraint welds them. Returns a label, or None if < 2 points.
+    consecutive segments SHARE a point - the chain is continuous and parametric (drags as one shape),
+    not a set of independent segments. To CLOSE a loop, repeat the first point as the last: geometric
+    closure forms the profile with NO explicit closing coincident constraint. That constraint is what
+    the sketch solver rejects on many outlines (VCS_SKETCH_SOLVING_FAILED, live-verified), so
+    closed_path delegates to this repeated-first-point shape. Returns a label, or None if < 2 points.
     """
     pts = [(float(x), float(y)) for x, y in (points or [])]
     if len(pts) < 2:
         return None
     lines = sketch.sketchCurves.sketchLines
-    first = None
     prev_end = None
     for i in range(1, len(pts)):
         start = prev_end if prev_end is not None else _pt(pts[i - 1][0], pts[i - 1][1], k)
@@ -237,19 +227,8 @@ def _draw_polyline(sketch, points, k, close):
         ln = lines.addByTwoPoints(start, end)
         if ln is None:
             return None
-        if first is None:
-            first = ln
         prev_end = safe(lambda ln=ln: ln.endSketchPoint)
-    if close and first is not None and prev_end is not None:
-        # connect last point back to the first line's start point, sharing the SketchPoint so the
-        # loop is closed AND coincident.
-        start_pt = safe(lambda: first.startSketchPoint)
-        closing = lines.addByTwoPoints(prev_end, start_pt) if start_pt is not None else None
-        if closing is not None and start_pt is not None:
-            # explicit coincident constraint on top of the shared point (belt-and-suspenders)
-            sketch.geometricConstraints.addCoincident(closing.endSketchPoint, start_pt)
-    n = len(pts) - 1 + (1 if close else 0)
-    return f"polyline {len(pts)} pts, {n} segments{' (closed)' if close else ''}"
+    return f"polyline {len(pts)} pts, {len(pts) - 1} segments"
 
 
 def _all_sketch_curves_count(sketch):
@@ -269,7 +248,16 @@ def _draw(sketch, kind, p, k):
     """Dispatch a draw operation. p = params dict (raw user numbers). k = cm scale. Returns a label."""
     curves = sketch.sketchCurves
     if kind in ("polyline", "closed_path"):
-        return _draw_polyline(sketch, p.get("points") or [], k, close=(kind == "closed_path"))
+        pts = list(p.get("points") or [])
+        # closed_path DELEGATES to the polyline-with-repeated-first-point shape: appending the first
+        # point closes the loop geometrically (a profile forms + extrudes) without the explicit
+        # closing coincident the solver rejects on many outlines. Scales like polyline (no ~48 ceiling).
+        if kind == "closed_path" and len(pts) >= 2:
+            pts = pts + [pts[0]]
+        label = _draw_polyline(sketch, pts, k)
+        if label and kind == "closed_path":
+            label += " (closed)"
+        return label
     if kind == "line":
         ln = curves.sketchLines.addByTwoPoints(_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k))
         return f"line ({p['x1']},{p['y1']})->({p['x2']},{p['y2']})" if ln else None
@@ -379,7 +367,7 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, requested = _target_sketch(design, sketch_name)
+    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sketch:
         if (sketch_name or "").strip():
             return error(f"No sketch named '{sketch_name}'. Use sketch_get to list them, "
@@ -481,7 +469,7 @@ def draw_3d_line_handler(sketch_name: str = "", units: str = "mm",
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sketch, _ = _target_sketch(design, sketch_name)
+    sketch, _ = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sketch:
         if (sketch_name or "").strip():
             return error(f"No sketch named '{sketch_name}'. Use sketch_get or sketch_create.")
@@ -590,10 +578,8 @@ _ADD_DESC = (
                                            "[default]/cm/in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
                                            "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
-                                           "chain sharing endpoints (continuous + parametric); 'closed_path' closes the boundary. "
-                                           "closed_path's constraint chain FAILS past "
-                                           "~48 points (sketch solver); for a larger outline use 'polyline' with the first point repeated "
-                                           "as the last - geometric closure still forms the profile (scales to 264+). center_rectangle "
+                                           "chain sharing endpoints (continuous + parametric); 'closed_path' closes the boundary "
+                                           "(delegates to a repeated-first-point loop, so it scales to large outlines). center_rectangle "
                                            "adds NO center/symmetry constraints (unlike native) - constrain/dimension it after. Targets "
                                            "'sketch_name' (else the most recent sketch). WRITES; pair with view_screenshot to view it."
 )

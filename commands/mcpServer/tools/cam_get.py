@@ -14,12 +14,12 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse
-from ._cam_common import get_cam
+from ._cam_common import get_cam, find_operation
 
 app = adsk.core.Application.get()
 
 _SLICES = ("operations", "parameters", "tool", "references", "nc_programs", "time", "tools", "library",
-           "templates")
+           "library_types", "machines", "templates")
 
 # Keep operation rows readable (via _common.terse): a healthy op collapses to {name, tool, strategy, state}; an
 # abnormal op keeps the flag(s) that aren't default (is_suppressed=true, has_error=true, ...) and pops.
@@ -150,6 +150,22 @@ def _slice_library(cam, scope, library, tool_type):
     return _unwrap(cam_edit_tools.read_library(scope or "document", library, tool_type))
 
 
+def _slice_library_types(cam):
+    """The tool-type vocabulary (the geometry families a sample can be cloned from) that
+    cam_edit_tools resolves add_tools[].from_type against. Distinct from 'library' (a catalog's
+    tools); the add/remove/edit writes stay on cam_edit_tools."""
+    from . import cam_edit_tools
+    return _unwrap(cam_edit_tools._do_list_types())
+
+
+def _slice_machines(cam, vendor, machine_type):
+    """The machine catalog cam_edit_setup's 'machine' input can resolve from (Local + Fusion360
+    locations), each row name/vendor/model/location/kind/simulation_ready. 'vendor' and
+    'machine_type' (milling/turning/cutting/additive) filter."""
+    from . import cam_edit_setup
+    return _unwrap(cam_edit_setup.read_machines(vendor or "", machine_type or ""))
+
+
 def _slice_templates(cam, template_location, template_url, template_depth):
     """The CAM toolpath TEMPLATE library tree (folders + templates by URL) for a location
     (cloud/local/fusion/...) or a specific folder 'template_url'. Apply/save stay on cam_apply_template
@@ -168,13 +184,17 @@ def _slice_templates(cam, template_location, template_url, template_depth):
 # (we list their NAMES here); pass 'preset' to read one preset's feeds/speeds expressions (~17 rows).
 # The caller scopes to one operation first, then reads the detail they want.
 
-def _find_operation(cam, name):
-    """The Operation named `name` (case-insensitive EXACT), or (None, available-names). Delegates to
-    the shared _cam_common.find_operation so a name resolves the same way in every CAM tool - and so an
-    ambiguous/partial name is REFUSED (returns None + the available names) rather than silently
-    grabbing the first substring match."""
-    from . import _cam_common as _cc
-    return _cc.find_operation(cam, name)
+def _op_miss_error(operation, names):
+    """Word find_operation's (None, available). A DUPLICATED name comes back as each duplicate's
+    'Setup / op' path (leaf == the searched name) - that is ambiguity, not absence, so say so and
+    list the paths; a true miss lists the available operation names."""
+    want = (operation or "").strip().lower()
+    paths = [n for n in names if n and n.split(" / ")[-1].strip().lower() == want]
+    if paths:
+        return error(f"'{operation}' is ambiguous - {len(paths)} operations share that name: "
+                     f"{', '.join(paths)}. Rename the target so its name is unique, then retry.")
+    return error(f"No operation matching '{operation}'. Available (sample): "
+                 f"{', '.join(n for n in names[:20] if n)}.")
 
 
 def _grouped_visible_params(param_coll):
@@ -208,10 +228,9 @@ def _slice_parameters(cam, operation):
     if not (operation or "").strip():
         return None, error("include=['parameters'] needs 'operation' - the operation whose settings to "
                            "read (scope first with cam_get(setup=..., include=['operations'])).")
-    op, names = _find_operation(cam, operation)
+    op, names = find_operation(cam, operation)
     if not op:
-        return None, error(f"No operation matching '{operation}'. Available (sample): "
-                           f"{', '.join(n for n in names[:20] if n)}.")
+        return None, _op_miss_error(operation, names)
     groups = _grouped_visible_params(safe(lambda: op.parameters))
     return {"operation": safe(lambda: op.name), "strategy": safe(lambda: op.strategy),
             "sections": groups,
@@ -223,10 +242,9 @@ def _slice_tool(cam, operation, preset):
     expressions (the feeds/speeds recipe). Requires 'operation'."""
     if not (operation or "").strip():
         return None, error("include=['tool'] needs 'operation' - the operation whose tool to read.")
-    op, names = _find_operation(cam, operation)
+    op, names = find_operation(cam, operation)
     if not op:
-        return None, error(f"No operation matching '{operation}'. Available (sample): "
-                           f"{', '.join(n for n in names[:20] if n)}.")
+        return None, _op_miss_error(operation, names)
     t = safe(lambda: op.tool)
     if not t:
         return {"operation": safe(lambda: op.name), "tool": None}, None
@@ -262,7 +280,8 @@ def _slice_tool(cam, operation, preset):
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
-            scope: str = "", library: str = "", tool_type: str = "",
+            scope: str = "", library: str = "", tool_type: str = "", vendor: str = "",
+            machine_type: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0) -> dict:
     """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
@@ -310,6 +329,14 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         out["library"], e = _slice_library(cam, scope, library, tool_type)
         if e:
             return e
+    if "library_types" in inc:                  # the from_type vocabulary add_tools clones from
+        out["library_types"], e = _slice_library_types(cam)
+        if e:
+            return e
+    if "machines" in inc:                       # the machine catalog (names cam_edit_setup accepts)
+        out["machines"], e = _slice_machines(cam, vendor, machine_type)
+        if e:
+            return e
     if "templates" in inc:                      # the CAM toolpath template library tree
         out["templates"], e = _slice_templates(cam, template_location, template_url, template_depth)
         if e:
@@ -351,9 +378,10 @@ TOOL_DESCRIPTION = (
     "'references' (X-ref source docs), 'nc_programs', 'time' (cycle estimate), 'tools' (the tool sheet "
     "ops USE), 'library' (a tool LIBRARY's catalog you can add FROM; 'scope'=document/local/cloud/hub, "
     "'library'=shared-lib name/url, 'tool_type' filters; the add/remove/edit writes stay on "
-    "cam_edit_tools), 'templates' (the toolpath TEMPLATE library tree; 'template_location'="
-    "cloud/local/fusion/..., 'template_url' a folder, 'template_depth'; apply/save stay on "
-    "cam_apply_template / cam_save_template). Read-only; works without switching to Manufacture (op "
+    "cam_edit_tools), 'library_types' (the add_tools[].from_type vocabulary), 'machines' (MACHINE "
+    "catalog cam_edit_setup assigns; 'vendor'/'machine_type' filter), 'templates' (the toolpath "
+    "TEMPLATE library; apply/save stay on cam_apply_template / cam_save_template). "
+    "Read-only; works without switching to Manufacture (op "
     "VALIDITY is only trustworthy once Manufacture has been entered)."
 )
 
@@ -361,8 +389,8 @@ tool = (
     Tool.create_simple(name="cam_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices: operations | parameters | tool | references | nc_programs | "
-                           "time | tools | library | templates (list or comma-string). parameters/tool "
-                           "need 'operation'. Omit for the setups orientation slice."})
+                           "time | tools | library | library_types | machines | templates (list or "
+                           "comma-string). parameters/tool need 'operation'. Omit for the setups orientation slice."})
     .add_input_property("setup", {"type": "string",
             "description": "Scope operations/references/time to this setup name (omit = all setups)."})
     .add_input_property("operation", {"type": "string",
@@ -375,6 +403,11 @@ tool = (
             "description": "With include=['library'] + a shared scope: the library name/url (omit to list the libraries there)."})
     .add_input_property("tool_type", {"type": "string",
             "description": "With include=['library']: filter the catalog by tool type (e.g. 'ball', 'drill')."})
+    .add_input_property("vendor", {"type": "string",
+            "description": "With include=['machines']: filter the machine catalog by vendor (e.g. 'Haas')."})
+    .add_input_property("machine_type", {"type": "string",
+            "enum": ["milling", "turning", "cutting", "additive"],
+            "description": "With include=['machines']: keep only machines with this capability (the bundled catalog is mostly additive printers - 'milling' finds the mills)."})
     .add_input_property("template_location", {"type": "string",
             "description": "With include=['templates']: library location (cloud/local/fusion/...; default cloud)."})
     .add_input_property("template_url", {"type": "string",

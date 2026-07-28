@@ -1,185 +1,141 @@
 # Reference - building a tool from a vendor page
 
 Loaded on demand by the `build-tool-from-url` skill when a step needs the reasoning behind it, not
-just the instruction. No shop-specific data here - only the API facts and verified findings that
-justify how the skill is built.
+just the instruction. No shop-specific data here - only the facts that justify how the skill is
+built. Each contract is stated once, here or in `SKILL.md`, not both.
 
 ## The document tool library needs a CAM PRODUCT, never a CAM SETUP
 
-Verified live, and a real mistake to guard against: `cam_edit_tools(scope='document')` resolves via
-`get_cam()` (`_cam_common.py`), which needs `doc.products.itemByProductType('CAMProductType')` to
-exist. On a document that has never had CAM data, that product doesn't exist yet - `get_cam()`
-returns the error `"This document has no CAM (Manufacture) data. Open a document with setups, or
-create them in the Manufacture workspace."` That error text (and separately, `cam_create_setup`'s own
-tool description, which says "switch to Manufacture once if the doc has no CAM data") both read as if
-a SETUP is the fix. It is not. The CAM product is created just by entering the Manufacture workspace
-(`view_switch_workspace(workspace='manufacture')` -> `match.activate()`, nothing CAM-specific beyond
-that) - a setup is an entirely separate structure (a machining job: selects bodies, holds toolpaths)
-that has nothing to do with the tool library.
+`cam_edit_tools(scope='document')` needs the document's CAM product to exist. Entering the
+Manufacture workspace once (`view_switch_workspace(workspace='manufacture')`) is what creates it -
+nothing else is required. A setup is an entirely separate structure (a machining job: selects
+bodies, holds toolpaths) with no relation to the tool library; never create one to satisfy a
+tool-library precondition - it is needless work with its own side effects (an unwanted setup
+machining a body the operator may not want machined yet). The tools' own error text teaches this
+same fix when the CAM product is missing. The skill defers this step until after Phase 4's gate, so
+a failed gate never changes the workspace.
 
-Confirmed by a live A/B on 2026-07-08: creating a scratch `cam_create_setup`, then successfully
-adding+listing a tool, then DELETING the scratch setup (`cam_delete`) - the added tool remained in
-`cam_edit_tools(action='list', scope='document')` completely unaffected by the setup's removal. So
-Phase 1's discovery probe should be tried FIRST; only fall back to `view_switch_workspace` if it
-specifically fails with the "no CAM data" message, and never reach for `cam_create_setup` as part of
-this skill - it does needless work with its own side effects (an operator now has an unwanted setup
-sitting on their document, machining a body they may not want machined yet).
+## Discovering the `from_type` vocabulary
+
+`cam_edit_tools(action='list_types')` returns the live list of tool geometry families the add
+action can clone (it walks Fusion's bundled sample libraries at run time, so the list always matches
+the installed Fusion). It needs no scope, no library, and no CAM product - safe to call first.
 
 ## Why there's no vendor-vocabulary lookup table
 
-An earlier draft of this skill considered a static table mapping vendor phrasing ("corner radius",
-"ball nose", "square end") to Fusion `from_type` values. That was dropped: `cam_edit_tools`'s
-`_build_type_map()` (`commands/mcpServer/tools/cam_edit_tools.py`) builds `{tool_type: (library_url,
-index)}` at RUN TIME by walking Fusion's bundled sample libraries (`Milling Tools (Metric)`, `Hole
-Making Tools (Metric)`, `Cutting Tools (Metric)`) and reading each sample tool's own `tool_type`
-parameter - there is no enum anywhere in the source to mirror into a table, and any hand-written
-table would silently drift from whatever the installed Fusion version actually ships. Classifying
-against the live-discovered list (Phase 1) is both simpler and correct-by-construction.
+There is no enum anywhere to mirror into a static table - the vocabulary is whatever the installed
+Fusion's sample libraries contain (which is why `list_types` reads it live), and any hand-written
+mapping from vendor phrasing to `from_type` would silently drift. Classification is deliberately
+ordinary agent reasoning: vendor phrasing for the same geometry family varies too much across sites
+("corner radius end mill" vs. "bull nose" vs. a bare radius value that implies the same thing) to
+enumerate. Reading a spec sheet and picking the best-matching entry from a known list is a skill an
+agent already applies elsewhere - no special-purpose classifier needed.
 
-The classification step itself is deliberately left to ordinary agent reasoning rather than a rules
-engine: vendor phrasing for the same geometry family varies too much across sites ("corner radius
-end mill" vs. "bull nose" vs. a radius value that implies the same thing without naming it) to
-enumerate. An agent reading a spec sheet and picking the best-matching entry from a known list is the
-same skill it already applies elsewhere - no special-purpose classifier needed.
+## WebFetch is lossy - use a raw fetch + deterministic parse, and mine JSON-LD first
 
-## The `from_type` discovery probe, and why it's cheap and safe
+WebFetch converts HTML to Markdown and summarizes it with a small model before the content is seen;
+that step is not configurable and is lossy by design. A dimension that gets machined into part
+geometry must not pass through an unverified paraphrase. So: fetch the raw page (`curl -s -A
+"Mozilla/5.0" "<url>"` via Bash - the UA header avoids some vendor bot blocks) and parse
+deterministically (author the extraction fresh per run; a hardcoded parser drifts against the
+vendors' HTML):
 
-`cam_edit_tools(action='add', scope='document', add_tools=[{"from_type": "__probe__"}])` is
-deliberately built to fail: `_sample_for_type` in `cam_edit_tools.py` returns an error
-`"No sample tool of type 'x'. Available types: ..."` before any document mutation happens (`_do_add`
-validates every entry via `_build_entry` BEFORE adding any of them - see the "build ALL entries
-before adding any" comment in the source). So the probe is read-only in effect despite being routed
-through a write-shaped tool: nothing lands in the tool library, and the error text is the only
-useful output. This is the ONLY reliable way to enumerate the vocabulary today - there is no
-`action='list_types'` or equivalent.
+1. **Mine structured data first.** Parse every `<script type="application/ld+json">` block before
+   anything strips scripts. A schema.org `Product` block commonly carries `name`, `sku`/`mpn`
+   (product id), `brand` (vendor), and sometimes dimensions as clean JSON - more trustworthy than
+   scraping the rendered table, and destroyed if scripts are stripped first.
+2. Strip `<script>`/`<style>` blocks.
+3. Replace every remaining tag with a single separator marker (not deleted - the boundary matters).
+4. Collapse whitespace/`&nbsp;` runs to a single space.
+5. Collapse RUNS of the separator down to one - vendor spec tables put empty cells between a label
+   and its value (Hoffmann's markup has 2-3), and skipping only single separators misses fields.
+6. For each checklist field, regex the label (tolerating a short trailing symbol letter - "Overall
+   length L", "Cutter diameter Dc"), then capture the first following number+unit token.
+7. Keep the raw matched substring alongside the parsed value - the report shows both.
 
-**Only `scope='document'` reaches this error - checked live against the source, not assumed.**
-`_resolve_target(scope, library)` branches before `_build_entry` is ever called: `scope='document'`
-calls `get_cam()` (fails cleanly if no CAM product is open, with ITS OWN error, never reaching
-`_build_entry`); a shared scope (`local`/`cloud`/`hub`) instead needs a `library` name/url resolved
-first, which also fails or succeeds before `_build_entry` runs. So the type-vocabulary error text is
-reachable ONLY through `scope='document'` with a CAM product already open - there is no scope that
-discovers the vocabulary "for free" without one. This is why Phase 1 folds the CAM-job precondition
-into the SAME step as vocabulary discovery instead of deferring it to the Phase 4 gate: discovery
-itself can't happen without it, so checking it twice would be redundant, not extra-safe.
+A vendor site that renders specs as an image, a PDF, or a JS-only widget yields nothing to parse -
+Phase 4's gate catches that and stops the skill, with WebFetch as an explicitly lower-confidence
+fallback, never a silent equal.
 
-## WebFetch is documented as lossy - use a raw fetch + deterministic parse instead
+## Unit inference for bare numbers
 
-The skill originally used the built-in `WebFetch` tool for Phase 2. That was a real design mistake,
-caught the hard way: the first live run extracted "overall length: 76mm" via WebFetch when the
-vendor page actually said 57mm, and the mismatch only surfaced because the operator independently
-compared their own browser screenshot of the page against the built tool. Anthropic's own
-documentation for WebFetch says the conversion-to-markdown-then-summarize-with-a-small-model step
-"is not configurable" and is "lossy by design" for exactly this class of task, recommending `curl`
-via Bash for the unprocessed page when byte-exact extraction matters (confirmed via the
-`claude-code-guide` agent, 2026-07-08). A dimension that gets machined into part geometry is exactly
-the kind of value that must not pass through an unverified paraphrase step.
-
-**The fix: fetch raw HTML (`curl -s -A "Mozilla/5.0" "<url>"` via Bash), then parse deterministically
-with a script - never route the numbers through WebFetch's model.** Verified live against both sample
-vendor pages (2026-07-08) that this generalizes:
-
-- **Hoffmann Group** (`hoffmann-group.com/.../p/<id>`): raw fetch succeeds (a UA header avoided a bot
-  block that occurred without one, on at least one attempt). Spec table markup is `<td>label</td>` /
-  `<td>value&nbsp;unit</td>` pairs, but with 2-3 EMPTY `<td>` cells between label and value in the
-  observed markup, and labels carry a trailing symbol letter ("Overall length L", "Cutter diameter
-  Dc", "Number of effective cutters... Z") that must be tolerated, not matched literally. A naive
-  "grab the first number right after the label text" regex misses the value entirely because of the
-  empty-cell gap - collapsing RUNS of empty separators (not just single ones) before matching is
-  required, confirmed by direct inspection of the tag-stripped text stream.
-- **Harvey Tool** (`harveytool.com/products/tool-details-<id>`): raw fetch succeeds with no special
-  headers needed in testing. Markup is `<span class="dimension-text">Label:</span>` /
-  `<span class="dimension-value">Value</span>` pairs - a different tag shape than Hoffmann's table,
-  but the same "strip tags to a text stream, then regex the label-adjacent number" approach handles
-  both without a vendor-specific parser, PROVIDED the empty-separator-collapse step above is present.
-
-**The general extraction shape that works on both** (a sketch, not a shipped script - author it fresh
-per run, since a hardcoded parser would be one more thing to keep in sync with two vendors' HTML,
-against the whole point of staying dependency-light):
-1. Strip `<script>`/`<style>` blocks.
-2. Replace every remaining tag with a single separator marker (not deleted - the boundary matters).
-3. Collapse whitespace/`&nbsp;` runs to a single space.
-4. Collapse RUNS of the separator marker (not just consecutive ones from step 2, but ones left after
-   whitespace collapse too) down to one - this is the step that was missing on the first attempt and
-   caused every field to come back empty against the real Hoffmann page.
-5. For each checklist field, regex: `<label>[A-Za-z]{0,3}\s*<sep>?\s*([0-9][0-9.,/]*\s*(?:mm|in|deg|
-   rpm|min|&quot;|")?)`, trying the plain label first and a symbol-suffixed variant second.
-6. Keep the raw matched substring alongside the parsed value - Phase 6 shows both so the operator can
-   eyeball the literal source text, not just trust a number.
-
-A vendor site that renders specs as an image, a PDF datasheet, or a JS-only widget with no server-
-rendered text will fail step 1 outright (nothing to grep) - Phase 4's gate (minimum viable field set)
-is what catches that and stops the skill, with an explicit fallback to WebFetch flagged as
-lower-confidence rather than silently accepted as equally good.
+A dimension keeps its own unit token, passed straight into Fusion's expression parser (`"3 mm"`,
+`"0.125 in"`). A BARE number (no unit) is inferred in order: the field's column header/units legend,
+then a page-wide unit declaration (locale, a "dimensions in mm" note), then a sibling dimension's
+unit in the same spec block. If two readings stay plausible (`3` as 3 mm or 3 in), the skill asks
+rather than assumes - a machined length is not a place to default a unit.
 
 ## The corner-radius-to-diameter ratio as a disambiguation signal
 
-This is the load-bearing geometric check the skill's classification step should lean on when vendor
-prose alone is ambiguous or (as with the Hoffmann example above) actively misleading:
+The load-bearing geometric check when vendor prose is ambiguous or misleading:
 - corner radius == 0 (or absent/negligible): a flat/square end mill.
 - 0 < corner radius < diameter/2: a bull-nose / corner-radius end mill.
 - corner radius == diameter/2 (within rounding): a ball-nose / full-radius end mill.
 - a stated included angle or taper with no flute-length-scale radius: a chamfer mill or countersink,
   not an end mill family at all.
-Vendor terminology is not always precise about this distinction (Hoffmann's "slot drill" naming a
-ball-nose profile is a real example, not a hypothetical) - the dimensional ratio is more reliable
-than the vendor's own category label when the two disagree.
+Vendor terminology is imprecise about this (a "slot drill" naming a ball-nose profile is a real
+case) - the dimensional ratio outranks the vendor's own category label when they disagree.
 
-## The `product_id` / `vendor` fields: RESOLVED live - they exist, but fail SILENTLY, not loudly
+## Reading a tool's real parameters - never guess a name
 
-Resolved on the first real run (2026-07-08), against `T2-Reference-Drive01 v1` after switching it
-into Manufacture. `tool_productId` and `tool_vendor` ARE real parameters on a non-holder (`flat end
-mill`) tool - confirmed by reading the tool's full `.parameters` collection via `sys_execute_script`
-(the parameter names are `tool_productId`/`tool_vendor`, not the holder JSON's `product-id`/`vendor`
-keys - different naming, same concept). BUT: passing `product_id`/`vendor` on the `cam_edit_tools`
-`add_tools` entry did NOT error, and did NOT apply them either - `_do_add` returned
-`{"added": 1, ...}` cleanly, yet a subsequent parameter read-back showed both fields as empty
-strings (`''`). This is a THIRD failure mode beyond "errors" and "applies cleanly" that the original
-design didn't anticipate: a silent no-op that looks identical to success from the return value alone.
+`cam_edit_tools(action='parameters', scope='document', tool=<index>)` returns every parameter of one
+tool: its `name`, `expression`, evaluated `value`, and a `formula_source` flag for a parameter whose
+expression is another parameter's name. This is how the reconcile step (Phase 5) learns the ACTUAL
+parameter names on the built tool, so it edits real names instead of guessing - the defect this read
+exists to close. `action='list'` returns only a summary (diameter/flutes/type/description/number and
+the tool's product identity); the full per-dimension read is `action='parameters'`.
 
-**The only way to catch this is reading the live parameter values back after the add** - there is no
-error text to branch on, so Step 1's original "if the call errors, fall back to description" logic
-never fires for this case; it needs Step 2's read-back to catch it and a subsequent
-`action='edit'` to actually land the values:
-```
-cam_edit_tools(action='edit', scope='document', tool=<index>,
-                parameters={"tool_productId": "'<id>'", "tool_vendor": "'<vendor>'"})
-```
-(Note the quoted-string expression form - `tool.parameters.itemByName(...).expression = "'text'"`,
-matching how `tool_description`'s own expression is stored: a Python string literal, not a bare
-value.) After this edit, the read-back confirmed both fields populated correctly. So: `product_id`/
-`vendor` DO have a structured home on a cutting tool (no need for the `DESCRIPTION_TEMPLATE`
-fallback in practice) - the add-path integration for them is just broken/no-op'd in the current
-`cam_edit_tools.py`, and `action='edit'` is the reliable path until that's fixed tool-side. This is
-an MCP-tool gap worth fixing upstream in `_build_entry` (the `product_id`/`vendor` keys are accepted
-in the schema but evidently dropped somewhere in the JSON-build path before `Tool.createFromJson`),
-not something to keep working around in every skill that hits it.
+## `product_id` / `vendor` land on the tool at add time - and a clean add proves it
 
-## Some dimensions are FORMULA-DERIVED, not free parameters - a genuine, un-fixable gap
+Passing `product_id`/`vendor` on an `add_tools` entry sets the tool's `tool_productId`/`tool_vendor`
+parameters, and the add reads them back and ERRORS if either failed to land - so an error-free
+`{"added": N}` is a verified claim, no post-add confirmation needed. The `action='list'` summary does
+not surface these two fields, so a later audit reads them via `action='parameters'`, not a list row.
 
-Not every mismatch is fixable by an `edit`. Verified live: `tool_shoulderLength`'s expression on a
-`flat end mill` tool is the literal string `"tool_fluteLength"` - it is DEFINED as equal to flute
-length, not an independent value. Setting `tool_shoulderLength` directly to a different expression
-would work syntactically, but breaks the tool's own internal formula (the two fields silently
-diverge instead of one another tracking the other, which is presumably intentional tool-modeling
-behavior, not a bug). The Hoffmann sample tool had a vendor-stated "shoulder length" of 21mm that
-does not equal its flute length (16mm) - these are two genuinely different measurements the vendor
-tracks separately that Fusion's tool model does not.
+## Formula-derived dimensions - report, don't overwrite
 
-This is a real, permanent gap for THIS tool type's parameter model, not a skill oversight - per the
-operator's own call (2026-07-08), the right behavior is to leave the formula alone (accept
-`tool_shoulderLength == tool_fluteLength` as Fusion's modeling choice) and report the vendor's
-un-appliable value plainly in Phase 6, rather than overwrite a derived formula to force an exact
-match. Treat any OTHER formula-derived parameter the same way if encountered: check
-`.expression` before assuming a field is independently settable - if it references another parameter
-name rather than holding a literal, overwriting it changes the tool's internal relationship, not just
-one field, and that decision belongs to the operator, not a silent default.
+Some tool dimensions are formulas tracking another parameter (a flat end mill's `tool_shoulderLength`
+is the expression `tool_fluteLength`, not an independent value); `action='parameters'` flags these
+with `formula_source`. Editing such a parameter succeeds but returns a warning naming the
+relationship being overwritten. The shop policy: leave the formula intact - accept Fusion's
+tool-modeling choice - and report the vendor's un-appliable value as `deliberately not applied` in
+Phase 6 rather than forcing an exact match that silently breaks the tool's internal relationship. A
+warning-free edit means the target held a literal and was safe to set.
 
-## Presets are opportunistic, unlike `insert-into-template`'s `PART_PARAMS`
+## Fusion parameter names for the reconcile step - NEEDS-LIVE-VERIFICATION
 
-`insert-into-template`'s `PART_PARAMS` (PartX/Y/Z) is a load-bearing optional feature - when present,
-it drives stock resizing, so its absence is worth a note to the operator. Feeds/speeds presets here
-are different: they're a nice-to-have capture of data the vendor page might already show (a
+The reconcile step matches each vendor spec field to a Fusion tool parameter. The table below is the
+current best knowledge, NOT an asserted contract: a name is filled in only where the repo's own code
+or tests already use it (source cited); a field whose Fusion parameter name the repo has not yet
+confirmed is left blank, to be filled by the one-time live probe.
+
+The AUTHORITATIVE source for any name is always the live read on a real tool -
+`cam_edit_tools(action='parameters', scope='document', tool=<i>)` - not this table. When a blank row
+matters for a build, read the real names rather than guessing.
+
+| Vendor spec field | Fusion parameter | Evidence |
+|---|---|---|
+| cutting / cutter diameter | `tool_diameter` | cam_edit_tools.py (diameter override), test_cam_edit_tools.py |
+| number of flutes | `tool_numberOfFlutes` | cam_edit_tools.py (summary), test_cam_edit_tools.py (edit) |
+| length of cut / flute length | `tool_fluteLength` | cam_edit_tools.py (`_formula_source`), test_cam_edit_tools.py |
+| shoulder length | `tool_shoulderLength` (often formula = `tool_fluteLength`) | cam_edit_tools.py, test_cam_edit_tools.py |
+| product id / part number | `tool_productId` | cam_edit_tools.py (`_build_entry`) |
+| vendor name | `tool_vendor` | cam_edit_tools.py (`_build_entry`) |
+| spindle speed (preset) | `tool_spindleSpeed` | cam_edit_tools.py (preset path) |
+| cutting feed (preset) | `tool_feedCutting` (mill) / `tool_feedPlunge` (drill) | cam_edit_tools.py (`_FEED_PARAM_CANDIDATES`) |
+| overall length (OAL) | *(blank - verify live)* | not in repo; read via `action='parameters'` |
+| shank / shaft diameter | *(blank - verify live)* | not in repo; read via `action='parameters'` |
+| corner radius | *(blank - verify live)* | not in repo; read via `action='parameters'` |
+| taper / included angle | *(blank - verify live)* | not in repo; read via `action='parameters'` |
+
+**To confirm the blank rows once (a live probe, run with a document open):** build one tool of each
+relevant family, then `cam_edit_tools(action='parameters', scope='document', tool=<i>)` and read the
+returned `name`s; the OAL / shank / corner-radius / taper parameter names are authoritative from that
+read. Fill the blank rows from it and drop the NEEDS-LIVE-VERIFICATION marking on this section.
+
+## Presets are opportunistic
+
+Feeds/speeds presets are a nice-to-have capture of data the vendor page might already show (a
 materials table, a max RPM), never something the skill computes, derives, or needs for the tool to
-be usable. So their absence gets no note in the final report - it isn't a gap, just nothing to
-capture this time.
+be usable. Their absence gets no note in the final report - it isn't a gap, just nothing to capture
+this time.

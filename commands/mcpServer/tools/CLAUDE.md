@@ -52,15 +52,15 @@ don't edit between the markers.
 
 | Helper | Provides (import from here - never re-implement) |
 |---|---|
-| `_common` | ok/error/safe, design/target_component, resolve_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate |
-| `_inputs` | the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool |
+| `_common` | ok/error/safe, design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), most_recent_body, open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate |
+| `_inputs` | the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool + length_value_input/looks_like_expression/expression_report (literal-or-parameter-expression lengths) + world_construction_axis (world key -> origin ConstructionAxis) |
 | `_outputs` | RETURNS kinds (ReturnsHandle/Urn/Name/Value/Verdict) - declare a tool's stable outputs once |
 | `_holder` | holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries |
 | `_data_common` | cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, doc_insert_occurrence (hub/project/folder/URN) |
-| `_cam_common` | get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / find_operation (resolve a setup/operation by name, case-insensitive, returning the object + available names) over setups / walk_operations (the shared setup + operation walks) + expression_error (the post-set CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness (the one CAM job-health signal) |
+| `_cam_common` | get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / resolve_cam_node (the ONE CAM tree traversal + by-name resolver every CAM tool targets through: case-insensitive EXACT, a miss lists the available names, a DUPLICATED name is REFUSED naming each hit's setup path; kinds=/setup= scope it) + operations_under (the ops nested under one setup/folder/pattern) + find_setup / find_operation (the (obj, available_names) wrappers over the same resolver) + expression_error (the post-set CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness (the one CAM job-health signal) |
 | `_export` | sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk substrate shared by design_export + mesh_export |
-| `_joints` | build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk - joints AND asBuiltJoints, root and every sub-component - that the health rollups count broken joints over) + find_joint (resolve ONE by name over those same scopes) + all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one offset-is-frame-Z wire sentence every joint payload appends) |
-| `_view_common` | camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set |
+| `_joints` | build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk - joints AND asBuiltJoints, root and every sub-component - that the health rollups count broken joints over) + find_joint (resolve ONE by name over those same scopes) + motion_link_partner (a joint's own MotionLink membership -> linked-partner name; joint_drive's second-member refusal gates on it) + all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one offset-is-frame-Z wire sentence every joint payload appends) |
+| `_view_common` | camera-orientation table for the standard named views - view_direction/look_direction/up_vector plus the true-orthographic-face set + apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics) |
 <!-- END GENERATED CATALOG -->
 
 ## Postconditions — an Edit tool declares verify-the-effect (the third kind system)
@@ -234,7 +234,7 @@ Hard rules:
 - `test_tool_naming.py` — the naming schema: verb vocabulary + verb-kind/`write=` agreement.
 - `test_write_status_annotations.py` — every registered tool declares a write-status annotation.
 - `test_wire_ascii.py` — every description/note/`*_DESCRIPTION` is pure ASCII.
-- `test_generated_docs_current.py` — shells `gen_spec.py`/`gen_manifest.py`/`gen_wiring.py --check`;
+- `test_generated_docs_current.py` — shells `gen_all.py --check` (`gen_manifest.py`/`gen_wiring.py`/`gen_posture.py`);
   fails with the regen command when a doc has gone stale.
 - `test_helper_duplication.py` — a denylist: a known shared symbol (`get_cam`, `sanitize`,
   `target_sketch`, …) may only be DEFINED in its home helper module; re-implementing it locally fails.

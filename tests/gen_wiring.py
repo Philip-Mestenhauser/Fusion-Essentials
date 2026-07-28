@@ -8,8 +8,7 @@ the repo, not a human), so an agent developing tools can see: where breadcrumbs 
 where a guard is duplicated across the surface (a shared-helper candidate), and where a tip points at a
 name that no longer exists (a dead reference).
 
-It is the pointer-map counterpart to TOOL_MANIFEST (what tools exist) and TEST_SPEC (what they're
-pinned to do):
+It is the pointer-map counterpart to TOOL_MANIFEST (what tools exist):
 
     py -3 tests/gen_wiring.py          # writes tests/generated/TOOL_POINTER_MAP.md
     py -3 tests/gen_wiring.py --check  # exit 1 if TOOL_POINTER_MAP.md is stale

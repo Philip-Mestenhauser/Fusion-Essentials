@@ -253,6 +253,13 @@ _LF_MAX_DEPTH = 12
 # (data_get(project, folder=<path>)).
 _LF_FOLDER_BUDGET = 20
 
+# WALL-CLOCK budget for the folder-tree walk, on top of _LF_FOLDER_BUDGET's fetch count: a single
+# dataFolders fetch can itself hang past normal latency on a transient network stall (the same class
+# live-verified for _data_read's project/file walk - see its _TIME_BUDGET_S). The fetch-count cap
+# never catches a stall on fetch #1. Checked BETWEEN folder visits only (an in-flight fetch can't be
+# interrupted); 'time_truncated' is a SIBLING of 'truncated', never a replacement.
+_TIME_BUDGET_S = 20.0
+
 
 def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4) -> dict:
     """Return a project's folder tree (name, id, path) to a bounded depth and folder budget."""
@@ -275,12 +282,12 @@ def list_folders_handler(project: str = "", project_id: str = "", max_depth: int
 
     try:
         root = proj.rootFolder
-        tree, count, truncated = _folder_tree_bounded(root, depth)
+        tree, count, truncated, time_truncated = _folder_tree_bounded(root, depth)
     except Exception as e:
         return error(f"Could not read folder tree: {e}")
 
     return ok({"project": safe(lambda: proj.name), "max_depth": depth,
-        "folder_count": count, "truncated": truncated,
+        "folder_count": count, "truncated": truncated, "time_truncated": time_truncated,
         "folders": tree})
 
 
@@ -289,19 +296,27 @@ def _folder_tree_bounded(root, max_depth):
     run/archive subtrees) and HARD-bounded by _LF_FOLDER_BUDGET fetches - every folder whose children
     are enumerated costs one main-thread cloud round-trip, so nothing beyond the budget is fetched
     (not even a has-children count). A node whose children were NOT fetched is marked:
-    folders_truncated=true when the BUDGET cut it, children_unknown=true at the depth cap.
-    `truncated` (returned) reports only the budget cut - the depth cap is caller-chosen and visible
-    as max_depth. Returns (tree, node_count, truncated)."""
+    folders_truncated=true when the BUDGET (fetch count OR the _TIME_BUDGET_S wall-clock deadline,
+    checked between folder visits since an in-flight fetch can't be interrupted) cut it,
+    children_unknown=true at the depth cap. `truncated` (returned) reports only the budget cut - the
+    depth cap is caller-chosen and visible as max_depth. Returns (tree, node_count, truncated,
+    time_truncated) - time_truncated is a SIBLING flag naming a wall-clock stall specifically."""
     tree = []
     count = 0
     fetches = 0
     queue = [(root, tree, None, "", 0)]    # (folder, children-list in the output, its node, path, depth)
     truncated = False
+    time_truncated = False
+    deadline = time.monotonic() + _TIME_BUDGET_S
     while queue:
         folder, children_out, node, path, depth = queue.pop(0)
-        if fetches >= _LF_FOLDER_BUDGET:
-            # budget exhausted: this folder's children are NOT enumerated - flag it, never guess
+        stalled = time.monotonic() > deadline
+        if fetches >= _LF_FOLDER_BUDGET or stalled:
+            # budget exhausted (fetch count OR time): this folder's children are NOT enumerated -
+            # flag it, never guess.
             truncated = True
+            if stalled:
+                time_truncated = True
             if node is not None:
                 node.pop("folders", None)
                 node["folders_truncated"] = True
@@ -326,7 +341,7 @@ def _folder_tree_bounded(root, max_depth):
                 # round-trip) - say so instead of implying 'none'.
                 child["children_unknown"] = True
     _prune_empty_folder_lists(tree)
-    return tree, count, truncated
+    return tree, count, truncated, time_truncated
 
 
 def _prune_empty_folder_lists(nodes):
@@ -350,16 +365,32 @@ def _folder_counts(folder):
     return files, subs
 
 
-def _subtree_counts(folder, _depth=0):
+# Folder-visit budget for the recursive blast-radius count. Each visited folder is a main-thread
+# cloud round-trip (dataFiles.count + dataFolders.asArray), so a wide subtree could stall the delete
+# preview past the handler cap. When the budget is spent the counts are a LOWER BOUND (_state
+# ['truncated']=True), reported as "at least N" - honest, and never a hang.
+_SUBTREE_VISIT_BUDGET = 60
+
+
+def _subtree_counts(folder, _depth=0, _state=None):
     """(total_file_count, total_subfolder_count) for the WHOLE subtree under 'folder' (recursive,
-    depth-capped). This is the real blast radius of a recursive delete - the immediate counts hide
-    nested files that force=true would also wipe (and whose xrefs would be orphaned)."""
+    depth- and visit-capped). This is the real blast radius of a recursive delete - the immediate
+    counts hide nested files that force=true would also wipe (and whose xrefs would be orphaned).
+    Bounded by _SUBTREE_VISIT_BUDGET folder visits; on a bigger subtree the walk stops and
+    _state['truncated'] is set, so the returned counts are a lower bound rather than a main-thread
+    hang."""
+    if _state is None:
+        _state = {"visits": 0, "truncated": False}
     files = safe(lambda: folder.dataFiles.count, 0) or 0
     subs = 0
     if _depth < 32:
         for sub in safe(lambda: folder.dataFolders.asArray(), []) or []:
+            if _state["visits"] >= _SUBTREE_VISIT_BUDGET:
+                _state["truncated"] = True
+                break
+            _state["visits"] += 1
             subs += 1
-            f, s = _subtree_counts(sub, _depth + 1)
+            f, s = _subtree_counts(sub, _depth + 1, _state)
             files += f
             subs += s
     return files, subs
@@ -406,22 +437,29 @@ def delete_folder_handler(folder_id: str = "", confirm_name: str = "",
     recursive_confirm = (recursive_confirm or "").strip()
 
     if non_empty:
-        # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too).
-        total_files, total_subs = _subtree_counts(folder)
+        # NON-EMPTY = a recursive subtree wipe. Compute the full blast radius (nested files too),
+        # bounded by a folder-visit budget so a huge subtree can't hang the preview.
+        subtree_state = {"visits": 0, "truncated": False}
+        total_files, total_subs = _subtree_counts(folder, _state=subtree_state)
+
+        def _n(count):
+            # a budget-truncated walk under-counts; say so instead of implying an exact total.
+            return f"at least {count}" if subtree_state["truncated"] else str(count)
+
         if not force:
             return error(
                 f"'{actual_name}' is not empty (immediate files: {file_count}, subfolders: "
                 f"{sub_count}). Deleting it RECURSIVELY removes its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) total - and bypasses the "
-                "per-file reference-orphan check. Pass force=true AND recursive_confirm="
+                f"{_n(total_files)} file(s) and {_n(total_subs)} subfolder(s) total - and bypasses "
+                "the per-file reference-orphan check. Pass force=true AND recursive_confirm="
                 f"'{actual_name}' to do this, or empty it first (data_delete_file for files).")
         # force is set but require the explicit recursive acknowledgment matching the name.
         if recursive_confirm != actual_name:
             return error(
                 f"RECURSIVE DELETE of '{actual_name}' would remove its ENTIRE subtree: "
-                f"{total_files} file(s) and {total_subs} subfolder(s) - and bypasses the per-file "
-                "reference-orphan check (nested referenced files would be orphaned). This is "
-                "irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
+                f"{_n(total_files)} file(s) and {_n(total_subs)} subfolder(s) - and bypasses the "
+                "per-file reference-orphan check (nested referenced files would be orphaned). This "
+                "is irreversible. To proceed, pass recursive_confirm='" + actual_name + "' "
                 "(a deliberate second acknowledgment). Nothing was deleted.")
 
     try:

@@ -276,7 +276,7 @@ class TestHonesty:
         assert res["isError"] is True and "sweep failed" in res["message"].lower()
 
 
-# ── cross-component hosting (F24 class): the feature lands on the profile's OWNER ────────────────
+# ── cross-component hosting: the feature lands on the profile's OWNER ────────────────────────────
 
 class _OwnedProfile:
     """A closed profile whose parentSketch.parentComponent names its OWNING component - the chain
@@ -312,7 +312,7 @@ def _install_two_component(body_names=("Body1",)):
 class TestCrossComponentHost:
     def test_sweep_is_built_on_the_profiles_owning_component(self):
         # The profile is owned by sub-component 'Frame' while ROOT is active. Handing another
-        # component's profile to the ACTIVE component's features raises bSet live (F24), so the feature
+        # component's profile to the ACTIVE component's features raises bSet live, so the feature
         # must be created on the OWNER's features - proven here by which features object got the call.
         root_sf, sub_sf, _ = _install_two_component()
         out = _payload(sw.handler(profile={"sketch": "Prof", "profile_index": 0},

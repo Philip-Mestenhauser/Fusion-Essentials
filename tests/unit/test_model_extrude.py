@@ -482,6 +482,22 @@ class TestTargetBodies:
         res = ex.handler(sketch_name="S", distance=5, operation="cut", target_bodies="Nope")
         assert res["isError"] is True and "Nope" in res["message"]
 
+    def test_scoped_echo_qualifies_same_named_bodies_by_owning_component(self):
+        # Fusion auto-names every body 'Body1' by default, so two DIFFERENT target bodies that
+        # happen to share that name must still read as distinguishable entries in
+        # 'scoped_to_bodies' - otherwise a cut mis-targeted onto the wrong body's component is
+        # invisible in the echo (the live defect this pins).
+        h1, h2 = "/v" + "A" * 70, "/v" + "B" * 70
+        carrier = _FakeBody("Body1")
+        carrier.parentComponent = type("C", (), {"name": "Carrier"})()
+        inner_ring = _FakeBody("Body1")
+        inner_ring.parentComponent = type("C", (), {"name": "Inner_Ring"})()
+        _install_geom(bodies={h1: carrier, h2: inner_ring})
+        out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut",
+                                  target_bodies=[h1, h2]))
+        assert out["scoped_to_bodies"] == ["Carrier/Body1", "Inner_Ring/Body1"]
+        assert out["scoped_to_bodies"][0] != out["scoped_to_bodies"][1]
+
 
 # ── extent selector guards (cross-extent conflicts) ──────────────────────────
 # 'extent' picks the depth style; these pin the cross-extent validation that must fire BEFORE any
@@ -872,7 +888,7 @@ class TestAffectedBodies:
 
 class TestCrossComponentCut:
     def test_unscoped_cut_bleeding_into_other_component_warns(self):
-        # ITEM 1: cut with no target_bodies removes material from BOTH CompA (sketch owner) and CompB.
+        # Case: unscoped cut, both components visible - material leaves BOTH CompA (sketch owner) and CompB.
         _install_multi(bodyA_after=45.6, bodyB_after=45.6)
         out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut"))
         assert out["cut_touched_other_components"] == ["CompB"]
@@ -887,7 +903,7 @@ class TestCrossComponentCut:
         assert "a named body is cut even if hidden" in note
 
     def test_component_field_names_where_material_landed_not_sketch_owner(self):
-        # ITEM 2: the cut removes material ONLY from CompB, though the sketch lives in CompA. The
+        # Case: the cut removes material ONLY from CompB, though the sketch lives in CompA. The
         # 'component' field must name CompB (where it landed), not the sketch's owning component.
         _install_multi(bodyA_after=48.0, bodyB_after=45.6)   # CompA untouched
         out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut"))
@@ -936,11 +952,50 @@ class TestCrossComponentCut:
         assert "WARNING" not in out["note"]
 
 
-# ── through_all direction teaching (item 3, PLATFORM behavior) ──────────────────────────────────────
+# ── through_all direction teaching (PLATFORM behavior) ──────────────────────────────────────────────
 # A sketch ON a body's face has its normal pointing AWAY from the material, so through_all's default
 # (and symmetric) direction hits pure air and Fusion raises 'body not found to extrude through'. The
 # direction MAPPING is correct - a negative 'distance' cuts into the body - so the error TEACHES the
 # flip at the failure moment.
+
+class TestBodySplitDisconnection:
+    """A cut/intersect that DISCONNECTS the target leaves it in several pieces. The extruded profile
+    removes no bodies, so a NET increase in the design-wide solid count is split-off pieces - warned,
+    naming the pieces, so a later op does not silently target the wrong one."""
+
+    def test_cut_that_disconnects_target_warns(self):
+        ef = _install([FakeSketch("S")])
+        root = ex.app.activeProduct.rootComponent
+        bar = BRepBody("Bar", volume=100.0)
+        root.bRepBodies = _NamedCollection([bar])
+        piece2 = BRepBody("Bar1", volume=40.0)
+
+        def _add(inp):
+            root.bRepBodies._items.append(piece2)     # the cut disconnected the bar into a 2nd body
+            f = FakeFeature()
+            f.bodies = type("BB", (), {"count": 2, "item": staticmethod(lambda i: [bar, piece2][i])})()
+            return f
+        ef.add = _add
+        out = _payload(ex.handler(sketch_name="S", operation="cut", distance=-5))
+        assert out["body_split"] == ["Bar", "Bar1"]
+        assert "DISCONNECTED" in out["note"]
+
+    def test_blind_cut_that_does_not_disconnect_no_warning(self):
+        # a cut that removes material without splitting leaves the solid count unchanged -> no warning.
+        ef = _install([FakeSketch("S")])
+        root = ex.app.activeProduct.rootComponent
+        root.bRepBodies = _NamedCollection([BRepBody("Bar", volume=100.0)])
+        out = _payload(ex.handler(sketch_name="S", operation="cut", distance=-5))
+        assert "body_split" not in out
+
+    def test_new_operation_never_flagged_as_split(self):
+        # a 'new' extrude makes a body by design - the split warning is scoped to cut/intersect.
+        ef = _install([FakeSketch("S")])
+        root = ex.app.activeProduct.rootComponent
+        root.bRepBodies = _NamedCollection([BRepBody("Bar", volume=100.0)])
+        out = _payload(ex.handler(sketch_name="S", distance=5))   # operation defaults 'new'
+        assert "body_split" not in out
+
 
 class TestThroughAllDirectionTeaching:
     def test_body_not_found_teaches_negative_distance(self):

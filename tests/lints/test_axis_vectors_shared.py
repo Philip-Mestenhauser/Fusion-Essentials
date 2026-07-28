@@ -8,7 +8,8 @@ The AxisRef kind resolves x/y/z (and edge/face handles) to a direction, backed b
 `_AXES = {"x": (1,0,0), ...}` re-rolls that constant (and forgoes handle support). This catches the
 copy by VALUE SHAPE: a dict mapping the string keys x, y AND z to unit-axis vectors, anywhere outside
 the home module - distinct from a view-direction table (front/top/... keys) or the construction-axis
-name maps (string values), which this deliberately does not touch.
+NAME map (string values), which this deliberately does not touch: that map is homed as
+`_inputs.WORLD_AXIS_ATTRS` and guarded by test_helper_duplication.py instead.
 """
 
 import ast
@@ -58,7 +59,8 @@ class TestAxisVectorsShared:
             "(or the AxisRef kind, which also accepts an edge/face handle):\n  " + "\n  ".join(offenders))
 
     def test_the_lint_bites(self):
-        # a copy of the map is caught; the look-alikes (view directions, construction-axis names) are not.
+        # a copy of the map is caught; the look-alikes (view directions, the construction-axis NAME
+        # map - homed as _inputs.WORLD_AXIS_ATTRS, guarded by test_helper_duplication.py) are not.
         assert _is_xyz_vector_map(ast.parse('{"x": (1,0,0), "y": (0,1,0), "z": (0,0,1)}').body[0].value)
         assert not _is_xyz_vector_map(ast.parse('{"front": (0,-1,0), "top": (0,0,1)}').body[0].value)
         assert not _is_xyz_vector_map(

@@ -121,7 +121,7 @@ class TestPickFace:
         assert f is not None and f.name == "cap"   # skips the bigger non-planar wall
 
     def test_top_bottom_skip_nonplanar_cylinder_wall(self):
-        # THE CABLE BUG: a cylinder's curved side wall spans the whole height, so by raw
+        # The curved-wall trap: a cylinder's curved side wall spans the whole height, so by raw
         # Z it would beat the flat end caps for both top and bottom — but createByPlanarFace
         # needs a PLANAR face, so top/bottom must skip the non-planar wall.
         body = _Faces([

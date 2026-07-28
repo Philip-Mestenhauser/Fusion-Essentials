@@ -30,27 +30,51 @@ class _Coll:
 
 
 class FakeCurve:
-    def __init__(self, name):
+    def __init__(self, name, kind=None):
         self.name = name
+        self.kind = kind
         self.isFixed = False
 
 
 class FakeConstraints:
+    """Mirrors live GeometricConstraints: an add* handed the wrong SketchEntity subclass raises at
+    the API boundary (e.g. addHorizontal with a SketchCircle), it does not return a constraint."""
     def __init__(self):
         self.calls = []
     def _rec(self, name, *args):
         self.calls.append((name, args))
         return (name, args)
+    def _require(self, entity, *kinds):
+        k = getattr(entity, "kind", None)
+        if k not in kinds:
+            raise TypeError(f"invalid argument: a {k or 'unknown'} entity where "
+                            f"{'/'.join(kinds)} is required")
     def addPerpendicular(self, a, b): return self._rec("perpendicular", a, b)
     def addParallel(self, a, b): return self._rec("parallel", a, b)
-    def addTangent(self, a, b): return self._rec("tangent", a, b)
+    def addTangent(self, a, b):
+        # live-verified: a point arg raises at the SWIG boundary (SketchCurve required)
+        self._require(a, "line", "arc", "circle")
+        self._require(b, "line", "arc", "circle")
+        return self._rec("tangent", a, b)
     def addEqual(self, a, b): return self._rec("equal", a, b)
-    def addConcentric(self, a, b): return self._rec("concentric", a, b)
+    def addConcentric(self, a, b):
+        # live-verified: a line arg raises "3 : invalid argument entityOne"
+        self._require(a, "arc", "circle")
+        self._require(b, "arc", "circle")
+        return self._rec("concentric", a, b)
     def addCollinear(self, a, b): return self._rec("collinear", a, b)
-    def addMidPoint(self, p, c): return self._rec("midpoint", p, c)
-    def addCoincident(self, p, e): return self._rec("coincident", p, e)
-    def addHorizontal(self, l): return self._rec("horizontal", l)
-    def addVertical(self, l): return self._rec("vertical", l)
+    def addMidPoint(self, p, c):
+        self._require(p, "point")
+        return self._rec("midpoint", p, c)
+    def addCoincident(self, p, e):
+        self._require(p, "point")
+        return self._rec("coincident", p, e)
+    def addHorizontal(self, l):
+        self._require(l, "line")
+        return self._rec("horizontal", l)
+    def addVertical(self, l):
+        self._require(l, "line")
+        return self._rec("vertical", l)
     def addSymmetry(self, a, b, line): return self._rec("symmetry", a, b, line)
 
 
@@ -109,9 +133,10 @@ def _payload(result):
 
 
 def _two_line_sketch():
-    return FakeSketch("S", lines=[FakeCurve("L0"), FakeCurve("L1")],
-                      arcs=[FakeCurve("A0")], circles=[FakeCurve("C0")],
-                      points=[FakeCurve("P0"), FakeCurve("P1"), FakeCurve("P2")])
+    return FakeSketch("S", lines=[FakeCurve("L0", "line"), FakeCurve("L1", "line")],
+                      arcs=[FakeCurve("A0", "arc")], circles=[FakeCurve("C0", "circle")],
+                      points=[FakeCurve("P0", "point"), FakeCurve("P1", "point"),
+                              FakeCurve("P2", "point")])
 
 
 # ── entity resolver ──────────────────────────────────────────────────────────
@@ -163,10 +188,15 @@ class TestTwoCurve:
         assert out["applied"] == "perpendicular"
 
     def test_parallel_equal_tangent_concentric_collinear(self):
-        for cname in ("parallel", "equal", "tangent", "concentric", "collinear"):
+        # entity kinds per constraint match live legality: concentric needs circles/arcs,
+        # tangent needs curves (line+circle is the canonical pair).
+        cases = (("parallel", "line:0", "line:1"), ("equal", "line:0", "line:1"),
+                 ("tangent", "line:0", "circle:0"), ("concentric", "circle:0", "arc:0"),
+                 ("collinear", "line:0", "line:1"))
+        for cname, e1, e2 in cases:
             s = _two_line_sketch(); _install(s)
             _payload(sc.handler(constraint=cname, sketch_name="S",
-                                entity_one="line:0", entity_two="line:1"))
+                                entity_one=e1, entity_two=e2))
             assert s.geometricConstraints.calls[0][0] == cname
 
     def test_two_curve_needs_entity_two(self):
@@ -271,6 +301,70 @@ class TestSymmetry:
         res = sc.handler(constraint="symmetry", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True and "symmetry_line" in res["message"]
+
+
+# ── wrong-kind refusals (the live API raises; the tool must return a clean error) ──
+
+class TestWrongKindRefusals:
+    def test_horizontal_on_a_circle_is_a_clean_error(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
+        assert res["isError"] is True
+        assert "horizontal" in res["message"] and "circle" in res["message"]
+        assert s.geometricConstraints.calls == []          # nothing was applied
+
+    def test_tangent_with_a_point_is_a_clean_error(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="tangent", sketch_name="S",
+                         entity_one="point:0", entity_two="circle:0")
+        assert res["isError"] is True
+        assert "tangent" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_concentric_with_a_line_is_a_clean_error(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="concentric", sketch_name="S",
+                         entity_one="line:0", entity_two="circle:0")
+        assert res["isError"] is True
+        assert "concentric" in res["message"] and "line" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_vertical_on_an_arc_is_a_clean_error(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="vertical", sketch_name="S", entity_one="arc:0")
+        assert res["isError"] is True
+        assert "vertical" in res["message"] and "arc" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_coincident_with_a_curve_first_is_a_clean_error(self):
+        # coincident/midpoint take a POINT as entity_one; a curve there raises live
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="circle:0", entity_two="line:0")
+        assert res["isError"] is True
+        assert "coincident" in res["message"] and "circle" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_midpoint_with_a_line_first_is_a_clean_error(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="midpoint", sketch_name="S",
+                         entity_one="line:0", entity_two="line:1")
+        assert res["isError"] is True
+        assert "midpoint" in res["message"] and "line" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_error_names_required_kinds_ahead_of_the_raw_text(self):
+        # the wrong-kind error PREFIXES the required kinds before the raw API text (which stays
+        # as the tail). Each constraint states what it needs, not just a SWIG signature dump.
+        s = _two_line_sketch(); _install(s)
+        r_tan = sc.handler(constraint="tangent", sketch_name="S",
+                           entity_one="point:0", entity_two="circle:0")
+        assert "two curves" in r_tan["message"] and "API rejected" in r_tan["message"]
+        r_con = sc.handler(constraint="concentric", sketch_name="S",
+                           entity_one="line:0", entity_two="circle:0")
+        assert "circles/arcs" in r_con["message"]
+        r_hor = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
+        assert "one line" in r_hor["message"]
 
 
 # ── guards ───────────────────────────────────────────────────────────────────

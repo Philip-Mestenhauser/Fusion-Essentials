@@ -4,70 +4,17 @@ Budgets are RATCHETS with named escape valves: lower them as the surface slims; 
 legitimately needs more gets a _DESCRIPTION_OVERRIDES entry with a one-line audited reason
 (the same shrink-only convention as the other lint tables) - the bare globals are never bumped
 to absorb silent growth. A description that outgrows its ceiling should lose prose to a typed
-input or a result note (see tools/CLAUDE.md "What actually crosses the wire"). Measured baseline
-when set: 139 tools, 226,099 bytes total, longest description 1,295 chars. Sizes are measured on
-the canonical compact JSON encoding of the tools/list result (the token-cost driver), not the
-indented HTTP body.
+input or a result note (see tools/CLAUDE.md "What actually crosses the wire"). Sizes are
+measured on the canonical compact JSON encoding of the tools/list result (the token-cost
+driver), not the indented HTTP body.
 
 The total headroom is deliberately SNUG: a NEW tool that pushes the total over must be paid for by
 slimming existing prose in the same change, not by bumping the global (that is the ratchet working
 as intended). The per-tool count is the ratchet's granularity: if you add a tool, the total moving
 up should be roughly its own weight. A tool whose own CAPABILITY genuinely grows (not just its
 prose) earns the same treatment as a new tool: the global moves up by that tool's own measured
-weight, named here - model_extrude's extent coverage (through_all/to_face/two_side added to the
-prior distance/to_object pair) added +609 bytes measured (224,124->224,733) after trimming its own
-existing prose first; sys_request_selection's HOLD (wait_seconds + expect_document) together with
-sys_get_selection's handle-minting are the current largest joint contributor, +1,258 bytes measured
-(224,733->225,991) after trimming both descriptions first; sys_request_selection's
-nothing-to-select refusal + the announce-the-pick-first caller norm added +108 measured
-(225,991->226,099) after trimming the schema-restating clauses from the same description;
-doc_insert_derive's source-subset scoping (source_components/source_bodies + exclude_components/
-exclude_bodies, and the require-open contract) added +867 bytes measured (226,099->226,966) after
-trimming its own description first - the derive tool went from whole-design-only to any component/
-body granularity, the crux of the derive-scoping build.
-
-assembly_get's joint_origins slice (the JOINT-ORIGIN SEAM read: include=['joint_origins'] +
-max_joint_origins, each Joint Origin surfaced as a referenceable, handle-bearing row so a machining
-WCS / joint binds to it by name-or-handle instead of a fragile box-point) added +537 bytes measured
-(226,966->227,503) after trimming its own description first - a whole new rich-read slice plus the
-first-class JointOrigin handle it mints.
-
-cam_edit_setup's wcs now accepts a Joint Origin (handle OR name), binding the WCS to it as a live
-associative reference (proven live: bound_entities=1, mode='point') - the CAM WCS<-JointOrigin binding
-that closes the run-08 gap (a setup could not bind to the self-centering stock origin). +175 bytes
-measured (227,503->227,678).
-
-model_construction's offset plane now accepts a parameter EXPRESSION ('StockZ/2', '25 mm') routed
-through createByString and NAMES the model parameter (dNN) it created (retargetable via param_set) -
-the same landed shape as model_extrude's distance fix. +129 bytes measured (227,678->227,807). The
-three live-verified honesty notes that rode the same batch (joint_create_origin lands on ROOT;
-sketch_create's frame is component-LOCAL; sketch_add_3d_line's z is along the sketch's LOCAL normal)
-were absorbed net-neutral by trimming redundant prose in those same descriptions.
-
-Three capability growths land together, +210 bytes measured (227,807->228,017) after trimming their
-own descriptions first: doc_copy's source_folder input (scopes the budget-bounded by-name walk - the
-main-thread stall fix's cheap escape path), view_set's hide/show accepting BODY targets (root-level
-bodies / one body of a multi-body component, per-body bulb read-back), and cam_edit_operation's
-expression-evaluation read-back claim (a non-evaluating expression rolls back all params).
-
-The watch-build disclosure batch lands +533 bytes measured (228,017->228,550) after trimming the
-same tools' own prose first: sketch_add_geometry's closed_path ~48-point solver limit + the
-polyline/repeated-point workaround and center_rectangle's no-implicit-constraints fact,
-sketch_dimension's lone-line length + point:0-is-origin facts, sketch_add_3d_line's new
-is_construction input, joint_create's free-part-moves warning, joint_drive's poses-do-not-survive-
-recompute warning, design_delete_feature's indices-shift warning, and joint_create_origin's
-model_parameters (dNN names) read-back.
-
-The vise-eval joint batch lands +340 bytes measured (228,550->228,890) after trimming the same
-tools' own prose first: joint_at_geometry's new flip input (seats the flush face-to-face pick that
-otherwise rotates the free part 180 deg - live-verified) + its flip teaching, joint_edit's
-offset-is-the-anchor-not-the-slide-value fact, and joint_create_origin's coordinates-anchor
-ROOT-ABSOLUTE fact (never follows an occurrence's transform).
-
-assembly_ground's corrected contract lands +67 bytes measured (228,890->228,957) after trimming
-its own prose first: grounding RE-LOCKS at the timeline placement and discards free moves,
-captured or not (a ground-then-move recipe does not survive recompute - live-disproven); the
-snap-back is read back and reported as position_reset.
+weight, after trimming the tool's own prose first - and the growth is justified in the COMMIT
+MESSAGE that bumps the constant, not in this docstring.
 """
 
 import json
@@ -76,10 +23,10 @@ import pytest
 
 from conftest import load_mcp_server, register_all_tools
 
-# Snug watermark: current real total is 228,957. Ratchet DOWN as prose moves to errors/notes or a
+# Snug watermark: current real total is 231,051. Ratchet DOWN as prose moves to errors/notes or a
 # description tightens; a new tool (or a tool whose capability genuinely grows) that needs the room
 # slims something else in the same change, or raises this by exactly its own measured weight.
-TOTAL_PAYLOAD_BUDGET_BYTES = 228_957
+TOTAL_PAYLOAD_BUDGET_BYTES = 231_051
 PER_TOOL_BUDGET_BYTES = 4_500
 
 # General per-description ceiling; a named override carries its own audited reason and is

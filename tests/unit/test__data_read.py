@@ -298,3 +298,125 @@ class TestTruncation:
         out = _payload(dm.list_project_files_handler(project="CAM", recursive=False))
         assert out["recursive"] is True
         assert out["folder"] == "(whole project)"
+
+    def test_folder_visit_budget_stops_a_wide_walk(self, monkeypatch):
+        # A wide tree with few files per folder never trips the FILE cap, yet each folder is a
+        # main-thread cloud fetch - so the VISIT budget must stop the walk and flag truncated.
+        subs = [FakeFolder(f"Sub{i}", files=[FakeFile(f"F{i}", f"urn:lin:{i}")]) for i in range(8)]
+        root = FakeFolder("Root", subfolders=subs)
+        _install_app([FakeProject("Wide", "wide-id", root)])
+        monkeypatch.setattr(dm, "_MAX_FOLDER_VISITS", 2)   # root + exactly one subfolder
+        out = _payload(dm.list_project_files_handler(project="Wide"))
+        assert out["truncated"] is True
+        # root(visit 1, no files) + Sub0(visit 2, one file); Sub1.. exceed the budget and are skipped
+        assert out["file_count"] == 1
+
+    def test_visit_budget_not_tripped_within_budget(self):
+        # the sample project (root + 2 folders + 1 nested = 4 visits) is under the default budget.
+        _install_app([_sample_project()])
+        out = _payload(dm.list_project_files_handler(project="CAM"))
+        assert out["truncated"] is False
+        assert out["file_count"] == 4
+
+
+# ── wall-clock time budget (_TIME_BUDGET_S) ────────────────────────────────
+#
+# A transient network stall can hang a single cloud round-trip past normal latency, on item #1 of a
+# small project - the item-COUNT caps above never catch this. time.monotonic() is monkeypatched with a
+# scripted sequence of return values (rather than a real sleep) so the deadline can be crossed
+# deterministically after a chosen number of between-item checks.
+
+def _scripted_clock(monkeypatch, mod, values):
+    """Patch mod.time.monotonic to return `values` in order, holding the last value for any call past
+    the end of the list (so a walk that keeps checking after the deadline stays 'stalled')."""
+    idx = {"i": 0}
+    def fake_monotonic():
+        v = values[min(idx["i"], len(values) - 1)]
+        idx["i"] += 1
+        return v
+    monkeypatch.setattr(mod.time, "monotonic", fake_monotonic)
+
+
+class TestFilesWalkTimeBudget:
+    def test_stops_partway_and_flags_time_truncated(self, monkeypatch):
+        # A flat folder of 3 files. Scripted clock: call#1 sets the deadline at t0; call#2 (the walk's
+        # own folder-visit check) and call#3 (the check before file 0) both land AT t0 (not exceeded,
+        # so file 0 is collected); call#4 (the check before file 1) lands past the deadline - the walk
+        # must stop there, never reading file 1 or file 2.
+        t0 = 1000.0
+        files = [FakeFile(f"F{i}", f"urn:lin:{i}") for i in range(3)]
+        root = FakeFolder("Root", files=files)
+        _install_app([FakeProject("Stall", "stall-id", root)])
+        _scripted_clock(monkeypatch, dm, [t0, t0, t0, t0 + dm._TIME_BUDGET_S + 1])
+
+        out = _payload(dm.list_project_files_handler(project="Stall"))
+        assert out["time_truncated"] is True
+        assert out["truncated"] is True
+        assert out["file_count"] == 1                      # only F0 landed before the stall
+        assert {f["name"] for f in out["files"]} == {"F0"}  # partial results present, not empty
+        assert out["time_truncated_at"] == "(project root)"
+
+    def test_stops_partway_through_a_subfolder(self, monkeypatch):
+        # The stall happens while walking a NAMED subfolder - time_truncated_at must name it, not the
+        # project root, so the caller knows exactly where to retry/narrow.
+        t0 = 2000.0
+        inner_files = [FakeFile(f"G{i}", f"urn:lin:g{i}") for i in range(2)]
+        inner = FakeFolder("Inner", files=inner_files)
+        root = FakeFolder("Root", subfolders=[inner])
+        _install_app([FakeProject("Stall2", "stall2-id", root)])
+        # calls: deadline calc, root-visit check(ok, no root files), subfolder-loop check for
+        # 'Inner'(ok, recurse in), Inner-visit check(ok), Inner file0 check(ok), Inner file1 check(stall)
+        _scripted_clock(monkeypatch, dm,
+                        [t0, t0, t0, t0, t0, t0 + dm._TIME_BUDGET_S + 1])
+        out = _payload(dm.list_project_files_handler(project="Stall2"))
+        assert out["time_truncated"] is True
+        assert out["time_truncated_at"] == "Inner"
+        assert out["file_count"] == 1
+
+    def test_fast_walk_has_no_time_truncated_flag(self):
+        # No monkeypatched clock: the real, fast walk must report time_truncated=false and full
+        # results - the flag must never fire on an ordinary call.
+        _install_app([_sample_project()])
+        out = _payload(dm.list_project_files_handler(project="CAM"))
+        assert out["time_truncated"] is False
+        assert "time_truncated_at" not in out
+        assert out["file_count"] == 4                       # nothing lost
+
+    def test_immediate_files_only_scope_also_honors_the_budget(self, monkeypatch):
+        # folder=<path> with recursive=false takes the OTHER loop (not _walk_folder) - it must be
+        # budgeted too.
+        t0 = 3000.0
+        files = [FakeFile(f"H{i}", f"urn:lin:h{i}") for i in range(3)]
+        named = FakeFolder("Templates", files=files)
+        root = FakeFolder("Root", subfolders=[named])
+        _install_app([FakeProject("Stall3", "stall3-id", root)])
+        # calls: deadline calc, then per-item checks in the immediate-files loop: item0 ok, item1 stall
+        _scripted_clock(monkeypatch, dm, [t0, t0, t0 + dm._TIME_BUDGET_S + 1])
+        out = _payload(dm.list_project_files_handler(
+            project="Stall3", folder="Templates", recursive=False))
+        assert out["time_truncated"] is True
+        assert out["file_count"] == 1
+        assert out["time_truncated_at"] == "Templates"
+
+
+class TestProjectsListingTimeBudget:
+    class _P:
+        def __init__(self, i):
+            self.name = f"P{i}"
+            self.id = f"id{i}"
+
+    def test_stops_partway_and_flags_time_truncated(self, monkeypatch):
+        t0 = 4000.0
+        _install_app([self._P(i) for i in range(5)])
+        # calls: deadline calc, item0 check(ok), item1 check(ok), item2 check(stall)
+        _scripted_clock(monkeypatch, dm, [t0, t0, t0, t0 + dm._TIME_BUDGET_S + 1])
+        out = _payload(dm.list_projects_handler())
+        assert out["time_truncated"] is True
+        assert out["project_count"] == 2
+        assert {p["name"] for p in out["projects"]} == {"P0", "P1"}
+
+    def test_fast_listing_has_no_time_truncated_flag(self):
+        _install_app([self._P(i) for i in range(3)])
+        out = _payload(dm.list_projects_handler())
+        assert out["time_truncated"] is False
+        assert out["project_count"] == 3

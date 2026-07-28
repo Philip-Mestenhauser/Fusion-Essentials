@@ -93,15 +93,12 @@ PART_PARAMS          = ["PartX", "PartY", "PartZ"]         # OPTIONAL: if the te
                                                           # still inserts + positions. NOT required.
 ```
 
-DEPENDENCY-LIGHT BY DESIGN — the FIRST-IMPRESSION priority. The skill does NOT require the template to
-be pre-wired in any particular way: a real user drops in THEIR existing CAM template and it works out of
-the box. Phase 6 positions the part by the BEST mechanism the template offers: if it has a root joint
-origin, the part's "Center of Model" JO rigidly mates to it (the clean, offset-aware path); if NOT, the
-part is seated on the stock top by measured geometry. Either way works — no specific JO name or params
-are required. The ONLY optional enhancement a template can offer is `PART_PARAMS` (PartX/Y/Z) feeding a
-stock-sizing chain: present -> driven; absent -> skipped with a note. (A template author who wants richer
-auto-stock can add a parametric stock chain that derives stock from PartX/Y/Z — but the skill never
-depends on it. See reference.md "Selectionless toolpaths and parametric stock".)
+DEPENDENCY-LIGHT BY DESIGN - the FIRST-IMPRESSION priority. The skill does NOT require the template to
+be pre-wired in any particular way: a real user drops in THEIR existing CAM template and it works out
+of the box - positioning per Phase 6's JO-first/stock-top contract, stock sizing optional per
+`PART_PARAMS` above. (A template author who wants richer auto-stock can add a parametric stock chain
+that derives stock from PartX/Y/Z - but the skill never depends on it. See reference.md "Selectionless
+toolpaths and parametric stock".)
 
 Methodology background (components as slots, the RFA, the WCS cube, joints surviving via Save-As
 lineage) is in [reference.md](reference.md). Read it if a crawl result is ambiguous.
@@ -128,8 +125,8 @@ lineage) is in [reference.md](reference.md). Read it if a crawl result is ambigu
   build), and `find_geometry` (locating the stock top face; the operator-picked face's `orient_axis`
   handle comes from the selection read itself) - do not re-implement these in a script. Concretely:
   Phase 6 (TEMPLATE) is Script A
-  (name + model component + DETECT root JO) -> insert -> POSITION (join Center-of-Model->root JO if present,
-  else stock-top fallback) -> probe health -> (optional) write PartX/Y/Z -> save. This is NOT "faking
+  (name + model component + DETECT root JO) -> insert -> POSITION (per Phase 6's JO-first/fallback
+  contract) -> probe health -> (optional) write PartX/Y/Z -> save. This is NOT "faking
   a missing block" - the script composes the SAME built operations. Read each result and verify the
   printed/returned values.
 - **Address by id (URN) once resolved.** Names are for humans; URNs drive the flow.
@@ -204,14 +201,11 @@ Two typed calls, in order. Substitute `body_name` and the face `handle` from Pha
    own axes define - see reference.md "Part-space extents and orientation"). Its `x`/`y`/`z` are the
    part-space extents (Z = the machining axis) and `center` should match step 1's computed center.
    RECORD these as `extents_mm` - no separate measure tool exists for this; it feeds the stock-top
-   fallback's offset in Phase 6 step 2b (needed to PERFORM the join, so it must be pre-join). Phase 6
-   step 4's stock sizing does NOT reuse this number - the join reorients the part, so that step
-   re-measures POST-join instead.
+   fallback's offset in Phase 6 step 2b (needed to PERFORM the join, so it must be pre-join; Phase 6
+   step 4's stock sizing re-measures POST-join and does not reuse this number).
 
 (The "Center of Model" JO is the PART-SIDE attach frame: bbox-center, oriented to the machining Z.
-Phase 6 joins THIS JO to the template's root JO when one exists (the primary path), or to the stock
-top face as a fallback. Either way the part side is this JO - so it is built on every run. A template
-needs NO matching JO for the fallback, but if it HAS a root JO, this JO mates to it cleanly.)
+Whichever join path Phase 6 takes, the part side is this JO - so it is built on every run.)
 
 -> Record: `joint_origin_name = "Center of Model"`, the verified Z axis (`frame_axes.primary_axis_Z`),
 and `extents_mm`.
@@ -276,23 +270,18 @@ it is the active document (confirmed via `doc_get`, NOT assumed).
 ## Phase 6 — Stand up the part in the template (WRITE) — JO-FIRST, GEOMETRY FALLBACK
 
 Position the part by the BEST mechanism the template offers, never REQUIRING any specific wiring:
-- **PRIMARY — a template root joint origin.** If the template has a root-level joint origin (a
+- **PRIMARY - a template root joint origin.** If the template has a root-level joint origin (a
   shop-built template usually does, with the part-position offsets baked into its JO), JOIN the
-  part's "Center of Model" JO to it. This is the clean, offset-aware path — use it whenever a root
-  JO exists.
-- **FALLBACK — no root JO.** Join the part's "Center of Model" JO to the STOCK TOP face, with the
-  part offset DOWN by `(0.5 * partZ + 1 mm)` so the part's top sits 1 mm below the stock top (a skim
-  allowance), the rest hanging into the stock. This needs no template JO at all.
-So the skill works on ANY template, and USES the good JO when present (do NOT skip a present JO for
-the cruder fallback). Stock-sizing stays OPTIONAL (driven only if `PART_PARAMS` exist). Substitute
+  part's "Center of Model" JO to it. This is the clean, offset-aware path - use it whenever a root
+  JO exists; do NOT skip a present JO for the cruder fallback.
+- **FALLBACK - no root JO.** Join the part's "Center of Model" JO to the STOCK TOP face, offset
+  down so the part's top sits a skim allowance below the stock top (formula at step 2b). This
+  needs no template JO at all.
+So the skill works on ANY template; stock sizing is optional per CONFIGURATION's `PART_PARAMS`.
+Either path carries ORIENTATION on the JO, never assumed: the JO's Z is the machining face the
+operator picked in Phase 1, mated to a Z-up template frame - so the machining face always ends up
+facing the setup's +Z, no matter how the part was modelled relative to world axes. Substitute
 `<MODEL_NAME>`, `<PART_URN>`, and from CONFIGURATION `NAMEPLATE_SKETCH`, `PART_PARAMS`.
-
-ORIENTATION is carried by the JO, not assumed. Both paths join the part's "Center of Model" JO (built
-in Phase 2 with its Z = the machining face the operator picked) to a Z-up template frame — so the
-machining face always ends up facing the setup's +Z, no matter how the part was modelled relative to
-world axes. The skill never assumes the part's world +Z is the machining face; the operator's Phase-1
-face is the single source of truth for orientation. (`partZ` everywhere is the part-space Z extent
-from Phase 2's oriented bbox — i.e. the depth along that machining axis, not the world Z extent.)
 
 Reminder: the doc just opened (Phase 5.2) — confirm it is SETTLED (`doc_get` shows it active) before
 these writes, or a configured-design template can crash mid-recompute.
@@ -389,9 +378,9 @@ def run(context):
      center) — the stock occurrence is the setup's stock body (e.g. `Main Stock:1`). Record its handle.
    - `joint_at_geometry` is for two handles; here the part side is a JO — so instead use
      `joint_create(occurrence_one="Center of Model", occurrence_two="<stock occ>:top", joint_type="rigid",
-     offset = -(0.5*partZ + 1 mm), units="mm")` where `partZ` is the part-space Z extent from Phase 2.
-     The negative offset drops the part center below the stock-top face by (½partZ + 1 mm) so the part
-     top is 1 mm under the stock top. (`:top` is the highest-face-center snap.)
+     offset = -(0.5*partZ + 1 mm), units="mm")` where `partZ` is the part-space Z extent from Phase 2's
+     oriented bbox (the depth along the machining axis, not the world Z). The negative offset seats the
+     part's top 1 mm under the stock top - the skim allowance. (`:top` is the highest-face-center snap.)
 
 3. **Verify the join from NUMBERS** - `assembly_get` for joint health, `model_inspect` for seating:
    - ASSERT the part's OWN joint is healthy - i.e. the joint you just made (`Center of Model` -> root
@@ -407,15 +396,14 @@ def run(context):
      should sit at the workpiece origin (~0,0 for a centered fixture) with Z lifted onto/into the
      stock. (Step 2b has no JO on the far side - omit `frame` and read world instead.)
 
-4. **Stock (OPTIONAL - only if the template exposes PART_PARAMS).** If Script A's `has_part_params`
+4. **Stock (optional per CONFIGURATION's `PART_PARAMS`).** If Script A's `has_part_params`
    lists PartX/Y/Z, measure AGAIN first - `model_inspect(target=<full path to the inserted occurrence>,
    units="mm")`, POST-join, no `frame` (world-aligned) - then `param_set` each of PartX/Y/Z from THIS
    reading, never Phase 2's pre-join `extents_mm`. The rigid join REORIENTS the part into the
    fixture's frame (live: part-space 80/60/20 read back as world 80/20/60 after joining), so a
    pre-join number lands on the wrong axis even though the three values still look plausible. The
    template's own stock chain (Calc_Stock* if present, else direct) recomputes. If `has_part_params`
-   is EMPTY, SKIP this and note "template has no PART_PARAMS - stock left as the template defines
-   it" (the part is still inserted + positioned + jointed; nothing fails).
+   is EMPTY, SKIP this and note "template has no PART_PARAMS - stock left as the template defines it".
 
 5. **Save.** `doc_save()` on the `<model>_CAM` document - insert + join + param_set are SESSION-ONLY
    until saved; without this step the standing-up work is lost when the session ends. `doc_get`

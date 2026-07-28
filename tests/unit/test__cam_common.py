@@ -6,6 +6,12 @@ get_setup_references_handler's per-setup 'references_truncated'. Also covers the
 ``_invalidation_reasons`` (parsing op.messageLog into categorical reasons / parameter-change count /
 machine-changed flag), ``_op_primary_state`` (the one-bucket-per-op priority order), ``_hms`` (seconds
 -> h:m:s), and the machining-time estimate's feed_scale/rapid_feed/tool_change constants.
+
+Plus the shared CAM tree walk + resolvers - walk_cam_tree / resolve_cam_node / operations_under and
+the find_setup / find_operation / setup_names wrappers. This is the ONE traversal + by-name
+resolution every CAM tool shares: case-insensitive EXACT, a miss lists the available names, and a
+DUPLICATED name is REFUSED naming each hit's setup path (operation names legitimately collide
+across setups).
 """
 
 import json
@@ -13,7 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import load_tool, make_cam
+from conftest import FakeSetup, FakeCAMFolder, FakeOperation
 
 cc = load_tool("_cam_common")
 
@@ -143,6 +150,23 @@ class TestOperationsCap:
         assert len(rec["operations"]) == cc._MAX_ITEMS
 
 
+class TestOperationsFilterNamedBranch:
+    """The `setup=` filter resolves through the shared resolver: a duplicated setup name is
+    REFUSED (naming each candidate), never silently narrowed to the first matching setup."""
+
+    def test_duplicate_setup_name_is_refused(self, install, operation_cast_passthrough):
+        install(FakeCAM([_OpSetup("Dup", [object()]), _OpSetup("Dup", [object(), object()])]))
+        res = cc.get_cam_operations_handler(setup="Dup")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert res["message"].count("Dup") >= 3          # the input + both candidates named
+
+    def test_named_setup_miss_lists_available(self, install, operation_cast_passthrough):
+        install(FakeCAM([_OpSetup("S1", [])]))
+        res = cc.get_cam_operations_handler(setup="Ghost")
+        assert res["isError"] is True
+        assert "Ghost" in res["message"] and "S1" in res["message"]
+
+
 class TestOperationSummaryStateNaming:
     def test_operation_state_1_is_named_out_of_date(self, install, operation_cast_passthrough):
         # the op-level state name (_OP_STATE_NAMES) must agree with _op_primary_state's own vocabulary.
@@ -171,6 +195,21 @@ class _RefSetup:
         self.models = list(models)
         self.fixtures = []
         self.stockSolids = []
+
+
+class TestReferencesFilterNamedBranch:
+    def test_duplicate_setup_name_is_refused(self, install, occurrence_cast_passthrough):
+        # same contract as the operations filter: named -> shared resolver -> duplicate REFUSED.
+        install(FakeCAM([_RefSetup("Dup"), _RefSetup("Dup")]))
+        res = cc.get_setup_references_handler(setup="Dup")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert res["message"].count("Dup") >= 3
+
+    def test_named_setup_miss_lists_available(self, install, occurrence_cast_passthrough):
+        install(FakeCAM([_RefSetup("S1")]))
+        res = cc.get_setup_references_handler(setup="Ghost")
+        assert res["isError"] is True
+        assert "Ghost" in res["message"] and "S1" in res["message"]
 
 
 class TestReferencesCap:
@@ -274,6 +313,34 @@ class TestOpPrimaryState:
 
     def test_state_0_is_valid(self):
         assert cc._op_primary_state(self._facts(operationState=0)) == "valid"
+
+
+# ── _operations_summary: readiness derives from the per-op error state it ships beside ──────────
+# The summary must NOT read "ready to post" while an op carries has_error - a toolpath can read valid
+# on an errored op (live: "4 of 4 valid, ready to post" while a Drill op had has_error). Derive the
+# verdict from BOTH toolpath_valid AND has_error, never toolpath_valid alone.
+
+class TestOperationsSummaryErrorGate:
+    def _rec(self, name, **kw):
+        base = {"name": name, "state": "valid", "toolpath_valid": True, "is_suppressed": False,
+                "has_error": False, "blocked_by": []}
+        base.update(kw)
+        return base
+
+    def test_errored_op_is_not_ready_to_post(self, monkeypatch):
+        monkeypatch.setattr(cc, "_validity_basis", lambda: "manufacture_verified")
+        records = [self._rec("Face1"),
+                   self._rec("Drill1", has_error=True)]   # toolpath reads valid but the op is errored
+        summary = cc._operations_summary(records)
+        assert "ready to post" not in summary["readiness"]
+        drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
+        assert "operation_error" in drill["blocked_by"]
+
+    def test_all_valid_no_errors_is_ready(self, monkeypatch):
+        monkeypatch.setattr(cc, "_validity_basis", lambda: "manufacture_verified")
+        summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
+        assert "ready to post" in summary["readiness"]
+        assert summary["exceptions"] == []
 
 
 # ── _hms: seconds -> h:m:s ─────────────────────────────────────────────────────────────────────
@@ -390,3 +457,155 @@ class TestToolHolder:
 
     def test_bad_json_is_none_not_a_raise(self):
         assert cc.tool_holder(_HolderTool("{not json")) is None
+
+
+# ── find_setup / find_operation / setup_names: the (obj, available_names) wrappers ───────────────
+
+
+class TestFindSetup:
+    def test_found_case_insensitive(self):
+        cam = make_cam(FakeSetup("Setup1"), FakeSetup("Setup2"))
+        s, avail = cc.find_setup(cam, "setup2")          # lowercase input resolves 'Setup2'
+        assert s is not None and s.name == "Setup2"
+        assert avail == ["Setup1", "Setup2"]
+
+    def test_not_found_returns_available(self):
+        cam = make_cam(FakeSetup("Setup1"))
+        s, avail = cc.find_setup(cam, "Ghost")
+        assert s is None and avail == ["Setup1"]
+
+    def test_empty_cam_is_safe(self):
+        s, avail = cc.find_setup(make_cam(), "x")
+        assert s is None and avail == []
+
+
+class TestFindSetupDuplicate:
+    def test_duplicate_setup_name_is_refused(self):
+        cam = make_cam(FakeSetup("Dup"), FakeSetup("Dup"))
+        s, avail = cc.find_setup(cam, "Dup")
+        assert s is None                                  # refused, never the first hit
+        assert avail == ["Dup", "Dup"]
+
+
+class TestSetupNames:
+    def test_lists_all_setup_names(self):
+        assert cc.setup_names(make_cam(FakeSetup("A"), FakeSetup("B"))) == ["A", "B"]
+
+
+class TestWalkOperations:
+    def test_flattens_across_setups_countitem(self):
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Face1"), FakeOperation("Adaptive1")]),
+                       FakeSetup("S2", ops=[FakeOperation("Drill1")]))
+        assert [o.name for o in cc.walk_operations(cam)] == ["Face1", "Adaptive1", "Drill1"]
+
+    def test_empty_setup_walks_to_nothing(self):
+        assert cc.walk_operations(make_cam(FakeSetup("S1"))) == []
+
+
+class TestFindOperation:
+    def test_found_case_insensitive_across_setups(self):
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Face1")]),
+                       FakeSetup("S2", ops=[FakeOperation("Drill1")]))
+        op, avail = cc.find_operation(cam, "drill1")     # lowercase input resolves 'Drill1'
+        assert op is not None and op.name == "Drill1"
+        assert avail == ["Face1", "Drill1"]
+
+    def test_not_found_returns_available(self):
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Face1")]))
+        op, avail = cc.find_operation(cam, "Ghost")
+        assert op is None and avail == ["Face1"]
+
+    def test_duplicate_name_is_refused_with_setup_paths(self):
+        # a name duplicated across setups returns NO op (refusal, never first-match) and each
+        # duplicate's 'Setup / op' path as the available list, so even a plain not-found error
+        # surfaces the collision.
+        cam = make_cam(FakeSetup("S1", ops=[FakeOperation("Drill1")]),
+                       FakeSetup("S2", ops=[FakeOperation("Drill1")]))
+        op, avail = cc.find_operation(cam, "Drill1")
+        assert op is None
+        assert avail == ["S1 / Drill1", "S2 / Drill1"]
+
+
+# ── walk_cam_tree / resolve_cam_node / operations_under: the shared traversal + refusal resolver ──
+
+
+def _tree_cam():
+    """Two setups; Setup1 nests an op in a folder, a pattern in that folder, and a loose op."""
+    pattern = FakeCAMFolder("Pat1", ops=[FakeOperation("Bore1")])
+    folder = FakeCAMFolder("Holes", ops=[FakeOperation("Drill1")], patterns=[pattern])
+    s1 = FakeSetup("Setup1", ops=[FakeOperation("Face1")], folders=[folder])
+    s2 = FakeSetup("Setup2", ops=[FakeOperation("Face2")])
+    return make_cam(s1, s2), s1, s2, folder, pattern
+
+
+class TestWalkCamTree:
+    def test_structural_kinds_and_paths(self):
+        cam, s1, s2, folder, pattern = _tree_cam()
+        nodes = {(n.kind, n.path): n for n in cc.walk_cam_tree(cam)}
+        assert ("setup", "Setup1") in nodes
+        assert ("operation", "Setup1 / Face1") in nodes
+        assert ("folder", "Setup1 / Holes") in nodes
+        assert ("operation", "Setup1 / Holes / Drill1") in nodes
+        assert ("pattern", "Setup1 / Holes / Pat1") in nodes
+        assert ("operation", "Setup1 / Holes / Pat1 / Bore1") in nodes
+        assert ("operation", "Setup2 / Face2") in nodes
+        assert nodes[("operation", "Setup1 / Holes / Drill1")].setup == "Setup1"
+
+    def test_containers_unreachable_via_alloperations_are_walked(self):
+        # setup.allOperations DROPS folder/pattern containers (the measured fact the conftest trio
+        # encodes) - the walk still reaches them through the explicit .folders/.patterns recursion.
+        cam, s1, _, folder, pattern = _tree_cam()
+        assert all(getattr(o, "name") != "Holes" for o in s1.allOperations)   # dropped by flatten
+        kinds = {n.name: n.kind for n in cc.walk_cam_tree(cam)}
+        assert kinds["Holes"] == "folder" and kinds["Pat1"] == "pattern"
+
+    def test_walk_operations_projection_includes_nested(self):
+        cam, *_ = _tree_cam()
+        assert sorted(o.name for o in cc.walk_operations(cam)) == \
+            ["Bore1", "Drill1", "Face1", "Face2"]
+
+    def test_operations_under_scopes_to_one_container(self):
+        cam, s1, s2, folder, pattern = _tree_cam()
+        assert sorted(o.name for o in cc.operations_under(s1)) == ["Bore1", "Drill1", "Face1"]
+        assert [o.name for o in cc.operations_under(folder)] == ["Drill1", "Bore1"]
+        assert [o.name for o in cc.operations_under(s2)] == ["Face2"]
+
+
+class TestResolveCamNode:
+    def test_unique_hit_returns_node(self):
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "drill1")            # case-insensitive exact
+        assert err is None and node.kind == "operation" and node.name == "Drill1"
+        assert node.setup == "Setup1" and node.path == "Setup1 / Holes / Drill1"
+
+    def test_kinds_filter_excludes_other_kinds(self):
+        # a folder name is NOT resolvable when only operations are asked for.
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "Holes", kinds=("operation",), label="operation")
+        assert node is None and "No operation named 'Holes'" in err
+
+    def test_miss_lists_available_names(self):
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "Ghost", kinds=("operation",), label="operation")
+        assert node is None
+        assert "Ghost" in err and "Face1" in err and "Drill1" in err
+
+    def test_duplicate_refused_with_count_and_paths(self):
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1")]),
+                       FakeSetup("Setup2", ops=[FakeOperation("Drill1")]))
+        node, err = cc.resolve_cam_node(cam, "Drill1")
+        assert node is None and "ambiguous" in err and "2" in err
+        assert "Setup1 / Drill1" in err and "Setup2 / Drill1" in err
+
+    def test_setup_scoped_resolution(self):
+        # setup= scopes the walk: the same name in ANOTHER setup neither resolves nor collides.
+        cam, s1, s2, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(None, "Face1", setup=s1)
+        assert err is None and node.obj.name == "Face1"
+        node, err = cc.resolve_cam_node(None, "Face2", setup=s1, label="operation")
+        assert node is None and "Face2" in err
+
+    def test_setup_kind_matches_setups_only(self):
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "setup2", kinds=("setup",), label="setup")
+        assert err is None and node.kind == "setup" and node.name == "Setup2"

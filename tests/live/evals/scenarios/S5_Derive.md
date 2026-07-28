@@ -9,7 +9,7 @@ fixture: the S4 artifact P4-Gimbal (verified BY URN) OPENED by the orchestrator 
   (per-run subfolders + legacy chains), so a by-name search picks the wrong lineage. Missing
   fixture = ask - never create a project.
 budget:
-  max_tool_calls: 90
+  max_tool_calls: 63
   max_tokens: 68000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -52,7 +52,10 @@ between frame and inner ring):
   - DETAIL FEATURES on the derived body itself: at least EXTERNAL FILLETS on outer edges you
     choose (report the edges and the radius) - a derive is locally editable, and the point is
     that these edits live HERE while the source stays authoritative,
-  - PATCH surfaces closing the ring's bores/openings a toolpath should see as closed,
+  - PATCH surfaces closing each radial CROSS-HOLE opening (the small side holes through the
+    ring wall) - a toolpath should see those closed. The central bore stays OPEN - do NOT
+    patch it. These openings are hard: if a patch refuses, read its error - it names what the
+    boundary needs,
   - OFFSET surfaces from at least two faces - one at ZERO offset and one at a nonzero offset
     you choose (report which faces and offsets),
   - at least one BOUNDARY SKETCH projecting/outlining machining-relevant geometry,
@@ -70,9 +73,11 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   platform behavior - report the read honestly, it is diagnostic, not pass/fail).
 - the detail features exist ON the derived body: fresh reads show the fillet feature (its edge
   count and the radius you declared) and the body's volume changed from your pre-fillet read.
-- the prep layer exists: patch surface(s), offset surfaces (>= 2, with the zero and nonzero
-  offsets you declared), the boundary sketch, and the joint origin at the measured bbox center
-  (report the center you measured and the origin's read-back position - they must match).
+- the prep layer exists: a patch surface per cross-hole opening (report the patch body count
+  and which opening each caps; a fresh read shows the central bore still OPEN), offset
+  surfaces (>= 2, with the zero and nonzero offsets you declared), the boundary sketch, and
+  the joint origin at the measured bbox center (report the center you measured and the
+  origin's read-back position - they must match).
 - one-way proof: your prep work - INCLUDING the local edits on the derived body - did NOT touch
   the source: a fresh cloud read shows P4-Gimbal still at the version you found it.
 - doc_get -> saved as "P5-RingModel", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
@@ -99,9 +104,9 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   zero-offset copy is a real machining-prep idiom), sketch projection on derived geometry, and
   joint_create_origin(bbox_center) with orientation.
 - The tool REQUIRES the source document open (its precondition names doc_open). The orchestrator
-  now PRE-OPENS the source by URN (2026-07-20 fix): a blind by-name search picks the wrong
+  PRE-OPENS the source by URN: a blind by-name search picks the wrong
   lineage because "P4-Gimbal" is not unique (per-run subfolders + legacy Rig-Sources chains) -
-  the first run derived a stale Rig-Sources P4 v2 (OD r126) instead of this batch's P4 (OD r60).
+  it derives a stale Rig-Sources P4 (OD r126) instead of the pipeline's P4 (OD r60).
   Source IDENTITY is not a graded skill; the derive mechanism + prep layer are. Pre-opening
   removes the ambiguity while keeping every graded element.
 - Freshness grading is FRESH-STATE ONLY here: the staleness + refresh-refusal story (stale
@@ -114,6 +119,14 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   the honest report, not the count.
 - SCOPING is graded: the tool takes source_components, so a whole-source landing (multiple
   components in the tree read) is a task-comprehension FAIL, not a tool limit.
+- CROSS-HOLE PATCHES are the graded surface work (rule: cap the side holes, never the
+  central bore - the bore is the fixturing/datum surface). The openings are the degenerate
+  tangent-saddle class: a single-seed patch fails on them, and the working technique is an
+  explicit boundary from the opening's two half-edges (live-verified recipe; surface_patch's
+  error names it on failure). Grade the honest struggle-and-recover path; a silently skipped
+  opening or a patched-over bore is a FAIL of this element.
 - Staging: verify P4 present BY URN; doc_open the source P4 by URN (force_api_open, leave open);
-  doc_new for the fresh empty active AFTER; verify twice; run the block. Budget calibrated to
-  measured + 25% (2026-07-20: 72 calls incl. a surface_offset chaining recovery).
+  doc_new for the fresh empty active AFTER; verify twice; run the block. Budget:
+  measured + 25% (72 calls incl. a surface_offset chaining recovery); the
+  cross-hole patch work replaces the single bore patch - recalibrate from the next blind run's
+  measured count.

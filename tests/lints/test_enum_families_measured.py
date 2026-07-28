@@ -9,7 +9,10 @@ the SAME scraper the live enum-sweep uses lists every referenced family, and eac
 the generated live_api_facts.ENUMS. Red here means one command with Fusion running -
 ``py -3 tests/live/measure_api.py`` - the enum-sweep measures the new family automatically and
 the regenerated facts file turns this green with zero hand-edits. The second gate does the same
-for BEHAVIOR keys the harness consumes."""
+for BEHAVIOR keys the harness consumes. The third gate is the REVERSE direction: every behavior
+key measure_api can EMIT (facts_on_pass and FACT prints) must exist in the generated
+live_api_facts.BEHAVIOR - a key renamed in a measurement row without a live regen would
+otherwise leave the fakes consuming the orphaned old fact forever."""
 
 import os
 import re
@@ -47,3 +50,46 @@ class TestEnumFamiliesMeasured:
             "The harness consumes BEHAVIOR keys live_api_facts.py does not carry - add a "
             "measurement row (facts_on_pass or a FACT line) to tests/live/measure_api.py and "
             "regenerate against live Fusion. Missing: " + ", ".join(missing))
+
+
+# Emitted keys the generated facts file does not carry YET - each is a measurement-row rename or
+# addition awaiting the next live regen (a fully-PASSING py -3 tests/live/measure_api.py rewrites
+# BEHAVIOR and empties this table). Shrink-only; the staleness check below fails the moment the
+# regen lands the key, so an entry cannot outlive its excuse.
+_PENDING_REGEN = {}
+
+
+def _uncarried_emitted_keys(emitted, carried, pending):
+    """Emitted behavior keys that live_api_facts.BEHAVIOR does not carry and no pending-regen
+    entry excuses."""
+    return sorted(set(emitted) - set(carried) - set(pending))
+
+
+class TestEmittedBehaviorKeysAreCarried:
+    def test_every_emitted_behavior_key_is_carried(self):
+        missing = _uncarried_emitted_keys(measure_api.emitted_behavior_keys(),
+                                          live_api_facts.BEHAVIOR, _PENDING_REGEN)
+        assert not missing, (
+            "measure_api.py can emit behavior keys the generated live_api_facts.BEHAVIOR does not "
+            "carry - a renamed/new flag in a measurement row needs a live regen (py -3 "
+            "tests/live/measure_api.py with Fusion up, commit the regenerated file), or a "
+            "reasoned _PENDING_REGEN entry until that run happens. Missing: " + ", ".join(missing))
+
+    def test_pending_regen_entries_are_still_pending(self):
+        emitted = set(measure_api.emitted_behavior_keys())
+        stale = []
+        for key, reason in _PENDING_REGEN.items():
+            assert reason.strip(), f"{key} _PENDING_REGEN entry needs a plain-English reason"
+            if key not in emitted:
+                stale.append(f"{key}: measure_api no longer emits it - remove the entry")
+            elif key in live_api_facts.BEHAVIOR:
+                stale.append(f"{key}: the regen landed it in BEHAVIOR - remove the entry")
+        assert not stale, "stale _PENDING_REGEN entries:\n  " + "\n  ".join(stale)
+
+    def test_the_reverse_check_bites(self):
+        # a doctored emitted key with no carried fact and no excuse MUST be flagged...
+        assert _uncarried_emitted_keys(["ghost_flag"], {"real_flag": True}, {}) == ["ghost_flag"]
+        # ...a carried key and a pending-regen key are not, and order is deterministic.
+        assert _uncarried_emitted_keys(["real_flag"], {"real_flag": True}, {}) == []
+        assert _uncarried_emitted_keys(["ghost_flag"], {}, {"ghost_flag": "pending"}) == []
+        assert _uncarried_emitted_keys(["b", "a"], {}, {}) == ["a", "b"]

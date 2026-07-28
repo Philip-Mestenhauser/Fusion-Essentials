@@ -16,9 +16,12 @@ import adsk.fusion
 
 from . import _common
 from . import _joints   # the JointOrigin walk (all_joint_origins / find_joint_origins_by_name / proxy)
+from ._export import component_by_name as _component_by_name   # the one design-wide by-name component walk
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool"
+MAP_BLURB = ("the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool + "
+             "length_value_input/looks_like_expression/expression_report (literal-or-parameter-"
+             "expression lengths) + world_construction_axis (world key -> origin ConstructionAxis)")
 
 app = adsk.core.Application.get()
 
@@ -114,6 +117,9 @@ class GeometryHandle(InputKind):
         # find_geometry minted keeps working across later calls without the caller re-querying.
         ent = _resolve_token_entity(des, h)
         if ent is None:
+            if _LAST_REFIND_REFUSAL:
+                return None, (f"'{self.name}': handle did not resolve - {_LAST_REFIND_REFUSAL}. "
+                              "Re-run find_geometry for a fresh handle.")
             return None, (f"'{self.name}': handle did not resolve - the entityToken is stale AND no "
                           "geometry locator recovered it. Re-run find_geometry for a fresh handle "
                           "(the geometry itself may have changed, or this isn't a find_geometry handle).")
@@ -227,20 +233,20 @@ class EdgeLoopRef(GeometryHandleList):
 
 # ── body reference (name OR handle - bodies have auto-names, so a handle is the precise path) ───
 
-def _resolve_token_entity(des, s, _expected=None):
+def _resolve_token_entity(des, s):
     """Try to resolve `s` as an entityToken (find_geometry handle). Returns the entity if the token
     resolves to ONE, else None - so the caller falls back to a name lookup.
 
     Handle-vs-name is never guessed from the string's length or shape: we just ask findEntityByToken;
     a name that isn't a real token simply returns nothing and the caller tries the name path.
-    (_expected is unused; the caller type-checks the returned entity so it can give a precise
-    wrong-kind message.)
 
     SELF-HEALING: a find_geometry handle is a COMPOSITE - the entityToken plus a geometry locator
     ('<token>|@<kind>:<x>,<y>,<z>'), see make_handle(). entityTokens are short-lived (the same entity
     yields different tokens across queries; an old one can fail with no model edit). So if the token
     fails, we re-find the entity by its kind+position locator instead of forcing the caller to re-query.
     """
+    global _LAST_REFIND_REFUSAL
+    _LAST_REFIND_REFUSAL = None
     if not isinstance(s, str) or not s:
         return None
     token, locator = _split_handle(s)
@@ -251,6 +257,12 @@ def _resolve_token_entity(des, s, _expected=None):
     if locator:
         return _refind_by_locator(des, locator)
     return None
+
+
+# Why the last locator recovery was REFUSED (set by _refind_by_locator, cleared per resolve) -
+# an error-detail channel so the resolver's message can say "the model changed" instead of the
+# generic staleness text. Never drives behavior, only sharpens the error.
+_LAST_REFIND_REFUSAL = None
 
 
 # ── composite, self-healing geometry handle ──────────────────────────────────
@@ -265,12 +277,19 @@ _HANDLE_SEP = "|@"
 def make_handle(entity, kind, position_cm):
     """Build a composite handle from a live entity: its entityToken + a kind+position locator.
     `position_cm` = (x,y,z) in cm (centroid for a face, a point-on-edge for an edge). find_geometry
-    calls this so every handle it returns can self-heal when its token later goes stale."""
+    calls this so every handle it returns can self-heal when its token later goes stale. BRep
+    entities also carry their body's revisionId (';rv='), so the self-heal can tell benign token
+    rotation (same body, recover) from a model edit (different/rebuilt geometry now at the same
+    position - recovery there silently measures the WRONG entity, live-proven)."""
     token = _common.safe(lambda: entity.entityToken) or ""
     if not token or position_cm is None:
         return token
     x, y, z = position_cm
-    return f"{token}{_HANDLE_SEP}{kind}:{x:.6f},{y:.6f},{z:.6f}"
+    handle = f"{token}{_HANDLE_SEP}{kind}:{x:.6f},{y:.6f},{z:.6f}"
+    rev = _common.safe(lambda: entity.body.revisionId)
+    if rev:
+        handle += f";rv={rev}"
+    return handle
 
 
 def is_handle(v) -> bool:
@@ -289,14 +308,20 @@ def is_handle(v) -> bool:
 
 
 def _split_handle(s):
-    """('<token>', (kind, x, y, z)) for a composite handle, or ('<token>', None) for a bare token."""
+    """('<token>', (kind, x, y, z, rev)) for a composite handle, or ('<token>', None) for a bare
+    token. 'rev' is the minting body's revisionId when the handle carries one (';rv=<id>'), else
+    None (legacy handles and non-BRep entities)."""
     if not isinstance(s, str) or _HANDLE_SEP not in s:
         return s, None
     token, loc = s.split(_HANDLE_SEP, 1)
     try:
         kind, coords = loc.split(":", 1)
+        rev = None
+        if ";rv=" in coords:
+            coords, rev = coords.split(";rv=", 1)
+            rev = rev or None
         x, y, z = (float(c) for c in coords.split(","))
-        return token, (kind, x, y, z)
+        return token, (kind, x, y, z, rev)
     except Exception:
         return token, None
 
@@ -376,12 +401,17 @@ def _refind_profile(des, kind, want_pt):
 
 
 def _refind_by_locator(des, locator):
-    """Re-find the entity matching a (kind, x, y, z) locator by scanning the design's BRep geometry for
-    the nearest face/edge/vertex of that kind to the recorded point. Returns the entity or None. This is
-    the staleness recovery: the token died, but the geometry is unchanged, so its kind+position still
-    pins it. Profile locators route to _refind_profile (sketch profiles are not BRep and their tokens
-    can be dead on arrival)."""
-    kind, lx, ly, lz = locator
+    """Re-find the entity matching a locator by scanning the design's BRep geometry for the nearest
+    face/edge/vertex of that kind to the recorded point. Returns the entity or None. This is the
+    staleness recovery: the token died, but the geometry is unchanged, so its kind+position still
+    pins it. Two gates keep the recovery honest (a delete-rebuild can put DIFFERENT geometry at the
+    recorded position, and recovering it silently measures the wrong entity - live-proven): the
+    candidate must sit essentially AT the recorded point, and when the handle carries the minting
+    body's revisionId, the candidate's body must still match it. A gated refusal leaves its reason
+    in _LAST_REFIND_REFUSAL for the resolver's error. Profile locators route to _refind_profile
+    (sketch profiles are not BRep and their tokens can be dead on arrival)."""
+    kind, lx, ly, lz = locator[0], locator[1], locator[2], locator[3]
+    want_rev = locator[4] if len(locator) > 4 else None
     if kind.startswith("profile"):
         return _refind_profile(des, kind, (lx, ly, lz))
     root = _common.safe(lambda: des.rootComponent)
@@ -428,6 +458,18 @@ def _refind_by_locator(des, locator):
                 consider(vs.item(i))
     # Accept only a close match (1 micron in cm) so we never silently bind the wrong entity.
     if best is not None and best_d is not None and best_d <= 1e-4:
+        if want_rev:
+            got_rev = _common.safe(lambda: best.body.revisionId)
+            if got_rev != want_rev:
+                # Position alone cannot tell a rebuilt/different entity from the original (a
+                # rotated rebuild lands its record point EXACTLY on the original's, live-verified);
+                # a changed body revision means the recovery would be a guess - refuse it.
+                global _LAST_REFIND_REFUSAL
+                _LAST_REFIND_REFUSAL = (
+                    "the model CHANGED since this handle was minted (the geometry at the "
+                    "recorded position belongs to a different/rebuilt body), so locator "
+                    "recovery would bind the wrong entity")
+                return None
         return best
     return None
 
@@ -882,6 +924,19 @@ class PlaneRef(InputKind):
 
 _AXIS_VECS = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
 
+# world axis key -> a component's origin construction-axis ATTRIBUTE name (the entity form of a world
+# direction - what a feature input that wants a ConstructionAxis entity, not a vector, consumes).
+WORLD_AXIS_ATTRS = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstructionAxis"}
+
+
+def world_construction_axis(comp, key):
+    """The component's origin ConstructionAxis entity for a world-axis key ('x'/'y'/'z').
+    None for an unknown key or an unreadable component (the caller words its own error)."""
+    attr = WORLD_AXIS_ATTRS.get((key or "").strip().lower())
+    if not attr:
+        return None
+    return _common.safe(lambda: getattr(comp, attr))
+
 
 def _axis_from_face(name, face):
     """A DIRECTION for a face used as an axis SOURCE: a PLANAR face -> its normal; a CYLINDRICAL or
@@ -1017,6 +1072,56 @@ class Distance(InputKind):
         if not self.allow_negative and v < 0:
             return None, f"'{self.name}' must be positive."
         return v * scale_factor, None
+
+
+def looks_like_expression(v) -> bool:
+    """True if v is a non-numeric string - a parameter EXPRESSION ('StockZ/2', '25 mm'), not a literal
+    number. A plain numeric string ('25') is a literal, resolved the numeric way."""
+    if not isinstance(v, str):
+        return False
+    s = v.strip()
+    if not s:
+        return False
+    try:
+        float(s)
+        return False
+    except ValueError:
+        return True
+
+
+def length_value_input(raw, k, design, label):
+    """A ValueInput for a length that may be a literal number OR a parameter-expression string. A
+    number is scaled to internal cm (createByReal); a string is an EXPRESSION (createByString), which
+    ties the feature's value to a live parameter. The expression is validated through the design's
+    units engine so an unresolvable one (unknown parameter, bad syntax, non-length units) is refused
+    BY NAME instead of failing opaquely at feature add(). 'label' names the input in the error.
+    Returns (ValueInput, error)."""
+    if looks_like_expression(raw):
+        expr = raw.strip()
+        um = _common.safe(lambda: design.unitsManager)
+        try:
+            # evaluateExpression raises on an unresolvable/dimension-incompatible expression; a length
+            # unit keeps a length expression valid. createByString then preserves the parametric link.
+            um.evaluateExpression(expr, _common.safe(lambda: um.defaultLengthUnits) or "mm")
+        except Exception as e:
+            return None, (f"'{label}' expression '{expr}' did not evaluate - use a length expression "
+                          f"like 'StockZ/2' or '25 mm' and confirm the parameter names exist "
+                          f"(param_get): {e}")
+        return adsk.core.ValueInput.createByString(expr), None
+    try:
+        return adsk.core.ValueInput.createByReal(float(raw) * k), None
+    except (TypeError, ValueError):
+        return None, f"'{label}' must be a number or a parameter-expression string."
+
+
+def expression_report(value):
+    """The length value echoed back: an expression string as-is, else the rounded literal number."""
+    if looks_like_expression(value):
+        return value.strip()
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return value
 
 
 class UnitField(InputKind):
@@ -1281,14 +1386,7 @@ class JointOriginRef(InputKind):
 # body, an assembly occurrence, a component, or the WHOLE design. TargetRef unifies that (like PlaneRef
 # did for planes): one input, several resolution paths tried in order, returning (entity, kind) so the
 # consumer can branch on what it got. It composes the existing resolvers (_resolve_token_entity /
-# _resolve_occurrence / _resolve_any_body) rather than re-implementing them.
-
-def _component_by_name(des, name):
-    """A Component by name across the design (root + all components), or None."""
-    for comp in _common.all_components(des):
-        if (_common.safe(lambda c=comp: c.name) or "") == name:
-            return comp
-    return None
+# _resolve_occurrence / _resolve_any_body / _export.component_by_name) rather than re-implementing them.
 
 
 class TargetRef(InputKind):
@@ -1484,22 +1582,13 @@ def _resolve_profile_legacy(name, sketch_name, profile_index):
     des = _common.design()
     if not des:
         return None, "No active design to resolve the profile against."
-    sk_name = (sketch_name or "").strip()
-    if sk_name:
-        sketch = _common.resolve_sketch(des, sk_name)
-        if not sketch:
+    sketch, sk_name = _common.resolve_or_recent_sketch(des, sketch_name)
+    if not sketch:
+        if sk_name:
             names = _common.all_sketch_names(des)
             return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
                           + (", ".join(n for n in names if n) or "(none)") + ".")
-    else:
-        comp = _common.target_component(des)
-        coll = _common.safe(lambda: comp.sketches)
-        if coll is None:
-            return None, f"'{name}': no sketches in the active component to select a profile from."
-        n = _common.safe(lambda: coll.count, 0)
-        sketch = coll.item(n - 1) if n else None
-        if not sketch:
-            return None, f"'{name}': no sketch to take a profile from. Create one with a closed region."
+        return None, f"'{name}': no sketch to take a profile from. Create one with a closed region."
     profiles = _common.safe(lambda: sketch.profiles)
     pcount = _common.safe(lambda: profiles.count, 0) if profiles else 0
     if pcount == 0:

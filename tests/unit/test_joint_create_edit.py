@@ -284,7 +284,7 @@ class _FakePlanarFace:
         self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
 
 
-def _install_resolve_seam(token_map):
+def _install_resolve_seam(monkeypatch, token_map):
     import adsk.fusion, adsk.core
     # JointGeometry factory -> a sentinel recorder so we can assert which builder ran.
     rec = type("R", (), {
@@ -293,13 +293,14 @@ def _install_resolve_seam(token_map):
         "createByCurve": staticmethod(lambda c, kp: ("curve", kp)),
         "createByPoint": staticmethod(lambda p: ("point",)),
     })
-    adsk.fusion.JointGeometry = rec
-    adsk.fusion.BRepFace = _FakePlanarFace
-    adsk.fusion.BRepEdge = type("E", (), {})
-    adsk.fusion.BRepVertex = type("V", (), {})
-    adsk.fusion.ConstructionPoint = type("CP", (), {})
-    adsk.fusion.SketchPoint = type("SP", (), {})
-    adsk.fusion.JointOrigin = type("JointOrigin", (), {})   # a real type so is_joint_origin() works
+    monkeypatch.setattr(adsk.fusion, "JointGeometry", rec)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", _FakePlanarFace)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", type("E", (), {}))
+    monkeypatch.setattr(adsk.fusion, "BRepVertex", type("V", (), {}))
+    monkeypatch.setattr(adsk.fusion, "ConstructionPoint", type("CP", (), {}))
+    monkeypatch.setattr(adsk.fusion, "SketchPoint", type("SP", (), {}))
+    # a real type so is_joint_origin() works
+    monkeypatch.setattr(adsk.fusion, "JointOrigin", type("JointOrigin", (), {}))
 
     class FakeDesign:
         def __init__(self):
@@ -312,15 +313,15 @@ def _install_resolve_seam(token_map):
     d = FakeDesign()
     # Dual-seam: the handler reads design via joint._common, but the JointOriginRef kind (the JO-name
     # path) resolves through joint._inputs._common - patch BOTH to the same design (tests/CLAUDE.md).
-    joint._common.design = lambda: d
-    joint._inputs._common.design = lambda: d
+    monkeypatch.setattr(joint._common, "design", lambda: d)
+    monkeypatch.setattr(joint._inputs._common, "design", lambda: d)
     return d
 
 
 class TestResolveInputHandle:
-    def test_handle_resolves_to_joint_geometry_at_real_face(self):
+    def test_handle_resolves_to_joint_geometry_at_real_face(self, monkeypatch):
         face = _FakePlanarFace()
-        design = _install_resolve_seam({"H_FACE": face})
+        design = _install_resolve_seam(monkeypatch, {"H_FACE": face})
         g, label, err = joint._resolve_input(design, "H_FACE")
         import adsk.fusion
         assert err is None
@@ -328,19 +329,19 @@ class TestResolveInputHandle:
         assert g == ("planar", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
         assert label.startswith("handle:")
 
-    def test_non_token_falls_through_to_jo_name(self):
+    def test_non_token_falls_through_to_jo_name(self, monkeypatch):
         # 'JO_A' is not a resolvable token -> handle path declines, JO-name path (JointOriginRef) resolves it.
-        design = _install_resolve_seam({})
+        design = _install_resolve_seam(monkeypatch, {})
         target = SimpleNamespace(name="JO_A")
         design.rootComponent.jointOrigins = _JOCollection({"JO_A": target})
         g, label, err = joint._resolve_input(design, "JO_A")
         assert err is None and g is target and label == "JO_A"
 
-    def test_joint_origin_handle_used_directly(self):
+    def test_joint_origin_handle_used_directly(self, monkeypatch):
         # A JOINT ORIGIN handle (assembly_get mints these) is a first-class joint input - used directly,
         # NOT run through build_joint_geometry (which would reject it).
         import adsk.fusion
-        design = _install_resolve_seam({})
+        design = _install_resolve_seam(monkeypatch, {})
         jo = adsk.fusion.JointOrigin()
         jo.name = "Stock_Center"
         design.rootComponent.jointOrigins = _JOCollection({})
@@ -350,8 +351,8 @@ class TestResolveInputHandle:
         g, label, err = joint._resolve_input(design, "H_JO")
         assert err is None and g is jo and label == "handle:joint_origin"
 
-    def test_unresolvable_spec_errors_naming_all_paths(self):
-        design = _install_resolve_seam({})
+    def test_unresolvable_spec_errors_naming_all_paths(self, monkeypatch):
+        design = _install_resolve_seam(monkeypatch, {})
         g, label, err = joint._resolve_input(design, "Nope")
         assert g is None
         assert "handle" in err and "Joint Origin" in err and "snap" in err
@@ -383,35 +384,35 @@ class _IterableJOs:
 # ── resolve-failure error lists the design's Joint Origins (self-correction data) ───────────
 
 class TestResolveErrorListsJointOrigins:
-    def _design_with_jos(self):
+    def _design_with_jos(self, monkeypatch):
         root_jo = SimpleNamespace(name="Attach Center of Workpiece")
         sub_jo = SimpleNamespace(name="Center of Model")
         root = SimpleNamespace(name="RootComp", jointOrigins=_IterableJOs(
             {"Attach Center of Workpiece": root_jo}))
         sub = SimpleNamespace(name="SculpturalTower", jointOrigins=_IterableJOs(
             {"Center of Model": sub_jo}))
-        design = _install_resolve_seam({})
+        design = _install_resolve_seam(monkeypatch, {})
         design.rootComponent = root
         design.allComponents = [root, sub]
         return design
 
-    def test_error_names_each_jo_and_owner(self):
-        design = self._design_with_jos()
+    def test_error_names_each_jo_and_owner(self, monkeypatch):
+        design = self._design_with_jos(monkeypatch)
         g, label, err = joint._resolve_input(design, "Wrong Name")
         assert g is None
         assert "'Attach Center of Workpiece' (root)" in err
         assert "'Center of Model' (in component 'SculpturalTower')" in err
 
-    def test_listing_is_capped_with_overflow_count(self):
-        design = self._design_with_jos()
+    def test_listing_is_capped_with_overflow_count(self, monkeypatch):
+        design = self._design_with_jos(monkeypatch)
         many = {f"JO_{i}": SimpleNamespace(name=f"JO_{i}") for i in range(12)}
         design.rootComponent.jointOrigins = _IterableJOs(many)
         listed, more = joint._available_joint_origins(design, limit=8)
         assert len(listed) == 8
         assert more == 5  # 12 root + 1 sub-component JO, 8 listed
 
-    def test_no_jos_keeps_error_unadorned(self):
-        design = _install_resolve_seam({})
+    def test_no_jos_keeps_error_unadorned(self, monkeypatch):
+        design = _install_resolve_seam(monkeypatch, {})
         g, label, err = joint._resolve_input(design, "Nope")
         assert "Joint Origins in this design" not in err
 
@@ -437,7 +438,7 @@ class TestFmtNum:
 # MiddleKeyPoint (CenterKeyPoint is invalid there), a circular edge -> center, a line edge ->
 # middle, a vertex/point -> createByPoint.
 
-def _jg_seam():
+def _jg_seam(monkeypatch):
     """Install the JointGeometry recorder + entity-kind fakes the resolver branches on."""
     import adsk.fusion, adsk.core
     calls = []
@@ -447,7 +448,7 @@ def _jg_seam():
         "createByCurve": staticmethod(lambda c, kp: calls.append(("curve", kp)) or ("curve", kp)),
         "createByPoint": staticmethod(lambda p: calls.append(("point", None)) or ("point",)),
     })
-    adsk.fusion.JointGeometry = rec
+    monkeypatch.setattr(adsk.fusion, "JointGeometry", rec)
 
     class _Face:
         def __init__(self, stype):
@@ -460,49 +461,49 @@ def _jg_seam():
     class _Vertex:
         pass
 
-    adsk.fusion.BRepFace = _Face
-    adsk.fusion.BRepEdge = _Edge
-    adsk.fusion.BRepVertex = _Vertex
-    adsk.fusion.ConstructionPoint = type("CP", (), {})
-    adsk.fusion.SketchPoint = type("SP", (), {})
+    monkeypatch.setattr(adsk.fusion, "BRepFace", _Face)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", _Edge)
+    monkeypatch.setattr(adsk.fusion, "BRepVertex", _Vertex)
+    monkeypatch.setattr(adsk.fusion, "ConstructionPoint", type("CP", (), {}))
+    monkeypatch.setattr(adsk.fusion, "SketchPoint", type("SP", (), {}))
     return _Face, _Edge, _Vertex
 
 
 class TestJgFromEntity:
-    def test_planar_face_center(self):
+    def test_planar_face_center(self, monkeypatch):
         import adsk.core, adsk.fusion
-        Face, _, _ = _jg_seam()
+        Face, _, _ = _jg_seam(monkeypatch)
         g, label, err = joint._jg_from_entity(Face(adsk.core.SurfaceTypes.PlaneSurfaceType))
         assert err is None and "planar" in label
         assert g == ("planar", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
 
-    def test_cylinder_face_middle_not_center(self):
+    def test_cylinder_face_middle_not_center(self, monkeypatch):
         import adsk.core, adsk.fusion
-        Face, _, _ = _jg_seam()
+        Face, _, _ = _jg_seam(monkeypatch)
         g, label, err = joint._jg_from_entity(Face(adsk.core.SurfaceTypes.CylinderSurfaceType))
         # CenterKeyPoint invalid on a cylinder
         assert err is None and g == ("nonplanar", adsk.fusion.JointKeyPointTypes.MiddleKeyPoint)
 
-    def test_circular_edge_center(self):
+    def test_circular_edge_center(self, monkeypatch):
         import adsk.core, adsk.fusion
-        _, Edge, _ = _jg_seam()
+        _, Edge, _ = _jg_seam(monkeypatch)
         g, label, err = joint._jg_from_entity(Edge(adsk.core.Curve3DTypes.Circle3DCurveType))
         assert err is None and label == "edge"
         assert g == ("curve", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
 
-    def test_line_edge_middle(self):
+    def test_line_edge_middle(self, monkeypatch):
         import adsk.core, adsk.fusion
-        _, Edge, _ = _jg_seam()
+        _, Edge, _ = _jg_seam(monkeypatch)
         g, _, err = joint._jg_from_entity(Edge(adsk.core.Curve3DTypes.Line3DCurveType))
         assert err is None and g == ("curve", adsk.fusion.JointKeyPointTypes.MiddleKeyPoint)
 
-    def test_vertex_uses_point(self):
-        _, _, Vertex = _jg_seam()
+    def test_vertex_uses_point(self, monkeypatch):
+        _, _, Vertex = _jg_seam(monkeypatch)
         g, label, err = joint._jg_from_entity(Vertex())
         assert err is None and g == ("point",) and label == "point"
 
-    def test_unsupported_entity_errors(self):
-        _jg_seam()
+    def test_unsupported_entity_errors(self, monkeypatch):
+        _jg_seam(monkeypatch)
         g, label, err = joint._jg_from_entity(object())
         assert g is None and err is not None and "not a supported joint geometry" in err
 
@@ -600,7 +601,7 @@ class _CreateJoints:
         return SimpleNamespace(name="Joint1", jointMotion=None)
 
 
-def _install_create(jo_names=("JO_A", "JO_B")):
+def _install_create(monkeypatch, jo_names=("JO_A", "JO_B")):
     import adsk.fusion, adsk.core
     jos = {n: SimpleNamespace(name=n) for n in jo_names}
     joints_coll = _CreateJoints()
@@ -615,9 +616,9 @@ def _install_create(jo_names=("JO_A", "JO_B")):
             return []
     d = FakeDesign()
     # Dual-seam: the JO-name inputs resolve through the JointOriginRef kind (joint._inputs._common).
-    joint._common.design = lambda: d
-    joint._inputs._common.design = lambda: d
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
+    monkeypatch.setattr(joint._common, "design", lambda: d)
+    monkeypatch.setattr(joint._inputs._common, "design", lambda: d)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: ("real", v)))
     return d, joints_coll
 
 
@@ -627,8 +628,8 @@ def _payload2(result):
 
 
 class TestCreateHandler:
-    def test_requires_both_inputs(self):
-        _install_create()
+    def test_requires_both_inputs(self, monkeypatch):
+        _install_create(monkeypatch)
         res1 = joint.handler(occurrence_one="JO_A")
         assert res1["isError"] is True
         assert "Provide 'occurrence_one' and 'occurrence_two'" in res1["message"]
@@ -636,96 +637,96 @@ class TestCreateHandler:
         assert res2["isError"] is True
         assert "Provide 'occurrence_one' and 'occurrence_two'" in res2["message"]
 
-    def test_unknown_joint_type_errors(self):
-        _install_create()
+    def test_unknown_joint_type_errors(self, monkeypatch):
+        _install_create(monkeypatch)
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", joint_type="weld")
         assert res["isError"] is True and "Unknown joint_type" in res["message"]
 
-    def test_unknown_axis_errors(self):
-        _install_create()
+    def test_unknown_axis_errors(self, monkeypatch):
+        _install_create(monkeypatch)
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                             joint_type="revolute", axis="q")
         assert res["isError"] is True and "Unknown axis" in res["message"]
 
-    def test_unknown_units_errors(self):
-        _install_create()
+    def test_unknown_units_errors(self, monkeypatch):
+        _install_create(monkeypatch)
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", units="furlong")
         assert res["isError"] is True and "Unknown units" in res["message"]
 
-    def test_revolute_dispatches_axis_and_echoes_axis_field(self):
-        _, coll = _install_create()
+    def test_revolute_dispatches_axis_and_echoes_axis_field(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="revolute", axis="y"))
         assert coll.last_input.called == ("revolute", 1)   # YAxisJointDirection == 1
         assert out["joint_type"] == "revolute" and out["axis"] == "y"
 
-    def test_rigid_has_null_axis_field(self):
-        _, coll = _install_create()
+    def test_rigid_has_null_axis_field(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="rigid"))
         assert coll.last_input.called == ("rigid",)
         assert out["axis"] is None                         # rigid needs no axis
 
-    def test_ball_has_null_axis_field(self):
-        _, coll = _install_create()
+    def test_ball_has_null_axis_field(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="ball"))
         assert coll.last_input.called[0] == "ball"
         assert out["axis"] is None
 
-    def test_ball_uses_valid_pitch_and_yaw_directions(self):
+    def test_ball_uses_valid_pitch_and_yaw_directions(self, monkeypatch):
         # Live API fact this pins: setAsBallJointMotion(pitchDirection, yawDirection) REJECTS XAxis
         # as the pitch direction ("Invalid parameter pitchDirection") - it requires
         # pitch=ZAxisJointDirection and yaw=XAxisJointDirection, and a mock accepts any args, so
         # only pinning the enums here catches a wrong pair before a live document does.
         import adsk.fusion
         JD = adsk.fusion.JointDirections
-        _, coll = _install_create()
+        _, coll = _install_create(monkeypatch)
         joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", joint_type="ball")
         kind, pitch, yaw = coll.last_input.called
         assert kind == "ball"
         assert pitch == JD.ZAxisJointDirection, "pitchDirection must be ZAxisJointDirection (not X)"
         assert yaw == JD.XAxisJointDirection, "yawDirection must be XAxisJointDirection"
 
-    def test_offset_scaled_to_cm_on_value_input(self):
-        _, coll = _install_create()
+    def test_offset_scaled_to_cm_on_value_input(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="rigid", offset=10, units="mm"))
         # 10 mm -> 1.0 cm passed to ValueInput.createByReal
         assert coll.last_input.offset == ("real", 1.0)
         assert out["offset"] == 10
 
-    def test_offset_inch_scaling(self):
-        _, coll = _install_create()
+    def test_offset_inch_scaling(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                 joint_type="rigid", offset=2, units="in"))
         assert abs(coll.last_input.offset[1] - 5.08) < 1e-9   # 2 in -> 5.08 cm
 
-    def test_angle_converted_to_radians(self):
+    def test_angle_converted_to_radians(self, monkeypatch):
         import math
-        _, coll = _install_create()
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="revolute", angle=90))
         assert abs(coll.last_input.angle[1] - math.radians(90)) < 1e-9
         assert out["angle_deg"] == 90
 
-    def test_flip_sets_is_flipped(self):
-        _, coll = _install_create()
+    def test_flip_sets_is_flipped(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="rigid", flip=True))
         assert coll.last_input.isFlipped is True and out["flipped"] is True
 
-    def test_no_offset_angle_reported_as_none(self):
-        _install_create()
+    def test_no_offset_angle_reported_as_none(self, monkeypatch):
+        _install_create(monkeypatch)
         out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
                                       joint_type="rigid"))
         assert out["offset"] is None and out["angle_deg"] is None
 
-    def test_add_failure_on_input_paths_hints_the_proxy_fix(self):
+    def test_add_failure_on_input_paths_hints_the_proxy_fix(self, monkeypatch):
         # Fusion's "Provided input paths for joint are not valid" = an input not in assembly
         # context. The error must carry the remedy (pass JOs by name so the tool proxies them),
         # not just echo Fusion's opaque message.
-        _, coll = _install_create()
+        _, coll = _install_create(monkeypatch)
         def boom(ji):
             raise RuntimeError("3 : Provided input paths for joint are not valid.")
         coll.add = boom
@@ -734,8 +735,8 @@ class TestCreateHandler:
         assert "assembly context" in res["message"]
         assert "<occurrence>:<JO name>" in res["message"]
 
-    def test_add_failure_other_errors_unadorned(self):
-        _, coll = _install_create()
+    def test_add_failure_other_errors_unadorned(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
         def boom(ji):
             raise RuntimeError("5 : something else entirely")
         coll.add = boom

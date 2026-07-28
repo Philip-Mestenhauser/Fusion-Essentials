@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Unit tests for the doc generators (gen_spec / gen_manifest / gen_wiring).
+"""Unit tests for the doc generators (gen_manifest / gen_wiring).
 
 test_generated_docs_current.py pins output FRESHNESS (the committed doc matches the generator);
 these pin the generators' LOGIC (the generator matches the truth). A generator defect that lies
@@ -15,7 +15,6 @@ import ast
 import pytest
 
 import gen_manifest
-import gen_spec
 import gen_wiring
 
 
@@ -59,28 +58,6 @@ class TestToolHandlerMap:
             'other = Item.create_tool_item(tool=unknown_var, write="read", handler=h2)\n'
         )
         assert self._map(src) == {}
-
-
-# ── gen_spec: test-name -> behavior-line transform ────────────────────────────
-
-class TestGenSpecTransforms:
-    def test_humanize_strips_prefix_and_underscores(self):
-        assert gen_spec._humanize("test_picks_largest_body_by_volume") == "picks largest body by volume"
-
-    def test_module_doc_summary_is_first_paragraph_flattened(self):
-        tree = ast.parse('"""First line\ncontinues here.\n\nSecond paragraph."""\n')
-        assert gen_spec._module_doc_summary(tree) == "First line continues here."
-
-    def test_render_counts_files_and_behaviors(self):
-        data = {"test_mytool.py": ("Does things.", [("Guards", "refuses empty name"),
-                                                    ("Guards", "refuses bad units"),
-                                                    ("", "happy path works")])}
-        out = gen_spec.render(data)
-        assert "**Tools with a test file:** 1" in out
-        assert "**Behaviors pinned:** 3" in out
-        assert "## `mytool`" in out
-        assert "**Guards**" in out
-        assert "- refuses empty name" in out
 
 
 # ── gen_manifest: family grouping + CLAUDE.md splice ──────────────────────────

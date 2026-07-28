@@ -7,10 +7,6 @@ Re-orients + fits + saveAsImageFile per requested view (the same mechanism view_
 one viewport per call), restoring the user's camera at the end. Read-only.
 """
 
-import base64
-import os
-import tempfile
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -55,8 +51,6 @@ def _parse_views(views):
         if name not in seen:
             seen.add(name)
             out.append(name)
-    if not out:
-        return list(_DEFAULT_VIEWS), None
     return out, None
 
 
@@ -65,12 +59,18 @@ def handler(views=None, width: int = 600, height: int = 500) -> dict:
     names, err = _parse_views(views)
     if err:
         return error(err)
+    # Cap the view count, but NAME the dropped views (below) rather than truncating silently.
+    dropped = names[_MAX_VIEWS:]
     names = names[:_MAX_VIEWS]
-    try:
-        width = max(1, min(int(width), _MAX_DIM))
-        height = max(1, min(int(height), _MAX_DIM))
-    except Exception:
-        width, height = 600, 500
+
+    # Clamp each dimension INDEPENDENTLY: a non-numeric width must not discard a valid height.
+    def _clamp_dim(value, default):
+        try:
+            return max(1, min(int(value), _MAX_DIM))
+        except Exception:
+            return default
+    width = _clamp_dim(width, 600)
+    height = _clamp_dim(height, 500)
 
     vp = app.activeViewport
     if not vp:
@@ -82,44 +82,19 @@ def handler(views=None, width: int = 600, height: int = 500) -> dict:
     try:
         for name in names:
             try:
-                # Set the camera to EXACT world-axis vectors (guaranteed square) rather than the
-                # viewOrientation setter, which leaves a few-degree tilt that distorts orthographic
-                # reads. Shares the vector table with view_screenshot.
-                from .view_screenshot import _ortho_camera_vectors, _is_ortho_face
-                cam = vp.camera
-                # every parsed view name resolves in the shared table (_VIEWS is built from it)
-                look, up = _ortho_camera_vectors(name)
-                tgt = cam.target
-                dist = cam.eye.distanceTo(cam.target) or 100.0
-                cam.eye = adsk.core.Point3D.create(
-                    tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
-                cam.upVector = adsk.core.Vector3D.create(*up)
-                if _is_ortho_face(name):
-                    cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-                vp.camera = cam
-                vp.fit()
+                # every parsed view name resolves in the shared table (_VIEWS is built from it); the
+                # shared apply sets exact world-axis vectors (guaranteed square) + ortho + fit.
+                _view_common.apply_named_view(vp, name)
             except Exception as e:
                 content.append({"type": "text", "text": f"[{name}] failed to orient: {e}"})
                 continue
-            temp_path = None
-            try:
-                fd, temp_path = tempfile.mkstemp(prefix="fe_mcp_views", suffix=".png")
-                os.close(fd)
-                did = vp.saveAsImageFile(temp_path, width, height)
-                if not did or not os.path.exists(temp_path):
-                    content.append({"type": "text", "text": f"[{name}] capture failed."})
-                    continue
-                with open(temp_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("ascii")
-                content.append({"type": "text", "text": f"View: {name}"})
-                content.append({"type": "image", "data": b64, "mimeType": "image/png"})
-                captured.append(name)
-            finally:
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        os.unlink(temp_path)
-                    except Exception:
-                        pass
+            b64, cerr = _view_common.capture_png_b64(vp, width, height, prefix="fe_mcp_views")
+            if cerr:
+                content.append({"type": "text", "text": f"[{name}] capture failed."})
+                continue
+            content.append({"type": "text", "text": f"View: {name}"})
+            content.append({"type": "image", "data": b64, "mimeType": "image/png"})
+            captured.append(name)
     finally:
         try:
             vp.camera = saved_camera
@@ -128,9 +103,12 @@ def handler(views=None, width: int = 600, height: int = 500) -> dict:
 
     if not captured:
         return error("No views were captured.")
-    content.insert(0, {"type": "text",
-        "text": f"Captured {len(captured)} view(s): {', '.join(captured)}. "
-        "Each image is labelled with its view above it."})
+    summary = (f"Captured {len(captured)} view(s): {', '.join(captured)}. "
+               "Each image is labelled with its view above it.")
+    if dropped:
+        summary += (f" Dropped {len(dropped)} view(s) over the {_MAX_VIEWS}-view cap: "
+                    f"{', '.join(dropped)} - request them in a second call.")
+    content.insert(0, {"type": "text", "text": summary})
     return {"content": content, "isError": False}
 
 

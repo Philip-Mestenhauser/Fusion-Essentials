@@ -6,55 +6,18 @@ moveAfter. Operation order in a setup is the machining sequence (rough before fi
 bore)."""
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, resolve_cam_node
 
 app = adsk.core.Application.get()
 
 _POSITIONS = ("before", "after")
-
-
-def _walk_parent(parent, out):
-    """Collect (name, object) for operations + folders + patterns under a parent (setup or folder),
-    recursively. allOperations omits folders/patterns, so walk .folders / .patterns explicitly."""
-    ops = safe(lambda: parent.operations)
-    for i in range(safe(lambda: ops.count, 0) or 0):
-        o = safe(lambda i=i: ops.item(i))
-        if o is not None:
-            out.append((safe(lambda o=o: o.name), o))
-    for getter in (lambda: parent.folders, lambda: parent.patterns):
-        coll = safe(getter)
-        for i in range(safe(lambda: coll.count, 0) or 0):
-            c = safe(lambda i=i: coll.item(i))
-            if c is not None:
-                out.append((safe(lambda c=c: c.name), c))
-                _walk_parent(c, out)
-
-
-def _all_named(cam):
-    out = []
-    for si in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda si=si: cam.setups.item(si))
-        if s is not None:
-            _walk_parent(s, out)
-    return out
-
-
-def _resolve(named, name):
-    """(object, None) for a unique name; (None, error) if missing or ambiguous."""
-    matches = [o for (n, o) in named if (n or "").lower() == (name or "").lower()]
-    if not matches:
-        avail = [n for (n, o) in named if n]
-        return None, (f"No CAM operation/folder/pattern named '{name}'. Available: "
-                      f"{', '.join(avail)[:300] or '(none)'}.")
-    if len(matches) > 1:
-        return None, f"'{name}' is ambiguous - {len(matches)} items share that name. Rename so it's unique."
-    return matches[0], None
+_KINDS = ("operation", "folder", "pattern")
+_LABEL = "CAM operation/folder/pattern"
 
 
 def handler(entity: str = "", position: str = "after", reference: str = "") -> dict:
@@ -72,14 +35,14 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)
-    named = _all_named(cam)
 
-    mover, merr = _resolve(named, entity)
+    mover_node, merr = resolve_cam_node(cam, entity, kinds=_KINDS, label=_LABEL)
     if merr:
         return error(merr)
-    ref, rerr = _resolve(named, reference)
+    ref_node, rerr = resolve_cam_node(cam, reference, kinds=_KINDS, label=_LABEL)
     if rerr:
         return error(rerr)
+    mover, ref = mover_node.obj, ref_node.obj
 
     fn = (lambda: mover.moveBefore(ref)) if position == "before" else (lambda: mover.moveAfter(ref))
     did = safe(fn, False)

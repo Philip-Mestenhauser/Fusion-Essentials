@@ -1,12 +1,12 @@
-"""Lint: the generated docs (TEST_SPEC/TOOL_MANIFEST/TOOL_POINTER_MAP + the CLAUDE.md map) match the live tree.
+"""Lint: the generated docs (TOOL_MANIFEST/TOOL_POINTER_MAP/PERMISSION_POSTURE + the CLAUDE.md map) match the live tree.
 
-Three scripts derive documentation from the tests/registry/source instead of being hand-maintained:
-``gen_spec.py`` (TEST_SPEC.md from test names), ``gen_manifest.py`` (TOOL_MANIFEST.md + the CLAUDE.md map from
-the registry), ``gen_wiring.py`` (tests/generated/TOOL_POINTER_MAP.md from the tool source). ``gen_all.py``
-fronts all three in one process and its ``--check`` exits non-zero if any output would differ from
-what is committed. Since agents run pytest constantly but rarely remember to re-run a generator,
-this test shells that ``--check`` so a stale doc shows up as a normal test failure instead of
-silently rotting.
+Three scripts derive documentation from the registry/source instead of being hand-maintained:
+``gen_manifest.py`` (TOOL_MANIFEST.md + the CLAUDE.md map from the registry), ``gen_wiring.py``
+(tests/generated/TOOL_POINTER_MAP.md from the tool source), ``gen_posture.py`` (PERMISSION_POSTURE.md
+from the registry's write-status truth). ``gen_all.py`` fronts all three in one process and its
+``--check`` exits non-zero if any output would differ from what is committed. Since agents run
+pytest constantly but rarely remember to re-run a generator, this test shells that ``--check`` so a
+stale doc shows up as a normal test failure instead of silently rotting.
 """
 
 import subprocess

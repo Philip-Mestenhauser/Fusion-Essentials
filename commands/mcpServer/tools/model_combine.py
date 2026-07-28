@@ -71,7 +71,16 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if not feature:
         return error("Combine returned no feature.")
 
-    return ok({
+    # body-split: a cut/intersect that DISCONNECTS the single target leaves it in >1 piece.
+    # CombineFeature.bodies returns the bodies this feature modified/created; the tool bodies were
+    # consumed, so for a cut/intersect more than one result body means the target split (there is
+    # exactly one target here, unlike an unscoped extrude, so no multi-body ambiguity).
+    result_bodies = []
+    fb = safe(lambda: feature.bodies)
+    for i in range(safe(lambda: fb.count, 0) if fb else 0):
+        result_bodies.append(safe(lambda i=i: fb.item(i).name))
+
+    payload = {
         "combined": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -81,7 +90,13 @@ def handler(target: str = "", tools=None, operation: str = "join",
         "new_component": bool(new_component),
         "bodies_remaining": safe(lambda: comp.bRepBodies.count, None),
         "note": "Bodies combined. Pair with view_screenshot to view the result.",
-    })
+    }
+    if op_key in ("cut", "intersect") and len(result_bodies) > 1:
+        payload["body_split"] = result_bodies
+        payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(result_bodies)} "
+                            f"separate bodies ({', '.join(n for n in result_bodies if n)}) - reference "
+                            "each piece by name; a later op assuming one body may hit the wrong piece.")
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (

@@ -71,53 +71,53 @@ class _MovingOcc:
         return type("M", (), {"translation": vec})()
 
 
-def _install():
+def _install(monkeypatch):
     rec = _Recorder()
     # JointGeometry factory -> our recorder
-    adsk.fusion.JointGeometry = rec
+    monkeypatch.setattr(adsk.fusion, "JointGeometry", rec)
     # make the handler's isinstance checks use our fakes
-    adsk.fusion.BRepFace = FakeBRepFace
-    adsk.fusion.BRepEdge = FakeBRepEdge
-    adsk.fusion.BRepVertex = FakeBRepVertex
-    adsk.fusion.ConstructionPoint = type("CP", (), {})
-    adsk.fusion.SketchPoint = type("SP", (), {})
+    monkeypatch.setattr(adsk.fusion, "BRepFace", FakeBRepFace)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", FakeBRepEdge)
+    monkeypatch.setattr(adsk.fusion, "BRepVertex", FakeBRepVertex)
+    monkeypatch.setattr(adsk.fusion, "ConstructionPoint", type("CP", (), {}))
+    monkeypatch.setattr(adsk.fusion, "SketchPoint", type("SP", (), {}))
     return rec
 
 
 # ── the runtime-rule logic (the whole point of the tool) ────────────────────
 
 class TestJointGeometryRules:
-    def test_cylinder_face_uses_MIDDLE_not_center(self):
+    def test_cylinder_face_uses_MIDDLE_not_center(self, monkeypatch):
         # The key rule: CenterKeyPoint is invalid on a cylinder face — use MiddleKeyPoint.
-        _install()
+        _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.CylinderSurfaceType))
         assert err is None
         assert g[1] == "nonplanar" and g[2] == _KP.MiddleKeyPoint     # createByNonPlanarFace + MiddleKeyPoint
         assert "cylinder" in label
 
-    def test_cone_face_also_uses_middle(self):
-        _install()
+    def test_cone_face_also_uses_middle(self, monkeypatch):
+        _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.ConeSurfaceType))
         assert err is None and g[2] == _KP.MiddleKeyPoint
 
-    def test_planar_face_uses_CENTER(self):
-        _install()
+    def test_planar_face_uses_CENTER(self, monkeypatch):
+        _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.PlaneSurfaceType))
         assert err is None
         assert g[1] == "planar" and g[2] == _KP.CenterKeyPoint
 
-    def test_circular_edge_uses_center(self):
-        _install()
+    def test_circular_edge_uses_center(self, monkeypatch):
+        _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepEdge(_CT.Circle3DCurveType))
         assert err is None and g[1] == "curve" and g[2] == _KP.CenterKeyPoint
 
-    def test_line_edge_uses_middle(self):
-        _install()
+    def test_line_edge_uses_middle(self, monkeypatch):
+        _install(monkeypatch)
         g, _, err = jg._joint_geometry_for(FakeBRepEdge(_CT.Line3DCurveType))
         assert err is None and g[2] == _KP.MiddleKeyPoint
 
-    def test_vertex_uses_point(self):
-        _install()
+    def test_vertex_uses_point(self, monkeypatch):
+        _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepVertex())
         assert err is None and g[1] == "point"
 
@@ -137,7 +137,7 @@ class _FakeJointInput:
     def setAsCylindricalJointMotion(self, *args):
         self.motion = ("cyl",) + args; return True
     def setAsBallJointMotion(self, a, b):
-        self.motion = ("ball",); return True
+        self.motion = ("ball", a, b); return True
 
 
 class _FakeJoints:
@@ -154,8 +154,8 @@ class _FakeJoints:
                               "occurrenceTwo": type("O", (), {"name": "Crank:1"})()})()
 
 
-def _install_design(token_map, joint_health=0, joint_msg=""):
-    rec = _install()
+def _install_design(monkeypatch, token_map, joint_health=0, joint_msg=""):
+    rec = _install(monkeypatch)
     joints = _FakeJoints(joint_health, joint_msg)
     root = type("R", (), {"joints": joints})()
     class FakeDesign:
@@ -164,10 +164,10 @@ def _install_design(token_map, joint_health=0, joint_msg=""):
             e = token_map.get(h)
             return [e] if e is not None else []
     d = FakeDesign()
-    jg.app = type("A", (), {"activeProduct": d})()
-    jg._common.app = jg.app
-    import adsk.fusion
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    app = type("A", (), {"activeProduct": d})()
+    monkeypatch.setattr(jg, "app", app)
+    monkeypatch.setattr(jg._common, "app", app)
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
     return joints
 
 
@@ -177,112 +177,116 @@ def _payload(res):
 
 
 class TestHandler:
-    def test_unknown_motion(self):
-        _install_design({})
+    def test_unknown_motion(self, monkeypatch):
+        _install_design(monkeypatch, {})
         res = jg.handler(handle_one="a", handle_two="b", motion="weld")
         assert res["isError"] is True and "Unknown motion" in res["message"]
 
-    def test_unresolved_handle(self):
-        _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType)})   # 'b' not in map
+    def test_unresolved_handle(self, monkeypatch):
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType)})   # 'b' not in map
         res = jg.handler(handle_one="a", handle_two="b")
         # The typed GeometryHandle kind names the offending input and flags possible staleness.
         assert res["isError"] is True
         assert "handle_two" in res["message"] and "did not resolve" in res["message"]
 
-    def test_revolute_forced_world_axis(self):
-        joints = _install_design({"rod": FakeBRepFace(_ST.CylinderSurfaceType), "pin": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_revolute_forced_world_axis(self, monkeypatch):
+        joints = _install_design(monkeypatch, {"rod": FakeBRepFace(_ST.CylinderSurfaceType), "pin": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="rod", handle_two="pin", motion="revolute", axis="x"))
         assert out["jointed"] is True
         assert out["occurrence_one"] == "Rod:1" and out["occurrence_two"] == "Crank:1"
         # axis='x' forces the world X direction (no custom-axis entity)
         assert joints.last_input.motion == ("revolute", _JD.XAxisJointDirection)
 
-    def test_revolute_auto_axis_uses_geometry_axis(self):
+    def test_revolute_auto_axis_uses_geometry_axis(self, monkeypatch):
         # axis='auto' (default) on cylinder faces derives the axis FROM the geometry
         # (CustomJointDirection + the cylinder face as the axis entity), not a world axis.
         pin = FakeBRepFace(_ST.CylinderSurfaceType)
-        joints = _install_design({"rod": FakeBRepFace(_ST.CylinderSurfaceType), "pin": pin})
+        joints = _install_design(monkeypatch, {"rod": FakeBRepFace(_ST.CylinderSurfaceType), "pin": pin})
         out = _payload(jg.handler(handle_one="rod", handle_two="pin", motion="revolute"))
         m = joints.last_input.motion
         assert m[0] == "revolute" and m[1] == _JD.CustomJointDirection      # CustomJointDirection used
         assert m[2] is not None                              # an axis entity was passed
         assert out["axis"] == "auto(geometry)"
 
-    def test_slider_auto_axis_from_geometry(self):
-        joints = _install_design({"pis": FakeBRepFace(_ST.CylinderSurfaceType), "bore": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_slider_auto_axis_from_geometry(self, monkeypatch):
+        joints = _install_design(monkeypatch, {"pis": FakeBRepFace(_ST.CylinderSurfaceType), "bore": FakeBRepFace(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="pis", handle_two="bore", motion="slider"))
         m = joints.last_input.motion
         assert m[0] == "slider" and m[1] == _JD.CustomJointDirection
 
-    def test_reports_health_warning_when_joint_fails_to_compute(self):
+    def test_reports_health_warning_when_joint_fails_to_compute(self, monkeypatch):
         # a joint can ADD fine yet report healthState=1 (over-constrained / Compute Failed) - the
         # handler must surface that as a health warning, not a false success.
-        _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)},
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)},
                         joint_health=1, joint_msg="Can't resolve positions.Compute FailedX")
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is False
         assert "FAILED TO COMPUTE" in out["health_warning"]
         assert "Compute Failed" not in out["health_warning"]   # message trimmed
 
-    def test_healthy_joint_no_warning(self):
-        _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_healthy_joint_no_warning(self, monkeypatch):
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is True and "health_warning" not in out
 
-    def test_rigid_motion_has_null_axis(self):
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_rigid_motion_has_null_axis(self, monkeypatch):
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert joints.last_input.motion == ("rigid",)
         assert out["axis"] is None                       # rigid has no motion axis to report
 
-    def test_ball_motion_uses_two_world_directions(self):
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_ball_motion_pins_pitch_z_yaw_x(self, monkeypatch):
+        # Live API fact: setAsBallJointMotion(pitchDirection, yawDirection) REJECTS X as the pitch
+        # ("Invalid parameter pitchDirection") - the valid pair is pitch=Z, yaw=X. A mock accepts
+        # any args, so only pinning the enum pair catches a swap before a live document does.
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball"))
-        assert joints.last_input.motion == ("ball",)     # setAsBallJointMotion(Z, X)
+        assert joints.last_input.motion == ("ball", _JD.ZAxisJointDirection, _JD.XAxisJointDirection)
         assert out["jointed"] is True
 
-    def test_slider_forced_world_axis(self):
+    def test_slider_forced_world_axis(self, monkeypatch):
         # axis='z' on cylinder faces still FORCES the world Z direction (no CustomJointDirection).
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="slider", axis="z"))
         assert joints.last_input.motion == ("slider", _JD.ZAxisJointDirection)
 
-    def test_cylindrical_forced_world_axis(self):
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+    def test_cylindrical_forced_world_axis(self, monkeypatch):
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="cylindrical", axis="y"))
         assert joints.last_input.motion == ("cyl", _JD.YAxisJointDirection)
 
-    def test_auto_axis_with_no_geometry_axis_falls_back_to_world_z(self):
+    def test_auto_axis_with_no_geometry_axis_falls_back_to_world_z(self, monkeypatch):
         # PLANAR faces give _axis_entity nothing -> 'auto' can't derive an axis; the motion uses the
         # default world Z direction and the reported axis is plain 'auto', NOT 'auto(geometry)'.
-        joints = _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType), "b": FakeBRepFace(_ST.PlaneSurfaceType)})
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType), "b": FakeBRepFace(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert joints.last_input.motion == ("revolute", _JD.ZAxisJointDirection)   # world Z, not CUSTOM
         assert out["axis"] == "auto"
 
-    def test_unknown_axis_keyword_errors(self):
+    def test_unknown_axis_keyword_errors(self, monkeypatch):
         # An unrecognized axis string (not x/y/z, not auto) must be REFUSED, naming the offending
         # value - not silently coerced to the world Z direction.
-        _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType), "b": FakeBRepFace(_ST.PlaneSurfaceType)})
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType), "b": FakeBRepFace(_ST.PlaneSurfaceType)})
         res = jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="diagonal")
         assert res["isError"] is True
         assert "diagonal" in res["message"]
 
-    def test_circular_edge_is_an_axis_entity_for_auto(self):
+    def test_circular_edge_is_an_axis_entity_for_auto(self, monkeypatch):
         # a circular edge can define the motion axis (auto -> CustomJointDirection + the edge).
-        joints = _install_design({"a": FakeBRepEdge(_CT.Circle3DCurveType), "b": FakeBRepEdge(_CT.Circle3DCurveType)})
+        joints = _install_design(monkeypatch, {"a": FakeBRepEdge(_CT.Circle3DCurveType), "b": FakeBRepEdge(_CT.Circle3DCurveType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         m = joints.last_input.motion
         assert m[0] == "revolute" and m[1] == _JD.CustomJointDirection and m[2] is not None
         assert out["axis"] == "auto(geometry)"
 
-    def test_reports_moved_by_when_part_repositioned(self):
+    def test_reports_moved_by_when_part_repositioned(self, monkeypatch):
         # joint_at aligns the picked keypoints, repositioning handle_one's occurrence; a real move
-        # must surface as moved_by + move_warning, not silently (the item-6 teleport defect).
+        # must surface as moved_by + move_warning, not silently (the teleport defect: a member
+        # relocating to the joint without the caller being told).
         moving = _MovingOcc("Rod:1", (10.0, 0.0, 0.0))    # cm - the moving occurrence's origin
         face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
         face_b = FakeBRepFace(_ST.PlaneSurfaceType)
-        joints = _install_design({"a": face_a, "b": face_b})
+        joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):                                # add() repositions the occurrence
             j = orig_add(ji); moving.move_to((2.5, 0.5, 0.0)); return j
@@ -294,13 +298,13 @@ class TestHandler:
         assert out["moved_by"]["direction"][0] < 0
         assert "move_warning" in out and "keypoints" in out["move_warning"].lower()
 
-    def test_reports_moved_by_when_the_fixed_side_moves(self):
+    def test_reports_moved_by_when_the_fixed_side_moves(self, monkeypatch):
         # grounding / an existing joint can make the solver move occurrence_TWO instead of one - both
-        # sides are watched, and the mover is named (a live case moved handle_two, not handle_one).
+        # sides are watched, and the mover is named (observed live: the wrong member can be the one that moves).
         moving = _MovingOcc("Crank:1", (0.0, 0.0, 0.0))
         face_a = FakeBRepFace(_ST.PlaneSurfaceType)                        # handle_one stays put
         face_b = FakeBRepFace(_ST.PlaneSurfaceType); face_b.assemblyContext = moving
-        joints = _install_design({"a": face_a, "b": face_b})
+        joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):
             j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j    # 3 cm = 30 mm
@@ -309,19 +313,19 @@ class TestHandler:
         assert "moved_by" in out and out["moved_by"]["distance_mm"] == 30.0
         assert "Crank:1" in out["move_warning"]
 
-    def test_no_moved_by_when_part_stays_put(self):
+    def test_no_moved_by_when_part_stays_put(self, monkeypatch):
         # a well-matched pair whose keypoints already coincide does not move -> no moved_by / warning.
         still = _MovingOcc("Rod:1", (4.0, 1.0, 0.0))
         face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = still
         face_b = FakeBRepFace(_ST.PlaneSurfaceType)
-        _install_design({"a": face_a, "b": face_b})       # add() leaves the position unchanged
+        _install_design(monkeypatch, {"a": face_a, "b": face_b})       # add() leaves the position unchanged
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "moved_by" not in out and "move_warning" not in out
 
-    def test_motion_setter_failure_reports_error(self):
+    def test_motion_setter_failure_reports_error(self, monkeypatch):
         # if the motion setter raises (e.g. incompatible geometry), the handler returns an error
         # naming the motion + the axis hint, NOT a false success.
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
 
         def boom(*a, **k):
             raise RuntimeError("geometry rejected")
@@ -336,17 +340,17 @@ class TestHandler:
         assert res["isError"] is True
         assert "Could not set revolute motion" in res["message"]
 
-    def test_flip_sets_isFlipped_on_the_joint_input(self):
+    def test_flip_sets_isFlipped_on_the_joint_input(self, monkeypatch):
         # flip=true must reach the JointInput BEFORE add() - a dropped flag silently recreates the
         # 180-deg flush-mate rotation the input exists to prevent.
-        joints = _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType),
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType),
                                   "b": FakeBRepFace(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid", flip=True))
         assert joints.last_input.isFlipped is True
         assert out["flipped"] is True
 
-    def test_no_flip_leaves_joint_input_unflipped(self):
-        joints = _install_design({"a": FakeBRepFace(_ST.PlaneSurfaceType),
+    def test_no_flip_leaves_joint_input_unflipped(self, monkeypatch):
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType),
                                   "b": FakeBRepFace(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert not getattr(joints.last_input, "isFlipped", False)
@@ -370,28 +374,28 @@ class TestFlipHint:
 
     def test_opposing_normals_without_flip_flag_the_hint(self, monkeypatch):
         fa, fb = self._faces(monkeypatch, [0.0, 0.0, -1.0], [0.0, 0.0, 1.0])
-        _install_design({"a": fa, "b": fb})
+        _install_design(monkeypatch, {"a": fa, "b": fb})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "flip_hint" in out and "180" in out["flip_hint"] and "flip=true" in out["flip_hint"]
 
     def test_opposing_normals_with_flip_no_hint(self, monkeypatch):
         fa, fb = self._faces(monkeypatch, [0.0, 0.0, -1.0], [0.0, 0.0, 1.0])
-        _install_design({"a": fa, "b": fb})
+        _install_design(monkeypatch, {"a": fa, "b": fb})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid", flip=True))
         assert "flip_hint" not in out
 
     def test_agreeing_normals_no_hint(self, monkeypatch):
         fa, fb = self._faces(monkeypatch, [0.0, 0.0, 1.0], [0.0, 0.0, 1.0])
-        _install_design({"a": fa, "b": fb})
+        _install_design(monkeypatch, {"a": fa, "b": fb})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "flip_hint" not in out
 
 
 class TestModelParameters:
-    def test_payload_names_the_joints_own_dnn_params(self):
+    def test_payload_names_the_joints_own_dnn_params(self, monkeypatch):
         # the created joint's offset/angle ModelParameter names must reach the payload (with the
         # shared offset-is-frame-Z teaching) so an agent can param_set the right dNN.
-        joints = _install_design({"a": FakeBRepFace(_ST.CylinderSurfaceType),
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
                                   "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         orig_add = joints.add
         def add_with_params(ji):

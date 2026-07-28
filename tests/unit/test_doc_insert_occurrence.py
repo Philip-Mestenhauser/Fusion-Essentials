@@ -9,6 +9,10 @@ test stays offline; occurrence resolution goes through the real _inputs kind aga
 """
 
 import json
+import math
+
+import pytest
+
 from conftest import load_tool
 
 io = load_tool("doc_insert_occurrence")
@@ -117,7 +121,11 @@ class TestPlacement:
     def test_rotation_built(self, monkeypatch):
         design, root_comp = _install(monkeypatch)
         out = _payload(io.handler(document_id="urn:x", rotate_deg=90, rotate_axis="y"))
-        assert root_comp.occurrences.last_transform.rotation is not None
+        # setToRotation takes RADIANS: 90 deg in must reach the API as pi/2, about world Y at origin
+        angle, axis, origin = root_comp.occurrences.last_transform.rotation
+        assert angle == pytest.approx(math.radians(90))
+        assert axis == ("vec", 0, 1, 0)
+        assert origin == ("pt", 0, 0, 0)
         assert out["rotate_deg"] == 90
 
     def test_bad_units(self, monkeypatch):
@@ -129,6 +137,17 @@ class TestPlacement:
         _install(monkeypatch)
         res = io.handler(document_id="urn:x", rotate_deg=45, rotate_axis="w")
         assert res["isError"] is True and "rotate_axis" in res["message"]
+
+
+class TestSavedVersionWireSentence:
+    def test_result_note_states_it_reads_the_last_saved_version(self, monkeypatch):
+        # insert brings in the source's last SAVED cloud version, not live in-session edits.
+        design, root_comp = _install(monkeypatch)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert "last SAVED cloud version" in out["note"]
+
+    def test_description_states_the_saved_version_rule(self):
+        assert "last SAVED cloud version" in io.TOOL_DESCRIPTION
 
 
 class TestAlwaysReference:
@@ -202,16 +221,6 @@ class TestResolveDataFile:
         _set_data(monkeypatch, {})
         got, resolved, candidates = io._resolve_data_file("urn:adsk.nope:1")
         assert got is None and resolved is None
-
-
-class TestB64UrlDecode:
-    def test_roundtrip(self):
-        raw = "urn:adsk:lineage:Hello"
-        seg = base64.b64encode(raw.encode()).decode().replace('+', '-').replace('/', '_').rstrip('=')
-        assert io._b64url_decode(seg) == raw
-
-    def test_garbage_returns_none(self):
-        assert io._b64url_decode("!!!notb64!!!") is None
 
 
 # ── into_component / remove_existing via the shared OccurrenceRef kind ────────

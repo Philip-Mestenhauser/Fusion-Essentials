@@ -78,6 +78,59 @@ class TestActiveIdentity:
         assert "unsaved changes" in out["active"]["save_state"]
         assert "5" in out["active"]["save_state"]
 
+    def test_isSaved_false_but_datafile_present_does_not_contradict(self):
+        # Platform contradiction (observed live): doc.isSaved can read False on a doc that carries a real URN, version 1,
+        # and is unmodified. is_saved must derive from the DataFile (True here), the save_state must
+        # read 'saved and unmodified', and the open-doc list must NOT flag it never_saved.
+        d = _Doc("Bracket", saved=False, modified=False, data_file=_DataFile(urn="urn:x", vnum=1))
+        _install(d)
+        out = _payload(dg.handler())
+        assert out["active"]["is_saved"] is True
+        assert out["active"]["has_data_file"] is True
+        assert "saved and unmodified" in out["active"]["save_state"]
+        # and no 'never_saved' exception on a doc that plainly has a data file
+        assert out["summary"]["exceptions"] == []
+
+    def test_active_identity_reads_datafile_once(self):
+        # every doc.dataFile access is a cloud round-trip on the main thread - _active_identity must
+        # resolve it ONCE and reuse it for the URN/version fields, not re-fetch per field. With no
+        # other open docs, the active doc's dataFile is read exactly once across the whole handler.
+        class _CountingDoc:
+            def __init__(self, data_file):
+                self.name = "Bracket"
+                self.isSaved = True
+                self.isModified = False
+                self.isVisible = True
+                self.version = "2.0"
+                self._df = data_file
+                self.datafile_reads = 0
+
+            @property
+            def dataFile(self):
+                self.datafile_reads += 1
+                return self._df
+
+        d = _CountingDoc(_DataFile(urn="urn:x", vnum=2, latest=2))
+        _install(active=d, open_docs=[])          # active not in the open list -> isolate the read
+        out = _payload(dg.handler())
+        assert out["active"]["document_id"] == "urn:x"     # the URN field still populated
+        assert d.datafile_reads == 1                        # ... from a single dataFile fetch
+
+    def test_active_block_carries_the_version_lag_sentence(self):
+        # ONE sentence covers both lagging surfaces (this block's version_number/latest + xref_tree's
+        # current/latest) and names version_id / version_confirmed as authoritative.
+        d = _Doc("Bracket", data_file=_DataFile(vnum=2, latest=2))
+        _install(d)
+        note = _payload(dg.handler())["active"]["version_lag_note"]
+        assert "version_id" in note and "version_confirmed" in note
+        assert "xref_tree" in note and "LAG" in note
+
+    def test_unsaved_active_block_has_no_version_lag_sentence(self):
+        # no DataFile -> no version fields -> no lag to warn about
+        d = _Doc("Untitled", saved=False, data_file=None)
+        _install(d)
+        assert "version_lag_note" not in _payload(dg.handler())["active"]
+
 
 class TestOpenList:
     def test_terse_healthy_doc_collapses(self):
@@ -334,7 +387,7 @@ class TestXrefTree:
         assert out["references"][0]["kind"] == "xref"
 
 
-# ── (B2) xref_tree slice - derive links (blind spot fix) ──────────────────────
+# ── (B2) xref_tree slice - derive links ───────────────────────────────────────
 
 class TestXrefTreeDerive:
     def test_derive_row_present_with_kind_field(self, monkeypatch):

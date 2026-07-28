@@ -165,3 +165,80 @@ class TestUnitsAreTyped:
         assert _is_units_kind({"type": "string", "enum": ["mm", "cm", "in", "ft"]})
         assert not _is_units_kind({"type": "string", "description": "mm | cm | in"})
         assert not _is_units_kind(None)
+
+
+# ── exemption staleness - an entry must still exist and still need its exemption ────────────────
+
+def _stale_exempt_entries(exempt, tool_props):
+    """Stale _EXEMPT entries, given {tool_name: input props}: an entry is dead weight when its tool
+    is gone, its tool now exposes a 'units' selector, or no numeric input at that path names a unit
+    in prose any more - in each case the main check passes without it, so the entry must go."""
+    stale = []
+    for path, reason in exempt.items():
+        assert reason.strip(), f"{path} exemption needs a plain-English reason"
+        tool_name = path.split(".", 1)[0]
+        props = tool_props.get(tool_name)
+        if props is None:
+            stale.append(f"{path}: no such tool")
+            continue
+        if "units" in props:
+            stale.append(f"{path}: the tool now exposes a 'units' selector - remove the entry")
+            continue
+        found = []
+        _numeric_unit_props(props, tool_name, found)
+        if path not in [p for p, _, _ in found]:
+            stale.append(f"{path}: no numeric input naming a unit in prose at this path - remove the entry")
+    return stale
+
+
+def _stale_reports_exempt_entries(exempt, report_rows):
+    """Stale _REPORTS_EXEMPT entries, given [(name, props, src)] rows: an entry is dead weight when
+    its tool is gone, no longer reports a units field, or already wires the shared UNITS kind - in
+    each case the read-side check passes without it, so the entry must go."""
+    rows = {name: (props, src) for name, props, src in report_rows}
+    stale = []
+    for name, reason in exempt.items():
+        assert reason.strip(), f"{name} exemption needs a plain-English reason"
+        if name not in rows:
+            stale.append(f"{name}: no such tool")
+            continue
+        props, src = rows[name]
+        if '"units":' not in src:
+            stale.append(f"{name}: no longer reports a units field - remove the entry")
+        elif _is_units_kind(props.get("units")):
+            stale.append(f"{name}: its 'units' input is already the shared UNITS kind - the read-side "
+                         "check passes without the exemption")
+    return stale
+
+
+class TestExemptionsAreNotStale:
+    def test_exempt_entries_still_need_their_exemption(self):
+        tool_props = {}
+        for it in register_all_tools():
+            d = it.to_dict()
+            tool_props[d.get("name")] = (d.get("inputSchema") or {}).get("properties", {}) or {}
+        stale = _stale_exempt_entries(_EXEMPT, tool_props)
+        assert not stale, "stale _EXEMPT entries:\n  " + "\n  ".join(stale)
+
+    def test_reports_exempt_entries_still_need_their_exemption(self):
+        stale = _stale_reports_exempt_entries(_REPORTS_EXEMPT, _tools_with_report_source())
+        assert not stale, "stale _REPORTS_EXEMPT entries:\n  " + "\n  ".join(stale)
+
+    def test_the_staleness_checks_bite(self):
+        # _EXEMPT: a live entry (numeric input naming a unit, no selector) is kept...
+        live = {"depth": {"type": "number", "description": "cut depth in mm"}}
+        assert _stale_exempt_entries({"t.depth": "fixed unit"}, {"t": live}) == []
+        # ...a vanished tool, a vanished input, and a now-typed tool each go stale.
+        assert _stale_exempt_entries({"gone.depth": "r"}, {"t": live})
+        assert _stale_exempt_entries({"t.other": "r"}, {"t": live})
+        typed = dict(live, units={"type": "string", "enum": ["mm", "cm", "in"]})
+        assert _stale_exempt_entries({"t.depth": "r"}, {"t": typed})
+        # _REPORTS_EXEMPT: a live entry (reports units, hand-rolled input) is kept...
+        rows = [("t", {"units": {"type": "string"}}, 'payload = {"units": u}')]
+        assert _stale_reports_exempt_entries({"t": "domain choice"}, rows) == []
+        # ...a vanished tool, a no-longer-reporting tool, and a now-shared-kind tool each go stale.
+        assert _stale_reports_exempt_entries({"gone": "r"}, rows)
+        assert _stale_reports_exempt_entries({"t": "r"}, [("t", {}, "payload = {}")])
+        shared = [("t", {"units": {"type": "string", "enum": ["mm", "cm", "in"]}},
+                   'payload = {"units": u}')]
+        assert _stale_reports_exempt_entries({"t": "r"}, shared)

@@ -90,3 +90,98 @@ class TestOrthoFace:
         for name in ("iso-top-right", "iso-top-left", "iso-bottom-right", "iso-bottom-left",
                      "current", "banana"):
             assert vc.is_ortho_face(name) is False
+
+
+# ── apply_named_view: the one orient-then-fit both screenshot tools share ────
+
+class _FakePoint:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+    def distanceTo(self, other):
+        return 10.0
+
+
+class _FakeCam:
+    def __init__(self):
+        self.eye = _FakePoint(5, 0, 0)
+        self.target = _FakePoint(0, 0, 0)
+        self.upVector = None
+        self.cameraType = "initial"
+
+
+class _FakeViewport:
+    def __init__(self, cam=None, save_ok=True, png=b"PNGBYTES"):
+        self._cam = cam or _FakeCam()
+        self.assigned_camera = None
+        self.fit_called = 0
+        self.calls = []
+        self._save_ok = save_ok
+        self._png = png
+
+    @property
+    def camera(self):
+        return self._cam
+
+    @camera.setter
+    def camera(self, value):
+        self.assigned_camera = value
+
+    def fit(self):
+        self.fit_called += 1
+
+    def refresh(self):
+        self.calls.append("refresh")
+
+    def saveAsImageFile(self, path, w, h):
+        self.calls.append("save")
+        if not self._save_ok:
+            return False
+        with open(path, "wb") as f:
+            f.write(self._png)
+        return True
+
+
+class TestApplyNamedView:
+    def test_named_view_assigns_camera_and_fits(self):
+        vp = _FakeViewport()
+        vc.apply_named_view(vp, "front")
+        assert vp.assigned_camera is vp._cam     # assigning back applies the change
+        assert vp.fit_called == 1
+
+    def test_true_face_forces_orthographic_camera(self):
+        vp = _FakeViewport()
+        vc.apply_named_view(vp, "front")
+        assert vp._cam.cameraType != "initial"
+
+    def test_iso_corner_keeps_camera_type(self):
+        vp = _FakeViewport()
+        vc.apply_named_view(vp, "iso-top-right")
+        assert vp._cam.cameraType == "initial"
+
+    def test_unknown_or_current_is_a_noop(self):
+        for name in ("current", "banana"):
+            vp = _FakeViewport()
+            vc.apply_named_view(vp, name)
+            assert vp.assigned_camera is None and vp.fit_called == 0
+
+
+class TestCapturePngB64:
+    def test_refreshes_before_the_grab(self):
+        # the refresh must precede saveAsImageFile - the capture otherwise races an un-refreshed
+        # frame (a camera/visibility change that hasn't drawn yet reads as blank).
+        vp = _FakeViewport()
+        b64, err = vc.capture_png_b64(vp, 100, 80)
+        assert err is None
+        assert vp.calls.index("refresh") < vp.calls.index("save")
+
+    def test_returns_the_png_as_base64(self):
+        import base64
+        vp = _FakeViewport(png=b"IMAGEDATA")
+        b64, err = vc.capture_png_b64(vp, 100, 80)
+        assert err is None and base64.b64decode(b64) == b"IMAGEDATA"
+
+    def test_save_returning_false_is_an_error_not_a_blank_ok(self):
+        vp = _FakeViewport(save_ok=False)
+        b64, err = vc.capture_png_b64(vp, 100, 80)
+        assert b64 is None and "capture failed" in err.lower()

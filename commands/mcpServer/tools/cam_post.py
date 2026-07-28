@@ -24,7 +24,7 @@ from ._common import ok, error, safe
 from . import _assert
 from . import _inputs
 from . import _outputs
-from ._cam_common import get_cam, live_readiness
+from ._cam_common import get_cam, live_readiness, resolve_cam_node, setups as cam_setups
 from ._export import verify_written   # the file-landed proof (postProcess() true != a file)
 
 app = adsk.core.Application.get()
@@ -48,31 +48,7 @@ _P_COMMENT = "nc_program_comment"
 _P_FOLDER = "nc_program_output_folder"
 _P_OPEN_EDITOR = "nc_program_openInEditor"
 _P_UNIT = "nc_program_unit"
-# Choice index for the unit selector - Document / Inches / Millimeters order (best-effort; the readback
-# in the result surfaces what actually stuck).
-_UNIT_INDEX = {"document": 0, "inch": 1, "mm": 2}
-
 _MISSING = object()   # sentinel: the parameter is not present on this program
-
-
-def _find_target(cam, name):
-    """Resolve a scope NAME to a Setup / Folder / Operation across all setups (exact, case-insensitive).
-    Returns (object, kind) or (None, None)."""
-    want = (name or "").strip().lower()
-    if not want:
-        return None, None
-    for i in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda i=i: cam.setups.item(i))
-        if s is None:
-            continue
-        if (safe(lambda s=s: s.name) or "").lower() == want:
-            return s, "setup"
-        for op in (safe(lambda s=s: s.allOperations, []) or []):
-            if (safe(lambda op=op: op.name) or "").lower() == want:
-                folder = adsk.cam.CAMFolder.cast(op)
-                operation = adsk.cam.Operation.cast(op)
-                return op, ("folder" if folder else "operation" if operation else "target")
-    return None, None
 
 
 # Cloud/Hub post scope -> the LibraryLocations enum member that names its root. The team library is
@@ -293,10 +269,42 @@ def _set_value_param(params, name, value):
     return safe(lambda: p.value.value)
 
 
+def _set_unit_param(params, units_key):
+    """Set the NC-program output-unit ChoiceParameter to `units_key` and read it back. Returns
+    (applied_value, note): applied_value is _MISSING when the program has no unit parameter, the
+    read-back value on success, or an '<error: ...>' string on failure; note is None on success or a
+    human explanation when the units did NOT apply.
+
+    A ChoiceParameterValue rejects a bare int index (live: the set raises a std::string type error),
+    and it has NO '.choices' property - the legal values come from getChoices(), which returns
+    (ok, names, values) as SWIG out-params (live API doc). We pick the value whose NAME carries the
+    requested unit word (the closed 3-entry platform list), set it, and read back - so a failure
+    surfaces as a partial note instead of a silently-wrong-units file."""
+    p = safe(lambda: params.itemByName(_P_UNIT))
+    if p is None:
+        return _MISSING, None
+    cval = safe(lambda: p.value)
+    got = safe(lambda: cval.getChoices()) if cval is not None else None
+    try:
+        names, values = (list(got[1]), list(got[2])) if got and got[0] else ([], [])
+        token = {"inch": "inch", "mm": "milli", "document": "document"}[units_key]
+        hits = [v for n, v in zip(names, values) if token in str(n).lower()]
+        if len(hits) != 1:
+            raise ValueError(
+                f"no unique '{token}' entry in the program's unit choices {names or '(none exposed)'}")
+        cval.value = hits[0]
+    except Exception as e:
+        note = (f"Output units could not be set to '{units_key}' ({e}) - the NC file posts in the "
+                "program's current units. Set units in the post config / Fusion UI, or omit 'units'.")
+        return f"<error: {e}>", note
+    return safe(lambda: cval.value), None
+
+
 def _apply_output_params(params, program_name, out_dir, comment, units_key):
     """Apply the NC-program output parameters onto a CAMParameters collection (an NCProgramInput's or an
-    existing NCProgram's). Returns (applied, unresolved): applied is {param: read_back_value}, unresolved
-    is the list of expected params this program did not expose."""
+    existing NCProgram's). Returns (applied, unresolved, unit_note): applied is {param: read_back_value},
+    unresolved is the list of expected params this program did not expose, unit_note is a human string
+    when the output units failed to apply (else None) - so a units failure is surfaced, never swallowed."""
     applied = {}
     unresolved = []
 
@@ -313,9 +321,11 @@ def _apply_output_params(params, program_name, out_dir, comment, units_key):
     if (comment or "").strip():
         record(_P_COMMENT, _set_str_param(params, _P_COMMENT, comment.strip()))
     record(_P_OPEN_EDITOR, _set_value_param(params, _P_OPEN_EDITOR, False))   # headless: never pop the editor
+    unit_note = None
     if units_key != "document":
-        record(_P_UNIT, _set_value_param(params, _P_UNIT, _UNIT_INDEX[units_key]))
-    return applied, unresolved
+        uval, unit_note = _set_unit_param(params, units_key)
+        record(_P_UNIT, uval)
+    return applied, unresolved, unit_note
 
 
 # Fusion writes the DETAILED post error to <TEMP>/Fusion360CAM/<session>/<n>/<program>.log - NOT the
@@ -362,14 +372,7 @@ def _operations_collection(cam, target):
     """The list of things to post: the single resolved target, or every setup for the whole document.
     NCProgramInput/NCProgram.operations is a vector<OperationBase> setter - it takes a plain Python
     LIST of setups/folders/operations (NOT an ObjectCollection) and expands children."""
-    if target is not None:
-        return [target]
-    out = []
-    for i in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda i=i: cam.setups.item(i))
-        if s is not None:
-            out.append(s)
-    return out
+    return [target] if target is not None else cam_setups(cam)
 
 
 def handler(scope: str = "", post: str = "", post_scope: str = "local", output_folder: str = "",
@@ -396,10 +399,11 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
     target, kind = (None, "document")
     want = (scope or "").strip()
     if want and want.lower() not in ("all", "document", "*"):
-        target, kind = _find_target(cam, want)
-        if not target:
-            return error(f"No setup/folder/operation named '{scope}'. Use cam_get(include=['operations']) "
-                         "to list names, or omit 'scope' to post the whole document.")
+        node, serr = resolve_cam_node(cam, want, kinds=("setup", "folder", "operation"),
+                                      label="setup/folder/operation")
+        if serr:
+            return error(serr + " Omit 'scope' to post the whole document.")
+        target, kind = node.obj, node.kind
 
     # Up-front refusal: nothing valid to post. live_readiness is the one CAM health signal; the post
     # omits invalid/empty operations, so zero valid ops -> no file.
@@ -431,14 +435,14 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
             program = existing
             program.operations = _operations_collection(cam, target)
             program.postConfiguration = post_config
-            applied, unresolved = _apply_output_params(program.parameters, prog_name, out_dir,
-                                                        program_comment, units_key)
+            applied, unresolved, unit_note = _apply_output_params(program.parameters, prog_name,
+                                                                  out_dir, program_comment, units_key)
         else:
             nc_input = cam.ncPrograms.createInput()
             nc_input.displayName = prog_name
             nc_input.operations = _operations_collection(cam, target)
-            applied, unresolved = _apply_output_params(nc_input.parameters, prog_name, out_dir,
-                                                        program_comment, units_key)
+            applied, unresolved, unit_note = _apply_output_params(nc_input.parameters, prog_name,
+                                                                  out_dir, program_comment, units_key)
             program = cam.ncPrograms.add(nc_input)
             program.postConfiguration = post_config
     except Exception as e:
@@ -522,6 +526,10 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
     if unresolved:
         # Non-fatal (the file landed); name what the program did not expose so a caller can confirm.
         result["params_unresolved"] = unresolved
+    if unit_note:
+        # The units knob failed to apply (non-fatal: the file still posted, but in the program's
+        # current units) - surface it explicitly rather than burying it in params_applied.
+        result["units_note"] = unit_note
     if not clean:
         # A file appeared but the post flagged failure or the program faulted - surface both facts AND
         # the post log's error lines so the caller sees the real reason, not just "review the output".
@@ -541,6 +549,8 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
                       f"{live.get('readiness', '')} Only valid toolpaths were posted "
                       "(out-of-date/errored ops are omitted); cam_get(include=['nc_programs']) shows the "
                       "program, cam_get(include=['operations']) any ops that were skipped.")
+    if unit_note:
+        result["note"] += " " + unit_note
     return ok(result)
 
 

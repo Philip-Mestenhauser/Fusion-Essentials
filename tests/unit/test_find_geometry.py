@@ -284,6 +284,21 @@ class TestNestedAssembly:
         out = _payload(fg.handler(target="Bracket:1"))
         assert out["returned"] == 1
 
+    def test_targeting_a_wrapper_includes_its_nested_subtree(self):
+        # An inserted xref/derive wraps its geometry one level down: the wrapper occurrence has
+        # NO direct bodies; its nested child holds them (real fullPathNames separate with '+').
+        # Targeting the wrapper must scan the whole subtree - a direct-bodies-only scan reads 0
+        # faces on a wrapper whose child holds them all (live-verified).
+        f = _cyl("DEEP", 0.8, (0, 0, 0))
+        top = FakeOcc("Model:1", "Model", [], full_path="Model:1")
+        wrapper = FakeOcc("P5:1", "P5", [], full_path="Model:1+P5:1")
+        child = FakeOcc("Ring:1", "Ring", [FakeBody(faces=[f])],
+                        full_path="Model:1+P5:1+Ring:1")
+        _install([top], all_occs=[top, wrapper, child])
+        out = _payload(fg.handler(target="Model:1+P5:1", units="mm"))
+        assert out["returned"] == 1
+        assert out["matches"][0]["handle"].startswith("DEEP|@")
+
     def test_whole_design_includes_nested_and_root_bodies(self):
         # whole-design scan reaches BOTH a root-level body (occurrence None) AND a NESTED occurrence's
         # body — the self-heal path scans both, so the initial query must too.

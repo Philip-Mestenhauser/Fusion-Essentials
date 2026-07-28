@@ -132,7 +132,8 @@ class TestGuards:
 class TestRolledBackTimeline:
     """A rolled-back marker (markerPosition < count) means features after it - downstream joints
     included - are reverted to home while still reading healthy; assembly_get must surface that and
-    NOT report is_healthy over an incomplete model. (The state a non-restoring joint_edit once left.)"""
+    NOT report is_healthy over an incomplete model (the state a joint_edit that fails to restore
+    the marker leaves behind)."""
 
     def test_rolled_back_marker_is_incomplete_and_unhealthy(self):
         _install([FakeOcc("A:1", "A")],
@@ -329,12 +330,12 @@ class TestOrientation:
         assert o["origin"] == [1.0, 0.0, 0.0]
 
 
-# ── HEALTH: the thing a user sees FIRST (Compute Failed), which the probe was blind to ──────────
+# ── HEALTH: the thing a user sees FIRST (Compute Failed) ───────────────────────────────────────
 #
 # A joint can be created + wired correctly yet FAIL TO COMPUTE (mis-axised -> over-constrained).
 # The probe must surface that (is_healthy / broken_joints / per-joint healthy + timeline_problems)
-# so it never reports a broken assembly as fine. Caught live: PistonSlide1 healthState=1 while the
-# probe said everything was structurally great.
+# so it never reports a broken assembly as fine - observed live: a joint reads healthState=1
+# (Compute Failed) while every structural read looks correct.
 
 class TestHealth:
     def test_all_healthy(self):

@@ -47,29 +47,6 @@ RETURNS = [
 ]
 
 
-def _open_profile_or_error(comp, sketch):
-    """Build an OPEN profile from a sketch's curves via Component.createOpenProfile, so an open path
-    (a spline, an arc, a single line) can sweep into a SURFACE. Returns (open_profile, error). Used
-    when the profile sketch has no closed region."""
-    curves = safe(lambda: sketch.sketchCurves)
-    n = safe(lambda: curves.count, 0) if curves else 0
-    if not n:
-        return None, (f"Profile sketch '{safe(lambda: sketch.name)}' has no curves to sweep. "
-                      "Draw an open path (a line/arc/spline) or a closed region first.")
-    coll = adsk.core.ObjectCollection.create()
-    for i in range(n):
-        c = safe(lambda i=i: curves.item(i))
-        if c is not None:
-            coll.add(c)
-    try:
-        prof = comp.createOpenProfile(coll, True) # chainCurves=True
-    except Exception as e:
-        return None, f"Could not build an open profile for a surface sweep: {e}"
-    if not prof:
-        return None, "Could not build an open profile from the sketch's curves (createOpenProfile returned nothing)."
-    return prof, None
-
-
 def _sketch_for_open(comp, profile_raw):
     """The sketch to build an OPEN profile from when the profile selector has no closed region. Only a
     {sketch, profile_index} selector names a sketch; a bare handle can't (it points at a closed
@@ -105,7 +82,10 @@ def _resolve_profile(comp, profile_raw, as_surface):
     sk = _sketch_for_open(comp, profile_raw)
     if sk is not None:
         host = _common.safe(lambda: sk.parentComponent) or comp
-        open_prof, operr = _open_profile_or_error(host, sk)
+        open_prof, operr = _common.open_profile_from_sketch(
+            host, sk, "for a surface sweep",
+            no_curves_error=(f"Profile sketch '{safe(lambda: sk.name)}' has no curves to sweep. "
+                             "Draw an open path (a line/arc/spline) or a closed region first."))
         if open_prof is not None:
             return open_prof, False, True, host, None
         return None, None, None, None, operr or err

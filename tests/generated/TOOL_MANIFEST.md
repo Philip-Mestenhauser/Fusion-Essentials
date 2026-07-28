@@ -36,14 +36,14 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `model_arrange` | ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - the Arrange command |
 | ✎ | `model_base_feature` | Manage a BASE-FEATURE edit scope in a parametric design (a base feature is a direct-edit scope inside parametric - required for mesh inserts / imported-body edi... |
-| ✎ | `model_chamfer` | Bevel (chamfer) edges with a constant distance - an angled edge break |
+| ✎ | `model_chamfer` | Bevel (chamfer) edges with a constant distance - the machinist's default deburr/edge-break |
 | ✎ | `model_combine` | Boolean-combine solid BODIES - the Combine feature |
 | · | `model_compute_holder` | Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool Holder command |
 | ✎ | `model_construction` | Add construction geometry (reference datums) in the active component |
 | ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (... |
 | ✎ | `model_draft` | Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part needs so it releases from its tooling |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid (via sketch_create / sketch_add_geometry) |
-| ✎ | `model_fillet` | Round (fillet) edges with a constant radius - the deburr/edge-break every real part needs |
+| ✎ | `model_fillet` | Round (fillet) edges with a constant radius - for edges where a RADIUS is the design intent (the standard machined edge break is model_chamfer) |
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
 | · | `model_inspect` | Measure a target - size, mass, or mesh stats - in one read |
 | ✎ | `model_loft` | Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order given - order is load-bearing), optionally shaped by 'rails' (guide... |
@@ -116,7 +116,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_edit_folders` | CAM FOLDERS in a setup |
 | ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern |
-| ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools (each action's inputs are documented on the properties below) |
+| ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often minutes; poll cam_get_status(handle), never block) |
 | · | `cam_get` | Read the active document's CAM (Manufacture) state by zoom level |
 | · | `cam_get_status` | Poll toolpath generation AND nudge it forward |
@@ -134,7 +134,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `assembly_capture_position` | Capture / revert / report the assembly's flexible POSITION in the timeline |
 | ✎ | `assembly_constrain` | Constrain component occurrences' geometry - Constrain Components (flush / coincident / concentric / at an angle, INFERRED from the geometry) |
 | · | `assembly_get` | Read the active assembly's KINEMATIC STATE as clean JSON |
-| ✎ | `assembly_ground` | Set an occurrence's 'ground_to_parent' lock - the STATELESS rigid-to-parent flag |
+| ✎ | `assembly_ground` | Ground an occurrence via isGroundToParent - the STATELESS rigid-to-parent lock: true RE-LOCKS the part at its TIMELINE placement, DISCARDING any free move (the ... |
 | · | `assembly_inspect_interference` | Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each interfering PAIR by occurrence name with its overlap volume (cm^... |
 | ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition with NO joint created (use joint_create/assembly_constrain for a maintained relationship) |
 | ✎ | `assembly_rigid_group` | Lock two or more component occurrences together as a single rigid unit (Rigid Group) |
@@ -146,7 +146,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `joint_at_geometry` | Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part origins like an ':origin' snap |
 | ✎ | `joint_create` | Create a Joint between two inputs |
 | ✎ | `joint_create_as_built` | Create a rigid AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins needed (unlike the joint tool) |
-| ✎ | `joint_create_origin` | Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user click |
+| ✎ | `joint_create_origin` | Create a Joint Origin (a reusable coordinate frame / WCS anchor) |
 | ✎ | `joint_drive` | DRIVE a joint to a value - the API's Drive Joints command |
 | ✎ | `joint_edit` | Edit an existing joint in place |
 | ✎ | `joint_motion_link` | Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives the other proportionally - a gear pair, belt/chain drive, or coupl... |

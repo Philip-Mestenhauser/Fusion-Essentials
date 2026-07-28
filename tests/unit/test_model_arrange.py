@@ -11,7 +11,7 @@ import json
 
 import adsk.fusion
 
-from conftest import load_tool
+from conftest import assert_no_active_design, load_tool
 
 ar = load_tool("model_arrange")
 
@@ -255,3 +255,29 @@ class TestSpacing:
         res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
         assert res["isError"] is True
         assert "Arrange failed: objectSpacing is read-only" in res["message"]
+
+
+# ── honesty: failed/absent mutation must surface as isError, never a false ok ─
+# (the paths test_model_mirror.py / test_model_shell.py treat as mandatory)
+
+class TestHonesty:
+    def test_add_returning_none_is_error(self):
+        _, af = _install([FakeSketch("B")], ["A:1"])
+        af.add = lambda inp: None
+        res = ar.handler(boundary_sketch="B", shapes="A:1")
+        assert res["isError"] is True and "no feature" in res["message"].lower()
+
+    def test_add_raising_surfaces_as_error(self):
+        _, af = _install([FakeSketch("B")], ["A:1"])
+
+        def _boom(inp):
+            raise RuntimeError("solver crashed")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="B", shapes="A:1")
+        assert res["isError"] is True
+        assert "Arrange failed" in res["message"] and "solver crashed" in res["message"]
+
+    def test_no_active_design(self):
+        _install([FakeSketch("B")], ["A:1"])
+        assert_no_active_design(ar, ar.handler, boundary_sketch="B", shapes="A:1")

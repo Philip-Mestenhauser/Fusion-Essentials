@@ -1,7 +1,6 @@
 """Unit tests for ``assembly_transform.py`` - occurrence ground/move + rigid group.
 
-Tests are written BEFORE the tool is wired further (project rule). The logic
-pinned here, no live Fusion: occurrence resolution (exact, then substring;
+The logic pinned here, no live Fusion: occurrence resolution (exact, then substring;
 missing reported), the ground_to_parent lock (isGroundToParent), assembly_move
 building a Matrix3D translation/rotation and applying it to occurrence.transform, and
 assembly_rigid_group collecting occurrences into RigidGroups.add. Fakes expose the real
@@ -9,6 +8,7 @@ attributes the handlers set so we can assert on them.
 """
 
 import json
+import math
 
 import pytest
 
@@ -184,7 +184,9 @@ def _occ(occs, name):
 # -- ground ---------------------------------------------------------------------
 
 class TestGround:
-    # assembly_ground sets ONLY the stateless ground_to_parent lock; it never writes isGrounded.
+    # assembly_ground sets ONLY isGroundToParent (the stateless parent lock). The UI Ground/Fix
+    # flag (isGrounded) is deliberately not settable - the platform treats it as legacy - but
+    # both flags are reported back so the caller sees the full grounding state.
     def test_lock_to_parent(self):
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
@@ -247,8 +249,9 @@ class TestGround:
         out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
         assert "position_reset" not in out and "position_warning" not in out
 
-    def test_only_sets_ground_to_parent(self):
-        # The tool sets ONLY isGroundToParent; it must never write isGrounded.
+    def test_isGrounded_is_never_written(self):
+        # The tool sets ONLY isGroundToParent; the UI Ground/Fix flag (isGrounded) is not settable
+        # through this surface and stays exactly as it was.
         _, occs, _ = _install(["Block:1"])
         o = _occ(occs, "Block:1")
         o.isGrounded = False
@@ -256,12 +259,28 @@ class TestGround:
         assert o.isGrounded is False              # untouched
 
     def test_no_grounded_param_is_rejected_by_strict_schema(self):
-        # The 'grounded' input was removed; the handler signature no longer accepts it. (At the MCP
-        # boundary the strict schema rejects it; at the Python level it's a TypeError.)
+        # There is no 'grounded' input - only 'ground_to_parent'. (At the MCP boundary the strict
+        # schema rejects it; at the Python level it's a TypeError.)
         _install(["Block:1"])
         import pytest
         with pytest.raises(TypeError):
             asm.ground_handler(occurrence="Block:1", grounded=True)
+
+    def test_mode_input_is_gone(self):
+        # There is no 'mode' selector - isGrounded is not reachable through any input. (Strict
+        # schema at the MCP boundary; TypeError at the Python level.)
+        _install(["Block:1"])
+        import pytest
+        with pytest.raises(TypeError):
+            asm.ground_handler(occurrence="Block:1", ground_to_parent=True, mode="fixed")
+
+    def test_reports_both_flags_distinctly(self):
+        # the payload carries BOTH flags so the caller sees the full grounding state (a human may
+        # have set isGrounded in the UI).
+        _, occs, _ = _install(["Block:1"])
+        out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
+        assert "isGroundToParent" in out and "isGrounded" in out
+        assert out["isGroundToParent"] is True
 
     def test_substring_match(self):
         _, occs, _ = _install(["Block:1"])
@@ -350,14 +369,26 @@ class TestMove:
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=90, rotate_axis="y"))
         o = _occ(occs, "Block:1")
-        assert o.transform.rotation is not None        # a rotation was set
+        # setToRotation takes RADIANS: 90 deg in must reach the API as pi/2, about world Y
+        angle, axis, _origin = o.transform.rotation
+        assert angle == pytest.approx(math.radians(90))
+        assert axis == ("vec", 0, 1, 0)
         assert out["rotate_axis"] == "y"
 
     def test_multi_axis_rotation(self):
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_x=90, rotate_z=45))
         o = _occ(occs, "Block:1")
-        assert o.transform.rotation is not None       # composed rotations landed
+        # The handler builds ONE working matrix (per-axis rotations composed onto it), then composes
+        # that onto the occurrence's original transform - so o.transform.composed holds the working
+        # matrix, and the per-axis rotations are ITS composed list: X then Z, each angle in RADIANS.
+        assert len(o.transform.composed) == 1
+        working = o.transform.composed[0]
+        rots = [m.rotation for m in working.composed if getattr(m, "rotation", None) is not None]
+        assert [(r[0], r[1]) for r in rots] == [
+            (pytest.approx(math.radians(90)), ("vec", 1, 0, 0)),
+            (pytest.approx(math.radians(45)), ("vec", 0, 0, 1)),
+        ]
         assert out["rotate_axis"] == "multi"
         assert out["rotate_xyz"] == {"x": 90, "y": 0, "z": 45}
 
@@ -418,8 +449,9 @@ class TestMove:
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=45, rotate_axis=h))
         o = _occ(occs, "Block:1")
         # rotation set about the edge's derived unit direction + a point ON the edge (5,0,0),
-        # not the occ origin
+        # not the occ origin; the 45 deg input reaches setToRotation in RADIANS
         angle, axis, origin = o.transform.rotation
+        assert angle == pytest.approx(math.radians(45))
         assert (axis.x, axis.y, axis.z) == (1.0, 0.0, 0.0)
         assert (origin.x, origin.y, origin.z) == (5, 0, 0)
         assert out["rotate_axis"] == "edge"
@@ -444,6 +476,7 @@ class TestMove:
         asm._inputs._common.design = lambda: real
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=30, rotate_axis=h))
         angle, axis, origin = _occ(occs, "Block:1").transform.rotation
+        assert angle == pytest.approx(math.radians(30))
         assert (axis.x, axis.y, axis.z) == (0, 0, 1)
         assert (origin.x, origin.y, origin.z) == (2, 2, 0)
         assert out["rotate_axis"] == "edge"

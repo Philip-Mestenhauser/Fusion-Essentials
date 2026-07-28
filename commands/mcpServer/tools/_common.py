@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), most_recent_body, open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -131,6 +131,39 @@ def result_bodies(feature):
     return out
 
 
+def most_recent_body(comp):
+    """The most recently created body in a component - the blank-input fallback for a tool that
+    defaults to 'the body you just made'. Returns the body or None (the caller words its own hint)."""
+    bodies = safe(lambda: comp.bRepBodies)
+    n = safe(lambda: bodies.count, 0) if bodies else 0
+    return bodies.item(n - 1) if n else None
+
+
+def open_profile_from_sketch(comp, sketch, verb, no_curves_error=None):
+    """Build an OPEN profile from a sketch's unclosed curves via Component.createOpenProfile
+    (chainCurves=True follows the open chain), so an open path (a line/arc/spline) can become a
+    SURFACE. Returns (open_profile, error). 'verb' finishes the failure sentence ("for a surface
+    extrude", "from the sketch"); 'no_curves_error' is the caller's empty-sketch hint.
+    createOpenProfile wants an ObjectCollection of the individual curve entities, NOT the
+    SketchCurves collection object (passing that raises "invalid input curves")."""
+    curves = safe(lambda: sketch.sketchCurves)
+    n = safe(lambda: curves.count, 0) if curves is not None else 0
+    if not n:
+        return None, (no_curves_error or "Sketch has no curves to build an open profile from.")
+    coll = adsk.core.ObjectCollection.create()
+    for i in range(n):
+        c = safe(lambda i=i: curves.item(i))
+        if c is not None:
+            coll.add(c)
+    try:
+        prof = comp.createOpenProfile(coll, True)
+    except Exception as e:
+        return None, f"Could not build an open profile {verb}: {e}"
+    if not prof:
+        return None, "Could not build an open profile from the sketch's curves (createOpenProfile returned nothing)."
+    return prof, None
+
+
 def resolve_sketch(d, name):
     """Resolve a sketch BY NAME across the whole design - the ONE true resolver every by-name sketch
     tool should use. Search order: the ACTIVE edit component first (where model_create_component(
@@ -155,6 +188,20 @@ def resolve_sketch(d, name):
         if sk:
             return sk
     return None
+
+
+def resolve_or_recent_sketch(d, name):
+    """The ONE name-or-default sketch contract: a NAME resolves DESIGN-WIDE via ``resolve_sketch``
+    (active component first, then root, then the rest - a root master sketch stays reachable from an
+    activated sub-component); an EMPTY name means the most recently created sketch in the ACTIVE
+    component. Returns (sketch-or-None, the stripped requested name or None when blank) - the caller
+    words its own not-found error off the requested name."""
+    nm = (name or "").strip()
+    if nm:
+        return resolve_sketch(d, nm), nm
+    coll = safe(lambda: target_component(d).sketches)
+    n = safe(lambda: coll.count, 0) if coll is not None else 0
+    return (coll.item(n - 1) if n else None), None
 
 
 def all_sketch_names(d):

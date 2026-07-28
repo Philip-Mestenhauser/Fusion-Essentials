@@ -198,6 +198,19 @@ class TestMove:
         assert res["isError"] is True
         assert "'operations' (names to move into it)" in res["message"]
 
+    def test_duplicate_move_target_name_is_refused(self, monkeypatch):
+        # "Drill1" exists in TWO folders of the same setup - moving by that name must REFUSE with
+        # both paths, never silently move whichever the walk met first.
+        f1 = _Folder("Rough", ops=[_OpBase("Drill1")])
+        f2 = _Folder("Finish", ops=[_OpBase("Drill1")])
+        dest = _Folder("Holes")
+        setup = _Setup("Setup1", ops=[], folders=[f1, f2, dest])
+        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Drill1"])
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "Setup1 / Rough / Drill1" in res["message"]
+        assert "Setup1 / Finish / Drill1" in res["message"]
+
     def test_folder_into_folder_move_resolves(self, monkeypatch):
         # allOperations (the prior lookup) omits folders entirely, so moving a FOLDER into
         # another folder needs _find_op to walk .folders too, not just flat operations.

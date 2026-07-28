@@ -10,10 +10,6 @@ Returns the image as an MCP image content block (base64 PNG). Optionally reorien
 assigning camera.viewOrientation is unreliable.
 """
 
-import base64
-import os
-import tempfile
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -34,22 +30,6 @@ _MAX_DIM = 4096
 
 _FIT_TO = _inputs.OccurrenceRef("fit_to",
         description="Occurrence to frame the camera on (isolates it for the shot, then restores).")
-
-
-def _ortho_camera_vectors(view):
-    """Return (look_dir, up) unit world vectors for a named view, or None for 'current'/unknown.
-
-    Sets camera eye/target/up EXPLICITLY so the resulting view is exactly world-axis aligned - needed
-    for the non-square 'right'/'top' orthographic views to render as a true (undistorted) read."""
-    look = _view_common.look_direction(view)
-    if look is None:
-        return None
-    return look, _view_common.up_vector(view)
-
-
-def _is_ortho_face(view):
-    """True if 'view' is one of the 6 true orthographic faces (force an orthographic camera)."""
-    return _view_common.is_ortho_face(view)
 
 
 def _keep_visible(o_path, target_path):
@@ -146,22 +126,13 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     if view != "current" or want_fit or (zoom and zoom != 1.0):
         try:
             saved_camera = vp.camera          # snapshot of the user's current view
-            cam = vp.camera
             if view != "current":
-                # Every named view resolves in the shared table (_VIEWS is built from it). Set the
-                # camera EXPLICITLY to exact world-axis vectors so the view is GUARANTEED square to
-                # world (not a rotate-toward that leaves a tilt). target keeps the current focus;
-                # eye is placed along the exact look direction.
-                look, up = _ortho_camera_vectors(view)
-                tgt = cam.target
-                dist = safe(lambda: cam.eye.distanceTo(cam.target), 100.0) or 100.0
-                cam.eye = adsk.core.Point3D.create(
-                    tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
-                cam.upVector = adsk.core.Vector3D.create(*up)
-                if _is_ortho_face(view):
-                    cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-            vp.camera = cam                   # assigning back applies the change
-            vp.fit()
+                # Every named view resolves in the shared table (_VIEWS is built from it); the shared
+                # apply sets exact world-axis vectors (guaranteed square), forces ortho for the 6
+                # faces, and fits.
+                _view_common.apply_named_view(vp, view)
+            else:
+                vp.fit()
             # zoom: scale the camera-to-target distance after fitting (>1 zooms OUT, <1 zooms IN).
             z = float(zoom or 1.0)
             if z and z != 1.0 and z > 0:
@@ -176,18 +147,10 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
                 restore_fit_to()
             return error(f"Failed to set view '{view}': {e}")
 
-    temp_path = None
     try:
-        fd, temp_path = tempfile.mkstemp(prefix="fe_mcp_shot", suffix=".png")
-        os.close(fd)
-        # Force the viewport to render the visibility/camera changes before the grab - otherwise the
-        # capture can race an un-refreshed frame (an isolate that hasn't drawn yet reads as blank).
-        safe(lambda: vp.refresh())
-        did = vp.saveAsImageFile(temp_path, width, height)
-        if not did or not os.path.exists(temp_path):
-            return error("Viewport capture failed (saveAsImageFile returned false).")
-        with open(temp_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
+        b64, cerr = _view_common.capture_png_b64(vp, width, height)
+        if cerr:
+            return error(cerr)
         content = []
         note = _active_component_note(_common.design())
         if note:
@@ -207,11 +170,6 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
         if restore_fit_to:
             try:
                 restore_fit_to()
-            except Exception:
-                pass
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
             except Exception:
                 pass
 

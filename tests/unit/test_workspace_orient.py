@@ -399,7 +399,7 @@ class TestTimelineHonesty:
 
     def test_warning_surfaced_distinctly_even_when_otherwise_healthy(self):
         # errors 0 -> is_healthy stays True, but a timeline WARNING must be STATED in the note, never
-        # folded into a clean 'no problems'. This is the 13c honesty fix.
+        # folded into a clean 'no problems'.
         des = self._des([FakeTL(0), FakeTL(1)])                       # one warning, no error
         _install(active_product=des, doc=FakeDoc(design=des))
         out = _payload(wo.handler())

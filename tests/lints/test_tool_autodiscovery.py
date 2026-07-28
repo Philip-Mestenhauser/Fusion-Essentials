@@ -77,10 +77,10 @@ class TestAutoDiscovery:
     def test_explicitly_referenced_modules_are_importable_with_their_entry_points(self):
         # entry._collect_items() references three modules OUTSIDE the sweep and must import them
         # explicitly (NOT as bound attributes of the tools package — the sweep may not have imported
-        # them). This is the exact bug that aborted startup: the gated sys_execute_script is SKIPPED by
-        # the sweep, so `tools.sys_execute_script.register_tool()` raised AttributeError when the gate
-        # was enabled, the server never bound its port, and /health 404'd. Pin that each explicitly-
-        # referenced module loads and exposes the entry point entry.py calls on it.
+        # them). A `tools.<name>` attribute access on a module the sweep skips (the gated
+        # sys_execute_script) raises AttributeError at startup, so the server never binds its port
+        # and /health 404s. Pin that each explicitly-referenced module loads and exposes the entry
+        # point entry.py calls on it.
         assert callable(getattr(load_tool("sys_execute_script"), "register_tool", None)), \
             "gated sys_execute_script must expose register_tool() (entry.py calls it when enabled)"
         reload_mod = load_tool("sys_reload_addin")
@@ -90,11 +90,11 @@ class TestAutoDiscovery:
             "sys_reload_addin must expose install_reload_event() (entry.py installs its event)"
 
     def test_entry_does_not_attribute_access_swept_or_gated_modules(self):
-        # Regression guard for the startup-abort bug: with the sweep emptying tools/__init__.py, a
-        # module is only a bound attribute of the `tools` package if something imported it. Referencing
-        # `tools.<name>.foo()` for a module the sweep SKIPS (gated) — or relying on the attribute at all
-        # — raised AttributeError and aborted server startup. entry.py must import these modules
-        # explicitly (`from .tools import <name>`), never reach them as `tools.<name>`.
+        # With the sweep emptying tools/__init__.py, a module is only a bound attribute of the
+        # `tools` package if something imported it. Referencing `tools.<name>.foo()` for a module
+        # the sweep SKIPS (gated) raises AttributeError and aborts server startup. entry.py must
+        # import these modules explicitly (`from .tools import <name>`), never reach them as
+        # `tools.<name>`.
         import os
         entry = os.path.join(os.path.dirname(TOOLS_DIR), "entry.py")
         src = open(entry, encoding="utf-8").read()

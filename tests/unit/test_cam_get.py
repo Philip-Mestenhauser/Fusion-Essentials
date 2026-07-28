@@ -32,6 +32,9 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "_slice_tools", lambda cam: ({"tools": []}, None))
     monkeypatch.setattr(cg, "_slice_library",
                         lambda cam, scope, library, tool_type: ({"tool_count": 0, "tools": []}, None))
+    monkeypatch.setattr(cg, "_slice_library_types", lambda cam: ({"type_count": 0, "types": []}, None))
+    monkeypatch.setattr(cg, "_slice_machines",
+                        lambda cam, vendor, machine_type: ({"count": 0, "machines": []}, None))
     monkeypatch.setattr(cg, "_slice_templates",
                         lambda cam, loc, url, depth: ({"node_count": 0, "tree": {}}, None))
 
@@ -41,7 +44,7 @@ class TestDefaultSlice:
         out = _payload(cg.handler())
         assert "setups" in out and "setup_count" in out
         # the heavy slices must be absent by default (anti-flood)
-        for k in ("operations", "references", "nc_programs", "time", "tools"):
+        for k in ("operations", "references", "nc_programs", "time", "tools", "library_types"):
             assert k not in out
 
     def test_default_note_advertises_remaining(self, stub_slices):
@@ -219,6 +222,57 @@ class TestLibrarySlice:
         out, err = cg._slice_library(object(), "document", "", "")
         assert err is None and out["tool_count"] == 2
 
+    def test_router_includes_library_types(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(cg, "_slice_library_types",
+                            lambda cam: ({"type_count": 2, "types": ["ball end mill", "drill"]}, None))
+        out = _payload(cg.handler(include=["library_types"]))
+        assert out["library_types"]["types"] == ["ball end mill", "drill"]
+        assert out["library_types"]["type_count"] == 2
+
+    def test_library_types_slice_runs_cam_edit_tools_list_types(self, monkeypatch):
+        # _slice_library_types runs cam_edit_tools' _do_list_types (imported, not copied): the REAL
+        # sorted-type payload comes through, driven by that module's own _build_type_map seam.
+        ctl = load_tool("cam_edit_tools")
+        monkeypatch.setattr(ctl, "_build_type_map",
+                            lambda: {"drill": ("u", 0), "ball end mill": ("u", 1),
+                                     "chamfer mill": ("u", 2)})
+        out, err = cg._slice_library_types(object())
+        assert err is None
+        assert out["types"] == ["ball end mill", "chamfer mill", "drill"]   # sorted, actual content
+        assert out["type_count"] == 3
+
+    def test_library_types_empty_map_surfaces_error(self, monkeypatch):
+        ctl = load_tool("cam_edit_tools")
+        monkeypatch.setattr(ctl, "_build_type_map", lambda: {})
+        out, err = cg._slice_library_types(object())
+        assert out is None and err["isError"] is True
+
+    def test_router_includes_machines_and_passes_filters(self, monkeypatch, stub_slices):
+        # include=['machines'] must route AND forward the vendor + machine_type filters to the slice.
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_machines",
+                            lambda cam, vendor, machine_type: (
+                                seen.update(vendor=vendor, machine_type=machine_type)
+                                or ({"count": 2, "machines": []}, None)))
+        out = _payload(cg.handler(include=["machines"], vendor="Haas", machine_type="milling"))
+        assert out["machines"]["count"] == 2
+        assert seen == {"vendor": "Haas", "machine_type": "milling"}
+
+    def test_machines_slice_delegates_to_read_machines(self, monkeypatch):
+        # _slice_machines unwraps cam_edit_setup.read_machines' ok() payload (the read lives with the
+        # machine resolver, its owner; cam_get is the wire surface).
+        ces = load_tool("cam_edit_setup")
+        seen = {}
+        monkeypatch.setattr(ces, "read_machines",
+                            lambda vendor, machine_type: (
+                                seen.update(vendor=vendor, machine_type=machine_type)
+                                or {"isError": False,
+                                    "content": [{"type": "text", "text": json.dumps(
+                                        {"count": 1, "machines": [{"name": "Haas VF-2"}]})}]}))
+        out, err = cg._slice_machines(object(), "Haas", "milling")
+        assert err is None and out["count"] == 1
+        assert seen == {"vendor": "Haas", "machine_type": "milling"}
+
     def test_templates_slice_delegates_with_location(self, monkeypatch):
         # _slice_templates forwards location/url/depth to cam_templates' list engine and unwraps it.
         seen = {}
@@ -279,6 +333,32 @@ class TestDeepZoom:
             {"name": "tool_spindleSpeed", "title": "Spindle Speed", "expression": "12000"}]
         assert g["Geometry"][0]["name"] == "boundaryOffset"
         assert "hidden" not in str(g)                        # invisible param dropped
+
+
+class TestDuplicateOperationName:
+    """_cam_common.find_operation REFUSES a duplicated name, returning each duplicate's 'Setup / op'
+    path as the available list - the deep-zoom miss error must word that as ambiguity naming the
+    paths, never a plain not-found."""
+
+    def test_parameters_duplicate_words_ambiguity_with_paths(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(cg, "find_operation",
+                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "ambiguous" in msg.lower()
+        assert "Setup1 / Drill1" in msg and "Setup2 / Drill1" in msg
+
+    def test_tool_duplicate_words_ambiguity_with_paths(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(cg, "find_operation",
+                            lambda cam, name: (None, ["Setup1 / Drill1", "Setup2 / Drill1"]))
+        msg = error_message(cg.handler(include=["tool"], operation="Drill1"))
+        assert "ambiguous" in msg.lower() and "Setup2 / Drill1" in msg
+
+    def test_true_miss_stays_not_found_listing_names(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(cg, "find_operation",
+                            lambda cam, name: (None, ["Face1", "Adaptive1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "ambiguous" not in msg.lower()
+        assert "Face1" in msg and "Adaptive1" in msg
 
 
 class TestNormalizeInclude:

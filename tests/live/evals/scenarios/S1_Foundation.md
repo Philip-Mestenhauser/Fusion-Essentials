@@ -5,7 +5,7 @@ fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNE
   hub and project "MCP Test Project" verified to EXIST before spawning (ask the user if missing -
   never create). The agent's final doc_save_as of the ACTIVE document is the artifact step.
 budget:
-  max_tool_calls: 195
+  max_tool_calls: 125
   max_tokens: 87000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -150,11 +150,11 @@ NOTES: <short. What you had to DISCOVER mid-run that a description should have s
   multi-part plan built around a SHARED SKELETON: component decomposition (incl. a NESTED
   sub-component), construction geometry as the cross-part contract, expression-driven dimensions,
   the propagation habit, sketch-only discipline under a goal that tempts extrusion.
-- WHY STRUCTURE POSTCONDITIONS: the first pipeline's S1 passed every COUNT while the geometry was
-  a coplanar-in-name-only flat stack - pins on ring FACES along the ring's axial direction - and
-  every later stage faithfully compounded it (the lazy-susan). S1's skeleton IS the contract S2
+- WHY STRUCTURE POSTCONDITIONS: an S1 can pass every COUNT while the geometry is a
+  coplanar-in-name-only flat stack - pins on ring FACES along the ring's axial direction - and
+  every later stage faithfully compounds it (the lazy-susan). S1's skeleton IS the contract S2
   and S3 inherit; grade the vectors and distances, never the counts alone.
-- Topology A (owner-picked 2026-07-14): pedestal post -> yaw CARRIER -> outer ring -> inner ring
+- Topology A: pedestal post -> yaw CARRIER -> outer ring -> inner ring
   -> rotor, + a frame CRANK for S3's motion link (a genuinely independent chain - Fusion refuses
   motion links between joints on the same chain, a live-verified platform rule).
 - The unbodied postcondition IS the S1->S2 handoff contract. The artifact NAME + LOCATION are
@@ -169,10 +169,10 @@ NOTES: <short. What you had to DISCOVER mid-run that a description should have s
 - Reads are units-labeled; postcondition values must quote units (mm expected by default).
 - Staging: data_get -> hub pinned, "MCP Test Project" exists; doc_new; then run the block via
   run_eval.py. Record run-NN + hub upload per the README.
-- Budget calibrated to the first v3-wording measured run + 25% (2026-07-16: 156 calls / 69.5k
-  output tokens - the vertical-zones + rotor-edge-on postconditions added ~50 calls over the v1
-  wording's 105-126).
-- SPIN-IN-RING-PLANE clause (added after the first v3 run): a blind executor legally chose a
-  VERTICAL spin axis (disc flat in the ring plane, shaft parallel to yaw) - every read passed,
+- Budget: measured run + 25% (156 calls / 69.5k output tokens - the vertical-zones +
+  rotor-edge-on postconditions account for ~50 of those calls over a counts-only wording's
+  105-126).
+- SPIN-IN-RING-PLANE clause: a blind executor can legally choose a VERTICAL spin axis (disc
+  flat in the ring plane, shaft parallel to yaw) - every read passes,
   but a vertical shaft never meets the inner ring band that must seat it (S2b's bearing seats,
   S3's spin revolute). The spin line must lie IN the ring plane; the dot-with-yaw read pins it.

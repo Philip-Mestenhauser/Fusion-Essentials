@@ -6,6 +6,12 @@ inside a tool file instead of imported from its home diverges silently the next 
 is fixed or extended - the local copy keeps stale (or wrong) behavior forever. This is a DENYLIST
 lint: for each known shared symbol, its definition must appear in its home module and NOWHERE else
 under ``tools/``. Growing this list is how a future consolidation locks itself in.
+
+The pattern accepts one optional leading underscore on the symbol: a private re-roll
+(``def _target_sketch(...)`` of ``_common.target_sketch``) is the same duplication wearing a
+module-private name. A same-named definition that is genuinely a DIFFERENT job (a legal-values
+tuple named like a name->enum map) is named in ``_ALLOWLIST`` with a reason; the staleness test
+keeps each entry real (still defined there, still different from the home definition).
 """
 
 import os
@@ -23,6 +29,12 @@ _DENYLIST = {
     "walk_operations": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
+    # The ONE CAM tree traversal + refusal resolver (setups/ops/folders/patterns; a duplicated name
+    # is refused with each hit's setup path) - every cam_* tool resolves names through these.
+    "walk_cam_tree": ("_cam_common", "def"),
+    "tree_nodes": ("_cam_common", "def"),
+    "resolve_cam_node": ("_cam_common", "def"),
+    "operations_under": ("_cam_common", "def"),
     "_b64url_decode": ("_data_common", "def"),
     "_urn_candidates": ("_data_common", "def"),
     "sanitize": ("_export", "def"),
@@ -30,12 +42,23 @@ _DENYLIST = {
     "verify_written": ("_export", "def"),
     "ptxyz": ("_common", "def"),
     "target_sketch": ("_common", "def"),
+    "resolve_or_recent_sketch": ("_common", "def"),
     "timeline_health": ("_common", "def"),
     "result_bodies": ("_common", "def"),
+    "open_profile_from_sketch": ("_common", "def"),
+    "most_recent_body": ("_common", "def"),
     "resolve_entity_ref": ("_common", "def"),
     "design_wide_counts": ("_common", "def"),
     "CM_TO_UNIT": ("_common", "assign"),
     "OPERATIONS": ("_common", "assign"),
+    # The literal-or-parameter-expression length trio (extrude distance, offset plane) - one home
+    # beside the Distance kind.
+    "looks_like_expression": ("_inputs", "def"),
+    # World axis key -> origin ConstructionAxis: the name map + the entity accessor, one home.
+    "WORLD_AXIS_ATTRS": ("_inputs", "assign"),
+    "world_construction_axis": ("_inputs", "def"),
+    "length_value_input": ("_inputs", "def"),
+    "expression_report": ("_inputs", "def"),
     "unit_vector": ("_geom", "def"),
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),
@@ -51,18 +74,72 @@ _DENYLIST = {
     "find_joint_origins_by_name": ("_joints", "def"),
     "jo_assembly_proxy": ("_joints", "def"),
     "jo_reference_names": ("_joints", "def"),
+    # The orient + refresh-then-grab capture mechanics both screenshot tools share.
+    "apply_named_view": ("_view_common", "def"),
+    "capture_png_b64": ("_view_common", "def"),
+}
+
+
+# (module without .py, symbol) -> why this same-named definition is a DIFFERENT job, not a re-roll
+# of the shared helper. Each reason must describe the local definition's own job. Kept honest by
+# test_allowlist_entries_still_exist_and_still_differ: the entry must still match the pattern in
+# that module AND its definition must still differ from the home module's - a local copy that
+# becomes identical to home is a true duplicate and loses its exemption.
+_ALLOWLIST = {
+    ("mesh_combine", "OPERATIONS"):
+        "operation key -> MeshCombineOperationTypes enum-member map (the mesh enum family), "
+        "not _common.OPERATIONS' name -> FeatureOperations map",
+    ("model_combine", "OPERATIONS"):
+        "legal-values tuple (combine needs an existing target, so no 'new'); the name->enum map "
+        "it resolves through IS _common.OPERATIONS",
+    ("surface_ops", "OPERATIONS"):
+        "legal-values tuple of the keys this tool accepts; the name->enum map it resolves "
+        "through IS _common.OPERATIONS",
+    ("surface_edit", "result_bodies"):
+        "projection over _common.result_bodies -> (names, any_solid); it delegates to the shared "
+        "walk rather than re-implementing it",
 }
 
 
 def _pattern(symbol, kind):
+    # `_?`: a re-roll hiding behind a leading underscore is the same duplication.
     if kind == "def":
-        return re.compile(r"^def " + re.escape(symbol) + r"\(", re.M)
-    return re.compile(r"^" + re.escape(symbol) + r"\s*=", re.M)
+        return re.compile(r"^def _?" + re.escape(symbol) + r"\(", re.M)
+    return re.compile(r"^_?" + re.escape(symbol) + r"\s*=", re.M)
 
 
 def _all_tool_files():
     return [fn for fn in sorted(os.listdir(TOOLS_DIR))
             if fn.endswith(".py") and fn != "__init__.py"]
+
+
+def _read(fn):
+    return open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
+
+
+def _bracket_delta(line):
+    return sum(line.count(o) for o in "([{") - sum(line.count(c) for c in ")]}")
+
+
+def _definition_block(src, match):
+    """The full statement starting at `match`: a def's body (lines until the next column-0 line) or
+    a possibly-multi-line assignment (lines until brackets balance). Good enough for a lint's
+    same-or-different comparison; strings containing brackets can only over-extend the block."""
+    lines = src[match.start():].splitlines()
+    block = [lines[0]]
+    depth = _bracket_delta(lines[0])
+    for line in lines[1:]:
+        if depth <= 0 and line and not line[0].isspace():
+            break
+        block.append(line)
+        depth += _bracket_delta(line)
+    return "\n".join(block).strip()
+
+
+def _normalized(block, symbol):
+    """The block with the symbol's optional leading underscore dropped, so `_OPERATIONS = (...)`
+    compares against home's `OPERATIONS = (...)` on content, not on the private prefix."""
+    return re.sub(r"\b_" + re.escape(symbol) + r"\b", symbol, block)
 
 
 class TestHelperDefinedOnlyInItsHomeModule:
@@ -73,14 +150,16 @@ class TestHelperDefinedOnlyInItsHomeModule:
             pattern = _pattern(symbol, kind)
             defined_in = []
             for fn in _all_tool_files():
-                src = open(os.path.join(TOOLS_DIR, fn), encoding="utf-8").read()
-                if pattern.search(src):
+                if pattern.search(_read(fn)):
                     defined_in.append(fn)
-            elsewhere = [fn for fn in defined_in if fn != home_file]
+            elsewhere = [fn for fn in defined_in
+                         if fn != home_file and (fn[:-3], symbol) not in _ALLOWLIST]
             if elsewhere:
                 offenders.append(
                     f"'{symbol}' is defined outside its home module {home_file} in: "
-                    f"{', '.join(elsewhere)} - import it from {home} instead of re-implementing it"
+                    f"{', '.join(elsewhere)} - import it from {home} instead of re-implementing it "
+                    f"(a leading-underscore variant counts; a genuinely different job gets an "
+                    f"_ALLOWLIST entry with a reason)"
                 )
             if home_file not in defined_in:
                 offenders.append(
@@ -88,3 +167,30 @@ class TestHelperDefinedOnlyInItsHomeModule:
                     f"the denylist entry is stale, fix it or move the definition back"
                 )
         assert not offenders, "helper duplication:\n  " + "\n  ".join(offenders)
+
+    def test_allowlist_entries_still_exist_and_still_differ(self):
+        # An entry that no longer matches anything is dead weight hiding a regression check; an
+        # entry whose local definition became a verbatim copy of home's is a true duplicate that
+        # must collapse, not stay exempted.
+        stale = []
+        for (mod_name, symbol), reason in _ALLOWLIST.items():
+            assert reason.strip(), f"({mod_name}, {symbol}) allowlist entry needs a reason"
+            assert symbol in _DENYLIST, f"({mod_name}, {symbol}): '{symbol}' is not denylisted"
+            home, kind = _DENYLIST[symbol]
+            path = os.path.join(TOOLS_DIR, mod_name + ".py")
+            if not os.path.exists(path):
+                stale.append(f"({mod_name}, {symbol}): no such module - remove the entry")
+                continue
+            src = _read(mod_name + ".py")
+            m = _pattern(symbol, kind).search(src)
+            if not m:
+                stale.append(f"({mod_name}, {symbol}): the module no longer defines it - "
+                             f"remove the entry")
+                continue
+            home_src = _read(home + ".py")
+            hm = _pattern(symbol, kind).search(home_src)
+            if hm and (_normalized(_definition_block(src, m), symbol)
+                       == _normalized(_definition_block(home_src, hm), symbol)):
+                stale.append(f"({mod_name}, {symbol}): now identical to {home}'s definition - "
+                             f"a true duplicate; collapse it onto {home} and remove the entry")
+        assert not stale, "stale allowlist entries:\n  " + "\n  ".join(stale)

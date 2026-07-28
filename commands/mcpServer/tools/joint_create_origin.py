@@ -429,22 +429,24 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint Origin (a reusable coordinate frame / WCS anchor), placed by the agent - no user "
-    "click. Orientation follows the anchor:\n"
+    "Create a Joint Origin (a reusable coordinate frame / WCS anchor). Orientation follows the "
+    "anchor:\n"
     "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
-    "World-aligned and ROOT-ABSOLUTE (never follows an occurrence's transform - anchor on "
-    "geometry/bbox_center to track a part); held by parametric offsetX/Y/Z from the model "
-    "origin (the result names the dNN params to param_set).\n"
+    "World-aligned and ROOT-ABSOLUTE (never follows an occurrence's transform); held by "
+    "parametric offsetX/Y/Z from the model origin (the result names the dNN params to "
+    "param_set).\n"
     "- anchor='sketch_line': on a sketch line (sketch_name + entity_index + 'keypoint') - frame Z "
-    "runs along the line (draw one with sketch_add_3d_line).\n"
+    "runs along the line.\n"
     "- anchor='sketch_point': on a sketch point (position only).\n"
     "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
     "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
     "- anchor='bbox_center': at the world bbox CENTER of 'bbox_target' (a body/occurrence/component), "
     "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it).\n"
     "- anchor='face_center': at a planar FACE's centroid (the 'geometry' handle), Z = the face normal.\n"
-    "Optional 'name'. WRITES; 'frame_axes' reports the resulting Z/X/Y vectors. The origin lands on "
-    "the ROOT component (not the active one) and tracks its anchor parametrically."
+    "Optional 'name'. WRITES; 'frame_axes' reports Z/X/Y. The origin lands on the ROOT component "
+    "(not the active one). Placement is a SNAPSHOT - bbox_center/face_center do NOT follow a "
+    "parametric resize; to TRACK a resizable part use anchor='coordinates' with offset "
+    "expressions on the dNN params."
 )
 
 tool = (

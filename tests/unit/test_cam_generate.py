@@ -1,18 +1,20 @@
 """Unit tests for ``cam_generate.py`` — launch/poll toolpath generation.
 
 ``_live_op_tally`` is already pinned in test_tier2_misc.py. This file covers the rest of the real
-logic (no live Fusion): ``_find_target`` (setup/folder/operation classification + not-found),
-``_collect_op_health`` (warning/error collection and the EMPTY-toolpath text derivation), and the two
-handlers' branching — generate's skip-valid short-circuit and target-not-found, and status's
-handle/'latest' resolution, the unknown-handle guard, the pump-budget clamp, the "nothing generating
-but out-of-date remain" stall warning, and the NO-HANDLE live-poll path (document + by-name target)
-that reports an inline/UI generation with no cam_generate handle.
+logic (no live Fusion): target resolution through the shared ``_cam_common.resolve_cam_node``
+(setup/folder classification, the duplicate-name refusal, not-found), ``_collect_op_health``
+(warning/error collection and the EMPTY-toolpath text derivation), and the two handlers' branching —
+generate's skip-valid short-circuit and target-not-found, and status's handle/'latest' resolution,
+the unknown-handle guard, the pump-budget clamp, the "nothing generating but out-of-date remain"
+stall warning, and the NO-HANDLE live-poll path (document + by-name target) that reports an inline/UI
+generation with no cam_generate handle.
 """
 
 import json
 from types import SimpleNamespace
 
 from conftest import load_tool, _NamedCollection
+from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder, FakeOperation as SharedOp
 
 gen = load_tool("cam_generate")
 
@@ -22,7 +24,7 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-# ── _find_target: classify a name as setup / folder / operation ─────────────────────────────────────
+# ── target resolution (via the shared _cam_common.resolve_cam_node) ─────────────────────────────────
 
 class _FakeCAM:
     def __init__(self, setups):
@@ -43,41 +45,44 @@ def _setup(name, ops=()):
     return SimpleNamespace(name=name, allOperations=_NamedCollection(ops))
 
 
-class TestFindTarget:
-    def test_matches_setup_by_name_ci(self, monkeypatch):
-        cam = _FakeCAM([_setup("Roughing")])
-        # CAMFolder/Operation casts only matter for ops; here the name matches the SETUP first.
-        tgt, kind = gen._find_target(cam, "roughing")
-        assert kind == "setup" and tgt.name == "Roughing"
+class TestTargetResolution:
+    """cam_generate's 'target' resolves through the shared _cam_common resolver - pin the
+    classification, the folder reachability, and THE contract fix: a duplicated operation name is
+    refused at this entry point, never first-matched."""
 
-    def test_matches_operation(self, monkeypatch):
-        op = SimpleNamespace(name="Face1")
-        cam = _FakeCAM([_setup("S", [op])])
-        import adsk.cam
-        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))   # not a folder
-        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))      # is an operation
-        tgt, kind = gen._find_target(cam, "face1")
-        assert kind == "operation" and tgt is op
+    def _install(self, monkeypatch, setups):
+        cam = _FakeCAM(setups)
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        return cam
 
-    def test_matches_folder(self, monkeypatch):
-        folder = SimpleNamespace(name="Drilling")
-        cam = _FakeCAM([_setup("S", [folder])])
-        import adsk.cam
-        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: x))      # IS a folder
-        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: None))
-        tgt, kind = gen._find_target(cam, "drilling")
-        assert kind == "folder"
+    def test_setup_target_launches_scoped_generation_ci(self, monkeypatch):
+        setup = SharedSetup("Roughing", ops=[SharedOp("Face1", operation_state=1)])
+        cam = self._install(monkeypatch, [setup])
+        out = _payload(gen.generate_handler(target="roughing"))   # case-insensitive exact
+        assert out["launched"] is True
+        assert cam.generate_calls == [("target", setup)]
+        assert out["target"] == "setup 'roughing'"
 
-    def test_unknown_name_returns_none(self, monkeypatch):
-        cam = _FakeCAM([_setup("S", [SimpleNamespace(name="Face1")])])
-        import adsk.cam
-        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
-        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        assert gen._find_target(cam, "Ghost") == (None, None)
+    def test_folder_target_resolves_via_explicit_folder_walk(self, monkeypatch):
+        # setup.allOperations DROPS folder containers (live-verified), so a folder target is only
+        # reachable through the shared walk's explicit .folders recursion.
+        folder = SharedFolder("Drilling", ops=[SharedOp("D1", operation_state=1)])
+        setup = SharedSetup("S", folders=[folder])
+        cam = self._install(monkeypatch, [setup])
+        out = _payload(gen.generate_handler(target="Drilling", skip_valid=False))
+        assert out["launched"] is True
+        assert cam.generate_calls == [("target", folder)]
+        assert out["target"] == "folder 'Drilling'"
 
-    def test_empty_name_returns_none(self):
-        cam = _FakeCAM([_setup("S")])
-        assert gen._find_target(cam, "") == (None, None)
+    def test_duplicate_op_name_across_setups_is_refused(self, monkeypatch):
+        # "Drill1" exists in TWO setups - generating by that name must REFUSE with both setup
+        # paths and launch NOTHING, never regenerate whichever op the walk met first.
+        cam = self._install(monkeypatch, [SharedSetup("Setup1", ops=[SharedOp("Drill1")]),
+                                          SharedSetup("Setup2", ops=[SharedOp("Drill1")])])
+        res = gen.generate_handler(target="Drill1", skip_valid=False)
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "Setup1 / Drill1" in res["message"] and "Setup2 / Drill1" in res["message"]
+        assert cam.generate_calls == []                      # nothing was launched
 
 
 # ── _collect_op_health: warnings / errors / empty derivation ────────────────────────────────────────
@@ -187,7 +192,7 @@ class TestStatusHandler:
                                           numberOfCompleted=2),
                 "target": "all setups", "started_at": 0.0, "total": 2}
 
-    # status_handler now DELEGATES CAM health to _cam_common.live_readiness (the single source) - tests
+    # status_handler delegates CAM health to _cam_common.live_readiness (the single source) - tests
     # patch that seam (gen._cam_common.live_readiness -> (signal, None)) instead of a local tally.
     def _states(self, **kw):
         base = {"valid": 0, "out_of_date": 0, "errored": 0, "generating": 0, "suppressed": 0,
@@ -224,7 +229,7 @@ class TestStatusHandler:
         assert "WARNING" in out["note"]
 
     def test_errored_op_surfaced_while_still_generating(self, monkeypatch):
-        # THE refinement: an errored op (hasError) will NEVER finish, so a still-generating poll must
+        # An errored op (hasError) will NEVER finish, so a still-generating poll must
         # flag it NOW (the BLOCKER readiness + one sample + a pointer to cam_get), not wait for a
         # completion that can't come. The verdict comes from _cam_common.live_readiness (one source).
         gen._GENERATIONS["gen1"] = {
@@ -263,6 +268,30 @@ class TestStatusHandler:
         assert "BLOCKER" in out["note"]
         assert "Op1" in out["note"]
         assert "will NOT complete" in out["note"]
+
+    def test_completed_waits_for_live_states_to_settle(self, monkeypatch):
+        # the Future flips isGenerationCompleted a poll BEFORE live op state settles (live: completed
+        # while live_states showed generating=3). completed must stay False until live_states.generating
+        # hits 0, so the caller never reads a premature done.
+        gen._GENERATIONS["gen1"] = self._completed_entry()      # future says done
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(out_of_date=3, generating=3, total=3,
+                                            readiness="0 of 3 active ops valid - run cam_generate to finish the rest."))
+        out = _payload(gen.status_handler(handle="gen1", pump_seconds=0))
+        assert out["completed"] is False
+        assert out["live_states"]["generating"] == 3
+        assert "gen1" in gen._GENERATIONS          # not popped while still settling
+
+    def test_completed_when_future_done_and_live_settled(self, monkeypatch):
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=2, generating=0, total=2, readiness="ready to post."))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda: {"warnings": [], "errors": [], "empty": []})
+        out = _payload(gen.status_handler(handle="gen1", pump_seconds=0))
+        assert out["completed"] is True
 
     def test_pump_budget_is_clamped(self, monkeypatch):
         # a huge pump_seconds must be clamped to <=10; with a completed future no pumping happens.

@@ -377,21 +377,25 @@ def _machine(vendor, model, description=None):
     return SimpleNamespace(vendor=vendor, model=model, description=description)
 
 
-def _machine_lib(machines):
+def _machine_lib(machines, f360=()):
+    """Fake MachineLibrary: a Local pool + a Fusion360 pool behind createQuery."""
+    local_pool, f360_pool = list(machines), list(f360)
     def create_query(loc, vendor, model):
-        pool = machines if loc == "LOCAL" else []       # only the Local location holds machines here
+        pool = local_pool if loc == "LOCAL" else (f360_pool if loc == "F360" else [])
         matched = [m for m in pool
                    if (not vendor or (m.vendor or "").lower() == vendor.lower())
                    and (not model or (m.model or "").lower().startswith(model.lower()))]
         return SimpleNamespace(execute=lambda: matched)
-    return SimpleNamespace(createQuery=create_query)
+    return SimpleNamespace(createQuery=create_query, _local_pool=local_pool)
 
 
-def _install_machine_lib(monkeypatch, machines):
-    holder = SimpleNamespace(libraryManager=SimpleNamespace(machineLibrary=_machine_lib(machines)))
+def _install_machine_lib(monkeypatch, machines, f360=()):
+    lib = _machine_lib(machines, f360)
+    holder = SimpleNamespace(libraryManager=SimpleNamespace(machineLibrary=lib))
     monkeypatch.setattr(ces.adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
     monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "LocalLibraryLocation", "LOCAL", raising=False)
     monkeypatch.setattr(ces.adsk.cam.LibraryLocations, "Fusion360LibraryLocation", "F360", raising=False)
+    return lib
 
 
 _VF2_FAMILY = [
@@ -456,6 +460,134 @@ class TestMachineResolver:
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
         m, label, err = ces._resolve_machine("Okuma|Genos")
         assert m is None and "No machine matches" in err
+
+
+# ── the machine CATALOG read (cam_get include=['machines'] delegates here) ──────────────────────────
+
+class TestReadMachines:
+    def test_lists_both_locations_with_sim_flag(self, monkeypatch):
+        sim = _machine("Haas", "VF-3", "Haas VF-3")
+        sim.hasSimulationModel = True
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Haas VF-2 (local)")], [sim])
+        out = _payload(ces.read_machines())
+        assert out["count"] == 2 and out["truncated"] is False
+        by_name = {r["name"]: r for r in out["machines"]}
+        assert by_name["Haas VF-2 (local)"]["location"] == "local"
+        assert by_name["Haas VF-3"]["location"] == "fusion360"
+        assert by_name["Haas VF-3"]["simulation_ready"] is True
+        assert by_name["Haas VF-2 (local)"]["simulation_ready"] is False
+
+    def test_vendor_filter(self, monkeypatch):
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2"), _machine("DMG", "DMU 50")])
+        out = _payload(ces.read_machines(vendor="Haas"))
+        assert out["count"] == 1 and out["machines"][0]["vendor"] == "Haas"
+
+    def test_truncation_reports(self, monkeypatch):
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-%d" % i) for i in range(3)])
+        out = _payload(ces.read_machines(max_results=2))
+        assert out["count"] == 2 and out["truncated"] is True
+
+    def test_machine_type_filters_by_capability_and_rows_carry_kind(self, monkeypatch):
+        # The bundled library is mostly additive printers; machine_type='milling' must keep only
+        # capability-flagged mills, and filtered-out rows must not count toward truncation.
+        mill = _machine("Haas", "VF-2", "Haas VF-2")
+        mill.capabilities = SimpleNamespace(isMillingSupported=True)
+        printers = [_machine("Anet", "A%d" % i) for i in range(5)]
+        for p in printers:
+            p.capabilities = SimpleNamespace(isAdditiveSupported=True)
+        _install_machine_lib(monkeypatch, [], [mill] + printers)
+        out = _payload(ces.read_machines(machine_type="milling", max_results=2))
+        assert out["count"] == 1 and out["truncated"] is False
+        assert out["machines"][0]["name"] == "Haas VF-2"
+        assert out["machines"][0]["kind"] == ["milling"]
+
+    def test_unknown_machine_type_is_error(self, monkeypatch):
+        _install_machine_lib(monkeypatch, [])
+        res = ces.read_machines(machine_type="waterjet")
+        assert res["isError"] is True and "waterjet" in res["message"]
+        assert "milling" in res["message"]      # the refusal names the valid vocabulary
+
+    def test_library_unavailable_is_error(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("no library manager")
+        monkeypatch.setattr(ces.adsk.cam.CAMManager, "get", staticmethod(_boom), raising=False)
+        res = ces.read_machines()
+        assert res["isError"] is True and "machine library" in res["message"]
+
+
+# ── machine_strip_simulation: the ONE assignment path for simulation-ready machines ─────────────────
+#
+# Setup.machine refuses ANY machine with hasSimulationModel=True regardless of library location
+# (verified live - a Local createFromFile-loaded copy refuses identically; the platform error's
+# copy-to-local advice does not work via the API). Stripping the simulation model from the
+# TRANSIENT resolved copy is what unlocks assignment.
+
+class TestMachineStripSimulation:
+    def _setup_with_sim_machine(self, monkeypatch):
+        cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS))])
+        monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(ces, "_object_collection", _ObjColl.create)
+        src = _machine("Haas", "VF-2", "Haas VF-2")
+        src.hasSimulationModel = True
+        src.clearSimulationModel = lambda: setattr(src, "hasSimulationModel", False)
+        monkeypatch.setattr(ces, "_resolve_machine", lambda name: (src, "Haas VF-2", None))
+        return cam, src
+
+    def test_strip_then_assign_reports_both(self, monkeypatch):
+        cam, src = self._setup_with_sim_machine(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", machine="Haas VF-2",
+                                   machine_strip_simulation=True))
+        assert out["machine_simulation_stripped"] is True
+        assert out["machine_set"] == "Haas VF-2"
+        assert src.hasSimulationModel is False           # the strip actually ran on the copy
+        assert cam.setups.item(0).machine is src
+
+    def test_strip_failure_is_error(self, monkeypatch):
+        cam, src = self._setup_with_sim_machine(monkeypatch)
+        def _boom():
+            raise RuntimeError("no simulation model")
+        src.clearSimulationModel = _boom
+        res = ces.handler(setup="Setup1", machine="Haas VF-2", machine_strip_simulation=True)
+        assert res["isError"] is True and "simulation model" in res["message"]
+
+    def test_no_strip_without_the_flag(self, monkeypatch):
+        cam, src = self._setup_with_sim_machine(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", machine="Haas VF-2"))
+        assert "machine_simulation_stripped" not in out
+        assert src.hasSimulationModel is True            # never silently stripped
+
+    def test_sim_ready_refusal_error_names_the_flag(self, monkeypatch):
+        # Without the flag, the platform's refusal must TEACH the working escape at failure time.
+        cam, src = self._setup_with_sim_machine(monkeypatch)
+        def _refuse(self, m):
+            raise RuntimeError("Setting a simulation ready machine from an external library is "
+                               "currently not supported. Try copying this machine to your local "
+                               "library.")
+        monkeypatch.setattr(_Setup, "machine", property(lambda self: None, _refuse))
+        res = ces.handler(setup="Setup1", machine="Haas VF-2")
+        assert res["isError"] is True and "machine_strip_simulation=true" in res["message"]
+
+    def test_non_sim_assignment_error_has_no_flag_hint(self, monkeypatch):
+        # An unrelated assignment failure must not advertise the strip flag as a cure.
+        cam, src = self._setup_with_sim_machine(monkeypatch)
+        def _refuse(self, m):
+            raise RuntimeError("machine schema version mismatch")
+        monkeypatch.setattr(_Setup, "machine", property(lambda self: None, _refuse))
+        res = ces.handler(setup="Setup1", machine="Haas VF-2")
+        assert res["isError"] is True and "machine_strip_simulation" not in res["message"]
+
+
+class TestWCSResolveJOAxes:
+    def test_jo_refused_for_axis_keys_with_recipe(self, monkeypatch):
+        # The platform accepts a JO for the ORIGIN binding but InternalValidationErrors on an
+        # AXIS bind (verified live) - the resolver must refuse axes-JO up front, naming the
+        # working recipe, instead of letting the raw platform error surface.
+        monkeypatch.setattr(ces, "_resolve_wcs_value", lambda v: (object(), True, None))
+        resolved, err = ces._resolve_wcs({"z_axis": "SomeJO"})
+        assert resolved is None
+        assert "ORIGIN only" in err and "face" in err
+        resolved2, err2 = ces._resolve_wcs({"origin": "SomeJO"})
+        assert err2 is None and "origin" in resolved2
 
 
 class TestWCS:

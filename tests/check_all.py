@@ -4,7 +4,7 @@
 """The one command: every generator check, the whole suite, and the live gate, in order.
 
 Stages (each fails loudly with the command that repairs it):
-  1. generators --check   (TEST_SPEC / TOOL_MANIFEST / TOOL_POINTER_MAP stay in sync with the code)
+  1. generators --check   (TOOL_MANIFEST / TOOL_POINTER_MAP stay in sync with the code)
   2. pytest               (unit tests + lints)
   3. tool_verify --check  (the receipt: the last green live run saw exactly this tool source;
                            recomputed offline, no Fusion needed)
@@ -21,13 +21,13 @@ Usage:
   py -3 tests/check_all.py --offline       # no Fusion here: skip the live gate, visibly
   py -3 tests/check_all.py --fast          # generators + lints only
   py -3 tests/check_all.py --gen           # generator checks only (the pre-commit path)
-  py -3 tests/check_all.py --install-hook  # write .git/hooks/pre-commit running --gen
+  py -3 tests/check_all.py --install-hook  # write pre-commit (--gen) and pre-push (--push) hooks
 
 The quality system, layer by layer (the one guarantee each makes):
   constitution docs      the rules, taught once at the point of use (CLAUDE.md beside the code)
-  unit tests (~2670)     tool logic proven against fakes - which are POPULATED from measured facts
-  lints (~30)            the repo polices its own conventions (naming, wire text, comments, fakes)
-  generators             TEST_SPEC / TOOL_MANIFEST / TOOL_POINTER_MAP regenerate from code; gen_all --check gates
+  unit tests             tool logic proven against fakes - which are POPULATED from measured facts
+  lints                  the repo polices its own conventions (naming, wire text, comments, fakes)
+  generators             TOOL_MANIFEST / TOOL_POINTER_MAP regenerate from code; gen_all --check gates
   api measurement        live Fusion MEASURES enum values + behavior flags -> live_api_facts.py
   facts + guard lints    mocks seeded from measurement; a hand-typed or unmeasured API claim is red
   tool verify + evals    every tool called once against real Fusion, receipted in VERIFIED_TOOLS.md

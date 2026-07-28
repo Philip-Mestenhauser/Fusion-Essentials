@@ -79,29 +79,6 @@ def _resolve_profile_indices(profile_index, pcount, profiles=None):
     return (idxs or [0]), None
 
 
-def _open_profile_or_error(root, sketch):
-    """Build an OPEN profile from a sketch's open (unclosed) curves via Component.createOpenProfile,
-    so an open path (an arc, a single line) can extrude into a SURFACE. Returns (open_profile, error).
-    Used when there is no closed profile (or as_surface was forced)."""
-    curves = safe(lambda: sketch.sketchCurves)
-    n = safe(lambda: curves.count, 0) if curves else 0
-    if not n:
-        return None, (f"Sketch '{safe(lambda: sketch.name)}' has no curves to extrude as a surface. "
-    "Draw an open path (a line/arc) or a closed region first.")
-    coll = adsk.core.ObjectCollection.create()
-    for i in range(n):
-        c = safe(lambda i=i: curves.item(i))
-        if c is not None:
-            coll.add(c)
-    try:
-        prof = root.createOpenProfile(coll, True)   # chainCurves=True
-    except Exception as e:
-        return None, f"Could not build an open profile for a surface extrude: {e}"
-    if not prof:
-        return None, "Could not build an open profile from the sketch's curves (createOpenProfile returned nothing)."
-    return prof, None
-
-
 def _through_all_direction_key(symmetric, distance):
     """'positive' | 'negative' | 'symmetric' - which way extent='through_all' cuts. The SIGN of
     'distance' (its magnitude is unused for through_all) picks a one-sided direction - the same
@@ -115,6 +92,22 @@ def _through_all_direction_key(symmetric, distance):
     except (TypeError, ValueError):
         pass
     return "positive"
+
+
+def _qualified_body_name(body):
+    """The body's name qualified with its owning component (or occurrence path), so two target
+    bodies sharing Fusion's ubiquitous default name ('Body1') are distinguishable in the
+    'scoped_to_bodies' echo - a cut mis-targeted onto the WRONG body's component still reads
+    distinctly from the intended one. Reuses _inputs._body_context, the same 'where this body
+    lives' idiom model_fillet_chamfer's own echo already reports (assemblyContext.fullPathName,
+    else the owning component name)."""
+    if body is None:
+        return None
+    name = safe(lambda: body.name)
+    ctx = _inputs._body_context(body)
+    if name and ctx and ctx not in ("?", name):
+        return f"{ctx}/{name}"
+    return name
 
 
 def _solo_solid_body(comp):
@@ -161,21 +154,6 @@ def _affected_bodies(snap):
     return out
 
 
-def _looks_like_expression(v) -> bool:
-    """True if v is a non-numeric string - a parameter EXPRESSION ('StockZ/2', '25 mm'), not a literal
-    number. A plain numeric string ('25') is a literal, resolved the numeric way."""
-    if not isinstance(v, str):
-        return False
-    s = v.strip()
-    if not s:
-        return False
-    try:
-        float(s)
-        return False
-    except ValueError:
-        return True
-
-
 def _distance_missing(distance) -> bool:
     """True when 'distance' supplies no extrude depth: None, blank, or a literal 0. A non-numeric string
     is an EXPRESSION (a real depth), and any non-zero number is a real depth."""
@@ -193,40 +171,6 @@ def _distance_missing(distance) -> bool:
         return float(distance) == 0
     except (TypeError, ValueError):
         return True
-
-
-def _distance_input(raw, k, design, label):
-    """A ValueInput for an extrude depth that may be a literal number OR a parameter-expression string.
-    A number is scaled to internal cm (createByReal); a string is an EXPRESSION (createByString), which
-    ties the feature's distance to a live parameter. The expression is validated through the design's
-    units engine so an unresolvable one (unknown parameter, bad syntax, non-length units) is refused BY
-    NAME instead of failing opaquely at feature add(). Returns (ValueInput, error)."""
-    if _looks_like_expression(raw):
-        expr = raw.strip()
-        um = safe(lambda: design.unitsManager)
-        try:
-            # evaluateExpression raises on an unresolvable/dimension-incompatible expression; a length
-            # unit keeps a length expression valid. createByString then preserves the parametric link.
-            um.evaluateExpression(expr, safe(lambda: um.defaultLengthUnits) or "mm")
-        except Exception as e:
-            return None, (f"'{label}' expression '{expr}' did not evaluate - use a length expression "
-                          f"like 'StockZ/2' or '25 mm' and confirm the parameter names exist "
-                          f"(param_get): {e}")
-        return adsk.core.ValueInput.createByString(expr), None
-    try:
-        return adsk.core.ValueInput.createByReal(float(raw) * k), None
-    except (TypeError, ValueError):
-        return None, f"'{label}' must be a number or a parameter-expression string."
-
-
-def _distance_report(distance):
-    """The 'distance' echoed back: an expression string as-is, else the rounded literal number."""
-    if _looks_like_expression(distance):
-        return distance.strip()
-    try:
-        return round(float(distance), 6)
-    except (TypeError, ValueError):
-        return distance
 
 
 def _feature_parameters(feature) -> dict:
@@ -297,14 +241,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
 
     root = target_component(design)
-    # By NAME: the design-wide resolver (active component first, then root, then the rest) - so a
-    # ROOT master sketch stays reachable while a sub-component is the active edit target. An EMPTY
-    # name keeps meaning "the most recent sketch in the ACTIVE component".
-    requested = (sketch_name or "").strip()
-    if requested:
-        sketch = _common.resolve_sketch(design, requested)
-    else:
-        sketch, _ = _common.target_sketch(root, "")
+    sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sketch:
         if requested:
             names = _common.all_sketch_names(design)
@@ -321,8 +258,10 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     open_surface = False
     indices = [0]
     if want_surface:
-        profile_arg, perr = _open_profile_or_error(
-            safe(lambda: sketch.parentComponent) or root, sketch)
+        profile_arg, perr = _common.open_profile_from_sketch(
+            safe(lambda: sketch.parentComponent) or root, sketch, "for a surface extrude",
+            no_curves_error=(f"Sketch '{safe(lambda: sketch.name)}' has no curves to extrude as a "
+                             "surface. Draw an open path (a line/arc) or a closed region first."))
         if perr:
             # No closed profile AND no open curves -> the original dead-end, but now points at the
             # surface path so the agent knows as_surface exists.
@@ -403,16 +342,16 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             if taper:
                 return error("taper_deg is not supported with extent=two_side "
                              "(setTwoSidesDistanceExtent takes no taper).")
-            d1, d1err = _distance_input(distance, k, design, "distance")
+            d1, d1err = _inputs.length_value_input(distance, k, design, "distance")
             if d1err:
                 return error(d1err)
-            d2, d2err = _distance_input(distance2, k, design, "distance2")
+            d2, d2err = _inputs.length_value_input(distance2, k, design, "distance2")
             if d2err:
                 return error(d2err)
             if not ext_input.setTwoSidesDistanceExtent(d1, d2):
                 return error("Fusion rejected extent=two_side (setTwoSidesDistanceExtent returned false).")
         else:
-            dist_val, dverr = _distance_input(distance, k, design, "distance")
+            dist_val, dverr = _inputs.length_value_input(distance, k, design, "distance")
             if dverr:
                 return error(dverr)
             if taper and symmetric:
@@ -444,7 +383,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             return error(berr)
         try:
             ext_input.participantBodies = list(bodies_ents)
-            scoped_to = [safe(lambda b=b: b.name) for b in bodies_ents]
+            scoped_to = [_qualified_body_name(b) for b in bodies_ents]
         except Exception as e:
             return error(f"Could not scope to target_bodies: {e}")
 
@@ -470,7 +409,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         # only fail here, so the agent still learns which expression to fix. If a through_all cut could
         # not find a body, TEACH the direction trap (confirmed live: a sketch ON a body's face points
         # its normal AWAY from the material, so the default - and symmetric - direction hits pure air).
-        if _looks_like_expression(distance):
+        if _inputs.looks_like_expression(distance):
             hint = f" The distance expression '{distance.strip()}' may be unresolvable - check param_get."
         elif ext_key == "through_all" and "body not found" in str(e).lower():
             hint = (" extent=through_all follows the sketch-plane normal; a sketch ON a body's face "
@@ -503,6 +442,22 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     bodies = safe(lambda: feature.bodies)
     for i in range(safe(lambda: bodies.count, 0) if bodies else 0):
         body_names.append(safe(lambda i=i: bodies.item(i).name))
+
+    # body-split: a cut/intersect that DISCONNECTS the target leaves it in several pieces. The
+    # extruded profile removes no bodies, so any NET increase in the design-wide solid-body count is
+    # split-off pieces (a plain multi-body cut adds none). Live-verified: a full-width slot cut takes
+    # a bar's solid count 1 -> 2. Counting solids (not feature.bodies, which for a cut reports only
+    # the own-component result) also catches a split in a co-located component.
+    split_count = 0
+    if op_key in ("cut", "intersect") and solid_snap:
+        post_solids = 0
+        for _c in _common.all_components(design):
+            _coll = safe(lambda c=_c: c.bRepBodies)
+            for _i in range(safe(lambda: _coll.count, 0) if _coll else 0):
+                _b = safe(lambda i=_i, cl=_coll: cl.item(i))
+                if _b is not None and safe(lambda b=_b: b.isSolid):
+                    post_solids += 1
+        split_count = post_solids - len(solid_snap)
 
     # cut/intersect: the bodies (and owning components) that ACTUALLY lost material, from the pre-op
     # volume snapshot. 'component' then names where the cut landed - not merely where the sketch lives -
@@ -538,7 +493,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     elif ext_key == "through_all":
         extent_report, distance_report = "through_all", None
     else:
-        extent_report, distance_report = ext_key, _distance_report(distance)
+        extent_report, distance_report = ext_key, _inputs.expression_report(distance)
 
     # Name the model parameters the feature created so the retarget path is discoverable without
     # fishing through param_get to guess which dNN is which (param_set '<dNN>' '<expression>').
@@ -570,7 +525,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if model_params:
         result["model_parameters"] = model_params
     if ext_key == "two_side":
-        result["distance2"] = _distance_report(distance2)
+        result["distance2"] = _inputs.expression_report(distance2)
     if ext_key == "through_all":
         result["direction"] = through_all_dir
     if through_all_removed is not None:
@@ -591,6 +546,12 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                                f"every VISIBLE body it intersects, including {', '.join(foreign)} "
                                "(hidden bodies are spared). Scope it by passing 'target_bodies' (a named "
                                "body is cut even if hidden), or hide the bodies that must be spared.")
+    if split_count > 0:
+        result["body_split"] = body_names
+        result["note"] += (f" WARNING: this {op_key} DISCONNECTED the target - it created "
+                           f"{split_count} additional disconnected body/bodies (the feature now yields "
+                           f"{len(body_names)}: {', '.join(n for n in body_names if n)}). Reference "
+                           "each piece by name; a later op assuming one body may hit the wrong piece.")
     return ok(result)
 
 
@@ -610,7 +571,7 @@ extrude_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or a sketch_get profile 'handle' (targets one exact region on a multi-profile / on-face sketch)."})
+            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' - a LIST of handles is rejected (several regions = index list)."})
     .add_input_property("distance", {"type": ["number", "string"],
             "description": "Extrude depth in 'units' (negative reverses), OR a parameter EXPRESSION string ('StockZ/2', '25 mm'; carries its own units). Side one for two_side; sign-only direction for through_all."})
     .add_input_property("distance2", {"type": ["number", "string"],

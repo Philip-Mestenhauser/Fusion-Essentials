@@ -20,11 +20,76 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, scale
 from . import _common
 from . import _inputs
-from ._joints import find_joint as _find_joint, current_joint_type as _current_joint_type
+from ._joints import (find_joint as _find_joint, current_joint_type as _current_joint_type,
+                      motion_link_partner as _motion_link_partner)
 
 # joint_type -> which value(s) it drives.
 _DRIVES_ANGLE = {"revolute", "cylindrical"}
 _DRIVES_SLIDE = {"slider", "cylindrical"}
+
+# (document identity, joint ENTITY TOKEN) pairs successfully driven this add-in session. Driving BOTH
+# members of a motion-linked pair can kill the Fusion process outright - observed live only in an
+# XREF / referenced context; plain in-document pairs survive it. So the second-member refusal is
+# scoped to xref-context pairs (see _pair_is_plain); a plain in-document pair is allowed with a warning.
+# Keyed by entity TOKEN so a delete+recreate of the driven joint (a NEW token) clears the block, while a
+# rename (token stable) does not. The set outlives doc close.
+_driven_this_session = set()
+
+
+def _reg_key(doc_id, joint):
+    """Registry key for a driven joint: (doc identity, entityToken). The token makes delete+recreate
+    clear the poison (new token) while a rename keeps it (stable token). Falls back to the joint NAME
+    when no token is readable (an un-persisted joint, or a fake under test)."""
+    token = safe(lambda: joint.entityToken)
+    return (doc_id, token if token else (safe(lambda: joint.name) or ""))
+
+
+def _occ_positively_plain(occ):
+    """True only when this occurrence can be POSITIVELY confirmed native - not a referenced/xref
+    component and with no referenced ancestor up its assembly-context chain. Any unreadable value ->
+    False, so an unknown context keeps the crash guard ON (fail toward refusal)."""
+    if occ is None:
+        return False
+    ref = safe(lambda: occ.isReferencedComponent)
+    if ref is None or ref:
+        return False
+    ctx = safe(lambda: occ.assemblyContext)
+    depth = 0
+    while ctx is not None and depth < 32:
+        r = safe(lambda c=ctx: c.isReferencedComponent)
+        if r is None or r:
+            return False
+        ctx = safe(lambda c=ctx: c.assemblyContext)
+        depth += 1
+    return True
+
+
+def _pair_is_plain(j1, j2):
+    """Both linked joints wholly native - no xref anywhere in either joint's two occurrences. Only such
+    a pair skips the second-member refusal (all four crashes were xref-context; plain pairs survived
+    every controlled both-members drive). Unprovable -> False, so the guard stays on."""
+    for j in (j1, j2):
+        if j is None:
+            return False
+        if not (_occ_positively_plain(safe(lambda jj=j: jj.occurrenceOne))
+                and _occ_positively_plain(safe(lambda jj=j: jj.occurrenceTwo))):
+            return False
+    return True
+
+
+def _current_value_text(jm, jtype):
+    """The joint's current driven value as display text ('12.5 mm' / '30.0 deg'), for the refusal
+    message - so the caller gets the read-the-partner answer without another call."""
+    parts = []
+    if jtype in _DRIVES_ANGLE:
+        rv = safe(lambda: jm.rotationValue)
+        if rv is not None:
+            parts.append(f"{round(math.degrees(rv), 4)} deg")
+    if jtype in _DRIVES_SLIDE:
+        sv = safe(lambda: jm.slideValue)
+        if sv is not None:
+            parts.append(f"{round(sv * 10.0, 4)} mm")
+    return ", ".join(parts) or "unknown"
 
 
 def _limit_violation(limits, value, what):
@@ -76,6 +141,26 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     if jm is None:
         return error(f"Could not read the motion of joint '{joint_name}'.")
 
+    # Second-member refusal, scoped to XREF context: if this joint's motion-link partner was already
+    # driven this session AND the pair is not provably plain (native, no xref), refuse BEFORE mutating -
+    # the link already moved this joint when the partner was driven, and driving both members of a
+    # linked pair in an xref assembly has killed the Fusion process. A plain in-document pair falls
+    # through (allowed) and gets a warning below. Keyed on the lineage URN + entity token.
+    doc_id = (safe(lambda: app.activeDocument.dataFile.id)
+              or safe(lambda: app.activeDocument.name) or "")
+    resolved_name = safe(lambda: joint.name) or joint_name
+    partner = _motion_link_partner(joint)
+    partner_joint = _find_joint(design, partner) if partner else None
+    partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
+    plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
+    if partner_driven and not plain_pair:
+        return error(
+            f"Refused: '{resolved_name}' is motion-linked to '{partner}', which was already driven "
+            f"this session, and the pair is in an XREF/referenced context where driving BOTH members "
+            f"has killed the Fusion process. The link ALREADY moved '{resolved_name}' (current value: "
+            f"{_current_value_text(jm, jtype)}) - read it back with assembly_get; do not re-drive it. "
+            f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
+
     applied = {}
     warnings = []
     try:
@@ -94,6 +179,14 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             jm.slideValue = cm
             applied["distance"] = round(float(distance), 6)
     except Exception as e:
+        # A cylindrical drive can land its rotation and then fail on the slide: the joint (and via a
+        # motion link, its partner) HAS moved, so the session guard must register the attempt or the
+        # xref both-members refusal fails open on exactly the partial-drive sequence it exists for.
+        if applied:
+            _driven_this_session.add(_reg_key(doc_id, joint))
+            return error(f"Could not drive joint '{joint_name}': {e}. PARTIALLY applied first "
+                         f"({applied}) - the joint (and any motion-linked partner) has moved; read "
+                         "the pose back with assembly_get.")
         return error(f"Could not drive joint '{joint_name}': {e}")
 
     # Read the values back off the joint so the caller sees what actually took (the joint may clamp).
@@ -116,15 +209,25 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         "units": units,
         "note": "Joint driven (the Drive Joints command) - the mechanism followed along this joint's "
                 "DOF. This poses the model; it does not add a timeline feature, and a later recompute "
-                "can reset the pose. For a position that PERSISTS parametrically, param_set the "
-                "joint's 'offset' model parameter (named in joint_create/joint_edit results; it moves "
-                "along the joint frame's Z). Pair with assembly_get "
-                "to confirm the kinematics and view_screenshot to see it.",
+                "resets the pose. There is no parameter for a slide/rotation VALUE (the 'offset' "
+                "param moves a DIFFERENT axis - the frame Z - so it cannot persist a drive); build the "
+                "mechanism at its rest pose. Pair with assembly_get to confirm the kinematics and "
+                "view_screenshot to see it.",
     }
     if warnings:
         result["limit_warnings"] = warnings
         result["note"] += (" NOTE: the commanded value exceeds an ENABLED joint limit - Fusion may have "
                            "clamped it (see value_now vs applied).")
+    if partner:
+        result["motion_link_partner"] = partner
+        result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' - the link "
+                           "moved the partner too; read it back with assembly_get, do not drive it. "
+                           "In xref assemblies, drive/edit cycles on a linked pair have killed the "
+                           "Fusion process.")
+        if partner_driven and plain_pair:
+            result["note"] += (" Both members have now been driven; allowed in this plain (non-xref) "
+                               "assembly, but avoid it in an xref assembly.")
+    _driven_this_session.add(_reg_key(doc_id, joint))
     return ok(result)
 
 
@@ -136,8 +239,11 @@ TOOL_DESCRIPTION = (
     "cylindrical. Respects the joint's enabled limits (warns + reports the clamped value). Only revolute / "
     "slider / cylindrical are drivable (rigid has no value; pose a ball joint with assembly_move). A "
     "driven pose does NOT survive a timeline recompute - a later feature edit re-zeros it - so build "
-    "the mechanism interference-clean at the REST pose, not a driven one. WRITES "
-    "(poses the model; adds no timeline feature)."
+    "the mechanism at the REST pose, not a driven one. MOTION-LINKED pairs: drive "
+    "ONE member and read the partner back (the link moves it). In an XREF/referenced assembly, driving "
+    "the OTHER member is REFUSED for the session - driving both members there has killed the Fusion "
+    "process; in a plain in-document assembly it is allowed with a warning. Rebuilding the partner "
+    "clears the refusal. WRITES (poses the model; adds no timeline feature)."
 )
 
 tool = (

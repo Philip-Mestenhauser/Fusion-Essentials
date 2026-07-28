@@ -282,7 +282,7 @@ class TestLoft:
 
     def test_loft_built_on_the_profiles_owning_component(self):
         # The profiles are OWNED by a sub-component while a DIFFERENT component is active. Handing
-        # another component's native profile to the active component's features raises bSet live (F24),
+        # another component's native profile to the active component's features raises bSet live,
         # so the loft feature must be created on the OWNER's features. The active comp carries its own
         # loftFeatures; the owner carries a SEPARATE one - the test proves the owner's got the call.
         owner_lf = _FakeLoftFeatures()

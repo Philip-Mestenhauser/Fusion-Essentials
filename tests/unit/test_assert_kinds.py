@@ -317,6 +317,113 @@ class TestFeatureHealthy:
         assert "features_verified" not in out
 
 
+# ── ChildGeometryMoved: a joint's reposition must reach the NESTED body geometry ────────────────
+#
+# The fake occurrence tree is built from types.SimpleNamespace (no bespoke Fake* classes): a handler
+# moves a part by reassigning occ.transform.translation and, when it propagates, the nested body's
+# boundingBox.minPoint - exactly the world reads the kind captures before / verifies after.
+
+def _pt(x, y, z):
+    return types.SimpleNamespace(x=x, y=y, z=z)
+
+
+def _body(bbmin):
+    return types.SimpleNamespace(boundingBox=types.SimpleNamespace(minPoint=bbmin))
+
+
+def _coll(items):
+    return types.SimpleNamespace(count=len(items), item=lambda i, items=items: items[i])
+
+
+def _occ(name, transl, bodies=None, children=None):
+    return types.SimpleNamespace(
+        name=name,
+        transform=types.SimpleNamespace(translation=transl),
+        bRepBodies=_coll(bodies or []),
+        childOccurrences=_coll(children or []))
+
+
+class TestChildGeometryMoved:
+    def _wire(self, monkeypatch, occs):
+        p = kernel.ChildGeometryMoved()
+        monkeypatch.setattr(p, "_top_occurrences", lambda: occs)
+        return p
+
+    def test_propagated_move_confirms(self, monkeypatch):
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(8.5, 8.5, 0)   # the joint moved the wrapper
+            cbody.boundingBox.minPoint = _pt(8.5, 8.5, 0)      # ...and the nested child followed
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["child_geometry_move_verified"] is True
+
+    def test_frozen_nested_child_bites_and_teaches_the_lock_workaround(self, monkeypatch):
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(8.5, 8.5, 0)   # transform moved...
+            # ...but cbody stays at origin: the non-propagation defect
+            return _ok({"created": True})
+
+        res = kernel.wrap(handler, [p])()
+        assert res["isError"] is True
+        assert "did not propagate" in res["message"].lower()
+        assert "Wrapper:1" in res["message"]
+        # The taught remedy is the multi-level-proven one: LOCK every nested free occurrence
+        # (ground_to_parent), then joint the WRAPPER - jointing the nested occurrence directly
+        # repositions the top-most free ancestor and strands deeper geometry.
+        assert "LOCK" in res["message"] and "ground_to_parent" in res["message"]
+        assert "joint the WRAPPER" in res["message"]
+
+    def test_no_move_passes_trivially(self, monkeypatch):
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+        out = _payload(kernel.wrap(lambda **kw: _ok({"created": True}), [p])())
+        assert out["child_geometry_move_verified"] is True   # expected-zero motion passes
+
+    def test_samples_the_deepest_nested_body_not_the_direct_body(self, monkeypatch):
+        # The wrapper's OWN direct body follows the move, but the deeper nested child body is frozen -
+        # the guard must sample the DEEPEST body (the nested child) so it still bites (the exact
+        # 'directly-owned bodies moved, nested child did not' shape).
+        direct = _body(_pt(0, 0, 0))
+        nested = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[nested])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), bodies=[direct], children=[child])
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(8.5, 8.5, 0)
+            direct.boundingBox.minPoint = _pt(8.5, 8.5, 0)     # the direct body moved
+            # nested stays frozen
+            return _ok({"created": True})
+
+        res = kernel.wrap(handler, [p])()
+        assert res["isError"] is True
+        assert "did not propagate" in res["message"].lower()
+
+    def test_occurrence_without_bodies_is_skipped(self, monkeypatch):
+        empty = _occ("Empty:1", _pt(0, 0, 0))   # no bodies anywhere - nothing to gate
+        p = self._wire(monkeypatch, [empty])
+
+        def handler(**kw):
+            empty.transform.translation = _pt(8.5, 8.5, 0)
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert "child_geometry_move_verified" not in out
+
+
 class TestFileLanded:
     def test_missing_file_bites(self, tmp_path):
         ghost = str(tmp_path / "ghost.pdf")

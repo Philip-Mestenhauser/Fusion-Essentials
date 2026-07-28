@@ -12,11 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, expression_error
 
 app = adsk.core.Application.get()
 
-_ACTIONS = ("list", "add", "remove", "edit", "where_used", "create_library")
+_ACTIONS = ("list", "list_types", "parameters", "add", "remove", "edit", "where_used", "create_library")
 _SCOPES = ("document", "local", "cloud", "hub")
 _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLocation",
                      "hub": "HubLibraryLocation"}
@@ -28,18 +28,25 @@ class _Target:
     """Uniform interface the handler drives, hiding document-vs-shared differences.
     persist() commits a shared library; document edits commit per-tool via update_tool()."""
     def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None,
-                 refetch_count_fn=None):
+                 refetch_count_fn=None, reread_param_fn=None):
         self._lib = lib
         self.is_document = is_document
         self._persist_fn = persist_fn
         self._update_tool_fn = update_tool_fn
         self._ops_fn = ops_fn
         self._refetch_count_fn = refetch_count_fn
+        self._reread_param_fn = reread_param_fn
 
     def persisted_count(self):
         """The tool count re-read FRESH from the persisted url (None when unavailable) - the proof
         a persist() actually landed; updateToolLibrary returning true is not."""
         return self._refetch_count_fn() if self._refetch_count_fn else None
+
+    def reread_param(self, index, name):
+        """The expression of one parameter re-read FRESH from the persisted library (None when
+        unavailable) - the proof an edit() actually stored; updateTool/updateToolLibrary returning
+        true is not."""
+        return self._reread_param_fn(index, name) if self._reread_param_fn else None
 
     @property
     def tools(self):
@@ -82,14 +89,9 @@ def _tool_libraries():
     return safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
 
 
-def _shared_libraries(scope):
-    """List (name, url) of the libraries at a shared scope, recursing folders (Hub/Cloud nest).
-    Returns (entries, None) or (None, error). Patched in tests."""
-    libs = _tool_libraries()
-    if not libs:
-        return None, "Tool libraries unavailable."
-    loc = getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])
-    root = safe(lambda: libs.urlByLocation(loc))
+def _collect_library_urls(libs, root):
+    """Every tool-library asset URL under a shared root, recursing folders (Hub/Cloud nest), bounded
+    to depth 6. The ONE library-folder walk both _shared_libraries and _resolve_target target."""
     found = []
 
     def walk(url, depth):
@@ -100,6 +102,18 @@ def _shared_libraries(scope):
         for f in (safe(lambda: list(libs.childFolderURLs(url)), []) or []):
             walk(f, depth + 1)
     walk(root, 0)
+    return found
+
+
+def _shared_libraries(scope):
+    """List (name, url) of the libraries at a shared scope, recursing folders (Hub/Cloud nest).
+    Returns (entries, None) or (None, error). Patched in tests."""
+    libs = _tool_libraries()
+    if not libs:
+        return None, "Tool libraries unavailable."
+    loc = getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])
+    root = safe(lambda: libs.urlByLocation(loc))
+    found = _collect_library_urls(libs, root)
     return [{"name": safe(lambda a=a: a.leafName), "url": safe(lambda a=a: a.toString())}
             for a in found], None
 
@@ -115,24 +129,17 @@ def _resolve_target(scope, library):
             return None, "No document tool library."
         return _Target(dtl, is_document=True,
                        update_tool_fn=lambda t: dtl.updateTool(t),
-                       ops_fn=lambda t: safe(lambda: dtl.operationsByTool(t))), None
+                       ops_fn=lambda t: safe(lambda: dtl.operationsByTool(t)),
+                       reread_param_fn=lambda idx, nm: safe(
+                           lambda: dtl.item(idx).parameters.itemByName(nm).expression)), None
     # shared library - no open document needed
     libs = _tool_libraries()
     if not libs:
         return None, "Tool libraries unavailable."
     loc = getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])
     root = safe(lambda: libs.urlByLocation(loc))
-    # collect libraries (recurse folders for Hub/Cloud)
-    found = []
-
-    def walk(url, depth):
-        if depth > 6 or url is None:
-            return
-        for a in (safe(lambda: list(libs.childAssetURLs(url)), []) or []):
-            found.append(a)
-        for f in (safe(lambda: list(libs.childFolderURLs(url)), []) or []):
-            walk(f, depth + 1)
-    walk(root, 0)
+    # collect libraries (recurse folders for Hub/Cloud) via the shared walk
+    found = _collect_library_urls(libs, root)
     target = (library or "").strip()
     if not target:
         return None, f"Provide 'library' (name or url) for {scope} scope. Available: " \
@@ -147,7 +154,9 @@ def _resolve_target(scope, library):
         return None, f"Could not load {scope} library '{target}'."
     return _Target(lib, is_document=False,
                    persist_fn=lambda: libs.updateToolLibrary(lib_url, lib),
-                   refetch_count_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url).count)), None
+                   refetch_count_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url).count),
+                   reread_param_fn=lambda idx, nm: safe(
+                       lambda: libs.toolLibraryAtURL(lib_url).item(idx).parameters.itemByName(nm).expression)), None
 
 
 def _source_tool(library_url, index):
@@ -181,6 +190,14 @@ _type_map_cache = None   # {tool_type: (library_url, index)} built once from the
 
 def _tool_from_json(json_str):
     return adsk.cam.Tool.createFromJson(json_str)
+
+
+def _quote(text):
+    """Quote a string as a Fusion parameter expression literal - the form tool_description's own
+    string parameter is stored in. Used for tool_productId/tool_vendor: createFromJson's JSON schema
+    silently drops those keys (verified live), so they are applied as expressions AFTER creation
+    instead (see _build_entry)."""
+    return "'" + str(text).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _fusion360_child(leaf_substr):
@@ -251,6 +268,43 @@ def _holder_json(ref):
     return (hd["holder"] if "holder" in hd else hd), None
 
 
+# ── tool number: auto-assigned on add so multiple adds don't collide ──────────
+# A cloned sample keeps the sample's tool_number, so two adds land at the same number and cam_post
+# refuses ("Different tools have the same tool number"). On add we hand each new tool the next FREE
+# number. tool_number is an expression-settable integer parameter (cam_edit_tools' own edit path sets
+# it via .expression), read back via .value.value.
+_P_TOOL_NUMBER = "tool_number"
+
+
+def _read_tool_number(tool):
+    """The tool's assigned tool_number as an int, or None if the parameter is absent/unreadable."""
+    p = safe(lambda: tool.parameters.itemByName(_P_TOOL_NUMBER))
+    if p is None:
+        return None
+    v = safe(lambda: p.value.value)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_tool_number(tool, number):
+    """Set a tool's tool_number and read it back. (assigned_int, None) on success, (None, error) if
+    the parameter is missing or the value did not land."""
+    p = safe(lambda: tool.parameters.itemByName(_P_TOOL_NUMBER))
+    if p is None:
+        return None, "The tool has no 'tool_number' parameter - a free number could not be assigned."
+    try:
+        p.expression = str(int(number))
+    except Exception as e:
+        return None, f"Could not set tool_number to {number}: {e}."
+    landed = _read_tool_number(tool)
+    if landed != int(number):
+        return None, (f"Set tool_number to {number} but it read back {landed!r} - "
+                      "the number did not land.")
+    return int(number), None
+
+
 # ── per-tool summary ─────────────────────────────────────────────────────────
 
 def _tp(tool, name, default=None):
@@ -258,16 +312,33 @@ def _tp(tool, name, default=None):
     return safe(lambda: p.value.value, default) if p else default
 
 
+def _json_scalar(v):
+    """A parameter's evaluated value coerced to a JSON-safe scalar; a non-scalar value type is
+    str()'d so it is still reported, never dropped."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    return safe(lambda: str(v))
+
+
 def _tool_summary(tool, index):
     from ._cam_common import tool_holder
     dia = _tp(tool, "tool_diameter")
     summ = {
         "index": index,
+        "number": _read_tool_number(tool),   # the tool NUMBER (auto-assigned on add; cam_post keys on it)
         "type": _tp(tool, "tool_type"),
         "diameter_mm": round(dia * 10.0, 4) if isinstance(dia, (int, float)) else None,
         "flutes": _tp(tool, "tool_numberOfFlutes"),
         "description": _tp(tool, "tool_description"),
     }
+    # The CUTTING tool's OWN product identity (tool_productId/tool_vendor) - distinct from the holder's
+    # product_id/vendor below. The add path sets and verifies these, so this list read confirms them.
+    product_id = _tp(tool, "tool_productId")
+    vendor = _tp(tool, "tool_vendor")
+    if product_id:
+        summ["tool_product_id"] = product_id
+    if vendor:
+        summ["tool_vendor"] = vendor
     holder = tool_holder(tool)   # assigned holder identity - shown only when the tool carries one
     if holder:
         summ["holder"] = holder
@@ -284,7 +355,10 @@ def _do_list(target, tool_type=""):
         if tfilter and tfilter not in str(summ.get("type") or "").lower():
             continue
         tools.append(summ)
-    out = {"tool_count": len(tools), "tools": tools}
+    out = {"tool_count": len(tools), "tools": tools,
+           "note": "Summary rows only (diameter/flutes/type/description/number/product identity). "
+                   "For a tool's FULL parameter list - every dimension by name/expression/value - "
+                   "call action='parameters' with that tool's index."}
     if tfilter:
         out["filtered_by_type"] = tool_type
     return ok(out)
@@ -297,6 +371,17 @@ def _do_list_libraries(scope):
     return ok({"scope": scope, "library_count": len(entries), "libraries": entries,
                "note": "Pass 'library' = one of these (name or url) to list/manage its tools. Tool "
                        "references are (library_url, index)."})
+
+
+def _do_list_types():
+    """The tool-type vocabulary _build_type_map() discovers by walking the bundled sample libraries -
+    the same map action='add' resolves 'from_type' against. No document/CAM product/scope/library
+    needed (replaces harvesting the vocabulary off a deliberately-failing add probe)."""
+    tmap = _build_type_map()
+    if not tmap:
+        return error("Could not read the sample tool libraries - tool types are unavailable.")
+    return ok({"type_count": len(tmap), "types": sorted(tmap.keys()),
+               "note": "Pass one of these as add_tools[].from_type to clone a sample of that type."})
 
 
 # The preset 'feed' parameter name varies by tool CLASS: a mill preset carries 'tool_feedCutting', but a
@@ -331,11 +416,14 @@ def _build_entry(ref):
     or (None, error). An entry is a dict:
       {from_type: 'drill'}            -> clone a sample-library tool of that geometry type, OR
       {library_url, index}            -> copy that existing tool
-      + optional 'description', 'diameter' overrides
+      + optional 'description', 'diameter', 'product_id', 'vendor' overrides
       + optional 'holder': {library_url, index}  -> assign that holder
       + optional 'presets': [{name?, spindle_speed?, feed?}]  -> add presets after creation
     Building goes through the tool's JSON so the holder swap + description override are clean; the
-    resulting Tool is created with _tool_from_json. (All steps verified live.)"""
+    resulting Tool is created with _tool_from_json. product_id/vendor are NOT part of that JSON
+    schema (createFromJson silently drops them - verified live) so they are applied as quoted-string
+    expressions on tool_productId/tool_vendor AFTER creation, then read back. (All steps verified
+    live.)"""
     if not isinstance(ref, dict):
         return None, f"Each add_tools entry must be an object; got {ref!r}."
 
@@ -379,6 +467,31 @@ def _build_entry(ref):
             return None, "The tool has no 'tool_diameter' parameter - the requested diameter override cannot apply."
         p.expression = str(ref["diameter"])
 
+    # 3b) product_id / vendor: real tool parameters (tool_productId/tool_vendor), but NOT part of
+    # createFromJson's JSON schema - those keys are silently dropped there (the holder JSON's own
+    # 'product-id'/'vendor' keys are a different, unrelated concept; verified live). Apply
+    # as quoted-string expressions AFTER creation - the same form tool_description's own string value
+    # is stored in - then read the landed value back; a mismatch is an error, never a silent gap.
+    for field, pname in (("product_id", "tool_productId"), ("vendor", "tool_vendor")):
+        val = ref.get(field)
+        if val is None:
+            continue
+        val = str(val)
+        p = safe(lambda pname=pname: tool.parameters.itemByName(pname))
+        if p is None:
+            return None, f"The tool has no '{pname}' parameter - the requested {field} cannot apply."
+        try:
+            p.expression = _quote(val)
+        except Exception as e:
+            return None, f"Could not set {pname} = {val!r}: {e}."
+        eerr, _ = expression_error(p)
+        if eerr:
+            return None, f"Set {pname} but it failed to evaluate: {eerr}."
+        landed = safe(lambda p=p: p.value.value)
+        if landed != val:
+            return None, (f"Set {pname}'s expression but it read back {landed!r} instead of "
+                          f"{val!r} - the {field} did not land.")
+
     # 4) presets - same rule: a preset that cannot be created or populated is an error, not a skip
     for ps in (ref.get("presets") or []):
         preset = safe(lambda: tool.presets.add())
@@ -404,7 +517,8 @@ def _do_add(target, add_tools):
     if not add_tools:
         return error("Provide 'add_tools' - entries to add. Each: {from_type:'drill'} (create from a "
                      "sample of that type) or {library_url, index} (copy an existing tool); optional "
-                     "'description'/'diameter' overrides, 'holder':{library_url,index}, 'presets':[...].")
+                     "'description'/'diameter'/'product_id'/'vendor' overrides, "
+                     "'holder':{library_url,index}, 'presets':[...].")
     # build ALL entries before adding any (no partial write on an error)
     built = []
     for ref in add_tools:
@@ -412,6 +526,20 @@ def _do_add(target, add_tools):
         if terr:
             return error(terr)
         built.append(t)
+    # Auto-assign a FREE tool_number to each new tool. A cloned sample keeps the sample's number, so
+    # two adds would collide and cam_post refuses duplicate tool numbers; hand out the next free one
+    # (skipping every number already in the library, and each one just assigned in this call).
+    used = {n for n in (_read_tool_number(t) for t in target.tools) if n is not None}
+    assigned = []
+    nxt = 1
+    for t in built:
+        while nxt in used:
+            nxt += 1
+        num, nerr = _set_tool_number(t, nxt)
+        if nerr:
+            return error(nerr)
+        used.add(num)
+        assigned.append(num)
     for t in built:
         target.add(t)
     if not target.is_document:
@@ -420,9 +548,20 @@ def _do_add(target, add_tools):
         if got is not None and got != len(target.tools):
             return error(f"updateToolLibrary reported success but the library re-read from its url "
                          f"holds {got} tool(s), not {len(target.tools)} - the persist did not land.")
+    # Honesty read-back, scoped: this re-reads each IN-MEMORY tool object's number after the
+    # add/persist - it catches an assignment that did not stick on the object, and the persisted
+    # COUNT is verified from the url above, but a persist-side renumber of an individual tool
+    # (never observed live) would pass; only cam_post's duplicate-number refusal would catch it.
+    landed = [_read_tool_number(t) for t in built]
+    if landed != assigned:
+        return error(f"Auto-assigned tool numbers {assigned} but after the add they read back "
+                     f"{landed} - the tool-number assignment did not persist.")
     return ok({"added": len(built), "tool_count": len(target.tools),
-               "note": "Tools added and persisted." if not target.is_document
-                       else "Tools added to the document library."})
+               "assigned_tool_numbers": assigned,
+               "note": (("Tools added and persisted. " if not target.is_document
+                         else "Tools added to the document library. ")
+                        + f"Auto-assigned free tool number(s) {assigned} (next free per tool, so "
+                        "multiple adds do not collide - cam_post refuses duplicate tool numbers).")})
 
 
 def _do_remove(target, indices):
@@ -444,6 +583,20 @@ def _do_remove(target, indices):
     return ok({"removed": len(set(indices)), "tool_count": len(target.tools)})
 
 
+def _formula_source(params, name, before_expr):
+    """If `before_expr` (a parameter's CURRENT expression, before this edit lands) is exactly another
+    parameter's NAME on the same tool, the value is formula-derived - it tracks that other parameter
+    (e.g. tool_shoulderLength's expression is the literal string 'tool_fluteLength') rather than
+    holding an independent literal. Returns the referenced name, or None for an ordinary literal/
+    numeric/quoted expression. Verified live: overwriting a formula-derived parameter
+    works syntactically but silently breaks the tool's own internal relationship, so the caller warns
+    instead of editing quietly."""
+    ref = (before_expr or "").strip()
+    if not ref or ref == name:
+        return None
+    return ref if safe(lambda: params.itemByName(ref)) is not None else None
+
+
 def _do_edit(target, tool_index, parameters):
     tools = target.tools
     if tool_index is None or not (0 <= tool_index < len(tools)):
@@ -461,9 +614,15 @@ def _do_edit(target, tool_index, parameters):
     if missing:
         return error(f"Tool has no parameter(s): {', '.join(missing)}. (Read the tool's parameters first.)")
     changed = []
+    warnings = []
     for name, expr in parameters.items():
         p = resolved[name]
         before = safe(lambda p=p: p.expression)
+        src = _formula_source(params, name, before)
+        if src:
+            warnings.append(f"'{name}' was formula-derived (expression was '{src}', tracking that "
+                            f"parameter) - this edit overwrites that internal relationship; the tool "
+                            f"no longer keeps '{name}' equal to '{src}'.")
         try:
             p.expression = str(expr)
         except Exception as e:
@@ -475,8 +634,19 @@ def _do_edit(target, tool_index, parameters):
         target.update_tool(tool)
     else:
         target.persist()
-    return ok({"edited": len(changed), "tool": tool_index, "changed": changed,
-               "note": "Tool edited and persisted."})
+    # Persist read-back (honesty contract): updateTool/updateToolLibrary returning is NOT proof the
+    # edit stored. An edit changes no tool COUNT (so the add/remove count gate can't cover it) - so
+    # re-fetch the tool from the library and confirm ONE edited expression actually landed.
+    check = changed[0]
+    stored = target.reread_param(tool_index, check["name"])
+    if stored is not None and str(stored) != str(check["after"]):
+        return error(f"Edited '{check['name']}' to '{check['after']}' but the tool re-read from the "
+                     f"library holds '{stored}' - the edit did not persist.")
+    out = {"edited": len(changed), "tool": tool_index, "changed": changed,
+           "note": "Tool edited and persisted."}
+    if warnings:
+        out["warnings"] = warnings
+    return ok(out)
 
 
 def _do_where_used(target, tool_index):
@@ -491,6 +661,37 @@ def _do_where_used(target, tool_index):
     return ok({"tool": tool_index, "description": _tp(tool, "tool_description"),
                "operation_count": len(ops), "operations": ops,
                "note": "Operations that use this tool." if ops else "This tool is not used by any operation."})
+
+
+def _do_parameters(target, tool_index):
+    """The full parameter list of ONE tool - the deeper read the list summary points to. Reports each
+    parameter's name, expression, and evaluated value where readable; only what the API exposes, no
+    guessed names. 'formula_source' flags a parameter whose expression IS another parameter's name
+    (it tracks that parameter rather than holding a literal; an edit overwrites that relationship)."""
+    tools = target.tools
+    if tool_index is None or not (0 <= tool_index < len(tools)):
+        return error(f"Provide a valid 'tool' index (0..{len(tools) - 1}).")
+    tool = tools[tool_index]
+    params = safe(lambda: tool.parameters)
+    n = safe(lambda: params.count, 0) or 0 if params is not None else 0
+    rows = []
+    for i in range(n):
+        p = safe(lambda i=i: params.item(i))
+        if p is None:
+            continue
+        name = safe(lambda p=p: p.name)
+        expr = safe(lambda p=p: p.expression)
+        row = {"name": name, "expression": expr,
+               "value": _json_scalar(safe(lambda p=p: p.value.value))}
+        src = _formula_source(params, name, expr)
+        if src:
+            row["formula_source"] = src
+        rows.append(row)
+    return ok({"tool": tool_index, "description": _tp(tool, "tool_description"),
+               "parameter_count": len(rows), "parameters": rows,
+               "note": "Every parameter's name/expression/value (value is null where unreadable). "
+                       "'formula_source' marks a parameter tracking another (editing it overwrites "
+                       "that relationship). Set one with action='edit'."})
 
 
 # friendly scope -> LibraryLocations attr for creating a new library (document can't host a new library).
@@ -588,6 +789,10 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
     # list is the READ half - one implementation, also surfaced as cam_get(include=['library']).
     if action == "list":
         return read_library(scope, library, tool_type)
+    # list_types needs no scope/library/document - _build_type_map reads the bundled sample libraries
+    # directly (dispatched here, before _resolve_target, same as create_library above).
+    if action == "list_types":
+        return _do_list_types()
 
     target, terr = _resolve_target(scope, library)
     if terr:
@@ -601,22 +806,27 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
         return _do_edit(target, tool, parameters)
     if action == "where_used":
         return _do_where_used(target, tool)
+    if action == "parameters":
+        return _do_parameters(target, tool)
     return error(f"Unhandled action '{action}'.")
 
 
 TOOL_DESCRIPTION = (
-    "Read & manage CAM TOOL LIBRARIES + their tools (each action's inputs are documented on the "
-    "properties below). 'scope': document / local / cloud / hub. 'action': list | add | remove | edit | "
-    "where_used | create_library. 'list' with a shared scope and NO 'library' lists the libraries there, "
-    "else that library's tools (each carries a (library_url,index) reference). For shared scopes give "
-    "'library' (name or url); document scope needs none. WRITES persist; Hub is shared TEAM data and Hub "
-    "reads/writes are network-slow. 'where_used' is document-scope only. 'list'/'where_used' read-only."
+    "Read & manage CAM TOOL LIBRARIES + their tools. 'scope': document / local / cloud / hub. "
+    "'action': list | list_types | parameters | add | remove | edit | where_used | create_library. "
+    "'list' with a shared scope and NO 'library' lists the libraries there, else that library's tools "
+    "(each carries a (library_url,index) reference); 'list_types' lists the from_type vocabulary; "
+    "'parameters' reads one tool's FULL parameter list (name/expression/value, flags formula-derived). "
+    "WRITES persist; Hub is shared TEAM data and network-slow. 'where_used' is document-scope only. "
+    "list/list_types/parameters/"
+    "where_used read-only. 'add' auto-assigns each new tool a free tool number (in assigned_tool_numbers; "
+    "cam_post refuses duplicates)."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_tools", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "list / add / remove / edit / where_used / create_library."})
+            "description": "One of the enum values; each is described in the tool description."})
     .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),
             "description": "document / local / cloud / hub."})
     .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not for document scope)."})
@@ -624,13 +834,14 @@ tool = (
             "items": {"type": "object", "properties": {
                 "from_type": {"type": "string"}, "library_url": {"type": "string"}, "index": {"type": "integer"},
                 "description": {"type": "string"}, "diameter": {"type": "string"},
+                "product_id": {"type": "string"}, "vendor": {"type": "string"},
                 "holder": {"type": "object", "properties": {"library_url": {"type": "string"}, "index": {"type": "integer"}}},
                 "presets": {"type": "array", "items": {"type": "object", "properties": {
                     "spindle_speed": {"type": "number"}, "feed": {"type": "number"}}}}}},
-            "description": "Tools to add/create. Each: {from_type:'drill'} (clone a sample of that type) OR {library_url,index} (copy); + optional description/diameter, holder:{library_url,index}, presets:[{spindle_speed,feed}]."})
+            "description": "Tools to add/create. Each: {from_type:'drill'} (clone a sample of that type) OR {library_url,index} (copy); + optional description/diameter/product_id/vendor overrides, holder:{library_url,index}, presets:[{spindle_speed,feed}]."})
     .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"},
             "description": "Tool indices to remove."})
-    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / where_used)."})
+    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / where_used / parameters)."})
     .add_input_property("parameters", {"type": "object",
             "description": "Tool parameters to set (edit): {name: expression}."})
     .add_input_property("tool_type", {"type": "string",

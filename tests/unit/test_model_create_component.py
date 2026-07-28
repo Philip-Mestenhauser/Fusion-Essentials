@@ -1,6 +1,6 @@
 """Unit tests for ``model_create_component.py`` — make a new empty component occurrence.
 
-Tests written BEFORE the tool is wired (project rule). The logic pinned, no live
+The logic pinned, no live
 Fusion: an empty component+occurrence is created (Occurrences.addNewComponent),
 optionally named and/or placed at x/y/z (a translation transform, scaled to cm),
 and optionally activated as the edit target. This is the prerequisite for
@@ -103,11 +103,15 @@ class FakeChildOcc:
         self.component = FakeComponent()
         self.activated = False
         self._proxy = proxy
+        self.last_proxy = None        # the proxy handed out, so tests can assert on ITS state
     def activate(self):
         self.activated = True
         return True
     def createForAssemblyContext(self, parent):
-        return FakeChildProxy(self, parent) if self._proxy else None
+        if not self._proxy:
+            return None
+        self.last_proxy = FakeChildProxy(self, parent)
+        return self.last_proxy
 
 
 class FakeParentOccurrences:
@@ -268,7 +272,7 @@ class TestCreateComponent:
 
 
 # ── F-intent: a PART design is auto-promoted to HYBRID so a multi-component build works ──────────
-# A fresh (Jan-2026+) doc is PART intent, which REFUSES addNewComponent ('Part Design documents can
+# A fresh doc (current Fusion) is PART intent, which REFUSES addNewComponent ('Part Design documents can
 # only contain one component'). model_create_component detects that and promotes PART -> HYBRID
 # (keeps modeling enabled, unlike Assembly) before creating, reporting it as design_intent_promoted.
 
@@ -347,6 +351,10 @@ class TestNestedParent:
 
     def test_activate_targets_the_nested_proxy(self):
         design, parent = _install_with_parent()
-        _payload(cc.handler(name="Child", parent="Frame:1", activate=True))
-        # the proxy (assembly-context), not the native child, is what gets activated as the edit target
-        assert parent.component.occurrences._child.activated is False
+        out = _payload(cc.handler(name="Child", parent="Frame:1", activate=True))
+        # the proxy (assembly-context), not the native child, is what gets activated as the edit
+        # target - assert the proxy WAS activated, not merely that the native child wasn't.
+        child = parent.component.occurrences._child
+        assert child.last_proxy is not None and child.last_proxy.activated is True
+        assert child.activated is False
+        assert out["activated"] is True

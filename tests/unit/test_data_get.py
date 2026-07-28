@@ -80,6 +80,56 @@ class TestScopeDispatch:
         out = _payload(dge.handler(project="P1", include=["folders"]))
         assert "folder budget" not in out["note"]
 
+    def test_time_truncated_files_walk_gets_the_time_note(self, stub, monkeypatch):
+        # A time-budget-cut walk must TEACH the same kind of next step as a size-truncated one, and
+        # must name WHERE it stopped.
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+            type("DR", (), {
+                "list_project_files_handler": staticmethod(lambda **kw: _ok({
+                    "file_count": 1, "files": ["a"],
+                    "time_truncated": True, "time_truncated_at": "Parts/Fixtures"})),
+                "_TIME_BUDGET_S": 20.0,
+            }))
+        out = _payload(dge.handler(project="P1"))
+        assert "time budget" in out["note"] and "Parts/Fixtures" in out["note"]
+
+    def test_untruncated_files_walk_has_no_time_note(self, stub):
+        out = _payload(dge.handler(project="P1"))
+        assert "time budget" not in out["note"]
+
+    def test_time_truncated_folder_tree_gets_the_time_note(self, stub, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
+            type("DO", (), {
+                "list_folders_handler": staticmethod(lambda **kw: _ok({
+                    "project": kw.get("project"), "folder_count": 1, "truncated": False,
+                    "time_truncated": True, "folders": []})),
+                "_TIME_BUDGET_S": 20.0,
+            }))
+        out = _payload(dge.handler(project="P1", include=["folders"]))
+        assert "time budget" in out["note"]
+
+    def test_untruncated_folder_tree_has_no_time_note(self, stub):
+        out = _payload(dge.handler(project="P1", include=["folders"]))
+        assert "time budget" not in out["note"]
+
+    def test_time_truncated_projects_listing_gets_the_time_note(self, stub, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+            type("DR", (), {
+                "list_projects_handler": staticmethod(lambda: _ok({
+                    "active_hub": "Main", "project_count": 1, "projects": [{"name": "P1"}],
+                    "time_truncated": True})),
+                "_TIME_BUDGET_S": 20.0,
+            }))
+        out = _payload(dge.handler())
+        assert "time budget" in out["note"]
+
+    def test_untruncated_projects_listing_has_no_time_note(self, stub):
+        out = _payload(dge.handler())
+        assert "time budget" not in out["note"]
+
     def test_include_hubs_lists_hubs(self, stub):
         out = _payload(dge.handler(include=["hubs"]))
         assert out["scope"] == "hubs"

@@ -139,11 +139,11 @@ class TestFolderPathString:
 
 # ── doc-lifecycle handlers + AI-agent save attribution ─────────────────────
 #
-# These save/close/activate/list the active document and carry the "[AI agent]"
+# These save/activate/list the active document and carry the "[AI agent]"
 # version-description marker. The logic worth pinning: _agent_description is
-# idempotent (never double-prefixes); save refuses a never-saved doc; close
-# targets active/named/all and reports per-doc results; activate/list resolve
-# names against app.documents (the superset of visible tabs).
+# idempotent (never double-prefixes); save refuses a never-saved doc;
+# activate/list resolve names against app.documents (the superset of visible
+# tabs). saveAs, copy, delete, and close are tested in test_doc_lifecycle.py.
 
 import json
 
@@ -247,7 +247,7 @@ class TestSaveDocument:
     def test_false_success_still_modified_is_an_error(self, monkeypatch):
         # Document.save() returns True but the doc stays modified (Fusion silently declined to version,
         # e.g. dirty child references) - the VersionAdvanced postcondition on the Item catches this;
-        # the handler itself no longer re-checks (the kernel owns verify-the-effect).
+        # the kernel owns verify-the-effect; the handler does not re-check.
         kernel = load_tool("_assert")
         doc = FakeDocument("PartA", is_saved=True, is_modified=True, save_persists=False)
         _install_app([doc], active=doc)
@@ -297,51 +297,6 @@ class TestSaveDocument:
         assert res["isError"] is True and "No active document" in res["message"]
 
 
-class TestCloseDocument:
-    def test_closes_active_by_default_discarding(self):
-        doc = FakeDocument("PartA")
-        _install_app([doc], active=doc)
-        out = _payload(dm.close_document_handler())
-        assert out["closed"] == ["PartA"]
-        assert doc.closed_with is False        # discard (save_changes default false)
-
-    def test_close_named(self):
-        a = FakeDocument("A")
-        b = FakeDocument("B")
-        _install_app([a, b], active=a)
-        out = _payload(dm.close_document_handler(name="B", save_changes=True))
-        assert out["closed"] == ["B"]
-        assert b.closed_with is True
-
-    def test_close_all(self):
-        a, b = FakeDocument("A"), FakeDocument("B")
-        _install_app([a, b], active=a)
-        out = _payload(dm.close_document_handler(close_all=True))
-        assert set(out["closed"]) == {"A", "B"}
-
-    def test_unmatched_name_errors(self):
-        _install_app([FakeDocument("A")], active=None)
-        res = dm.close_document_handler(name="Ghost")
-        assert res["isError"] is True and "No open document matched" in res["message"]
-
-    def test_close_failure_with_no_successful_close_is_an_error(self):
-        # the only targeted close failing must surface as isError, not a false ok().
-        bad = FakeDocument("Stuck", close_ok=False)
-        _install_app([bad], active=bad)
-        res = dm.close_document_handler()
-        assert res["isError"] is True
-        assert "Stuck" in res["message"]
-
-    def test_close_all_partial_failure_reports_ok_with_errors(self):
-        # a MIXED result (one closed, one failed) is a partial success - report both, don't error.
-        good = FakeDocument("Good")
-        bad = FakeDocument("Stuck", close_ok=False)
-        _install_app([good, bad], active=good)
-        out = _payload(dm.close_document_handler(close_all=True))
-        assert out["closed"] == ["Good"]
-        assert out["errors"]                   # the false-return surfaced
-
-
 class TestActivateDocument:
     def test_activate_taken_reports_true(self):
         # the switch propagated (active doc is now B) -> activated:true, is_active:true, no pending note.
@@ -354,8 +309,8 @@ class TestActivateDocument:
         assert out["document_name"] == "B" and "note" not in out
 
     def test_activate_async_pending_reports_pending_not_true(self):
-        # the switch was ACCEPTED but the active doc hasn't propagated yet (the real async behavior the
-        # user observed). Must report 'pending', NOT a false 'true'.
+        # the switch was ACCEPTED but the active doc hasn't propagated yet (real async behavior,
+        # observed live). Must report 'pending', NOT a false 'true'.
         a, b = FakeDocument("A"), FakeDocument("B")
         _install_app([a, b], active=a)        # active stays A after activate() -> not propagated
         out = _payload(dm.activate_document_handler(name="B"))
@@ -397,7 +352,7 @@ class TestFindOpenDocument:
 
     def test_shared_name_is_ambiguous_not_first_match(self):
         # TWO open docs share the display name 'P1-Gimbal' (Fusion allows this). Resolving by that
-        # name must REFUSE (ambiguous), never grab the first - the run-12 name-twin, made safe.
+        # name must REFUSE (ambiguous), never grab the first of two name-twins.
         a = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:AAA")
         b = FakeDocument("P1-Gimbal", data_file_id="urn:adsk.wipprod:dm.lineage:BBB")
         _install_app([a, b])
@@ -538,6 +493,27 @@ class TestDeleteFolderGate:
         outer, inner = self._nested()
         files, subs = dm._subtree_counts(outer)
         assert files == 3 and subs == 1   # a + b + c files; Inner subfolder
+
+    def test_subtree_counts_stops_at_visit_budget(self, monkeypatch):
+        # each folder visited is a main-thread cloud round-trip; past the budget the recursive
+        # blast-radius count stops and reports a LOWER BOUND rather than fanning out unbounded.
+        wide = [FakeDelFolder(f"s{i}", f"S{i}", files=[f"f{i}"]) for i in range(10)]
+        root = FakeDelFolder("root", "Root", subs=wide)
+        monkeypatch.setattr(dm, "_SUBTREE_VISIT_BUDGET", 3)
+        state = {"visits": 0, "truncated": False}
+        files, subs = dm._subtree_counts(root, _state=state)
+        assert state["truncated"] is True
+        assert files == 3 and files < 10        # only the first 3 leaves counted before the budget
+
+    def test_truncated_preview_says_at_least(self, monkeypatch):
+        # when the blast-radius walk is budget-cut, the refusal message must not imply an exact total.
+        wide = [FakeDelFolder(f"s{i}", f"S{i}", files=[f"f{i}"]) for i in range(10)]
+        root = FakeDelFolder("root", "Root", subs=wide)
+        _install_folder_tree(root)
+        monkeypatch.setattr(dm, "_SUBTREE_VISIT_BUDGET", 3)
+        res = _del("root", confirm_name="Root", force=True)   # non-empty, no recursive_confirm
+        assert res["isError"] is True
+        assert "at least" in res["message"]
 
 
 # ── data_ops handlers: create project / create folder / upload / list folders ────
@@ -748,6 +724,19 @@ class TestUploadFile:
         out2 = _payload(dm.upload_file_handler(file_path=str(f), project="Proj"))
         assert out2["upload_state"] == "99"
 
+    def test_upload_state_failed_is_an_error_not_ok(self, tmp_path):
+        # uploadState 2 = failed - the same terminal state the data_get_upload_status poller
+        # reports as FAILED. The upload tool must refuse with isError naming the file, never
+        # return ok with upload_state 'failed'.
+        proj, _ = self._proj_with_path()
+        _install_proj_data([proj])
+        f = tmp_path / "p.step"
+        f.write_text("x")
+        self._set_future(2)
+        res = dm.upload_file_handler(file_path=str(f), project="Proj")
+        assert res["isError"] is True
+        assert "FAILED" in res["message"] and "p.step" in res["message"]
+
     def test_existing_nested_folder_target(self, tmp_path):
         proj, _ = self._proj_with_path()
         _install_proj_data([proj])
@@ -824,8 +813,8 @@ class TestListFolders:
         assert out["truncated"] is False
 
     def test_folder_budget_cuts_the_walk_and_flags_it(self, monkeypatch):
-        # every dataFolders fetch is a slow MAIN-THREAD cloud round-trip (a real project's walk
-        # stalled Fusion past the 30 s handler cap, live-verified) - the walk must stop at the
+        # every dataFolders fetch is a slow MAIN-THREAD cloud round-trip (a large project's walk
+        # can stall Fusion past the 30 s handler cap, live-verified) - the walk must stop at the
         # budget, report truncated=true, and mark each unexpanded node folders_truncated so the
         # caller knows WHICH subtrees were cut, not just that something was.
         root = FakeProjFolder("Root", is_root=True)
@@ -844,6 +833,44 @@ class TestListFolders:
             assert top[name].get("folders_truncated") is True
             assert "folders" not in top[name]
 
+    def test_time_budget_cuts_the_walk_and_flags_it(self, monkeypatch):
+        # A transient network stall can hang a single dataFolders fetch past normal latency - unlike
+        # the fetch-COUNT budget above, this exercises the WALL-CLOCK deadline (checked between folder
+        # visits, since an in-flight fetch can't be interrupted). time.monotonic() is scripted rather
+        # than really slept.
+        root = FakeProjFolder("Root", is_root=True)
+        for i in range(4):
+            root._add_child(f"Sub{i}")
+        _install_proj_data([FakeProj("Proj", "pid", root)])
+
+        t0 = 5000.0
+        # calls: 1) deadline calc, 2) root-visit check(ok), 3) Sub0-visit check(ok, no children),
+        # 4) Sub1-visit check(stall) - Sub2/Sub3 never even get fetched.
+        values = [t0, t0, t0, t0 + dm._TIME_BUDGET_S + 1]
+        idx = {"i": 0}
+        def fake_monotonic():
+            v = values[min(idx["i"], len(values) - 1)]
+            idx["i"] += 1
+            return v
+        monkeypatch.setattr(dm.time, "monotonic", fake_monotonic)
+
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["truncated"] is True
+        assert out["time_truncated"] is True
+        top = {n["name"]: n for n in out["folders"]}
+        assert set(top) == {"Sub0", "Sub1", "Sub2", "Sub3"}
+        # Sub0 was actually fetched (visited before the stall) and had no children - a genuine leaf,
+        # not a truncation.
+        assert top["Sub0"].get("folders_truncated") is None
+        # Sub1 onward were never fetched once the deadline was crossed.
+        for name in ("Sub1", "Sub2", "Sub3"):
+            assert top[name].get("folders_truncated") is True
+
+    def test_time_budget_not_tripped_on_a_fast_walk(self):
+        _install_proj_data([self._tree()])
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["time_truncated"] is False
+
     def test_walk_is_breadth_first_shallow_before_deep(self, monkeypatch):
         # a deep chain must not eat the budget before the shallow siblings are even listed.
         root = FakeProjFolder("Root", is_root=True)
@@ -857,98 +884,3 @@ class TestListFolders:
         top = {n["name"]: n for n in out["folders"]}
         assert set(top) == {"A", "B", "C"}                # every shallow folder listed first
         assert out["truncated"] is True
-
-
-# ── doc_save_as: lineage-URN reporting + name-collision detection (F38) ───────────
-#
-# Fusion PERMITS same-name documents; identity is the lineage URN. doc_save_as must (a) report the
-# URN of the file it wrote (it resolves asynchronously post-save), and (b) REFUSE a same-name file
-# already in the target folder by default (a fork risk), only forking - and flagging name_collision -
-# when allow_duplicate_name=true is passed. These pin both, plus that a fresh save carries no warning.
-
-class _SaveAsFile:
-    """A DataFile already in the destination folder (has name + id, the collision-guard fields)."""
-    def __init__(self, name, file_id):
-        self.name = name
-        self.id = file_id
-
-
-class _SaveAsActiveDoc:
-    """The active document being saved. saveAs records the call; dataFile.id is the settled lineage URN
-    (the poll returns on its first read since the URN is present - no real wait in the test)."""
-    def __init__(self, new_urn, is_saved=False, save_ok=True):
-        self.name = "Untitled"
-        self.isSaved = is_saved
-        self._save_ok = save_ok
-        self.saved_as = None
-        self.dataFile = _FakeDataFile(new_urn)     # what the poll will report as document_id
-
-    def saveAs(self, name, folder, description, tag):
-        self.saved_as = (name, getattr(folder, "name", None), description)
-        self.name = name + " v1"
-        return self._save_ok
-
-
-def _install_saveas(active_doc, folder_files=()):
-    """Wire a one-project/one-root-folder data model + the active doc, with folder_files pre-populated."""
-    root = FakeProjFolder("Pipeline-v1", is_root=True)
-    root._files.extend(folder_files)
-    proj = FakeProj("MCP Test Project", "pid", root)
-    _install_proj_data([proj])
-    dm.app = type("A", (), {"activeDocument": active_doc})()
-    return root
-
-
-class TestSaveDocumentAs:
-    def test_reports_written_lineage_urn(self):
-        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
-        _install_saveas(doc)
-        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
-        assert out["saved"] is True
-        assert out["document_id"] == "urn:adsk.wipprod:dm.lineage:NEW"   # the URN, not null
-        assert "name_collision" not in out                              # nothing pre-existed
-        assert doc.saved_as[0] == "P1-Gimbal"
-
-    def test_name_collision_is_flagged_with_existing_urn(self):
-        # a DIFFERENT file named 'P1-Gimbal' already sits in the folder. The fork is refused by default,
-        # so allow_duplicate_name=true is the deliberate opt-in that reaches the warn+name path.
-        existing = _SaveAsFile("P1-Gimbal", "urn:adsk.wipprod:dm.lineage:OLD")
-        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
-        _install_saveas(doc, folder_files=[existing])
-        out = _payload(dm.save_document_as_handler(
-            name="P1-Gimbal", project="MCP Test Project", allow_duplicate_name=True))
-        assert out["saved"] is True
-        assert out["name_collision"]["existing_document_id"] == "urn:adsk.wipprod:dm.lineage:OLD"
-        assert out["document_id"] == "urn:adsk.wipprod:dm.lineage:NEW"   # the fork's URN
-        assert "collision" in out["note"].lower()
-
-    def test_same_name_refused_by_default(self):
-        # without the opt-in, a same-name file in the folder REFUSES - no saveAs, existing URN named.
-        existing = _SaveAsFile("P1-Gimbal", "urn:adsk.wipprod:dm.lineage:OLD")
-        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
-        _install_saveas(doc, folder_files=[existing])
-        res = dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project")
-        assert res["isError"] is True
-        assert "urn:adsk.wipprod:dm.lineage:OLD" in res["message"]
-        assert "allow_duplicate_name" in res["message"]
-        assert doc.saved_as is None            # refused BEFORE the saveAs call
-
-    def test_no_collision_when_same_name_absent(self):
-        # a same-named file in a DIFFERENT context must not false-trigger: only the target folder counts.
-        other = _SaveAsFile("SomethingElse", "urn:adsk.wipprod:dm.lineage:X")
-        doc = _SaveAsActiveDoc(new_urn="urn:adsk.wipprod:dm.lineage:NEW")
-        _install_saveas(doc, folder_files=[other])
-        out = _payload(dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project"))
-        assert "name_collision" not in out
-
-    def test_saveas_declined_is_an_error(self):
-        doc = _SaveAsActiveDoc(new_urn="urn:x", save_ok=False)
-        _install_saveas(doc)
-        res = dm.save_document_as_handler(name="P1-Gimbal", project="MCP Test Project")
-        assert res["isError"] is True and "declined" in res["message"].lower()
-
-    def test_requires_name_and_project(self):
-        doc = _SaveAsActiveDoc(new_urn="urn:x")
-        _install_saveas(doc)
-        assert dm.save_document_as_handler(name="", project="MCP Test Project")["isError"] is True
-        assert dm.save_document_as_handler(name="P1-Gimbal", project="")["isError"] is True

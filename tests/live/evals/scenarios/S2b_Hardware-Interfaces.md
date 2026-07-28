@@ -6,7 +6,7 @@ fixture: P2a-Gimbal (the S2a artifact - the eight primary bodies, contact-free) 
   The agent builds the pivot interfaces and saves AS A NEW document (P2-Gimbal); P2a-Gimbal's
   cloud version must remain untouched. Missing fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 212
+  max_tool_calls: 122
   max_tokens: 173000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -19,8 +19,8 @@ Goal-shaped, second half of the hardware stage (split so one blind run fits the 
 task-time cap). The parts exist and are contact-free; now build what joins them: physical pivot
 pins ALONG the skeleton's axes, threading BOTH parts of each interface through real bores with
 real clearance. Grades pin-to-skeleton collinearity, through-bore proof, clearance honesty, and
-the final only-pins-touch clearance state S3 inherits. The orchestrator hands the block below
-VERBATIM.
+the final ZERO-interference clearance state S3 inherits (pins ride in clearance bores, so nothing
+touches). The orchestrator hands the block below VERBATIM.
 
 ## AGENT PROMPT (verbatim)
 
@@ -69,10 +69,16 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
   measured extent) - and report pin radius vs bore radius at each interface (bore strictly
   larger).
 - the shaft bearing seats exist with clearance (report shaft radius vs seat radius).
-- FINAL CLEARANCE - the defining check of this stage: a fresh interference check reports
-  contact ONLY where pins/shaft meet their bores/seats (name each expected contact with its
-  volume); ANY other overlapping pair is a defect you fix before saving (report the checker's
-  actual output).
+- FINAL CLEARANCE - the defining check of this stage: every pin and shaft end rides in a bore or
+  seat STRICTLY LARGER than it, so with real clearance NOTHING touches - a fresh interference check
+  reports ZERO interfering pairs. Any overlapping pair is a defect you fix before saving; a
+  pin-in-bore or shaft-in-seat contact means the clearance is missing, so open that bore/seat until
+  it clears (report the checker's actual output).
+- RETENTION DISCLOSURE - name it, do not assume: for EACH pin and shaft interface, name the
+  geometric feature that stops the pin/shaft from sliding axially out of its bore/seat, or state
+  plainly that NONE exists. A pin floating in a clearance bore has no axial capture - say so.
+  Retention is out of scope for this chain, so "none exists" is the honest and expected answer; the
+  disclosure itself is the grade, not the presence of a retainer.
 - timeline is healthy (a fresh health read: no errors).
 - doc_get -> active document saved as "P2-Gimbal", real URN, version >= 1, in MCP Test Project /
   Pipeline-v1/{{RUN_FOLDER}} - AND a fresh cloud read shows P2a-Gimbal still at the version you
@@ -96,26 +102,35 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 
 - WHAT THIS MEASURES: pin-to-skeleton collinearity (axis vector + distance-to-line), through
   bores proven by read (watch whether the agent finds through-all on the wire or measures a
-  depth: the latter is a WIRE finding), bounded cuts (the unscoped-cut footgun bit a prior run
-  for 9 features - watch for target_bodies discipline), clearance honesty, and the
-  only-pins-touch final state.
+  depth: the latter is a WIRE finding), bounded cuts (an unscoped cut silently eats sibling
+  features - watch for target_bodies discipline), clearance honesty, and the
+  zero-interference final state (clearance bores mean pins do not touch; see the retention
+  disclosure below).
 - REBUILT SKETCHES MUST STAY PARAMETRIC: a mid-build teardown/redraw ("_Clean" sketch) that
   drops the driving dimensions severs the parameter chain at the sketch level while every
-  static read and health check stays green - a live P2 walk found exactly that (OuterRing_Clean:
-  literal radii, zero dimensions, vs Rotor_Disc's driving "d56 = RotorRadius"). Grade rebuilt
+  static read and health check stays green - observed live in a P2 walk (a "_Clean" sketch with
+  literal radii and zero dimensions beside a sibling's driving "d56 = RotorRadius"). Grade rebuilt
   sketches by their DIMENSIONS (sketch_get dimensions[] expressions), not their shapes; S2c is
   the downstream catch when this slips.
-- WHY THE SPLIT: one blind S2 run measured ~100+ min wall-clock, over the harness's ~60-min
-  task cap (owner rule: split the task, never dodge the cap). S2a+S2b each fit with margin.
-- WHY ONLY-PINS-TOUCH: this is the exact state S3's interference postcondition assumes;
-  grading it HERE means an S3 FAIL can no longer be caused upstream by the hardware stage.
+- WHY THE SPLIT: an unsplit blind S2 measures ~100+ min wall-clock, over the harness's ~60-min
+  task cap (rule: split the task, never dodge the cap). S2a+S2b each fit with margin.
+- WHY ZERO-INTERFERENCE (not "only pins touch"): the bores carry real clearance, so the pins do
+  NOT touch them - the correct final state is ZERO interfering pairs, and that is exactly what S3's
+  rest-pose interference postcondition assumes. Grading it HERE means an S3 FAIL can no longer be
+  caused upstream by the hardware stage. An interference report that names a pin-in-bore contact is
+  a missing-clearance defect, not an expected contact.
+- WHY THE RETENTION DISCLOSURE: the gimbal falls apart as hardware - pins float in clearance bores
+  with nothing capturing them axially - and without this clause a run certifies to three decimals
+  anyway. Forcing the executor to NAME the retaining feature (or say none exists) puts the
+  physical honesty on the record. "None exists" is the correct, passing disclosure here; retention
+  is out of scope for the whole chain (see S2a). Grade the honesty of the disclosure, not a count.
 - Pin housing: pins may live as bodies inside a ring component or their own components; grade
-  placement sanity, not a prescribed layout. The prior run's Carrier blind-bore judgment
-  (a solid hub on the axis, honestly disclosed) was accepted - the contract is THREADING both
+  placement sanity, not a prescribed layout. A Carrier blind-bore judgment
+  (a solid hub on the axis, honestly disclosed) is acceptable - the contract is THREADING both
   parts and bore-through-local-material, not literal double-opening through a hub.
 - Handoff: P2-Gimbal is the artifact S3's fixture consumes (its fixture wording names the S2b
   artifact).
 - Staging: doc_open the S2a artifact BY URN (force_api_open), confirm active; run the block.
-- Budget calibrated to the first measured run + 25% (2026-07-19: 170 calls / 138.3k output
+- Budget: measured run + 25% (170 calls / 138.3k output
   tokens / 28.1 min, including two self-caught recovery cycles; the runner-audited call count
   sets the size, not the executor self-count).

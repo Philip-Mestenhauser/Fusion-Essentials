@@ -199,7 +199,7 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-# ── _geometry_handle / _selection_record: Task B (find_geometry-style handle minting) ───────────
+# ── _geometry_handle / _selection_record: find_geometry-style handle minting ────────────────────
 
 class TestGeometryHandle:
     def test_face_handle_uses_centroid_and_token(self):
@@ -256,8 +256,8 @@ class TestSelectionRecordHandle:
 
 
 # ── shared fakes for the sys_request_selection orchestration tests ──────────────────────────────
-# Nested classes (not top-level), matching this file's pre-existing _fake_ui_with pattern - they do
-# not count toward test_bespoke_fake_ratchet.py's scan (which only walks module-level classes).
+# Nested classes matching this file's pre-existing _fake_ui_with pattern. The ratchet lint walks
+# nested classes too; these stay outside its count because their names are not fake-shaped.
 
 def _fake_ui(entities=()):
     """activeSelections (clear/count/item) + activeSelectionChanged (add/remove) - the surface
@@ -400,7 +400,7 @@ class TestOnSelectionChanged:
         assert box == {}
 
 
-# ── sys_request_selection: wait_seconds guard (Task A design decision: <=300, names the value) ──
+# ── sys_request_selection: wait_seconds guard (<=300; the error names the value) ────────────────
 
 class TestValidateWaitSeconds:
     def test_zero_is_valid(self):

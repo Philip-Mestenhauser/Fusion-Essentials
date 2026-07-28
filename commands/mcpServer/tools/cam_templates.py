@@ -17,20 +17,32 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-# Friendly location names -> LibraryLocations enum value.
-_LOCATIONS = {
-    "local": 0,
-    "cloud": 1,
-    "network": 2,
-    "samples": 3,
-    "external": 4,
-    "fusion": 5,
-    "hub": 6,
+# Friendly location name -> the LibraryLocations enum MEMBER name. The member is resolved via getattr
+# on the enum (the enum owns the value), never a hand-coded int - matching cam_edit_setup /
+# cam_edit_tools / cam_post.
+_LOCATION_MEMBERS = {
+    "local": "LocalLibraryLocation",
+    "cloud": "CloudLibraryLocation",
+    "network": "NetworkLibraryLocation",
+    "samples": "OnlineSamplesLibraryLocation",
+    "external": "ExternalLibraryLocation",
+    "fusion": "Fusion360LibraryLocation",
+    "hub": "HubLibraryLocation",
 }
+
+
+def _location_enum(key):
+    """The LibraryLocations enum member for a friendly location key, or None when the key is unknown
+    OR this Fusion build has no such member (getattr on the enum member, not a hand-coded int)."""
+    member = _LOCATION_MEMBERS.get((key or "").lower())
+    if not member:
+        return None
+    return getattr(adsk.cam.LibraryLocations, member, None)
+
 
 # The wire-validated selector for a library location: its enum carries the legal names, so an unknown
 # location fails at the schema instead of the handler re-listing them (see honesty contract).
-_LOCATION = _inputs.Choice("location", options=list(_LOCATIONS), default="cloud",
+_LOCATION = _inputs.Choice("location", options=list(_LOCATION_MEMBERS), default="cloud",
                            description="Which template library to read/write.")
 
 _MAX_NODES = 1500
@@ -77,7 +89,10 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
         loc_key, lerr = _LOCATION.resolve(location)
         if lerr:
             return error(lerr)
-        start_url = safe(lambda: lib.urlByLocation(_LOCATIONS[loc_key]))
+        loc = _location_enum(loc_key)
+        if loc is None:
+            return error(f"Location '{loc_key}' is not available in this Fusion build.")
+        start_url = safe(lambda: lib.urlByLocation(loc))
         if not start_url:
             return error(f"Could not resolve the '{location}' library root "
     "(it may not be configured/available).")
@@ -229,6 +244,10 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
     else:
         template, where = _find_template_by_name(lib, loc_key, template_name.strip())
         if not template:
+            # An ambiguity hint is already a complete, self-contained message - don't wrap it as
+            # 'not found' (it WAS found, in more than one place).
+            if where and "ambiguous" in where:
+                return error(where)
             return error(f"Template named '{template_name}' not found under '{loc_key}'. "
                           + (where or ""))
 
@@ -276,16 +295,22 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
 
 
 def _find_template_by_name(lib, location, name):
-    """Search a library location (recursively) for a template by name. Returns (template, hint)."""
-    loc = _LOCATIONS.get((location or "cloud").lower())
-    if loc is None:
+    """Search a library location (recursively) for a template by name. Returns (template, hint). A
+    name that matches in MORE THAN ONE folder is REFUSED (None + an 'ambiguous' hint naming the
+    folders) rather than first-DFS-matched - template_url is the precise escape (the resolver idiom
+    _cam_common uses for CAM tree names)."""
+    if (location or "cloud").lower() not in _LOCATION_MEMBERS:
         return None, f"Unknown location '{location}'."
+    loc = _location_enum(location or "cloud")
+    if loc is None:
+        return None, f"Location '{location}' is not available in this Fusion build."
     root = safe(lambda: lib.urlByLocation(loc))
     if not root:
         return None, f"Could not resolve the '{location}' library root."
 
     want = name.lower()
     seen_names = []
+    matches = []          # (template, containing-folder display name)
     stack = [root]
     visited = 0
     while stack and visited < _MAX_NODES:
@@ -297,7 +322,7 @@ def _find_template_by_name(lib, location, name):
                 if tn:
                     seen_names.append(tn)
                 if tn and tn.lower() == want:
-                    return t, None
+                    matches.append((t, safe(lambda: lib.displayName(folder_url)) or "?"))
         except Exception:
             pass
         try:
@@ -305,6 +330,12 @@ def _find_template_by_name(lib, location, name):
                 stack.append(sub)
         except Exception:
             pass
+    if len(matches) == 1:
+        return matches[0][0], None
+    if len(matches) > 1:
+        folders = ", ".join(f for _, f in matches)
+        return None, (f"'{name}' is ambiguous - {len(matches)} templates share that name (in: "
+                      f"{folders}). Pass the precise template_url instead.")
     hint = f"Templates seen: {', '.join(seen_names[:25]) or '(none)'}."
     return None, hint
 
@@ -424,7 +455,10 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
     loc_key, lerr = _LOCATION.resolve(location)
     if lerr:
         return error(lerr)
-    root = safe(lambda: lib.urlByLocation(_LOCATIONS[loc_key]))
+    loc = _location_enum(loc_key)
+    if loc is None:
+        return error(f"Location '{loc_key}' is not available in this Fusion build.")
+    root = safe(lambda: lib.urlByLocation(loc))
     if not root:
         return error(f"Could not resolve the '{location}' library root.")
 

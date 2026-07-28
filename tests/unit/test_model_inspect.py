@@ -7,10 +7,12 @@ by live validation.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import (load_tool, error_message, FakePoint, FakeBoundingBox3D, BRepBody,
+                      _NamedCollection)
 
 mi = load_tool("model_inspect")
 
@@ -118,3 +120,209 @@ class TestNormalizeInclude:
 
     def test_none_empty(self):
         assert mi._normalize_include(None) == [] and mi._normalize_include("") == []
+
+
+# ── _measurable_geometry: getOrientedBoundingBox needs B-Rep, a Component must fall back ───────────
+
+class TestMeasurableGeometry:
+    def test_brep_body_passes_through(self):
+        b = BRepBody(name="Plate")
+        geom, note = mi._measurable_geometry(b)
+        assert geom is b and note == ""
+
+    def test_entity_without_bodies_collection_passes_through(self):
+        e = SimpleNamespace(name="not a component")     # no bRepBodies -> assumed already B-Rep
+        geom, note = mi._measurable_geometry(e)
+        assert geom is e and note == ""
+
+    def test_component_with_no_bodies_yields_none(self):
+        comp = SimpleNamespace(bRepBodies=_NamedCollection([]))
+        geom, _ = mi._measurable_geometry(comp)
+        assert geom is None
+
+    def test_component_single_body_falls_back_to_it_and_names_it(self):
+        body = SimpleNamespace(name="Core", boundingBox=None)
+        comp = SimpleNamespace(bRepBodies=_NamedCollection([body]))
+        geom, note = mi._measurable_geometry(comp)
+        assert geom is body and "Core" in note
+
+    def test_multi_body_component_measures_the_largest_by_aabb_volume(self):
+        small = SimpleNamespace(name="Pin", boundingBox=FakeBoundingBox3D(
+            FakePoint(0, 0, 0), FakePoint(1, 1, 1)))            # volume 1
+        big = SimpleNamespace(name="Block", boundingBox=FakeBoundingBox3D(
+            FakePoint(0, 0, 0), FakePoint(10, 2, 1)))           # volume 20
+        comp = SimpleNamespace(bRepBodies=_NamedCollection([small, big]))
+        geom, note = mi._measurable_geometry(comp)
+        assert geom is big
+        assert "largest of 2" in note and "Block" in note       # the fallback is flagged to the caller
+
+
+# ── _joint_origin_axes: the JO frame -> bbox axes mapping ──────────────────────────────────────────
+
+class TestJointOriginAxes:
+    def test_axes_map_secondary_third_primary_to_xyz(self, monkeypatch):
+        # X=secondaryAxisVector, Y=thirdAxisVector, Z=primaryAxisVector - swapping any of these
+        # would silently measure the box in a rotated frame.
+        jo = SimpleNamespace(secondaryAxisVector="SEC", thirdAxisVector="THIRD",
+                             primaryAxisVector="PRIM", name="MachineFrame")
+        monkeypatch.setattr(mi._joints, "find_joint_origins_by_name", lambda d, n: [(jo, "path")])
+        assert mi._joint_origin_axes(None, "MachineFrame") == ("SEC", "THIRD", "PRIM", "MachineFrame")
+
+    def test_no_match_returns_nones(self, monkeypatch):
+        monkeypatch.setattr(mi._joints, "find_joint_origins_by_name", lambda d, n: [])
+        assert mi._joint_origin_axes(None, "Ghost") == (None, None, None, None)
+
+
+# ── the frame= path of _bbox: oriented box in a joint-origin frame ─────────────────────────────────
+
+class TestBboxFramePath:
+    def _axes(self):
+        return (SimpleNamespace(x=1, y=0, z=0), SimpleNamespace(x=0, y=1, z=0),
+                SimpleNamespace(x=0, y=0, z=1))
+
+    def test_oriented_bbox_measured_with_the_frame_axes(self, monkeypatch):
+        xv, yv, zv = self._axes()
+        monkeypatch.setattr(mi, "_joint_origin_axes", lambda d, n: (xv, yv, zv, "PartFrame"))
+        obb = SimpleNamespace(length=1.0, width=2.0, height=0.5, centerPoint=FakePoint(1, 2, 3))
+        seen = {}
+        def gobb(geom, x, y):
+            seen["args"] = (geom, x, y)
+            return obb
+        monkeypatch.setattr(mi, "app",
+                            SimpleNamespace(measureManager=SimpleNamespace(getOrientedBoundingBox=gobb)))
+        body = BRepBody(name="Plate")
+        out = _payload(mi._bbox(None, body, "body 'Plate'", "PartFrame", "mm"))
+        assert seen["args"] == (body, xv, yv)               # measured with the frame's X/Y axes
+        assert out["oriented"] is True and out["frame"] == "joint origin 'PartFrame' (part space)"
+        # length=X, width=Y, height=Z, scaled cm -> mm
+        assert (out["x"], out["y"], out["z"]) == (10.0, 20.0, 5.0)
+        assert out["center"] == {"x": 10.0, "y": 20.0, "z": 30.0}
+        assert out["frame_axes"]["z_axis"] == [0, 0, 1]
+
+    def test_unknown_frame_errors_naming_it(self, monkeypatch):
+        monkeypatch.setattr(mi, "_joint_origin_axes", lambda d, n: (None, None, None, None))
+        res = mi._bbox(None, object(), "whole design", "Ghost", "mm")
+        assert res["isError"] and "Ghost" in error_message(res)
+
+    def test_frame_target_without_brep_body_errors(self, monkeypatch):
+        # a Component with no bodies has nothing getOrientedBoundingBox accepts - refuse with a pointer.
+        xv, yv, zv = self._axes()
+        monkeypatch.setattr(mi, "_joint_origin_axes", lambda d, n: (xv, yv, zv, "F"))
+        monkeypatch.setattr(mi, "app", SimpleNamespace(measureManager=object()))
+        comp = SimpleNamespace(bRepBodies=_NamedCollection([]))
+        res = mi._bbox(None, comp, "component 'Empty'", "F", "mm")
+        assert res["isError"] and "no B-Rep body" in error_message(res)
+
+    def test_oriented_measure_failure_is_an_error(self, monkeypatch):
+        xv, yv, zv = self._axes()
+        monkeypatch.setattr(mi, "_joint_origin_axes", lambda d, n: (xv, yv, zv, "F"))
+        def boom(geom, x, y):
+            raise RuntimeError("axes not perpendicular")
+        monkeypatch.setattr(mi, "app",
+                            SimpleNamespace(measureManager=SimpleNamespace(getOrientedBoundingBox=boom)))
+        res = mi._bbox(None, BRepBody(name="Plate"), "body 'Plate'", "F", "mm")
+        assert res["isError"] and "axes not perpendicular" in error_message(res)
+
+    def test_unknown_units_errors(self):
+        res = mi._bbox(None, object(), "x", "", "furlong")
+        assert res["isError"] and "furlong" in error_message(res)
+
+
+# ── _full_props / _physical_properties: unit scaling + guards + per-occurrence breakdown ───────────
+
+def _make_pp(**over):
+    """A PhysicalProperties fake with concrete cm-based values (the API reports cm)."""
+    pp = SimpleNamespace(mass=2.0, volume=4.0, area=6.0, density=0.0078,
+                         centerOfMass=SimpleNamespace(x=1.0, y=2.0, z=3.0), accuracy=None)
+    pp.getXYZMomentsOfInertia = lambda: (True, 1.0, 2.0, 3.0, 0.4, 0.5, 0.6)
+    pp.getPrincipalMomentsOfInertia = lambda: (True, 5.0, 6.0, 7.0)
+    pp.getPrincipalAxes = lambda: (True, SimpleNamespace(x=1, y=0, z=0),
+                                   SimpleNamespace(x=0, y=1, z=0), SimpleNamespace(x=0, y=0, z=1))
+    pp.getRadiusOfGyration = lambda: (True, 0.5, 0.6, 0.7)
+    pp.getRotationToPrincipal = lambda: (True, 0.1, 0.2, 0.3)
+    for k, v in over.items():
+        setattr(pp, k, v)
+    return pp
+
+
+class TestFullProps:
+    def test_mm_scaling_per_quantity(self):
+        # k = cm-per-mm = 0.1: lengths x10, areas x100, volumes x1000, inertia x100; mass (kg) and
+        # rotation angles never rescale. A single wrong exponent here misreports every mass read.
+        out = mi._full_props(_make_pp(), mi._common.scale("mm"))
+        assert out["mass_kg"] == 2.0
+        assert out["volume"] == 4000.0 and out["area"] == 600.0
+        assert out["center_of_mass"] == [10.0, 20.0, 30.0]
+        assert out["inertia_world"]["Ixx"] == 100.0 and out["inertia_world"]["Ixz"] == 60.0
+        assert out["principal_moments"]["i1"] == 500.0
+        assert out["radius_of_gyration"]["kx"] == 5.0
+        assert out["rotation_to_principal_rad"]["rx"] == 0.1
+        assert out["principal_axes"]["z"] == [0, 0, 1]
+
+    def test_failed_sub_reads_omit_their_blocks(self):
+        # each get*() returns (retVal, ...) - a False retVal means the read failed, so its block is
+        # omitted rather than reporting zeros as if measured.
+        pp = _make_pp()
+        pp.getXYZMomentsOfInertia = lambda: (False, 0, 0, 0, 0, 0, 0)
+        pp.getPrincipalMomentsOfInertia = lambda: None
+        out = mi._full_props(pp, 0.1)
+        assert "inertia_world" not in out and "principal_moments" not in out
+
+
+class TestPhysicalProperties:
+    def test_unknown_units_errors(self):
+        res = mi._physical_properties(None, object(), "x", "parsec", "medium", False)
+        assert res["isError"] and "parsec" in error_message(res)
+
+    def test_unknown_accuracy_errors(self):
+        res = mi._physical_properties(None, object(), "x", "mm", "extreme", False)
+        assert res["isError"] and "extreme" in error_message(res)
+
+    def test_no_measurable_solid_errors_naming_the_target(self):
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: None)
+        res = mi._physical_properties(None, e, "body 'Shell'", "mm", "medium", False)
+        assert res["isError"] and "Shell" in error_message(res)
+
+    def test_reports_mass_and_the_accuracy_actually_used(self):
+        # accuracy_used is read BACK off the result (the API may compute at a different accuracy
+        # than requested) - echoing the request instead would hide that.
+        pp = _make_pp(accuracy=mi._ACCURACY["high"])
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: pp)
+        out = _payload(mi._physical_properties(None, e, "body 'Plate'", "mm", "medium", False))
+        assert out["mass_kg"] == 2.0 and out["accuracy"] == "medium"
+        assert out["accuracy_used"] == "high"
+        assert "per_occurrence" not in out                  # opt-in via per_body
+
+    def test_per_body_breakdown_skips_unmeasurable_occurrences(self):
+        opp = SimpleNamespace(mass=1.25, centerOfMass=SimpleNamespace(x=0.1, y=0.0, z=0.0))
+        o1 = SimpleNamespace(name="A:1", getPhysicalProperties=lambda acc: opp)
+        o2 = SimpleNamespace(name="B:1", getPhysicalProperties=lambda acc: None)  # surface-only: no pp
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            occurrences=_NamedCollection([o1, o2]))
+        out = _payload(mi._physical_properties(None, e, "whole design", "mm", "medium", True))
+        assert out["per_occurrence_count"] == 1
+        assert out["per_occurrence"] == [{"occurrence": "A:1", "mass_kg": 1.25,
+                                          "center_of_mass": [1.0, 0.0, 0.0]}]
+
+
+class TestRouterErrorPropagation:
+    def test_mass_slice_error_fails_the_read(self, monkeypatch, stub_slices):
+        _resolve_to(monkeypatch, "body")
+        monkeypatch.setattr(mi, "_physical_properties",
+                            lambda *a: mi.error("no measurable solid"))
+        res = mi.handler(target="Body1", include=["mass"])
+        assert res["isError"] and "no measurable solid" in error_message(res)
+
+    def test_bbox_error_fails_the_read(self, monkeypatch, stub_slices):
+        _resolve_to(monkeypatch, "body")
+        monkeypatch.setattr(mi, "_bbox", lambda *a: mi.error("no bounding box"))
+        res = mi.handler(target="Body1")
+        assert res["isError"] and "no bounding box" in error_message(res)
+
+
+class TestVecHelpers:
+    def test_none_vectors_stay_none(self):
+        assert mi._vec(None) is None and mi._vecxyz(None) is None
+
+    def test_vec_scales_components(self):
+        assert mi._vec(SimpleNamespace(x=1.0, y=2.0, z=3.0), 10.0) == [10.0, 20.0, 30.0]

@@ -15,7 +15,7 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 | Fusion 2704.1.36 | verified 2026-07-22
+Stamp: source 86402594f0d174e315752ae1cb0841ebfc312ea3db887b31c3d195e1b19b1cc6 | Fusion 2704.1.36 | verified 2026-07-28
 
 114 covered / 25 skipped(reason) / 0 pending
 
@@ -32,20 +32,20 @@ Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 |
 | cam_activate_setup | covered | activate the setup |
 | cam_apply_template | covered | apply the template to a second setup |
 | cam_compare_operations | covered | compare the two operations |
-| cam_create_operation | covered | create the face and adaptive operations |
-| cam_create_setup | covered | create the milling setup on the stock |
+| cam_create_operation | covered | create the face, adaptive, silhouette, and drill operations |
+| cam_create_setup | covered | create the milling setup on the Carrier in the vise |
 | cam_delete | covered | delete a scratch operation; count diff |
-| cam_edit_folders | covered | create an operation folder |
+| cam_edit_folders | covered | organize the job into Milling and Drilling folders |
 | cam_edit_operation | covered | edit the face operation's feed |
-| cam_edit_setup | covered | bind the WCS to the StockCenter JO (bound read back); stock box sized from a fresh GimbalDia read |
-| cam_edit_tools | covered | add a flat end mill to the document library |
-| cam_generate | covered | generate the toolpaths |
+| cam_edit_setup | covered | real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned |
+| cam_edit_tools | covered | add a flat end mill + a 3mm drill to the document library |
+| cam_generate | covered | generate the toolpaths against the real part in the real fixture |
 | cam_get | covered | read the CAM job structure |
-| cam_get_status | covered | poll the generation to completion |
+| cam_get_status | covered | poll the generation to completion (empty toolpaths fail) |
 | cam_post | covered | post the NC program to disk |
 | cam_reorder | covered | reorder the adaptive before the face op |
 | cam_save_template | covered | save the setup as a local CAM template |
-| cam_select_geometry | covered | select the face operation's geometry |
+| cam_select_geometry | covered | select stock-top face, zero-handle silhouette, and the bolt-circle holes |
 | cam_set_nc_comment | covered | stamp the NC program comment |
 | cam_show_toolpath | covered | leave the toolpath visible on camera |
 | data_create_folder | skipped: cloud write (opt-in tier) |  |
@@ -60,7 +60,7 @@ Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 |
 | design_configure | skipped: configuration table needs a SAVED document (a DataFile to carry it); opt-in tier |  |
 | design_delete_feature | covered | add a wart feature then delete it; health diff |
 | design_delete_occurrence | covered | delete a scratch occurrence |
-| design_export | covered | export the stock to STEP |
+| design_export | covered | export the machined part to STEP |
 | design_get | covered | final design read: the whole cast |
 | design_recompute | covered | recompute the assembly after motion |
 | design_set_mode | skipped: irreversible parametric->direct conversion; not run unattended |  |
@@ -84,9 +84,9 @@ Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 |
 | joint_create | covered | revolute the yaw, ring pivots, spin, and crank |
 | joint_create_as_built | covered | seat the rotor shaft in the inner ring as-built |
 | joint_create_origin | covered | place the crank mount and the stock-center WCS |
-| joint_drive | covered | drive every axis, then the crank -> rotor 2:1, then rest |
+| joint_drive | covered | drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other) |
 | joint_edit | covered | set rotation limits on the yaw |
-| joint_motion_link | covered | couple the crank to the rotor spin at 2:1 |
+| joint_motion_link | covered | couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering) |
 | mesh_combine | covered | combine two mesh copies |
 | mesh_export | covered | export a mesh to STL |
 | mesh_generate_face_groups | covered | group the mesh faces |
@@ -156,7 +156,7 @@ Stamp: source 8a1e7494f12b4c1026aefaa2dc3fe65c0f17945aa2379ba3f2c3d6c74dc6a3c4 |
 | view_list_workspaces | covered | list the workspaces available |
 | view_screenshot | covered | capture the sectioned mechanism |
 | view_screenshot_multi | covered | capture the front and top beauty shots |
-| view_section | covered | the money shot: cut through the gimbal center |
+| view_section | covered | section cut through the gimbal center |
 | view_set | covered | orient the camera to the iso hero angle |
 | view_switch_workspace | covered | switch to Manufacture, then back to Design |
 | workspace_orient | covered | orient: read the empty design before building |

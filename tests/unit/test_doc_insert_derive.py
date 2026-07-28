@@ -280,7 +280,7 @@ class TestGuards:
         assert "urn:adsk:1" in res["message"]
 
 
-# ── source-open precondition (the createInput async-load fix) ─────────────────────────────────────
+# ── source-open precondition (createInput needs the source open - async load) ─────────────────────
 
 class TestSourceOpenPrecondition:
     def test_source_not_open_errors_with_doc_open_guidance(self, monkeypatch):
@@ -582,25 +582,61 @@ class TestIntoComponent:
         out = _payload(io.handler(document_id="urn:x"))
         assert out["into_component"] == "root component"
 
-    def test_named_occurrence_resolves_its_component(self, monkeypatch):
-        chassis_derive = FakeDeriveFeatures()
+    def _nested_setup(self, monkeypatch, *, occ_activates=True, chassis_derive=None):
+        """A design with a Chassis:1 occurrence targetable by into_component. The occ records
+        activate() calls (the platform routes a derive into the ACTIVE component, so nesting
+        activates the target first); the design records the root-restore."""
+        chassis_derive = chassis_derive or FakeDeriveFeatures()
         chassis_comp = FakeComp("Chassis", derive_features=chassis_derive)
-        occ = type("Occ", (), {"name": "Chassis:1", "fullPathName": "Chassis:1",
-                               "component": chassis_comp})()
+        calls = {"activated": 0, "root_restored": 0}
+        occ = type("Occ", (), {
+            "name": "Chassis:1", "fullPathName": "Chassis:1", "component": chassis_comp,
+            "activate": lambda self=None: calls.__setitem__("activated", calls["activated"] + 1)
+                        or occ_activates,
+        })()
         root_comp = FakeComp("Root")
         design = FakeDesign(root_comp)
         design.rootComponent = type("Root", (), {
             "name": "Root", "allOccurrences": [occ], "occurrences": root_comp.occurrences,
         })()
+        design.activateRootComponent = (
+            lambda: calls.__setitem__("root_restored", calls["root_restored"] + 1) or True)
         monkeypatch.setattr(io._common, "design", lambda: design)
         monkeypatch.setattr(io._inputs._common, "design", lambda: design)
         df = FakeDataFile()
         source_doc = FakeSourceDoc(data_file=df, design=_make_source())
         monkeypatch.setattr(io, "app", FakeApp(FakeDocuments(open_docs=[source_doc])))
         monkeypatch.setattr(io, "_resolve_data_file", lambda raw: (df, raw, [raw]))
+        return design, chassis_comp, chassis_derive, calls
+
+    def test_named_occurrence_activates_derives_and_restores_root(self, monkeypatch):
+        design, chassis, chassis_derive, calls = self._nested_setup(monkeypatch)
         out = _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
         assert "Chassis" in out["into_component"]
         assert chassis_derive.created is not None
+        assert calls["activated"] == 1       # nesting = activate the target before add()
+        assert calls["root_restored"] == 1   # ...and restore the root edit target after
+
+    def test_activation_failure_refuses_before_deriving(self, monkeypatch):
+        design, chassis, chassis_derive, calls = self._nested_setup(monkeypatch,
+                                                                    occ_activates=False)
+        res = io.handler(document_id="urn:x", into_component="Chassis:1")
+        assert res["isError"] is True and "activate" in res["message"].lower()
+        assert chassis_derive.created is None       # nothing was derived
+
+    def test_root_stray_landing_is_an_honest_error(self, monkeypatch):
+        # The platform ignored the activation and landed the derive at ROOT: the read-back must
+        # say so, never report a nested success over a root sibling.
+        chassis_derive = FakeDeriveFeatures()
+        design, chassis, _, calls = self._nested_setup(monkeypatch,
+                                                       chassis_derive=chassis_derive)
+        stray = FakeOcc("Stray:1", is_derived=True, body_count=1)
+        chassis_derive.on_add = (
+            lambda: design.rootComponent.occurrences._items.append(stray))
+        design.rootComponent.occurrences = FakeOccurrences([])
+        res = io.handler(document_id="urn:x", into_component="Chassis:1")
+        assert res["isError"] is True
+        assert "ROOT" in res["message"] and "Stray:1" in res["message"]
 
     def test_unknown_occurrence_errors(self, monkeypatch):
         _install(monkeypatch)
@@ -617,6 +653,13 @@ class TestPayloadContract:
         for kind in io.RETURNS:
             problem = kind.assert_present(out)
             assert problem == "", problem
+
+    def test_saved_version_wire_sentence_present(self, monkeypatch):
+        # derive reads the source's last SAVED cloud version, not live in-session edits.
+        _install(monkeypatch)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert "last SAVED cloud version" in out["note"]
+        assert "last SAVED cloud version" in io.TOOL_DESCRIPTION
 
     def test_document_metadata_reported(self, monkeypatch):
         df = FakeDataFile(id_="urn:adsk.wipprod:dm.lineage:abc", name="Gimbal", version=7)

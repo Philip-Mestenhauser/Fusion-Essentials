@@ -4,6 +4,7 @@
 """Shared CAM substrate: resolves the active document's CAM product and judges job health, for
 cam_get and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) to reuse."""
 
+import collections
 import json
 import re
 
@@ -14,11 +15,14 @@ import adsk.fusion
 from ._common import ok, error, safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + find_setup / "
-             "find_operation (resolve a setup/operation by name, case-insensitive, returning the object "
-             "+ available names) over setups / walk_operations (the shared setup + operation walks) + "
-             "expression_error (the post-set CAMParameter evaluation read-back every CAM param editor "
-             "gates on) + live_readiness (the one CAM job-health signal)")
+MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / "
+             "resolve_cam_node (the ONE CAM tree traversal + by-name resolver every CAM tool targets "
+             "through: case-insensitive EXACT, a miss lists the available names, a DUPLICATED name is "
+             "REFUSED naming each hit's setup path; kinds=/setup= scope it) + operations_under (the "
+             "ops nested under one setup/folder/pattern) + find_setup / find_operation (the "
+             "(obj, available_names) wrappers over the same resolver) + expression_error (the post-set "
+             "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
+             "(the one CAM job-health signal)")
 
 app = adsk.core.Application.get()
 
@@ -100,7 +104,7 @@ def _iter_collection(coll):
 
 
 def setups(cam):
-    """Every Setup in the document, as a list - the basis for the by-name resolvers below."""
+    """Every Setup in the document, as a list - the basis for the tree walk below."""
     return list(_iter_collection(safe(lambda: cam.setups)))
 
 
@@ -109,46 +113,127 @@ def setup_names(cam):
     return [safe(lambda s=s: s.name) for s in setups(cam)]
 
 
-def find_setup(cam, name):
-    """The Setup named `name` (case-INSENSITIVE exact), or (None, available_names). The ONE setup-by-name
-    resolver every CAM tool shares, so a setup is matched the SAME way everywhere - several hand-rolls
-    were case-sensitive and one case-insensitive, so 'Setup1' vs 'setup1' resolved differently per tool."""
-    want = (name or "").strip().lower()
-    available = []
+# One node of the CAM tree. kind is STRUCTURAL - which collection yielded the node ('setup' /
+# 'operation' / 'folder' / 'pattern') - so no type-name sniffing is needed. path is the
+# 'Setup / Folder / Op' breadcrumb an ambiguity refusal names its candidates by.
+CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "path"])
+
+
+def _walk_children(parent, setup_name, path, out):
+    """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern).
+    `.operations` lists only the DIRECT children, and setup.allOperations flattens folder children
+    while DROPPING the folder/pattern containers (verified live) - so containers are reachable only
+    by recursing `.folders`/`.patterns` explicitly, which nest. A parent exposing no `.operations`
+    collection degrades to its allOperations flatten (operations only)."""
+    ops = safe(lambda: parent.operations)
+    if ops is not None:
+        for o in _iter_collection(ops):
+            nm = safe(lambda o=o: o.name)
+            out.append(CamNode(o, "operation", nm, setup_name, f"{path} / {nm}"))
+        for kind, getter in (("folder", lambda: parent.folders),
+                             ("pattern", lambda: parent.patterns)):
+            for c in _iter_collection(safe(getter)):
+                nm = safe(lambda c=c: c.name)
+                child_path = f"{path} / {nm}"
+                out.append(CamNode(c, kind, nm, setup_name, child_path))
+                _walk_children(c, setup_name, child_path, out)
+        return
+    for o in _iter_collection(safe(lambda: parent.allOperations)):
+        op = adsk.cam.Operation.cast(o)
+        if op is not None:
+            nm = safe(lambda op=op: op.name)
+            out.append(CamNode(op, "operation", nm, setup_name, f"{path} / {nm}"))
+
+
+def _setup_node(s):
+    nm = safe(lambda: s.name)
+    return CamNode(s, "setup", nm, nm, nm or "")
+
+
+def tree_nodes(setup_obj):
+    """CamNodes for ONE setup subtree: the setup itself, then every operation/folder/pattern nested
+    anywhere under it - the setup-scoped slice of walk_cam_tree."""
+    node = _setup_node(setup_obj)
+    nodes = [node]
+    _walk_children(setup_obj, node.name, node.path, nodes)
+    return nodes
+
+
+def walk_cam_tree(cam):
+    """Every node of the CAM tree as CamNode(obj, kind, name, setup, path): each Setup plus all
+    operations/folders/patterns nested anywhere under it. The ONE traversal every CAM tool walks
+    and resolves names over."""
+    nodes = []
     for s in setups(cam):
-        nm = safe(lambda s=s: s.name)
-        available.append(nm)
-        if (nm or "").lower() == want:
-            return s, available
-    return None, available
+        nodes.extend(tree_nodes(s))
+    return nodes
+
+
+def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None):
+    """The ONE by-name resolver over the CAM tree: case-insensitive EXACT match on nodes whose kind
+    is in `kinds`, optionally scoped to one setup object (`setup`, in which case `cam` is unused).
+    Returns (CamNode, None) for the unique hit. 0 hits -> (None, error listing the available names).
+    2+ hits -> REFUSED: (None, error naming the count and each duplicate's 'Setup / item' path) -
+    operation names legitimately collide across setups, so a first (or last) match silently targets
+    the wrong entity. `label` is the noun the error uses (defaults to the kinds joined with '/')."""
+    if setup is not None:
+        nodes = tree_nodes(setup)
+    elif set(kinds) == {"setup"}:
+        nodes = [_setup_node(s) for s in setups(cam)]
+    else:
+        nodes = walk_cam_tree(cam)
+    label = label or "/".join(kinds)
+    want = (name or "").strip().lower()
+    pool = [n for n in nodes if n.kind in kinds]
+    matches = [n for n in pool if (n.name or "").lower() == want]
+    if not matches:
+        available = [n.name for n in pool if n.name]
+        return None, (f"No {label} named '{name}'. Available: "
+                      f"{', '.join(available)[:300] or '(none)'}.")
+    if len(matches) > 1:
+        return None, (f"'{name}' is ambiguous - {len(matches)} CAM items share that name: "
+                      f"{', '.join(n.path for n in matches)}. Rename the target so its name is "
+                      "unique, then retry.")
+    return matches[0], None
+
+
+def operations_under(parent):
+    """Every real Operation nested anywhere under one setup/folder/pattern - the scoped leaf
+    projection of the shared walk (a 'show this folder' / 'poll this setup' collects ops through
+    it instead of re-walking)."""
+    nodes = []
+    _walk_children(parent, None, "", nodes)
+    return [n.obj for n in nodes if n.kind == "operation"]
+
+
+def find_setup(cam, name):
+    """The unique Setup named `name` (case-INSENSITIVE exact), or (None, available_names). A
+    DUPLICATED setup name is REFUSED (None + the available names) - never resolved to the first
+    hit; resolve_cam_node(kinds=('setup',)) is the same resolver with the full refusal message."""
+    node, _err = resolve_cam_node(cam, name, kinds=("setup",), label="setup")
+    return (node.obj if node else None), setup_names(cam)
 
 
 def walk_operations(cam):
-    """Every real Operation across every setup, folder/pattern-nested ops INCLUDED (setup.allOperations
-    flattens them; it drops the folder/pattern PARENT objects, which an operation walk doesn't want).
-    Operation.cast skips any non-operation the collection yields. The ONE operation walk - find_operation
-    resolves a name over it - so 'which operations exist' is answered the same way everywhere."""
-    out = []
-    for s in setups(cam):
-        for op in _iter_collection(safe(lambda s=s: s.allOperations)):
-            o = adsk.cam.Operation.cast(op)
-            if o is not None:
-                out.append(o)
-    return out
+    """Every real Operation across every setup, folder/pattern-nested INCLUDED - the operation
+    projection of walk_cam_tree, so 'which operations exist' is answered by the same traversal
+    everywhere."""
+    return [n.obj for n in walk_cam_tree(cam) if n.kind == "operation"]
 
 
 def find_operation(cam, name):
-    """The Operation named `name` (case-INSENSITIVE exact) anywhere in the CAM tree, or
-    (None, available_names). The ONE operation-by-name resolver so every CAM tool matches a name the
-    SAME way - the hand-rolls split between case-sensitive and case-insensitive."""
+    """The unique Operation named `name` (case-INSENSITIVE exact) anywhere in the CAM tree, or
+    (None, available_names). A DUPLICATED name is REFUSED: (None, each duplicate's 'Setup / op'
+    path) so even a caller's plain not-found error surfaces the collision; a true miss returns
+    every operation name. resolve_cam_node is the same resolver with the full refusal message."""
+    nodes = [n for n in walk_cam_tree(cam) if n.kind == "operation"]
     want = (name or "").strip().lower()
-    available = []
-    for o in walk_operations(cam):
-        nm = safe(lambda o=o: o.name)
-        available.append(nm)
-        if (nm or "").lower() == want:
-            return o, available
-    return None, available
+    matches = [n for n in nodes if (n.name or "").lower() == want]
+    if len(matches) == 1:
+        return matches[0].obj, [n.name for n in nodes]
+    if len(matches) > 1:
+        return None, [n.path for n in matches]
+    return None, [n.name for n in nodes]
 
 
 def first_error_line(obj):
@@ -163,7 +248,7 @@ def _op_state_facts(op) -> dict:
     (cam_get's per-setup op_states via _op_primary_state, cam_get_status's live_states via
     op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
     isSuppressed/isGenerating/hasWarning independently. operationState: 0=valid, 1=out_of_date,
-    2=suppressed, 3=no_toolpath (see _OP_STATE_NAMES in cam_generate.py)."""
+    2=suppressed, 3=no_toolpath (see _OP_STATE_NAMES below in this module)."""
     return {
         "name": safe(lambda: op.name),
         "has_error": bool(safe(lambda: op.hasError, False)),
@@ -242,9 +327,8 @@ def live_readiness():
         tally = op_state_tally(walk_operations(cam))
         samples["op"] = tally["op_sample"]
         setups_errored = 0
-        for i in range(safe(lambda: cam.setups.count, 0) or 0):
-            s = safe(lambda i=i: cam.setups.item(i))
-            if s is not None and safe(lambda s=s: s.hasError, False):
+        for s in setups(cam):
+            if safe(lambda s=s: s.hasError, False):
                 setups_errored += 1
                 if samples["setup"] is None:
                     samples["setup"] = {"name": safe(lambda s=s: s.name), "error": first_error_line(s)}
@@ -494,29 +578,29 @@ def get_cam_operations_handler(setup: str = "") -> dict:
     if err:
         return error(err)
 
-    want = (setup or "").strip().lower()
+    # Two-branch filter: a named setup resolves through the shared resolver (a duplicated setup
+    # name is REFUSED, not first-matched); empty = every setup via the shared walk.
+    want = (setup or "").strip()
+    if want:
+        node, rerr = resolve_cam_node(cam, want, kinds=("setup",), label="setup")
+        if rerr:
+            return error(rerr)
+        target_setups = [node.obj]
+    else:
+        target_setups = setups(cam)
+
     result_setups = []
-    available = []
     try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            s_name = safe(lambda: s.name)
-            available.append(s_name)
-            if want and (s_name or "").lower() != want:
-                continue
+        for s in target_setups:
             ops, ops_truncated = _operations_in(s)
             result_setups.append({
-            "setup": s_name,
+            "setup": safe(lambda s=s: s.name),
             "summary": _operations_summary(ops),    # exception-first rollup BEFORE the full list
             "operations": ops,
             "operations_truncated": ops_truncated,
             })
     except Exception as e:
         return error(f"Could not read operations: {e}")
-
-    if want and not result_setups:
-        return error(f"Setup not found: '{setup}'. "
-                      f"Available: {', '.join(n for n in available if n) or '(none)'}")
 
     # Also summarize the distinct tools used across the returned operations.
     tools_used = {}
@@ -559,9 +643,16 @@ def _operations_summary(op_records) -> dict:
         if r.get("is_suppressed"):
             continue                              # suppressed = excluded from posting; not active, not blocking
         active_total += 1
-        if r.get("toolpath_valid"):
+        has_err = bool(r.get("has_error"))
+        # An op counts as good-to-post only when its toolpath is valid AND it carries no error.
+        # has_error is the authoritative per-op fault flag this record ships beside the toolpath flag
+        # (a toolpath can read valid while the op is errored - live: "4 of 4 valid, ready to post"
+        # while a Drill op carried has_error). Derive the summary from BOTH, never toolpath_valid alone.
+        if r.get("toolpath_valid") and not has_err:
             valid_active += 1
-        blocked = r.get("blocked_by") or []
+        blocked = list(r.get("blocked_by") or [])
+        if has_err and "operation_error" not in blocked:
+            blocked.append("operation_error")    # an errored op blocks the post even if nothing else flags it
         if blocked:
             exceptions.append({"name": r.get("name"), "blocked_by": blocked})
 
@@ -673,17 +764,20 @@ def get_setup_references_handler(setup: str = "") -> dict:
     if err:
         return error(err)
 
-    want = (setup or "").strip().lower()
-    out_setups = []
-    available = []
-    try:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            s_name = safe(lambda: s.name)
-            available.append(s_name)
-            if want and (s_name or "").lower() != want:
-                continue
+    # Two-branch filter: named -> the shared resolver (a duplicated setup name is REFUSED);
+    # empty -> every setup via the shared walk.
+    want = (setup or "").strip()
+    if want:
+        node, rerr = resolve_cam_node(cam, want, kinds=("setup",), label="setup")
+        if rerr:
+            return error(rerr)
+        target_setups = [node.obj]
+    else:
+        target_setups = setups(cam)
 
+    out_setups = []
+    try:
+        for s in target_setups:
             refs = []
             seen_ids = set()
             refs_truncated = False
@@ -701,14 +795,10 @@ def get_setup_references_handler(setup: str = "") -> dict:
                         seen_ids.add(key)
                     refs.append(ref)
 
-            out_setups.append({"setup": s_name, "reference_count": len(refs),
+            out_setups.append({"setup": safe(lambda s=s: s.name), "reference_count": len(refs),
         "references": refs, "references_truncated": refs_truncated})
     except Exception as e:
         return error(f"Could not read setup references: {e}")
-
-    if want and not out_setups:
-        return error(f"Setup not found: '{setup}'. "
-                      f"Available: {', '.join(n for n in available if n) or '(none)'}")
 
     return ok({"setup_count": len(out_setups), "setups": out_setups})
 
@@ -820,24 +910,14 @@ def get_machining_time_handler(setup: str = "") -> dict:
     tool_change = 1.5           # seconds
 
     targets = []  # (label, object)
-    try:
-        if (setup or "").strip():
-            want = setup.strip().lower()
-            for i in range(cam.setups.count):
-                s = cam.setups.item(i)
-                if (safe(lambda: s.name) or "").lower() == want:
-                    targets.append((s.name, s))
-                    break
-            if not targets:
-                avail = [safe(lambda: cam.setups.item(j).name) for j in range(cam.setups.count)]
-                return error(f"Setup not found: '{setup}'. "
-                              f"Available: {', '.join(n for n in avail if n) or '(none)'}")
-        else:
-            for i in range(cam.setups.count):
-                s = cam.setups.item(i)
-                targets.append((safe(lambda: s.name), s))
-    except Exception as e:
-        return error(f"Could not read setups: {e}")
+    if (setup or "").strip():
+        node, rerr = resolve_cam_node(cam, setup, kinds=("setup",), label="setup")
+        if rerr:
+            return error(rerr)
+        targets.append((node.name, node.obj))
+    else:
+        for s in setups(cam):
+            targets.append((safe(lambda s=s: s.name), s))
 
     results = []
     grand = 0.0

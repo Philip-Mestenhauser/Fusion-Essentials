@@ -89,7 +89,6 @@ def _find_occurrence_by_name(root, want):
     if occ_err and "ambiguous" in occ_err.lower():
         return None, occ_err
     return None, None
-    return None
 
 
 def _walk_occurrence(occ, depth, max_depth, counter):

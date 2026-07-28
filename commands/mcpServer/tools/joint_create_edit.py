@@ -61,6 +61,16 @@ _JOINT_TYPES = {
 _MOTIONS = list(_inputs.JOINT_MOTIONS) + ["pin_slot"]
 
 
+# The one honest note appended whenever a rest limit is set. A rest value is the joint LIMIT's
+# equilibrium setpoint (used by motion study); setting it does NOT move the static model - the part
+# stays at the joint's home value (0), live-verified on a bare slider (rest_mm 20/50/0 moved nothing).
+# So a caller must not read "rest_mm applied" as "the slider is now posed".
+_REST_LIMIT_NOTE = (
+    " NOTE: rest_mm/rest_deg set the joint LIMIT'S rest value (a motion-study equilibrium), which does "
+    "NOT reposition the static model - it stays at the joint's home value. To POSE the mechanism use "
+    "joint_drive (a driven pose does not survive recompute).")
+
+
 def _fmt_num(v):
     """Format a number for a parameter expression: drop a trailing '.0' (e.g. -200, not -200.0)."""
     f = float(v)
@@ -138,19 +148,11 @@ def _resolve_snap_input(design, occ_name, snap):
     """Build a JointGeometry from an occurrence's geometry (no human selection), proxied into the
     occurrence's assembly context. snap: origin | center | top | bottom | cylinder.
     Returns (jointGeometry_or_None, error_or_None)."""
-    entity, kind, err = _resolve_snap_entity(design, occ_name, snap)
+    entity, _kind, err = _resolve_snap_entity(design, occ_name, snap)
     if not entity:
         return None, err
-    JG = adsk.fusion.JointGeometry
-    KP = adsk.fusion.JointKeyPointTypes
-    if kind == "point":
-        g = safe(lambda: JG.createByPoint(entity))
-        return (g, None) if g else (None, "createByPoint failed for origin.")
-    if kind == "cylinder":
-        g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-        return (g, None) if g else (None, "createByNonPlanarFace failed.")
-    g = safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
-    return (g, None) if g else (None, "createByPlanarFace failed.")
+    g, _label, gerr = _jg_from_entity(entity)
+    return (g, None) if g else (None, gerr)
 
 
 def _resolve_input(design, spec):
@@ -279,8 +281,7 @@ def _world_axis_entity(design, axis_idx):
     about world Y when you ask for 'Z'. Passing a world construction axis as the custom direction
     makes the motion about a TRUE world axis regardless of the snap frame."""
     root = design.rootComponent
-    attr = ["xConstructionAxis", "yConstructionAxis", "zConstructionAxis"][axis_idx]
-    return safe(lambda: getattr(root, attr))
+    return _inputs.world_construction_axis(root, "xyz"[axis_idx])
 
 
 def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
@@ -471,6 +472,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         **limits_out,
         "note": "Joint created as a timeline feature. View it with view_screenshot.",
     }
+    if any(k in limits_out for k in ("rest_mm", "rest_deg")):
+        payload["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
     if mp:
         payload["model_parameters"] = mp
@@ -554,6 +557,23 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         if not new2:
             return error(err2 or f"Could not resolve input_two '{input_two}'.")
 
+    # A joint can only reference geometry/origins that exist BEFORE it in the timeline: editing rolls
+    # the marker to just before the joint, where a feature CREATED AFTER the joint does not exist yet -
+    # the platform raises a bare 'InternalValidationError: findObjectPath' (live-verified: rewiring a
+    # slider to a JO made after it fails; rewiring a joint to a JO made before it succeeds). Catch a
+    # later Joint-Origin input here and refuse with an actionable message, before rolling the timeline.
+    joint_tl = safe(lambda: joint.timelineObject.index)
+    for lbl, newx in (("input_one", new1), ("input_two", new2)):
+        if newx is not None and _is_joint_origin(newx) and joint_tl is not None:
+            jo_tl = safe(lambda nx=newx: nx.timelineObject.index)
+            if jo_tl is not None and jo_tl >= joint_tl:
+                return error(
+                    f"Cannot rewire '{joint_name}' {lbl} to that Joint Origin: the Joint Origin is "
+                    f"LATER in the timeline (position {jo_tl}) than the joint (position {joint_tl}). "
+                    "Editing a joint rolls the timeline to just before it, where a later feature does "
+                    "not exist yet. Create the Joint Origin before the joint, or delete the joint and "
+                    "recreate it after the Joint Origin with joint_create.")
+
     changed = {}
     rolled = False
     try:
@@ -619,7 +639,14 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             if lim_err:
                 return error(lim_err)
     except Exception as e:
-        return error(f"Edit failed: {e}")
+        msg = f"Edit failed: {e}"
+        if "findObjectPath" in str(e) or "InternalValidationError" in str(e):
+            # A referenced input (geometry or origin) is later in the timeline than the joint, so it
+            # does not exist at the rolled-back marker. Name the cause rather than ship the raw error.
+            msg += (" - a re-selected input likely appears LATER in the timeline than the joint; a "
+                    "joint can only reference geometry/origins created before it. Recreate the joint "
+                    "after that input with joint_create.")
+        return error(msg)
     finally:
         if rolled:
             # Roll the marker to the TRUE END of the timeline, not just past THIS joint. rollTo(False)
@@ -639,13 +666,7 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     recompute_errors = None
     try:
         design.computeAll()
-        tl = safe(lambda: design.timeline)
-        errs = []
-        for i in range(safe(lambda: tl.count, 0) or 0):
-            it = safe(lambda i=i: tl.item(i))
-            if safe(lambda it=it: it.healthState) == 2:
-                errs.append(safe(lambda it=it: it.name) or f"#{i}")
-        recompute_errors = errs
+        recompute_errors, _, _ = _common.timeline_health(design)
     except Exception:
         pass
 
@@ -663,6 +684,8 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     else:
         out["note"] = ("Joint edited in place + full recompute (downstream features settled). "
                        "view_screenshot to view.")
+    if any(k in changed for k in ("rest_mm", "rest_deg")):
+        out["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
     if mp:
         out["model_parameters"] = mp
@@ -677,7 +700,8 @@ TOOL_DESCRIPTION = (
     "referenced part (either way the tool proxies it into assembly context; do NOT script this "
     "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
     "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
-    "the part origin (zero offset) - use a handle for a real offset. Creating a joint MOVES the free "
+    "the part origin AND aligns its FULL local frame (un-rotating a pre-rotated part) - use "
+    "a handle for a real offset. Creating a joint MOVES the free "
     "(ungrounded) part so its snap/JO point lands on the other input's location - do not pre-place "
     "it. 'joint_type' = rigid (default)/"
     "revolute/slider/cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing "
@@ -713,7 +737,7 @@ tool = (
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_assert.FeatureHealthy(), _assert.ChildGeometryMoved()])
 
 
 EDIT_DESCRIPTION = (

@@ -1,16 +1,17 @@
 """Lint: no BANNED VOCABULARY word appears in any agent-facing wire string.
 
-The owner's rule (2026-07-16): "we use the term container, as humans, when describing a component -
-Fusion does not call these things containers, and neither should our codebase." An invented noun on
+Fusion never calls a component a "container"; this codebase does not either - agent-facing text
+must use Fusion's own vocabulary. An invented noun on
 the wire teaches a connected agent a word Fusion's own UI never uses, so the agent can't map it back
 to what it sees. This lint keeps that word (and any future banned term) out of the ONLY strings an
 agent reads about a tool: its description, its per-input descriptions, and any module-level
 ``*_DESCRIPTION`` constant.
 
 Same surfaces as ``test_wire_ascii`` - the live registry (every tool's description + every input
-property's description, recursively) and the SOURCE constants - but checking WHICH WORDS are used
-rather than that the bytes are ASCII. Comments and internal identifiers are out of scope on purpose:
-they never serialize onto the wire.
+property's description, recursively), the SOURCE constants, and the RUNTIME payloads (every string
+literal inside an ``ok(...)`` / ``error(...)`` call in the tool sources) - but checking WHICH WORDS
+are used rather than that the bytes are ASCII. Comments and internal identifiers are out of scope
+on purpose: they never serialize onto the wire.
 
 A term is matched case-insensitively on a word boundary (so "container"/"Container"/"containers" all
 trip; "self-contained" does not). To permit a genuinely unavoidable use, add a
@@ -119,6 +120,55 @@ class TestNoBannedVocabularyInDescriptionConstants:
                 for s in strings:
                     offenders += _report(f"{fn}:{const_name}", _banned_hits(s))
         assert not offenders, "banned wire word in description constant(s):\n  " + "\n  ".join(offenders)
+
+
+def _ok_error_call_strings(src, filename="<src>"):
+    """(call_name, lineno, [string literals]) for every ``ok(...)`` / ``error(...)`` call in the
+    source text - the runtime payload authoring sites (``_common.ok``/``_common.error`` attribute
+    calls too). Every string literal in the call subtree is collected (f-string pieces, nested
+    dict keys/values): each is text that crosses the wire JSON-encoded."""
+    tree = ast.parse(src, filename=filename)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.id if isinstance(fn, ast.Name) else (
+            fn.attr if isinstance(fn, ast.Attribute) else None)
+        if name not in ("ok", "error"):
+            continue
+        strings = [n.value for n in ast.walk(node)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        if strings:
+            out.append((name, node.lineno, strings))
+    return out
+
+
+class TestNoBannedVocabularyInRuntimePayloads:
+    def test_no_ok_error_literal_uses_a_banned_word(self):
+        offenders = []
+        for fn in sorted(os.listdir(TOOLS_DIR)):
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(TOOLS_DIR, fn)
+            src = open(path, encoding="utf-8").read()
+            for call_name, lineno, strings in _ok_error_call_strings(src, path):
+                for s in strings:
+                    offenders += _report(f"{fn}:{lineno} ({call_name} payload)", _banned_hits(s))
+        assert not offenders, "banned wire word in ok()/error() payload(s):\n  " + "\n  ".join(offenders)
+
+    def test_the_runtime_sweep_bites(self):
+        # A doctored error() message coining the banned noun MUST be flagged...
+        hits = _ok_error_call_strings('def h():\n    return error("pick the container occurrence")\n')
+        assert [t for _, _, strings in hits for s in strings for t in _banned_hits(s)] == ["container"]
+        # ...an ok() note through the attribute form too, and inside an f-string piece...
+        hits = _ok_error_call_strings(
+            'def h():\n    return _common.ok({"note": f"moved {n} containers"})\n')
+        assert [t for _, _, strings in hits for s in strings for t in _banned_hits(s)] == ["container"]
+        # ...while a non-wire call is out of scope, and Fusion's own vocabulary passes clean.
+        assert _ok_error_call_strings('def h():\n    log("container in a log line")\n') == []
+        hits = _ok_error_call_strings('def h():\n    return ok({"note": "a component occurrence"})\n')
+        assert not [t for _, _, strings in hits for s in strings for t in _banned_hits(s)]
 
 
 # The skill files under .claude/skills/ are agent-facing too: an executing agent reads

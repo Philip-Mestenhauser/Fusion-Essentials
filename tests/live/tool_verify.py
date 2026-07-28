@@ -7,6 +7,15 @@ A deterministic script of direct tools/call requests (no LLM, no SDK) walking a 
 that builds its own world in a scratch document and tears it down. The gate: a ledger with zero
 unexplained rows - every tool is pass / expected-refusal / skipped(reason).
 
+The sweep is the END-TO-END STORY the evals grade agents on, in one document: a parametric
+gyroscope is cast, turned solid, jointed and driven on every axis, detailed, resized, then
+REDUCED to its one machinable part (the Carrier bar), a self-centering VISE is modeled around
+it (sliders, motion link at ratio -1, grip proven by measure), and a real milling job runs on
+the REAL part in the REAL fixture - four operations, generated to completion (an empty toolpath
+fails the run), NC posted. Optional SPATIAL value-checks read the scene through the
+fusion-spatial add-in's raw TCP protocol (port 8767; a closed port skips them, never fails).
+Cameo fixtures for families with no home on the mechanism ride the same document.
+
 A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
 per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
 run to the exact tool source it exercised. ``--check`` recomputes the hash offline (no Fusion
@@ -19,10 +28,13 @@ Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the 
       py -3 tests/live/tool_verify.py --check    (no Fusion: exit 1 when VERIFIED_TOOLS.md is missing
                                                   or its source hash differs from the tree)
       py -3 tests/live/tool_verify.py --json     (also write tests/live/results/verify-<ts>.json)
+      py -3 tests/live/tool_verify.py --keep-open  (leave the story document open for inspection)
 
 Steps are DATA (see STEPS): each row is (tool, args, expect) where args may be a dict or a
-callable(ctx) reading what earlier steps stored, and expect is "ok" or "refused" (a deliberate
-guard check whose error must name the offense). Extend coverage by adding rows, not code.
+callable(ctx) reading what earlier steps stored, and expect is "ok", "refused" (a deliberate
+guard check whose error must name the offense), or a callable(payload) -> bool - a VALUE
+PREDICATE run on an ok result (falsy = FAIL); that is how grip contact and machine assignment
+are asserted, not just call success. Extend coverage by adding rows, not code.
 """
 
 import argparse
@@ -30,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -117,16 +130,24 @@ def _prof(key):
     return (key, lambda p: p["profiles"][0]["handle"])          # sketch_get -> first profile handle
 
 
-def _box(name, ox=0):
-    """Four steps building a fresh free component 'name' holding one 20x20x10 solid box (offset ox in
-    x). The reusable free occurrence the joint/assembly steps mate."""
+def _box(name, ox=0, oy=0):
+    """Four steps building a fresh free component 'name' holding one 20x20x10 solid box (offset
+    ox/oy in the world grid - every cameo gets its own slot so nothing builds on top of the
+    gyroscope or another cameo). The reusable free occurrence the joint/assembly steps mate."""
     return [
         ("model_create_component", {"name": name, "activate": True}, "ok", None),
         ("sketch_create", {"plane": "xy", "name": name + "S"}, "ok", None),
-        ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": 0, "x2": ox + 20, "y2": 20,
+        ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy, "x2": ox + 20, "y2": oy + 20,
                                  "sketch_name": name + "S"}, "ok", None),
         ("model_extrude", {"sketch_name": name + "S", "profile_index": 0, "distance": 10}, "ok", None),
     ]
+
+
+def _watch(occurrence):
+    """A camera row: orient iso and FIT to the occurrence just built, so a viewer watching the run
+    sees each feature appear instead of an empty corner of the world."""
+    return ("view_set", {"action": "orient", "orientation": "iso-top-right", "focus": occurrence},
+            "ok", None)
 
 
 # ── the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document ──────
@@ -158,7 +179,7 @@ _OVERTURE = [
     ("sys_get_selection", {}, "refused", None),   # nothing picked yet - the expected empty-selection refusal
 ]
 
-# --- ACT 1: SKELETON + PARAMETERS - the parametric cast, sketch-only (the S1 analog) -----------
+# --- ACT 1: SKELETON + PARAMETERS - parametric skeleton, sketch-only (mirrors scenario S1) -----
 _SKELETON = [
     # one driving diameter; every ring/rotor radius derives from it so ACT 6's resize propagates.
     ("param_add", {"name": "GimbalDia", "expression": "120 mm"}, "ok", None),
@@ -227,15 +248,21 @@ _SKELETON = [
     ("design_activate_component", {"occurrence": "RotorShaft:1"}, "ok", None),
     ("sketch_create", {"plane": "yz", "name": "ShaftSketch"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 3, "sketch_name": "ShaftSketch"}, "ok", None),
-    # the carrier yoke bar.
+    # the carrier yoke, BELOW the rotor's swing (the rotor disc reaches z=-24): a bar plus a round
+    # hub that carries the machinable detail (center bore, bolt circle, end pivot bores - cut in
+    # ACT 2). Sitting at z=-32..-26 it clears the rings (z=+/-2) and the spinning rotor.
     ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "CarrierSketch"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "CarrierPlane"}, "ok", None),
+    ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierSketch"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -8, "x2": 50, "y2": 8, "sketch_name": "CarrierSketch"}, "ok", None),
-    # the pedestal base + a smaller top profile on an offset plane, for a base-to-post LOFT.
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 14, "sketch_name": "CarrierSketch"}, "ok", None),
+    # the pedestal base + a smaller top profile on an offset plane, for a base-to-post LOFT -
+    # entirely BELOW the carrier (top at z=-32 meets the carrier's underside).
     ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
-    ("sketch_create", {"plane": "xy", "name": "PedBase"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -60, "name": "PedBasePlane"}, "ok", None),
+    ("sketch_create", {"plane": "PedBasePlane", "name": "PedBase"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 15, "sketch_name": "PedBase"}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 30, "name": "PedTopPlane"}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "PedTopPlane"}, "ok", None),
     ("sketch_create", {"plane": "PedTopPlane", "name": "PedTop"}, "ok", None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 8, "sketch_name": "PedTop"}, "ok", None),
     # the crank: a path + a profile for a swept handle.
@@ -251,7 +278,7 @@ _SKELETON = [
                          "height": 6, "x": -60, "y": 72}, "ok", None),
 ]
 
-# --- ACT 2: SOLIDS - the cast turns solid, EACH PART ITS OWN COLOR (the S2 analog) -------------
+# --- ACT 2: SOLIDS - the parts turn solid, each part its own color (mirrors scenario S2) -------
 # The hero solids ride on ACT 1's parametric sketches; the multi-body feature tools that have no
 # single natural gyroscope home (draft/mirror/patterns/hole/combine) ride cameo bodies in the SAME
 # document, so every one is exercised without contorting the mechanism.
@@ -266,13 +293,33 @@ _SOLIDS = [
     # the rotor disc, REVOLVED about the spin axis; the shaft and carrier extruded.
     ("model_revolve", {"sketch_name": "RotorSketch", "profile_index": 0, "axis": "x", "angle_deg": 360}, "ok", None),
     ("model_extrude", {"sketch_name": "ShaftSketch", "profile_index": 0, "distance": 30, "symmetric": True}, "ok", None),
-    ("model_extrude", {"sketch_name": "CarrierSketch", "profile_index": 0, "distance": 6, "symmetric": True}, "ok", None),
-    # the pedestal base-to-post transition, LOFTED between the two profiles.
+    # the carrier: bar + hub in one extrude (all regions), then the machinable detail cut
+    # through - a 5mm center bore, a 6x 3mm bolt circle on R9, and 4mm pivot bores at the ends.
+    ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
+    ("model_extrude", {"sketch_name": "CarrierSketch", "profile_index": "all", "distance": 6}, "ok", None),
+    ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 2.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 9, "cy": 0, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 4.5, "cy": 7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": -4.5, "cy": 7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": -9, "cy": 0, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": -4.5, "cy": -7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 4.5, "cy": -7.794, "radius": 1.5, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": -45, "cy": 0, "radius": 2, "sketch_name": "CarrierHoles"}, "ok", None),
+    ("model_extrude", {"sketch_name": "CarrierHoles", "profile_index": "all", "distance": 6, "operation": "cut"}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # the pedestal base-to-post transition, LOFTED between the two profiles - built INTO the
+    # Pedestal component (the loft lands in the ACTIVE component, not the profiles' owner).
+    ("design_activate_component", {"occurrence": "Pedestal:1"}, "ok", None),
     ("sketch_get", {"sketch_name": "PedBase"}, "ok", ("ped_base", lambda p: p["profiles"][0]["handle"])),
     ("sketch_get", {"sketch_name": "PedTop"}, "ok", ("ped_top", lambda p: p["profiles"][0]["handle"])),
     ("model_loft", lambda c: {"profiles": [_ctx_get(c, "ped_base", "pedestal base"), _ctx_get(c, "ped_top", "pedestal top")]}, "ok", None),
-    # the crank handle, SWEPT along its path.
+    # the crank handle, SWEPT along its path - into the Crank component for the same reason.
+    ("design_activate_component", {"occurrence": "Crank:1"}, "ok", None),
     ("model_sweep", {"profile": {"sketch": "CrankProf", "profile_index": 0}, "path": "sketch:CrankPath"}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     # EACH PART ITS OWN COLOR - the recording's signature look - and a physical material on the rotor.
     ("appearance_set", {"target": "Frame", "color": "#5E6AD2"}, "ok", None),
     ("appearance_set", {"target": "Pedestal", "color": "#8A94A6"}, "ok", None),
@@ -296,10 +343,15 @@ _SOLIDS = [
     ("sketch_create", {"plane": "xy", "name": "FCPad"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 0, "x2": 240, "y2": 40, "sketch_name": "FCPad"}, "ok", None),
     ("model_extrude", {"sketch_name": "FCPad", "profile_index": 0, "distance": 20}, "ok", None),
+    _watch("FeatureCameo:1"),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [200, 20, 10], "max_results": 1}, "ok", _fg("fc_side")),
     ("model_draft", lambda c: {"faces": [_ctx_get(c, "fc_side", "cameo side face")], "pull_direction": "xy", "angle_deg": 3}, "ok", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_top")),
-    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[5, 5, 0]]}, "ok", None),
+    # hole points are in the FACE'S LOCAL frame, whose origin for this face is the MODEL origin
+    # projected onto its plane - so on-pad coordinates are the world x,y. ([5,5] here drilled at
+    # world (5,5), a point off this pad entirely: the hole silently cut whatever body sat near
+    # the origin, and the axis-count read-back cannot see a wrong-body cut. Measured live.)
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[220, 20, 0]]}, "ok", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_body")),
     ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "plane": "yz"}, "ok", None),
     ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, "ok", None),
@@ -312,13 +364,14 @@ _SOLIDS = [
     ("sketch_create", {"plane": "xy", "name": "CC2"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 220, "y1": 120, "x2": 250, "y2": 150, "sketch_name": "CC2"}, "ok", None),
     ("model_extrude", {"sketch_name": "CC2", "profile_index": 0, "distance": 10}, "ok", None),
+    _watch("CombineCameo:1"),
     ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [215, 115, 10], "max_results": 1}, "ok", _fg("cc_a")),
     ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [235, 135, 10], "max_results": 1}, "ok", _fg("cc_b")),
     ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"), "tools": [_ctx_get(c, "cc_b", "combine tool")], "operation": "join"}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
-# --- ACT 3: MOTION - four gimbal axes + a crank->rotor link, DRIVEN ON CAMERA (the S3 analog) --
+# --- ACT 3: MOTION - four gimbal axes + a crank->rotor link, driven live (mirrors scenario S3) -
 # Joints on the real gyroscope parts via origin snaps (no teleport). assembly_move/capture/constrain
 # pose scratch cameos so the mechanism itself is not disturbed.
 _MOTION = [
@@ -350,6 +403,7 @@ _MOTION = [
     ("sketch_get", {"sketch_name": "BoreS"}, "ok", ("bore_ring", lambda p: p["profiles"][-1]["handle"])),
     ("model_extrude", lambda c: {"sketch_name": "BoreS", "profile_index": _ctx_get(c, "bore_ring", "bore ring"), "distance": 20}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    _watch("BoreCameo:1"),
     ("find_geometry", {"target": "PinCameo", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("pin_cyl")),
     ("find_geometry", {"target": "BoreCameo", "kind": "cylinder_face", "radius": 5.5, "max_results": 1}, "ok", _fg("bore_cyl")),
     ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "pin_cyl", "pin face"), "handle_two": _ctx_get(c, "bore_cyl", "bore face"), "motion": "revolute"}, "ok", None),
@@ -361,6 +415,11 @@ _MOTION = [
     ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 20}, "ok", None),
     ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 25}, "ok", None),
     ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 30}, "ok", None),
+    # CrankAxis (a link member) is now in the session drive registry, so driving its partner Spin
+    # must REFUSE (the second-member guard). This is also the live proof that
+    # MotionLink.jointOne/jointTwo resolve: a wrong property name would leave the partner lookup
+    # blind and this drive would wrongly succeed, failing the row.
+    ("joint_drive", {"joint_name": "Spin", "angle_deg": 5}, "refused", None),
     ("assembly_get", {}, "ok", None),   # the crank->rotor 2:1 link read (Spin should read 60 deg)
     ("assembly_inspect_interference", {}, "ok", None),   # driven pose
     ("joint_drive", {"joint_name": "Yaw", "angle_deg": 0}, "ok", None),
@@ -383,7 +442,7 @@ _MOTION += _box("ConA", ox=360) + _box("ConB", ox=360) + [
     ("design_recompute", {}, "ok", None),
 ]
 
-# --- ACT 4: DETAILS - fillet/chamfer the rings, section through the gimbal center (the S4 analog)
+# --- ACT 4: DETAILS - fillet/chamfer the rings, section through the gimbal center (mirrors S4) -
 _DETAILS = [
     ("find_geometry", {"target": "OuterRing", "kind": "circular_edge", "max_results": 1}, "ok", _fg("or_edge")),
     ("model_fillet", lambda c: {"edges": [_ctx_get(c, "or_edge", "outer ring edge")], "radius": 1}, "ok", None),
@@ -394,13 +453,14 @@ _DETAILS = [
     ("sketch_create", {"plane": "xy", "name": "ShellS"}, "ok", None),
     ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 0, "x2": 430, "y2": 30, "sketch_name": "ShellS"}, "ok", None),
     ("model_extrude", {"sketch_name": "ShellS", "profile_index": 0, "distance": 20}, "ok", None),
+    _watch("ShellCap:1"),
     ("find_geometry", {"target": "ShellCap", "kind": "planar_face", "nearest_to": [415, 15, 20], "max_results": 1}, "ok", _fg("shell_top")),
     ("model_shell", lambda c: {"body_name": "ShellCap", "remove_faces": [_ctx_get(c, "shell_top", "shell top")], "thickness": 2}, "ok", None),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 12, "name": "WartPlane"}, "ok", None),
     ("design_delete_feature", {"feature": "WartPlane"}, "ok", None),
     ("model_create_component", {"name": "ScratchOcc", "activate": False}, "ok", None),
     ("design_delete_occurrence", {"occurrence": "ScratchOcc:1"}, "ok", None),
-    # THE MONEY SHOT: cut through the gimbal center, then clear.
+    # Section view: cut through the gimbal center, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
     ("view_section", {"action": "cut", "plane": "yz", "offset": 0}, "ok", None),
@@ -409,7 +469,7 @@ _DETAILS = [
     ("view_screenshot_multi", {"views": ["front", "top"], "width": 400, "height": 300}, "ok", None),
 ]
 
-# --- ACT 6: THE RESIZE - the parametric money moment (the S6 analog) ---------------------------
+# --- ACT 6: THE RESIZE - the parametric resize check (mirrors scenario S6) ---------------------
 # Bump the one driving diameter; the whole gyroscope grows. Read the rings back before and after.
 _RESIZE = [
     ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300}, "ok", None),
@@ -427,6 +487,9 @@ _RESIZE = [
     ("sketch_get", {"sketch_name": "OuterRingSketch"}, "ok", None),   # restored
     ("param_add", {"name": "ScratchDim", "expression": "5 mm"}, "ok", None),
     ("param_delete", {"name": "ScratchDim"}, "ok", None),
+    # REST-POSE HONESTY over the gyroscope parts: only the intended shaft-in-rotor press fit may
+    # overlap; any other gyro-pair collision fails the story (cameo snap-fits are out of scope).
+    ("assembly_inspect_interference", {}, lambda p: _gyro_rest_clean(p), None),
 ]
 
 # --- FINALE: back to the design, beauty shots, then DISCARD the document on camera --------------
@@ -515,6 +578,10 @@ _MOTION_FB = (
         ("joint_edit", {"joint_name": "RevJoint", "min_deg": -45, "max_deg": 45}, "ok", None),
         ("joint_create", {"occurrence_one": "JM:1:top", "occurrence_two": "JN:1:top", "joint_type": "revolute", "axis": "z", "name": "RevJoint2"}, "ok", None),
         ("joint_motion_link", {"joint_one": "RevJoint", "joint_two": "RevJoint2", "ratio": 2}, "ok", None),
+        # RevJoint was driven above, so driving its NEW link partner must refuse (the second-member
+        # guard). This row also proves MotionLink.jointOne/jointTwo resolve live: a wrong property
+        # name would make the partner lookup blind and this drive would wrongly succeed.
+        ("joint_drive", {"joint_name": "RevJoint2", "angle_deg": 10}, "refused", None),
         ("joint_create_as_built", {"occurrence_one": "JE:1", "occurrence_two": "JF:1"}, "ok", None),
         ("find_geometry", {"target": "JG", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("jg_face")),
         ("find_geometry", {"target": "JH", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("jh_face")),
@@ -564,16 +631,20 @@ _RESIZE_FB = [
 
 # ACT 5: MACHINING PREP - surfaces, sheet ops, split/stitch/arrange/base-feature, holder read.
 _MACHINING = [
+    # the surface/split/stitch cameos live on a GRID (y=200 row, plus a z-lifted revolve) so each
+    # builds in clear space a viewer can see, never on top of the gyroscope or another cameo.
     ("model_create_component", {"name": "SRev", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xz", "name": "SRevS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 10, "y1": 0, "x2": 10, "y2": 30, "sketch_name": "SRevS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 10, "y1": 60, "x2": 10, "y2": 90, "sketch_name": "SRevS"}, "ok", None),
     ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360}, "ok", None),
     ("find_geometry", {"target": "SRev", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("srev_face")),
     ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "srev_face", "surface face")], "thickness": 2}, "ok", None),
+    _watch("SRev:1"),
     ("model_create_component", {"name": "Surf", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "SurfS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 40, "y2": 30, "sketch_name": "SurfS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 200, "x2": 240, "y2": 230, "sketch_name": "SurfS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SurfS", "distance": 15}, "ok", None),
+    _watch("Surf:1"),
     ("find_geometry", {"target": "Surf", "kind": "planar_face", "max_results": 1}, "ok", _fg("surf_face")),
     ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 3}, "ok", None),
     ("surface_offset", lambda c: {"faces": [_ctx_get(c, "surf_face", "surface face")], "distance": 0}, "ok", None),
@@ -583,15 +654,16 @@ _MACHINING = [
     ("surface_reverse_normal", lambda c: {"bodies": [_ctx_get(c, "surf_body", "surface body")]}, "ok", None),
     ("model_create_component", {"name": "SDel", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "SD1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20, "sketch_name": "SD1"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 200, "x2": 320, "y2": 220, "sketch_name": "SD1"}, "ok", None),
     ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, "ok", None),
-    ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("sdel_top")),
+    _watch("SDel:1"),
+    ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 10], "max_results": 1}, "ok", _fg("sdel_top")),
     ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False}, "ok", None),
-    ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [10, 10, 10], "max_results": 4}, "ok", _fgn("sdel_rim")),
+    ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [310, 210, 10], "max_results": 4}, "ok", _fgn("sdel_rim")),
     ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges")}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "Proj"}, "ok", None),
-    ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [10, 10, 0], "max_results": 1}, "ok", _fg("proj_face")),
+    ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 0], "max_results": 1}, "ok", _fg("proj_face")),
     ("sketch_project", lambda c: {"entities": [_ctx_get(c, "proj_face", "project face")], "sketch_name": "Proj"}, "ok", None),
     # surface_trim + surface_untrim on an intersecting-sheet topology. Staged in clear space (X=600)
     # so no other body's surface intersects the sheet - only its own cutter divides it, keeping the
@@ -611,37 +683,42 @@ _MACHINING = [
     # split / unstitch / stitch / base-feature / arrange / compute-holder.
     ("model_create_component", {"name": "Spl", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "Sp1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 40, "y2": 40, "sketch_name": "Sp1"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 200, "x2": 440, "y2": 240, "sketch_name": "Sp1"}, "ok", None),
     ("model_extrude", {"sketch_name": "Sp1", "profile_index": 0, "distance": 20}, "ok", None),
-    ("model_construction", {"kind": "plane", "plane": "xz", "offset": 20, "name": "SplMid"}, "ok", None),
-    ("find_geometry", {"target": "Spl", "kind": "planar_face", "nearest_to": [20, 20, 20], "max_results": 1}, "ok", _fg("spl_body")),
+    _watch("Spl:1"),
+    ("model_construction", {"kind": "plane", "plane": "xz", "offset": 220, "name": "SplMid"}, "ok", None),
+    ("find_geometry", {"target": "Spl", "kind": "planar_face", "nearest_to": [420, 220, 20], "max_results": 1}, "ok", _fg("spl_body")),
     ("model_split", lambda c: {"split": "body", "target": _ctx_get(c, "spl_body", "split body"), "split_plane": "SplMid"}, "ok", None),
     ("model_create_component", {"name": "Stc", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "St1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20, "sketch_name": "St1"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 500, "y1": 200, "x2": 520, "y2": 220, "sketch_name": "St1"}, "ok", None),
     ("model_extrude", {"sketch_name": "St1", "profile_index": 0, "distance": 10}, "ok", None),
-    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("stc_body")),
+    _watch("Stc:1"),
+    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 10], "max_results": 1}, "ok", _fg("stc_body")),
     ("model_unstitch", lambda c: {"target": _ctx_get(c, "stc_body", "unstitch body"), "chain": False}, "ok", None),
-    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [10, 10, 0], "max_results": 1}, "ok", _fg("stc_f1")),
-    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [0, 10, 5], "max_results": 1}, "ok", _fg("stc_f2")),
+    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 0], "max_results": 1}, "ok", _fg("stc_f1")),
+    ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [500, 210, 5], "max_results": 1}, "ok", _fg("stc_f2")),
     ("model_stitch", lambda c: {"bodies": [_ctx_get(c, "stc_f1", "stitch a"), _ctx_get(c, "stc_f2", "stitch b")]}, "ok", None),
     ("model_base_feature", {"action": "start", "base_feature": "BF1"}, "ok", None),
     ("model_base_feature", {"action": "finish", "base_feature": "BF1"}, "ok", None),
-] + _box("ArrP1", ox=200) + _box("ArrP2", ox=260) + [
+] + _box("ArrP1", ox=200, oy=350) + _box("ArrP2", ox=260, oy=350) + [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "ArrB"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 100, "y1": 100, "x2": 500, "y2": 500, "sketch_name": "ArrB"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 100, "y1": 400, "x2": 500, "y2": 600, "sketch_name": "ArrB"}, "ok", None),
     ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1", "ArrP2:1"], "solver": "rectangular", "spacing": 5}, "ok", None),
     # compute_holder needs a body + a cyl-face axis + a planar end-datum.
     ("model_create_component", {"name": "HolderPart", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "HP1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 40, "y2": 20, "sketch_name": "HP1"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 200, "x2": 640, "y2": 220, "sketch_name": "HP1"}, "ok", None),
     ("model_extrude", {"sketch_name": "HP1", "profile_index": 0, "distance": 10}, "ok", None),
-    ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [20, 10, 10], "max_results": 1}, "ok", _fg("hp_top")),
-    ("model_hole", lambda c: {"face": _ctx_get(c, "hp_top", "holder top"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[5, 5, 0]]}, "ok", None),
+    _watch("HolderPart:1"),
+    ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_top")),
+    # hole points ride the face's LOCAL frame = the model origin projected onto the face, so
+    # on-pad coordinates are the world x,y (same measured fact as the FeatureCameo hole).
+    ("model_hole", lambda c: {"face": _ctx_get(c, "hp_top", "holder top"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[605, 205, 0]]}, "ok", None),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "max_results": 1}, "ok", _fg("hp_body")),
     ("find_geometry", {"target": "HolderPart", "kind": "cylinder_face", "radius": 2, "max_results": 1}, "ok", _fg("hp_axis")),
-    ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [20, 10, 10], "max_results": 1}, "ok", _fg("hp_datum")),
+    ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_datum")),
     ("model_compute_holder", lambda c: {"body": _ctx_get(c, "hp_body", "holder body"), "axis": _ctx_get(c, "hp_axis", "holder axis"), "end_datum": _ctx_get(c, "hp_datum", "holder datum")}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
@@ -650,14 +727,15 @@ _MACHINING = [
 _MESH = [
     ("model_create_component", {"name": "Msh", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "MshS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20, "sketch_name": "MshS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 300, "x2": 220, "y2": 320, "sketch_name": "MshS"}, "ok", None),
     ("model_extrude", {"sketch_name": "MshS", "profile_index": 0, "distance": 10}, "ok", None),
-    ("find_geometry", {"target": "Msh", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("msh_body")),
+    _watch("Msh:1"),
+    ("find_geometry", {"target": "Msh", "kind": "planar_face", "nearest_to": [210, 310, 10], "max_results": 1}, "ok", _fg("msh_body")),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "MshMid"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "MshCyl"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 60, "cy": 60, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 260, "cy": 360, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
     ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, "ok", None),
-    ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [60, 60, 10], "max_results": 1}, "ok", _fg("cyl_body")),
+    ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [260, 360, 10], "max_results": 1}, "ok", _fg("cyl_body")),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MRED", "quality": "high"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MA", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MC", "quality": "low"}, "ok", None),
@@ -676,10 +754,376 @@ _MESH = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
-# ACT 8: CAM FINALE - a full milling job on a scratch stock, toolpath LEFT VISIBLE, NC posted.
+# ── the SPATIAL value-checks: the fusion-spatial add-in's raw TCP protocol (stdlib only) ────────
+# A closed port 8767 SKIPS a spatial phase (one skipped row, never a FAIL); a check that returns
+# false is a FAIL row - it means the STORY's geometry is wrong, which blocks the receipt.
+SPATIAL_PORT = 8767
+
+
+def spatial_rpc(sock, method, params=None):
+    sock.sendall((json.dumps({"id": 1, "method": method, "params": params or {}}) + "\n")
+                 .encode("utf-8"))
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise RuntimeError("spatial add-in closed the connection mid-reply")
+        buf += chunk
+    reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    if "error" in reply:
+        raise RuntimeError(reply["error"].get("message", "spatial error"))
+    return reply["result"]
+
+
+def spatial_phase(name, checks, rows):
+    """Run spatial value-checks against the live scene. checks = [(label, fn(bodies) -> bool)]."""
+    print(f"\n-- {name} --")
+    try:
+        sock = socket.create_connection(("127.0.0.1", SPATIAL_PORT), timeout=2)
+    except OSError:
+        rows.append((name, "skipped", f"spatial add-in port {SPATIAL_PORT} closed"))
+        print(f"  skipped(spatial): port {SPATIAL_PORT} closed")
+        return
+    try:
+        inventory = spatial_rpc(sock, "space.bodies", {"scope": "all"})
+        bodies = inventory.get("bodies", [])
+        print(f"  space.bodies: {len(bodies)} bodies, units={inventory.get('units')}, "
+              f"up={inventory.get('upAxis')}")
+        for label, fn in checks:
+            try:
+                passed = bool(fn(bodies))
+            except Exception as e:
+                rows.append((f"{name}:{label}", "FAIL", f"check raised: {e}"))
+                continue
+            rows.append((f"{name}:{label}", "pass" if passed else "FAIL",
+                         "" if passed else "spatial check returned false"))
+    except Exception as e:
+        rows.append((name, "FAIL", str(e)[:160]))
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _solids(bodies):
+    return [b for b in bodies if b.get("kind") == "solid"]
+
+
+def _named(bodies, fragment):
+    frag = fragment.lower()
+    return [b for b in bodies if frag in ((b.get("layer") or "") + (b.get("name") or "")).lower()]
+
+
+def _xy_within(inner, outer, slack=0.5):
+    """inner's world XY footprint sits inside outer's (radial nesting, seen from bboxes)."""
+    bi, bo = inner["bbox"], outer["bbox"]
+    return (bi["min"][0] >= bo["min"][0] - slack and bi["max"][0] <= bo["max"][0] + slack
+            and bi["min"][1] >= bo["min"][1] - slack and bi["max"][1] <= bo["max"][1] + slack)
+
+
+def _one(bodies, frag):
+    """One body by occurrence path: EXACT layer match first ('Frame:1' must not resolve to the
+    nested 'Frame:1/Pedestal:1' body via substring), fragment match as the fallback."""
+    exact = [b for b in bodies if (b.get("layer") or "") == frag]
+    if exact:
+        return exact[0]
+    hits = _named(bodies, frag)
+    return hits[0] if hits else None
+
+
+GYRO_CHECKS = [
+    # the eight-part cast (plus cameos) is standing: a thin inventory floor, not an exact count.
+    ("solid_count>=8", lambda bodies: len(_solids(bodies)) >= 8),
+    # the rotor is a revolved disc R=GimbalDia/5=24mm, 4mm thick: pi*24^2*4 ~ 7238 mm^3.
+    ("rotor_volume_band", lambda bodies: any(
+        b.get("volume") and 6000 <= b["volume"] <= 8500 for b in _named(bodies, "rotor"))),
+    # every solid reports a world bbox the engine could mesh.
+    ("bboxes_present", lambda bodies: all(b.get("bbox") for b in _solids(bodies))),
+    # the gimbal NESTS - rotor inside the inner ring, inner inside outer, outer inside the frame.
+    ("gimbal_nesting_chain", lambda bodies: _xy_within(_one(bodies, "Rotor:1"), _one(bodies, "InnerRing"))
+        and _xy_within(_one(bodies, "InnerRing"), _one(bodies, "OuterRing"))
+        and _xy_within(_one(bodies, "OuterRing"), _one(bodies, "Frame:1"))),
+    # the carrier rides BELOW the rotor's swing (the disc reaches z=-24) - no sweep collision.
+    ("carrier_clear_of_rotor", lambda bodies:
+        _one(bodies, "Carrier")["bbox"]["max"][2] <= _one(bodies, "Rotor:1")["bbox"]["min"][2] + 0.01),
+    # the pedestal sits entirely below the carrier (the stack: pedestal -> carrier -> gimbal).
+    ("pedestal_below_carrier", lambda bodies:
+        _one(bodies, "Pedestal")["bbox"]["max"][2] <= _one(bodies, "Carrier")["bbox"]["min"][2] + 0.01),
+]
+
+FIXTURE_CHECKS = [
+    # the gripped stack is standing: stock + two jaws + base + the carrier inside.
+    ("fixture_parts_present", lambda bodies: all(
+        _named(bodies, frag) for frag in ("STOCK", "JawL", "JawR", "ViseBase", "Carrier"))),
+    # SELF-CENTERING, seen from independent spatial data: after driving ONE jaw, the two jaws
+    # sit mirrored about y=0 (JawL's near face at -y equals JawR's near face at +y).
+    ("jaws_mirror_about_center", lambda bodies: abs(
+        _named(bodies, "JawL")[0]["bbox"]["max"][1]
+        + _named(bodies, "JawR")[0]["bbox"]["min"][1]) <= 0.1),
+    ("jaw_travel_happened", lambda bodies:
+        _named(bodies, "JawL")[0]["bbox"]["max"][1] > -13.5),  # built at -15; driven +3 -> -12
+    # machinist seating: the stock rides PROUD of the jaw tops (a cutter can reach the part).
+    ("stock_proud_of_jaws", lambda bodies: _named(bodies, "STOCK")[0]["bbox"]["max"][2]
+        > _named(bodies, "JawL")[0]["bbox"]["max"][2]),
+]
+
+
+# Rest-pose interference gate over the GYROSCOPE parts (the _RESIZE predicate): only the intended
+# shaft-in-rotor press-fit pair may overlap. Cameo pairs (a pin seated in its bore, the constrained
+# boxes) are joint-snapped fits by design and are out of scope.
+_GYRO_PARTS = {"Frame:1", "Pedestal:1", "Carrier:1", "OuterRing:1", "InnerRing:1",
+               "Rotor:1", "RotorShaft:1", "Crank:1"}
+
+
+def _gyro_rest_clean(p):
+    for i in p.get("measured", {}).get("interferences", []):
+        a = (i.get("occurrence_one") or "").split("/")[-1]
+        b = (i.get("occurrence_two") or "").split("/")[-1]
+        if a in _GYRO_PARTS and b in _GYRO_PARTS and sorted([a, b]) != ["Rotor:1", "RotorShaft:1"]:
+            return False
+    return True
+
+
+# ACT 8: REDUCE - the gyroscope is stripped to its ONE machinable part (the Carrier bar). The
+# mechanism and the near-origin cameos go; the survivor stays parametric. The far-grid cameo
+# fixtures (surface/mesh families) are out of frame and stay.
+_REDUCE = [
+    ("view_switch_workspace", {"workspace": "design"}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+] + [
+    ("design_delete_occurrence", {"occurrence": occ}, "ok", None)
+    for occ in ("Crank:1", "RotorShaft:1", "Rotor:1", "InnerRing:1", "OuterRing:1",
+                "Frame:1",           # takes the nested Pedestal with it
+                "FeatureCameo:1", "CombineCameo:1", "PinCameo:1", "BoreCameo:1",
+                "PoseCameo:1", "ConA:1", "ConB:1", "ShellCap:1")
+] + [
+    # the root Skeleton sketch (the construction axis crosses) goes too - the fixture scene
+    # shows the PART, not the build scaffolding.
+    ("design_delete_feature", {"feature": "Skeleton"}, "ok", None),
+    # the survivor, alone and still parametric.
+    ("model_inspect", {"target": "Carrier:1"}, "ok", None),
+    ("workspace_orient", {}, "ok", None),
+    _watch("Carrier:1"),
+]
+
+
+# ACT 9: VISE FIXTURE - the eval-proven self-centering vise modeled around the Carrier.
+# Geometry contract (all mm, Carrier occupies x[-50,50] hub y[-14,14] z[-32,-26]):
+#   STOCK    x[-55,55] y[-18,18] z[-35,-23]  - real margin all around (the adaptive's material)
+#   ViseBase x[-70,70] y[-52,52] z[-69,-49]
+#   Jaw seat z=-35 (the stock's underside rests level with the seat ledge)
+#   Jaw grip faces OPEN at y=-/+21; stock sides at y=-/+18 -> each jaw closes 3mm to contact
+#   Jaw lips top out at z=-27 -> the stock rides 4mm PROUD of the jaws (machinist seating)
+
+def _plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
+    """Component + its own build plane at z_offset + one rectangle, extruded up by height.
+    The plane lives INSIDE the component: sketch_create resolves construction-plane names in
+    the ACTIVE component, so a root-level plane is invisible after activate."""
+    plane = comp + "Floor"
+    return [
+        ("model_create_component", {"name": comp, "activate": True}, "ok", None),
+        ("model_construction", {"kind": "plane", "plane": "xy", "offset": z_offset,
+                                "name": plane}, "ok", None),
+        ("sketch_create", {"plane": plane, "name": sketch}, "ok", None),
+        ("sketch_add_geometry", {"kind": "rectangle", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                 "sketch_name": sketch}, "ok", None),
+        ("model_extrude", {"sketch_name": sketch, "profile_index": 0, "distance": height},
+         "ok", None),
+    ]
+
+
+def _second_plate(comp, sketch, z_offset, x1, y1, x2, y2, height):
+    """A second stacked extrude inside the ACTIVE component (the jaw's upper gripping lip)."""
+    plane = comp + "LipPlane"
+    return [
+        ("model_construction", {"kind": "plane", "plane": "xy", "offset": z_offset,
+                                "name": plane}, "ok", None),
+        ("sketch_create", {"plane": plane, "name": sketch}, "ok", None),
+        ("sketch_add_geometry", {"kind": "rectangle", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                 "sketch_name": sketch}, "ok", None),
+        ("model_extrude", {"sketch_name": sketch, "profile_index": 0, "distance": height},
+         "ok", None),
+    ]
+
+
+_VISE = (
+    _plate("ViseBase", "VBase", -69, -70, -52, 70, 52, 20)
+    # JawL: lower seat block up to the seat ledge (z=-35), then the gripping lip above it.
+    + _plate("JawL", "JLseat", -49, -30, -37, 30, -15, 14)
+    + _second_plate("JawL", "JLlip", -35, -30, -37, 30, -21, 8)
+    + _plate("JawR", "JRseat", -49, -30, 15, 30, 37, 14)
+    + _second_plate("JawR", "JRlip", -35, -30, 21, 30, 37, 8)
+    + _plate("STOCK", "StockS", -35, -55, -18, 55, 18, 12)
+) + [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("appearance_set", {"target": "ViseBase", "color": "#455A64"}, "ok", None),
+    ("appearance_set", {"target": "JawL", "color": "#E5533C"}, "ok", None),
+    ("appearance_set", {"target": "JawR", "color": "#E5533C"}, "ok", None),
+    ("appearance_set", {"target": "STOCK", "color": "#8D6E63"}, "ok", None),
+    # the fixture skeleton: base grounded, each jaw a NAMED slider on the base. Every component
+    # here has its origin at the WORLD origin (geometry is drawn in world coordinates), so the
+    # ':origin' snap aligns already-aligned frames - a positional no-op, no teleport - and the
+    # slider axis 'y' rides the world-aligned frame.
+    ("assembly_ground", {"occurrence": "ViseBase:1", "ground_to_parent": True}, "ok", None),
+    ("joint_create", {"occurrence_one": "JawL:1:origin", "occurrence_two": "ViseBase:1:origin",
+                      "joint_type": "slider", "axis": "y", "name": "SlideL"}, "ok", None),
+    ("joint_create", {"occurrence_one": "JawR:1:origin", "occurrence_two": "ViseBase:1:origin",
+                      "joint_type": "slider", "axis": "y", "name": "SlideR"}, "ok", None),
+    # the stock in the vise, the part in the stock - both as-built rigid (no motion).
+    ("joint_create_as_built", {"occurrence_one": "STOCK:1", "occurrence_two": "ViseBase:1"}, "ok", None),
+    ("joint_create_as_built", {"occurrence_one": "Carrier:1", "occurrence_two": "STOCK:1"}, "ok", None),
+    # SELF-CENTERING: couple the two sliders at ratio -1 (on real sliders the platform accepts
+    # slider-slider links - live-verified).
+    ("joint_motion_link", {"joint_one": "SlideL", "joint_two": "SlideR", "ratio": -1}, "ok", None),
+    # drive ONE jaw closed by its 3mm approach; the link must bring the OTHER jaw in too.
+    ("joint_drive", {"joint_name": "SlideL", "distance": 3}, "ok", None),
+    # GRIP VERIFIED BY MEASURE, not by trust: each jaw's gripping face touches its stock side.
+    ("find_geometry", {"target": "JawL", "kind": "planar_face", "nearest_to": [0, -18, -31],
+                       "max_results": 1}, "ok", _fg("jawL_grip")),
+    ("find_geometry", {"target": "JawR", "kind": "planar_face", "nearest_to": [0, 18, -31],
+                       "max_results": 1}, "ok", _fg("jawR_grip")),
+    ("model_measure_between", lambda c: {"a": _ctx_get(c, "jawL_grip", "JawL grip face"),
+                                         "b": "STOCK"},
+     lambda p: p.get("distance", 99) <= 0.1, None),
+    ("model_measure_between", lambda c: {"a": _ctx_get(c, "jawR_grip", "JawR grip face"),
+                                         "b": "STOCK"},
+     lambda p: p.get("distance", 99) <= 0.1, None),
+    ("assembly_inspect_interference", {}, "ok", None),
+    ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
+    ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
+]
+
+
+# ACT 10a: CAM on the REAL part in the REAL fixture - job built and generated. The scratch-stock
+# rows remain as this act's fallback, so the CAM family stays covered when the story world
+# could not build.
+_CAM_STORY = [
+    ("view_switch_workspace", {"workspace": "manufacture"}, "ok", None),
+    ("cam_get", {}, "ok", None),
+    # two document tools: a mill for the milling ops, a 3mm drill for the bolt circle.
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": "flat end mill"},
+                                      {"from_type": "drill", "diameter": "3 mm"}]}, "ok", None),
+    # sample clones keep the sample's tool number; two clones can collide and the post refuses
+    # ("Different tools have the same tool number") - assign distinct numbers explicitly.
+    ("cam_edit_tools", {"action": "edit", "scope": "document", "tool": 0,
+                        "parameters": {"tool_number": "1"}}, "ok", None),
+    ("cam_edit_tools", {"action": "edit", "scope": "document", "tool": 1,
+                        "parameters": {"tool_number": "2"}}, "ok", None),
+    ("cam_create_setup", {"models": ["Carrier"], "name": "DemoSetup"}, "ok", None),
+    # the REAL stock solid and the REAL fixture bodies - the shop-template selection shape.
+    ("cam_edit_setup", {"setup": "DemoSetup", "stock": ["STOCK"],
+                        "fixtures": ["ViseBase", "JawL", "JawR"]}, "ok", None),
+    # THE ASSOCIATIVE SEAM ON CAMERA: a Joint Origin at the real stock's center becomes the
+    # setup WCS; the bound_entities read-back lands in ctx as the receipt's evidence.
+    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": "STOCK:1",
+                             "orient_axis": "z", "name": "StockWCS"}, "ok", None),
+    ("cam_edit_setup", {"setup": "DemoSetup", "wcs": {"origin": "StockWCS"}}, "ok",
+     ("wcs_bound_entities", lambda p: p["wcs_set"]["origin"]["bound_entities"])),
+    # a real machine: simulation-ready machines refuse direct assignment (API limitation);
+    # machine_strip_simulation is the one working path. Asserted by read-back, not call success.
+    ("cam_edit_setup", {"setup": "DemoSetup", "machine": "Haas VF-2",
+                        "machine_strip_simulation": True},
+     lambda p: p.get("machine_set") == "Haas VF-2", None),
+    ("cam_get", {"include": ["machines"], "vendor": "Haas", "machine_type": "milling"},
+     lambda p: p.get("machines", {}).get("count", 0) > 0, None),
+    # four operations: an explicit FACE selection, an ADAPTIVE with real stock margin to clear,
+    # a zero-handle SILHOUETTE, and a DRILL on the hub's patterned bolt circle.
+    ("cam_create_operation", {"setup": "DemoSetup", "strategy": "face",
+                              "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+    ("cam_create_operation", {"setup": "DemoSetup", "strategy": "adaptive",
+                              "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+    ("cam_create_operation", {"setup": "DemoSetup", "strategy": "contour2d",
+                              "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
+    ("cam_create_operation", {"setup": "DemoSetup", "strategy": "drill",
+                              "tool_scope": "document", "tool_index": 1, "generate": False}, "ok", None),
+    ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}, "ok", None),
+    ("find_geometry", {"target": "STOCK", "kind": "planar_face", "nearest_to": [0, 0, -23],
+                       "max_results": 1}, "ok", _fg("stock_top")),
+    ("cam_select_geometry", lambda c: {"operation": "Face1", "selection": "face",
+                                       "handles": [_ctx_get(c, "stock_top", "stock top")],
+                                       "generate": False}, "ok", None),
+    # zero-handle silhouette: applies against the setup's model (live-verified mechanism).
+    ("cam_select_geometry", {"operation": "2D Contour1", "selection": "silhouette",
+                             "generate": False}, "ok", None),
+    # the drill: the bolt-circle bores selected by handle + diameter filter (3mm +/- 0.1).
+    ("find_geometry", {"target": "Carrier", "kind": "cylinder_face", "radius": 1.5,
+                       "max_results": 8}, "ok", _fgn("bolt_bores")),
+    ("cam_select_geometry", lambda c: {"operation": "Drill1", "selection": "holes",
+                                       "handles": _ctx_get(c, "bolt_bores", "bolt-circle bores"),
+                                       "min_diameter": 2.9, "max_diameter": 3.1,
+                                       "generate": False}, "ok", None),
+    ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}}, "ok", None),
+    ("cam_reorder", {"entity": "Adaptive1", "position": "before", "reference": "Face1"}, "ok", None),
+    ("cam_activate_setup", {"setup": "DemoSetup"}, "ok", None),
+    ("cam_compare_operations", {"operation_a": "Face1", "operation_b": "Adaptive1"}, "ok", None),
+    # FOLDERS: organize the job the way a shop sheet reads - milling vs drilling.
+    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Milling"}, "ok", None),
+    ("cam_edit_folders", {"action": "create", "setup": "DemoSetup", "name": "Drilling"}, "ok", None),
+    ("cam_edit_folders", {"action": "move", "setup": "DemoSetup", "folder": "Milling",
+                          "operations": ["Face1", "Adaptive1", "2D Contour1"]}, "ok", None),
+    ("cam_edit_folders", {"action": "move", "setup": "DemoSetup", "folder": "Drilling",
+                          "operations": ["Drill1"]}, "ok", None),
+    ("cam_show_toolpath", {"action": "list"}, "ok", None),
+    ("cam_generate", {"target": "DemoSetup", "skip_valid": False}, "ok", None),
+    # generation completion is gated by the bounded poll run() performs after this act (an
+    # errored op or an EMPTY toolpath - a 'valid' op that cuts nothing - fails the run).
+]
+
+# ACT 10b: CAM read-back + deliverables on the generated job - toolpath shown, NC posted,
+# template saved and re-applied.
+_CAM_DELIVER = [
+    ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}, "ok", None),
+    ("cam_show_toolpath", {"action": "isolate", "operation": "Face1", "fit": True}, "ok", None),
+    ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
+    ("cam_show_toolpath", {"action": "hide_all"}, "ok", None),
+    ("cam_post", {"scope": "DemoSetup", "post": "haas", "post_scope": "local",
+                  "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"}, "ok", None),
+    ("cam_set_nc_comment", {"comment": "GYRO sweep"}, "ok", None),
+    ("cam_save_template", {"template_name": "GyroTmpl", "setup": "DemoSetup",
+                           "operations": "Face1", "location": "local"}, "ok", None),
+    ("cam_create_setup", {"models": ["Carrier"], "name": "Setup2"}, "ok", None),
+    ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl",
+                            "location": "local", "generate": "skip"}, "ok", None),
+    ("cam_delete", {"entity": "Adaptive1"}, "ok", None),
+    ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export",
+                       "target": "Carrier"}, "ok", None),
+]
+
+
+def poll_generation(rows, notes, setup, max_polls=40):
+    """Pump cam_get_status until completed (bounded). An errored op, an EMPTY toolpath (a 'valid'
+    op that cuts nothing - the silent version of wrong), or an exhausted budget FAILs."""
+    for _ in range(max_polls):
+        is_error, payload = call("cam_get_status", {"target": setup, "pump_seconds": 10})
+        if is_error:
+            rows.append(("cam_get_status", "FAIL", str(payload)[:160]))
+            return
+        states = payload.get("live_states", {})
+        if states.get("errored"):
+            rows.append(("cam_get_status", "FAIL",
+                         f"{states['errored']} operation(s) errored during generation"))
+            return
+        if payload.get("completed"):
+            empty = payload.get("empty_toolpaths") or []
+            if empty:
+                rows.append(("cam_get_status", "FAIL",
+                             f"empty toolpath(s) - nothing to machine: {', '.join(empty)}"))
+            else:
+                rows.append(("cam_get_status", "pass",
+                             f"{states.get('valid', '?')} valid, non-empty toolpaths"))
+                notes["cam_get_status"] = STORY.get("cam_get_status", "")
+            return
+    rows.append(("cam_get_status", "FAIL", f"not complete after {max_polls} polls"))
+
+
+# ACT 10a fallback: the scratch-stock milling job (kept whole so the CAM family stays covered
+# when the story world could not build).
 _CAM = (
-    _box("GyroStock")
+    _box("GyroStock", ox=700)
     + [
+        _watch("GyroStock:1"),
         ("view_switch_workspace", {"workspace": "manufacture"}, "ok", None),
         ("cam_get", {}, "ok", None),
         ("cam_edit_tools", {"action": "add", "scope": "document", "add_tools": [{"from_type": "flat end mill"}]}, "ok", None),
@@ -693,7 +1137,7 @@ _CAM = (
         # COMPUTED from it (GimbalDia/4 square, GimbalDia/8 tall - encloses the 20x20x10 stock part).
         # Computed-numbers-from-a-fresh-read is the verifiable shape: the CAM parameter store accepts
         # any expression TEXT unevaluated (a bogus name stores fine), so a CAD-param expression string
-        # cannot be trusted to evaluate - a live-probed fact, 2026-07-16.
+        # cannot be trusted to evaluate - a live-probed fact.
         ("param_get", {"name": "GimbalDia"}, "ok",
          ("gimbal_mm", lambda p: p["parameter"]["value"] * 10)),
         ("cam_edit_setup", lambda c: {"setup": "Setup1", "parameters": {
@@ -705,7 +1149,7 @@ _CAM = (
         ("cam_create_operation", {"setup": "Setup1", "strategy": "face", "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
         ("cam_create_operation", {"setup": "Setup1", "strategy": "adaptive", "tool_scope": "document", "tool_index": 0, "generate": False}, "ok", None),
         ("cam_get", {"include": ["operations"], "setup": "Setup1"}, "ok", None),
-        ("find_geometry", {"target": "GyroStock", "kind": "planar_face", "nearest_to": [10, 10, 10], "max_results": 1}, "ok", _fg("cam_top")),
+        ("find_geometry", {"target": "GyroStock", "kind": "planar_face", "nearest_to": [710, 10, 10], "max_results": 1}, "ok", _fg("cam_top")),
         ("cam_select_geometry", lambda c: {"operation": "Face1", "selection": "face", "handles": [_ctx_get(c, "cam_top", "cam top face")], "generate": False}, "ok", None),
         ("cam_edit_operation", {"operation": "Face1", "parameters": {"tool_feedCutting": "1200"}}, "ok", None),
         ("cam_edit_setup", {"setup": "Setup1", "models": ["GyroStock"]}, "ok", None),
@@ -716,15 +1160,19 @@ _CAM = (
         ("cam_show_toolpath", {"action": "list"}, "ok", None),
         ("cam_generate", {"target": "Setup1", "skip_valid": False}, "ok", None),
         ("cam_get_status", {"target": "Setup1", "pump_seconds": 10}, "ok", None),
-        ("cam_post", {"scope": "Setup1", "post": "haas", "post_scope": "local", "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"}, "ok", None),
-        ("cam_set_nc_comment", {"comment": "GYRO sweep"}, "ok", None),
-        ("cam_save_template", {"template_name": "GyroTmpl", "setup": "Setup1", "operations": "Face1", "location": "local"}, "ok", None),
-        ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup2"}, "ok", None),
-        ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl", "location": "local", "generate": "skip"}, "ok", None),
-        ("cam_delete", {"entity": "Adaptive1"}, "ok", None),
-        ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
     ]
 )
+
+# ACT 10b fallback: deliverables on the scratch job.
+_CAM_FB_DELIVER = [
+    ("cam_post", {"scope": "Setup1", "post": "haas", "post_scope": "local", "output_folder": EXPORT_DIR + "/nc", "program_name": "1001"}, "ok", None),
+    ("cam_set_nc_comment", {"comment": "GYRO sweep"}, "ok", None),
+    ("cam_save_template", {"template_name": "GyroTmpl", "setup": "Setup1", "operations": "Face1", "location": "local"}, "ok", None),
+    ("cam_create_setup", {"models": ["GyroStock"], "name": "Setup2"}, "ok", None),
+    ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl", "location": "local", "generate": "skip"}, "ok", None),
+    ("cam_delete", {"entity": "Adaptive1"}, "ok", None),
+    ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
+]
 
 # ── the ACT program ────────────────────────────────────────────────────────────────────────────
 # (name, precondition, narrative, fallback). A precondition read that ERRORS routes the act to its
@@ -739,9 +1187,27 @@ ACTS = [
     ("ACT 5 - MACHINING PREP", None, _MACHINING, None),
     ("ACT 6 - RESIZE", ("sketch_get", {"sketch_name": "OuterRingSketch"}), _RESIZE, _RESIZE_FB),
     ("ACT 7 - MESH", None, _MESH, None),
-    ("ACT 8 - CAM FINALE", None, _CAM, None),
+    # the story's third movement: strip to the machinable part, model the vise around it, and
+    # machine the REAL part in the REAL fixture. Each act's precondition routes to a fallback
+    # (empty when the act's tools are all covered by earlier acts) so a broken story world still
+    # yields a complete per-tool ledger - on the scratch-stock fixtures.
+    ("ACT 8 - REDUCE TO THE PART", ("model_inspect", {"target": "Carrier:1"}), _REDUCE, []),
+    ("ACT 9 - VISE FIXTURE", ("model_inspect", {"target": "Carrier:1"}), _VISE, []),
+    ("ACT 10a - CAM: JOB + GENERATE", ("model_inspect", {"target": "STOCK:1"}), _CAM_STORY, _CAM),
+    ("ACT 10b - CAM: DELIVERABLES", ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}), _CAM_DELIVER, _CAM_FB_DELIVER),
     ("FINALE", None, _FINALE, None),
 ]
+
+# Post-act hooks run() fires after an act completes: the bounded generation poll between the CAM
+# job act and its deliverables, and the optional spatial value-check phases. Spatial phases run
+# only in narrative mode (the fallback world has no gyroscope or vise to check).
+POLL_AFTER = {
+    "ACT 10a - CAM: JOB + GENERATE": {"narrative": "DemoSetup", "fallback": "Setup1"},
+}
+SPATIAL_AFTER = {
+    "ACT 6 - RESIZE": ("SPATIAL (gyroscope)", GYRO_CHECKS),
+    "ACT 9 - VISE FIXTURE": ("SPATIAL (fixture grip)", FIXTURE_CHECKS),
+}
 
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the
 # completeness lint reads (every registered tool must appear as some step's tool). run() iterates
@@ -795,8 +1261,8 @@ STORY = {
     "joint_at_geometry": "joint a pin in its bore via cylinder faces",
     "joint_create_as_built": "seat the rotor shaft in the inner ring as-built",
     "joint_edit": "set rotation limits on the yaw",
-    "joint_motion_link": "couple the crank to the rotor spin at 2:1",
-    "joint_drive": "drive every axis, then the crank -> rotor 2:1, then rest",
+    "joint_motion_link": "couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering)",
+    "joint_drive": "drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other)",
     "assembly_get": "read the joint wiring, driven angles, and the StockCenter anchor back",
     "assembly_move": "pose a scratch cameo occurrence",
     "assembly_capture_position": "capture the posed snapshot",
@@ -808,7 +1274,7 @@ STORY = {
     "model_shell": "shell a scratch cap cameo",
     "design_delete_feature": "add a wart feature then delete it; health diff",
     "design_delete_occurrence": "delete a scratch occurrence",
-    "view_section": "the money shot: cut through the gimbal center",
+    "view_section": "section cut through the gimbal center",
     "view_screenshot": "capture the sectioned mechanism",
     "view_screenshot_multi": "capture the front and top beauty shots",
     "surface_revolve": "revolve a prep sheet",
@@ -842,25 +1308,25 @@ STORY = {
     "param_delete": "delete a scratch parameter",
     "view_switch_workspace": "switch to Manufacture, then back to Design",
     "cam_get": "read the CAM job structure",
-    "cam_edit_tools": "add a flat end mill to the document library",
-    "cam_create_setup": "create the milling setup on the stock",
-    "cam_create_operation": "create the face and adaptive operations",
-    "cam_select_geometry": "select the face operation's geometry",
+    "cam_edit_tools": "add a flat end mill + a 3mm drill to the document library",
+    "cam_create_setup": "create the milling setup on the Carrier in the vise",
+    "cam_create_operation": "create the face, adaptive, silhouette, and drill operations",
+    "cam_select_geometry": "select stock-top face, zero-handle silhouette, and the bolt-circle holes",
     "cam_edit_operation": "edit the face operation's feed",
-    "cam_edit_setup": "bind the WCS to the StockCenter JO (bound read back); stock box sized from a fresh GimbalDia read",
-    "cam_edit_folders": "create an operation folder",
+    "cam_edit_setup": "real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned",
+    "cam_edit_folders": "organize the job into Milling and Drilling folders",
     "cam_reorder": "reorder the adaptive before the face op",
     "cam_activate_setup": "activate the setup",
     "cam_compare_operations": "compare the two operations",
     "cam_show_toolpath": "leave the toolpath visible on camera",
-    "cam_generate": "generate the toolpaths",
-    "cam_get_status": "poll the generation to completion",
+    "cam_generate": "generate the toolpaths against the real part in the real fixture",
+    "cam_get_status": "poll the generation to completion (empty toolpaths fail)",
     "cam_post": "post the NC program to disk",
     "cam_set_nc_comment": "stamp the NC program comment",
     "cam_save_template": "save the setup as a local CAM template",
     "cam_apply_template": "apply the template to a second setup",
     "cam_delete": "delete a scratch operation; count diff",
-    "design_export": "export the stock to STEP",
+    "design_export": "export the machined part to STEP",
     "design_get": "final design read: the whole cast",
     "doc_get": "read the document identity before discarding",
     "doc_close": "discard the document on camera - clean teardown",
@@ -1002,7 +1468,7 @@ def _precondition_holds(pre):
     return not is_error
 
 
-def run(write_json):
+def run(write_json, keep_open=False):
     health = health_gate()
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
     all_tools = registered_tools()
@@ -1014,6 +1480,8 @@ def run(write_json):
             mode, steps = "fallback", fallback
         act_modes.append((name, mode))
         print(f"\n-- {name} [{mode}] --")
+        if keep_open and name == "FINALE":
+            steps = [s for s in steps if s[0] != "doc_close"]
         for tool, args, expect, save in steps:
             try:
                 arguments = args(ctx) if callable(args) else dict(args)
@@ -1021,23 +1489,41 @@ def run(write_json):
                 rows.append((tool, "blocked", str(e)))
                 continue
             is_error, payload = call(tool, arguments)
-            if expect == "ok" and not is_error:
-                status, note = "pass", ""
-                if save is not None:
-                    key, extract = save
+            if callable(expect):
+                # a VALUE PREDICATE on an ok result: call success is not enough - the payload
+                # must satisfy the check (grip contact, machine assignment, rest-pose honesty).
+                if is_error:
+                    status, note = "FAIL", str(payload)[:160]
+                else:
                     try:
-                        ctx[key] = extract(payload)
+                        good = bool(expect(payload))
                     except Exception as e:
-                        status, note = "pass*", f"saved-value extraction failed: {e}"
+                        good, payload = False, f"predicate raised: {e}"
+                    status, note = ("pass", "") if good else ("FAIL", str(payload)[:160])
+            elif expect == "ok" and not is_error:
+                status, note = "pass", ""
             elif expect == "refused" and is_error:
                 status, note = "expected-refusal", str(payload)[:80]
             else:
                 status, note = "FAIL", str(payload)[:160]
+            if status == "pass" and save is not None and not is_error:
+                key, extract = save
+                try:
+                    ctx[key] = extract(payload)
+                except Exception as e:
+                    status, note = "pass*", f"saved-value extraction failed: {e}"
             rows.append((tool, status, note))
             if status in ("pass", "pass*", "expected-refusal"):
                 story = STORY.get(tool, "")
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
             time.sleep(0.1)
+        if name in POLL_AFTER:
+            poll_generation(rows, notes, POLL_AFTER[name][mode])
+        if mode == "narrative" and name in SPATIAL_AFTER:
+            phase_name, checks = SPATIAL_AFTER[name]
+            spatial_phase(phase_name, checks, rows)
+    if keep_open:
+        print("\n--keep-open: the story document is left open for inspection.")
 
     covered = {t for t, s, _ in rows if s in ("pass", "pass*", "expected-refusal")}
     ledger = []
@@ -1090,5 +1576,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--keep-open", action="store_true",
+                    help="leave the story document open at the end instead of discarding it")
     args = ap.parse_args()
-    sys.exit(check() if args.check else run(args.json))
+    sys.exit(check() if args.check else run(args.json, keep_open=args.keep_open))

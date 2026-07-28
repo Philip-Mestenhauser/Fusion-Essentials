@@ -69,6 +69,24 @@ def referenced_enum_families():
     return sorted(fams)
 
 
+_FACT_BEHAVIOR_PRINT = re.compile(r"FACT behavior\.([a-z0-9_]+)")
+
+
+def emitted_behavior_keys():
+    """Every behavior flag key a measurement row can emit - ``facts_on_pass`` entries plus
+    ``FACT behavior.*`` prints inside row script bodies. The reverse gate in
+    tests/lints/test_enum_families_measured.py consumes this: each emitted key must exist in the
+    generated live_api_facts.BEHAVIOR, so a key rename here goes red until a live regen."""
+    keys = set()
+    for row in ROWS:
+        for key in (row.get("facts_on_pass") or {}):
+            if key.startswith("behavior."):
+                keys.add(key[len("behavior."):])
+        body = row["body_fn"]() if "body_fn" in row else row.get("body", "")
+        keys |= set(_FACT_BEHAVIOR_PRINT.findall(body))
+    return sorted(keys)
+
+
 def _all_enums_body():
     """Script body for the enum-sweep row: dump every referenced family, then PASS iff each
     resolved to at least one int member (a family that dumps nothing is a stale/renamed reference)."""
@@ -108,12 +126,6 @@ def dump_enum(label, cls):
         v = getattr(cls, n)
         if not n.startswith("_") and isinstance(v, int):
             print("FACT enums." + label + "." + n + " " + str(v))
-
-def dump_shape(label, obj):
-    names = sorted(n for n in dir(obj) if not n.startswith("_"))
-    for i in range(0, len(names), 20):
-        print("SHAPE " + label + " " + " ".join(names[i:i + 20]))
-    return len(names)
 
 def dump_shape(label, obj):
     names = sorted(n for n in dir(obj) if not n.startswith("_"))
@@ -323,7 +335,7 @@ ROWS = [
     {
         "id": "meshbodies-no-itembyname",
         "claim": "A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName",
-        "encoded_in": "tests/unit/test_mesh_export.py + test_inputs.py (omit it, correct); test_surface_ops.py (wrongly provides it)",
+        "encoded_in": "tests/unit/test_mesh_export.py + test_inputs.py + test_surface_ops.py (all omit it, correct)",
         "facts_on_pass": {"behavior.meshbodies_has_itembyname": False},
         "body": """
     root = adsk.fusion.Design.cast(app.activeProduct).rootComponent

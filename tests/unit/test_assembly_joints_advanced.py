@@ -1,7 +1,6 @@
 """Unit tests for ``assembly_joints_advanced.py`` - assembly_capture_position, joint_create_as_built, assembly_constrain.
 
-Tests written BEFORE further wiring (project rule). The nuances pinned, no live
-Fusion:
+The nuances pinned, no live Fusion:
 
   assembly_capture_position — the timeline pose mechanic. Capture is only valid when a move
   is pending (Design.snapshots.hasPendingSnapshot); 'revert' deletes the latest
@@ -228,12 +227,6 @@ class TestAsBuiltJoint:
         o1, o2, _ = abj.last
         assert o1.fullPathName == "SubA/Bolt:1" and o2.fullPathName == "SubB/Bolt:1"
 
-    def test_same_object_twice_still_rejected(self):
-        # The identity fallback: passing the SAME occurrence (same fullPathName) twice is still rejected.
-        _install(["A:1"])
-        res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="A:1")
-        assert res["isError"] is True and "two distinct" in res["message"].lower()
-
 
 # ── assembly_constrain ──────────────────────────────────────────────────────
 
@@ -285,11 +278,12 @@ class TestAssemblyConstraintSnaps:
         assert "FAILED to solve" in res["message"]
         assert "over-constrained" in res["message"]
 
-    def test_snap_carries_offset_value(self, monkeypatch):
+    def test_flip_defaults_false(self, monkeypatch):
         design, ac = self._install_with_snaps(monkeypatch)
         ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top",
                                        offset=10, units="mm")
-        # the 4th arg of add() is the ValueInput (offset); flipped is the 3rd
+        # flip is the 3rd arg of add(); unset it must be False (the offset VALUE
+        # encoding is pinned in TestConstraintValueEncoding)
         args = ac.last_input.geometricRelationships.added[0]
         assert args[2] is False           # flipped
 

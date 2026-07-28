@@ -8,14 +8,14 @@ object-lists (drill hole faces); heights are a mode+offset parameter group."""
 import time
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, scale
-from ._cam_common import get_cam
+from ._cam_common import get_cam, resolve_cam_node
 from . import _inputs
+from . import cam_generate  # its _GENERATIONS registry keeps a launched Future alive (see below)
 
 app = adsk.core.Application.get()
 
@@ -44,37 +44,6 @@ _CURVE_BUILDER = {
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
 
-def _find_operation(cam, name):
-    """Find an Operation by name across all setups/folders/patterns (recursive)."""
-    name = (name or "").strip()
-    found = []
-
-    def walk(parent):
-        ops = safe(lambda: parent.operations)
-        for i in range(safe(lambda: ops.count, 0) or 0):
-            o = safe(lambda i=i: ops.item(i))
-            if o is not None:
-                found.append(o)
-        for getter in (lambda: parent.folders, lambda: parent.patterns):
-            coll = safe(getter)
-            for i in range(safe(lambda: coll.count, 0) or 0):
-                c = safe(lambda i=i: coll.item(i))
-                if c is not None:
-                    walk(c)
-
-    for si in range(safe(lambda: cam.setups.count, 0) or 0):
-        s = safe(lambda si=si: cam.setups.item(si))
-        if s is not None:
-            walk(s)
-    matches = [o for o in found if (safe(lambda o=o: o.name) or "").lower() == (name or "").lower()]
-    if not matches:
-        names = [safe(lambda o=o: o.name) for o in found]
-        return None, f"No operation named '{name}'. Operations: {', '.join(str(n) for n in names)[:300]}."
-    if len(matches) > 1:
-        return None, f"'{name}' is ambiguous - {len(matches)} operations share it. Rename so it's unique."
-    return matches[0], None
-
-
 def _curve_param(op):
     """The op's curve-selection parameter (CadContours2dParameterValue), or None."""
     for nm in _CURVE_PARAM_CANDIDATES:
@@ -84,19 +53,29 @@ def _curve_param(op):
     return None
 
 
-def _generate_and_wait(cam, op, timeout=25.0):
-    """generateToolpath then PUMP the future to true completion (not op.isGenerating). Returns
-    (completed: bool, err: str|None)."""
+def _launch_generation(cam, op, op_name):
+    """Launch toolpath generation for the op and return IMMEDIATELY - never wait or pump. The
+    Future is registered in cam_generate._GENERATIONS (if it were garbage-collected, Fusion would
+    ABANDON the in-progress generation; the registry also gives cam_get_status's handle path the
+    same poll-and-cleanup lifecycle a cam_generate launch gets). Returns (handle, None) or
+    (None, err)."""
     try:
         fut = cam.generateToolpath(op)
     except Exception as e:
-        return False, str(e)
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        safe(lambda: adsk.doEvents())
-        if safe(lambda: fut.isGenerationCompleted, False) is True:
-            return True, None
-    return False, "generation did not complete within the time budget"
+        return None, str(e)
+    if not fut:
+        return None, "generateToolpath returned no future."
+    cam_generate._HANDLE_SEQ[0] += 1
+    handle = f"gen{cam_generate._HANDLE_SEQ[0]}"
+    cam_generate._GENERATIONS[handle] = {
+        "future": fut,
+        "target": f"operation '{op_name}'",
+        "scope": "operation",
+        "skip_valid": False,
+        "started_at": time.time(),
+        "total": safe(lambda: fut.numberOfOperations, None),
+    }
+    return handle, None
 
 
 # ── selection appliers ───────────────────────────────────────────────────────
@@ -215,9 +194,10 @@ def handler(operation: str = "", selection: str = "", handles=None,
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)
-    op, oerr = _find_operation(cam, operation)
+    node, oerr = resolve_cam_node(cam, operation, kinds=("operation",), label="operation")
     if oerr:
         return error(oerr)
+    op = node.obj
 
     # resolve geometry handles to live BRep entities (require edge for chain, face otherwise)
     require = "edge" if selection == _CHAIN else "face"
@@ -273,35 +253,27 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if diam_note:
         result["diameter_filter"] = diam_note
 
-    # ── generate (async, future-gated) ──
+    # ── generate: LAUNCH async and return - the poll (cam_get_status) pumps it forward ──
     if not generate:
         result["note"] = "Selection applied; pass generate=true (or cam_generate) to compute the toolpath."
         return ok(result)
 
-    completed, gerr = _generate_and_wait(cam, op)
-    has_tp = bool(safe(lambda: op.hasToolpath, False))
-    valid = bool(safe(lambda: op.isToolpathValid, False))
-    warn = safe(lambda: op.warning)
-    result.update({"generated": completed, "has_toolpath": has_tp, "toolpath_valid": valid})
+    op_name = result["operation"] or operation
+    handle, gerr = _launch_generation(cam, op, op_name)
     if gerr:
         result["generate_error"] = gerr
-        result["note"] = f"Selection applied but generation errored: {gerr}"
-    elif has_tp and valid:
-        result["note"] = "Selection applied and a valid toolpath generated."
-    else:
-        # has_toolpath/toolpath_valid False is the authoritative EMPTY signal - and it can be silent on
-        # the warning channel (verified live: a zero-depth contour reports hasWarning/hasError False).
-        # Report the observed state + the candidate causes; don't assert one.
-        if not warn:
-            result["note"] = ("Selection applied, but has_toolpath is False (the op produced no path) - "
-                              "the warning/error channels can be silent here. Candidate causes: the cut "
-                              "has zero depth (top & bottom resolve to the same Z - set bottom_mode/"
-                              "bottom_offset; drill derives depth from the holes, contour does not), the "
-                              "selected geometry doesn't bound a cut, or generation didn't finish "
-                              "(re-poll). Check the height settings and the selection.")
-        else:
-            result["warning"] = warn
-            result["note"] = f"Selection applied; toolpath has a warning: {warn}"
+        result["note"] = (f"Selection applied but generation failed to launch: {gerr}. The selection "
+                          f"is saved - fix the cause, then run cam_generate(target='{op_name}').")
+        return ok(result)
+    result["launched"] = True
+    result["handle"] = handle
+    result["note"] = (f"Selection applied; generation is launched. Fusion advances it on the "
+                      f"main-thread loop, which the POLL pumps - so call "
+                      f"cam_get_status(target='{op_name}') repeatedly until completed=true (each poll "
+                      "nudges it forward a bounded burst and returns; it never blocks for the full "
+                      "compute). If it completes with has_toolpath False the op produced no path - the "
+                      "warning channel can be silent there; check the heights (a zero-depth cut: drill "
+                      "derives depth from the holes, contour does not) and the selection.")
     return ok(result)
 
 
@@ -312,9 +284,9 @@ TOOL_DESCRIPTION = (
     "filtered by min_diameter/max_diameter in 'units'). 'handles' = find_geometry handles (edges for chain, "
     "faces otherwise). Optional top_mode/top_offset + bottom_mode/bottom_offset set heights (mode = "
     "e.g. 'from stock top'/'from contour'/'from hole bottom'; never set the resolved _value). WRITES; "
-    "generation is async and gated internally. If has_toolpath comes back False the op produced no path "
-    "(the warning channel can be silent) - check the height settings (a zero-depth cut), the selection, "
-    "and that generation finished. Pair: cam_create_operation -> this; find_geometry supplies handles."
+    "'generate' (default true) LAUNCHES regeneration and returns immediately - poll "
+    "cam_get_status(target=<operation>) until completed=true; the note teaches the empty-toolpath "
+    "checks. Pair: cam_create_operation -> this; find_geometry supplies handles."
 )
 
 tool = (
@@ -326,14 +298,14 @@ tool = (
             "description": "find_geometry handles: edges for chain, faces for pocket/face/holes."})
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
-    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units')."})
+    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units'); filters the PASSED handles only, never discovers - pass every candidate face."})
     .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (in 'units')."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("top_mode", {"type": "string", "description": "top height mode, e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string", "description": "top height offset, e.g. '0 mm'."})
     .add_input_property("bottom_mode", {"type": "string", "description": "bottom height mode, e.g. 'from contour'."})
     .add_input_property("bottom_offset", {"type": "string", "description": "bottom height offset, e.g. '-10 mm'."})
-    .add_input_property("generate", {"type": "boolean", "description": "Regenerate after (default true)."})
+    .add_input_property("generate", {"type": "boolean", "description": "Launch regeneration after (default true; async - poll cam_get_status)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

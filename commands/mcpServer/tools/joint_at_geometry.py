@@ -18,6 +18,7 @@ from . import _common
 from . import _inputs
 from . import _outputs
 from . import _geom
+from . import _assert
 from ._joints import (AXES as _AXES, OFFSET_PARAM_NOTE, apply_motion,
                       build_joint_geometry as _joint_geometry_for,
                       is_joint_origin as _is_joint_origin, motion_param_names)
@@ -281,7 +282,9 @@ joint_at_tool = (
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()
 )
-joint_at_item = Item.create_tool_item(tool=joint_at_tool, write="write", handler=handler, run_on_main_thread=True)
+joint_at_item = Item.create_tool_item(tool=joint_at_tool, write="write", handler=handler,
+                                      run_on_main_thread=True,
+                                      postconditions=[_assert.ChildGeometryMoved()])
 
 
 def register_tool():

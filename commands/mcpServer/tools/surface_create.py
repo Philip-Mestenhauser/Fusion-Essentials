@@ -32,28 +32,12 @@ _CONTINUITY = {
 "curvature": "CurvatureSurfaceContinuityType",
 }
 
-_AXES = {"x": "xConstructionAxis", "y": "yConstructionAxis", "z": "zConstructionAxis"}
-
 # curves: an OPEN chain of edge/sketch-curve handles to use as the profile (instead of a sketch).
 _CURVES = _inputs.EdgeLoopRef("curves", closed=False, required=False,
     description="OPEN edge/curve handles to extrude as a profile (instead of a sketch profile).")
 # boundary: the CLOSED loop a patch fills.
 _BOUNDARY = _inputs.EdgeLoopRef("boundary", closed=True, required=True,
     description="The closed loop of edges to fill with a surface.")
-
-
-def _target_sketch(design, comp, sketch_name):
-    """Resolve the target sketch by name via the shared cross-component resolver (active component
-    first, then root, then every other component), or default to the ACTIVE component's most
-    recently created sketch when no name is given."""
-    name = (sketch_name or "").strip()
-    if name:
-        return _common.resolve_sketch(design, name), name
-    coll = safe(lambda: comp.sketches)
-    if coll is None:
-        return None, name
-    n = safe(lambda: coll.count, 0)
-    return (coll.item(n - 1) if n else None), name
 
 
 def _curve_host_component(ents, fallback):
@@ -82,25 +66,6 @@ def _open_profile_from_curves(comp, ents):
         return comp.createOpenProfile(coll, False), None
     except Exception as e:
         return None, f"Could not build an open profile from the curves: {e}"
-
-
-def _open_sketch_profile(comp, sketch):
-    """An open profile from a sketch's curves (its open chain). Returns (profile, error)."""
-    curves = safe(lambda: sketch.sketchCurves)
-    n = safe(lambda: curves.count, 0) if curves is not None else 0
-    if not n:
-        return None, "Sketch has no curves to build an open profile from."
-    # createOpenProfile wants an ObjectCollection of the individual curve entities, NOT the
-    # SketchCurves collection object (passing that raises "invalid input curves").
-    coll = adsk.core.ObjectCollection.create()
-    for i in range(n):
-        c = safe(lambda i=i: curves.item(i))
-        if c is not None:
-            coll.add(c)
-    try:
-        return comp.createOpenProfile(coll, True), None       # isChained=True follows the open chain
-    except Exception as e:
-        return None, f"Could not build an open profile from the sketch: {e}"
 
 
 def _body_names_and_solid(feature):
@@ -145,13 +110,13 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested = _target_sketch(design, comp, sketch_name)
+        sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
         if not sketch:
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
             return error("No sketch or 'curves' to extrude. Draw an OPEN chain first, or pass curves.")
         host = safe(lambda: sketch.parentComponent) or comp
-        profile, perr = _open_sketch_profile(host, sketch)
+        profile, perr = _common.open_profile_from_sketch(host, sketch, "from the sketch")
         source = safe(lambda: sketch.name)
     if perr:
         return error(perr)
@@ -202,7 +167,7 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
     if op_key not in _SURFACE_OPS:
         return error(f"Unknown operation '{operation}'. Surface revolve supports: new, join.")
     a = (axis or "z").strip().lower()
-    if a not in _AXES:
+    if a not in _inputs.WORLD_AXIS_ATTRS:
         return error(f"Unknown axis '{axis}'. Use x, y, or z.")
 
     design = _common.design()
@@ -226,18 +191,18 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         profile, perr = _open_profile_from_curves(host, ents)
         source = "curves"
     else:
-        sketch, requested = _target_sketch(design, comp, sketch_name)
+        sketch, requested = _common.resolve_or_recent_sketch(design, sketch_name)
         if not sketch:
             if requested:
                 return error(f"No sketch named '{requested}'. Use sketch_get or sketch_create.")
             return error("No sketch or 'curves' to revolve. Draw an OPEN chain first, or pass curves.")
         host = safe(lambda: sketch.parentComponent) or comp
-        profile, perr = _open_sketch_profile(host, sketch)
+        profile, perr = _common.open_profile_from_sketch(host, sketch, "from the sketch")
         source = safe(lambda: sketch.name)
     if perr:
         return error(perr)
 
-    axis_entity = safe(lambda: getattr(host, _AXES[a]))
+    axis_entity = _inputs.world_construction_axis(host, a)
     if not axis_entity:
         return error(f"Could not resolve the {a}-axis of the active component.")
 
@@ -291,6 +256,24 @@ def _patch_one_loop(comp, boundary, op, cont):
             patch_input.continuity = cont
         feature = comp.features.patchFeatures.add(patch_input)
     except Exception as e:
+        msg = str(e).lower()
+        # This error text (raises 'invalid argument chainOptions'; also seen as
+        # ASM_BL_NON_MAN_EDVERT / PATCH_NO_TOOLBODY) is a single-seed auto-complete failure with TWO
+        # distinct live-verified causes that look identical from the string alone: (1) a degenerate
+        # TANGENT saddle opening (a radial hole tangent to a flat face splits the rim into exactly
+        # two half-edges pinched at the tangent points); (2) an edge loop SPLIT into more than two
+        # segments by a later feature (e.g. a fillet reaching the opening). Name both and point at
+        # the one cheap probe (find_geometry's edge count) that tells them apart - never assert
+        # either cause alone, the string can't distinguish them.
+        if any(s in msg for s in ("chainoptions", "non_man", "non-man", "toolbody")):
+            return None, (f"Patch failed: {e}. This failure has two known causes: (1) a degenerate "
+                "TANGENT saddle opening - a radial hole tangent to a flat face splits the rim into "
+                "two half-edges; pass the opening's two half-edges as an explicit boundary list. "
+                "(2) an edge loop SPLIT by a later feature (e.g. a fillet reaching the opening) into "
+                "more than two segments; pass ALL of the loop's edges as an explicit boundary list, "
+                "or patch this opening before adding the feature that splits it. Count the opening's "
+                "edges with find_geometry to tell them apart: exactly 2 means case (1), more means "
+                "case (2).")
         return None, (f"Patch failed: {e}. (The boundary must form a CLOSED loop - pass the loop's "
     "edges, or a single edge Fusion can auto-complete.)")
     if not feature:

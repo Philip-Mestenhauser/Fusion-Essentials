@@ -19,13 +19,15 @@ class TestProducesNote:
         note = k.produces_note()
         assert note.startswith("handle:")
         assert "entityToken" in note
-        assert "joint_at_geometry" in note and "model_fillet" in note
+        assert " -> joint_at_geometry, model_fillet" in note   # the ASCII consumer arrow
 
     def test_note_without_consumers_omits_arrow(self):
+        # The consumer arrow crosses the wire as ASCII " -> " (see produces_note); with NO declared
+        # consumers the note must carry no arrow text at all - not a dangling "key: label -> ".
         k = out.ReturnsValue("became_solid", "whether the stitch closed into a solid")
         note = k.produces_note()
         assert note.startswith("became_solid:")
-        assert "→" not in note
+        assert "->" not in note
 
     def test_urn_and_name_labels(self):
         assert "URN" in out.ReturnsUrn("document_id").produces_note()

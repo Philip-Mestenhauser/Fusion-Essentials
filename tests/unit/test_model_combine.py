@@ -7,7 +7,7 @@ are set on the CombineInput.
 
 import json
 
-from conftest import load_tool
+from conftest import assert_no_active_design, load_tool
 
 cb = load_tool("model_combine")
 
@@ -42,10 +42,17 @@ class FakeCombineInput:
 class FakeCombineFeatures:
     def __init__(self):
         self.last_input = None
+        self.comp = None              # wired by _install so add() can consume tool bodies
     def createInput(self, target, tools):
         self.last_input = FakeCombineInput(target, tools)
         return self.last_input
     def add(self, inp):
+        # a real Combine CONSUMES the tool bodies (unless isKeepToolBodies) - remove them from the
+        # component so bodies_remaining pins the post-combine read-back, not a static echo
+        if self.comp is not None and not inp.isKeepToolBodies:
+            for b in list(inp.tools._i):
+                if b in self.comp.bRepBodies._b:
+                    self.comp.bRepBodies._b.remove(b)
         return type("F", (), {"name": "Combine1"})()
 
 
@@ -65,6 +72,7 @@ class FakeDesign:
 def _install(body_names):
     cf = FakeCombineFeatures()
     comp = FakeComp(body_names, cf)
+    cf.comp = comp
     design = FakeDesign(comp)
     cb.app = type("A", (), {"activeProduct": design})()
     cb._common.app = cb.app
@@ -154,10 +162,11 @@ class TestCombine:
         assert cf.last_input.tools.count == 3
 
     def test_bodies_remaining_reports_count(self):
-        # comp has 2 bodies in the fake; bodies_remaining mirrors comp.bRepBodies.count
+        # the fake's combine CONSUMES the tool body: 2 bodies before, 1 after. bodies_remaining must
+        # be the POST-combine read-back (1), not an echo of the pre-combine count.
         cf = _install(["T", "a"])
         out = _payload(cb.handler(target="T", tools=["a"]))
-        assert out["bodies_remaining"] == 2
+        assert out["bodies_remaining"] == 1
 
     def test_keep_tools_defaults_false(self):
         cf = _install(["T", "a"])
@@ -173,11 +182,78 @@ class TestCombine:
 
     def test_keep_tools_flag(self):
         cf = _install(["T", "a"])
-        _payload(cb.handler(target="T", tools=["a"], keep_tools=True))
+        out = _payload(cb.handler(target="T", tools=["a"], keep_tools=True))
         assert cf.last_input.isKeepToolBodies is True
+        assert out["bodies_remaining"] == 2       # kept tools -> nothing consumed
 
     def test_new_component_flag(self):
         cf = _install(["T", "a"])
         out = _payload(cb.handler(target="T", tools=["a"], new_component=True))
         assert cf.last_input.isNewComponent is True
         assert out["new_component"] is True
+
+
+# ── honesty: failed/absent mutation must surface as isError, never a false ok ─
+# (the paths test_model_mirror.py / test_model_shell.py treat as mandatory)
+
+class TestHonesty:
+    def test_add_returning_none_is_error(self):
+        cf = _install(["T", "a"])
+        cf.add = lambda inp: None
+        res = cb.handler(target="T", tools=["a"])
+        assert res["isError"] is True and "no feature" in res["message"].lower()
+
+    def test_add_raising_surfaces_as_error(self):
+        cf = _install(["T", "a"])
+
+        def _boom(inp):
+            raise RuntimeError("bodies do not intersect")
+
+        cf.add = _boom
+        res = cb.handler(target="T", tools=["a"], operation="cut")
+        assert res["isError"] is True
+        assert "Combine failed" in res["message"] and "bodies do not intersect" in res["message"]
+
+    def test_no_active_design(self):
+        _install(["T", "a"])
+        assert_no_active_design(cb, cb.handler, target="T", tools=["a"])
+
+
+# ── body-split: a cut/intersect that DISCONNECTS the single target warns naming the pieces ──
+
+class _ResultBodies:
+    def __init__(self, names):
+        self._n = list(names)
+    @property
+    def count(self):
+        return len(self._n)
+    def item(self, i):
+        return type("B", (), {"name": self._n[i]})()
+
+
+def _feature_with_bodies(names):
+    return type("F", (), {"name": "Combine1", "bodies": _ResultBodies(names)})()
+
+
+class TestBodySplit:
+    def test_cut_disconnecting_target_warns(self):
+        # CombineFeature.bodies returns >1 result body for a cut that split the target (tools were
+        # consumed, so the extra body is a disconnected piece, not another target).
+        cf = _install(["Ring", "Bore"])
+        cf.add = lambda inp: _feature_with_bodies(["Ring", "Ring1"])
+        out = _payload(cb.handler(target="Ring", tools=["Bore"], operation="cut"))
+        assert out["body_split"] == ["Ring", "Ring1"]
+        assert "DISCONNECTED" in out["note"]
+
+    def test_single_result_body_no_split_warning(self):
+        cf = _install(["A", "B"])
+        cf.add = lambda inp: _feature_with_bodies(["A"])
+        out = _payload(cb.handler(target="A", tools=["B"], operation="cut"))
+        assert "body_split" not in out
+
+    def test_join_with_several_bodies_not_flagged_as_split(self):
+        # the split warning is scoped to cut/intersect - a join is never a disconnection.
+        cf = _install(["A", "B"])
+        cf.add = lambda inp: _feature_with_bodies(["A", "B"])
+        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
+        assert "body_split" not in out

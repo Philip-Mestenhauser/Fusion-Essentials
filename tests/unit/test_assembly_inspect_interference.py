@@ -57,8 +57,8 @@ class FakeInput:
 
 
 class FakeInputRejectsCoincident:
-    """Raises when areCoincidentFacesIncluded is set - models the API rejecting the value, so the
-    honesty fix (removing the swallowing try/except) must surface it as an analysis failure."""
+    """Raises when areCoincidentFacesIncluded is set - models the API rejecting the value. The set
+    must not be swallowed by a try/except: a rejected value surfaces as an analysis failure."""
     def __setattr__(self, name, value):
         if name == "areCoincidentFacesIncluded":
             raise RuntimeError("areCoincidentFacesIncluded rejected by the API")

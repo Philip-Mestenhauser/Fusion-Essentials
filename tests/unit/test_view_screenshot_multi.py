@@ -6,9 +6,16 @@ separate image, and returns them interleaved with text labels — so an inferenc
 model sees front/top/right/iso together.
 
 Pinned here (no live Fusion): _parse_views (default set, explicit list, aliases,
-unknown-view error, dedupe/order). The saveAsImageFile capture + camera
-restore are live-only.
+unknown-view error, dedupe/order), and the handler's composition over the shared
+_view_common helpers — the _MAX_VIEWS cap, width/height clamping + the non-numeric
+600x500 fallback, per-view orient/capture failure isolation, the all-failed error,
+the camera restore in ``finally``, and the ortho-camera-for-faces-only behavior
+(via the real apply_named_view). The actual saveAsImageFile pixels are live-only.
 """
+
+from types import SimpleNamespace
+
+import pytest
 
 from conftest import load_tool
 
@@ -64,3 +71,205 @@ class TestParseViews:
         views, err = cv._parse_views([])
         assert err is None
         assert views == ["front", "top", "right", "iso-top-right"]
+
+
+# ── handler fakes ───────────────────────────────────────────────────────────
+
+class FakePoint:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+    def distanceTo(self, other):
+        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2
+                + (self.z - other.z) ** 2) ** 0.5
+
+
+class FakeCamera:
+    def __init__(self):
+        self.eye = FakePoint(5, 0, 0)
+        self.target = FakePoint(0, 0, 0)
+        self.upVector = None
+        self.cameraType = "user-camera-type"
+
+
+class FakeViewport:
+    """The getter always returns the one camera object; every assignment is recorded so a test
+    can assert the handler's final ``finally`` restore (the last assignment is the saved camera)."""
+
+    def __init__(self):
+        self._cam = FakeCamera()
+        self.camera_assignments = []
+
+    @property
+    def camera(self):
+        return self._cam
+
+    @camera.setter
+    def camera(self, value):
+        self.camera_assignments.append(value)
+
+    def fit(self):
+        pass
+
+    def refresh(self):
+        pass
+
+
+@pytest.fixture
+def rig(monkeypatch):
+    """Fake viewport + recorded stand-ins for the shared _view_common helpers.
+
+    The handler's own job is COMPOSITION (order views, size images, isolate per-view
+    failures, restore the camera); the orient/capture mechanics are pinned in
+    test__view_common.py, so they are stubbed here per the router-test idiom."""
+    vp = FakeViewport()
+    monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
+    applied, captures = [], []
+
+    def fake_apply(viewport, name):
+        applied.append(name)
+        viewport.camera = f"cam-{name}"
+
+    def fake_capture(viewport, width, height, prefix="fe_mcp_shot"):
+        captures.append((width, height))
+        return "B64DATA", None
+
+    monkeypatch.setattr(cv._view_common, "apply_named_view", fake_apply)
+    monkeypatch.setattr(cv._view_common, "capture_png_b64", fake_capture)
+    return SimpleNamespace(vp=vp, applied=applied, captures=captures)
+
+
+def _texts(result):
+    return [c["text"] for c in result["content"] if c["type"] == "text"]
+
+
+def _images(result):
+    return [c for c in result["content"] if c["type"] == "image"]
+
+
+class TestViewCap:
+    def test_nine_views_in_captures_only_the_first_eight(self, rig):
+        nine = ["front", "back", "left", "right", "top", "bottom",
+                "iso-top-right", "iso-top-left", "iso-bottom-right"]
+        result = cv.handler(views=nine)
+        assert result["isError"] is False
+        assert rig.applied == nine[:8]          # the ninth view is never oriented
+        assert len(_images(result)) == 8
+        summary = _texts(result)[0]
+        assert "Captured 8 view(s)" in summary
+        # the truncation is REPORTED: the summary names the dropped view over the cap.
+        assert "Dropped 1 view(s)" in summary
+        assert "iso-bottom-right" in summary
+
+
+class TestDimensionClamp:
+    def test_oversize_dimensions_clamp_to_4096(self, rig):
+        cv.handler(views=["front"], width=10000, height=99999)
+        assert rig.captures == [(4096, 4096)]
+
+    def test_zero_and_negative_dimensions_clamp_to_1(self, rig):
+        cv.handler(views=["front"], width=0, height=-20)
+        assert rig.captures == [(1, 1)]
+
+    def test_non_numeric_width_keeps_the_valid_height(self, rig):
+        # int('abc') resets ONLY the bad width to its default; the valid height=300 is kept
+        # (each dimension is clamped independently).
+        cv.handler(views=["front"], width="abc", height=300)
+        assert rig.captures == [(600, 300)]
+
+    def test_non_numeric_height_keeps_the_valid_width(self, rig):
+        cv.handler(views=["front"], width=800, height="oops")
+        assert rig.captures == [(800, 500)]
+
+
+class TestPerViewFailureIsolation:
+    def test_one_orient_failure_reports_that_row_and_keeps_the_rest(self, rig, monkeypatch):
+        def flaky_apply(viewport, name):
+            if name == "top":
+                raise ValueError("boom")
+            rig.applied.append(name)
+
+        monkeypatch.setattr(cv._view_common, "apply_named_view", flaky_apply)
+        result = cv.handler(views=["front", "top", "right"])
+        assert result["isError"] is False
+        assert "[top] failed to orient: boom" in _texts(result)
+        assert len(_images(result)) == 2
+        assert len(rig.captures) == 2           # no capture attempt for the failed view
+        assert "Captured 2 view(s): front, right" in _texts(result)[0]
+
+    def test_one_capture_failure_reports_that_row_and_keeps_the_rest(self, rig, monkeypatch):
+        calls = {"n": 0}
+
+        def flaky_capture(viewport, width, height, prefix="fe_mcp_shot"):
+            calls["n"] += 1
+            if calls["n"] == 2:                 # the second view ("top") fails to grab
+                return None, "saveAsImageFile returned false"
+            return "B64DATA", None
+
+        monkeypatch.setattr(cv._view_common, "capture_png_b64", flaky_capture)
+        result = cv.handler(views=["front", "top", "right"])
+        assert result["isError"] is False
+        assert "[top] capture failed." in _texts(result)
+        assert len(_images(result)) == 2
+        assert "Captured 2 view(s): front, right" in _texts(result)[0]
+
+    def test_every_view_failing_is_an_error_not_an_empty_ok(self, rig, monkeypatch):
+        monkeypatch.setattr(cv._view_common, "capture_png_b64",
+                            lambda vp, w, h, prefix="fe_mcp_shot": (None, "nope"))
+        result = cv.handler(views=["front", "top"])
+        assert result["isError"] is True
+        assert result["message"] == "No views were captured."
+
+
+class TestCameraRestore:
+    def test_original_camera_is_reasserted_after_a_successful_run(self, rig):
+        cv.handler(views=["front", "top"])
+        # apply assigned per-view cameras; the finally must put the SAVED camera back last.
+        assert rig.vp.camera_assignments[-1] is rig.vp._cam
+
+    def test_original_camera_is_reasserted_even_when_a_capture_raises(self, rig, monkeypatch):
+        def exploding_capture(viewport, width, height, prefix="fe_mcp_shot"):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(cv._view_common, "capture_png_b64", exploding_capture)
+        with pytest.raises(RuntimeError):
+            cv.handler(views=["front"])
+        assert rig.vp.camera_assignments and rig.vp.camera_assignments[-1] is rig.vp._cam
+
+
+@pytest.fixture
+def rig_real_orient(monkeypatch):
+    """Fake viewport but the REAL _view_common.apply_named_view, so the handler-to-helper
+    composition that decides camera TYPE per view is exercised end to end. Point3D/Vector3D
+    construction is redirected to plain fakes so the camera math runs on real floats."""
+    import adsk.core
+    vp = FakeViewport()
+    monkeypatch.setattr(cv, "app", SimpleNamespace(activeViewport=vp))
+    monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+    monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: (x, y, z))
+    cam_types = []
+
+    def fake_capture(viewport, width, height, prefix="fe_mcp_shot"):
+        cam_types.append(viewport.camera.cameraType)   # camera type at the capture moment
+        return "B64DATA", None
+
+    monkeypatch.setattr(cv._view_common, "capture_png_b64", fake_capture)
+    return SimpleNamespace(vp=vp, cam_types=cam_types)
+
+
+class TestOrthoCameraType:
+    def test_all_six_face_views_capture_with_an_orthographic_camera(self, rig_real_orient):
+        import adsk.core
+        result = cv.handler(views="all")
+        assert result["isError"] is False
+        assert len(rig_real_orient.cam_types) == 6
+        assert all(t is adsk.core.CameraTypes.OrthographicCameraType
+                   for t in rig_real_orient.cam_types)
+
+    def test_iso_view_keeps_the_user_camera_type(self, rig_real_orient):
+        import adsk.core
+        # iso first (before any face view has forced ortho): the iso capture must see the
+        # user's own camera type untouched; the face view after it gets ortho.
+        cv.handler(views=["iso-top-right", "front"])
+        assert rig_real_orient.cam_types[0] == "user-camera-type"
+        assert rig_real_orient.cam_types[1] is adsk.core.CameraTypes.OrthographicCameraType

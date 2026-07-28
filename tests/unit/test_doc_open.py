@@ -106,7 +106,7 @@ class TestCamTemplateGuard:
         assert payload["document_name"] == "Plain"
 
     def test_bare_open_refuses_without_declaring_intent(self, monkeypatch):
-        # The crash that bit us: a bare doc_open (no is_cam_template, no force_api_open) must NOT
+        # The crash guard: a bare doc_open (no is_cam_template, no force_api_open) must NOT
         # silently take the API path. It refuses and resolves/opens NOTHING.
         touched = {"resolve": False, "open": False}
         monkeypatch.setattr(od, "_resolve_data_file",

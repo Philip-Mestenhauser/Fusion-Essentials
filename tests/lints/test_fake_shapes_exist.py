@@ -10,6 +10,11 @@ generated live_api_facts.py is the measured dir() membership of each type; this 
 mapped fake's public surface (class attrs, methods, and self.X assignments in __init__) against
 it. Bespoke per-test fakes are deliberately NOT swept - migrating them to the shared fakes is
 what makes them safer.
+
+The map is COMPLETE by construction: any conftest class whose stripped name (leading underscore
+and a Fake/Make prefix removed) matches a SHAPES key is mapped automatically, and a fake-shaped
+conftest class that maps to nothing FAILS - a new shared fake cannot dodge the sweep by simply
+not registering in _FAKE_TO_LIVE.
 """
 
 import ast
@@ -20,7 +25,8 @@ import live_api_facts
 _CONFTEST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "conftest.py")
 
-# conftest fake class -> the live type (a SHAPES key) it impersonates. Grows with the fakes.
+# conftest fake class -> the live type (a SHAPES key) it impersonates. Only needed when the
+# stripped class name does not literally match its SHAPES key - everything else auto-maps.
 _FAKE_TO_LIVE = {
     "BRepBody": "BRepBody",
     "BRepFace": "BRepFace",
@@ -41,6 +47,46 @@ _FAKE_TO_LIVE = {
 
 # fake.attr -> one-line reason a live-absent attribute is tolerated. Shrink-only.
 _ALLOWLIST = {}
+
+# Fake-shaped conftest classes with NO live SHAPES dump to sweep against yet. Shrink-only: the
+# staleness check fails the moment a dump lands (auto-map then takes over) or the class goes.
+_UNMAPPED_OK = {
+    "FakeUnitsManager": "UnitsManager has no SHAPES dump yet - add it to a shape-dump measurement "
+                        "row and regenerate (py -3 tests/live/measure_api.py with Fusion up)",
+}
+
+
+def _stripped(name):
+    """The class name with a leading underscore and a Fake/Make prefix removed - the name the
+    fake impersonates (_FakeObjectCollection -> ObjectCollection, MakeDesign -> Design)."""
+    base = name.lstrip("_")
+    for prefix in ("Fake", "Make"):
+        if base.startswith(prefix):
+            base = base[len(prefix):]
+            break
+    return base
+
+
+def _auto_mapped(class_names, shapes):
+    """{conftest class: SHAPES key} for every class whose stripped name IS a SHAPES key."""
+    return {n: _stripped(n) for n in class_names if _stripped(n) in shapes}
+
+
+def _is_fake_shaped(name, shapes):
+    """test_bespoke_fake_ratchet's fake-shape discriminator, mirrored (that file is owned
+    separately): Fake/_Fake-prefixed or the bare name of a live adsk type in SHAPES - plus the
+    Make prefix conftest's builder fakes use."""
+    return (name.startswith("Fake") or name.startswith("_Fake") or name.startswith("Make")
+            or name in shapes)
+
+
+def _unmapped_fakes(class_names, shapes, manual, allowlist):
+    """Fake-shaped conftest classes the sweep would silently skip: neither manually mapped, nor
+    auto-mapped, nor excused by the allowlist."""
+    auto = _auto_mapped(class_names, shapes)
+    return [n for n in sorted(class_names)
+            if _is_fake_shaped(n, shapes)
+            and n not in manual and n not in auto and n not in allowlist]
 
 
 def _public_surface(cls_node):
@@ -68,12 +114,19 @@ def _public_surface(cls_node):
     return names
 
 
+def _effective_map(class_names):
+    """The full sweep map: auto-derived entries plus the manual table (manual wins on overlap)."""
+    mapping = _auto_mapped(class_names, live_api_facts.SHAPES)
+    mapping.update(_FAKE_TO_LIVE)
+    return mapping
+
+
 class TestSharedFakeShapesExist:
     def test_every_shared_fake_attribute_exists_live(self):
         tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
         classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
         offenders = []
-        for fake, live in sorted(_FAKE_TO_LIVE.items()):
+        for fake, live in sorted(_effective_map(classes).items()):
             assert fake in classes, f"mapped fake {fake} not found in conftest.py"
             shape = live_api_facts.SHAPES.get(live)
             assert shape, (
@@ -88,6 +141,49 @@ class TestSharedFakeShapesExist:
             "API that will AttributeError in Fusion. Rename/remove the attribute, or if the live "
             "surface genuinely changed, re-run the probes and commit the regenerated facts:\n  "
             + "\n  ".join(offenders))
+
+    def test_every_fake_shaped_class_is_mapped(self):
+        # The completeness gate: a NEW conftest fake that maps to nothing is a silently-unswept
+        # mock - it must map (rename it so the stripped name hits a SHAPES key, add a manual
+        # entry, or measure the missing live type), never just be left out.
+        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
+        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _FAKE_TO_LIVE, _UNMAPPED_OK)
+        assert not unmapped, (
+            "fake-shaped conftest classes the shape sweep would silently skip - map each to a "
+            "SHAPES key (auto: name it after the live type; or add a _FAKE_TO_LIVE entry; or "
+            "shape-dump the live type), or add a reasoned _UNMAPPED_OK entry:\n  "
+            + "\n  ".join(unmapped))
+
+    def test_unmapped_ok_entries_still_trip(self):
+        tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
+        classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        stale = []
+        for name, reason in _UNMAPPED_OK.items():
+            assert reason.strip(), f"{name} _UNMAPPED_OK entry needs a plain-English reason"
+            if name not in classes:
+                stale.append(f"{name}: no such conftest class - remove the entry")
+            elif _stripped(name) in live_api_facts.SHAPES:
+                stale.append(f"{name}: '{_stripped(name)}' now has a SHAPES dump - the auto-map "
+                             "sweeps it; remove the entry")
+            elif name in _FAKE_TO_LIVE:
+                stale.append(f"{name}: manually mapped in _FAKE_TO_LIVE - remove the entry")
+        assert not stale, "stale _UNMAPPED_OK entries:\n  " + "\n  ".join(stale)
+
+    def test_the_completeness_gate_bites(self):
+        shapes = {"Widget": ["name"], "BoundingBox3D": ["minPoint"]}
+        # a new Fake-prefixed class with no matching SHAPES key and no entry MUST be flagged...
+        assert _unmapped_fakes(["FakeGizmo"], shapes, {}, {}) == ["FakeGizmo"]
+        # ...auto-map catches the stripped-name matches (Fake/_Fake/Make prefixes, underscore)...
+        assert _unmapped_fakes(["FakeWidget", "_FakeWidget", "MakeWidget", "FakeBoundingBox3D"],
+                               shapes, {}, {}) == []
+        assert _auto_mapped(["FakeBoundingBox3D"], shapes) == {"FakeBoundingBox3D": "BoundingBox3D"}
+        # ...a manual entry or an allowlist entry excuses, an unrelated helper never trips.
+        assert _unmapped_fakes(["FakeGizmo"], shapes, {"FakeGizmo": "Widget"}, {}) == []
+        assert _unmapped_fakes(["FakeGizmo"], shapes, {}, {"FakeGizmo": "reason"}) == []
+        assert _unmapped_fakes(["WidgetHelper"], shapes, {}, {}) == []
+        # a bare live-type shadow (the ratchet's third shape) is fake-shaped too - and auto-maps.
+        assert _is_fake_shaped("Widget", shapes) and _unmapped_fakes(["Widget"], shapes, {}, {}) == []
 
     def test_allowlist_entries_still_trip(self):
         tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())

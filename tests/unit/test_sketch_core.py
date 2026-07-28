@@ -184,6 +184,8 @@ class FakeSketches:
         return self._l[i]
     def itemByName(self, n):
         return next((s for s in self._l if s.name == n), None)
+    def add(self, planar):
+        return self._l[0]
 
 
 class FakeDesignDraw:
@@ -219,8 +221,8 @@ class TestNewKinds:
         assert s.sketchEllipses.count == 1
 
     def test_slot(self):
-        # REGRESSION: slot used curves.sketchLines.addCenterToCenterSlot (wrong object) with a bare
-        # float width (must be ValueInput). Now it must call the SKETCH method with a ValueInput
+        # slot must call the SKETCH method addCenterToCenterSlot with a ValueInput width
+        # (curves.sketchLines is the wrong object; a bare float width is rejected), with
         # width = radius*2 (full slot width; radius is the documented half-width). 3mm radius,
         # default units mm -> full width 6mm = 0.6cm.
         s = FakeSketch(); _install_draw(s)
@@ -340,25 +342,34 @@ class TestParsePoints:
         assert pts is None and "points" in err
 
 
-class TestClosedPathConstraintHonesty:
-    """The belt-and-suspenders addCoincident() on a closed_path's closing segment must raise into the
-    handler's error path on a real API rejection, not be swallowed in safe() while 'drawn'/'(closed)'
-    still reports success."""
+class TestClosedPathDelegation:
+    """closed_path DELEGATES to the repeated-first-point polyline shape: it appends the first point
+    and draws an open chain, adding NO explicit closing coincident constraint. That constraint is the
+    one the sketch solver rejects on many outlines (VCS_SKETCH_SOLVING_FAILED), leaving a partial
+    chain behind - the loop closes geometrically, so the solver-rejecting path is never taken."""
 
-    def test_addCoincident_failure_surfaces_as_error(self):
+    def test_closed_path_adds_no_closing_coincident(self):
+        s = FakeSketch(); _install_draw(s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]]))
+        assert "(closed)" in out["drawn"]
+        assert len(s.geometricConstraints.added) == 0     # no explicit closing constraint
+
+    def test_closed_path_survives_a_solver_rejecting_constraint(self):
+        # Even with the geometric-constraint API set to reject every addCoincident, closed_path
+        # SUCCEEDS: it does not route through that call, so the solver failure can't fire and leave
+        # a partial chain (the non-atomicity defect this delegation guards against).
         s = FakeSketch(); _install_draw(s)
         s.geometricConstraints.raise_on_add = True
-        res = sk.add_sketch_geometry_handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]])
-        assert res["isError"] is True
-        assert "addCoincident rejected" in res["message"]
-
-    def test_addCoincident_success_still_closes_the_loop(self):
-        # unchanged happy path: removing safe() must not affect the normal, succeeding call.
-        s = FakeSketch(); _install_draw(s)
-        out = _payload(sk.add_sketch_geometry_handler(kind="closed_path",
-                                                       points=[[0, 0], [1, 0], [1, 1]]))
+        out = _payload(sk.add_sketch_geometry_handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]]))
         assert "(closed)" in out["drawn"]
-        assert len(s.geometricConstraints.added) == 1
+
+    def test_closed_path_repeats_first_point_for_the_closing_segment(self):
+        # N points -> N segments (the appended first point closes the loop), matching the proven
+        # polyline-with-repeated-point shape.
+        s = FakeSketch(); _install_draw(s)
+        _payload(sk.add_sketch_geometry_handler(kind="closed_path",
+                                                points=[[0, 0], [2, 0], [2, 2], [0, 2]]))
+        assert s.sketchLines.count == 4      # 4 points + repeated first = 5 pts -> 4 segments
 
 
 class TestMarkConstructionHonesty:
@@ -407,17 +418,17 @@ class TestPolyline:
         assert s.sketchLines.count == 3
 
 
-# ── _target_sketch: named vs default-most-recent ───────────────────────────
+# ── resolve_or_recent_sketch: named vs default-most-recent ─────────────────
 
 class TestTargetSketch:
     def test_named_sketch_resolved(self):
         s = FakeSketch("Named"); _install_draw(s)
-        got, requested = sk._target_sketch(sk._common.design(), "Named")
+        got, requested = sk._common.resolve_or_recent_sketch(sk._common.design(), "Named")
         assert got is s and requested == "Named"
 
     def test_default_is_most_recent(self):
         s = FakeSketch("Only"); _install_draw(s)
-        got, requested = sk._target_sketch(sk._common.design(), "")
+        got, requested = sk._common.resolve_or_recent_sketch(sk._common.design(), "")
         assert got is s and requested is None
 
     def test_missing_named_sketch_errors(self):
@@ -450,6 +461,18 @@ class TestOnFacePlaneNameMisuse:
         res = sk.create_sketch_handler(on_face="NOTAPLANE")
         assert res["isError"] is True
         assert "stale handle" in res["message"]
+
+
+class TestCreateFrameNote:
+    def test_note_states_the_xz_origin_plane_axis_mapping(self, monkeypatch):
+        # the create result teaches the origin-plane local-axis -> world mapping so an agent
+        # need not discover it (the xz plane maps local +Y to world -Z, live-proven).
+        s = FakeSketch(); _install_draw(s)
+        monkeypatch.setattr(sk, "_resolve_plane",
+                            lambda design, p: (SimpleNamespace(tag="xZ"), "xZ origin plane"))
+        out = _payload(sk.create_sketch_handler(plane="xz"))
+        assert "local +Y maps to world -Z" in out["note"]
+        assert "frame.y_world" in out["note"]
 
 
 # ── draw_3d_line_handler: off-plane scaling + readback ──────────────────────

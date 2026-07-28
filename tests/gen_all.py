@@ -20,7 +20,7 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
 
-_GENERATORS = ("gen_spec", "gen_manifest", "gen_wiring", "gen_posture")
+_GENERATORS = ("gen_manifest", "gen_wiring", "gen_posture")
 
 
 def main():

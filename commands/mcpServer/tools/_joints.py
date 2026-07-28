@@ -22,11 +22,22 @@ def is_joint_origin(x):
     except TypeError:
         return False
 
+
+def is_as_built_joint(x):
+    """isinstance(x, adsk.fusion.AsBuiltJoint), degrading to False when the type isn't a real class
+    (a Mock under test). apply_motion routes an as-built joint through a DIFFERENT setter arity."""
+    try:
+        return isinstance(x, adsk.fusion.AsBuiltJoint)
+    except TypeError:
+        return False
+
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_motion (motion-type "
              "dispatch, frame-relative or a custom direction entity) + all_joints (the full joint walk "
              "- joints AND asBuiltJoints, root and every sub-component - that the health rollups count "
              "broken joints over) + find_joint (resolve ONE by name over those same scopes) + "
+             "motion_link_partner (a joint's own MotionLink membership -> linked-partner name; "
+             "joint_drive's second-member refusal gates on it) + "
              "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
              "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + "
              "motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one "
@@ -50,8 +61,9 @@ def motion_param_names(joint):
 # three tools return the block; the teaching must not fork).
 OFFSET_PARAM_NOTE = (
     " model_parameters are the joint's own dNN params: param_set 'offset' to an expression for a "
-    "PARAMETRIC position - it moves along the joint FRAME'S Z axis, not the motion axis. A slider's "
-    "slide VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute).")
+    "PARAMETRIC position - it ALWAYS moves along the joint FRAME'S Z axis, not the motion axis, and "
+    "neither 'flip' (which does not invert its sign) nor 'world_axis' redirects it. A slider's slide "
+    "VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute).")
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
 # passing a custom_entity to apply_motion instead).
@@ -111,6 +123,32 @@ def apply_motion(ji, jtype, axis_idx, custom_entity=None, slide_axis_idx=None):
         ax = JD.CustomJointDirection
     else:
         ax = dirs[axis_idx]
+    # An EXISTING as-built joint being redefined takes a DIFFERENT setter arity than a JointInput: the
+    # motion setters carry an extra JointGeometry arg (setAsSliderJointMotion(direction, geometry
+    # [, customEntity]) - live-verified via sys_get_api_doc), and a rigid as-built joint carries NO
+    # geometry ("Geometry should not be null if joint motion is not rigid" - live-verified), so it
+    # cannot be converted to any motion type. Route it here rather than let the JointInput calls below
+    # misfile the custom entity as the geometry ("wrong number or type of arguments" overload error).
+    if jtype != "rigid" and is_as_built_joint(ji):
+        geom = safe(lambda: ji.geometry)
+        if geom is None:
+            return False, (f"this is a rigid AS-BUILT joint with no joint geometry, so the API "
+                           f"cannot redefine it as a '{jtype}' joint (it has no anchor to move "
+                           "along). Delete it and build the motion joint with joint_create (a "
+                           "':origin' snap) or joint_at_geometry (a real face/edge).")
+        setter = {"revolute": "setAsRevoluteJointMotion", "slider": "setAsSliderJointMotion",
+                  "cylindrical": "setAsCylindricalJointMotion",
+                  "planar": "setAsPlanarJointMotion"}.get(jtype)
+        if setter is None:
+            return False, (f"redefining an as-built joint as '{jtype}' is not supported here - "
+                           "delete it and use joint_create.")
+        try:
+            fn = getattr(ji, setter)
+            if custom_entity is not None:
+                return bool(fn(ax, geom, custom_entity)), None
+            return bool(fn(ax, geom)), None
+        except Exception as e:
+            return False, str(e)
     try:
         if jtype == "rigid":
             return bool(ji.setAsRigidJointMotion()), None
@@ -244,6 +282,30 @@ def find_joint(design, name):
         cand = safe(lambda c=c: c.asBuiltJoints.itemByName(want))
         if cand:
             return cand
+    return None
+
+
+def motion_link_partner(joint):
+    """The name of the joint motion-linked to `joint`, or None when it is in no link. Read off the
+    joint's OWN membership (Joint/AsBuiltJoint.motionLinks - 'the MotionLink objects that this joint
+    is involved in'), so a pair linked inside an xref'd sub-assembly is seen through the same joint
+    find_joint resolved - no component walk. Joint.motionLinks returns a MotionLinkVector - a plain
+    SEQUENCE (len/index/iterate; it has NO .count/.item, so a collection-style read finds nothing,
+    verified live) - unlike Component.motionLinks which is a MotionLinks collection. The partner is
+    whichever of MotionLink.jointOne/jointTwo is not this joint (jointTwo is null for a same-joint
+    two-DOF link - no partner to report)."""
+    my_name = safe(lambda: joint.name)
+    if not my_name:
+        return None
+    for ml in safe(lambda: list(joint.motionLinks), []) or []:
+        if ml is None:
+            continue
+        one = safe(lambda: ml.jointOne.name)
+        two = safe(lambda: ml.jointTwo.name)
+        if one == my_name and two:
+            return two
+        if two == my_name and one:
+            return one
     return None
 
 

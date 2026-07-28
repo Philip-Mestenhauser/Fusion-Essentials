@@ -4,7 +4,7 @@ The Fusion configurations API is mocked; what we pin is the tool's OWN logic: th
 guards (unknown action, no design, not-yet-configured for column actions), creating a configured
 design, adding configuration rows, and the four column kinds (parameter / suppress / visibility /
 appearance-theme) including:
-  - addressing cells by ROW NAME (getCellByRowName) — the robust path the live spike found,
+  - addressing cells by ROW NAME (getCellByRowName) — the robust path, live-verified,
   - parameter cells take an EXPRESSION string,
   - suppress cells take isSuppressed (bool), visibility cells take isVisible (bool),
   - the appearance-theme ORDERING: the body column must be added before extra theme rows, and each

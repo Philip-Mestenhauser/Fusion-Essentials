@@ -233,6 +233,7 @@ def handler(document_id: str = "", into_component: str = "",
     if not good:
         return mode_err
 
+    into_occ = None
     if (into_component or "").strip():
         into_occ, into_err = _INTO_COMPONENT.resolve(into_component)
         if into_err:
@@ -316,11 +317,27 @@ def handler(document_id: str = "", into_component: str = "",
     before_params = safe(lambda: design.userParameters.count, 0) or 0
     before_bodies, _ = _common.design_wide_counts(design)
     before_occ_tokens = _occurrence_tokens(comp)
+    root = safe(lambda: design.rootComponent)
+    before_root_tokens = _occurrence_tokens(root) if comp is not root else before_occ_tokens
 
+    # The platform routes a derive into the ACTIVE component (the UI Insert>Derive behavior),
+    # IGNORING which component's deriveFeatures collection built the input - without activation
+    # a derive "into" a non-active component lands as a ROOT sibling (live-verified). So nesting
+    # = activate the target, add, restore; the landing read-back below verifies where it went.
+    prev_active = safe(lambda: design.activeComponent.name)
+    if into_occ is not None:
+        if not safe(lambda: into_occ.activate(), False):
+            return error(f"Could not activate '{into_component}' to receive the derive "
+                         "(Occurrence.activate() returned false). Nothing was derived.")
     try:
-        feature = derive_feats.add(di)
-    except Exception as e:
-        return error(f"Derive failed: {e}.")
+        try:
+            feature = derive_feats.add(di)
+        except Exception as e:
+            return error(f"Derive failed: {e}.")
+    finally:
+        if into_occ is not None:
+            if safe(lambda: design.activateRootComponent(), None) is None:
+                safe(lambda: into_occ.deactivate())
     if not feature:
         return error("deriveFeatures.add returned nothing (the derive did not produce a feature).")
 
@@ -349,6 +366,16 @@ def handler(document_id: str = "", into_component: str = "",
                       "is_derived": bool(safe(lambda b=b: b.isDerived, False))}
                      for b in _common.result_bodies(feature)]
     derived_components = _new_derived_occurrences(comp, before_occ_tokens)
+    if not derived_components and comp is not root:
+        # Landing net: nothing new in the TARGET component - if the derive surfaced at ROOT
+        # instead, the nesting failed and saying so beats a silent root sibling.
+        strays = _new_derived_occurrences(root, before_root_tokens)
+        if strays:
+            names = _names([s.get("name") for s in strays])
+            return error(f"Derive landed at the ROOT component ({names}), not in {comp_desc} - "
+                         "the target activation did not take, so the nesting failed. The derive "
+                         "EXISTS at root: delete its feature (design_delete_feature) and retry, "
+                         "or keep it and move on.")
     after_bodies, _ = _common.design_wide_counts(design)
     bodies_landed = max(0, after_bodies - before_bodies)
     any_derived_marker = (any(b["is_derived"] for b in direct_bodies) or bool(derived_components))
@@ -385,14 +412,20 @@ def handler(document_id: str = "", into_component: str = "",
     "derived_bodies": direct_bodies,
     "bodies_landed": bodies_landed,
     "parameters_imported": parameters_imported,
-    "note": ("One-way linked COPY: edits made here (a fillet, a patch, an offset) never travel "
-            "back to the source, and the source itself was not modified. Build prep on top of the "
-            "derived body/bodies."),
+    "note": ("One-way linked COPY of the source's last SAVED cloud version - unsaved in-session "
+            "edits in the source are NOT derived (save the source, then doc_update_xref). Edits made "
+            "here (a fillet, a patch, an offset) never travel back to the source, and the source "
+            "itself was not modified. Build prep on top of the derived body/bodies."),
     }
     if excluded_entities:
         result["excluded"] = ", ".join(excl_comp_names + excl_body_names)
     if param_warning:
         result["parameter_warning"] = param_warning
+    if into_occ is not None and prev_active and prev_active != (safe(lambda: root.name) or ""):
+        result["edit_target_note"] = (f"the active edit target was '{prev_active}' before this "
+                                      "call and is now ROOT (nesting requires activating the "
+                                      "target; restoration returns to root). Re-activate with "
+                                      "design_activate_component if needed.")
     return ok(result)
 
 
@@ -411,7 +444,8 @@ TOOL_DESCRIPTION = (
     "source_components / source_bodies (names in the SOURCE), and exclude_components / "
     "exclude_bodies to omit some. For a linked INSTANCE instead, use doc_insert_occurrence. "
     "Requires a parametric design and the source document already OPEN (doc_open - Fusion loads "
-    "documents asynchronously, so it cannot be opened in the same call). Freshness: "
+    "documents asynchronously, so it cannot be opened in the same call). Derives the source's last "
+    "SAVED cloud version (unsaved in-session source edits are not included - save first). Freshness: "
     "doc_get(include=['xref_tree']) shows kind='derive' rows; doc_update_xref refreshes, else "
     "delete and re-derive.\n"
     + _outputs.produces_block(RETURNS)

@@ -148,7 +148,7 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
   macOS**.
 - **Never compare Fusion API objects with `is`.** The API returns fresh wrapper objects for the
   same underlying entity, so `occurrence.component is someComponent` silently fails. Match by
-  `.name` (or compare entity tokens). This bit the `joint_create` resolver (live-verified fix).
+  `.name` (or compare entity tokens); an `is`-based resolver matches nothing (live-verified).
 - **A Joint Origin inside a referenced/child occurrence must be joined via its assembly-context
   proxy**, not the native JO: `jo.createForAssemblyContext(occurrence)`. Passing the native JO
   yields "Provided input paths for joint are not valid". The `joint_create` tool resolves this
@@ -247,9 +247,8 @@ because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools ar
   `tests/live/VERIFIED_TOOLS.md` - commit it with your change). Reload the add-in first so the live
   session runs the code you just edited.
 - **Regenerate the docs:** `py -3 tests/gen_all.py` rebuilds everything under `tests/generated/`
-  (TEST_SPEC from test names, TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP
-  from source);
-  run it whenever check_all says an artifact is stale.
+  (TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP from source,
+  PERMISSION_POSTURE from the write annotations); run it whenever check_all says an artifact is stale.
 - **New adsk API?** If your tool references an enum family the generated `live_api_facts.py` has
   not measured, the suite goes red with the one command that fixes it: run
   `py -3 tests/live/measure_api.py` with Fusion up, then commit the regenerated facts.

@@ -7,72 +7,22 @@ property, unlike the modal simulation/in-process-stock UI commands, which this d
 Toolpaths only render in the Manufacture workspace."""
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam
+from ._cam_common import get_cam, resolve_cam_node, walk_cam_tree, operations_under
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
 
 
-def _all_operations(cam):
-    """Yield (setup_name, folder_name, Operation) for every operation across all setups."""
-    out = []
-    for i in range(safe(lambda: cam.setups.count, 0)):
-        s = cam.setups.item(i)
-        sname = safe(lambda s=s: s.name)
-        for op in safe(lambda s=s: s.allOperations, []) or []:
-            o = adsk.cam.Operation.cast(op)
-            if o:
-                out.append((sname, o))
-    return out
-
-
-def _find_op(cam, name):
-    """The operation named `name` (case-insensitive EXACT), or (None, available-names). Exact-only:
-    an operation name is unique within the CAM tree, so a partial/ambiguous name is REFUSED (None +
-    available names) rather than resolved to the first substring match, which could isolate the wrong
-    toolpath."""
-    want = (name or "").strip().lower()
-    exact = None
-    names = []
-    for sname, o in _all_operations(cam):
-        nm = safe(lambda o=o: o.name) or ""
-        if len(names) < 80:
-            names.append(nm)
-        if nm.lower() == want:
-            exact = o
-    return exact, names
-
-
-def _find_folder_ops(cam, folder_name):
-    """Operations inside a named folder OR a named setup (matched case-insensitively)."""
-    want = (folder_name or "").strip().lower()
-    ops = []
-    matched = None
-    for i in range(safe(lambda: cam.setups.count, 0)):
-        s = cam.setups.item(i)
-        if (safe(lambda s=s: s.name) or "").lower() == want:
-            matched = safe(lambda s=s: s.name)
-            for op in safe(lambda s=s: s.allOperations, []) or []:
-                o = adsk.cam.Operation.cast(op)
-                if o:
-                    ops.append(o)
-            return ops, matched
-        for child in safe(lambda s=s: s.children, []) or []:
-            if type(child).__name__ == "CAMFolder" and (safe(lambda c=child: c.name) or "").lower() == want:
-                matched = safe(lambda c=child: c.name)
-                for op in safe(lambda c=child: c.allOperations, []) or []:
-                    o = adsk.cam.Operation.cast(op)
-                    if o:
-                        ops.append(o)
-                return ops, matched
-    return ops, matched
+def _operation_nodes(cam):
+    """Every operation in the document as CamNodes (setup name + object) - the shared walk's
+    operation projection, used by list/isolate/hide_all."""
+    return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
 
 
 def _set_bulb(o, on):
@@ -102,8 +52,9 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
     if action == "list":
         rows = []
-        for sname, o in _all_operations(cam):
-            rows.append({"setup": sname, "op": safe(lambda o=o: o.name),
+        for node in _operation_nodes(cam):
+            o = node.obj
+            rows.append({"setup": node.setup, "op": node.name,
         "has_toolpath": safe(lambda o=o: o.hasToolpath),
         "valid": safe(lambda o=o: o.isToolpathValid),
         "suppressed": safe(lambda o=o: o.isSuppressed),
@@ -113,7 +64,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if action == "hide_all":
         n = 0
         failed = 0
-        for _, o in _all_operations(cam):
+        for node in _operation_nodes(cam):
+            o = node.obj
             if safe(lambda o=o: o.hasToolpath):
                 if _set_bulb(o, False):
                     n += 1
@@ -129,12 +81,13 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if action == "show_folder":
         if not folder.strip():
             return error("Provide 'folder' - the folder or setup name to show.")
-        ops, matched = _find_folder_ops(cam, folder)
-        if matched is None:
-            return error(f"No folder/setup named '{folder}'. Use cam_show_toolpath(list) or cam_get(include=['operations']).")
+        fnode, ferr = resolve_cam_node(cam, folder, kinds=("setup", "folder"), label="folder/setup")
+        if ferr:
+            return error(ferr + " Use cam_show_toolpath(list) or cam_get(include=['operations']).")
+        ops, matched = operations_under(fnode.obj), fnode.name
         # hide everything, then show this folder's generated ops
-        for _, o in _all_operations(cam):
-            _set_bulb(o, False)
+        for node in _operation_nodes(cam):
+            _set_bulb(node.obj, False)
         shown = []
         failed = []
         for o in ops:
@@ -153,14 +106,15 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
                            "show - see toggle_failures. " + out["note"])
         return ok(out)
 
-    # show / hide / isolate a single operation
+    # show / hide / isolate a single operation - the shared resolver REFUSES a duplicated name
+    # (naming each candidate's setup path) instead of silently toggling the wrong toolpath.
     if not operation.strip():
         return error(f"Provide 'operation' - the operation name to {action}.")
-    o, names = _find_op(cam, operation)
-    if not o:
-        return error(f"No operation matched '{operation}'. Some: "
-                      f"{', '.join(n for n in names if n)[:300]}.")
-    name = safe(lambda: o.name)
+    onode, oerr = resolve_cam_node(cam, operation, kinds=("operation",), label="operation")
+    if oerr:
+        return error(oerr + " Use cam_show_toolpath(list) to see every operation.")
+    o = onode.obj
+    name = onode.name
 
     if action == "hide":
         if not _set_bulb(o, False):
@@ -169,8 +123,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         return ok({"action": "hide", "operation": name})
 
     if action == "isolate":
-        for _, other in _all_operations(cam):
-            _set_bulb(other, False)
+        for node in _operation_nodes(cam):
+            _set_bulb(node.obj, False)
         took = _set_bulb(o, True)
     else:  # show
         took = _set_bulb(o, True)

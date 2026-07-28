@@ -1,7 +1,7 @@
 ---
 id: S2c_Regeneration
 tier: pipeline
-fixture: P2-Gimbal (the S2b artifact - pins, bores, seats, only-pins-touch verified) OPENED as
+fixture: P2-Gimbal (the S2b artifact - pins, bores, seats, zero-interference verified) OPENED as
   the active document by the orchestrator BY URN, active hub PINNED first. READ-AND-RESTORE
   stage - the agent changes parameters but never saves; the cloud artifact must remain at the
   version staged. Missing fixture = ask the user - never create a project.
@@ -18,7 +18,7 @@ expected_refusals: none
 Goal-shaped micro-stage. The chain claims the gimbal is parametric - one driving diameter
 propagating through every part. This stage PROVES it on the BUILT SOLIDS: bump the driver,
 recompute, and require the geometry to actually follow, the timeline to stay healthy, and the
-only-pins-touch clearance state to survive at the new scale. A model whose sketches carry
+zero-interference clearance state to survive at the new scale. A model whose sketches carry
 expressions but whose solids do not follow is scenery, not a parametric model - this stage
 exists to fail it. The orchestrator hands the block below VERBATIM.
 
@@ -86,9 +86,9 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 ## Grader notes (orchestrator-only - never handed to the agent)
 
 - WHAT THIS MEASURES: whether the chain's parametric claim holds at the SOLID level. Sketch
-  expressions are necessary but not sufficient - features built from baked coordinates (the
-  2026-07-20 watch-movement build's gear teeth are the canonical example: a generator computed
-  the geometry, the document received frozen output) pass every static read and fail exactly
+  expressions are necessary but not sufficient - features built from baked coordinates (gear
+  teeth computed by a generator and pasted as frozen output are the canonical
+  example) pass every static read and fail exactly
   here. Regeneration is the cheapest un-fakeable parametric proof: one param_set, and either
   the model follows or it does not.
 - WHY A SEPARATE MICRO-STAGE: the build stages (S2a/S2b) run near the harness's ~60-min cap;
@@ -103,5 +103,5 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   saved, the run is INVALID regardless of verdict - restage from the prior version.
 - Staging: doc_open the S2b artifact BY URN (force_api_open), confirm active; run the block.
 - Chain placement: after S2b, before S3 (S3 consumes the same P2 artifact; S2c leaves it
-  untouched). Budget PROVISIONAL 45 calls / 32k tokens - recalibrate to measured + 25% after
-  the first run.
+  untouched). Budget PROVISIONAL 45 calls / 32k tokens - recalibrate to measured + 25% once a
+  measured run lands.

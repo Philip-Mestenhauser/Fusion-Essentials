@@ -97,6 +97,55 @@ def _query_machines(lib, vendor, model):
     return found
 
 
+# Machine.capabilities flags -> the 'kind' vocabulary (the bundled library is DOMINATED by
+# additive printers, so an unfiltered read floods - machine_type narrows to the relevant kind).
+_MACHINE_KINDS = {"milling": "isMillingSupported", "turning": "isTurningSupported",
+                  "cutting": "isCuttingSupported", "additive": "isAdditiveSupported"}
+
+
+def read_machines(vendor: str = "", machine_type: str = "", max_results: int = 100):
+    """The machine CATALOG the 'machine' input resolves from: every machine in the Local +
+    Fusion360 locations (the same two _resolve_machine searches), filtered by vendor and/or
+    machine_type. Read-only; cam_get(include=['machines']) is the wire surface."""
+    mt = (machine_type or "").strip().lower()
+    if mt and mt not in _MACHINE_KINDS:
+        return error(f"Unknown machine_type '{machine_type}'. Valid: "
+                     f"{', '.join(sorted(_MACHINE_KINDS))}.")
+    try:
+        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    except Exception as e:
+        return error(f"Could not access the machine library: {e}")
+    rows, total = [], 0
+    for loc_name in _MACHINE_LOCATIONS:
+        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
+        if loc is None:
+            continue
+        loc_label = loc_name.replace("LibraryLocation", "").lower()   # 'local' / 'fusion360'
+        try:
+            matches = lib.createQuery(loc, vendor or "", "").execute() or []
+        except Exception:
+            continue
+        for m in matches:
+            caps = safe(lambda m=m: m.capabilities)
+            kinds = [k for k, attr in sorted(_MACHINE_KINDS.items())
+                     if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
+            if mt and mt not in kinds:
+                continue
+            total += 1
+            if len(rows) >= max_results:
+                continue
+            label, v, mo = _machine_ident(m)
+            rows.append({"name": label, "vendor": v, "model": mo, "location": loc_label,
+                         "kind": kinds,
+                         "simulation_ready": bool(safe(lambda m=m: m.hasSimulationModel, False))})
+    return ok({
+        "machines": rows, "count": len(rows), "truncated": total > len(rows),
+        "note": ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); "
+                 "machine_type='milling' narrows past the additive printers. The API refuses "
+                 "assigning any simulation_ready machine - machine_strip_simulation=true "
+                 "assigns it without its simulation model (posting/kinematics unaffected).")})
+
+
 def _exact_machine(cands, machine, vendor, model):
     """Exact-match, MOST-SPECIFIC first: a unique full-LABEL match wins over a unique 'vendor model'
     match, which wins over a unique model match. Prioritizing the label is what makes same-model
@@ -215,9 +264,17 @@ def _resolve_wcs(wcs):
     for key, value in wcs.items():
         if value in (None, "", []):
             continue
-        ent, _is_jo, err = _resolve_wcs_value(value)
+        ent, is_jo, err = _resolve_wcs_value(value)
         if err:
             return None, f"wcs.{key}: {err}"
+        # The platform ACCEPTS a Joint Origin for the ORIGIN binding but throws
+        # InternalValidationError binding one to an AXIS (verified live) - refuse with the
+        # working recipe instead of surfacing the raw platform error.
+        if is_jo and key != "origin":
+            return None, (f"wcs.{key}: a Joint Origin can bind the WCS ORIGIN only - the platform "
+                          "rejects one as an axis. Bind z_axis/x_axis to a face (its normal) or a "
+                          "straight edge via a find_geometry handle; to center a WCS on a Joint "
+                          "Origin, pass it as wcs.origin.")
         resolved[key] = ent
     return resolved, None
 
@@ -240,7 +297,7 @@ def _bind_cad_param(setup, cad_param_name, entity):
 
 
 def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None,
-            machine: str = "", wcs=None) -> dict:
+            machine: str = "", machine_strip_simulation: bool = False, wcs=None) -> dict:
     """See TOOL_DESCRIPTION."""
     if not (setup or "").strip():
         return error("Provide 'setup' - the CAM setup name (see cam_get).")
@@ -371,10 +428,27 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
     if resolved_machine is not None:
         m_obj, m_label = resolved_machine
+        if machine_strip_simulation:
+            # Setup.machine refuses ANY machine whose hasSimulationModel is True ('currently not
+            # supported'), regardless of library location - verified live, including a Local
+            # createFromFile-loaded copy; the platform error's copy-to-local advice does not work
+            # via the API. Stripping the simulation model from the TRANSIENT resolved copy (the
+            # library asset is untouched) is the one working assignment path.
+            try:
+                m_obj.clearSimulationModel()
+            except Exception as e:
+                return error(f"Could not strip the simulation model from '{m_label}': {e}")
+            result["machine_simulation_stripped"] = True
         try:
             target.machine = m_obj                       # Setup.machine takes a transient copy
         except Exception as e:
-            return error(f"Could not assign machine '{want_machine}' to setup '{setup}': {e}.")
+            hint = ("" if machine_strip_simulation or "simulation" not in str(e).lower() else
+                    " The API refuses ANY simulation-ready machine (this platform error's "
+                    "copy-to-local advice does not work via the API). Pass "
+                    "machine_strip_simulation=true to assign it without its simulation model "
+                    "(posting and kinematics unaffected), or pick a simulation_ready=false "
+                    "machine from cam_get(include=['machines']).")
+            return error(f"Could not assign machine '{want_machine}' to setup '{setup}': {e}.{hint}")
         # Read Setup.machine back to CONFIRM the assignment took - a swallowed no-op must not report ok.
         applied = _machine_label(safe(lambda: target.machine))
         if not applied or applied != m_label:
@@ -417,7 +491,8 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 TOOL_DESCRIPTION = (
     "Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern. 'setup' = "
     "setup name. 'machine' = a machine library entry ('vendor|model', e.g. 'Haas|VF-2') to assign (the "
-    "prerequisite a job needs before posting; exact name wins over a shared prefix). 'stock'/'fixtures'/"
+    "prerequisite a job needs before posting; exact name wins over a shared prefix; browse names with "
+    "cam_get(include=['machines'])). 'stock'/'fixtures'/"
     "'models' = lists of bodies (find_geometry handles or names) OR component occurrence names "
     "that REPLACE that collection: 'stock' switches to from-solid stock, 'fixtures' auto-enables fixtures. "
     "Select the COMPONENT occurrence (not the body inside) so the setup keeps its selection when contents are swapped "
@@ -441,7 +516,9 @@ tool = (
     .add_input_property("stock", {"type": "array", "items": {"type": "string"},
             "description": "Solid stock: bodies (handles/names) or a stock component occurrence name - REPLACES the stock set."})
     .add_input_property("machine", {"type": "string",
-            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library."})
+            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library (browse: cam_get include=['machines'])."})
+    .add_input_property("machine_strip_simulation", {"type": "boolean",
+            "description": "With 'machine': assign a simulation-ready machine by stripping the simulation model from the assigned copy - the API refuses simulation-ready machines outright. The library asset is untouched; posting and kinematics keep working; in-Fusion machine simulation stays unavailable for this setup."})
     .add_input_property("wcs", {"type": "object",
             "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference (bound_entities read back); the WCS re-derives from it (associative)."})
     .strict_schema()

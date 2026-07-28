@@ -22,6 +22,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
+from . import _assert
 from . import _inputs
 from . import _outputs
 
@@ -138,7 +139,8 @@ draft_tool = (
             "description": "Flip the pull direction (default false)."})
     .strict_schema()
 )
-draft_item = Item.create_tool_item(tool=draft_tool, write="write", handler=handler, run_on_main_thread=True)
+draft_item = Item.create_tool_item(tool=draft_tool, write="write", handler=handler, run_on_main_thread=True,
+                                   postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

@@ -22,13 +22,6 @@ from .design_mode import run_in_base_feature
 app = adsk.core.Application.get()
 
 
-def _result_bodies(feat):
-    """The MeshBody(ies) a mesh feature produced, as JSON-safe records. Reads only - a feature with no
-    .bodies (or an empty one) returns []. Reports the cut/grouped result."""
-    return [{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
-            for b in _common.result_bodies(feat)]
-
-
 # ── mesh_generate_face_groups ───────────────────────────────────────────────────────────────────
 
 _FG_MESH = _inputs.MeshBodyRef("mesh", required=True,
@@ -202,7 +195,8 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     # Parametric: the feature carries .bodies. Non-parametric (feat None): the cut applied (no
     # exception); split_body raises the mesh body count, trim/split_faces modify in place. We report
     # the observed mesh body set (before/after) rather than the unavailable feature object.
-    bodies = _result_bodies(feat) if feat else []
+    bodies = ([{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
+               for b in _common.result_bodies(feat)] if feat else [])
 
     note = ("Mesh cut by the plane. 'trim' keeps one side, 'split_body' makes two mesh bodies, "
     "'split_faces' cuts the triangulation in place. fill controls the new opening "

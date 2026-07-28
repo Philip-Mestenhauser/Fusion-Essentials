@@ -1,21 +1,31 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Ratchet: bespoke per-file fake classes in tests/unit/ do not grow.
+"""Ratchet: bespoke fake classes in tests/unit/ do not grow - per file, shrink-only.
 
 Most test files predate the shared fakes in conftest.py (BRepFace/BRepEdge/Plane/Cylinder/Line3D/
 Circle3D/FakePoint/FakeVector3D, ...) and instead hand-roll their own - see tests/CLAUDE.md "The
 legacy bespoke pattern exists in most files". A re-rolled fake drifts from the live API silently (it
 is never SHAPES-swept the way a mapped conftest fake is in test_fake_shapes_exist.py), and the same
-geometry shape gets reinvented file after file. This counts every top-level class in tests/unit/*.py
-whose name MATCHES the fake shape - starts with Fake/_Fake, OR shadows a conftest shared-fake name
-(a local redefinition instead of an import), OR matches a live adsk type name in
-live_api_facts.SHAPES (e.g. a bare local ``class BRepBody:``) - and blocks the count from rising.
+geometry shape gets reinvented file after file. This counts every class definition in
+tests/unit/*.py - module-level AND nested (ast.walk), so a fake tucked inside a function or class
+body counts the same as a top-level one - whose name MATCHES the fake shape: starts with Fake/_Fake,
+OR shadows a conftest shared-fake name (a local redefinition instead of an import), OR matches a
+live adsk type name in live_api_facts.SHAPES (e.g. a bare local ``class BRepBody:``).
 
-It is deliberately a RATCHET (count <= _BASELINE), not a zero gate: cleaning up the existing count
-is a dedicated migration nobody has green-lit, so this only blocks REGRESSION - a new test builds
-from the shared fakes (extending them in conftest.py is fine when the attribute is real, i.e.
-present in live_api_facts.SHAPES) instead of adding another bespoke class.
+The baseline is PER FILE and must match measured reality exactly, moving only downward:
+
+- A file ABOVE its ``_PER_FILE_BASELINE`` entry - or a NEW file at any count, since a new test
+  builds from conftest's shared fakes (tests/CLAUDE.md) - fails, naming the file, the delta, and
+  the offending classes.
+- An entry ABOVE reality (the file's count dropped, or the file went away) is STALE: the lint fails
+  and prints the corrected dict ready to paste over ``_PER_FILE_BASELINE``. Locking a win in
+  immediately means a deleted legacy fake in one file can never fund a new bespoke fake in another.
+
+Cleaning up the existing counts is a dedicated migration nobody has green-lit, so the entries are
+measured legacy reality, not accepted targets. A genuinely novel test surface (an object graph the
+conftest fakes do not model) may raise its OWN file's entry with a one-line reason comment. The
+total across files is printed for information only - it gates nothing.
 """
 
 import ast
@@ -27,62 +37,189 @@ TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # test
 UNIT_DIR = os.path.join(TESTS_DIR, "unit")
 CONFTEST_PATH = os.path.join(TESTS_DIR, "conftest.py")
 
-# Count of top-level tests/unit/*.py classes currently matching the bespoke-fake shape. Ratchet DOWN
-# only - this is a measured legacy count (tests/CLAUDE.md's "legacy bespoke pattern"), not an
-# accepted target. A genuinely novel test surface may bump this with a one-line reason comment.
-# +5: model_create_component parent-nesting fakes (the createForAssemblyContext occurrence-proxy graph,
-# a surface conftest's geometry fakes do not model) + the extrude parameter-expression units engine.
-_BASELINE = 556
+# Measured bespoke-fake class count per tests/unit file (module-level + nested). Shrink-only:
+# a file may only match or drop below its entry; a stale (higher) entry fails with a paste-ready
+# replacement. Files without an entry must have zero. A genuinely novel test surface may raise its
+# own file's entry with a one-line reason comment.
+_PER_FILE_BASELINE = {
+    "test__cam_common.py": 1,
+    "test__data_read.py": 5,
+    "test__geom.py": 2,
+    "test__sketch_detail.py": 12,
+    "test__view_common.py": 3,
+    "test_appearance_set.py": 11,
+    "test_assembly_get.py": 5,
+    "test_assembly_inspect_interference.py": 10,
+    "test_assembly_joints_advanced.py": 10,
+    "test_assembly_transform.py": 8,
+    "test_assert_kinds.py": 2,
+    "test_cam_activate_setup.py": 1,
+    "test_cam_compare.py": 7,
+    "test_cam_create_setup.py": 8,
+    "test_cam_delete.py": 3,
+    "test_cam_edit_operation.py": 9,
+    "test_cam_generate.py": 1,
+    "test_cam_post.py": 1,
+    "test_cam_reorder.py": 3,
+    "test_cam_set_nc_comment.py": 5,
+    "test_cam_show_toolpath.py": 6,
+    "test_cam_templates.py": 2,
+    "test_data_management.py": 11,
+    "test_data_switch_hub.py": 3,
+    "test_design_configure.py": 3,
+    "test_design_delete_feature.py": 3,
+    "test_design_delete_occurrence.py": 6,
+    "test_design_export.py": 14,
+    "test_design_mode.py": 3,
+    "test_design_ops.py": 3,
+    "test_doc_insert_derive.py": 17,
+    "test_doc_insert_occurrence.py": 6,
+    "test_doc_lifecycle.py": 7,
+    "test_doc_open.py": 1,
+    "test_doc_update_xref.py": 9,
+    "test_drawing_create.py": 6,
+    "test_drawing_export.py": 3,
+    "test_drawing_update.py": 4,
+    "test_edit_joint.py": 9,
+    "test_family_gating.py": 3,
+    "test_find_geometry.py": 6,
+    "test_inputs.py": 41,
+    "test_joint_at_geometry.py": 6,
+    "test_joint_create_edit.py": 4,
+    "test_joint_create_origin.py": 14,
+    "test_joint_drive.py": 6,
+    "test_joint_motion_link.py": 6,
+    "test_mesh_combine.py": 3,
+    "test_mesh_edit.py": 4,
+    "test_mesh_export.py": 15,
+    "test_mesh_ops.py": 6,
+    "test_model_arrange.py": 10,
+    "test_model_combine.py": 7,
+    "test_model_compute_holder.py": 2,
+    "test_model_construction.py": 2,
+    "test_model_create_component.py": 11,
+    "test_model_draft.py": 4,
+    "test_model_extrude.py": 12,
+    "test_model_fillet_chamfer.py": 15,
+    "test_model_hole.py": 5,
+    "test_model_mirror.py": 3,
+    "test_model_pattern.py": 9,
+    "test_model_revolve.py": 9,
+    "test_model_shell.py": 5,
+    "test_model_split.py": 7,
+    "test_model_sweep.py": 7,
+    "test_param_ops.py": 5,
+    "test_polyline.py": 6,
+    "test_sketch_constrain.py": 7,
+    "test_sketch_core.py": 3,
+    "test_sketch_delete_entity.py": 6,
+    "test_sketch_dimension.py": 11,
+    "test_sketch_get_merge.py": 1,
+    "test_sketch_project.py": 1,
+    "test_sketch_set_text.py": 8,
+    "test_surface_create.py": 17,
+    "test_surface_edit.py": 20,
+    "test_surface_ops.py": 16,
+    "test_sys_api_doc.py": 3,
+    "test_view_screenshot.py": 3,
+    "test_view_screenshot_multi.py": 3,
+    "test_view_section.py": 12,
+    "test_view_set.py": 12,
+    "test_workspace_orient.py": 16,
+    "test_write_guard.py": 4,
+}
 
 
-def _top_level_classes(path):
-    """[(name, lineno)] for every top-level class definition in the .py file at `path`."""
+def _all_classes(path):
+    """[(name, lineno)] for EVERY class definition in the .py file at `path` - module-level and
+    nested (inside functions, methods, or other classes) alike."""
     tree = ast.parse(open(path, encoding="utf-8").read(), filename=str(path))
-    return [(node.name, node.lineno) for node in tree.body if isinstance(node, ast.ClassDef)]
+    return [(node.name, node.lineno) for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
 
 def _conftest_fake_names():
     """Every top-level class name conftest.py defines - the shared fakes a local class must not
     shadow with its OWN redefinition (an import of the same name is not a definition, so it never
     trips this)."""
-    return {name for name, _ in _top_level_classes(CONFTEST_PATH)}
+    tree = ast.parse(open(CONFTEST_PATH, encoding="utf-8").read(), filename=CONFTEST_PATH)
+    return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
 
 
 def _offenders_in_file(path, conftest_names, shape_names):
-    """[(name, lineno)] for every top-level class in `path` matching the bespoke-fake shape:
-    Fake/_Fake-prefixed, OR shadows a conftest shared-fake name, OR matches a live adsk type name
-    in live_api_facts.SHAPES."""
+    """[(name, lineno)] for every class in `path` (module-level or nested) matching the bespoke-fake
+    shape: Fake/_Fake-prefixed, OR shadows a conftest shared-fake name, OR matches a live adsk type
+    name in live_api_facts.SHAPES."""
     out = []
-    for name, lineno in _top_level_classes(path):
+    for name, lineno in _all_classes(path):
         if (name.startswith("Fake") or name.startswith("_Fake")
                 or name in conftest_names or name in shape_names):
             out.append((name, lineno))
     return out
 
 
-def _all_offenders():
+def _measured_counts():
+    """({file: count}, {file: [(name, lineno)]}) for every tests/unit/*.py with at least one
+    bespoke fake-shaped class."""
     conftest_names = _conftest_fake_names()
     shape_names = set(live_api_facts.SHAPES)
-    offenders = []
+    counts, details = {}, {}
     for fn in sorted(os.listdir(UNIT_DIR)):
         if not fn.endswith(".py"):
             continue
-        for name, lineno in _offenders_in_file(os.path.join(UNIT_DIR, fn), conftest_names, shape_names):
-            offenders.append(f"{fn}:{lineno}: class {name}")
-    return offenders
+        offenders = _offenders_in_file(os.path.join(UNIT_DIR, fn), conftest_names, shape_names)
+        if offenders:
+            counts[fn] = len(offenders)
+            details[fn] = offenders
+    return counts, details
+
+
+def _deltas(measured, baseline):
+    """(regressions, stale) between measured per-file counts and the baseline dict.
+    regressions: [(file, measured, baseline_entry)] where a file EXCEEDS its entry (a missing entry
+    is 0, so a new file with any bespoke fakes regresses). stale: [(file, measured, baseline_entry)]
+    where the entry exceeds reality (count dropped or file gone) and must be lowered to match."""
+    regressions = [(fn, n, baseline.get(fn, 0)) for fn, n in sorted(measured.items())
+                   if n > baseline.get(fn, 0)]
+    stale = [(fn, measured.get(fn, 0), b) for fn, b in sorted(baseline.items())
+             if measured.get(fn, 0) < b]
+    return regressions, stale
+
+
+def _baseline_literal(counts):
+    """The corrected _PER_FILE_BASELINE dict as paste-ready source text."""
+    lines = ["_PER_FILE_BASELINE = {"]
+    lines += [f'    "{fn}": {counts[fn]},' for fn in sorted(counts)]
+    lines.append("}")
+    return "\n".join(lines)
 
 
 class TestBespokeFakeRatchet:
-    def test_bespoke_fake_class_count_does_not_regress(self):
-        offenders = _all_offenders()
-        assert len(offenders) <= _BASELINE, (
-            f"bespoke fake-shaped classes in tests/unit: {len(offenders)} (baseline {_BASELINE}). "
-            "Build from conftest's shared fakes - BRepFace/BRepEdge/Plane/Cylinder/Line3D/Circle3D/"
-            "FakePoint/FakeVector3D - or extend them in conftest (only an attribute that is real, "
-            "i.e. present in live_api_facts.SHAPES); a genuinely novel surface may bump _BASELINE "
-            "with a one-line reason comment. New offenders:\n  " + "\n  ".join(offenders))
+    def test_bespoke_fake_count_per_file_shrink_only(self):
+        measured, details = _measured_counts()
+        print(f"bespoke fake-shaped classes in tests/unit: {sum(measured.values())} total "
+              f"across {len(measured)} files (informational - the gate is per-file)")
+        regressions, stale = _deltas(measured, _PER_FILE_BASELINE)
+        if regressions:
+            report = []
+            for fn, n, base in regressions:
+                report.append(f"{fn}: {n} bespoke fake-shaped classes (baseline {base}, "
+                              f"+{n - base}):")
+                report += [f"  {fn}:{lineno}: class {name}" for name, lineno in details[fn]]
+            assert not regressions, (
+                "bespoke fake-shaped classes grew in these files. Build from conftest's shared "
+                "fakes - BRepFace/BRepEdge/Plane/Cylinder/Line3D/Circle3D/FakePoint/FakeVector3D - "
+                "or extend them in conftest (only an attribute that is real, i.e. present in "
+                "live_api_facts.SHAPES). A genuinely novel object graph the conftest fakes cannot "
+                "model may raise its own file's _PER_FILE_BASELINE entry with a one-line reason "
+                "comment.\n" + "\n".join(report))
+        if stale:
+            drops = ", ".join(f"{fn} {b} -> {n}" for fn, n, b in stale)
+            assert not stale, (
+                f"_PER_FILE_BASELINE is stale - counts dropped ({drops}). Lock the win in so it "
+                "cannot fund a new bespoke fake elsewhere: replace _PER_FILE_BASELINE in "
+                "test_bespoke_fake_ratchet.py with:\n" + _baseline_literal(measured))
 
-    def test_the_lint_bites(self, tmp_path):
+    def test_the_scan_bites(self, tmp_path):
         conftest_names = _conftest_fake_names()
         shape_names = set(live_api_facts.SHAPES)
         hot = tmp_path / "hot.py"
@@ -98,3 +235,27 @@ class TestBespokeFakeRatchet:
         shadow.write_text("class BRepBody:\n    pass\n", encoding="utf-8")
         assert _offenders_in_file(shadow, conftest_names, shape_names), (
             "a local class shadowing a conftest/live type name must trip the scan")
+        # nesting is not a hiding place: a fake-shaped class inside a function counts.
+        nested = tmp_path / "nested.py"
+        nested.write_text(
+            "def _install():\n"
+            "    class FakeTucked:\n"
+            "        pass\n"
+            "    class BRepBody:\n"
+            "        pass\n",
+            encoding="utf-8")
+        assert len(_offenders_in_file(nested, conftest_names, shape_names)) == 2, (
+            "fake-shaped classes nested inside a function must trip the scan")
+
+    def test_the_ratchet_bites(self):
+        # growth in a baselined file, any count in a new file, and a stale entry all fail;
+        # an exact match is clean.
+        regressions, stale = _deltas({"a.py": 3, "new.py": 1}, {"a.py": 2})
+        assert regressions == [("a.py", 3, 2), ("new.py", 1, 0)], (
+            "a file above its entry and a new file with fakes must both regress")
+        regressions, stale = _deltas({"a.py": 1}, {"a.py": 2, "gone.py": 4})
+        assert not regressions
+        assert stale == [("a.py", 1, 2), ("gone.py", 0, 4)], (
+            "a dropped count and a vanished file must both mark the baseline stale")
+        assert _deltas({"a.py": 2}, {"a.py": 2}) == ([], []), (
+            "an exact match must be clean")

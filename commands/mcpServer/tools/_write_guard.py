@@ -106,10 +106,15 @@ def _collision_refusal(expect, candidates):
     """Structured refusal when a bare NAME is shared by MORE THAN ONE open document (no write happened).
     Lists each candidate's name + URN; an UNSAVED candidate has no URN, so its open_index (doc_get's
     session address) is given instead. Reuses _refusal's shape/style; instructs passing the URN."""
-    rows = []
+    rows, seen_urns = [], set()
     for c in candidates:
-        row = {"name": c.get("name"), "document_id": c.get("document_id")}
-        if not c.get("document_id"):
+        cid = c.get("document_id")
+        if cid and cid in seen_urns:
+            continue        # one document loaded twice (tab + dependency instance) is ONE candidate
+        if cid:
+            seen_urns.add(cid)
+        row = {"name": c.get("name"), "document_id": cid}
+        if not cid:
             row["open_index"] = c.get("open_index")    # unsaved: reachable only by open:N
         rows.append(row)
     payload = {
@@ -142,6 +147,13 @@ def _document_refusal(expect, name, urn):
     # e matches the ACTIVE doc's NAME - a match only if that name is unique across the open session.
     same = [d for d in _open_documents() if d.get("name") == e]
     if len(same) > 1:
+        # An assembly loads its references as real Documents, so a visible tab and its own
+        # dependency instance share the name AND the lineage URN - that is ONE document, not an
+        # ambiguity. When every candidate carries the active doc's URN, the write lands exactly
+        # where the agent meant; only genuinely different candidates refuse.
+        urns = {d.get("document_id") for d in same}
+        if urns == {urn} and urn:
+            return None
         return _collision_refusal(e, same)
     return None
 

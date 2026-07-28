@@ -2,12 +2,13 @@
 
 This is the meta-layer that keeps tools from re-inventing (and mis-shaping) their inputs. The value
 is that ONE declaration drives resolution + validation + schema + contract, and that a GeometryHandle
-input can ONLY be a real handle constrained to the required kind (the guardrail against ROOT CAUSE 1).
+input can ONLY be a real handle constrained to the required kind (the guardrail against a hand-rolled
+or wrong-kind reference resolving to the wrong entity).
 Pinned: handle resolution + the require-predicate enforcement, the units/Distance scaling chain, the
 schema/contract auto-generation, and resolve_inputs end-to-end.
 """
 
-from conftest import load_tool
+from conftest import load_tool, _make_object_collection
 
 inp = load_tool("_inputs")
 
@@ -90,7 +91,7 @@ class TestGeometryHandle:
 
 
 # ── self-healing composite handle: stale token recovers via the kind+position locator ──────────────
-# The live failure this fixes: find_geometry returns N handles; an older one's entityToken goes stale
+# Live failure mode: find_geometry returns N handles; an older one's entityToken goes stale
 # (Fusion mints a different token per query) and findEntityByToken returns nothing — even with NO model
 # edit. The composite handle '<token>|@<kind>:<x>,<y>,<z>' lets resolution re-find the SAME geometry by
 # its kind+position when the token is dead, so the caller never has to re-query.
@@ -178,6 +179,41 @@ class TestSelfHealingHandle:
         val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("BARE")
         assert err is None and val is f
 
+    def test_make_handle_stamps_body_revision(self):
+        # BRep entities carry their body's revisionId so locator recovery can verify identity.
+        ent = type("E", (), {"entityToken": "TOK",
+                             "body": type("B", (), {"revisionId": "REV7"})()})()
+        h = inp.make_handle(ent, "cylinder_face", (1.0, 2.0, 3.0))
+        assert h.endswith(";rv=REV7") and "|@cylinder_face:1.000000,2.000000,3.000000" in h
+
+    def test_split_handle_parses_revision_and_legacy(self):
+        tok, loc = inp._split_handle(f"T{inp._HANDLE_SEP}cylinder_face:1.0,2.0,3.0;rv=REV7")
+        assert tok == "T" and loc == ("cylinder_face", 1.0, 2.0, 3.0, "REV7")
+        tok, loc = inp._split_handle(f"T{inp._HANDLE_SEP}cylinder_face:1.0,2.0,3.0")
+        assert tok == "T" and loc == ("cylinder_face", 1.0, 2.0, 3.0, None)
+
+    def test_locator_recovery_with_matching_revision_succeeds(self):
+        # token dead, geometry AND its body revision unchanged -> benign token rotation, recover.
+        f = _HealFace((1.0, 2.0, 3.0))
+        f.body = type("B", (), {"revisionId": "REV7"})()
+        _install_with_bodies([f], token_map={})
+        handle = f"DEAD{inp._HANDLE_SEP}planar_face:1.0,2.0,3.0;rv=REV7"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert err is None and val is f
+
+    def test_locator_recovery_refuses_on_changed_revision(self):
+        # A delete-rebuild can put DIFFERENT geometry exactly at the recorded position (live-proven:
+        # a rotated cylinder's record point landed on the deleted one's, and a relation read then
+        # certified a comparison that never happened). A changed body revision = refuse, never guess.
+        f = _HealFace((1.0, 2.0, 3.0))
+        f.body = type("B", (), {"revisionId": "REV8-DIFFERENT"})()
+        _install_with_bodies([f], token_map={})
+        handle = f"DEAD{inp._HANDLE_SEP}planar_face:1.0,2.0,3.0;rv=REV7"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert val is None
+        assert "changed since" in err.lower() or "model changed" in err.lower()
+        assert "find_geometry" in err
+
 
 # ── GeometryHandleList: the 'these specific edges/bodies' shape ─────────────
 
@@ -219,6 +255,67 @@ class TestGeometryHandleList:
         k = inp.GeometryHandleList("edges", require="edge")
         sch = k.schema()
         assert sch["type"] == "array" and sch["items"]["type"] == "string"
+
+
+# ── EdgeLoopRef: edge handles as a BOUNDARY, with the closed/open loop contract ─────────────
+
+
+def _install_loop(token_map):
+    """Edge handles plus a real ObjectCollection.create, so EdgeLoopRef can assemble the boundary
+    collection it hands to Patch/Extend."""
+    import adsk.core
+    _install(token_map)
+    adsk.core.ObjectCollection.create = _make_object_collection
+
+
+class TestEdgeLoopRef:
+    def test_required_empty_errors(self):
+        _install_loop({})
+        k = inp.EdgeLoopRef("boundary", closed=True, required=True)
+        val, err = k.resolve(None)
+        assert val is None and "edge" in err and "find_geometry" in err
+
+    def test_single_edge_is_a_legal_boundary(self):
+        # a lone edge is allowed - Fusion auto-finds the connected loop from it
+        e = FakeEdge()
+        _install_loop({"E1": e})
+        (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E1"])
+        assert err is None
+        assert meta["entities"] == [e]
+        assert coll.count == 1 and coll.item(0) is e
+
+    def test_open_chain_across_two_bodies_is_refused(self):
+        # closed=False (extend / open-extrude): every edge must come from ONE surface body -
+        # a multi-body chain is rejected before any mutation runs.
+        e1, e2 = FakeEdge(), FakeEdge()
+        e1.body, e2.body = object(), object()
+        _install_loop({"E1": e1, "E2": e2})
+        val, err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2"])
+        assert val is None and "ONE surface body" in err
+
+    def test_open_chain_one_body_resolves_with_body_count(self):
+        b = object()
+        e1, e2 = FakeEdge(), FakeEdge()
+        e1.body = b
+        e2.body = b
+        _install_loop({"E1": e1, "E2": e2})
+        (coll, meta), err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2"])
+        assert err is None and meta["body_count"] == 1 and coll.count == 2
+
+    def test_closed_loop_may_span_bodies_and_reports_body_count(self):
+        # the single-body rule gates OPEN chains only; a closed boundary resolves, and meta
+        # reports how many bodies the edges touch.
+        e1, e2 = FakeEdge(), FakeEdge()
+        e1.body, e2.body = object(), object()
+        _install_loop({"E1": e1, "E2": e2})
+        (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E1", "E2"])
+        assert err is None and meta["body_count"] == 2
+
+    def test_contract_note_states_closed_vs_open(self):
+        closed = inp.EdgeLoopRef("boundary", closed=True).contract_note()
+        opened = inp.EdgeLoopRef("edges", closed=False).contract_note()
+        assert "CLOSED loop" in closed and "single edge" in closed
+        assert "OPEN chain" in opened and "ONE surface body" in opened
 
 
 # ── BodyRef: name OR handle, dispatched WITHOUT a length heuristic ──────────────────────────────
@@ -326,7 +423,7 @@ class TestBodyRef:
         assert err is None and val is b
 
     def test_long_name_is_NOT_mistaken_for_a_handle(self):
-        # the exact bug: a 61-char body name must resolve by NAME, not error as a stale handle
+        # a 61-char body name must resolve by NAME, not error as a stale handle
         long_name = "Left-Hand-Bracket-Assembly-Revision-C-DO-NOT-MACHINE-final-v2"
         assert len(long_name) > 60
         b = FakeBody(long_name)
@@ -862,7 +959,7 @@ class TestBodyKind:
         assert val is None and "must be a MESH body" in err and "SOLID body" in err
 
     def test_mesh_resolves_by_name_from_meshBodies(self):
-        # a mesh is no longer an invisible miss: name lookup searches meshBodies too
+        # name lookup searches meshBodies too - a mesh name must never be an invisible miss
         m = FakeMesh("ScanData")
         _install_kind_bodies(mesh_named={"ScanData": m})
         val, err = inp.MeshBodyRef("body").resolve("ScanData")
@@ -1436,6 +1533,27 @@ class TestOccurrenceRefList:
         assert val is None and "ambiguous" in err.lower() and "occs[1]" in err
 
 
+class TestSharedResolverBehaviour:
+    """Behavioural anchors for _resolve_occurrence ITSELF - the canonical resolver
+    test_occurrence_ref_lint.py points every routed tool at. OccurrenceRef wraps it, but a tool may
+    also call it directly, so the helper's own contract (fullPathName beats a same-named instance;
+    an ambiguous bare name errors) is pinned here, not only through the kind."""
+
+    def test_fullpath_beats_a_same_named_instance(self):
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        _install_occurrences(a, b)
+        occ, err = inp._resolve_occurrence("t", "Sub-B:1+Bolt:1")
+        assert err is None and occ is b
+
+    def test_ambiguous_bare_name_errors(self):
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        _install_occurrences(a, b)
+        occ, err = inp._resolve_occurrence("t", "Bolt")
+        assert occ is None and "ambiguous" in err.lower()
+
+
 # ── TargetRef (the polymorphic measure/colour target) ───────────────────────
 
 def _install_target(*, handle_map=None, occurrences=(), components=(), brep_named=None, mesh_named=None):
@@ -1562,6 +1680,21 @@ class TestTargetRef:
         assert res is None
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
+
+    def test_ambiguous_body_name_errors_with_candidates(self):
+        # The same propagation rule for the BODY step: two same-named bodies must surface
+        # _resolve_any_body's ambiguity error (with each candidate's context), not fall through
+        # to the generic "did not resolve" miss.
+        pin_a = FakeBRep("Pin", is_solid=True)
+        pin_b = FakeBRep("Pin", is_solid=True)
+        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        res, err = inp.TargetRef("target").resolve("Pin")
+        assert res is None
+        assert "ambiguous" in err.lower()
+        assert "Sub-A:1" in err and "Sub-B:1" in err       # both candidate contexts listed
+        assert "did not resolve" not in err                # the generic miss must not mask it
 
 
 class TestTargetRefList:
@@ -1871,8 +2004,8 @@ class TestJointOriginRef:
         assert jo is None and "not a Joint Origin" in err
 
     def test_walk_finds_a_subcomponent_jo_the_root_walk_would_miss(self):
-        # the consolidation regression: a JO living ONLY in a sub-component must be found (a root-only
-        # walk under-reports). find_joint_origins_by_name is the resolve-one leaf over all_joint_origins.
+        # a JO living ONLY in a sub-component must be found (a root-only walk under-reports).
+        # find_joint_origins_by_name is the resolve-one leaf over all_joint_origins.
         native = _JO("Deep_Frame")
         sub = _Comp("Inner", [native])
         root = _RootJO(jos=[], occ_by_comp={"Inner": [_OccJO("Inner:1", sub)]})

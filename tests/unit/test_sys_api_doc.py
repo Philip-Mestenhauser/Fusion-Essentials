@@ -222,9 +222,19 @@ class TestCaps:
         assert out["truncated"] is True
 
     def test_max_results_never_exceeds_hard_cap(self, monkeypatch):
-        _install_fake_api(monkeypatch)
+        # A fake universe LARGER than _MAX_RESULTS, so the hard cap is load-bearing: without the
+        # clamp this returns every class/member and the test goes red.
+        n = ad._MAX_RESULTS + 10
+        mod = types.ModuleType("adsk.core")
+        for i in range(n):
+            cls = type(f"Thing{i:03d}", (), {"__doc__": f"Fake API class {i}.",
+                                             "probe": lambda self: None})
+            cls.__module__ = "adsk.core"
+            setattr(mod, cls.__name__, cls)
+        monkeypatch.setitem(sys.modules, "adsk.core", mod)
+        monkeypatch.setattr(ad, "_API_MODULES", ("adsk.core",))
         out = _payload(ad.handler(searchPattern=".", max_results=99999))
-        # hard cap is _MAX_RESULTS; we can't return more than the universe has,
-        # but the cap must not be exceeded.
-        assert len(out["classes"]) <= ad._MAX_RESULTS
-        assert len(out["members"]) <= ad._MAX_RESULTS
+        # requested 99999 is clamped to the hard cap, and the cut is flagged
+        assert len(out["classes"]) == ad._MAX_RESULTS
+        assert len(out["members"]) == ad._MAX_RESULTS
+        assert out["truncated"] is True

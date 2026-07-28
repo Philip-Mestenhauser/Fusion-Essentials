@@ -332,7 +332,7 @@ class TestLimits:
         assert "slide" in res["message"].lower() or "linear" in res["message"].lower()
 
 
-# ── world_axis: re-point to a TRUE world axis (the boom-about-Y fix) ─────────
+# ── world_axis: re-point a joint's motion to a TRUE world axis ───────────────
 
 class TestWorldAxis:
     def test_world_axis_uses_custom_construction_axis(self):

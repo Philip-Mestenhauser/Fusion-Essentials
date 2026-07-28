@@ -45,9 +45,7 @@ def _resolve_body(comp, body_name):
     name) resolves through BodyRef (kind-checked solid, precise error). Empty = the most-recent body in
     the active component. Returns (body, error)."""
     if body_name in (None, "", []):
-        bodies = safe(lambda: comp.bRepBodies)
-        n = safe(lambda: bodies.count, 0) if bodies else 0
-        body = bodies.item(n - 1) if n else None
+        body = _common.most_recent_body(comp)
         if not body:
             return None, ("No body in the active component to shell. Model one first, or pass "
                           "'remove_faces' = face handles from find_geometry.")

@@ -13,7 +13,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, resolve_sketch, all_sketch_names, target_component
+from ._common import error, ok, safe, all_sketch_names
 from . import _common
 from . import _inputs
 from . import _outputs
@@ -37,18 +37,6 @@ RETURNS = [
         "the created sketch-entity refs ('line:0','circle:1',...) to constrain/dimension",
         consumers=["sketch_constrain", "sketch_dimension"]),
 ]
-
-
-def _resolve_target_sketch(design, sketch_name):
-    """The sketch to project INTO: by name via the shared cross-component resolver, or the ACTIVE
-    component's most recently created sketch when no name is given (matches sketch_add_geometry)."""
-    name = (sketch_name or "").strip()
-    if name:
-        return resolve_sketch(design, name), name
-    coll = safe(lambda: target_component(design).sketches)
-    if coll and safe(lambda: coll.count, 0):
-        return coll.item(coll.count - 1), None
-    return None, None
 
 
 def _addressable_counts(sketch) -> dict:
@@ -79,7 +67,7 @@ def handler(entities="", sketch_name: str = "", link: bool = True) -> dict:
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    sk, requested = _resolve_target_sketch(design, sketch_name)
+    sk, requested = _common.resolve_or_recent_sketch(design, sketch_name)
     if not sk:
         if (sketch_name or "").strip():
             names = all_sketch_names(design)

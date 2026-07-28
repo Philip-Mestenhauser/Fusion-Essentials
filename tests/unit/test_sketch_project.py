@@ -67,9 +67,9 @@ def call(monkeypatch):
              raw=False, **kw):
         sk = sketch if sketch is not None else FakeSketch()
         if sketch_none:
-            monkeypatch.setattr(sp, "_resolve_target_sketch", lambda d, n: (None, n or None))
+            monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (None, n or None))
         else:
-            monkeypatch.setattr(sp, "_resolve_target_sketch", lambda d, n: (sk, n or None))
+            monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (sk, n or None))
         if resolve_err:
             monkeypatch.setattr(sp._ENTITIES, "resolve", lambda raw: (None, resolve_err))
         else:

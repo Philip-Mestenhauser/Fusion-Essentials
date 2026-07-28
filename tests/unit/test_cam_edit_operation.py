@@ -10,7 +10,8 @@ live Fusion here — fakes mimic CAMParameters.
 """
 
 import json
-from conftest import load_tool
+from conftest import load_tool, make_cam
+from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 ce = load_tool("cam_edit_operation")
 
@@ -141,10 +142,14 @@ class TestEditOperation:
 
     def test_invalid_value_reports_and_does_not_partially_apply(self, monkeypatch):
         op = _install(monkeypatch)
-        # second param raises on set; the tool should report the failure
+        # first value raises on set; the tool reports the failure and the op is left as found -
+        # read BOTH params back: a handler that swallowed the raise and kept applying would
+        # leave tool_stepover changed.
         res = ce.handler(operation="Adaptive1",
-                         parameters={"tool_stepover": "1.0", "maximumStepdown": "BOOM"})
+                         parameters={"maximumStepdown": "BOOM", "tool_stepover": "1.0"})
         assert res["isError"] is True and "maximumStepdown" in res["message"]
+        assert op.parameters.itemByName("maximumStepdown").expression == "2.0483"
+        assert op.parameters.itemByName("tool_stepover").expression == "2."
 
     def test_no_parameters_errors(self, monkeypatch):
         _install(monkeypatch)
@@ -235,6 +240,16 @@ class TestFindOperation:
         res = ce.handler(operation="Ghost", parameters={"tool_stepover": "1"})
         assert res["isError"] is True
         assert "RealOp" in res["message"]      # available names surfaced
+
+    def test_duplicate_op_name_across_setups_is_refused(self, monkeypatch):
+        # "Drill1" exists in TWO setups - editing by that name must REFUSE with both setup paths,
+        # never silently edit whichever setup's op the walk met first.
+        cam = make_cam(SharedSetup("Setup1", ops=[SharedOp("Drill1")]),
+                       SharedSetup("Setup2", ops=[SharedOp("Drill1")]))
+        monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
+        res = ce.handler(operation="Drill1", parameters={"tool_stepover": "1"})
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "Setup1 / Drill1" in res["message"] and "Setup2 / Drill1" in res["message"]
 
     def test_operation_nested_in_a_folder_resolves(self, monkeypatch):
         # a folder-nested operation must resolve too - .operations only lists what's directly in

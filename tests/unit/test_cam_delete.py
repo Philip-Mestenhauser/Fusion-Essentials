@@ -133,12 +133,14 @@ class TestGuards:
         assert res["isError"] is True and "Ghost" in res["message"]
 
     def test_ambiguous_name(self, monkeypatch):
-        # two operations named the same across setups -> refuse rather than guess
+        # two operations named the same across setups -> refuse rather than guess, naming each
+        # candidate's setup path so the agent can rename/disambiguate.
         s1 = Setup("S1", ops=[Operation("Dup")])
         s2 = Setup("S2", ops=[Operation("Dup")])
         _install(monkeypatch, [s1, s2])
         res = cd.handler(entity="Dup")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "S1 / Dup" in res["message"] and "S2 / Dup" in res["message"]
 
 
 # ── delete ───────────────────────────────────────────────────────────────────
@@ -159,7 +161,7 @@ class TestDelete:
 
     def test_delete_nested_pattern(self, monkeypatch):
         # a pattern lives inside a folder and is NOT in allOperations — the tool must walk the tree
-        # (.folders -> .patterns) to find it. This was the live bug.
+        # (.folders -> .patterns) to find it.
         cam = _install(monkeypatch)
         out = _payload(cd.handler(entity="Pattern1"))
         assert out["deleted"] is True and out["entity_type"] == "pattern"

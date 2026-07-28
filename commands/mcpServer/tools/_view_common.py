@@ -5,11 +5,21 @@
 plus the four iso corners; Fusion is Z-up). VIEW_DIRECTIONS is the eye-target direction; consumers
 that instead need the opposite-sign LOOK direction (target-eye) call look_direction(). The table
 exists because assigning camera.viewOrientation does not reliably move the eye/target - consumers
-set explicit vectors instead.
+set explicit vectors instead. apply_named_view/capture_png_b64 are the shared orient-then-grab
+mechanics the screenshot tools sit on.
 """
 
+import base64
+import os
+import tempfile
+
+import adsk.core
+
+from . import _common
+
 MAP_BLURB = ("camera-orientation table for the standard named views - view_direction/"
-             "look_direction/up_vector plus the true-orthographic-face set")
+             "look_direction/up_vector plus the true-orthographic-face set + "
+             "apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics)")
 
 # eye - target direction per named view. Not pre-normalized (the iso corners are (+-1,+-1,+-1));
 # view_direction()/look_direction() normalize on read.
@@ -71,3 +81,47 @@ def up_vector(name):
 def is_ortho_face(name):
     """True if 'name' is one of the 6 true orthographic faces (front/back/top/bottom/left/right)."""
     return name in ORTHO_FACE_VIEWS
+
+
+def apply_named_view(vp, name):
+    """Point the viewport's camera at a named view and fit. The camera is set to EXACT world-axis
+    eye/target/up vectors so the view is GUARANTEED square to world (a rotate-toward/viewOrientation
+    assignment leaves a tilt that distorts an orthographic read); target keeps the current focus, eye
+    is placed along the exact look direction, and the 6 true faces force an orthographic camera.
+    Raises on failure (the caller words its own error); no-op for an unknown/'current' name."""
+    look = look_direction(name)
+    if look is None:
+        return
+    up = up_vector(name)
+    cam = vp.camera
+    tgt = cam.target
+    dist = _common.safe(lambda: cam.eye.distanceTo(cam.target), 100.0) or 100.0
+    cam.eye = adsk.core.Point3D.create(
+        tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
+    cam.upVector = adsk.core.Vector3D.create(*up)
+    if is_ortho_face(name):
+        cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
+    vp.camera = cam                   # assigning back applies the change
+    vp.fit()
+
+
+def capture_png_b64(vp, width, height, prefix="fe_mcp_shot"):
+    """Grab the viewport as a base64 PNG string via a temp file (always removed). Forces a viewport
+    refresh FIRST - the capture can otherwise race an un-refreshed frame (a camera/visibility change
+    that hasn't drawn yet reads as blank). Returns (b64, error)."""
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=".png")
+        os.close(fd)
+        _common.safe(lambda: vp.refresh())
+        did = vp.saveAsImageFile(temp_path, width, height)
+        if not did or not os.path.exists(temp_path):
+            return None, "Viewport capture failed (saveAsImageFile returned false)."
+        with open(temp_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii"), None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass

@@ -43,6 +43,17 @@ class _ValParam:
         self.value = types.SimpleNamespace(value=value)
 
 
+class _ChoiceParam:
+    """A ChoiceParameterValue-shaped param: getChoices() -> (ok, names, values) out-params, and
+    .value legal only as one of those values (the live binding rejects anything else)."""
+    def __init__(self, name, names, values, current):
+        self.name = name
+        legal = list(values)
+        cv = types.SimpleNamespace(value=current)
+        cv.getChoices = lambda: (True, list(names), legal)
+        self.value = cv
+
+
 def _make_params(missing=()):
     """The output parameters an NC program exposes. `missing` drops names to simulate a program that
     lacks a parameter (e.g. no output-folder param)."""
@@ -51,7 +62,8 @@ def _make_params(missing=()):
         "nc_program_output_folder": _StrParam("nc_program_output_folder"),
         "nc_program_comment": _StrParam("nc_program_comment"),
         "nc_program_openInEditor": _ValParam("nc_program_openInEditor", True),
-        "nc_program_unit": _ValParam("nc_program_unit", 0),
+        "nc_program_unit": _ChoiceParam("nc_program_unit", ["Document unit", "Inches", "Millimeters"],
+                                        ["$doc", "$in", "$mm"], "$doc"),
     }
     for n in missing:
         params.pop(n, None)
@@ -287,6 +299,17 @@ class TestGuards:
                          output_folder=str(tmp_path), program_name="1")
         assert res["isError"] is True and "Ghost" in res["message"]
 
+    def test_duplicate_scope_name_across_setups_is_refused(self, monkeypatch, tmp_path):
+        # "Drill1" exists in TWO setups - posting that scope must REFUSE with both setup paths and
+        # post NOTHING, never post whichever setup's op the walk met first.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Drill1")]),
+                                          _Setup("S2", [_Op("Drill1")])]))
+        res = cp.handler(scope="Drill1", post=str(_write_cps(tmp_path)),
+                         output_folder=str(tmp_path), program_name="1")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "S1 / Drill1" in res["message"] and "S2 / Drill1" in res["message"]
+        assert cam.posted == [] and cam.ncPrograms.count == 0    # no program, no post
+
 
 # -- post config resolution ----------------------------------------------------
 
@@ -309,8 +332,8 @@ class TestPostResolution:
 
 class TestCloudPostScope:
     def test_local_scope_default_returns_ready_post_configuration(self, monkeypatch, tmp_path):
-        # Backward compat: post_scope defaults to local and still loads a .cps via createFromContent,
-        # returning a ready PostConfiguration (not a path) - the handler no longer loads it.
+        # post_scope defaults to local and loads a .cps via createFromContent,
+        # returning a ready PostConfiguration (not a path) - the handler does not load it.
         cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
         cps = _write_cps(tmp_path)
         pc, label, err = cp._resolve_post_config(cam, str(cps), "local")
@@ -391,7 +414,7 @@ class TestCreateOrReuse:
             str(tmp_path).replace("\\", "/")
         assert _unq(params.itemByName("nc_program_comment").expression) == "rev A"
         assert params.itemByName("nc_program_openInEditor").value.value is False   # headless
-        assert params.itemByName("nc_program_unit").value.value == cp._UNIT_INDEX["mm"]
+        assert params.itemByName("nc_program_unit").value.value == "$mm"
 
     def test_operations_collection_carries_the_target_setup(self, monkeypatch, tmp_path):
         s1 = _Setup("Setup1", [_Op("Face1")])
@@ -480,6 +503,64 @@ class TestPostWritesFile:
                          output_folder=str(tmp_path), program_name="1")
         assert res["isError"] is True and "kaboom" in res["message"]
         assert cam.ncPrograms.count == 0                    # orphan removed after the raise
+
+
+# ── nc_program_unit: a ChoiceParameterValue rejects a bare int index; set the choice STRING, and ──
+# ── surface an explicit note (never post silently-wrong units) when the set still fails. ────────────
+
+class TestUnitParam:
+    def test_missing_unit_param_is_no_note(self):
+        val, note = cp._set_unit_param(_Params({}), "mm")
+        assert val is cp._MISSING and note is None
+
+    def test_no_choices_exposed_is_error_note_not_wrong_typed_set(self):
+        # a value with no getChoices() must NOT be set blind (the platform rejects a bare int with a
+        # std::string type error) - surface the error + note instead.
+        params = _Params({"nc_program_unit": _ValParam("nc_program_unit", 0)})
+        val, note = cp._set_unit_param(params, "mm")
+        assert isinstance(val, str) and "error" in val
+        assert note and "units" in note.lower()
+
+    def test_choice_value_picked_by_unit_word_in_its_name(self):
+        # getChoices() returns (ok, names, values); the value whose NAME carries the unit word is set -
+        # never an index guess into the names.
+        cv = types.SimpleNamespace(value="$doc")
+        cv.getChoices = lambda: (True, ["Document unit", "Inches", "Millimeters"],
+                                 ["$doc", "$in", "$mm"])
+        params = _Params({"nc_program_unit": types.SimpleNamespace(name="nc_program_unit", value=cv)})
+        val, note = cp._set_unit_param(params, "mm")
+        assert note is None and cv.value == "$mm"
+
+    def test_set_failure_returns_error_value_and_surfaced_note(self):
+        # the live defect: setting the value raises 'ChoiceParameterValue__set_value'. The failure must
+        # come back as an error value + a human note, never a swallowed success.
+        class _Reject:
+            def getChoices(self):
+                return (True, ["Document unit", "Inches", "Millimeters"], ["$doc", "$in", "$mm"])
+            @property
+            def value(self):
+                return "$doc"
+            @value.setter
+            def value(self, v):
+                raise RuntimeError("error in ChoiceParameterValue__set_value")
+
+        params = _Params({"nc_program_unit": types.SimpleNamespace(name="nc_program_unit", value=_Reject())})
+        val, note = cp._set_unit_param(params, "mm")
+        assert isinstance(val, str) and "error" in val
+        assert note and "units" in note.lower()
+
+    def test_handler_surfaces_unit_note_but_still_posts(self, monkeypatch, tmp_path):
+        # a units failure is NON-fatal (the file posts in the program's current units) but must be
+        # surfaced explicitly in units_note + the note, not buried in params_applied.
+        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        monkeypatch.setattr(cp, "_set_unit_param",
+                            lambda params, units_key: ("<error: boom>",
+                                                       "Output units could not be set to 'mm'."))
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="1", units="mm"))
+        assert data["file_count"] == 1                          # non-fatal: the file still posted
+        assert "units_note" in data and "units" in data["units_note"].lower()
+        assert "Output units could not be set" in data["note"]
 
 
 # ── post-log surfacing: a failed post's real error lives in the log, not the output folder ──────────

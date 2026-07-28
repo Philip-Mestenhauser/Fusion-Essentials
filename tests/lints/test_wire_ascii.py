@@ -6,11 +6,13 @@ connected agent ever reads about a tool - and they cross the wire JSON-encoded w
 6-character ``\\uXXXX`` escape that costs tokens every turn and reads worse than the plain-ASCII
 spelling (" - " for an em dash, "..." for an ellipsis, "->" for an arrow, "deg" for a degree sign).
 
-This sweeps two places a wire string is authored:
+This sweeps three places a wire string is authored:
   1. the LIVE registry - every registered tool's description and every input property's
      description (recursively, for nested array/object schemas);
   2. the SOURCE - any module-level ``*_DESCRIPTION`` constant, whether or not it ends up wired to a
-     tool today (catching a dead-but-about-to-be-reused constant before it goes non-ASCII).
+     tool today (catching a dead-but-about-to-be-reused constant before it goes non-ASCII);
+  3. the RUNTIME payloads - every string literal inside an ``ok(...)`` / ``error(...)`` call in
+     the tool sources (notes, error text, payload keys/values - all of it crosses the wire).
 
 Box-drawing dividers in ``#`` comments (module docstrings) are outside this sweep on purpose - a
 comment never serializes onto the wire.
@@ -108,3 +110,58 @@ class TestDescriptionConstantsAreAscii:
                         offenders.append(f"{fn}: {const_name} has {bad} - "
                                           f"replace with a plain-ASCII spelling (' - ', '...', '->')")
         assert not offenders, "non-ASCII description constant(s):\n  " + "\n  ".join(offenders)
+
+
+def _ok_error_call_strings(src, filename="<src>"):
+    """(call_name, lineno, [string literals]) for every ``ok(...)`` / ``error(...)`` call in the
+    source text - the runtime payload authoring sites (``_common.ok``/``_common.error`` attribute
+    calls too). Every string literal in the call subtree is collected (f-string pieces, nested
+    dict keys/values, defaults handed to safe()): each is text that crosses the wire JSON-encoded."""
+    tree = ast.parse(src, filename=filename)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.id if isinstance(fn, ast.Name) else (
+            fn.attr if isinstance(fn, ast.Attribute) else None)
+        if name not in ("ok", "error"):
+            continue
+        strings = [n.value for n in ast.walk(node)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        if strings:
+            out.append((name, node.lineno, strings))
+    return out
+
+
+class TestRuntimePayloadStringsAreAscii:
+    def test_every_ok_error_literal_is_ascii(self):
+        offenders = []
+        for fn in sorted(os.listdir(TOOLS_DIR)):
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(TOOLS_DIR, fn)
+            src = open(path, encoding="utf-8").read()
+            for call_name, lineno, strings in _ok_error_call_strings(src, path):
+                for s in strings:
+                    bad = _non_ascii(s)
+                    if bad:
+                        offenders.append(f"{fn}:{lineno}: {call_name}(...) literal has {bad} - "
+                                          f"replace with a plain-ASCII spelling (' - ', '...', '->')")
+        assert not offenders, "non-ASCII ok()/error() payload literal(s):\n  " + "\n  ".join(offenders)
+
+    def test_the_runtime_sweep_bites(self):
+        # A doctored error() payload with a degree sign MUST be flagged...
+        hits = _ok_error_call_strings('def h():\n    return error("tilt is 5° too far")\n')
+        assert hits and any(_non_ascii(s) for _, _, strings in hits for s in strings)
+        # ...an ok() note through the attribute form too...
+        hits = _ok_error_call_strings(
+            'def h():\n    return _common.ok({"note": "a → b"})\n')
+        assert hits and any(_non_ascii(s) for _, _, strings in hits for s in strings)
+        # ...an f-string piece inside the call is collected...
+        hits = _ok_error_call_strings('def h():\n    return error(f"bad °: {x}")\n')
+        assert hits and any(_non_ascii(s) for _, _, strings in hits for s in strings)
+        # ...while a non-wire call is out of scope, and a clean payload has no non-ASCII hit.
+        assert _ok_error_call_strings('def h():\n    log("° in a log line")\n') == []
+        hits = _ok_error_call_strings('def h():\n    return ok({"note": "5 deg off"})\n')
+        assert hits and not any(_non_ascii(s) for _, _, strings in hits for s in strings)

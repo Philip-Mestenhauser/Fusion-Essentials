@@ -69,9 +69,23 @@ def _resolve_target(design, target):
                 pairs.append((o, b))
         return pairs, "whole design"
     # by occurrence fullPathName (unambiguous), name, or component name - recursively.
-    for o in all_occs:
-        if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
-                or safe(lambda o=o: o.component.name) == name):
+    matched = [o for o in all_occs
+               if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
+                   or safe(lambda o=o: o.component.name) == name)]
+    if matched:
+        # Scan the matched occurrence's whole SUBTREE, not just its direct bodies: geometry
+        # often lives on occurrences nested beneath the named one (an inserted xref wraps its
+        # own tree; a derive lands its solid one level down - live-verified: a wrapper target
+        # scanned direct-only returned 0 faces while its nested child held all 9).
+        prefixes = [p for p in (safe(lambda o=o: o.fullPathName) for o in matched) if p]
+        seen = {id(o) for o in matched}
+        subtree = list(matched)
+        for o2 in all_occs:
+            fp = safe(lambda o2=o2: o2.fullPathName) or ""
+            if id(o2) not in seen and any(fp.startswith(p + "+") for p in prefixes):
+                subtree.append(o2)
+                seen.add(id(o2))
+        for o in subtree:
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
     if pairs:

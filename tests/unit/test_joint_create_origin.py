@@ -290,7 +290,7 @@ class TestHandlerGuards:
 
 
 class TestHandlerCoordinateAnchor:
-    # The honesty repair (run-07b): anchor='coordinates' anchors on the MODEL ORIGIN and holds the
+    # anchor='coordinates' anchors on the MODEL ORIGIN and holds the
     # position in REAL parametric offsetX/Y/Z - not an undimensioned point floating in a hidden sketch
     # (which read plausibly while spawning 0.00mm parameters). The reported location is the read-back
     # offsets, so it is verifiable and recompute-robust.

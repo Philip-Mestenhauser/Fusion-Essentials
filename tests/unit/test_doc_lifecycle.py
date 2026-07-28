@@ -1,5 +1,7 @@
-"""Unit tests for the two CLOUD-COPY handlers in doc_lifecycle: save_document_as_handler
-(Document.saveAs of the active doc) and copy_document_handler (DataFile.copy of a saved file).
+"""Unit tests for the doc_lifecycle file-level handlers: save_document_as_handler
+(Document.saveAs of the active doc), copy_document_handler (DataFile.copy of a saved file),
+delete_document_handler, new_document_handler, close_document_handler (incl. dead-proxy
+skipping), and the open:N addressability of unsaved same-name documents.
 
 These are the document-duplication mechanisms the insert-into-template skill depends on:
 the skill copies a CAM template by OPEN-then-saveAs (save_document_as_handler), and doc_copy
@@ -9,8 +11,8 @@ version marker. The boundaries worth pinning — missing args, project/folder re
 create_path, the rename-after-copy, the duplicate guard, the xref report, and the
 async/null-document_id contract — are pure logic and need no live Fusion.
 
-These complement test_data_management.py (save/close/activate/list + the folder-path helpers),
-which does not exercise saveAs or copy.
+These complement test_data_management.py (save/activate/list + the folder-path helpers and the
+data_ops project/folder/upload handlers); saveAs, copy, delete, and close are tested only here.
 
 SCOPE: every DECISION branch with behaviour in copy_document_handler and save_document_as_handler
 is covered (verified with `coverage --branch`) and mutation-checked. The only lines left uncovered
@@ -140,18 +142,26 @@ class FakeData:
 
 
 class FakeSaveAsDoc:
-    """An active document that records its saveAs call."""
+    """An active document that records its saveAs call. raise_on_save/land_on_save model the observed
+    false-negative: saveAs RAISES (InternalValidationError) or returns false while the file DID land."""
 
-    def __init__(self, is_saved=False, save_ok=True, new_urn=None):
+    def __init__(self, is_saved=False, save_ok=True, new_urn=None,
+                 raise_on_save=False, land_on_save=False):
         self.isSaved = is_saved
         self._save_ok = save_ok
         self.saveas_args = None
+        self._raise_on_save = raise_on_save
+        self._land_on_save = land_on_save
         # dataFile.id after saveAs: a urn -> surfaced; a local handle -> reported null
         self._df = type("DF", (), {"id": new_urn})() if new_urn is not None else \
             type("DF", (), {"id": "C:/tmp/local-handle"})()
 
     def saveAs(self, name, target, description, tag):
         self.saveas_args = (name, target, description, tag)
+        if self._land_on_save:                       # the file lands on disk even when the call fails
+            target._files.append(FakeFile(name, fid="urn:adsk.file:landed"))
+        if self._raise_on_save:
+            raise RuntimeError("InternalValidationError")
         return self._save_ok
 
     @property
@@ -254,6 +264,57 @@ class TestSaveDocumentAs:
         res = _doc_lifecycle.save_document_as_handler(name="X", project="CAM")
         assert res["isError"] is True and "declined to save" in res["message"]
 
+    def test_saveas_raises_but_file_landed_recovers_as_ok(self):
+        # saveAs raised InternalValidationError while the folder AND file landed. A same-name file NOW
+        # present that was NOT there before is read-back evidence it landed - report ok, not the false
+        # negative that would send a retry into a collision.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=True)
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True
+        assert out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.file:landed"
+        assert "DID land" in out["note"] and "InternalValidationError" in out["note"]
+
+    def test_saveas_returns_false_but_file_landed_recovers_as_ok(self):
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(save_ok=False, land_on_save=True)
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.file:landed"
+
+    def test_saveas_raises_and_nothing_landed_still_errors(self):
+        # No file appeared and the never-saved doc has no settled urn (local handle) - the honest
+        # failure stands, no false ok.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=False)  # non-urn local handle df
+        _install([proj], active=doc)
+        res = _doc_lifecycle.save_document_as_handler(name="X", project="CAM")
+        assert res["isError"] is True and "saveAs failed" in res["message"]
+
+    def test_saveas_raises_never_saved_doc_with_settled_urn_recovers(self):
+        # No file visible in the folder listing yet (cloud lag), but the never-saved doc now carries
+        # a settled lineage urn - that is also proof it landed.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=False, new_urn="urn:adsk.lineage:settled")
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="X", project="CAM"))
+        assert out["saved"] is True and out["recovered_from_error"] is True
+        assert out["document_id"] == "urn:adsk.lineage:settled"
+
+    def test_saveas_error_does_not_false_recover_a_duplicate_fork(self):
+        # A pre-existing same-name file (allow_duplicate_name) means a file being 'present' after the
+        # error is NOT proof THIS save landed - the already-saved/pre-existing case must NOT recover.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("X", fid="urn:pre-existing"))
+        doc = FakeSaveAsDoc(is_saved=True, raise_on_save=True, land_on_save=False)
+        _install([proj], active=doc)
+        res = _doc_lifecycle.save_document_as_handler(
+            name="X", project="CAM", allow_duplicate_name=True)
+        assert res["isError"] is True and "saveAs failed" in res["message"]
+
     def test_resolves_project_by_id(self):
         doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
         _install([FakeProject("CAM", pid="p-cam")], active=doc)
@@ -287,6 +348,15 @@ class TestSaveDocumentAs:
         assert doc.saveas_args is not None                # the fork actually saved
         assert out["name_collision"]["existing_document_id"] == "urn:existing"
         assert "NAME COLLISION" in out["note"]
+
+    def test_no_collision_when_same_name_absent(self):
+        # a same-named file in a DIFFERENT context must not false-trigger: only the target folder counts.
+        proj = FakeProject("CAM")
+        proj.rootFolder._files.append(FakeFile("SomethingElse", fid="urn:adsk.file:x"))
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        out = _payload(_doc_lifecycle.save_document_as_handler(name="PartA_CAM", project="CAM"))
+        assert "name_collision" not in out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -665,33 +735,6 @@ class TestDeleteDocument:
         assert res["isError"] is True and "declined to delete" in res["message"]
 
 
-class TestDeleteHelpers:
-    def test_is_document_open_true_when_matching(self):
-        _install_delete({}, open_docs=[_OpenDoc("urn:f")])
-        assert _doc_lifecycle._is_document_open("urn:f") is True
-
-    def test_is_document_open_false_when_absent(self):
-        _install_delete({}, open_docs=[_OpenDoc("urn:other")])
-        assert _doc_lifecycle._is_document_open("urn:f") is False
-
-    def test_is_document_open_empty_id_false(self):
-        _install_delete({})
-        assert _doc_lifecycle._is_document_open("") is False
-
-    def test_parent_ref_summary_empty_when_no_refs(self):
-        assert _doc_lifecycle._parent_ref_summary(FakeDeleteFile("X")) == []
-
-    def test_parent_ref_summary_lists_refs(self):
-        f = FakeDeleteFile("X", parent_refs=[
-            type("R", (), {"name": "A", "id": "1"})(),
-            type("R", (), {"name": "B", "id": "2"})()])
-        out = _doc_lifecycle._parent_ref_summary(f)
-        assert [r["name"] for r in out] == ["A", "B"]
-
-    def test_xref_summary_empty_when_no_children(self):
-        assert _doc_lifecycle._xref_summary(FakeFile("X")) == []
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # new_document_handler  (app.documents.add)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,6 +773,36 @@ class TestCloseDocument:
         assert out["closed"] == ["PartA"] and out["closed_count"] == 1
         assert out["errors"] == []
 
+    def test_close_named(self):
+        a = _CloseableDoc("A")
+        b = _CloseableDoc("B")
+        class _App:
+            documents = _CloseableDocs([a, b])
+            activeDocument = a
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.close_document_handler(name="B", save_changes=True))
+        assert out["closed"] == ["B"]
+        assert b.close_called_with is True
+
+    def test_close_default_discards_unsaved_changes(self):
+        # The default close DISCARDS (save_changes=False on the platform call) - a silent flip to
+        # save-on-close would litter the cloud with unwanted versions.
+        d = _CloseableDoc("PartA")
+        class _App:
+            documents = _CloseableDocs([d])
+            activeDocument = d
+        _doc_lifecycle.app = _App()
+        _payload(_doc_lifecycle.close_document_handler())
+        assert d.close_called_with is False
+
+    def test_unmatched_name_errors(self):
+        class _App:
+            documents = _CloseableDocs([_CloseableDoc("A")])
+            activeDocument = None
+        _doc_lifecycle.app = _App()
+        res = _doc_lifecycle.close_document_handler(name="Ghost")
+        assert res["isError"] is True and "No open document matched" in res["message"]
+
     def test_close_returning_false_is_now_an_error(self):
         # A single-target close failure must surface as isError, not a false ok() success.
         d = _CloseableDoc("PartA", close_ok=False)
@@ -764,14 +837,14 @@ class TestCloseDocument:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Item 6: doc_save_as folder-resolution retry on the cloud eventual-consistency self-contradiction
+# doc_save_as folder-resolution retry on the cloud eventual-consistency self-contradiction
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _FlakyRoot:
     """A project root whose dataFolders enumeration lags (eventual-consistency): the first read returns
-    an empty list (so the first resolve MISSES the child) but every later read includes it - the exact
-    self-contradiction observed during a cloud outage, where the folder appeared in its own
-    available-folders list yet would not resolve until a retry."""
+    an empty list (so the first resolve MISSES the child) but every later read includes it - a cloud
+    eventual-consistency self-contradiction (observed live): the folder appears in its own
+    available-folders list yet does not resolve until a retry."""
     def __init__(self, child_name, empty_calls=1):
         self._child = FakeFolder(child_name)
         self._calls = 0
@@ -828,7 +901,7 @@ class TestFolderResolveEventual:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Item 4: unsaved-doc addressability (open:N) + close_all skipping dead reference proxies
+# unsaved-doc addressability (open:N) + close_all skipping dead reference proxies
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _NamedDoc:

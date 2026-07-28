@@ -9,7 +9,6 @@ unsaved host is fine.
 """
 
 import adsk.core
-import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -118,9 +117,10 @@ def handler(document_id: str = "", into_component: str = "",
         "removed_occurrence": removed,
         "placed_at": ({"x": x, "y": y, "z": z, "units": units} if (x or y or z) else "origin"),
         "rotate_deg": float(rotate_deg or 0.0),
-        "note": ("Inserted at the requested placement. Refine with a joint (see joint_create) if it "
-            "needs to mate to specific geometry. If an occurrence was removed, its joints "
-            "went with it."),
+        "note": ("Inserted at the requested placement. This is the source's last SAVED cloud version "
+            "- unsaved in-session edits in the source are NOT reflected here (save the source, then "
+            "doc_update_xref). Refine with a joint (see joint_create) if it needs to mate to specific "
+            "geometry. If an occurrence was removed, its joints went with it."),
     })
 
 
@@ -133,8 +133,8 @@ TOOL_DESCRIPTION = (
     "documents requires a shared project (an unsaved host references fine). Optional "
     "'remove_existing' = an existing occurrence to delete first (its joints go with it). Place it "
     "with x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine later with a "
-    "joint. WRITES to the design. Generic: this just creates the occurrence; how you use it "
-    "(fixtures, template model swap, layouts) is up to you."
+    "joint. WRITES to the design. Inserts the source's last SAVED cloud version - unsaved "
+    "in-session source edits are not included (save the source first)."
 )
 
 tool = (

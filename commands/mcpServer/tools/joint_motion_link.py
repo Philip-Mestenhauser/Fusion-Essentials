@@ -108,8 +108,10 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
     "ratio": r,
     "ratio_applied": True,
     "reversed": reversed_link,
-    "note": ("Joints linked - driving one (assembly_move + assembly_capture_position) now moves "
-        "the other proportionally. Verify with assembly_get."),
+    "note": ("Joints linked - drive ONE member (joint_drive) and the link moves the other "
+        "proportionally; read the partner's position back instead of driving it too (joint_drive "
+        "REFUSES the second member for the session - driving both has killed the Fusion process). "
+        "Verify with assembly_get."),
     }
     return ok(out)
 

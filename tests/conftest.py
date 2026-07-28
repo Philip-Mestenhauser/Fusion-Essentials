@@ -530,6 +530,61 @@ class Circle3D:
         self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Circle3DCurveType"]
 
 
+# ── CAM tree fakes (setup / folder / operation) ────────────────────────────
+#
+# The shared object model for the CAM setup/operation tree every cam_* tool walks. The one
+# load-bearing behavior lives here ONCE: allOperations mirrors the measured live flatten
+# (BEHAVIOR flags) - folder/pattern children are flattened IN while the folder/pattern
+# CONTAINERS are DROPPED - so a container is only reachable through the explicit
+# .operations/.folders/.patterns walk, exactly like live Fusion.
+
+class FakeOperation:
+    """A CAM Operation leaf. Every attribute is real per live_api_facts.SHAPES['Operation']."""
+    def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False,
+                 operation_state=0, has_error=False, error=""):
+        self.name = name
+        self.hasToolpath = has_toolpath
+        self.isToolpathValid = valid
+        self.isSuppressed = suppressed
+        self.isLightBulbOn = shown
+        self.operationState = operation_state
+        self.hasError = has_error
+        self.error = error
+
+
+class FakeCAMFolder:
+    """A CAM folder/pattern container: .operations/.folders/.patterns hold the DIRECT children
+    (Fusion's count/item protocol); allOperations applies the measured flatten (see the section
+    note above). Use it for a pattern too - the tools classify nodes STRUCTURALLY (by which
+    collection yielded them), never by type name."""
+    def __init__(self, name, ops=(), folders=(), patterns=()):
+        self.name = name
+        self.operations = _NamedCollection(list(ops))
+        self.folders = _NamedCollection(list(folders))
+        self.patterns = _NamedCollection(list(patterns))
+
+    @property
+    def allOperations(self):
+        flat = list(self.operations)
+        for coll in (self.folders, self.patterns):
+            for child in coll:
+                if _api_facts.BEHAVIOR["alloperations_flattens_folder_children"]:
+                    flat.extend(child.allOperations)
+                if not _api_facts.BEHAVIOR["alloperations_drops_folder_objects"]:
+                    flat.append(child)
+        return _NamedCollection(flat)
+
+
+class FakeSetup(FakeCAMFolder):
+    """A CAM Setup: the same container protocol + measured allOperations flatten as FakeCAMFolder."""
+
+
+def make_cam(*setups):
+    """A minimal CAM product carrying `setups` (count/item protocol) - pair with
+    `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`."""
+    return types.SimpleNamespace(setups=_NamedCollection(list(setups)))
+
+
 class FakeUnitsManager:
     """A UnitsManager whose evaluateExpression resolves only a known set - an unknown reference
     RAISES, matching the live FusionUnitsManager (it errors on an unresolvable or dimension-

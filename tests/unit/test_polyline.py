@@ -83,40 +83,40 @@ def _patch_pt(monkeypatch):
 
 
 class TestPolylineChaining:
-    def _draw(self, points, close):
+    def _draw(self, points):
         s = FakeSketch()
-        return s, sk._draw_polyline(s, points, k=0.1, close=close)
+        return s, sk._draw_polyline(s, points, k=0.1)
 
     def test_open_polyline_segment_count(self):
         # 4 points, open -> 3 segments
-        s, label = self._draw([(0, 0), (10, 0), (10, 10), (0, 10)], close=False)
+        s, label = self._draw([(0, 0), (10, 0), (10, 10), (0, 10)])
         assert len(s.sketchCurves.sketchLines.lines) == 3
 
-    def test_closed_polyline_segment_count(self):
-        # 4 points, closed -> 4 segments (last closes back to first)
-        s, label = self._draw([(0, 0), (10, 0), (10, 10), (0, 10)], close=True)
+    def test_repeated_first_point_closes_with_n_segments(self):
+        # a loop closes by repeating the first point as the last: 4 vertices + repeat -> 4 segments
+        s, label = self._draw([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)])
         assert len(s.sketchCurves.sketchLines.lines) == 4
 
     def test_consecutive_segments_share_endpoint(self):
         # THE KEY PROPERTY: segment N's start IS segment N-1's end (same point object) →
         # parametric, draggable. Not two separate coincident points. 4 pts open -> 3 segments.
-        s, _ = self._draw([(0, 0), (10, 0), (10, 10), (0, 10)], close=False)
+        s, _ = self._draw([(0, 0), (10, 0), (10, 10), (0, 10)])
         lines = s.sketchCurves.sketchLines.lines
         assert lines[1].startSketchPoint is lines[0].endSketchPoint
         assert lines[2].startSketchPoint is lines[1].endSketchPoint
 
-    def test_close_welds_last_to_first(self):
-        # the closing segment ends at the FIRST point of the loop (coincident close)
-        s, _ = self._draw([(0, 0), (10, 0), (10, 10)], close=True)
+    def test_closure_is_geometric_not_a_constraint(self):
+        # the closing segment ends AT the first point's coordinates, and NO explicit closing
+        # coincident constraint is added - that constraint is what the sketch solver rejects on
+        # many outlines (VCS_SKETCH_SOLVING_FAILED, live-verified); geometric closure forms the
+        # profile without it.
+        s, _ = self._draw([(0, 0), (10, 0), (10, 10), (0, 0)])
         lines = s.sketchCurves.sketchLines.lines
-        first_pt = lines[0].startSketchPoint
-        closing = lines[-1]
-        # closing segment starts at the last vertex and ends coincident with the first
-        assert (closing.endSketchPoint is first_pt) or \
-               ((first_pt, closing.endSketchPoint) in s.geometricConstraints.coincidents) or \
-               ((closing.endSketchPoint, first_pt) in s.geometricConstraints.coincidents)
+        first, closing_end = lines[0].startSketchPoint, lines[-1].endSketchPoint
+        assert (closing_end.x, closing_end.y) == (first.x, first.y)
+        assert not s.geometricConstraints.coincidents
 
     def test_needs_at_least_two_points(self):
         s = FakeSketch()
-        res = sk._draw_polyline(s, [(0, 0)], k=0.1, close=False)
+        res = sk._draw_polyline(s, [(0, 0)], k=0.1)
         assert res is None  # not enough points to draw anything

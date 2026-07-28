@@ -6,7 +6,7 @@ fixture: P7-Template (the S7 artifact) OPENED as the active document by the orch
   IN the template and saves it in place (this scenario advances P7-Template's version - by
   design; the template is the chain's second mutable artifact). Missing fixture = ask.
 budget:
-  max_tool_calls: 131
+  max_tool_calls: 78
   max_tokens: 72000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -45,10 +45,13 @@ GOAL - the template's manufacturing layer:
   components themselves, so whatever lives inside them - now or later - is consumed): a primary
   top setup and a second setup for the opposite side. The stock setup mode should consume the
   parametric stock; the work coordinate system should sit on the stock-center joint origin.
-- OPERATIONS on the placeholder in the PRIMARY setup exercising ALL FOUR tools: a facing pass
-  (face mill), a drilling operation (drill), a roughing/pocket or contour pass (endmill), and a
-  finishing pass (ball endmill). GENERATE the toolpaths and poll to completion - every operation
-  must compute healthy (fix or honestly report any that do not).
+- OPERATIONS on the placeholder in the PRIMARY setup exercising ALL FOUR tools, each aimed at real
+  placeholder geometry: a facing pass (face mill) on the top, a drilling operation (drill) INTO THE
+  PLACEHOLDER'S EXISTING THROUGH HOLE, a roughing/pocket or contour pass (endmill), and a finishing
+  pass (ball endmill) ON THE PLACEHOLDER'S CURVED FEATURE. The placeholder already carries a curved
+  feature and a through hole - do NOT add geometry to invent a target. GENERATE the toolpaths and
+  poll to completion - every operation must compute healthy (fix or honestly report any that do
+  not).
 - ACTIVATE the second setup, confirm the activation took, then activate back.
 - Persist BOTH ways: save the document in place, AND save the job as a reusable CAM TEMPLATE
   artifact (the template-library save), reporting where it landed.
@@ -88,6 +91,10 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   consumption idiom the whole template concept rests on), WCS-on-joint-origin, operation creation
   across four tool types, cam_generate + cam_get_status polling discipline, cam_activate_setup
   (first pipeline exposure), and cam_save_template.
+- OPERATIONS MAP TO REAL FEATURES: the S7 placeholder carries a curved
+  feature and a through hole, so the drill targets the existing hole and the ball endmill finishes
+  the curve - the four operations exercise four tool types against real geometry. An executor
+  that ADDS geometry to the placeholder here has over-reached (the geometry is already there).
 - CAM validity flags are stale until the Manufacture workspace has been entered (documented blind
   spot) - grade whether the agent handles workspace context; a wrong-workspace stumble honestly
   recovered is a finding about the wire's teaching, not an agent fail.
@@ -95,5 +102,4 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   versions); everything P1-P5 stays untouched.
 - cam_save_template creates NEW library entries every run (re-run hygiene: address by the
   returned URL/name recorded in the run record; no tool deletes them).
-- Budget calibrated to first-measured-run + 25% (run 08 of 2026-07-13: 105 calls / 57.3k output tokens, including ~11 calls investigating the WCS-to-JointOrigin binding gap).
-  run 1.
+- Budget: measured run + 25% (105 calls / 57.3k output tokens, including ~11 calls investigating the WCS-to-JointOrigin binding gap).

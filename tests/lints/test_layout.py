@@ -7,7 +7,7 @@ Two buckets, so the file tree teaches the two-layer testing model:
   tests/unit/   - tests that EXERCISE behavior (per-tool handlers + the shared framework + the server)
   tests/lints/  - tests that READ the codebase to enforce a CONVENTION (this file included)
 plus tests/live/ (Fusion-driven scripts, run on demand - never collected by this mock suite) and the
-shared harness at tests/ root (conftest.py, the gen_*.py generators, the generated TEST_SPEC/TOOL_MANIFEST).
+shared harness at tests/ root (conftest.py, the gen_*.py generators, the generated TOOL_MANIFEST/TOOL_POINTER_MAP).
 
 _LINT_TESTS names every convention-enforcing test; anything else belongs in unit/. Adding a lint
 means adding its name here AND placing it in lints/ - the gate fails until both are true, so the

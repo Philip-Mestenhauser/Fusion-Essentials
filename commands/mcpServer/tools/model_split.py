@@ -20,6 +20,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
+from . import _assert
 from . import _inputs
 from . import _outputs
 
@@ -220,7 +221,8 @@ split_tool = (
             "description": "Auto-extend the cutter to fully cross the target (default true)."})
     .strict_schema()
 )
-split_item = Item.create_tool_item(tool=split_tool, write="write", handler=handler, run_on_main_thread=True)
+split_item = Item.create_tool_item(tool=split_tool, write="write", handler=handler, run_on_main_thread=True,
+                                   postconditions=[_assert.FeatureHealthy()])
 
 
 def register_tool():

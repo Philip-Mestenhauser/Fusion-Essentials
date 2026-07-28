@@ -131,6 +131,9 @@ def _overall_bbox(root, design):
                  "z": round(conv(zmx - zmn), 4)},
         "center": {"x": round(conv((xmx + xmn) / 2), 4), "y": round(conv((ymx + ymn) / 2), 4),
                    "z": round(conv((zmx + zmn) / 2), 4)},
+        # Component.boundingBox SWEEPS sketch + construction geometry (an orphaned datum inflates
+        # it); model_inspect's bbox is solids-only - the two legitimately disagree.
+        "scope": "all geometry incl. sketches/construction - solids-only extents: model_inspect",
     }
 
 

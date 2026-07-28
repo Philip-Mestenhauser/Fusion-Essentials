@@ -5,57 +5,14 @@
 is validated to exist before any is applied, so a typo can't leave a half-edited operation."""
 
 import adsk.core
-import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, expression_error
+from ._cam_common import get_cam, expression_error, resolve_cam_node
 
 app = adsk.core.Application.get()
-
-
-def _walk_operations(parent, out):
-    """Recursively collect (name, operation) for every OPERATION under a setup/folder/pattern.
-    `.operations` only lists what's directly in the parent - folder/pattern-nested operations are
-    reached by recursing into `.folders` / `.patterns` (same walk cam_delete/cam_reorder use)."""
-    ops = safe(lambda: parent.operations)
-    for i in range(safe(lambda: ops.count, 0) or 0):
-        o = safe(lambda i=i: ops.item(i))
-        if o is not None:
-            out.append((safe(lambda o=o: o.name) or "", o))
-    for coll_getter in (lambda: parent.folders, lambda: parent.patterns):
-        coll = safe(coll_getter)
-        for i in range(safe(lambda: coll.count, 0) or 0):
-            c = safe(lambda i=i: coll.item(i))
-            if c is not None:
-                _walk_operations(c, out)
-
-
-def _find_operation(cam, name):
-    """Find an operation by name anywhere in the CAM tree, including inside folders/patterns.
-    Returns (op, available_names)."""
-    # Case-INSENSITIVE exact match, matching _cam_common.find_operation and the other CAM tools (this
-    # resolver stays folder-recursive - the fakes model a folder-nested op only via .folders/.patterns,
-    # not flattened into allOperations the way the live API does).
-    want = (name or "").strip().lower()
-    available = []
-    for si in range(safe(lambda: cam.setups.count, 0) or 0):
-        setup = cam.setups.item(si)
-        nested = []
-        if safe(lambda: setup.operations) is not None:
-            _walk_operations(setup, nested)
-        else:
-            ops = safe(lambda: setup.allOperations)
-            for oi in range(safe(lambda: ops.count, 0) or 0):
-                op = ops.item(oi)
-                nested.append((safe(lambda op=op: op.name) or "", op))
-        for nm, op in nested:
-            available.append(nm)
-            if (nm or "").lower() == want:
-                return op, available
-    return None, available
 
 
 def _parse_parameters(parameters):
@@ -95,10 +52,10 @@ def handler(operation: str = "", parameters=None) -> dict:
     if cam_err:
         return error(cam_err)
 
-    op, available = _find_operation(cam, operation)
-    if not op:
-        return error(f"Operation '{operation}' not found. Available: "
-                      f"{', '.join(n for n in available if n)[:300] or '(none)'}.")
+    node, oerr = resolve_cam_node(cam, operation, kinds=("operation",), label="operation")
+    if oerr:
+        return error(oerr)
+    op = node.obj
 
     params = op.parameters
     # Validate ALL named parameters exist BEFORE applying any (no half-edited op on a typo).
