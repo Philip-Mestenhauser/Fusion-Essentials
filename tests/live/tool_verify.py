@@ -337,6 +337,17 @@ _SOLIDS = [
     ("find_geometry", {"target": "RotorShaft", "kind": "cylinder_face", "max_results": 1}, "ok", _fg("shaft_cyl")),
     ("model_measure_relation", lambda c: {"relation": "coaxial", "entity_a": _ctx_get(c, "rotor_cyl", "rotor face"), "entity_b": _ctx_get(c, "shaft_cyl", "shaft face")}, "ok", None),
     ("model_inspect", {"target": "Rotor:1"}, "ok", None),
+    # PMI: a flatness note on the frame's flat plate face, and a hole/thread note read off a real
+    # carrier bolt-circle bore - two DIFFERENT leader points (a shared point errors the second note).
+    ("find_geometry", {"target": "Frame", "kind": "planar_face", "max_results": 1}, "ok", _fg("frame_flat")),
+    ("pmi_create", lambda c: {"kind": "note", "geometry": [_ctx_get(c, "frame_flat", "frame flat face")], "text": "{flatness}0.05", "name": "PmiFlat"}, "ok", None),
+    ("find_geometry", {"target": "Carrier", "kind": "cylinder_face", "radius": 1.5, "max_results": 1}, "ok", _fg("carrier_bore")),
+    ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "carrier_bore", "carrier bolt-circle bore")]}, "ok", None),
+    ("pmi_get", {"include": ["segments", "detail"]}, "ok", None),
+    ("pmi_edit", {"action": "set_text", "annotation": "PmiFlat", "text": "{perpendicularity}0.03"}, "ok", None),
+    ("pmi_edit", {"action": "hide", "annotation": "PmiFlat"}, "ok", None),
+    ("pmi_edit", {"action": "show", "annotation": "PmiFlat"}, "ok", None),
+    ("pmi_delete", {"annotation": "PmiFlat"}, "ok", None),
     # feature cameos on same-doc scratch bodies (no single natural gyroscope home for these verbs).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "FeatureCameo", "activate": True}, "ok", None),
@@ -1254,6 +1265,10 @@ STORY = {
     "model_measure_between": "measure the outer-ring-to-inner-ring gap",
     "model_measure_relation": "read rotor/shaft coaxiality",
     "model_inspect": "read the rotor's volume back",
+    "pmi_create": "author a flatness note on the frame plate and a hole note on a carrier bore",
+    "pmi_get": "read the PMI back with segments and detail",
+    "pmi_edit": "restate the flatness note's markup, then hide and show it",
+    "pmi_delete": "delete the flatness note; the count read-back confirms it",
     "assembly_ground": "ground the frame so the mechanism has a base",
     "assembly_rigid_group": "rigid-group the frame and carrier base",
     "joint_create_origin": "place the crank mount and the stock-center WCS",
@@ -1368,9 +1383,7 @@ EXCLUDED = {
 # tool moves it out of here into STEPS. test_tool_verify_complete.py enforces that every
 # registered tool is covered, excluded, or listed here, so a NEWLY added tool can't decay coverage
 # silently - it fails the gate until someone scripts it, excuses it, or adds it here deliberately.
-# pmi_*: live-verified by hand on a scratch part (note + hole note + edit + delete); scripting them
-# into the sweep story is the open move that empties this set again.
-PENDING = frozenset({"pmi_get", "pmi_create", "pmi_edit", "pmi_delete"})
+PENDING = frozenset()
 
 
 def source_hash(root=None):
