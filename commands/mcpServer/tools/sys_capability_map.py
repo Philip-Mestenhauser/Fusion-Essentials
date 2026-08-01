@@ -32,6 +32,7 @@ _FAMILY = {
     "sys":       ("Server/session utilities: find tools, this map, API docs, selection, the script hatch.", "sys_find_tool"),
     "find":      ("Find existing geometry (faces/edges/...) as stable handles for other tools.", "find_geometry"),
     "appearance":("Body/occurrence/face appearance (color) override.", "appearance_set"),
+    "pmi":       ("PMI / 3D annotations on model geometry: leader notes with GD&T symbols, hole/thread callouts, imported PMI.", "pmi_get"),
     "workspace": ("Cold-boot orientation: where you are + what's here + pointers to the right deep tool.", "workspace_orient"),
     "save":      ("Tessellate a BRep body into a persistent mesh body in the design.", "save_as_mesh"),
 }

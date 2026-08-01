@@ -45,7 +45,7 @@ MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "genera
 _FAMILY_PREFIXES = [
     ("model_", "model"), ("surface_", "surface"), ("mesh_", "mesh"), ("sketch_", "sketch"),
     ("cam_", "cam"), ("assembly_", "assembly"), ("joint_", "joint"), ("design_", "design"),
-    ("doc_", "doc"), ("data_", "data"), ("drawing_", "drawing"), ("param_", "param"),
+    ("doc_", "doc"), ("data_", "data"), ("drawing_", "drawing"), ("param_", "param"), ("pmi_", "pmi"),
     ("view_", "view"), ("find_", "find"), ("workspace_", "workspace"), ("appearance_", "appearance"),
     ("save_", "save"), ("sys_", "sys"),
 ]

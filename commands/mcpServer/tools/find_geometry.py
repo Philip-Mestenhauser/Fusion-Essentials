@@ -26,7 +26,8 @@ from . import _outputs
 RETURNS = [
     _outputs.ReturnsHandle("handle", require="any", in_list=True, consumers=[
         "joint_at_geometry", "sketch_create", "model_extrude", "model_fillet", "model_chamfer",
-        "model_construction", "model_mirror", "model_combine", "model_inspect", "view_section"]),
+        "model_construction", "model_mirror", "model_combine", "model_inspect", "view_section",
+        "pmi_create"]),
 ]
 
 app = adsk.core.Application.get()

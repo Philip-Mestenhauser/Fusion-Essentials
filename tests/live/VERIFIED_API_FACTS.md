@@ -6,7 +6,7 @@ leaning on it) does not match the platform: update the fake and its consumers, t
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2704.1.36 | verified 2026-07-26
+Stamp: Fusion 2704.1.39 | verified 2026-07-31
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|

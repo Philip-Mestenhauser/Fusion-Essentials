@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 139  |  **description breadcrumbs:** 536  |  **note/error breadcrumbs:** 260
+**Tools:** 143  |  **description breadcrumbs:** 549  |  **note/error breadcrumbs:** 270
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -21,16 +21,16 @@ close orphans, factor duplicated guards into shared helpers.
   `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **35x** across 23 module(s): "No active design. Create or open a document first (see doc_new)."
+- **39x** across 27 module(s): "No active design. Create or open a document first (see doc_new)."
 - **15x** across 10 module(s): "No active design. Open or create a document first (see doc_new)."
 - **7x** across 4 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 64  (desc 10, note 54)
-- `find_geometry`  <- 61  (desc 49, note 12)
-- `view_screenshot`  <- 46  (desc 20, note 26)
+- `doc_new`  <- 68  (desc 10, note 58)
+- `find_geometry`  <- 64  (desc 51, note 13)
+- `view_screenshot`  <- 47  (desc 20, note 27)
 - `sketch_create`  <- 30  (desc 19, note 11)
 - `cam_get`  <- 28  (desc 19, note 9)
 - `data_get`  <- 27  (desc 16, note 11)
@@ -1151,6 +1151,42 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `param_set_favorite`
 - No USER parameter named '
 - Could not set favorite on '
+
+### `pmi_create`
+- Verify placement visually with view_screenshot; read all PMI with pmi_get.
+- No active design. Create or open a document first (see doc_new).
+- '. Use mm, cm, or in.
+- The PMI add() returned nothing - no annotation was created. The geometry may not support this note kind (e.g. hole_note on a non-hole face).
+- ' has no PMI collection - this Fusion build may not support PMI authoring.
+- kind='hole_note' takes FACE handles only (got
+- ). Use find_geometry(kind='cylinder_face') on the hole.
+- kind='hole_note' composes its callout from the hole geometry - it does not take 'text'. Create it plain, then pmi_edit(action='set_text') to append custom segments.
+- (the annotation WAS created: '
+- ' - reposition with pmi_edit)
+- Leader note creation failed:
+- Hole/thread note creation failed:
+- . The faces must belong to geometric holes (cylinder/counterbore/countersink faces) or cylindrical bosses.
+
+### `pmi_delete`
+- No active design. Create or open a document first (see doc_new).
+- ) reports isDeletable=false - the platform refuses to delete it (e.g. PMI owned by an imported folder). Nothing was changed.
+- deleteMe() declined for '
+- ) - the annotation was NOT deleted.
+- deleteMe() reported success but '
+- ' still resolves in '
+- ' - treat the delete as failed.
+
+### `pmi_edit`
+- No active design. Create or open a document first (see doc_new).
+- '. Use mm, cm, or in.
+
+### `pmi_get`
+- - 'segments' adds the {symbol} markup (round-trips into pmi_create/pmi_edit text), 'detail' adds health/references/hole numerics. geometry= narrows to specific faces/edges.
+- Light records. Pull deeper with include=
+- No active design. Create or open a document first (see doc_new).
+- '. Use mm, cm, or in.
+- Unknown include slice(s)
+- 'max_results' must be 1..
 
 ### `save_as_mesh`
 - No active design. Open or create a document first (see doc_new).

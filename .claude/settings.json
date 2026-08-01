@@ -33,6 +33,7 @@
       "mcp__fusion-essentials__model_measure_between",
       "mcp__fusion-essentials__model_measure_relation",
       "mcp__fusion-essentials__param_get",
+      "mcp__fusion-essentials__pmi_get",
       "mcp__fusion-essentials__sketch_get",
       "mcp__fusion-essentials__sys_capability_map",
       "mcp__fusion-essentials__sys_find_tool",

@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2704.1.36"
-VERIFIED_ON = "2026-07-26"
+FUSION_VERSION = "2704.1.39"
+VERIFIED_ON = "2026-07-31"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -191,6 +191,38 @@ ENUMS = {
         "MaximumDeviationMeshReduceTargetType": 0,
         "ProportionMeshReduceTargetType": 1,
         "FaceCountMeshReduceTargetType": 2,
+    },
+    "fusion.PMISymbolTypes": {
+        "DiameterPMISymbolType": 0,
+        "TolerancePMISymbolType": 1,
+        "DegreesPMISymbolType": 2,
+        "SquarenessPMISymbolType": 3,
+        "CenterLinePMISymbolType": 4,
+        "PositionPMISymbolType": 5,
+        "CounterborePMISymbolType": 6,
+        "CountersinkPMISymbolType": 7,
+        "DepthPMISymbolType": 8,
+        "ConicalTaperPMISymbolType": 9,
+        "SlopePMISymbolType": 10,
+        "NotEqualPMISymbolType": 11,
+        "EnvelopePMISymbolType": 12,
+        "FreeStatePMISymbolType": 13,
+        "LeastMaterialConditionPMISymbolType": 14,
+        "MaximumMaterialConditionPMISymbolType": 15,
+        "ProjectedTolerancePMISymbolType": 16,
+        "StraightnessPMISymbolType": 17,
+        "CylindricityPMISymbolType": 18,
+        "AngularityPMISymbolType": 19,
+        "SymmetryPMISymbolType": 20,
+        "FlatnessPMISymbolType": 21,
+        "LineProfilePMISymbolType": 22,
+        "PerpendicularityPMISymbolType": 23,
+        "ConcentricityPMISymbolType": 24,
+        "TotalRunoutPMISymbolType": 25,
+        "CircularityPMISymbolType": 26,
+        "SurfaceProfilePMISymbolType": 27,
+        "ParallelismPMISymbolType": 28,
+        "CircularRunoutPMISymbolType": 29,
     },
     "fusion.SurfaceExtendTypes": {
         "NaturalSurfaceExtendType": 0,

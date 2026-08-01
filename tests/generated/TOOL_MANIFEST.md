@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 139  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 143  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -211,6 +211,15 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `param_get` | Read the active design's parameters: each parameter's name, expression, value, unit, and comment |
 | ✎ | `param_set` | Set a design parameter's expression (value) |
 | ✎ | `param_set_favorite` | Toggle a user parameter's 'favorite' flag (whether it appears in the favorites list). |
+
+### pmi
+
+| | Tool | Summary |
+|---|---|---|
+| ✎ | `pmi_create` | Create a PMI annotation (a 3D note attached to model geometry, shown in the viewport and exported with the model) |
+| ⚠ | `pmi_delete` | Delete ONE PMI annotation by its name from pmi_get (component= disambiguates a name that exists in several components) |
+| ✎ | `pmi_edit` | Edit an existing PMI annotation, addressed by its name from pmi_get (component= disambiguates a name that exists in several components) |
+| · | `pmi_get` | Read the design's PMI (Product Manufacturing Information - 3D annotations attached to model faces/edges): Fusion-authored leader notes and hole/thread notes, pl... |
 
 ### view
 

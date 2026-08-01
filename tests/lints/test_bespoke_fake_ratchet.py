@@ -109,6 +109,11 @@ _PER_FILE_BASELINE = {
     "test_model_split.py": 7,
     "test_model_sweep.py": 7,
     "test_param_ops.py": 5,
+    # PMI annotations/collections are an object graph no conftest shared fake models (not in
+    # live_api_facts.SHAPES); the fakes stay minimal until a PMI shape measurement lands.
+    "test_pmi_create.py": 2,
+    "test_pmi_delete.py": 1,
+    "test_pmi_edit.py": 1,
     "test_polyline.py": 6,
     "test_sketch_constrain.py": 7,
     "test_sketch_core.py": 3,

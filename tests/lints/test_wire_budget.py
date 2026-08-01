@@ -23,10 +23,10 @@ import pytest
 
 from conftest import load_mcp_server, register_all_tools
 
-# Snug watermark: current real total is 231,051. Ratchet DOWN as prose moves to errors/notes or a
+# Snug watermark: current real total is 237,444. Ratchet DOWN as prose moves to errors/notes or a
 # description tightens; a new tool (or a tool whose capability genuinely grows) that needs the room
 # slims something else in the same change, or raises this by exactly its own measured weight.
-TOTAL_PAYLOAD_BUDGET_BYTES = 231_051
+TOTAL_PAYLOAD_BUDGET_BYTES = 237_444
 PER_TOOL_BUDGET_BYTES = 4_500
 
 # General per-description ceiling; a named override carries its own audited reason and is
