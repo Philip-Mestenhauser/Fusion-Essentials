@@ -105,16 +105,55 @@ class FakeDesign:
 
 class FakeCamera:
     def __init__(self):
+        import adsk.core
         self.eye = FakePoint(10, 10, 10)
         self.target = FakePoint(0, 0, 0)
         self.upVector = None
         self.isFitView = False
+        # a camera starts orthographic here; the projection tests are what flip it
+        self.cameraType = adsk.core.CameraTypes.OrthographicCameraType
+        self.perspectiveAngle = 0.0
 
 
 class FakeViewport:
     def __init__(self):
         self.camera = FakeCamera()
         self.visualStyle = 0
+
+    def refresh(self):
+        pass
+
+
+class _StubbornViewport:
+    """A viewport that does not fully honour a camera assignment: every camera READ hands back a
+    fresh camera carrying the projection (and optionally the perspective angle) this viewport
+    insists on. Models the two states the orient read-back gates on - a projection set that never
+    took, and a perspective angle the camera settles on somewhere else."""
+
+    def __init__(self, camera_type, perspective_angle=None, angle_readable=True,
+                 type_readable=True):
+        self._type = camera_type
+        self._angle = perspective_angle
+        self._angle_readable = angle_readable
+        self._type_readable = type_readable
+        self.assigned = None
+        self.visualStyle = 0
+
+    @property
+    def camera(self):
+        cam = FakeCamera()
+        cam.cameraType = self._type
+        if self._angle is not None:
+            cam.perspectiveAngle = self._angle
+        if not self._angle_readable:
+            del cam.perspectiveAngle      # the property is unreadable, which is not an angle of 0
+        if not self._type_readable:
+            del cam.cameraType            # unreadable, which is not a projection that failed
+        return cam
+
+    @camera.setter
+    def camera(self, value):
+        self.assigned = value
 
     def refresh(self):
         pass
@@ -411,6 +450,264 @@ class TestOrient:
         assert (cam.target.x, cam.target.y, cam.target.z) == (1, 1, 6)
         # eye shifted by the same delta -> (11, 11, 16)
         assert (cam.eye.x, cam.eye.y, cam.eye.z) == (11, 11, 16)
+
+
+# ── camera projection ───────────────────────────────────────────────────────
+# 'projection' maps a wire key onto an adsk.core.CameraTypes member and is READ BACK off the
+# viewport camera; 'perspective_angle_deg' is a degrees-in / radians-to-the-API field of view that
+# only a perspective camera accepts.
+
+class TestProjection:
+    def _part(self):
+        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+
+    def test_each_key_maps_to_its_own_camera_types_member(self, monkeypatch):
+        import adsk.core
+        expected = {"orthographic": adsk.core.CameraTypes.OrthographicCameraType,
+                    "perspective": adsk.core.CameraTypes.PerspectiveCameraType}
+        assert len(set(expected.values())) == 2          # two distinct members, not one alias
+        for key, member in expected.items():
+            _install(monkeypatch, [self._part()])
+            out = _payload(iv.handler(action="orient", projection=key))
+            assert iv.app.activeViewport.camera.cameraType == member, key
+            assert out["applied"]["projection"] == key
+
+    def test_unknown_projection_is_refused_listing_the_valid_keys(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        res = iv.handler(action="orient", projection="fisheye")
+        assert res["isError"] is True
+        assert "Unknown projection 'fisheye'" in res["message"]
+        assert "orthographic, perspective" in res["message"]
+
+    def test_perspective_ortho_faces_is_not_offered(self, monkeypatch):
+        # An assigned PerspectiveWithOrthoFaces camera reads back as PerspectiveCameraType (wrote
+        # 2, read 1, measured with isFitView set), so the key is REFUSED rather than offered and
+        # silently downgraded - offering it would trip the read-back mismatch on a correct call.
+        assert list(iv._PROJECTIONS) == ["orthographic", "perspective"]      # the schema's enum
+        _install(monkeypatch, [self._part()])
+        res = iv.handler(action="orient", projection="perspective_ortho_faces")
+        assert res["isError"] is True
+        assert "Unknown projection 'perspective_ortho_faces'" in res["message"]
+        assert "orthographic, perspective" in res["message"]
+
+    def test_projection_combines_with_an_orientation_in_one_call(self, monkeypatch):
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", orientation="front", projection="perspective",
+                                  focus="Part"))
+        assert out["applied"]["orientation"] == "front"
+        assert out["applied"]["projection"] == "perspective"
+        cam = iv.app.activeViewport.camera
+        assert cam.cameraType == adsk.core.CameraTypes.PerspectiveCameraType
+        assert (cam.upVector.x, cam.upVector.y, cam.upVector.z) == (0, 0, 1)   # orientation kept
+
+    def test_a_projection_that_does_not_take_is_an_error(self, monkeypatch):
+        # the viewport swallows the assignment and keeps reading back orthographic - that must be
+        # an error naming what it actually reads, never a false ok.
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        monkeypatch.setattr(iv.app, "activeViewport",
+                            _StubbornViewport(adsk.core.CameraTypes.OrthographicCameraType))
+        res = iv.handler(action="orient", projection="perspective")
+        assert res["isError"] is True
+        assert "reads back 'orthographic'" in res["message"]
+        assert "did not take" in res["message"]
+
+    def test_an_unreadable_camera_type_is_an_error_not_a_mismatch_claim(self, monkeypatch):
+        # an unreadable property is a different report from a read that shows the change did not
+        # take - it must not be recast as a mismatch against a stringified None.
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        monkeypatch.setattr(iv.app, "activeViewport",
+                            _StubbornViewport(adsk.core.CameraTypes.PerspectiveCameraType,
+                                              type_readable=False))
+        res = iv.handler(action="orient", projection="perspective")
+        assert res["isError"] is True
+        assert "cameraType could not be read back" in res["message"]
+        assert "projection is unverified" in res["message"]
+        assert "did not take" not in res["message"]
+        assert "None" not in res["message"]
+
+    def test_untouched_projection_is_not_reported(self, monkeypatch):
+        # an orient with no projection input must not claim a projection it never set
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", orientation="top", focus="Part"))
+        assert "projection" not in out["applied"]
+
+    def test_angle_only_call_does_not_claim_an_applied_projection(self, monkeypatch):
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        iv.app.activeViewport.camera.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        out = _payload(iv.handler(action="orient", perspective_angle_deg=40))
+        assert "projection" not in out["applied"]        # nothing was applied to the projection
+        assert out["applied"]["perspective_angle_deg"] == 40.0
+
+
+class TestProjectionExtents:
+    """Flipping cameraType leaves the camera's extents inconsistent with the type it now carries -
+    assigning such a camera raises 'Camera type must be orthographic for extents' unless isFitView
+    recomputes them. So the projection path fits whether or not the caller asked it to."""
+
+    def _part(self):
+        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+
+    def test_projection_sets_isfitview_even_when_fit_is_false(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", projection="perspective", fit=False))
+        assert iv.app.activeViewport.camera.isFitView is True
+        assert "fitted even though fit was false" in out["note"]
+
+    def test_a_plain_orient_still_honours_fit_false(self, monkeypatch):
+        # no projection change -> no extents recompute is needed, so fit=false stays fit=false
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part", fit=False))
+        assert iv.app.activeViewport.camera.isFitView is False
+        assert "fitted even though" not in out["note"]
+
+    def test_fit_true_with_a_projection_says_nothing_extra(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", projection="perspective", fit=True))
+        assert iv.app.activeViewport.camera.isFitView is True
+        assert "fitted even though" not in out["note"]
+
+
+class TestPerspectiveAngle:
+    def _part(self):
+        return FakeOcc("Part", bbox=FakeBBox((0, 0, 0), (2, 2, 2)))
+
+    def test_degrees_reach_the_camera_as_radians(self, monkeypatch):
+        # Camera.perspectiveAngle is radians (a fresh perspective camera reads 0.39479 = Fusion's
+        # 22.62 deg default field of view), and a written angle survives the single camera
+        # assignment bit-exactly - so the value on the camera is EXACTLY radians(45), and the
+        # degree number itself never reaches the property.
+        import math
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", projection="perspective",
+                                  perspective_angle_deg=45))
+        cam = iv.app.activeViewport.camera
+        assert cam.perspectiveAngle == math.radians(45)
+        assert cam.perspectiveAngle != 45
+        assert out["applied"]["perspective_angle_deg"] == 45.0
+
+    def test_angle_allowed_on_a_camera_already_in_perspective_ortho_faces(self, monkeypatch):
+        # view_set cannot SET that mode - an assigned PerspectiveWithOrthoFaces camera reads back
+        # as plain Perspective - but a camera ALREADY in it accepts a written angle exactly
+        # (30 deg written, 30 deg read, live-measured), so the angle path must admit it.
+        import adsk.core
+        import math
+        _install(monkeypatch, [self._part()])
+        iv.app.activeViewport.camera.cameraType = (
+            adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType)
+        out = _payload(iv.handler(action="orient", perspective_angle_deg=35))
+        assert iv.app.activeViewport.camera.perspectiveAngle == math.radians(35)
+        assert out["applied"]["perspective_angle_deg"] == 35.0
+
+    def test_an_unreadable_camera_type_on_the_angle_path_names_no_projection(self, monkeypatch):
+        # the precondition needs the camera's OWN type when no projection is given; when that read
+        # fails there is no projection to name, so the refusal must say the read failed rather than
+        # report a projection whose name is the missing read.
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        monkeypatch.setattr(iv.app, "activeViewport",
+                            _StubbornViewport(adsk.core.CameraTypes.PerspectiveCameraType,
+                                              type_readable=False))
+        res = iv.handler(action="orient", perspective_angle_deg=45)
+        assert res["isError"] is True
+        assert "cameraType could not be read" in res["message"]
+        assert "None" not in res["message"]
+        assert "projection='perspective'" in res["message"]
+
+    def test_an_unreadable_angle_is_an_error_not_a_reported_zero(self, monkeypatch):
+        # the read-back is a MEASUREMENT: when the property cannot be read, publishing 0.0 would
+        # claim a field of view of zero degrees. Error naming the camera state instead.
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        monkeypatch.setattr(iv.app, "activeViewport",
+                            _StubbornViewport(adsk.core.CameraTypes.PerspectiveCameraType,
+                                              angle_readable=False))
+        res = iv.handler(action="orient", projection="perspective", perspective_angle_deg=45)
+        assert res["isError"] is True
+        assert "could not be read back" in res["message"]
+        assert "'perspective'" in res["message"]         # names the camera state it found
+        assert "0.0" not in res["message"]
+
+    def test_angle_on_an_orthographic_projection_is_refused(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        res = iv.handler(action="orient", projection="orthographic", perspective_angle_deg=35)
+        assert res["isError"] is True
+        assert "35" in res["message"] and "'orthographic'" in res["message"]
+        assert "perspective_ortho_faces" not in res["message"]   # not a value it can suggest
+        assert iv.app.activeViewport.camera.perspectiveAngle == 0.0   # nothing was written
+
+    def test_angle_without_a_projection_refuses_against_the_current_camera(self, monkeypatch):
+        # no projection given and the camera is orthographic -> the conflict is with the camera's
+        # OWN type, and the refusal names it rather than assuming a perspective camera.
+        _install(monkeypatch, [self._part()])
+        res = iv.handler(action="orient", perspective_angle_deg=35)
+        assert res["isError"] is True and "'orthographic'" in res["message"]
+
+    def test_angle_without_a_projection_is_allowed_on_a_perspective_camera(self, monkeypatch):
+        import adsk.core
+        import math
+        _install(monkeypatch, [self._part()])
+        iv.app.activeViewport.camera.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        out = _payload(iv.handler(action="orient", perspective_angle_deg=45))
+        assert math.isclose(iv.app.activeViewport.camera.perspectiveAngle, math.radians(45),
+                            rel_tol=1e-9)
+        assert out["applied"]["perspective_angle_deg"] == 45.0
+
+    def test_angle_outside_zero_to_one_eighty_is_refused(self, monkeypatch):
+        for bad in (0, 180, -10, 200):
+            _install(monkeypatch, [self._part()])
+            res = iv.handler(action="orient", projection="perspective", perspective_angle_deg=bad)
+            assert res["isError"] is True, bad
+            assert str(float(bad)) in res["message"], bad
+
+    def test_non_numeric_angle_is_refused(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        res = iv.handler(action="orient", projection="perspective", perspective_angle_deg="wide")
+        assert res["isError"] is True and "wide" in res["message"]
+
+    def test_an_angle_the_camera_settles_elsewhere_reports_both(self, monkeypatch):
+        # the camera comes back at 20 deg after a 45 deg request - report what it READS BACK and
+        # name the requested value, rather than echoing the request as if it stuck.
+        import adsk.core
+        import math
+        _install(monkeypatch, [self._part()])
+        monkeypatch.setattr(iv.app, "activeViewport",
+                            _StubbornViewport(adsk.core.CameraTypes.PerspectiveCameraType,
+                                              perspective_angle=math.radians(20)))
+        out = _payload(iv.handler(action="orient", projection="perspective",
+                                  perspective_angle_deg=45))
+        assert out["applied"]["perspective_angle_deg"] == 20.0
+        assert out["applied"]["perspective_angle_requested_deg"] == 45.0
+        assert "different perspective angle" in out["note"]
+
+    def test_a_matching_angle_read_back_reports_no_divergence(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", projection="perspective",
+                                  perspective_angle_deg=45))
+        assert "perspective_angle_requested_deg" not in out["applied"]
+        assert "different perspective angle" not in out["note"]
+
+
+class TestProjectionOnlyOnOrient:
+    def test_projection_on_another_action_is_refused(self, monkeypatch):
+        # accepting it on 'style'/'snapshot' would report ok while setting no projection at all
+        _install(monkeypatch, [FakeOcc("Part")])
+        res = iv.handler(action="style", style="wireframe", projection="perspective")
+        assert res["isError"] is True
+        assert "action='style'" in res["message"]
+
+    def test_perspective_angle_on_another_action_is_refused(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("Part")])
+        res = iv.handler(action="list_views", perspective_angle_deg=45)
+        assert res["isError"] is True and "action='list_views'" in res["message"]
+
+    def test_other_actions_are_unaffected_when_the_inputs_are_absent(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("Part")])
+        out = _payload(iv.handler(action="style", style="wireframe"))
+        assert out["style"] == "wireframe"
 
 
 # ── named views ──────────────────────────────────────────────────────────────

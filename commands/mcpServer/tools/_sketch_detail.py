@@ -45,13 +45,17 @@ def _round(v, f):
 
 
 def _build_token_map(sketch):
-    """Map entityToken -> '<type>:<index>' for every line/arc/circle/point in the sketch."""
+    """Map entityToken -> '<type>:<index>' for every entity kind resolve_entity_ref addresses (line/
+    arc/circle/ellipse/point/spline/cv_spline/fixed_spline)."""
     tok2id = {}
     curves = safe(lambda: sketch.sketchCurves)
     for kind, coll_get in (("line", lambda: curves.sketchLines),
                            ("arc", lambda: curves.sketchArcs),
                            ("circle", lambda: curves.sketchCircles),
-                           ("ellipse", lambda: curves.sketchEllipses)):
+                           ("ellipse", lambda: curves.sketchEllipses),
+                           ("spline", lambda: curves.sketchFittedSplines),
+                           ("cv_spline", lambda: curves.sketchControlPointSplines),
+                           ("fixed_spline", lambda: curves.sketchFixedSplines)):
         coll = safe(coll_get)
         for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
             tok = safe(lambda coll=coll, i=i: coll.item(i).entityToken)
@@ -135,6 +139,35 @@ def _entities(sketch, f):
         "center": _xy(c, f),
         "major_radius": _round(safe(lambda: el.majorAxisRadius), f),
         "minor_radius": _round(safe(lambda: el.minorAxisRadius), f)})
+
+    splines = safe(lambda: curves.sketchFittedSplines)
+    for i in range(safe(lambda: splines.count, 0) if splines else 0):
+        sp = splines.item(i)
+        con = bool(safe(lambda sp=sp: sp.isConstruction, False))
+        construction += 1 if con else 0
+        fit_pts = safe(lambda sp=sp: sp.fitPoints)
+        out.append({"id": f"spline:{i}", "type": "spline", "construction": con,
+        "is_closed": safe(lambda sp=sp: bool(sp.isClosed)),
+        "fit_point_count": safe(lambda fit_pts=fit_pts: fit_pts.count) if fit_pts is not None else None})
+
+    cv_splines = safe(lambda: curves.sketchControlPointSplines)
+    for i in range(safe(lambda: cv_splines.count, 0) if cv_splines else 0):
+        cv = cv_splines.item(i)
+        con = bool(safe(lambda cv=cv: cv.isConstruction, False))
+        construction += 1 if con else 0
+        ctrl_pts = safe(lambda cv=cv: cv.controlPoints)
+        # SketchControlPointSpline has no isClosed (live-verified).
+        out.append({"id": f"cv_spline:{i}", "type": "cv_spline", "construction": con,
+        "degree": safe(lambda cv=cv: cv.degree),
+        "control_point_count": safe(lambda ctrl_pts=ctrl_pts: ctrl_pts.count) if ctrl_pts is not None else None})
+
+    fixed_splines = safe(lambda: curves.sketchFixedSplines)
+    for i in range(safe(lambda: fixed_splines.count, 0) if fixed_splines else 0):
+        fx = fixed_splines.item(i)
+        con = bool(safe(lambda fx=fx: fx.isConstruction, False))
+        construction += 1 if con else 0
+        # SketchFixedSpline exposes no isClosed/fitPoints/degree (live-verified).
+        out.append({"id": f"fixed_spline:{i}", "type": "fixed_spline", "construction": con})
 
     pts = safe(lambda: sketch.sketchPoints)
     origin = safe(lambda: sketch.originPoint)
@@ -320,6 +353,9 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     "circles": safe(lambda: sketch.sketchCurves.sketchCircles.count, 0),
     "ellipses": safe(lambda: sketch.sketchCurves.sketchEllipses.count, 0),
     "points": safe(lambda: sketch.sketchPoints.count, 0),
+    "splines": safe(lambda: sketch.sketchCurves.sketchFittedSplines.count, 0),
+    "cv_splines": safe(lambda: sketch.sketchCurves.sketchControlPointSplines.count, 0),
+    "fixed_splines": safe(lambda: sketch.sketchCurves.sketchFixedSplines.count, 0),
     }
     fully = safe(lambda: sketch.isFullyConstrained)
     constraint_count = safe(lambda: sketch.geometricConstraints.count, 0)

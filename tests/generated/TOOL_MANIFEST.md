@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 143  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 147  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -50,9 +50,11 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an occurrence/component/body name |
 | · | `model_measure_relation` | Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the measured angle / axis offset / min distance and the tolerance i... |
 | ✎ | `model_mirror` | Mirror solid BODIES across a plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
+| ✎ | `model_offset_face` | Push or pull one or more faces along their normal by a signed distance, without redrawing the sketch that created them |
 | ✎ | `model_pattern_circular` | Pattern component OCCURRENCES evenly around an axis |
 | ✎ | `model_pattern_rectangular` | Pattern component OCCURRENCES in a rectangular grid |
 | ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part) |
+| ✎ | `model_scale` | Resize solid bodies about an anchor point that stays put (Fusion's Scale feature) - fit a part to a new envelope, or add a shrink allowance |
 | ✎ | `model_set_material` | Assign a PHYSICAL material (density-bearing) to a body, occurrence, component (all its bodies), or the whole design (empty target), so model_inspect's mass/dens... |
 | ✎ | `model_shell` | Hollow a solid body into a thin-walled shell (Fusion's Shell feature) |
 | ✎ | `model_split` | Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / SplitFace feature |
@@ -80,9 +82,10 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `mesh_combine` | Boolean-combine MESH bodies - the MeshCombine feature (the mesh analogue of model_combine, which only sees BRep solids) |
+| ⚠ | `mesh_delete` | Delete a MESH body (adsk.fusion.MeshBody) by find_geometry handle (preferred) or name - design_delete_feature and design_delete_occurrence can't reach it (a mes... |
 | ✎ | `mesh_export` | Export a body, MESH, component/occurrence, or the WHOLE design to a MESH file on local disk (OBJ / 3MF / STL) - the mesh-aware sibling of design_export (which d... |
 | ✎ | `mesh_generate_face_groups` | Segment a MESH body into planar FACE GROUPS - required before a PRISMATIC mesh_to_brep, which otherwise fails with 'MESH_FAILED_BREP - Use Generate Face Groups' |
-| · | `mesh_get` | List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a component or the whole design, with triangle/vertex counts and watertight (is_closed) hea... |
+| · | `mesh_get` | List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a component or the whole design, with triangle/vertex counts, area/volume, and watertight (... |
 | ✎ | `mesh_insert` | Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active (or named) component |
 | ✎ | `mesh_plane_cut` | Cut a MESH body with a plane |
 | ✎ | `mesh_reduce` | Decimate (reduce the triangle count of) a MESH body to a target proportion (percent), face_count, or max_deviation |
@@ -117,9 +120,10 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `cam_edit_operation` | Edit a CAM operation's PARAMETERS - the feeds/speeds/depths/tool values the other CAM tools can't reach |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP - the setup-level companion to cam_edit_operation, one call per concern |
 | ✎ | `cam_edit_tools` | Read & manage CAM TOOL LIBRARIES + their tools |
-| ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often minutes; poll cam_get_status(handle), never block) |
+| ✎ | `cam_generate` | Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle; generation runs in the background at its own pace (often minutes) - check cam_get_statu... |
 | · | `cam_get` | Read the active document's CAM (Manufacture) state by zoom level |
-| · | `cam_get_status` | Poll toolpath generation AND nudge it forward |
+| · | `cam_get_status` | Read toolpath generation progress - generation runs in the background on its own once launched; this is a plain status read, so check at whatever cadence you ne... |
+| · | `cam_inspect_toolpaths` | Check whether CAM toolpaths are generated and up to date, and name the operations that are not |
 | ✎ | `cam_post` | Create (or reuse) an NC Program for the chosen toolpaths, then post it to a G-code / NC file on disk - the final CAM step |
 | ✎ | `cam_reorder` | REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['o... |
 | ✎ | `cam_save_template` | Bundle a subset of a setup's operations into a NEW toolpath template in the library |
@@ -159,7 +163,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `design_configure` | BUILD or SWITCH a Configured Design (read the table with design_get(include=['configurations'])) |
 | ⚠ | `design_delete_feature` | Delete one timeline feature by name (from design_get(include=['timeline'])) - e.g |
 | ⚠ | `design_delete_occurrence` | Delete one component occurrence from the active design (e.g |
-| ✎ | `design_export` | Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file on local disk - STEP / IGES / SAT / STL |
+| ✎ | `design_export` | Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file on local disk - STEP / IGES / SAT / SMT / USD / Fusion-Archive (f... |
 | · | `design_get` | Read the active DESIGN by zoom level (one call for mode + tree + timeline + health + configs) |
 | ✎ | `design_recompute` | Force a full recompute (computeAll) of the active design so downstream features rebuild against current values (e.g |
 | ⚠ | `design_set_mode` | Convert the active design between parametric and direct modeling |
@@ -198,7 +202,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | | Tool | Summary |
 |---|---|---|
-| ✎ | `drawing_create` | Create a 2D drawing document from the active design, using Fusion's automatic drawing generator (the only creation mode the API supports) |
+| ✎ | `drawing_create` | Create a 2D drawing from the active design via Fusion's automatic generator (the only creation mode the API supports) |
 | ✎ | `drawing_export` | Export the active 2D drawing document to a PDF on local disk (only PDF is supported - the drawing export API exposes no DXF) |
 | ✎ | `drawing_update` | Refresh the active 2D drawing's out-of-date references to the latest source design - the API equivalent of the 'Refresh' button, regenerating the drawing's view... |
 

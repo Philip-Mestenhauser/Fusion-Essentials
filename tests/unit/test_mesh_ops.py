@@ -53,10 +53,17 @@ class FakeBBox:
         self.maxPoint = FakePoint(*mx)
 
 
+_UNSET = object()
+
+
 class MeshBody:
-    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody)."""
+    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody).
+
+    area/volume default to UNSET (the attribute is not set at all), so a plain access raises
+    AttributeError - the same shape as a live non-closed mesh raising on .volume. Pass explicit cm
+    values to model a real reading."""
     def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, is_oriented=True,
-                 token=None, bbox=None, parent=None):
+                 token=None, bbox=None, parent=None, area=_UNSET, volume=_UNSET):
         self.name = name
         self.displayMesh = TriangleMesh(tri, nodes)
         self.mesh = PolygonMesh(tri, tri, nodes)
@@ -65,6 +72,10 @@ class MeshBody:
         self.entityToken = token or f"MTOK::{name}"
         self.boundingBox = bbox or FakeBBox((0, 0, 0), (1, 2, 3))   # cm
         self.parentComponent = parent
+        if area is not _UNSET:
+            self.area = area
+        if volume is not _UNSET:
+            self.volume = volume
 
 
 class BRepBody:
@@ -385,6 +396,51 @@ class TestMeshGet:
         # the full count is still honest, even though the array is capped
         assert out["count"] == 60
 
+    def test_reports_area_and_volume_scaled_to_units(self):
+        # MeshBody.area/volume are cm^2/cm^3 (Fusion's internal units) - default units=mm scales by
+        # inv_scale^2 / inv_scale^3 (10^2 / 10^3), the same cm-based idiom model_inspect uses.
+        _wire_adsk()
+        m = MeshBody("Scan", area=6.0, volume=2.0)     # cm^2, cm^3
+        comp = FakeComp("Comp", meshes=[m])
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target=""))
+        rec = out["meshes"][0]
+        assert abs(rec["area"] - 600.0) < 1e-6      # 6 cm^2 -> 600 mm^2
+        assert abs(rec["volume"] - 2000.0) < 1e-6   # 2 cm^3 -> 2000 mm^3
+        assert out["units"] == "mm"
+
+    def test_area_and_volume_respect_units_param(self):
+        _wire_adsk()
+        m = MeshBody("Scan", area=6.0, volume=2.0)     # cm^2, cm^3
+        comp = FakeComp("Comp", meshes=[m])
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target="", units="cm"))
+        rec = out["meshes"][0]
+        assert abs(rec["area"] - 6.0) < 1e-6
+        assert abs(rec["volume"] - 2.0) < 1e-6
+        assert out["units"] == "cm"
+
+    def test_volume_is_null_when_read_raises_not_sunk(self):
+        # a non-closed mesh can RAISE on .volume (MeshBody.volume is undefined without a closed
+        # volume) - the record reports null for that field, the call is never sunk, and area (which
+        # DOES read cleanly) is still reported.
+        _wire_adsk()
+        m = MeshBody("OpenScan", is_closed=False, area=4.0)   # volume left UNSET -> raises on access
+        comp = FakeComp("Comp", meshes=[m])
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target=""))
+        rec = out["meshes"][0]
+        assert rec["is_closed"] is False
+        assert rec["volume"] is None
+        assert abs(rec["area"] - 400.0) < 1e-6   # 4 cm^2 -> 400 mm^2, unaffected by the volume failure
+
+    def test_unknown_units_rejected(self):
+        _wire_adsk()
+        comp = FakeComp("Comp", meshes=[MeshBody("Scan")])
+        _install(FakeDesign(comp))
+        res = mo.mesh_get_handler(target="", units="parsec")
+        assert res["isError"] is True
+
 
 # ── mesh measurement: bbox + counts + watertight (model_inspect calls this on a mesh target) ────
 
@@ -404,6 +460,20 @@ class TestMeshMeasure:
         m = MeshBody("Open", is_closed=False)
         out = _payload(mo.mesh_measure_of_body(m))
         assert out["is_closed"] is False and "not watertight" in out["note"].lower()
+
+    def test_measure_reports_area_volume_scaled(self):
+        _wire_adsk()
+        m = MeshBody("Scan", area=10.0, volume=5.0)
+        out = _payload(mo.mesh_measure_of_body(m, units="mm"))
+        assert abs(out["area"] - 1000.0) < 1e-6      # 10 cm^2 -> 1000 mm^2
+        assert abs(out["volume"] - 5000.0) < 1e-6    # 5 cm^3 -> 5000 mm^3
+
+    def test_measure_volume_null_when_not_closed(self):
+        _wire_adsk()
+        m = MeshBody("Open", is_closed=False)   # area/volume UNSET -> both raise -> both null
+        out = _payload(mo.mesh_measure_of_body(m))
+        assert out["volume"] is None
+        assert out["area"] is None
 
 
 # ── mesh_insert: base-feature gate in parametric; works in direct ───────────────────────────────

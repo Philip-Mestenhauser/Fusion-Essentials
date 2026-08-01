@@ -7,417 +7,227 @@ description: >-
   active CAD into the data model, defines a "Center of Model" part-space origin oriented to a
   machining axis the operator picks, places the shop's CAM template beside it (named
   <model>_CAM), inserts the part into the template's model component (the slot the real part
-  swaps into), positions it, and sizes
-  the stock from the measured part. A repeatable, team-owned procedure built entirely from
-  fusion-essentials building blocks — it runs without asking the operator for approval; the
+  swaps into), positions it, sizes the stock from the measured part, and regenerates the
+  toolpaths so the job leaves current, not stale. A repeatable, team-owned procedure that
+  chains fusion-essentials tool calls - it runs without asking the operator for approval; the
   only human step is clicking the machining face. Edit the CONFIGURATION block below to adapt
   it to your shop. Requires the fusion-essentials MCP server.
 allowed-tools: >-
   fusion-essentials:workspace_orient
   fusion-essentials:doc_get
   fusion-essentials:data_get
-  fusion-essentials:data_create_folder
-  fusion-essentials:doc_save_as
-  fusion-essentials:doc_save
-  fusion-essentials:doc_close
   fusion-essentials:design_get
+  fusion-essentials:cam_get
   fusion-essentials:param_get
   fusion-essentials:param_set
-  fusion-essentials:sketch_get
-  fusion-essentials:sys_request_selection
   fusion-essentials:sys_get_selection
-  fusion-essentials:sketch_create
-  fusion-essentials:sketch_add_3d_line
-  fusion-essentials:sys_execute_script
-  fusion-essentials:joint_create
-  fusion-essentials:joint_create_origin
   fusion-essentials:find_geometry
+  fusion-essentials:joint_create_origin
   fusion-essentials:model_inspect
-  fusion-essentials:assembly_ground
-  fusion-essentials:assembly_move
-  fusion-essentials:assembly_get
+  fusion-essentials:doc_save
+  fusion-essentials:doc_save_as
+  fusion-essentials:doc_open
   fusion-essentials:doc_insert_occurrence
   fusion-essentials:doc_update_xref
+  fusion-essentials:assembly_ground
+  fusion-essentials:assembly_get
+  fusion-essentials:joint_create
   fusion-essentials:sketch_set_text
   fusion-essentials:cam_set_nc_comment
-  fusion-essentials:doc_open
-  fusion-essentials:cam_get
-  fusion-essentials:cam_activate_setup
-  fusion-essentials:view_screenshot
+  fusion-essentials:cam_generate
+  fusion-essentials:cam_get_status
   fusion-essentials:view_switch_workspace
+  fusion-essentials:view_screenshot
 ---
 
 # Insert a new part into a CAM template
 
-This is a **team-owned, repeatable procedure** for authoring a CAM job from a new CAD part. It is
-the source of truth for the workflow — read it as a sequence to follow exactly, and EDIT the
-CONFIGURATION block to adapt it to your shop. It composes only fusion-essentials building blocks.
-
-It runs **without asking the operator to approve steps**. The single human action is in Phase 1:
-identifying the machining face (and if the operator already has one selected when the skill
-starts, that is used directly — no extra prompt). Everything else is deterministic — follow the
-phases in order, carry recorded values forward, and do not improvise.
+A team-owned procedure that stands up a CAM job from a new CAD part as one chain of
+fusion-essentials tool calls. Run the phases in order; each numbered step is a tool call whose
+output feeds a later step - record the named values and pass them on verbatim. The single human
+input is the machining-face pick in Phase 1; everything else runs without approval round-trips.
+If a step's stated expectation does not hold, STOP and report the failing value - do not
+improvise around it, and do not drop to sys_execute_script (a missing capability is a tool-surface
+gap to report, not to script around). Template methodology background is in
+[reference.md](reference.md).
 
 ## CONFIGURATION (edit these for your shop)
 
 ```
-# Destination for the CAM job when the CAD is NOT already saved in the cloud.
-# If the active CAD IS already saved, the CAM job lands in the SAME folder as the CAD instead
-# (the part's own location is the destination; these defaults are only the fallback).
-DEFAULT_PROJECT      = "CAM"          # project name to save into when the CAD is unsaved
-DEFAULT_FOLDER       = "{model}"      # folder path; "{model}" expands to the CAD's name
+# Destination when the CAD is NOT already saved (a saved part's own folder wins otherwise).
+DEFAULT_PROJECT      = "CAM"
+DEFAULT_FOLDER       = "{model}"      # "{model}" expands to the CAD's name
 
-# The team's CAM TEMPLATE LIBRARY: ONE directory that holds the shop's published templates.
-# This is the example mechanism for a team to deploy THEIR template set to this skill — edit
-# these two lines to point at your team's folder, and only the documents in it are eligible.
-# The skill lists this folder and picks/uses a template ONLY from it (never from anywhere else,
-# even if a similarly-named template exists in another project/folder). DEFAULT_TEMPLATE is the
-# one used when the operator does not name a specific template.
-TEMPLATE_LIBRARY_PROJECT = "CAM"                          # project holding the template library
-TEMPLATE_LIBRARY_FOLDER  = "Workflow Templates"           # the single folder = the library
-DEFAULT_TEMPLATE         = "4th Axis Windowframe Template" # used when no template is named
+# The team's template library: ONE folder holding the published templates. The skill uses ONLY
+# documents from this folder. DEFAULT_TEMPLATE is used when the operator does not name one.
+TEMPLATE_LIBRARY_PROJECT = "CAM"
+TEMPLATE_LIBRARY_FOLDER  = "Workflow Templates"
+DEFAULT_TEMPLATE         = "4th Axis Windowframe Template"
 
-# Naming convention.
-TEMPLATE_NAME_SUFFIX = "_CAM"         # template copy is named "<model name>_CAM"
-NAMEPLATE_SKETCH     = "File_Name"    # OPTIONAL: sketch name whose engraved text gets the model
-                                      # name; rename to match your template, or leave — naming is
-                                      # best-effort and a missing sketch is silently skipped
+# Naming.
+TEMPLATE_NAME_SUFFIX = "_CAM"         # the copy is named "<model>_CAM"
+NAMEPLATE_SKETCH     = "File_Name"    # sketch whose text gets the model name (missing = skipped)
 
-# Template wiring (names inside the template document). Adjust to your template.
-MODEL_COMPONENT      = "<from CAM setup model selection>"  # the component the setup's Model
-                                                          # selection names (the slot the part
-                                                          # swaps into); found at runtime
-PART_PARAMS          = ["PartX", "PartY", "PartZ"]         # OPTIONAL: if the template has these, the
-                                                          # skill writes the measured size so stock
-                                                          # resizes. If absent it is SKIPPED — the part
-                                                          # still inserts + positions. NOT required.
+# Template wiring - the shop's naming convention INSIDE its templates. A pinned name is
+# VERIFIED against the document reads (present or the run stops); leave "" to infer from the
+# reads instead, with any ambiguity settled by a structured question - never a guess.
+SETUP                = ""                            # "" = active milling setup, else first
+PLACEHOLDER          = "Placeholder model"           # the slot occurrence the part replaces
+ATTACH_JO            = "Attach Center of Workpiece"  # root JO the part joins to
+
+# OPTIONAL stock parameters. If the template defines these user parameters the measured part
+# size is written to them; if absent, stock sizing is skipped and the part still inserts.
+PART_PARAMS          = ["PartX", "PartY", "PartZ"]
 ```
 
-DEPENDENCY-LIGHT BY DESIGN - the FIRST-IMPRESSION priority. The skill does NOT require the template to
-be pre-wired in any particular way: a real user drops in THEIR existing CAM template and it works out
-of the box - positioning per Phase 6's JO-first/stock-top contract, stock sizing optional per
-`PART_PARAMS` above. (A template author who wants richer auto-stock can add a parametric stock chain
-that derives stock from PartX/Y/Z - but the skill never depends on it. See reference.md "Selectionless
-toolpaths and parametric stock".)
+## Phase 1 - Machining face + orientation (READ)
 
-Methodology background (components as slots, the RFA, the WCS cube, joints surviving via Save-As
-lineage) is in [reference.md](reference.md). Read it if a crawl result is ambiguous.
+The pick handshake is one deterministic structured question - no selection hold, no timeout,
+no polling. The operator clicks in Fusion at their own pace; the `AskUserQuestion` is the sync
+point, and answering it hands control back.
 
-## Rules (follow exactly)
+1. `sys_get_selection(require="face")` - read whatever is selected right now.
+2. `AskUserQuestion`, fixed shape (every run presents the identical control), header
+   `"Machining face"`:
+   - A face with a non-null `direction` is in hand -> question `"Selected: <face summary> on
+     <body>, normal <direction>. Use this as the Z-normal machining face for <model>?"`,
+     options exactly: `"Yes - use this face"` (proceed) / `"Read my selection again"` (the
+     operator has clicked a different face in Fusion; re-run step 1 and re-ask) / `"Cancel"`
+     (stop the skill).
+   - Nothing usable selected (or a null `direction`, e.g. a sphere) -> question `"No usable
+     face is selected. In Fusion, click the machining face - the face whose normal is the
+     machining Z - then choose Continue."`, options exactly: `"Continue - read my selection"`
+     (re-run step 1 and re-ask) / `"Cancel"` (stop).
+   Any free-text answer outside these options = stop and report it.
+3. From the confirmed record: `zdir` (= `direction`), `body_name`, and the face `handle`
+   (selection reads mint find_geometry-style handles).
+4. `workspace_orient` + `doc_get` - record model name, units, and identity:
+   - unsaved (`has_data_file` false): derive the model name (operator's name for the part,
+     else the dominant body's name, else ask once - never "Untitled"); destination =
+     `DEFAULT_PROJECT` / `DEFAULT_FOLDER`.
+   - saved: destination = the part's own folder (`data_get` on its `document_id` ->
+     `folder_path`); record the existing URN.
 
-- **Run the phases in order.** Each phase consumes values recorded by earlier ones.
-- **READ before WRITE.** Phase 1 (orient) and the face-read are read-only; the first cloud
-  mutation is Phase 3.
-- **No approval round-trips.** Do not ask the operator to confirm or choose between steps. The one
-  human input is identifying the machining face (Phase 1) — a required input, not an approval.
-  All other choices come from the CONFIGURATION block or from deterministic rules below.
-- **Bundle in-document work into a script only where no typed call reaches it.** Phase 2 (the
-  part-space origin) is typed calls only - `find_geometry` -> `joint_create_origin` ->
-  `model_inspect(frame=...)` - no script. Phase 6 (TEMPLATE) bundles its model-component detection + naming
-  pass into one `sys_execute_script` (atomic, all-or-nothing, prints what you need to verify) because
-  no typed read walks a component's occurrence+body children, classifies the WCS-cube heuristic, and
-  scans root joint origins in one call - round-trips are the cost there, the Fusion ops are fast. What
-  STAYS a named tool regardless of script use: (i) data-model ops that CROSS documents or are async -
-  `doc_save_as` (the template-copy mechanism - NOT `doc_copy`, which crashes on CAM templates) and
-  `doc_open`; (ii) the FRAGILE design ops whose tools encode non-obvious fixes - `doc_insert_occurrence`,
-  `joint_create` (the proxy-by-NAME fix for joining a JO inside a referenced occurrence - used for
-  BOTH the root-JO mate and the stock-top fallback), `joint_create_origin` (the oriented bbox-center
-  build), and `find_geometry` (locating the stock top face; the operator-picked face's `orient_axis`
-  handle comes from the selection read itself) - do not re-implement these in a script. Concretely:
-  Phase 6 (TEMPLATE) is Script A
-  (name + model component + DETECT root JO) -> insert -> POSITION (per Phase 6's JO-first/fallback
-  contract) -> probe health -> (optional) write PartX/Y/Z -> save. This is NOT "faking
-  a missing block" - the script composes the SAME built operations. Read each result and verify the
-  printed/returned values.
-- **Address by id (URN) once resolved.** Names are for humans; URNs drive the flow.
-- **Async tools** (`doc_save_as`, `doc_open`) return before completion —
-  confirm with a follow-up `doc_get` (active document); never assume.
-- **Pass the GATE (Phase 4) before any template write.** If any gate assertion fails, STOP and
-  report the failing assertion with its evidence. Do not improvise past it.
-- **Carry state forward.** After each phase, restate the recorded values so the next phase uses
-  them verbatim.
+-> Record: `zdir`, `body_name`, face `handle`, model name, units, URN or null, destination.
 
-## Phase 1 — Resolve the machining face + orient (READ only)
+## Phase 2 - "Center of Model" part-space origin (WRITE)
 
-Do the human input FIRST, and skip the prompt cycle if a face is already selected.
+1. `joint_create_origin(anchor="bbox_center", bbox_target=<body_name>, orient_axis=<face
+   handle>, name="Center of Model")` - builds the frame at the part's bbox center with Z along
+   the picked face's normal, and verifies its own placement (it rolls back and errors if the
+   origin lands off its computed center). EXPECT: the response's `frame_axes.primary_axis_Z`
+   is parallel to `zdir` - a negation means the selection went stale; redo Phase 1 step 2.
+2. `model_inspect(target=<body_name>, frame="Center of Model", units="mm")` - the part-space
+   extents (Z = machining axis). EXPECT: non-zero x/y/z; `center` matches step 1's center.
 
-1. **Read any EXISTING selection first** — `sys_get_selection(require="face")`. If it returns a
-   single planar face (or edge/cylindrical face) with a non-null `direction`, the operator has
-   ALREADY picked — go straight to the CONFIRM handshake below with that face. Do not run
-   `sys_request_selection`.
-2. **Only if nothing usable is selected:** tell the operator IN CHAT what to click first (the hold
-   shows no prompt inside Fusion), then `sys_request_selection(what="face")` - it HOLDS until the
-   operator picks (default 60s) and returns the pick in the same call, `handle` included. On
-   `status:"timeout"` nothing was picked: ask the operator, and re-request only on their go-ahead
-   (never re-fire in a loop). Then do the CONFIRM handshake below.
-3. **CONFIRM handshake (DETERMINISTIC — always the same structured control, never free text).**
-   The single human confirmation MUST be an `AskUserQuestion` with this exact shape, so every run
-   of the skill presents an identical, clickable structured-output result (not ad-hoc prose):
-   - header: `"Machining face"`
-   - question: `"Confirm the Z-normal machining face for <model>: is the selected face your machining datum?"`
-   - options (exactly these three, in order):
-     1. `"Yes — use this face"` — proceed with the read selection as the machining Z.
-     2. `"Pick a different face"` — re-hand selection control (`sys_request_selection`) and repeat this handshake.
-     3. `"Cancel"` — stop the skill.
-   After the operator answers, `sys_get_selection(require="face")` to read the confirmed face.
-   (Rationale: the operator clicks geometry in Fusion AND clicks a deterministic confirm here —
-   the skill's only human handshake. Emitting it as a fixed `AskUserQuestion` makes the result
-   reproducible run-to-run instead of depending on how the agent phrases a chat sentence.)
-4. VALIDATE: exactly one selection with a non-null `direction`. If null (e.g. a sphere), re-prompt
-   via the same handshake. Record `zdir = direction`, `direction_kind`, the owning `body_name`, and
-   the face's `handle` (all from the same read - both selection tools mint the standard
-   `find_geometry`-style handle, which Phase 2 consumes directly).
-5. `workspace_orient` (workspace/product/units) + `doc_get` (active document + identity) — record
-   model name, units, and the doc's identity:
-   - `has_data_file` **false** (unsaved): the doc name is "Untitled" — NOT a usable model name. Derive
-     a name: use the operator's name for the part if they gave one, else the dominant body's name, else
-     ask once. Destination = CONFIGURATION default (`DEFAULT_PROJECT`, folder `DEFAULT_FOLDER` with
-     `{model}` → the derived name, never "Untitled"). Phase 3 will save it under that name.
-   - `has_data_file` **true** (already saved): destination = the part's OWN folder — find this
-     `document_id` via `data_get` and read its `folder_path`; carry the existing URN
-     forward; Phase 3's save-as is skipped (but the re-save to capture the JO still applies).
+-> Record: `extents_mm` (x/y/z; z feeds the Phase 6 stock-top offset).
 
-→ Record: `zdir`, `body_name`, model name, units, lineage URN (or null), destination project+folder.
+## Phase 3 - Save the part with the JO (WRITE, async)
 
-## Phase 2 - Build the "Center of Model" part-space origin (typed calls, WRITE)
+1. Unsaved: `doc_save_as(name=<model>, project=<destination>, folder=<destination>,
+   create_path=true)`. Saved: `doc_save()`. Either way the new version captures the JO.
+2. `doc_get` - EXPECT the active document is the part, saved, with a URN. Record URN + version.
+   (The insert in Phase 6 references this SAVED version - the JO must be in it.)
 
-The part-space frame is at the **center of the part's bounding box**, ORIENTED so its Z axis is
-`zdir`, named **"Center of Model"**. (Bbox center - not the modeling origin (0,0,0), which is
-arbitrary - makes the part attach to the fixture by its geometric center, predictably.)
+## Phase 4 - Resolve and copy the template (WRITE, async)
 
-Two typed calls, in order. Substitute `body_name` and the face `handle` from Phase 1.
+1. `data_get(project=TEMPLATE_LIBRARY_PROJECT, folder=TEMPLATE_LIBRARY_FOLDER,
+   recursive=false)` - the eligible templates are exactly this listing. Match the operator's
+   named template (exact, case-insensitive) or use `DEFAULT_TEMPLATE`; a miss = STOP and
+   report the available names. Record `TEMPLATE_URN` from the listing - never a URN from
+   memory or another folder.
+2. `doc_open(<TEMPLATE_URN>, force_api_open=true)`, then `doc_get` until the template is the
+   active document. (Copy = open then save-as: `doc_copy` cold-reconciles a closed template's
+   reference graph and destabilizes the session - see reference.md.)
+3. `doc_save_as(name=<model> + TEMPLATE_NAME_SUFFIX, project=<destination>,
+   folder=<destination>, create_path=true)` - the copy becomes the active document.
+4. `doc_get` - EXPECT `active_document` = `<model>_CAM`; record its URN. The library original
+   is never modified.
 
-1. `joint_create_origin(anchor="bbox_center", bbox_target=<body_name>, orient_axis=<the face
-   handle from Phase 1>, name="Center of Model")` - computes the world bbox center, builds the
-   oriented frame there (its own hidden helper sketch + JointGeometry), creates the joint origin,
-   and reads the result BACK against its own computed center - rolling back and erroring if the
-   origin did not land where computed, rather than printing a number for the caller to eyeball.
-   VERIFY the response's `frame_axes.primary_axis_Z` is parallel to `zdir` - the live proof the
-   picked face's normal drove the orientation. (`zdir` and the handle come from the SAME read of
-   the SAME face, so a negation here means the selection went stale - re-read it via the Phase 1
-   handshake rather than passing `flip`.)
-2. `model_inspect(target=<body_name>, frame="Center of Model", units="mm")` - measures the body's
-   bounding box IN the new joint-origin frame (the same oriented-bounding-box computation the frame's
-   own axes define - see reference.md "Part-space extents and orientation"). Its `x`/`y`/`z` are the
-   part-space extents (Z = the machining axis) and `center` should match step 1's computed center.
-   RECORD these as `extents_mm` - no separate measure tool exists for this; it feeds the stock-top
-   fallback's offset in Phase 6 step 2b (needed to PERFORM the join, so it must be pre-join; Phase 6
-   step 4's stock sizing re-measures POST-join and does not reuse this number).
+## Phase 5 - Verify the template's wiring (READ)
 
-(The "Center of Model" JO is the PART-SIDE attach frame: bbox-center, oriented to the machining Z.
-Whichever join path Phase 6 takes, the part side is this JO - so it is built on every run.)
+All reads against the now-active `<model>_CAM`. Each wiring fact comes from CONFIGURATION and
+is VERIFIED against the read - a pinned name missing from the document = STOP, reporting the
+names that were found. Only a blank ("") config entry is inferred from the read, and an
+ambiguous inference is settled with an `AskUserQuestion` listing the read names as options -
+never by picking one silently.
 
--> Record: `joint_origin_name = "Center of Model"`, the verified Z axis (`frame_axes.primary_axis_Z`),
-and `extents_mm`.
+1. `cam_get` - EXPECT `SETUP` among the setups (blank: the active milling setup, else the
+   first milling setup). Record the setup, its model component occurrence
+   (`selected_models[0]` - the slot component the part swaps into), and its stock/fixture
+   names.
+2. `design_get(include=['tree'], component=<model component occurrence>)` - EXPECT
+   `PLACEHOLDER` among its child occurrences (blank: the one child occurrence with bodies
+   whose name is not WCS/zero-like - a lone cube named like "WCS"/"zero" is the setup's WCS
+   cube, never delete it; several candidates = AskUserQuestion, one option per child plus "No
+   placeholder - insert alongside" and "Cancel"). Bodies sitting directly in the model
+   component itself (no occurrence to remove) = STOP and report the listing.
+3. `assembly_get(include=['joint_origins'])` - EXPECT `ATTACH_JO` among the joint origins
+   whose `component` is the root component (blank: the root JO matching Attach / Center of
+   Model / Workpiece; several = AskUserQuestion with the read names; none = record none and
+   Phase 6 seats on the stock top instead). Also record the placeholder's own JO
+   `world_position` if it carries one - it marks the seat the part must land on, and it is
+   gone once the placeholder is deleted.
+4. `param_get()` - record which of `PART_PARAMS` exist as user parameters.
 
-## Phase 3 — Save the part with the JO (WRITE, async)
+-> Record: setup, model component occurrence, stock name, placeholder (or none), attach JO
+(or none), the seat position, which PART_PARAMS exist.
 
-The "Center of Model" JO lives only in the live session until saved, and an x-ref points at a
-SAVED version — so the CAD must be saved with the JO BEFORE Phase 6 inserts it as a reference.
-1. UNSAVED: `doc_save_as(name=<model name>, project_id, folder, create_path=true)` - saveAs
-   captures the live session (incl. the JO) into one new version. ALREADY SAVED: `doc_save()` for a
-   new version containing the JO.
-2. `doc_get` (after a short wait) — record the URN + version that contains the JO.
-   (If the CAD has its OWN stock parameters, set them from `extents_mm` and re-save — most parts
-   don't; the template's PartX/Y/Z are driven in Phase 6.)
+## Phase 6 - Stand up the part (WRITE)
 
-→ Record: the part's lineage URN and the version that contains the JO.
+1. `doc_insert_occurrence(document_id=<part URN>, into_component=<model component occurrence>
+   [, remove_existing=<placeholder occurrence>])` - inserts the part as an x-ref at identity
+   and clears the placeholder in the same call. Record `new_occurrence_name`. (If the tree
+   later shows the reference stale, `doc_update_xref(name=<model>)`.)
+2. `assembly_ground(occurrence=<new_occurrence_name>, ground_to_parent=false)` - an inserted
+   occurrence is locked to its parent by default; free it so the joint can position it.
+3. Join the part's JO to the template, one of two ways:
+   - Root JO recorded: `joint_create(occurrence_one="Center of Model",
+     occurrence_two=<root JO>, joint_type="rigid")` - the template JO's offsets position the
+     part; nothing to measure.
+   - No root JO: `joint_create(occurrence_one="Center of Model",
+     occurrence_two="<stock occurrence>:top", joint_type="rigid",
+     offset=-(0.5 * <extents_mm.z> + 1), units="mm")` - seats the part's top 1 mm below the
+     stock top (the skim allowance).
+   Each side is a Joint Origin name (bare, or `<occurrence>:<JO name>`) or a snap; on a
+   resolve error the tool lists the design's JOs - correct the name and retry once.
+4. Verify from numbers: `assembly_get` - EXPECT the new joint is not in `broken_joints`
+   (pre-existing template warnings are not yours to fix). `model_inspect(target=<inserted
+   occurrence full path>, units="mm")` - a world-frame read (`frame=` takes a BODY target
+   only, not an occurrence) - EXPECT `center` at the placeholder's recorded JO position from
+   Phase 5 (the seat), or on the stock-top path at the stock top minus the skim allowance.
+5. Stock (only if Phase 5 found PART_PARAMS): `model_inspect(target=<inserted occurrence full
+   path>, units="mm")` - measure POST-join in world axes (the join reorients the part, so
+   Phase 2's pre-join extents land on the wrong axes) - then `param_set` each parameter from
+   this reading. No PART_PARAMS = skip, and say the stock was left as the template defines.
+6. Naming (best-effort): `sketch_set_text(text=<model>, sketch_name=NAMEPLATE_SKETCH)`
+   (`changed_count` 0 = template has no nameplate; fine) and `cam_set_nc_comment(
+   comment=<model>)`.
+7. `doc_save()` - the insert, joint, and parameters are session-only until saved.
 
-## Phase 4 — Validate preconditions (the GATE)
+## Phase 7 - Generate the toolpaths (WRITE, async)
 
-Assert ALL, each with its evidence value. If ANY fails, STOP and report it — do not place the template.
-- [ ] The part is saved in the cloud, in a version that CONTAINS the "Center of Model" JO (URN + version).
-- [ ] The "Center of Model" joint origin exists with Z ≈ the picked direction (from Phase 2 verify).
-- [ ] A bounding box was measured (non-zero, sane units) — cite X/Y/Z.
-- [ ] The destination project + folder are known by id.
+The insert and stock resize invalidate the template's operations; the job is not stood up
+until they regenerate.
 
-## Phase 5 — Resolve the template, then OPEN it and SAVE-AS the `<model>_CAM` copy (WRITE)
+1. `view_switch_workspace` to Manufacture - out-of-date state is only re-evaluated against
+   the new geometry once Manufacture is active; generating from Design can wrongly skip
+   stale operations.
+2. `cam_generate()` (whole document) - returns a handle immediately; generation runs in the
+   background at its own pace (often minutes).
+3. `cam_get_status(handle=<handle>)` occasionally - a plain progress read; check every minute
+   or so until `completed` is true, doing nothing in between. An ERRORED operation will never
+   finish: stop waiting and report it from `cam_get`'s error text.
+4. `cam_get` - EXPECT no out_of_date or errored operations among the unsuppressed ones.
+   Failures = report each by name; do not silently accept a partial job.
+5. `doc_save()` - capture the generated job.
 
-**5.0 — Resolve the template FROM THE LIBRARY DIRECTORY (do this first; do not skip).** The
-template MUST come from the configured `TEMPLATE_LIBRARY_PROJECT` / `TEMPLATE_LIBRARY_FOLDER` and
-nowhere else — this is the only authoritative source. Do NOT reuse a URN from memory, from a prior
-run, or a similarly-named template found in another project/folder.
-- `data_get(project=TEMPLATE_LIBRARY_PROJECT, folder=TEMPLATE_LIBRARY_FOLDER,
-  recursive=false)` — returns ONLY the files in the library folder. That set is the eligible
-  templates (no need to dump/scan the whole project).
-- Choose the template: if the operator named one, match it (exact, case-insensitive) within the
-  library; otherwise use `DEFAULT_TEMPLATE`. If the chosen name is not in the library, STOP and
-  report the available library template names — do NOT fall back to anything outside the folder.
-- Record `TEMPLATE_URN` = the chosen entry's `id`, and the template name. Everything below uses
-  this resolved URN.
+## Phase 8 - Verify and report (READ)
 
-**★ COPY THE TEMPLATE VIA OPEN-THEN-SAVE-AS — never `doc_copy`.** Copy a CAM template by opening it
-and saving-as, NOT with `doc_copy`: `DataFile.copy` reconciles a closed template's whole reference
-graph and destabilises the session, while `Document.saveAs` writes the already-loaded doc safely. (See
-reference.md "Copying a CAM template safely".) The library original is never modified.
+1. `data_get(project=<destination project>, folder=<destination folder>)` - EXPECT the part
+   and `<model>_CAM` both listed.
+2. `view_screenshot` - the part seated in the fixture.
 
-1. **Open the TEMPLATE** (the library original) as one settled step:
-   - `doc_open(TEMPLATE_URN, force_api_open=true)`, then `doc_get` and ASSERT
-     `active_document` == the template name (the open is async — poll until active). A `view_screenshot`
-     here confirms it loaded AND shows the operator the doc (work VISIBLY). Do NOT write until active.
-
-2. **`doc_save_as` the open template as `<model>_CAM`** — this makes the copy AND leaves it active:
-   - `doc_save_as(name="<model name>" + TEMPLATE_NAME_SUFFIX, project_id, folder=<destination folder>,
-     create_path=true)`. The saved-as copy becomes the ACTIVE document (no separate re-open needed).
-   - `doc_get` (after a moment — saveAs is async) → confirm `active_document` == `<model>_CAM`
-     and record its lineage URN. VERIFY the copy is usable: `cam_get` lists the template's setups,
-     their model selection, and references. If the name still reads as the template's, STOP and report it.
-   (NO human step here. NO `doc_copy`.)
-
-→ Record: the resolved template name + URN (from the library); the `<model>_CAM` lineage URN; that
-it is the active document (confirmed via `doc_get`, NOT assumed).
-
-## Phase 6 — Stand up the part in the template (WRITE) — JO-FIRST, GEOMETRY FALLBACK
-
-Position the part by the BEST mechanism the template offers, never REQUIRING any specific wiring:
-- **PRIMARY - a template root joint origin.** If the template has a root-level joint origin (a
-  shop-built template usually does, with the part-position offsets baked into its JO), JOIN the
-  part's "Center of Model" JO to it. This is the clean, offset-aware path - use it whenever a root
-  JO exists; do NOT skip a present JO for the cruder fallback.
-- **FALLBACK - no root JO.** Join the part's "Center of Model" JO to the STOCK TOP face, offset
-  down so the part's top sits a skim allowance below the stock top (formula at step 2b). This
-  needs no template JO at all.
-So the skill works on ANY template; stock sizing is optional per CONFIGURATION's `PART_PARAMS`.
-Either path carries ORIENTATION on the JO, never assumed: the JO's Z is the machining face the
-operator picked in Phase 1, mated to a Z-up template frame - so the machining face always ends up
-facing the setup's +Z, no matter how the part was modelled relative to world axes. Substitute
-`<MODEL_NAME>`, `<PART_URN>`, and from CONFIGURATION `NAMEPLATE_SKETCH`, `PART_PARAMS`.
-
-Reminder: the doc just opened (Phase 5.2) — confirm it is SETTLED (`doc_get` shows it active) before
-these writes, or a configured-design template can crash mid-recompute.
-
-**Script A — name + resolve the model component + classify its children + detect a root JO** (one
-`sys_execute_script`). It picks the model component (the slot the part swaps into) from the setup
-the operator is staging (the ACTIVE setup, or the first milling setup) and classifies what's
-already inside it so the insert
-removes only a genuine placeholder — NOT a WCS cube or fixture (see reference.md "Two common mistakes"):
-```python
-def run(context):
-    import adsk.core, adsk.fusion, adsk.cam, json
-    app = adsk.core.Application.get(); doc = app.activeDocument
-    des = adsk.fusion.Design.cast(doc.products.itemByProductType('DesignProductType'))
-    cam = adsk.cam.CAM.cast(doc.products.itemByProductType('CAMProductType'))
-    root = des.rootComponent
-    # NAME (best-effort, optional): nameplate sketch text + every NC program comment
-    for c in des.allComponents:
-        for sk in c.sketches:
-            if sk.name == "<NAMEPLATE_SKETCH>":
-                for t in sk.sketchTexts: t.text = "<MODEL_NAME>"
-    for i in range(cam.ncPrograms.count):
-        p = cam.ncPrograms.item(i).parameters.itemByName("nc_program_comment")
-        if p: p.expression = "'<MODEL_NAME>'"
-    # SETUP: the active milling setup, else the first milling setup (do NOT blindly take item(0)).
-    setup = None
-    for i in range(cam.setups.count):
-        s = cam.setups.item(i)
-        if getattr(s, "isActive", False): setup = s; break
-    if setup is None:
-        for i in range(cam.setups.count):
-            s = cam.setups.item(i)
-            if str(s.operationType) == 'MillingOperation': setup = s; break
-    setup = setup or cam.setups.item(0)
-    # MODEL COMPONENT = the setup's MODEL selection (the slot component, per reference.md), not the browser tree.
-    model_occ = setup.models.item(0).name
-    model_comp = root.allOccurrences.itemByName(model_occ).component
-    def looks_wcs(nm):  # a lone simple box named like a WCS / zero-point is NOT a placeholder
-        nm = nm.lower(); return ('wcs' in nm) or ('zero' in nm)
-    # A template's dummy model can live EITHER as a child OCCURRENCE or as BODIES placed directly
-    # in the model component itself. Classify both. (Verified: some templates put the placeholder as
-    # a body, e.g. "Body1", not a sub-occurrence — an occurrence-only scan misses it.)
-    child_occs = [{"kind":"occurrence","name":o.name,"bodies":o.component.bRepBodies.count,
-                   "is_wcs":looks_wcs(o.name)} for o in model_comp.occurrences]
-    own_bodies = [{"kind":"body","name":b.name,"bodies":1,"is_wcs":looks_wcs(b.name)}
-                  for b in model_comp.bRepBodies]
-    children = child_occs + own_bodies
-    # placeholder candidates: anything with solid geometry that isn't a WCS cube
-    placeholders = [c for c in children if c["bodies"] > 0 and not c["is_wcs"]]
-    root_jos = [jo.name for jo in root.jointOrigins]
-    has_part_params = [p.name for p in des.userParameters if p.name in <PART_PARAMS>]
-    print(json.dumps({"setup": setup.name, "model_occurrence": model_occ, "model_component": model_comp.name,
-                      "children": children, "placeholders": placeholders,
-                      "root_jos": root_jos, "has_part_params": has_part_params}))
-```
-
-1. **Clear the placeholder, then insert.** Look at Script A's `placeholders` (each has a `kind`):
-   - **0 entries** (empty model component) → nothing to clear.
-   - **MORE than 1** → STOP and report the `children` list; do not guess which to remove.
-   - **exactly 1, `kind="occurrence"`** → pass it to the insert tool's `remove_existing`.
-   - **exactly 1, `kind="body"`** → `remove_existing` only removes child OCCURRENCES, so it will NOT
-     clear a body. Delete the body first in a one-line `sys_execute_script`:
-     `root.allOccurrences.itemByName("<model occurrence>").component.bRepBodies.itemByName("<body name>").deleteMe()`
-     then insert with NO `remove_existing`.
-   Then `doc_insert_occurrence(document_id=<PART_URN>, into_component=<model_component>
-   [, remove_existing=<occurrence placeholder>])` — inserts the part x-ref at IDENTITY. Record the
-   `new_occurrence_name` (e.g. `<MODEL_NAME>:1`).
-   (The reference carries the part's "Center of Model" JO from Phase 3. If a tree check shows it stale,
-   `doc_update_xref(name=<MODEL_NAME>)` before joining.)
-
-2. **★ UN-GROUND THE INSERTED PART FIRST (the #1 reason the join fails — do NOT skip):**
-   `assembly_ground(occurrence="<new_occurrence_name>", ground_to_parent=false)`. An inserted
-   occurrence is ground-to-parent by default; a rigid positioning joint can't resolve against that
-   (it shows unhealthy with `occurrence_two = null`). Freeing it first makes the join compute healthy.
-   (See reference.md "Why an inserted part must be un-grounded".) Then branch:
-
-   **2a. PRIMARY (root JO present):** pick the root JO (if several, the one that reads as the model/
-   workpiece attach — e.g. matches /Attach|Center.*Model|Workpiece/; record it). Then
-   `joint_create(occurrence_one="Center of Model", occurrence_two="<that root JO>", joint_type="rigid")` —
-   the join tool proxies the part's "Center of Model" JO by name inside the inserted occurrence and
-   rigidly mates it to the template JO (whose offsets position the part). No measuring/moving needed.
-   (A healthy root-JO join reports `occurrence_two = null` in assembly_get — that's normal for a
-   root-anchored JO, NOT a failure; trust the `healthy` flag + the part's measured position.)
-
-   **The argument shape is load-bearing.** Each side is a Joint Origin NAME — bare
-   (`"Center of Model"`) or scoped through the occurrence that carries it
-   (`"<new_occurrence_name>:Center of Model"`, e.g. `"SculpturalTower:1:Center of Model"`). Those
-   are the ONLY JO forms `joint_create` accepts — do not invent others. If the call errors, read
-   the error: it lists the design's Joint Origins — correct the name and retry ONCE. 
-   (`createForAssemblyContext`, see reference.md "Joining a JO inside a referenced occurrence").
-
-   **2b. FALLBACK (no root JO):** seat the part on the stock top:
-   - `find_geometry(target="<stock occurrence>", kind="planar_face")` and pick the TOP face (max Z
-     center) — the stock occurrence is the setup's stock body (e.g. `Main Stock:1`). Record its handle.
-   - `joint_at_geometry` is for two handles; here the part side is a JO — so instead use
-     `joint_create(occurrence_one="Center of Model", occurrence_two="<stock occ>:top", joint_type="rigid",
-     offset = -(0.5*partZ + 1 mm), units="mm")` where `partZ` is the part-space Z extent from Phase 2's
-     oriented bbox (the depth along the machining axis, not the world Z). The negative offset seats the
-     part's top 1 mm under the stock top - the skim allowance. (`:top` is the highest-face-center snap.)
-
-3. **Verify the join from NUMBERS** - `assembly_get` for joint health, `model_inspect` for seating:
-   - ASSERT the part's OWN joint is healthy - i.e. the joint you just made (`Center of Model` -> root
-     JO, or -> stock top) is NOT in `broken_joints`. Note: `assembly_get` may report
-     `is_healthy:false` for PRE-EXISTING template fixturing/feature warnings (e.g. an unused reversed
-     jaw joint, encapsulation features) that have nothing to do with your insert - those are OK to
-     leave. Judge ONLY your new joint; if IT is unhealthy, report the probe error and STOP.
-   - CONFIRM seating with `model_inspect(target=<full path to the inserted occurrence>, frame=<the
-     root JO you joined to in step 2a>)`, NOT `assembly_get`: the inserted part is a NESTED occurrence
-     (a child of the model component), and `assembly_get` lists TOP-LEVEL occurrences only - it cannot
-     see a nested one and falls back to reading the model COMPONENT's box instead, which spans the
-     fixture/stock too and looks off-origin even when the part IS seated. `model_inspect`'s `center`
-     should sit at the workpiece origin (~0,0 for a centered fixture) with Z lifted onto/into the
-     stock. (Step 2b has no JO on the far side - omit `frame` and read world instead.)
-
-4. **Stock (optional per CONFIGURATION's `PART_PARAMS`).** If Script A's `has_part_params`
-   lists PartX/Y/Z, measure AGAIN first - `model_inspect(target=<full path to the inserted occurrence>,
-   units="mm")`, POST-join, no `frame` (world-aligned) - then `param_set` each of PartX/Y/Z from THIS
-   reading, never Phase 2's pre-join `extents_mm`. The rigid join REORIENTS the part into the
-   fixture's frame (live: part-space 80/60/20 read back as world 80/20/60 after joining), so a
-   pre-join number lands on the wrong axis even though the three values still look plausible. The
-   template's own stock chain (Calc_Stock* if present, else direct) recomputes. If `has_part_params`
-   is EMPTY, SKIP this and note "template has no PART_PARAMS - stock left as the template defines it".
-
-5. **Save.** `doc_save()` on the `<model>_CAM` document - insert + join + param_set are SESSION-ONLY
-   until saved; without this step the standing-up work is lost when the session ends. `doc_get`
-   (after a short wait) to confirm the save landed.
-
--> Record: inserted occurrence, the join path used (root-JO vs stock-top fallback) + its name + health,
-PartX/Y/Z written (or "skipped"), and that the save landed (doc_get confirmed).
-
-## Phase 7 — Verify and report (READ)
-
-1. `data_get(project=<destination project>, folder=<destination folder>)` — confirm the part and
-   `<model>_CAM` are both present.
-2. `cam_get` / `cam_get(include=['tools'])` — confirm the machining recipe is intact.
-3. `view_screenshot` (iso) — visually confirm the part seated in the fixture and the stock sized.
-
-Report: the destination folder, the part URN, the `<model>_CAM` URN, the part-space bounding box,
-the "Center of Model" Z axis, and the verification screenshot.
+Report: destination folder, part URN, `<model>_CAM` URN, part-space extents, the join used
+(attach JO or stock top), PART_PARAMS written or skipped, the generation outcome per setup,
+and the screenshot.

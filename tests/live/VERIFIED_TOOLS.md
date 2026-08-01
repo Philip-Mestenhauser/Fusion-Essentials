@@ -15,9 +15,9 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 437cb293aaaefce2474eb588836c69b12f0cd4cf23227eb135fb8d98c32f57f5 | Fusion 2704.1.39 | verified 2026-07-31
+Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 | Fusion 2704.1.39 | verified 2026-08-01
 
-118 covered / 25 skipped(reason) / 0 pending
+122 covered / 25 skipped(reason) / 0 pending
 
 | tool | status | step (the demo's shot list) |
 |---|---|---|
@@ -38,10 +38,11 @@ Stamp: source 437cb293aaaefce2474eb588836c69b12f0cd4cf23227eb135fb8d98c32f57f5 |
 | cam_edit_folders | covered | organize the job into Milling and Drilling folders |
 | cam_edit_operation | covered | edit the face operation's feed |
 | cam_edit_setup | covered | real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned |
-| cam_edit_tools | covered | add a flat end mill + a 3mm drill to the document library |
+| cam_edit_tools | covered | add mill/drill/turning/center-drill tools; preset add/remove round-trip with unit, refusal, and rollback gates |
 | cam_generate | covered | generate the toolpaths against the real part in the real fixture |
 | cam_get | covered | read the CAM job structure |
 | cam_get_status | covered | poll the generation to completion (empty toolpaths fail) |
+| cam_inspect_toolpaths | covered | verdict false with named ops before generation, scoped check, bogus-scope refusal, verdict true after generation |
 | cam_post | covered | post the NC program to disk |
 | cam_reorder | covered | reorder the adaptive before the face op |
 | cam_save_template | covered | save the setup as a local CAM template |
@@ -88,6 +89,7 @@ Stamp: source 437cb293aaaefce2474eb588836c69b12f0cd4cf23227eb135fb8d98c32f57f5 |
 | joint_edit | covered | set rotation limits on the yaw |
 | joint_motion_link | covered | couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering) |
 | mesh_combine | covered | combine two mesh copies |
+| mesh_delete | covered | delete a scratch mesh body with the design-wide survivor re-scan |
 | mesh_export | covered | export a mesh to STL |
 | mesh_generate_face_groups | covered | group the mesh faces |
 | mesh_get | covered | read the mesh back |
@@ -112,9 +114,11 @@ Stamp: source 437cb293aaaefce2474eb588836c69b12f0cd4cf23227eb135fb8d98c32f57f5 |
 | model_measure_between | covered | measure the outer-ring-to-inner-ring gap |
 | model_measure_relation | covered | read rotor/shaft coaxiality |
 | model_mirror | covered | mirror a cameo body |
+| model_offset_face | covered | push a scratch block's top face outward |
 | model_pattern_circular | covered | circular-pattern a cameo body |
 | model_pattern_rectangular | covered | rectangular-pattern a cameo body |
 | model_revolve | covered | revolve the rotor disc about the spin axis |
+| model_scale | covered | uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, length, and angle expressions refused; a bare unitless parameter accepted; a vertex-anchored scale |
 | model_set_material | covered | assign the rotor a physical steel material |
 | model_shell | covered | shell a scratch cap cameo |
 | model_split | covered | split a scratch pin by a plane |

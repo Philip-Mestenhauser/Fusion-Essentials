@@ -22,6 +22,7 @@
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",
+      "mcp__fusion-essentials__cam_inspect_toolpaths",
       "mcp__fusion-essentials__data_get",
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",

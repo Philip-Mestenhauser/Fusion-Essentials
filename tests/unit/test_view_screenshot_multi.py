@@ -130,13 +130,17 @@ def rig(monkeypatch):
         applied.append(name)
         viewport.camera = f"cam-{name}"
 
-    def fake_capture(viewport, width, height, prefix="fe_mcp_shot"):
+    switches = []
+
+    def fake_capture(viewport, width, height, prefix="fe_mcp_shot",
+                     transparent_background=None, anti_aliased=None):
         captures.append((width, height))
+        switches.append((transparent_background, anti_aliased))
         return "B64DATA", None
 
     monkeypatch.setattr(cv._view_common, "apply_named_view", fake_apply)
     monkeypatch.setattr(cv._view_common, "capture_png_b64", fake_capture)
-    return SimpleNamespace(vp=vp, applied=applied, captures=captures)
+    return SimpleNamespace(vp=vp, applied=applied, captures=captures, switches=switches)
 
 
 def _texts(result):
@@ -182,6 +186,23 @@ class TestDimensionClamp:
         assert rig.captures == [(800, 500)]
 
 
+class TestCaptureSwitchPassThrough:
+    """The capture switches reach EVERY view's grab, and stay absent when omitted - an
+    omitted-switch call takes the plain capture path."""
+
+    def test_omitting_both_leaves_every_view_on_the_plain_path(self, rig):
+        cv.handler(views=["front", "top"])
+        assert rig.switches == [(None, None), (None, None)]
+
+    def test_switches_apply_to_every_captured_view(self, rig):
+        cv.handler(views=["front", "top", "right"], transparent_background=True, anti_aliased=False)
+        assert rig.switches == [(True, False)] * 3
+
+    def test_transparent_background_false_is_forwarded_not_dropped(self, rig):
+        cv.handler(views=["front"], transparent_background=False)
+        assert rig.switches == [(False, None)]
+
+
 class TestPerViewFailureIsolation:
     def test_one_orient_failure_reports_that_row_and_keeps_the_rest(self, rig, monkeypatch):
         def flaky_apply(viewport, name):
@@ -200,7 +221,7 @@ class TestPerViewFailureIsolation:
     def test_one_capture_failure_reports_that_row_and_keeps_the_rest(self, rig, monkeypatch):
         calls = {"n": 0}
 
-        def flaky_capture(viewport, width, height, prefix="fe_mcp_shot"):
+        def flaky_capture(viewport, width, height, prefix="fe_mcp_shot", **switches):
             calls["n"] += 1
             if calls["n"] == 2:                 # the second view ("top") fails to grab
                 return None, "saveAsImageFile returned false"
@@ -215,7 +236,7 @@ class TestPerViewFailureIsolation:
 
     def test_every_view_failing_is_an_error_not_an_empty_ok(self, rig, monkeypatch):
         monkeypatch.setattr(cv._view_common, "capture_png_b64",
-                            lambda vp, w, h, prefix="fe_mcp_shot": (None, "nope"))
+                            lambda vp, w, h, prefix="fe_mcp_shot", **switches: (None, "nope"))
         result = cv.handler(views=["front", "top"])
         assert result["isError"] is True
         assert result["message"] == "No views were captured."
@@ -228,7 +249,7 @@ class TestCameraRestore:
         assert rig.vp.camera_assignments[-1] is rig.vp._cam
 
     def test_original_camera_is_reasserted_even_when_a_capture_raises(self, rig, monkeypatch):
-        def exploding_capture(viewport, width, height, prefix="fe_mcp_shot"):
+        def exploding_capture(viewport, width, height, prefix="fe_mcp_shot", **switches):
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(cv._view_common, "capture_png_b64", exploding_capture)
@@ -249,7 +270,7 @@ def rig_real_orient(monkeypatch):
     monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: (x, y, z))
     cam_types = []
 
-    def fake_capture(viewport, width, height, prefix="fe_mcp_shot"):
+    def fake_capture(viewport, width, height, prefix="fe_mcp_shot", **switches):
         cam_types.append(viewport.camera.cameraType)   # camera type at the capture moment
         return "B64DATA", None
 

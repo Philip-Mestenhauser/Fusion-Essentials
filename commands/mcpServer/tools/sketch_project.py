@@ -27,9 +27,10 @@ _ENTITIES = _inputs.GeometryHandleList("entities", require="any", required=True,
     description="find_geometry handle(s) to project into the sketch (edges/faces/vertices; a face "
                 "projects all of its edges).")
 
-# The sketch-entity ref kinds sketch_constrain / sketch_dimension can address ('<type>:<index>').
-# Projected curves of other types (ellipse/spline/conic) are created but not addressable this way.
-_ADDRESSABLE = ("line", "arc", "circle", "point")
+# The sketch-entity ref kinds sketch_constrain / sketch_dimension can address ('<type>:<index>') -
+# _common.ENTITY_REF_KINDS is the single source of truth; defer to it instead of a local copy that can
+# drift (a projected elliptical arc / conic curve is still created but not addressable this way).
+_ADDRESSABLE = _common.ENTITY_REF_KINDS
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -42,13 +43,11 @@ RETURNS = [
 def _addressable_counts(sketch) -> dict:
     """Per-collection counts for the ref-addressable kinds, in creation order (matches
     _common.resolve_entity_ref's indexing so the reported refs resolve back to these entities)."""
-    curves = safe(lambda: sketch.sketchCurves)
-    return {
-        "line": safe(lambda: curves.sketchLines.count, 0) or 0 if curves else 0,
-        "arc": safe(lambda: curves.sketchArcs.count, 0) or 0 if curves else 0,
-        "circle": safe(lambda: curves.sketchCircles.count, 0) or 0 if curves else 0,
-        "point": safe(lambda: sketch.sketchPoints.count, 0) or 0,
-    }
+    counts = {}
+    for kind in _ADDRESSABLE:
+        coll = _common.entity_collection(sketch, kind)
+        counts[kind] = safe(lambda coll=coll: coll.count, 0) if coll is not None else 0
+    return counts
 
 
 def _new_refs(before: dict, after: dict) -> list:
@@ -100,12 +99,12 @@ def handler(entities="", sketch_name: str = "", link: bool = True) -> dict:
 
     refs = _new_refs(before, after)
     note = ("Geometry projected. 'entity_refs' are '<type>:<index>' handles for sketch_constrain / "
-            "sketch_dimension (line/arc/circle/point). "
+            f"sketch_dimension ({'/'.join(_ADDRESSABLE)}). "
             + ("Linked: the curves update when the source geometry moves."
                if link else "Static copy: the curves do NOT track the source geometry.")
             + " Extrude a resulting profile via sketch_get -> model_extrude.")
-    if refs and created_count > len(refs):
-        note += (" Some projected curves are non-addressable types (ellipse/spline/conic) - use "
+    if created_count > len(refs):
+        note += (" Some projected curves are non-addressable types (elliptical arc/conic curve) - use "
                  "sketch_get(include_entities=true) to inspect them.")
 
     return ok({

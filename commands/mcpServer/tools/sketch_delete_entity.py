@@ -5,7 +5,8 @@
 bad constraint can be surgically removed WITHOUT deleting and rebuilding the whole sketch.
 
   sketch_delete_entity -> remove one 'target' from a named sketch. 'target' is '<type>:<index>':
-      line / arc / circle / point (a curve or point, via the shared resolve_entity_ref) OR
+      line / arc / circle / ellipse / point / spline / cv_spline / fixed_spline (a curve or point,
+      via the shared resolve_entity_ref/entity_collection - see _common.ENTITY_REF_KINDS) OR
       constraint (a geometric constraint, indexed in sketch.geometricConstraints creation order).
       The delete is verified by reading the collection count back - a delete that removed nothing
       is reported as a failure, never a false ok. WRITES.
@@ -25,9 +26,6 @@ from ._common import ok, error, safe, resolve_sketch, all_sketch_names, resolve_
 from . import _common
 
 app = adsk.core.Application.get()
-
-# The curve/point kinds resolve_entity_ref already understands; 'constraint' is resolved here.
-_CURVE_KINDS = ("line", "arc", "circle", "point")
 
 
 def _constraint_collection(sketch):
@@ -62,8 +60,9 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
 
     ref = (target or "").strip().lower()
     if ":" not in ref:
-        return error("Provide 'target' as '<type>:<index>' - type = line | arc | circle | point | "
-                     "constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.")
+        return error("Provide 'target' as '<type>:<index>' - type = "
+                     + " | ".join(_common.ENTITY_REF_KINDS)
+                     + " | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.")
     kind, _, idx_s = ref.rpartition(":")
     try:
         idx = int(idx_s)
@@ -98,14 +97,12 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
         })
 
     # --- curve/point path (shared resolver + count read-back on the matching collection) ---
-    if kind not in _CURVE_KINDS:
-        return error(f"Unknown target type '{kind}'. Use line | arc | circle | point | constraint.")
+    if kind not in _common.ENTITY_REF_KINDS:
+        return error(f"Unknown target type '{kind}'. Use "
+                     + " | ".join(_common.ENTITY_REF_KINDS) + " | constraint.")
 
     # Count the SAME collection resolve_entity_ref indexes, so the read-back proves this delete.
-    curves = safe(lambda: sketch.sketchCurves)
-    coll = (safe(lambda: sketch.sketchPoints) if kind == "point"
-            else safe(lambda: getattr(curves, {"line": "sketchLines", "arc": "sketchArcs",
-                                                "circle": "sketchCircles"}[kind])) if curves else None)
+    coll = _common.entity_collection(sketch, kind)
     before = safe(lambda: coll.count, 0) if coll is not None else 0
 
     ent = resolve_entity_ref(sketch, ref)
@@ -133,12 +130,12 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
 
 TOOL_DESCRIPTION = (
     "Delete ONE sketch entity or constraint from a named sketch - the surgical alternative to deleting "
-    "and rebuilding the whole sketch. 'target' is '<type>:<index>': line | arc | circle | point (a "
-    "curve/point) or constraint (a geometric constraint, indexed in creation order). Get indexes from "
-    "sketch_get. Use it to undo a WRONG constraint (e.g. a coincident that pinned a circle to a curve "
-    "instead of centering it - see sketch_constrain) without losing the rest of the sketch. The delete "
-    "is verified by reading the collection count back: a delete that removed nothing is returned as an "
-    "error, never a false ok."
+    "and rebuilding the whole sketch. 'target' is '<type>:<index>': line | arc | circle | ellipse | "
+    "point | spline | cv_spline | fixed_spline (a curve or point) or constraint (a geometric "
+    "constraint, indexed in creation order). Get indexes from sketch_get. Use it to undo a WRONG "
+    "constraint (e.g. a coincident that pinned a circle to a curve instead of centering it - see "
+    "sketch_constrain) without losing the rest of the sketch. The delete is verified by reading the "
+    "collection count back: a delete that removed nothing is returned as an error, never a false ok."
 )
 
 tool = (
@@ -149,8 +146,9 @@ tool = (
         input_param_description="The sketch holding the entity (resolved design-wide, active component first).",
     )
     .add_input_property("target", {"type": "string",
-            "description": "The entity to delete as '<type>:<index>' - line | arc | circle | point | "
-                           "constraint (e.g. 'circle:0', 'constraint:2'). Indexes from sketch_get, 0-based."})
+            "description": "The entity to delete as '<type>:<index>' - line | arc | circle | ellipse | "
+                           "point | spline | cv_spline | fixed_spline | constraint (e.g. 'circle:0', "
+                           "'constraint:2'). Indexes from sketch_get, 0-based."})
     .add_required_input("target")
     .strict_schema()
 )

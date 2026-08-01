@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 143  |  read: 26  |  write: 106  |  destructive: 10  |  script-hatch: 1
+**Tools:** 147  |  read: 27  |  write: 108  |  destructive: 11  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -21,13 +21,14 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (26)
+### read - safe to auto-allow (27)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
 - `mcp__fusion-essentials__cam_compare_operations`
 - `mcp__fusion-essentials__cam_get`
 - `mcp__fusion-essentials__cam_get_status`
+- `mcp__fusion-essentials__cam_inspect_toolpaths`
 - `mcp__fusion-essentials__data_get`
 - `mcp__fusion-essentials__data_get_upload_status`
 - `mcp__fusion-essentials__design_get`
@@ -50,7 +51,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (106)
+### write - ask (108)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -121,9 +122,11 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__model_hole`
 - `mcp__fusion-essentials__model_loft`
 - `mcp__fusion-essentials__model_mirror`
+- `mcp__fusion-essentials__model_offset_face`
 - `mcp__fusion-essentials__model_pattern_circular`
 - `mcp__fusion-essentials__model_pattern_rectangular`
 - `mcp__fusion-essentials__model_revolve`
+- `mcp__fusion-essentials__model_scale`
 - `mcp__fusion-essentials__model_set_material`
 - `mcp__fusion-essentials__model_shell`
 - `mcp__fusion-essentials__model_split`
@@ -159,7 +162,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__view_set`
 - `mcp__fusion-essentials__view_switch_workspace`
 
-### destructive - ask / deny (10)
+### destructive - ask / deny (11)
 
 - `mcp__fusion-essentials__cam_delete`
 - `mcp__fusion-essentials__data_delete_file`
@@ -168,6 +171,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__design_delete_occurrence`
 - `mcp__fusion-essentials__design_set_mode`
 - `mcp__fusion-essentials__doc_close`
+- `mcp__fusion-essentials__mesh_delete`
 - `mcp__fusion-essentials__param_delete`
 - `mcp__fusion-essentials__pmi_delete`
 - `mcp__fusion-essentials__sketch_delete_entity`
@@ -189,6 +193,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",
+      "mcp__fusion-essentials__cam_inspect_toolpaths",
       "mcp__fusion-essentials__data_get",
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",
@@ -281,9 +286,11 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__model_hole",
       "mcp__fusion-essentials__model_loft",
       "mcp__fusion-essentials__model_mirror",
+      "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
       "mcp__fusion-essentials__model_pattern_rectangular",
       "mcp__fusion-essentials__model_revolve",
+      "mcp__fusion-essentials__model_scale",
       "mcp__fusion-essentials__model_set_material",
       "mcp__fusion-essentials__model_shell",
       "mcp__fusion-essentials__model_split",
@@ -327,6 +334,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__design_delete_occurrence",
       "mcp__fusion-essentials__design_set_mode",
       "mcp__fusion-essentials__doc_close",
+      "mcp__fusion-essentials__mesh_delete",
       "mcp__fusion-essentials__param_delete",
       "mcp__fusion-essentials__pmi_delete",
       "mcp__fusion-essentials__sketch_delete_entity",
@@ -349,6 +357,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",
+      "mcp__fusion-essentials__cam_inspect_toolpaths",
       "mcp__fusion-essentials__data_get",
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",
@@ -425,9 +434,11 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__model_hole",
       "mcp__fusion-essentials__model_loft",
       "mcp__fusion-essentials__model_mirror",
+      "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
       "mcp__fusion-essentials__model_pattern_rectangular",
       "mcp__fusion-essentials__model_revolve",
+      "mcp__fusion-essentials__model_scale",
       "mcp__fusion-essentials__model_set_material",
       "mcp__fusion-essentials__model_shell",
       "mcp__fusion-essentials__model_split",
@@ -485,6 +496,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__doc_save",
       "mcp__fusion-essentials__doc_save_as",
       "mcp__fusion-essentials__doc_update_xref",
+      "mcp__fusion-essentials__mesh_delete",
       "mcp__fusion-essentials__param_delete",
       "mcp__fusion-essentials__pmi_delete",
       "mcp__fusion-essentials__sketch_delete_entity"

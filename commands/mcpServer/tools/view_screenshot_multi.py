@@ -54,7 +54,8 @@ def _parse_views(views):
     return out, None
 
 
-def handler(views=None, width: int = 600, height: int = 500) -> dict:
+def handler(views=None, width: int = 600, height: int = 500, transparent_background=None,
+            anti_aliased=None) -> dict:
     """See TOOL_DESCRIPTION."""
     names, err = _parse_views(views)
     if err:
@@ -88,7 +89,9 @@ def handler(views=None, width: int = 600, height: int = 500) -> dict:
             except Exception as e:
                 content.append({"type": "text", "text": f"[{name}] failed to orient: {e}"})
                 continue
-            b64, cerr = _view_common.capture_png_b64(vp, width, height, prefix="fe_mcp_views")
+            b64, cerr = _view_common.capture_png_b64(
+                vp, width, height, prefix="fe_mcp_views",
+                transparent_background=transparent_background, anti_aliased=anti_aliased)
             if cerr:
                 content.append({"type": "text", "text": f"[{name}] capture failed."})
                 continue
@@ -117,7 +120,8 @@ TOOL_DESCRIPTION = (
     "images - so you can read geometry/position reliably instead of guessing from a single "
     "isometric. 'views' is a list of view names, or ['all'] for the six orthographic views; omit "
     "for a default front/top/right/iso set. 'width'/'height' size each "
-    "image. The camera is restored afterward (read-only). Prefer this over view_screenshot when "
+    "image; 'transparent_background'/'anti_aliased' apply to every shot. "
+    "The camera is restored afterward (read-only). Prefer this over view_screenshot when "
     "judging a 3D layout."
 )
 
@@ -128,6 +132,10 @@ tool = (
             "description": "Views to capture, in order; ['all'] for the six orthographic views; omit for a front/top/right/iso default."})
     .add_input_property("width", {"type": "integer", "description": "Width of each image in px (default 600)."})
     .add_input_property("height", {"type": "integer", "description": "Height of each image in px (default 500)."})
+    .add_input_property("transparent_background", {"type": "boolean",
+            "description": "Render the background transparent."})
+    .add_input_property("anti_aliased", {"type": "boolean",
+            "description": "Anti-alias the rendered images."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

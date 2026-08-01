@@ -5,10 +5,6 @@
 Two selection mechanisms exist: curve chains (contours/pockets/boundaries) and direct
 object-lists (drill hole faces); heights are a mode+offset parameter group."""
 
-import time
-
-import adsk.core
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -16,8 +12,6 @@ from ._common import ok, error, safe, scale
 from ._cam_common import get_cam, resolve_cam_node
 from . import _inputs
 from . import cam_generate  # its _GENERATIONS registry keeps a launched Future alive (see below)
-
-app = adsk.core.Application.get()
 
 # selection kind -> (CurveSelections builder method, geometry requirement) for the CURVE (A) family.
 # 'holes' is the DIRECT (B) family and handled separately.
@@ -54,27 +48,18 @@ def _curve_param(op):
 
 
 def _launch_generation(cam, op, op_name):
-    """Launch toolpath generation for the op and return IMMEDIATELY - never wait or pump. The
-    Future is registered in cam_generate._GENERATIONS (if it were garbage-collected, Fusion would
-    ABANDON the in-progress generation; the registry also gives cam_get_status's handle path the
-    same poll-and-cleanup lifecycle a cam_generate launch gets). Returns (handle, None) or
-    (None, err)."""
+    """Launch toolpath generation for the op and return IMMEDIATELY - never wait; generation runs
+    in the background on its own. The Future is registered in cam_generate._GENERATIONS (if it were
+    garbage-collected, Fusion would ABANDON the in-progress generation; the registry also gives
+    cam_get_status's handle path the same read-and-cleanup lifecycle a cam_generate launch gets).
+    Returns (handle, None) or (None, err)."""
     try:
         fut = cam.generateToolpath(op)
     except Exception as e:
         return None, str(e)
     if not fut:
         return None, "generateToolpath returned no future."
-    cam_generate._HANDLE_SEQ[0] += 1
-    handle = f"gen{cam_generate._HANDLE_SEQ[0]}"
-    cam_generate._GENERATIONS[handle] = {
-        "future": fut,
-        "target": f"operation '{op_name}'",
-        "scope": "operation",
-        "skip_valid": False,
-        "started_at": time.time(),
-        "total": safe(lambda: fut.numberOfOperations, None),
-    }
+    handle, _total = cam_generate.register_future(fut, f"operation '{op_name}'", "operation", False)
     return handle, None
 
 
@@ -253,7 +238,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if diam_note:
         result["diameter_filter"] = diam_note
 
-    # ── generate: LAUNCH async and return - the poll (cam_get_status) pumps it forward ──
+    # ── generate: LAUNCH async and return - generation runs in the background on its own ──
     if not generate:
         result["note"] = "Selection applied; pass generate=true (or cam_generate) to compute the toolpath."
         return ok(result)
@@ -267,11 +252,9 @@ def handler(operation: str = "", selection: str = "", handles=None,
         return ok(result)
     result["launched"] = True
     result["handle"] = handle
-    result["note"] = (f"Selection applied; generation is launched. Fusion advances it on the "
-                      f"main-thread loop, which the POLL pumps - so call "
-                      f"cam_get_status(target='{op_name}') repeatedly until completed=true (each poll "
-                      "nudges it forward a bounded burst and returns; it never blocks for the full "
-                      "compute). If it completes with has_toolpath False the op produced no path - the "
+    result["note"] = (f"Selection applied; generation is launched and runs in the background - "
+                      f"check cam_get_status(target='{op_name}') until completed=true. If it "
+                      "completes with has_toolpath False the op produced no path - the "
                       "warning channel can be silent there; check the heights (a zero-depth cut: drill "
                       "derives depth from the holes, contour does not) and the selection.")
     return ok(result)

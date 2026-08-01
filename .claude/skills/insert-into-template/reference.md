@@ -22,8 +22,8 @@ must live inside a Component; a Component can be empty (only its origin planes/a
 Consequence for crawling: a setup's `models` / `fixtures` / `stockSolids` entries are usually
 **component Occurrences** playing that slot role (in shipped templates named like `Model
 Component`, `Fixture Container`, `Stock Container`). Reading only the top level shows the slot
-component, not its contents. You MUST descend `Occurrence.childOccurrences` to find the real
-parts.
+component, not its contents - descend into it (`design_get(include=['tree'],
+component=<the slot>)`) to see the real parts.
 
 ## Joint Origin Containers (JOC) and joint survival
 
@@ -42,37 +42,36 @@ A setup's Model selection is a component nesting three standardized typed files:
 | **Clamping Unit / Pallet Type** | Mounts the vise to the machine; defines the Machine Model Attachment point used in simulation. |
 | **WCS Type** | A **simple cube** that explicitly defines the Z and X directions for the CAM setup, so the WCS is always accurately located. |
 
-So when `design_get_tree` descends a setup's model/fixture component, expect: a Clamping
+So when the tree read descends a setup's model/fixture component, expect: a Clamping
 Unit/Pallet + a Vise + a WCS cube + the machined model.
 
-## Two common mistakes to avoid
+## Two classification rules
 
-1. **Treating a slot component as one opaque object.** An early automated crawl read a
-   `Fixture Container` occurrence as a single part. Wrong -- descend it; the structure only
-   becomes legible when you read the nesting.
-2. **Calling the WCS cube a placeholder.** A lone cube referenced by a setup is almost
-   certainly the WCS Type -- it defines the WCS orientation. Do not label it a placeholder;
-   descend and label it correctly.
+1. **A slot component is not one opaque object.** Descend it; the structure only becomes
+   legible when you read the nesting.
+2. **The WCS cube is not a placeholder.** A lone cube referenced by a setup is almost
+   certainly the WCS Type -- it defines the WCS orientation. Never delete it.
 
 ## Selectionless toolpaths and parametric stock
 
 - **Selectionless toolpaths** (e.g. 3D Adaptive, Bore) point at the model component and use
   geometry recognition + diameter ranges, so they regenerate automatically when a new part is
-  inserted. This is the property Phase 3 checks for.
+  inserted.
 - **Parametric stock** is driven by user parameters; jaws adjust to the workpiece via
   configured joints. The stock params live in `Design.userParameters` (named like stock /
   fixture dimensions); their `.expression` may reference other parameters (the parametric
-  linkage). These are the params Phase 4 adjusts to the new part's bounding box.
+  linkage). These are the params the skill writes the measured part size to (PART_PARAMS).
 
 ## How this maps to the Fusion API (for the building blocks)
 
 - A CAM setup's `models` / `fixtures` / `stockSolids` are typically component Occurrences;
-  `design_get_tree` descends them and resolves external references.
+  `cam_get` reports them per setup (`selected_models` / `fixtures` / `stock_solids`) and
+  `design_get(include=['tree'])` descends them and resolves external references.
 - An external reference is `Occurrence.isReferencedComponent == True`; it resolves via
   `Occurrence.documentReference.dataFile` -> `.id` (lineage UID / URN), `.name`,
   `.fusionWebURL`.
-- CAM data is reachable WITHOUT switching to the Manufacture workspace -- the `get_cam_*`
-  building blocks already do this.
+- CAM data is reachable WITHOUT switching to the Manufacture workspace -- `cam_get` already
+  does this.
 - `cam_compare_operations` reports exact parameter expressions (including float jitter like
   `38.10000000000001`) deliberately. Do not round or filter; reason about precision.
 
@@ -97,8 +96,8 @@ A `doc_open` with `force_api_open=true` opens these fine WHEN the document is se
 a single, unhurried step. Instability appears when two heavy reference-graph operations overlap on
 the main thread (e.g. opening while a fresh copy is still resolving, or a heavy geometry edit before
 the open has finished loading). Practical rule: after any open/save-as of such a doc, confirm it is
-active (`sys_get_session`) and let it settle before the next write. (`is_cam_template=true` is an
-older, more conservative refuse-to-open mode; the save-as path above avoids needing it.)
+active (`doc_get`) and let it settle before the next write. (`is_cam_template=true` is a more
+conservative refuse-to-open mode; the save-as path above avoids needing it.)
 
 ## Why an inserted part must be UN-GROUNDED before a positioning joint
 
@@ -121,10 +120,9 @@ inputs must be in the ROOT's assembly context. The fix is the occurrence PROXY:
 the occurrence path, and the joint then computes.
 
 `joint_create` does this proxying automatically when you pass the JO by NAME (bare, or scoped as
-`<occurrence>:<JO name>` when several instances carry the same JO). This is why the skill says to
-join with `joint_create` and never to script the joint by hand: a hand-rolled script that reaches
-for `component.jointOrigins.itemByName(...)` gets the native JO and hits the error above — which a
-live run of this skill demonstrated (three failed script variants before the root cause surfaced).
+`<occurrence>:<JO name>` when several instances carry the same JO). This is why the skill joins
+with `joint_create` and never scripts the joint by hand: a hand-rolled script that reaches for
+`component.jointOrigins.itemByName(...)` gets the native JO and hits the error above.
 
 ## Part-space extents and orientation (the oriented bounding box)
 
@@ -138,11 +136,8 @@ regardless of how the part was modelled relative to world axes - it is always re
 machining frame. `model_inspect`'s `frame=` parameter is the typed home for this measurement; no other
 tool computes an oriented (as opposed to world-axis-aligned) bounding box.
 
-## Determinism checklist (why the phases are ordered this way)
+## Determinism (why the phases are ordered this way)
 
-- Orient and crawl are READ-only so the agent establishes ground truth before any change --
-  same starting state, same plan.
-- The Phase 3 gate converts the crawl into explicit pass/fail assertions; a failed assertion
-  stops the run instead of improvising.
-- Post-mutation re-reads (`cam_get(include=['time'])`, `cam_compare_operations`, screenshot) verify the
-  change did what was intended, closing the loop.
+Reads establish ground truth before any write; every write states its EXPECT and is re-read
+afterward; a failed expectation stops the run instead of improvising. Same starting state,
+same chain, same result.

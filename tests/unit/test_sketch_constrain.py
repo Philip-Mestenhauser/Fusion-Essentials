@@ -79,16 +79,22 @@ class FakeConstraints:
 
 
 class FakeSketchCurves:
-    def __init__(self, lines, arcs, circles):
+    def __init__(self, lines, arcs, circles, ellipses=(), splines=(), cv_splines=(), fixed_splines=()):
         self.sketchLines = _Coll(lines)
         self.sketchArcs = _Coll(arcs)
         self.sketchCircles = _Coll(circles)
+        self.sketchEllipses = _Coll(ellipses)
+        self.sketchFittedSplines = _Coll(splines)
+        self.sketchControlPointSplines = _Coll(cv_splines)
+        self.sketchFixedSplines = _Coll(fixed_splines)
 
 
 class FakeSketch:
-    def __init__(self, name, lines=(), arcs=(), circles=(), points=()):
+    def __init__(self, name, lines=(), arcs=(), circles=(), points=(), ellipses=(), splines=(),
+                cv_splines=(), fixed_splines=()):
         self.name = name
-        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles))
+        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles), list(ellipses),
+                                             list(splines), list(cv_splines), list(fixed_splines))
         self.sketchPoints = _Coll(list(points))
         self.geometricConstraints = FakeConstraints()
 
@@ -139,6 +145,16 @@ def _two_line_sketch():
                               FakeCurve("P2", "point")])
 
 
+def _full_sketch():
+    """A sketch also holding an ellipse and one of each spline kind, for resolver round-trip
+    coverage over the full ENTITY_REF_KINDS set."""
+    return FakeSketch("S", lines=[FakeCurve("L0", "line")],
+                      ellipses=[FakeCurve("E0", "ellipse")],
+                      splines=[FakeCurve("SP0", "spline"), FakeCurve("SP1", "spline")],
+                      cv_splines=[FakeCurve("CV0", "cv_spline")],
+                      fixed_splines=[FakeCurve("FX0", "fixed_spline")])
+
+
 # ── entity resolver ──────────────────────────────────────────────────────────
 
 class TestResolveEntity:
@@ -153,7 +169,16 @@ class TestResolveEntity:
         assert sc._common.resolve_entity_ref(s, "point:2").name == "P2"
 
     def test_bad_type(self):
+        # a token that is not one of _common.ENTITY_REF_KINDS at all
         s = _two_line_sketch()
+        assert sc._common.resolve_entity_ref(s, "helix:0") is None
+
+    def test_recognized_kind_missing_from_this_sketch_still_misses_cleanly(self):
+        # 'ellipse'/'spline' ARE valid ENTITY_REF_KINDS, but this sketch holds none of either - the
+        # resolver must still return None (not raise), same miss behavior as before these kinds
+        # existed.
+        s = _two_line_sketch()
+        assert sc._common.resolve_entity_ref(s, "ellipse:0") is None
         assert sc._common.resolve_entity_ref(s, "spline:0") is None
 
     def test_out_of_range(self):
@@ -175,6 +200,50 @@ class TestResolveEntity:
     def test_empty_ref(self):
         s = _two_line_sketch()
         assert sc._common.resolve_entity_ref(s, "") is None
+
+
+class TestResolveNewKinds:
+    """P0.1: ellipse and the three spline collections join line/arc/circle/point as addressable
+    ENTITY_REF_KINDS - a spline sketch_add_geometry(kind='spline') just created must be reachable by
+    sketch_constrain/sketch_dimension/sketch_delete_entity, not just by sketch_get."""
+
+    def test_ellipse_index(self):
+        s = _full_sketch()
+        assert sc._common.resolve_entity_ref(s, "ellipse:0").name == "E0"
+
+    def test_fitted_spline_index(self):
+        s = _full_sketch()
+        assert sc._common.resolve_entity_ref(s, "spline:0").name == "SP0"
+        assert sc._common.resolve_entity_ref(s, "spline:1").name == "SP1"
+
+    def test_control_point_spline_index(self):
+        s = _full_sketch()
+        assert sc._common.resolve_entity_ref(s, "cv_spline:0").name == "CV0"
+
+    def test_fixed_spline_index(self):
+        s = _full_sketch()
+        assert sc._common.resolve_entity_ref(s, "fixed_spline:0").name == "FX0"
+
+    def test_each_spline_collection_has_its_own_index_space(self):
+        # a fitted spline at index 0 and a control-point spline at index 0 are DIFFERENT entities -
+        # the three spline collections don't share one index space.
+        s = _full_sketch()
+        fitted = sc._common.resolve_entity_ref(s, "spline:0")
+        cv = sc._common.resolve_entity_ref(s, "cv_spline:0")
+        assert fitted.name != cv.name
+
+    def test_new_kind_out_of_range(self):
+        s = _full_sketch()
+        assert sc._common.resolve_entity_ref(s, "cv_spline:9") is None
+
+    def test_entity_collection_helper_matches_resolver(self):
+        # _common.entity_collection is the same collection resolve_entity_ref indexes - a caller
+        # needing a before/after count (sketch_delete_entity) must see the identical collection.
+        s = _full_sketch()
+        assert sc._common.entity_collection(s, "spline") is s.sketchCurves.sketchFittedSplines
+        assert sc._common.entity_collection(s, "cv_spline") is s.sketchCurves.sketchControlPointSplines
+        assert sc._common.entity_collection(s, "fixed_spline") is s.sketchCurves.sketchFixedSplines
+        assert sc._common.entity_collection(s, "ellipse") is s.sketchCurves.sketchEllipses
 
 
 # ── dispatch: two-curve constraints ─────────────────────────────────────────
@@ -365,6 +434,34 @@ class TestWrongKindRefusals:
         assert "circles/arcs" in r_con["message"]
         r_hor = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
         assert "one line" in r_hor["message"]
+
+
+# ── the handler accepts ellipse/spline refs end-to-end (no per-tool kind list to update) ────────
+
+class TestHandlerAcceptsNewKinds:
+    def test_equal_between_a_spline_and_an_ellipse(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sc.handler(constraint="equal", sketch_name="S",
+                                  entity_one="spline:0", entity_two="ellipse:0"))
+        name, args = s.geometricConstraints.calls[0]
+        assert name == "equal"
+        assert args[0].name == "SP0" and args[1].name == "E0"
+        assert out["applied"] == "equal"
+
+    def test_parallel_with_a_control_point_and_fixed_spline(self):
+        # 'parallel' (like 'equal'/'collinear'/'perpendicular') isn't kind-restricted in the fake -
+        # mirrors that the RESOLVER doesn't gate on entity kind: the live API is the authority on
+        # which constraint accepts which curve type, and its refusal surfaces as the tool's error.
+        s = _full_sketch(); _install(s)
+        out = _payload(sc.handler(constraint="parallel", sketch_name="S",
+                                  entity_one="cv_spline:0", entity_two="fixed_spline:0"))
+        assert out["applied"] == "parallel"
+
+    def test_unresolvable_new_kind_ref_is_a_clean_error(self):
+        s = _full_sketch(); _install(s)
+        res = sc.handler(constraint="equal", sketch_name="S",
+                         entity_one="fixed_spline:9", entity_two="line:0")
+        assert res["isError"] is True and "fixed_spline:9" in res["message"]
 
 
 # ── guards ───────────────────────────────────────────────────────────────────

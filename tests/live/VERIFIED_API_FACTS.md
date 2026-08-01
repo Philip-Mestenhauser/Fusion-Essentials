@@ -6,10 +6,11 @@ leaning on it) does not match the platform: update the fake and its consumers, t
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2704.1.39 | verified 2026-07-31
+Stamp: Fusion 2704.1.39 | verified 2026-08-01
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|
+| PASS | save-image-options-defaults | SaveImageFileOptions.create(path) initializes width/height to 0 and isBackgroundTransparent False / isAntiAliased True | test__view_common.py fake options initial values; _view_common._write_image size assignment |
 | PASS | units-cm | Lengths cross the API in cm - a 10 mm sketch square extruded 1.0 unit has bbox extent 1.0 | tests/conftest.py bbox fixture; every test asserting a scale() factor |
 | PASS | point3d-vectorto | Point3D.vectorTo(other) == other - self | tests/conftest.py FakePoint.vectorTo |
 | PASS | vector3d-normalize-zero | Vector3D.normalize() returns True even for a (near-)zero vector and leaves the components untouched - the return value is not a zero guard | tests/conftest.py FakeVector3D.normalize; commands/mcpServer/tools/sys_selection.py _unit |

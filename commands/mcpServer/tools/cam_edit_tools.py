@@ -2,8 +2,11 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Manage CAM tools across the document / local / cloud / hub tool libraries: list, add, remove, edit
-parameters, find where a tool is used, or create a new shared library. Hub libraries can't be created
-via the API (importToolLibrary fails there) - create those in the UI."""
+parameters, add/remove a named preset on an existing tool, find where a tool is used, or create a new
+shared library. Hub libraries can't be created via the API (importToolLibrary fails there) - create
+those in the UI."""
+
+import re
 
 import adsk.core
 import adsk.cam
@@ -16,7 +19,8 @@ from ._cam_common import get_cam, expression_error
 
 app = adsk.core.Application.get()
 
-_ACTIONS = ("list", "list_types", "parameters", "add", "remove", "edit", "where_used", "create_library")
+_ACTIONS = ("list", "list_types", "parameters", "add", "remove", "edit", "add_preset",
+            "remove_preset", "where_used", "create_library")
 _SCOPES = ("document", "local", "cloud", "hub")
 _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLocation",
                      "hub": "HubLibraryLocation"}
@@ -28,7 +32,7 @@ class _Target:
     """Uniform interface the handler drives, hiding document-vs-shared differences.
     persist() commits a shared library; document edits commit per-tool via update_tool()."""
     def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None,
-                 refetch_count_fn=None, reread_param_fn=None):
+                 refetch_count_fn=None, reread_param_fn=None, reread_presets_fn=None):
         self._lib = lib
         self.is_document = is_document
         self._persist_fn = persist_fn
@@ -36,6 +40,7 @@ class _Target:
         self._ops_fn = ops_fn
         self._refetch_count_fn = refetch_count_fn
         self._reread_param_fn = reread_param_fn
+        self._reread_presets_fn = reread_presets_fn
 
     def persisted_count(self):
         """The tool count re-read FRESH from the persisted url (None when unavailable) - the proof
@@ -47,6 +52,12 @@ class _Target:
         unavailable) - the proof an edit() actually stored; updateTool/updateToolLibrary returning
         true is not."""
         return self._reread_param_fn(index, name) if self._reread_param_fn else None
+
+    def reread_preset_names(self, index):
+        """The preset names of one tool re-read FRESH from the persisted library (None when
+        unavailable) - the proof a preset add/remove actually stored; updateTool/updateToolLibrary
+        returning true is not, and neither changes the library's tool COUNT."""
+        return self._reread_presets_fn(index) if self._reread_presets_fn else None
 
     @property
     def tools(self):
@@ -131,7 +142,9 @@ def _resolve_target(scope, library):
                        update_tool_fn=lambda t: dtl.updateTool(t),
                        ops_fn=lambda t: safe(lambda: dtl.operationsByTool(t)),
                        reread_param_fn=lambda idx, nm: safe(
-                           lambda: dtl.item(idx).parameters.itemByName(nm).expression)), None
+                           lambda: dtl.item(idx).parameters.itemByName(nm).expression),
+                       reread_presets_fn=lambda idx: _persisted_preset_names(
+                           safe(lambda: dtl.item(idx)))), None
     # shared library - no open document needed
     libs = _tool_libraries()
     if not libs:
@@ -156,7 +169,9 @@ def _resolve_target(scope, library):
                    persist_fn=lambda: libs.updateToolLibrary(lib_url, lib),
                    refetch_count_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url).count),
                    reread_param_fn=lambda idx, nm: safe(
-                       lambda: libs.toolLibraryAtURL(lib_url).item(idx).parameters.itemByName(nm).expression)), None
+                       lambda: libs.toolLibraryAtURL(lib_url).item(idx).parameters.itemByName(nm).expression),
+                   reread_presets_fn=lambda idx: _persisted_preset_names(
+                       safe(lambda: libs.toolLibraryAtURL(lib_url).item(idx)))), None
 
 
 def _source_tool(library_url, index):
@@ -182,8 +197,12 @@ import json as _json
 _json_loads = _json.loads
 _json_dumps = _json.dumps
 
-# Fusion sample libraries that, together, hold one of every common geometry type.
-_SAMPLE_LIBS = ("Milling Tools (Metric)", "Hole Making Tools (Metric)", "Cutting Tools (Metric)")
+# Fusion sample libraries that, together, hold one of every common geometry type. 'center drill'
+# appears in NO Metric sample library (all of them walked live) and Hole Making Tools (Inch) provides
+# it - the one Inch library carrying a type its Metric twin lacks, which is why it is here and the
+# other Inch twins are not. Metric entries come first: the first library holding a type wins the key.
+_SAMPLE_LIBS = ("Milling Tools (Metric)", "Hole Making Tools (Metric)", "Cutting Tools (Metric)",
+                "Turning Tools (Metric)", "Hole Making Tools (Inch)")
 _HOLDERS_LIB = "Holders (Metric)"
 _type_map_cache = None   # {tool_type: (library_url, index)} built once from the sample libs
 
@@ -384,31 +403,158 @@ def _do_list_types():
                "note": "Pass one of these as add_tools[].from_type to clone a sample of that type."})
 
 
-# The preset 'feed' parameter name varies by tool CLASS: a mill preset carries 'tool_feedCutting', but a
-# drill / hole-making preset does NOT (it exposes plunge/drilling feeds instead). So the {feed} preset
-# shape maps to the FIRST of these the preset actually carries; the error names what IS there otherwise.
+# A preset's cutting-data parameter names vary by tool CLASS. A mill preset carries
+# 'tool_feedCutting'; a drill / hole-making preset does not (it exposes plunge/drilling feeds
+# instead). A mill and a turning THREADING preset carry 'tool_spindleSpeed', while a general /
+# grooving / boring turning preset cuts at constant surface speed and carries 'tool_surfaceSpeed'
+# with no spindle speed at all. So a spec value maps to the FIRST candidate the preset actually
+# carries, and a miss names what IS there rather than asserting one class's parameter.
 _FEED_PARAM_CANDIDATES = ("tool_feedCutting", "tool_feedPlunge", "tool_feedRamp",
                           "tool_feedRetract", "tool_feedEntry", "tool_feedTransition")
+_SPEED_PARAM_CANDIDATES = ("tool_spindleSpeed",)
+
+# A BARE number is a fixed unit whatever the document works in (live-verified): feed 900 reads back
+# 900.0 mm/min in a millimetre document AND in an inch-units one, and spindle_speed 12000 reads back
+# 12000.0 rpm unscaled. Only a units-carrying expression converts - '35in/min' stores verbatim and
+# evaluates to 889.0 mm/min - so a string value is passed straight through as the expression.
+# (spec key, the substring naming that parameter family, the bare number's unit, the candidates)
+_PRESET_VALUE_FIELDS = (
+    ("spindle_speed", "speed", "rpm", _SPEED_PARAM_CANDIDATES),
+    ("feed", "feed", "mm/min", _FEED_PARAM_CANDIDATES),
+)
+_PRESET_SPEC_KEYS = ("name", "spindle_speed", "feed")
+_NUMERIC_LEAD = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)")
 
 
-def _preset_feed_param(preset):
-    """The preset ModelParameter that the 'feed' value should drive, or (None, available_feed_names).
-    Tries the known cutting/plunge feed names in order (so a mill keeps using tool_feedCutting and a
-    drill falls through to its plunge feed); on a miss it returns the feed-named params the preset DOES
-    have, so the error can name the right drill path instead of asserting a mill-only parameter."""
+def _preset_param_of(preset, candidates, word):
+    """The preset parameter a spec value drives, or (None, the parameters whose name contains
+    `word`). Tries `candidates` in order, so a mill keeps its tool_feedCutting and a drill falls
+    through to its plunge feed; a miss reports what the preset DOES carry."""
     params = safe(lambda: preset.parameters)
     if params is None:
         return None, []
-    for nm in _FEED_PARAM_CANDIDATES:
+    for nm in candidates:
         p = safe(lambda nm=nm: params.itemByName(nm))
         if p is not None:
             return p, None
-    feed_names = []
-    for i in range(safe(lambda: params.count, 0) or 0):
-        nm = safe(lambda i=i: params.item(i).name) or ""
-        if "feed" in nm.lower():
-            feed_names.append(nm)
-    return None, feed_names
+    present = [safe(lambda i=i: params.item(i).name) or ""
+               for i in range(safe(lambda: params.count, 0) or 0)]
+    return None, [nm for nm in present if word in nm.lower()]
+
+
+def _plain_number(value):
+    """`value` as a float when it is a number or a bare numeric string, else None (a units-carrying
+    expression like '35in/min' is None - its stored value is the converted number, not the text)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _preset_spec_error(spec):
+    """Why a {name?, spindle_speed?, feed?} preset spec is unusable, or None. Nothing else validates
+    a nested object, so an unrecognised key (a 'spindel_speed' typo) would otherwise apply nothing
+    and still report success, and a value the parameter store cannot evaluate would reach it as text."""
+    if not isinstance(spec, dict):
+        return f"'preset' must be an object carrying a 'name'; got {spec!r}."
+    unknown = sorted(k for k in spec if k not in _PRESET_SPEC_KEYS)
+    if unknown:
+        return (f"Unknown preset key(s): {', '.join(unknown)}. A preset takes only "
+                f"{', '.join(_PRESET_SPEC_KEYS)}.")
+    for key, _word, unit, _candidates in _PRESET_VALUE_FIELDS:
+        value = spec.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return f"'{key}' must be a number ({unit}) or an expression string; got {value!r}."
+        if isinstance(value, str) and not _NUMERIC_LEAD.match(value.strip()):
+            return (f"'{key}' = {value!r} does not open with a number - pass a number ({unit}) or an "
+                    "expression that carries its own units, like '35in/min'.")
+    return None
+
+
+def _set_preset_param(p, key, value, unit):
+    """Set ONE preset parameter and prove the value landed; returns an error string or None. A CAM
+    parameter STORES an expression it cannot evaluate verbatim and still reads a finite 0.0 back, so
+    .error (expression_error) is what reveals it. A bare number is additionally checked against the
+    value read back; a units-carrying expression is not, since its stored value is the converted
+    number rather than the text."""
+    try:
+        p.expression = str(value)
+    except Exception as e:
+        return f"Could not set '{key}' = {value!r} on the preset: {e}."
+    eerr, _ = expression_error(p)
+    if eerr:
+        return f"Set '{key}' = {value!r} on the preset but the expression failed to evaluate: {eerr}."
+    landed = safe(lambda: p.value.value)
+    if isinstance(landed, bool) or not isinstance(landed, (int, float)):
+        return (f"Set '{key}' = {value!r} on the preset but it read back {landed!r} - no numeric "
+                "value was stored.")
+    want = _plain_number(value)
+    if want is not None and abs(float(landed) - want) > 1e-9:
+        return (f"Set '{key}' = {value!r} on the preset but it read back {landed!r} {unit} - the "
+                "value did not land.")
+    return None
+
+
+def _apply_preset_values(preset, spec):
+    """Populate ONE preset from a {name?, spindle_speed?, feed?} spec. Returns an error string, or
+    None when every requested value landed - a value that cannot be applied is never a silent skip.
+    Shared by the creation-time presets of add_tools[] and by action='add_preset'."""
+    name = spec.get("name")
+    if name is not None:
+        name = str(name)
+        # The assigned name is read back: a name the library did not store is an error here, never a
+        # silently differently-named preset.
+        try:
+            preset.name = name
+        except Exception as e:
+            return f"Could not set the preset name to '{name}': {e}."
+        landed = safe(lambda: preset.name)
+        if landed != name:
+            return f"Set the preset name to '{name}' but it read back {landed!r} - the name did not land."
+    for key, word, unit, candidates in _PRESET_VALUE_FIELDS:
+        value = spec.get(key)
+        if value is None:
+            continue
+        p, avail = _preset_param_of(preset, candidates, word)
+        if p is None:
+            have = ", ".join(avail) if avail else "(none)"
+            return (f"This preset has no {'/'.join(candidates)} parameter, so '{key}' cannot apply. "
+                    f"Its {word} parameters: {have}.")
+        verr = _set_preset_param(p, key, value, unit)
+        if verr:
+            return verr
+    return None
+
+
+def _preset_names(presets):
+    """Every preset's name, in index order."""
+    return [safe(lambda i=i: presets.item(i).name)
+            for i in range(safe(lambda: presets.count, 0) or 0)]
+
+
+def _presets_named(presets, name):
+    """[(index, preset)] for every preset named exactly `name`, compared case-insensitively.
+    ToolPresets.remove addresses a preset BY INDEX, which itemsByName's hits do not carry, and
+    itemsByName reads '*' and '?' in the name as wild-cards - which a preset NAME must not be - so
+    the match walks the collection instead."""
+    want = (name or "").strip().lower()
+    out = []
+    for i in range(safe(lambda: presets.count, 0) or 0):
+        p = safe(lambda i=i: presets.item(i))
+        if p is not None and (safe(lambda p=p: p.name) or "").strip().lower() == want:
+            out.append((i, p))
+    return out
+
+
+def _persisted_preset_names(tool):
+    """The preset names of a tool re-fetched from a library, or None when the tool or its presets
+    could not be re-fetched (the caller then reports nothing rather than a false mismatch)."""
+    presets = safe(lambda: tool.presets) if tool is not None else None
+    return _preset_names(presets) if presets is not None else None
 
 
 def _build_entry(ref):
@@ -494,22 +640,15 @@ def _build_entry(ref):
 
     # 4) presets - same rule: a preset that cannot be created or populated is an error, not a skip
     for ps in (ref.get("presets") or []):
+        serr = _preset_spec_error(ps)
+        if serr:
+            return None, serr
         preset = safe(lambda: tool.presets.add())
         if preset is None:
             return None, "Could not add a preset to the tool - the requested presets were not applied."
-        if ps.get("spindle_speed") is not None:
-            sp = safe(lambda: preset.parameters.itemByName("tool_spindleSpeed"))
-            if sp is None:
-                return None, "The preset has no 'tool_spindleSpeed' parameter - the requested spindle_speed cannot apply."
-            sp.expression = str(ps["spindle_speed"])
-        if ps.get("feed") is not None:
-            fp, feed_avail = _preset_feed_param(preset)
-            if fp is None:
-                avail = ", ".join(feed_avail) if feed_avail else "(no feed parameters)"
-                return None, ("This tool's preset has no mill cutting-feed parameter (tool_feedCutting) - "
-                              "a drill/hole-making preset uses a different feed. Feed parameters on this "
-                              f"preset: {avail}. Set the right one via action='edit'.")
-            fp.expression = str(ps["feed"])
+        perr = _apply_preset_values(preset, ps)
+        if perr:
+            return None, perr
     return tool, None
 
 
@@ -649,6 +788,123 @@ def _do_edit(target, tool_index, parameters):
     return ok(out)
 
 
+def _preset_tool(target, tool_index, spec):
+    """(tool, presets, name, None) for a preset action, or (None, None, None, error): the guards both
+    preset actions share - a valid tool index, a spec carrying a name, and a tool exposing presets."""
+    tools = target.tools
+    if tool_index is None or not (0 <= tool_index < len(tools)):
+        return None, None, None, f"Provide a valid 'tool' index (0..{len(tools) - 1})."
+    serr = _preset_spec_error(spec)
+    if serr:
+        return None, None, None, serr
+    name = str(spec.get("name") or "").strip()
+    if not name:
+        return None, None, None, "Provide 'preset' with a 'name' - the preset to add or remove."
+    tool = tools[tool_index]
+    presets = safe(lambda: tool.presets)
+    if presets is None:
+        return None, None, None, f"The tool at index {tool_index} exposes no presets collection."
+    return tool, presets, name, None
+
+
+def _persist_preset_change(target, tool, tool_index, name, expect_present):
+    """Commit a preset add/remove the way this target commits any tool change, then re-read the
+    tool's presets back from the library. Returns (names_or_None, error_or_None)."""
+    if target.is_document:
+        target.update_tool(tool)
+    else:
+        target.persist()
+    stored = target.reread_preset_names(tool_index)
+    if stored is None:
+        return None, None
+    present = any((s or "").strip().lower() == name.lower() for s in stored)
+    if expect_present and not present:
+        return stored, (f"Added preset '{name}' but the tool re-read from the library holds presets "
+                        f"{stored} - the add did not reach the library.")
+    if present and not expect_present:
+        return stored, (f"Removed preset '{name}' but the tool re-read from the library still holds "
+                        f"it (presets {stored}) - the removal did not reach the library.")
+    return stored, None
+
+
+def _preset_note(target, done):
+    """The payload note for a completed preset change ('added to' / 'removed from'). A SHARED library
+    round-trips through updateToolLibrary and reloads from its url, which proves the write persisted;
+    a re-read of the DOCUMENT library returns the document's own unsaved state, so there it proves
+    the preset is present, not that anything was stored."""
+    if target.is_document:
+        return (f"Preset {done} the document tool library and read back there - the document itself "
+                "is stored by doc_save. 'presets' lists this tool's preset names.")
+    return (f"Preset {done} the library and persisted (re-read from the library url). 'presets' "
+            "lists this tool's preset names.")
+
+
+def _do_add_preset(target, tool_index, spec):
+    """Add ONE named preset (its own cutting data) to a tool already in the library."""
+    tool, presets, name, gerr = _preset_tool(target, tool_index, spec)
+    if gerr:
+        return error(gerr)
+    if _presets_named(presets, name):
+        return error(f"The tool already has a preset named '{name}' - remove it first "
+                     "(action='remove_preset') or pick another name.")
+    at = safe(lambda: presets.count, 0) or 0   # add() appends, so the new preset lands at this index
+    preset = safe(lambda: presets.add())
+    if preset is None:
+        return error(f"Could not add a preset to the tool at index {tool_index} - none was created.")
+    try:
+        verr = _apply_preset_values(preset, dict(spec, name=name))
+    except Exception as e:
+        verr = f"Could not populate the new preset '{name}': {e}."
+    if verr:
+        # add() has already appended the preset, so a value that will not apply would leave a
+        # half-populated preset on the tool - drop it again and report why nothing was added.
+        if safe(lambda: presets.remove(at), False) is False:
+            verr += f" The preset add() created at index {at} could not be removed again."
+        return error(verr)
+    matches = _presets_named(presets, name)
+    if len(matches) != 1:
+        return error(f"Added a preset named '{name}' but the tool's presets read back as "
+                     f"{_preset_names(presets)} - the add did not take.")
+    stored, perr = _persist_preset_change(target, tool, tool_index, name, expect_present=True)
+    if perr:
+        return error(perr)
+    return ok({"tool": tool_index, "preset": name, "preset_index": matches[0][0],
+               "preset_count": safe(lambda: presets.count, 0),
+               "presets": stored if stored is not None else _preset_names(presets),
+               "note": _preset_note(target, "added to")})
+
+
+def _do_remove_preset(target, tool_index, spec):
+    """Remove ONE named preset from a tool already in the library."""
+    tool, presets, name, gerr = _preset_tool(target, tool_index, spec)
+    if gerr:
+        return error(gerr)
+    matches = _presets_named(presets, name)
+    if not matches:
+        avail = [n for n in _preset_names(presets) if n]
+        return error(f"The tool has no preset named '{name}'. Presets on this tool: "
+                     f"{', '.join(avail) if avail else '(none)'}.")
+    if len(matches) > 1:
+        return error(f"'{name}' names {len(matches)} presets on this tool (indices "
+                     f"{', '.join(str(i) for i, _ in matches)}) - the removal is refused rather "
+                     "than picking one of them.")
+    index = matches[0][0]
+    removed = presets.remove(index)
+    if removed is False:
+        return error(f"ToolPresets.remove({index}) reported failure - preset '{name}' was not removed.")
+    survivors = _presets_named(presets, name)
+    if survivors:
+        return error(f"Removed preset '{name}' at index {index} but {len(survivors)} preset(s) of "
+                     "that name survive on the tool - the removal did not take.")
+    stored, perr = _persist_preset_change(target, tool, tool_index, name, expect_present=False)
+    if perr:
+        return error(perr)
+    return ok({"tool": tool_index, "preset": name, "removed_index": index,
+               "preset_count": safe(lambda: presets.count, 0),
+               "presets": stored if stored is not None else _preset_names(presets),
+               "note": _preset_note(target, "removed from")})
+
+
 def _do_where_used(target, tool_index):
     if not target.is_document:
         return error("'where_used' is only available for the document library (scope='document') - a "
@@ -773,7 +1029,7 @@ def read_library(scope: str = "document", library: str = "", tool_type: str = ""
 
 def handler(action: str = "list", scope: str = "document", library: str = "",
             add_tools=None, remove_indices=None, tool=None, parameters=None,
-            tool_type: str = "") -> dict:
+            tool_type: str = "", preset=None) -> dict:
     """See TOOL_DESCRIPTION."""
     action = (action or "list").strip().lower()
     if action not in _ACTIONS:
@@ -804,6 +1060,10 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
         return _do_remove(target, remove_indices or [])
     if action == "edit":
         return _do_edit(target, tool, parameters)
+    if action == "add_preset":
+        return _do_add_preset(target, tool, preset)
+    if action == "remove_preset":
+        return _do_remove_preset(target, tool, preset)
     if action == "where_used":
         return _do_where_used(target, tool)
     if action == "parameters":
@@ -813,10 +1073,12 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
 
 TOOL_DESCRIPTION = (
     "Read & manage CAM TOOL LIBRARIES + their tools. 'scope': document / local / cloud / hub. "
-    "'action': list | list_types | parameters | add | remove | edit | where_used | create_library. "
+    "'action': list | list_types | parameters | add | remove | edit | add_preset | remove_preset | "
+    "where_used | create_library. "
     "'list' with a shared scope and NO 'library' lists the libraries there, else that library's tools "
     "(each carries a (library_url,index) reference); 'list_types' lists the from_type vocabulary; "
-    "'parameters' reads one tool's FULL parameter list (name/expression/value, flags formula-derived). "
+    "'parameters' reads one tool's FULL parameter list (name/expression/value, flags formula-derived); "
+    "'add_preset'/'remove_preset' add or remove ONE named preset on the tool at 'tool'. "
     "list/list_types/parameters/where_used are read-only; the rest write and persist. Hub is shared "
     "TEAM data and network-slow; 'where_used' is document-scope only. 'add' auto-assigns each new "
     "tool a free tool number (in assigned_tool_numbers; cam_post refuses duplicates)."
@@ -836,15 +1098,21 @@ tool = (
                 "product_id": {"type": "string"}, "vendor": {"type": "string"},
                 "holder": {"type": "object", "properties": {"library_url": {"type": "string"}, "index": {"type": "integer"}}},
                 "presets": {"type": "array", "items": {"type": "object", "properties": {
-                    "spindle_speed": {"type": "number"}, "feed": {"type": "number"}}}}}},
-            "description": "Tools to add/create. Each: {from_type:'drill'} (clone a sample of that type) OR {library_url,index} (copy); + optional description/diameter/product_id/vendor overrides, holder:{library_url,index}, presets:[{spindle_speed,feed}]."})
+                    "name": {"type": "string"},
+                    "spindle_speed": {"type": ["number", "string"]},
+                    "feed": {"type": ["number", "string"]}}}}}},
+            "description": "Tools to add/create. Each: {from_type:'drill'} (clone a sample of that type) OR {library_url,index} (copy); + optional description/diameter/product_id/vendor overrides, holder:{library_url,index}, presets:[{name,spindle_speed(rpm),feed(mm/min)}]."})
     .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"},
             "description": "Tool indices to remove."})
-    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / where_used / parameters)."})
+    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / add_preset / remove_preset / where_used / parameters)."})
     .add_input_property("parameters", {"type": "object",
             "description": "Tool parameters to set (edit): {name: expression}."})
     .add_input_property("tool_type", {"type": "string",
             "description": "Filter for list (substring on tool type, e.g. 'ball', 'drill')."})
+    .add_input_property("preset", {"type": "object", "properties": {
+                "name": {"type": "string"}, "spindle_speed": {"type": ["number", "string"]},
+                "feed": {"type": ["number", "string"]}},
+            "description": "The preset for add_preset / remove_preset, on the tool at 'tool': {name, spindle_speed?, feed?} to add, {name} to remove. A bare number is rpm / mm-per-min whatever units the document uses; pass a string to carry your own, e.g. '35in/min'."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

@@ -92,7 +92,8 @@ def _active_component_note(design):
 
 
 def handler(view: str = "current", width: int = 800, height: int = 600,
-            zoom: float = 1.0, fit_to: str = "") -> dict:
+            zoom: float = 1.0, fit_to: str = "", transparent_background=None,
+            anti_aliased=None) -> dict:
     """See TOOL_DESCRIPTION."""
     view = (view or "current").strip().lower()
     if view not in _VIEWS:
@@ -148,7 +149,9 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
             return error(f"Failed to set view '{view}': {e}")
 
     try:
-        b64, cerr = _view_common.capture_png_b64(vp, width, height)
+        b64, cerr = _view_common.capture_png_b64(
+            vp, width, height, transparent_background=transparent_background,
+            anti_aliased=anti_aliased)
         if cerr:
             return error(cerr)
         content = []
@@ -180,7 +183,8 @@ TOOL_DESCRIPTION = (
     "'view' to reorient the camera (default 'current' = leave as-is). "
     "'width'/'height' set the pixel size (default 800x600, max 4096). 'zoom' scales the view after "
     "fitting (>1 zooms OUT, <1 zooms IN; default 1). 'fit_to' frames the camera on ONE occurrence "
-    "by name. "
+    "by name. 'transparent_background'/'anti_aliased' control the render; omit both for "
+    "Fusion's standard capture. "
     "Take a screenshot before editing to understand the model, and after to confirm changes."
 )
 
@@ -192,6 +196,10 @@ tool = (
     .add_input_property("height", {"type": "integer", "description": "Height in px (1-4096, default 600)."})
     .add_input_property("zoom", {"type": "number", "description": "Zoom factor after fitting (>1 out, <1 in; default 1)."})
     .add_input_property(*_FIT_TO.as_property())
+    .add_input_property("transparent_background", {"type": "boolean",
+            "description": "Render the background transparent."})
+    .add_input_property("anti_aliased", {"type": "boolean",
+            "description": "Anti-alias the rendered image."})
     .strict_schema()
 )
 

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 143  |  **description breadcrumbs:** 552  |  **note/error breadcrumbs:** 271
+**Tools:** 147  |  **description breadcrumbs:** 568  |  **note/error breadcrumbs:** 284
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -14,32 +14,32 @@ close orphans, factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (4)** - higher concern, a check-your-work tool nothing points to:
-  `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
+**Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
+  `cam_inspect_toolpaths`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (23)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `mesh_combine`, `model_arrange`, `model_draft`, `model_hole`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
+**Edit (24)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `model_arrange`, `model_draft`, `model_hole`, `model_offset_face`, `model_scale`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **39x** across 27 module(s): "No active design. Create or open a document first (see doc_new)."
+- **42x** across 30 module(s): "No active design. Create or open a document first (see doc_new)."
 - **15x** across 10 module(s): "No active design. Open or create a document first (see doc_new)."
 - **7x** across 4 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 68  (desc 10, note 58)
-- `find_geometry`  <- 63  (desc 51, note 12)
+- `doc_new`  <- 71  (desc 10, note 61)
+- `find_geometry`  <- 67  (desc 54, note 13)
 - `view_screenshot`  <- 47  (desc 20, note 27)
 - `sketch_create`  <- 30  (desc 19, note 11)
-- `cam_get`  <- 28  (desc 19, note 9)
-- `data_get`  <- 27  (desc 16, note 11)
+- `cam_get`  <- 29  (desc 20, note 9)
+- `data_get`  <- 28  (desc 16, note 12)
+- `design_get`  <- 23  (desc 11, note 12)
 - `model_extrude`  <- 23  (desc 21, note 2)
-- `design_get`  <- 22  (desc 11, note 11)
 - `sketch_get`  <- 19  (desc 8, note 11)
+- `design_delete_feature`  <- 16  (desc 9, note 7)
 - `doc_get`  <- 16  (desc 11, note 5)
 - `assembly_get`  <- 15  (desc 10, note 5)
-- `data_upload_file`  <- 15  (desc 12, note 3)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -218,7 +218,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_generate`
 - Generation launch returned no future (nothing to generate?).
-- Generation is launched. Fusion advances it on the main-thread loop, which the POLL pumps - so call cam_get_status(handle) repeatedly until completed=true (each poll nudges it forward a bounded burs...
+- Generation is launched and runs in the background at its own pace - the compute is often minutes. Check cam_get_status(handle) at whatever cadence you need the progress, until completed=true. The o...
 - Failed to launch generation for
 - Omit 'target' to generate the whole document.
 - Pass skip_valid=false to force-regenerate it.
@@ -229,7 +229,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_get_status`
 - No generation with handle '
-- . Omit 'handle' to poll live document state, or pass 'target' (a setup/operation name) to poll an inline generation by name.
+- . Omit 'handle' to read live document state, or pass 'target' (a setup/operation name) to read an inline generation by name.
+
+### `cam_inspect_toolpaths`
+- The toolpath validity check returned
+- , not a true/false verdict - there is no verdict to report.
+- The toolpath validity check failed for
 
 ### `cam_post`
 - Post did not report clean success - review before running.
@@ -276,8 +281,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `cam_select_geometry`
-- Selection applied; generation is launched. Fusion advances it on the main-thread loop, which the POLL pumps - so call cam_get_status(target='
-- ') repeatedly until completed=true (each poll nudges it forward a bounded burst and returns; it never blocks for the full compute). If it completes with has_toolpath False the op produced no path -...
+- Selection applied; generation is launched and runs in the background - check cam_get_status(target='
+- ') until completed=true. If it completes with has_toolpath False the op produced no path - the warning channel can be silent there; check the heights (a zero-depth cut: drill derives depth from the...
 - Selection applied; pass generate=true (or cam_generate) to compute the toolpath.
 - Selection applied but generation failed to launch:
 - . The selection is saved - fix the cause, then run cam_generate(target='
@@ -449,6 +454,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' (deleteMe returned false). It is likely owned by a pattern/mirror feature - delete or reduce that feature's count instead.  **[cause-guess]**
 
 ### `design_export`
+- Exported to local disk. To round-trip into the cloud, upload it with data_upload_file (STEP/IGES are translated to a Fusion design on the cloud).
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
@@ -456,7 +462,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
 - export reported success but
 - . execute() returned true but produced nothing - treating this as a failure, not a false success. Check the target geometry and the output path are valid.
-- Exported to local disk. To round-trip into the cloud, upload it with data_upload_file (STEP/IGES are translated to a Fusion design on the cloud).
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
 - Could not create output directory '
 
@@ -641,10 +646,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ) or switch the standard.
 - portrait orientation is not supported for the largest
 - '); use landscape or a smaller sheet.
+- sheet_size 'custom' requires both custom_width_mm and custom_height_mm.
+- custom_width_mm and custom_height_mm must be positive (got
+- custom_width_mm/custom_height_mm only apply when sheet_size='custom'.
+- ' could not be resolved to a file. Tried:
+- . Pass a DataFile id/versionId or a fusionWebURL from data_get / design_get(include=['tree']).
 - sheet_types must be a list of sheet-type names (e.g. ['component', 'main_assembly']).
 - sheet_types has unknown value(s)
 - createDrawingInput failed:
 - createDrawing failed:
+- custom_width_mm and custom_height_mm must be numbers (got
 
 ### `drawing_export`
 - Provide 'file_path' - the local output path for the drawing file. The .pdf extension is appended if missing.
@@ -776,6 +787,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not configure the mesh-combine input:
 - Mesh combine failed (meshCombineFeatures.add raised):
 - . (For cut / intersect the meshes must overlap; all must be MESH bodies.)
+
+### `mesh_delete`
+- No active design. Create or open a document first (see doc_new).
+- Delete reported success but a mesh named '
+- ' still resolves in the design (fresh collection walk) - treat the delete as failed.
+- Mesh body removed. (design_delete_feature / design_delete_occurrence don't reach mesh bodies - this is the mesh-side delete.)
+- This design has no meshRemoveFeatures collection (parametric mesh delete unavailable here).
+- meshRemoveFeatures.createInput returned nothing.
+- deleteMe() declined for mesh '
+- ' - it was NOT deleted (it may still be referenced by a downstream mesh_to_brep/mesh_reduce/mesh_combine feature).
+- Could not create the mesh-remove input:
+- Mesh delete failed (meshRemoveFeatures.add raised):
 
 ### `mesh_export`
 - Exported a MESH file to local disk (the design was not modified). To round-trip it into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use mesh_insert.
@@ -976,21 +999,38 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - fit). Diameter set from the standard clearance table (the API tags the fastener but doesn't auto-size on this version).
 - Clearance hole drilled + TAGGED for
 - Provide 'diameter' (e.g. '8 mm') or a 'fastener' (e.g. 'M6 Socket Head Cap Screw') to size the hole.
-- Provide 'points' - a list of [x, y, z] positions on the face to drill at.
 - A counterbore hole needs 'cbore_diameter' and 'cbore_depth'.
 - A countersink hole needs 'csink_diameter' and 'csink_angle' (e.g. '90 deg').
+- 'modeled' (a real helical thread) only applies to a tapped hole; pass 'tap' too.
+- 'tap_type' only applies to a tapped hole; pass 'tap' too.
 - '. Use 'blind' (with 'depth') or 'through'.
 - A blind hole needs 'depth' (e.g. '10 mm'). For a hole through the body use extent='through'.
-- Could not resolve 'face' to a planar face. Pass a find_geometry face handle.
+- 'tip_angle' only applies to a blind hole (the drill tip forms the hole's bottom); this hole's extent is 'through'.
 - This component does not support hole features.
-- Could not create a placement sketch on the face (sketches.add returned nothing).
-- '. Use mm, cm, or in.
 - holeFeatures.add returned no feature.
 - hole point(s) cut NOTHING - the feature created
-- Points must lie ON the drilled face.
+- Provide 'points' - a list of [x, y, z] positions on the face to drill at.
+- Could not resolve 'face' to a planar face. Pass a find_geometry face handle.
+- Could not create a placement sketch on the face (sketches.add returned nothing).
+- '. Use mm, cm, or in.
+- placement='center' needs 'edge' - a find_geometry handle at the circular/elliptical edge to center the hole on.
+- Could not resolve 'edge' to an edge. Pass a find_geometry edge handle.
+- Could not resolve 'plane'. Pass a plane alias/name or a planar-face handle.
+- Could not resolve 'offset_edge_one' to an edge.
+- Could not resolve 'offset_edge_two' to an edge.
 - Could not create a placement sketch on the face:
 - Could not add a sketch point at
+- Could not set tip_angle '
+- is not available on this Fusion version.
+- placement='on_edge' needs 'edge' - a find_geometry handle at the edge to position the hole along.
+- placement='on_edge' needs 'edge_offset' - the distance along 'edge', e.g. '5 mm'.
+- placement='plane_offsets' needs
 - ; expected [x, y, z] in '
+- Could not position the hole at the edge's center:
+- Could not set the tapped hole to a MODELED (helical) thread:
+- Could not set tap_type '
+- Could not position the hole on the edge:
+- Could not position the hole by plane and offsets:
 
 ### `model_inspect`
 - Mesh target: triangle/vertex counts + watertight (is_closed) + bbox. (A mesh has no B-Rep bounding box or mass; target a solid body/occurrence for include=['mass'].)
@@ -1035,6 +1075,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Mirror returned no feature.
 - Bodies mirrored across the plane. Pair with view_screenshot to view.
 
+### `model_offset_face`
+- Face(s) pushed/pulled along their normal. Positive extends outward (adds material); negative pushes inward (removes material).
+- No active design. Create or open a document first (see doc_new).
+- 'faces' resolved to face(s) with no readable owning body - cannot offset.
+- Offset face returned no feature.
+- Offset face was created but failed to compute:
+- . Try a smaller distance or a different face selection.
+- Offset face reported success but the affected body's volume is unchanged - nothing was actually pushed or pulled. The feature remains in the timeline; remove it with design_delete_feature.
+- . (The distance may be too large for the geometry, or the faces may not support a uniform offset together - try a smaller distance or fewer faces.)
+
 ### `model_pattern_circular`
 - quantity must be >= 2 for a circular pattern.
 - No active design. Open or create a document with components first.
@@ -1071,6 +1121,20 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (The axis must not pass through the profile in a way that self-intersects.)
 - Could not set revolve angle:
 - . (A 'cut'/'intersect' needs existing geometry to act on; the axis and profile must be coplanar.)
+
+### `model_scale`
+- Bodies resized about the anchor point, which stays put. Factors are unitless: 2 doubles every dimension and multiplies volume by 8.
+- A per-axis scale needs all three factors - got
+- . Give all three, or use 'factor' for a uniform scale.
+- Give EITHER 'factor' (uniform) OR x_factor/y_factor/z_factor (per-axis), not both.
+- 'factor' is required (the uniform scale factor), or give x_factor, y_factor and z_factor together for a per-axis scale.
+- No active design. Create or open a document first (see doc_new).
+- Scale returned no feature.
+- Scale feature was created but failed to compute:
+- . Try a factor closer to 1, or a different anchor.
+- No 'anchor' given and the active component has no origin construction point to scale about. Pass a vertex handle from find_geometry.
+- . (A parameter expression may not resolve - check it with param_get - or the factor may collapse the geometry; try a factor closer to 1.)
+- setToNonUniform refused the per-axis factors, so nothing was scaled. Retry as a uniform scale with 'factor'.
 
 ### `model_set_material`
 - ). model_inspect mass/density now reflects this material. This is NOT color - use appearance_set for cosmetic color.
@@ -1230,7 +1294,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `sketch_constrain`
 - Could not resolve entity_one '
-- ' (use '<type>:<index>', type = line/arc/circle/point).
+- ' (use '<type>:<index>', type =
 - returned nothing (entities may be incompatible for it).
 - Geometric constraint applied - the sketch is now parametric for this relationship.
 - ' needs 'entity_two' (a second '<type>:<index>'). Got '
@@ -1249,9 +1313,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ', which is a construction PLANE name, not a face handle. Pass it as plane='
 
 ### `sketch_delete_entity`
-- Provide 'target' as '<type>:<index>' - type = line | arc | circle | point | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.
+- | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.
+- Provide 'target' as '<type>:<index>' - type =
 - Unknown target type '
-- '. Use line | arc | circle | point | constraint.
 - (s). Indexes are 0-based in creation order; list them with sketch_get.
 - ). The entity may be consumed by a dimension/constraint - remove those first.
 - Entity removed. Deleting a curve can cascade to constraints/dimensions that referenced it; re-read with sketch_get before adding more.
@@ -1264,7 +1328,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Dimensional constraint added. Drive it later by name via param_set.
 - No active design. Create or open a document first (see doc_new).
 - No sketch to dimension. Create one first with sketch_create.
-- ' did not resolve. Use '<type>:<index>' (line/arc/circle/point), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.
+- ' did not resolve. Use '<type>:<index>' (
+- ), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.
 - ' takes a whole entity, not a point anchor - drop the ':
 - angle takes two whole lines, not point anchors - drop the anchor from entity_two.
 - dimension returned nothing.
@@ -1278,7 +1343,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `sketch_project`
 - Extrude a resulting profile via sketch_get -> model_extrude.
-- Geometry projected. 'entity_refs' are '<type>:<index>' handles for sketch_constrain / sketch_dimension (line/arc/circle/point).
+- Geometry projected. 'entity_refs' are '<type>:<index>' handles for sketch_constrain / sketch_dimension (
 - Linked: the curves update when the source geometry moves.
 - Static copy: the curves do NOT track the source geometry.
 - No active design. Create or open a document first (see doc_new).
@@ -1465,6 +1530,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Failed to create section (
 
 ### `view_set`
+- 'projection'/'perspective_angle_deg' apply to action='orient', not action='
 - No active design. Open a document with design geometry first.
 
 ### `view_switch_workspace`

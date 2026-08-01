@@ -570,10 +570,11 @@ def _body_context(b):
 
 
 def _collect_bodies_by_name(des, comp, name):
-    """Every DISTINCT body named `name` across the design (active component, root, and each occurrence's
-    proxies), de-duplicated by entityToken, as (body, context) pairs. A body name is only LOCALLY unique
-    (like an occurrence's), so the caller can refuse an ambiguous name with its candidate list instead of
-    grabbing the first - mirroring _resolve_occurrence's house pattern.
+    """Every DISTINCT body named `name` across the design (active component, root, each occurrence's
+    proxies, PLUS every component's meshBodies directly), de-duplicated by entityToken, as
+    (body, context) pairs. A body name is only LOCALLY unique (like an occurrence's), so the caller can
+    refuse an ambiguous name with its candidate list instead of grabbing the first - mirroring
+    _resolve_occurrence's house pattern.
 
     De-dup is by entityToken, NOT Python identity: one physical body is reachable through several
     collection paths (active component, root, an occurrence proxy) and the API hands back a FRESH
@@ -598,6 +599,14 @@ def _collect_bodies_by_name(des, comp, name):
         for o in (_common.safe(lambda: root.allOccurrences) or []):
             for b in _bodies_named_in(o, name):
                 add(b)
+    # LIVE-VERIFIED: an Occurrence proxy exposes bRepBodies but NOT meshBodies, so the occurrence walk
+    # above can miss a mesh living outside the active/root component. _common.all_meshes is the ONE
+    # design-wide mesh traversal (walks every component's meshBodies directly, not via occurrences) -
+    # the same one mesh_delete's survivor check builds on - so mesh name resolution is design-wide too.
+    if des is not None:
+        for _comp, m in _common.all_meshes(des):
+            if _common.safe(lambda m=m: m.name) == name:
+                add(m)
     return out
 
 

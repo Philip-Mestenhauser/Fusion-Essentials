@@ -154,6 +154,21 @@ def run(context):
 
 ROWS = [
     {
+        "id": "save-image-options-defaults",
+        "claim": ("SaveImageFileOptions.create(path) initializes width/height to 0 and "
+                  "isBackgroundTransparent False / isAntiAliased True"),
+        "encoded_in": "test__view_common.py fake options initial values; _view_common._write_image size assignment",
+        "facts_on_pass": {"behavior.save_image_options_defaults": True},
+        "body": """
+    opts = adsk.core.SaveImageFileOptions.create("probe_never_written.png")
+    emit(opts.width == 0 and opts.height == 0
+         and opts.isBackgroundTransparent is False and opts.isAntiAliased is True,
+         "save-image-options-defaults: w=" + str(opts.width) + " h=" + str(opts.height)
+         + " transparent=" + repr(opts.isBackgroundTransparent)
+         + " aa=" + repr(opts.isAntiAliased))
+""",
+    },
+    {
         "id": "units-cm",
         "claim": "Lengths cross the API in cm - a 10 mm sketch square extruded 1.0 unit has bbox extent 1.0",
         "encoded_in": "tests/conftest.py bbox fixture; every test asserting a scale() factor",

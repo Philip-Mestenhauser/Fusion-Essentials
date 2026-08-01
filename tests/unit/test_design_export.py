@@ -1,8 +1,9 @@
-"""Unit tests for ``design_export.py`` — export a body/component/whole-design to a neutral CAD file.
+"""Unit tests for ``design_export.py`` - export a body/component/whole-design to a neutral CAD file.
 
-Covers the format dispatch (step/iges/sat/stl), target resolution (handle / body name /
-component name / whole design), path defaulting + extension handling, and that the right
-ExportManager.create*Options call is used per format. No live Fusion — fakes mimic ExportManager.
+Covers the format dispatch (step/iges/sat/smt/usd/f3d/stl/3mf/obj), target resolution (handle / body
+name / component name / whole design), path defaulting + extension handling, the invisible-content
+and per-format option knobs (STL binary/units, DXF construction/points/projected/units), and that the
+right ExportManager.create*Options call is used per format. No live Fusion - fakes mimic ExportManager.
 """
 
 import json
@@ -59,13 +60,28 @@ class FakeComp:
         self.allOccurrences = list(occurrences)
 
 
+class FakeOptions:
+    """Stands in for a *ExportOptions/DXFSketchExportOptions object: dict-style access for the
+    harness's own record-keeping (kind/path/geom - what em.calls[-1]["x"] reads), plus free attribute
+    get/set for whatever properties the handler configures (isBinaryFormat, unitType,
+    isIncludingInvisibleBodies, isConstructionExported, ...)."""
+    def __init__(self, kind, path, geom=None):
+        self.kind = kind
+        self.path = path
+        self.geom = geom
+    def __getitem__(self, k):
+        return getattr(self, k, None)
+    def __setitem__(self, k, v):
+        setattr(self, k, v)
+
+
 class FakeExportManager:
-    """Records which create*Options was called + with what geometry, and that execute ran."""
+    """Records which create*Options was called + with what geometry/path, and that execute ran."""
     def __init__(self):
         self.calls = []
         self.executed = None
     def _opt(self, kind, path, geom=None):
-        rec = {"kind": kind, "path": path, "geom": geom}
+        rec = FakeOptions(kind, path, geom)
         self.calls.append(rec)
         return rec
     def createSTEPExportOptions(self, path, geom=None):
@@ -74,11 +90,30 @@ class FakeExportManager:
         return self._opt("iges", path, geom)
     def createSATExportOptions(self, path, geom=None):
         return self._opt("sat", path, geom)
+    def createSMTExportOptions(self, path, geom=None):
+        return self._opt("smt", path, geom)
+    def createUSDExportOptions(self, path, geom=None):
+        return self._opt("usd", path, geom)
+    def createFusionArchiveExportOptions(self, path, geom=None):
+        return self._opt("f3d", path, geom)
     def createSTLExportOptions(self, geom, path):
         # STL signature is (geometry, filename) in the real API
-        rec = {"kind": "stl", "path": path, "geom": geom}
-        self.calls.append(rec)
-        return rec
+        return self._opt("stl", path, geom)
+    def createC3MFExportOptions(self, geom, path):
+        return self._opt("3mf", path, geom)
+    def createOBJExportOptions(self, geom, path):
+        return self._opt("obj", path, geom)
+    def createDXFSketchExportOptions(self, path, sketch):
+        # signature is (filename, sketch), live-verified - (sketch, filename) raises TypeError
+        opts = self._opt("dxf", path, sketch)
+        # reading DXFSketchExportOptions.units aborts the live transaction - the fake raises so any
+        # regression that touches .units (even via safe()) is visible in a test run
+        cls = type(opts)
+        if not hasattr(cls, "units"):
+            def _units_boom(self_):
+                raise RuntimeError("Distance unit is not supported by DXF")
+            cls.units = property(_units_boom)
+        return opts
     def execute(self, opts):
         self.executed = opts
         # actually write a stub file so the handler's os.path.getsize/exists checks see it
@@ -143,6 +178,38 @@ class TestFormatDispatch:
         _, em, _ = _install(monkeypatch)
         _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
         assert em.calls[-1]["kind"] == "stl"
+
+    def test_smt_uses_smt_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="smt", file_path=str(tmp_path / "p.smt")))
+        assert out["exported"] is True
+        assert em.calls[-1]["kind"] == "smt"
+
+    def test_usd_uses_usd_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="usd", file_path=str(tmp_path / "p.usdz")))
+        assert out["exported"] is True
+        assert em.calls[-1]["kind"] == "usd"
+
+    def test_f3d_uses_fusion_archive_options(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="f3d", file_path=str(tmp_path / "p.f3d")))
+        assert out["exported"] is True
+        assert em.calls[-1]["kind"] == "f3d"
+
+    def test_3mf_uses_c3mf_options_geom_first(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="3mf", file_path=str(tmp_path / "p.3mf")))
+        assert out["exported"] is True
+        assert em.calls[-1]["kind"] == "3mf"
+        # 3MF is a mesh-style format - geometry-first arg order like STL
+        assert em.calls[-1]["geom"] is not None
+
+    def test_obj_uses_obj_options_geom_first(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="obj", file_path=str(tmp_path / "p.obj")))
+        assert out["exported"] is True
+        assert em.calls[-1]["kind"] == "obj"
 
     def test_unknown_format_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch)
@@ -224,6 +291,258 @@ class TestPathHandling:
         # the path handed to the exporter ends with the format extension
         assert em.calls[-1]["path"].lower().endswith(".step")
         assert out["file_path"].lower().endswith(".step")
+
+
+# ── invisible-content + per-format option knobs ─────────────────────────────
+
+class TestOptionsApplied:
+    def test_default_call_sets_no_extra_options(self, tmp_path, monkeypatch):
+        # the common case (no opt-in flags) must keep the plain export payload shape - no
+        # 'options_applied' key when nothing was requested.
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step")))
+        assert "options_applied" not in out
+        opts = em.calls[-1]
+        assert not hasattr(opts, "isIncludingInvisibleBodies")
+        assert not hasattr(opts, "isBinaryFormat")
+
+    def test_include_invisible_bodies_and_components(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path / "p.step"),
+                                   include_invisible_bodies=True, include_invisible_components=True))
+        opts = em.calls[-1]
+        assert opts.isIncludingInvisibleBodies is True
+        assert opts.isIncludingInvisibleComponents is True
+        assert out["options_applied"]["invisible_bodies"] is True
+        assert out["options_applied"]["invisible_components"] is True
+
+    def test_invisible_flags_ignored_when_false(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="step", file_path=str(tmp_path / "p.step"),
+                  include_invisible_bodies=False, include_invisible_components=False)
+        opts = em.calls[-1]
+        assert not hasattr(opts, "isIncludingInvisibleBodies")
+
+    def test_stl_binary_true(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_binary=True))
+        assert em.calls[-1].isBinaryFormat is True
+        assert out["options_applied"]["stl_binary"] is True
+
+    def test_stl_binary_false_ascii(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_binary=False))
+        assert em.calls[-1].isBinaryFormat is False
+        assert out["options_applied"]["stl_binary"] is True
+
+    def test_stl_binary_omitted_leaves_factory_default_untouched(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
+        assert not hasattr(em.calls[-1], "isBinaryFormat")
+
+    def test_stl_units_applied_via_distance_units_enum(self, tmp_path, monkeypatch):
+        # unitType takes DistanceUnits, live-verified; MeshUnits has mm/cm SWAPPED relative to it,
+        # so pinning the enum family here is what catches a silent 10x-wrong-geometry regression.
+        _, em, _ = _install(monkeypatch)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="in"))
+        assert em.calls[-1].unitType is dx.adsk.fusion.DistanceUnits.InchDistanceUnits
+        assert out["options_applied"]["stl_units"] is True
+
+    def test_stl_units_omitted_leaves_factory_default_untouched(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
+        assert not hasattr(em.calls[-1], "unitType")
+
+    def test_stl_units_bad_value_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        res = dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="parsecs")
+        assert res["isError"] is True and "stl_units" in res["message"]
+
+    def test_stl_options_ignored_for_other_formats(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_binary=True, stl_units="mm")
+        opts = em.calls[-1]
+        assert not hasattr(opts, "isBinaryFormat")
+        assert not hasattr(opts, "unitType")
+
+
+# ── format=dxf (sketch / face-profile 2D export) ──────────────────────────────
+
+class FakeCount:
+    def __init__(self, n=0):
+        self.count = n
+
+
+class FakeSketchCurves:
+    def __init__(self, lines=0, arcs=0, circles=0):
+        self.sketchLines = FakeCount(lines)
+        self.sketchArcs = FakeCount(arcs)
+        self.sketchCircles = FakeCount(circles)
+
+
+class FakeSketch:
+    """Stands in for a Sketch: deleteMe records that the scratch sketch was removed, project2 grows
+    the line count by 'project_adds'. DXF writing itself goes through the design's exportManager
+    (createDXFSketchExportOptions), not a method on the sketch."""
+    def __init__(self, name="Sketch1", lines=0, arcs=0, circles=0, points=0, project_adds=1):
+        self.name = name
+        self.sketchCurves = FakeSketchCurves(lines, arcs, circles)
+        self.sketchPoints = FakeCount(points)
+        self._project_adds = project_adds
+        self.deleted = False
+        self.project_calls = []
+
+    def deleteMe(self):
+        self.deleted = True
+        return True
+
+    def project2(self, entities, is_linked):
+        self.project_calls.append((entities, is_linked))
+        self.sketchCurves.sketchLines.count += self._project_adds
+        return [object()] * self._project_adds
+
+
+class FakeSketchesColl:
+    def __init__(self, sketch):
+        self._sketch = sketch
+        self.added_with = None
+
+    def add(self, face):
+        self.added_with = face
+        return self._sketch
+
+
+class FakeFaceComp:
+    def __init__(self, sketch):
+        self.sketches = FakeSketchesColl(sketch)
+
+
+class FakeFaceBody:
+    def __init__(self, comp):
+        self.parentComponent = comp
+
+
+class FakeFace:
+    def __init__(self, comp):
+        self.body = FakeFaceBody(comp)
+
+
+class TestDxfExport:
+    def test_sketch_happy_path(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=2)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
+                                   file_path=str(tmp_path / "p")))
+        assert out["exported"] is True
+        assert out["format"] == "dxf"
+        assert out["file_path"].lower().endswith(".dxf")
+        assert em.calls[-1]["kind"] == "dxf"
+        assert em.calls[-1]["geom"] is sk
+        assert em.calls[-1]["path"] == out["file_path"]
+
+    def test_sketch_export_defaults_include_everything(self, tmp_path, monkeypatch):
+        # Sketch.saveAsDXF takes no filter options at all (unfiltered output); the options-based
+        # export must reproduce that by defaulting all three content flags to True.
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=2)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf")))
+        opts = em.calls[-1]
+        assert opts.isConstructionExported is True
+        assert opts.isPointsExported is True
+        assert opts.isProjectedGeometryExported is True
+
+    def test_sketch_export_flags_can_be_narrowed(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=2)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        _payload(dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"),
+                            dxf_export_construction=False, dxf_export_points=False))
+        opts = em.calls[-1]
+        assert opts.isConstructionExported is False
+        assert opts.isPointsExported is False
+        assert opts.isProjectedGeometryExported is True   # left at its default (True)
+
+    def test_dxf_never_touches_the_units_property(self, tmp_path, monkeypatch):
+        # DXFSketchExportOptions.units is a poison property (reading it aborts the live
+        # transaction) - the fake's .units getter raises, so this export succeeding proves the
+        # handler leaves it alone entirely. There is deliberately no dxf_units input.
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=1)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+
+    def test_missing_sketch_and_face_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        res = dx.handler(format="dxf", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "dxf_sketch" in res["message"] and "dxf_face" in res["message"]
+
+    def test_both_sketch_and_face_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_face="H" * 40,
+                          file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "only one" in res["message"].lower()
+
+    def test_empty_sketch_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "empty" in res["message"].lower()
+
+    def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: None)
+        monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
+        res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True and "Nope" in res["message"]
+
+    def test_execute_false_is_reported_as_failure(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=1)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        em.execute = lambda opts: False
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "nothing was written" in res["message"].lower()
+
+    def test_face_happy_path_cleans_up_scratch_sketch(self, tmp_path, monkeypatch):
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=0, project_adds=3)
+        comp = FakeFaceComp(sk)
+        face = FakeFace(comp)
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                   file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert comp.sketches.added_with is face
+        assert sk.deleted is True
+        assert "removed" in out["note"].lower()
+        # the face path's entire content is projected geometry - the flag must default True
+        assert em.calls[-1].isProjectedGeometryExported is True
+
+    def test_face_no_geometry_errors_and_cleans_up(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        sk = FakeSketch(lines=0, project_adds=0)
+        comp = FakeFaceComp(sk)
+        face = FakeFace(comp)
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        res = dx.handler(format="dxf", dxf_face="H" * 40, file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "nothing to write" in res["message"].lower()
+        assert sk.deleted is True
+
+    def test_extension_auto_appended(self, tmp_path, monkeypatch):
+        _install(monkeypatch)
+        sk = FakeSketch(lines=1)
+        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
+        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
+                                   file_path=str(tmp_path / "noext")))
+        assert out["file_path"].lower().endswith(".dxf")
 
 
 # ── split_by_component (one file per top-level occurrence) ─────────────────────
@@ -311,8 +630,8 @@ class TestSplitByComponent:
 class TestExportOne:
     def test_stl_arg_order_is_geom_then_path(self):
         em = FakeExportManager()
-        okk, err = dx._export_one(em, "createSTLExportOptions", True, "GEOM", "C:/out.stl")
-        assert okk is True and err is None
+        okk, err, applied = dx._export_one(em, "createSTLExportOptions", True, "GEOM", "C:/out.stl")
+        assert okk is True and err is None and applied == {}
         # STL records (geom, path); the call captured the geometry, not the path, as geom
         assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == "C:/out.stl"
 
@@ -324,16 +643,37 @@ class TestExportOne:
     def test_execute_false_is_a_failure(self):
         em = FakeExportManager()
         em.execute = lambda opts: False
-        okk, err = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
-        assert okk is False and "nothing was written" in err
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
+        assert okk is False and "nothing was written" in err and applied == {}
 
     def test_exception_captured_as_error_string(self):
         em = FakeExportManager()
         def boom(path, geom=None):
             raise RuntimeError("disk full")
         em.createSTEPExportOptions = boom
-        okk, err = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
         assert okk is False and "disk full" in err
+
+    def test_configure_callback_runs_before_execute(self):
+        em = FakeExportManager()
+        seen = {}
+        def configure(opts):
+            seen["kind"] = opts.kind
+            opts.customFlag = True
+            return {"custom": True}
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p", configure)
+        assert okk is True
+        assert seen["kind"] == "step"
+        assert em.calls[-1].customFlag is True
+        assert applied == {"custom": True}
+
+    def test_configure_never_blocks_a_failed_execute(self):
+        # a decorative-option configure step must not stop the real failure from being reported.
+        em = FakeExportManager()
+        em.execute = lambda opts: False
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p",
+                                           lambda opts: {"x": True})
+        assert okk is False and "nothing was written" in err
 
 
 # ── file-existence gate (single-target export) ────────────────────────────────
@@ -385,145 +725,3 @@ class TestResolveTargetExtra:
         monkeypatch.setattr(dx._common, "design", lambda: None)
         res = dx.handler(format="step", file_path=str(tmp_path / "p.step"))
         assert res["isError"] is True and "no active design" in res["message"].lower()
-
-
-# ── format=dxf (sketch / face-profile 2D export) ──────────────────────────────
-
-class FakeCount:
-    def __init__(self, n=0):
-        self.count = n
-
-
-class FakeSketchCurves:
-    def __init__(self, lines=0, arcs=0, circles=0):
-        self.sketchLines = FakeCount(lines)
-        self.sketchArcs = FakeCount(arcs)
-        self.sketchCircles = FakeCount(circles)
-
-
-class FakeSketch:
-    """Stands in for a Sketch: saveAsDXF writes a stub file (or reports false), deleteMe records
-    that the scratch sketch was removed, project2 grows the line count by 'project_adds'."""
-    def __init__(self, name="Sketch1", lines=0, arcs=0, circles=0, points=0,
-                 save_result=True, delete_result=True, project_adds=1):
-        self.name = name
-        self.sketchCurves = FakeSketchCurves(lines, arcs, circles)
-        self.sketchPoints = FakeCount(points)
-        self._save_result = save_result
-        self._delete_result = delete_result
-        self._project_adds = project_adds
-        self.deleted = False
-        self.saved_path = None
-        self.project_calls = []
-
-    def saveAsDXF(self, path):
-        self.saved_path = path
-        if self._save_result:
-            with open(path, "w") as f:
-                f.write("dxf-stub")
-        return self._save_result
-
-    def deleteMe(self):
-        self.deleted = True
-        return self._delete_result
-
-    def project2(self, entities, is_linked):
-        self.project_calls.append((entities, is_linked))
-        self.sketchCurves.sketchLines.count += self._project_adds
-        return [object()] * self._project_adds
-
-
-class FakeSketchesColl:
-    def __init__(self, sketch):
-        self._sketch = sketch
-        self.added_with = None
-
-    def add(self, face):
-        self.added_with = face
-        return self._sketch
-
-
-class FakeFaceComp:
-    def __init__(self, sketch):
-        self.sketches = FakeSketchesColl(sketch)
-
-
-class FakeFaceBody:
-    def __init__(self, comp):
-        self.parentComponent = comp
-
-
-class FakeFace:
-    def __init__(self, comp):
-        self.body = FakeFaceBody(comp)
-
-
-class TestDxfExport:
-    def test_sketch_happy_path(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        sk = FakeSketch(lines=2)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
-        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
-                                   file_path=str(tmp_path / "p")))
-        assert out["exported"] is True
-        assert out["format"] == "dxf"
-        assert out["file_path"].lower().endswith(".dxf")
-        assert sk.saved_path == out["file_path"]
-
-    def test_missing_sketch_and_face_errors(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        res = dx.handler(format="dxf", file_path=str(tmp_path / "p.dxf"))
-        assert res["isError"] is True
-        assert "dxf_sketch" in res["message"] and "dxf_face" in res["message"]
-
-    def test_both_sketch_and_face_errors(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        res = dx.handler(format="dxf", dxf_sketch="Profile1", dxf_face="H" * 40,
-                          file_path=str(tmp_path / "p.dxf"))
-        assert res["isError"] is True and "only one" in res["message"].lower()
-
-    def test_empty_sketch_errors(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        sk = FakeSketch(lines=0, arcs=0, circles=0, points=0)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
-        res = dx.handler(format="dxf", dxf_sketch="Empty", file_path=str(tmp_path / "p.dxf"))
-        assert res["isError"] is True and "empty" in res["message"].lower()
-
-    def test_sketch_not_found_errors(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: None)
-        monkeypatch.setattr(dx._common, "all_sketch_names", lambda design: ["Sketch1"])
-        res = dx.handler(format="dxf", dxf_sketch="Nope", file_path=str(tmp_path / "p.dxf"))
-        assert res["isError"] is True and "Nope" in res["message"]
-
-    def test_face_happy_path_cleans_up_scratch_sketch(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        sk = FakeSketch(lines=0, project_adds=3)
-        comp = FakeFaceComp(sk)
-        face = FakeFace(comp)
-        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
-        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
-                                   file_path=str(tmp_path / "p.dxf")))
-        assert out["exported"] is True
-        assert comp.sketches.added_with is face
-        assert sk.deleted is True
-        assert "removed" in out["note"].lower()
-
-    def test_face_no_geometry_errors_and_cleans_up(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        sk = FakeSketch(lines=0, project_adds=0)
-        comp = FakeFaceComp(sk)
-        face = FakeFace(comp)
-        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
-        res = dx.handler(format="dxf", dxf_face="H" * 40, file_path=str(tmp_path / "p.dxf"))
-        assert res["isError"] is True
-        assert "nothing to write" in res["message"].lower()
-        assert sk.deleted is True
-
-    def test_extension_auto_appended(self, tmp_path, monkeypatch):
-        _install(monkeypatch)
-        sk = FakeSketch(lines=1)
-        monkeypatch.setattr(dx._common, "resolve_sketch", lambda design, name: sk)
-        out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
-                                   file_path=str(tmp_path / "noext")))
-        assert out["file_path"].lower().endswith(".dxf")

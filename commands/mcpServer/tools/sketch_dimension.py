@@ -140,7 +140,8 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     e1 = _common.resolve_entity_ref(sketch, base1)
     if e1 is None:
         return error(f"entity_one '{entity_one}' did not resolve. Use '<type>:<index>' "
-    "(line/arc/circle/point), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.")
+    f"({'/'.join(_common.ENTITY_REF_KINDS)}), optionally with an anchor "
+    "':start'/':end'/':mid'/':center', e.g. 'line:0:end'.")
     need_two = dt in ("distance", "horizontal_distance", "vertical_distance", "angle")
     e2 = None
     anchor2 = None
@@ -246,7 +247,8 @@ TOOL_DESCRIPTION = (
 "parametric sketching (sketch_constrain does the geometric half). distance/horizontal_distance/"
 "vertical_distance take TWO refs, or ONE lone line (dimensions its own length); radius/diameter one "
 "arc/circle; angle two lines. 'entity_one'/"
-"'entity_two' are '<type>:<index>' refs (line/arc/circle/point, e.g. 'line:0') - the sketch_constrain "
+"'entity_two' are '<type>:<index>' refs (line/arc/circle/ellipse/point/spline/cv_spline/fixed_spline, "
+"e.g. 'line:0') - the sketch_constrain "
 "scheme; point:0 is ALWAYS the sketch ORIGIN, point:1..N are geometry points in creation order. To "
 "pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
 "mis-attaches when points share coordinates): append ':start'/':end'/':mid' (line) or ':center' "

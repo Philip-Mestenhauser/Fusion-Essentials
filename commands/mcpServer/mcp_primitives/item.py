@@ -84,5 +84,12 @@ class Item:
         elif postconditions:
             raise ValueError(f"postconditions declared on a non-write tool '{tool.name}' - a read "
                              "mutates nothing to verify")
+        # READ-DOCUMENT STAMP: every read result reports the document it read from
+        # ('active_document') so a read taken against the wrong active document is visible in the
+        # payload, mirroring the write side's acted_on. Main-thread tools only - the identity read
+        # touches adsk, which a pure-Python off-thread handler must never do.
+        if write == "read" and run_on_main_thread:
+            from ..tools import _write_guard
+            handler = _write_guard.wrap_read(handler)
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
                    enforce_timeout=enforce_timeout)

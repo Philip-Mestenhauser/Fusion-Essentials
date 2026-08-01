@@ -22,7 +22,9 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "ops nested under one setup/folder/pattern) + find_setup / find_operation (the "
              "(obj, available_names) wrappers over the same resolver) + expression_error (the post-set "
              "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
-             "(the one CAM job-health signal)")
+             "(the one CAM job-health signal) + op_state_facts / op_primary_state / validity_basis "
+             "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
+             "the Manufacture-workspace trust gate every op-state rollup reads)")
 
 app = adsk.core.Application.get()
 
@@ -243,9 +245,9 @@ def first_error_line(obj):
     return msg[0] if msg else ""
 
 
-def _op_state_facts(op) -> dict:
+def op_state_facts(op) -> dict:
     """ONE safe read of the raw per-op lifecycle state Fusion exposes, so every op-state tally
-    (cam_get's per-setup op_states via _op_primary_state, cam_get_status's live_states via
+    (cam_get's per-setup op_states via op_primary_state, cam_get_status's live_states via
     op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
     isSuppressed/isGenerating/hasWarning independently. operationState: 0=valid, 1=out_of_date,
     2=suppressed, 3=no_toolpath (see _OP_STATE_NAMES below in this module)."""
@@ -263,7 +265,7 @@ def _op_state_facts(op) -> dict:
 def op_state_tally(ops) -> dict:
     """The valid/out_of_date/errored/generating/suppressed tally that live_readiness (the WHOLE
     document) and a scoped-target poll (cam_generate's poller, one setup/operation/folder) both need -
-    the ONE per-op walk both share, classifying every op from the same _op_state_facts. An ERRORED op
+    the ONE per-op walk both share, classifying every op from the same op_state_facts. An ERRORED op
     is its OWN bucket: it has a parameter/geometry fault and will NEVER finish generating, so counting
     it as out_of_date/generating would make a poller wait forever. 'generating' is an independent
     OVERLAY bit (an op can be valid/out_of_date AND generating).
@@ -272,7 +274,7 @@ def op_state_tally(ops) -> dict:
     op_sample is the first errored op's {name, error}, or None. Each caller layers its OWN payload
     shape on top (live_readiness adds setup-/program-level errors + a readiness verdict; the scoped
     poller adds setups_errored=0/programs_errored=0). This is a DIFFERENT tally from cam_get's
-    op_states (a per-SETUP, mutually-exclusive-bucket rollup via _op_primary_state) - same raw facts,
+    op_states (a per-SETUP, mutually-exclusive-bucket rollup via op_primary_state) - same raw facts,
     different shape for a different question ("what's live right now" vs "this setup's state mix)."""
     valid = ood = errored = generating = suppressed = total = 0
     active = None
@@ -281,7 +283,7 @@ def op_state_tally(ops) -> dict:
         op = adsk.cam.Operation.cast(raw)
         if op is None:
             continue
-        facts = _op_state_facts(op)
+        facts = op_state_facts(op)
         total += 1
         if facts["has_error"]:
             errored += 1                             # FAILED, not pending - its own bucket
@@ -494,11 +496,11 @@ def get_cam_setups_handler() -> dict:
 
     return ok({"setup_count": len(setups), "setups": setups, "truncated": setups_truncated})
 
-def _op_primary_state(facts: dict) -> str:
+def op_primary_state(facts: dict) -> str:
     """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once and the tally
     sums to the op total: suppressed > error > generating > no_toolpath > out_of_date > valid. (A
     warning is an OVERLAY, counted separately - it coexists with any of these.) Classifies from the
-    _op_state_facts dict (the same raw facts op_state_tally shares) rather than re-reading the op."""
+    op_state_facts dict (the same raw facts op_state_tally shares) rather than re-reading the op."""
     if facts["is_suppressed"]:
         return "suppressed"
     if facts["has_error"]:
@@ -548,8 +550,8 @@ def _attach_setup_invalidation(rec, setup):
             op = adsk.cam.Operation.cast(o)
             if op is None:
                 continue
-            facts = _op_state_facts(op)
-            st = _op_primary_state(facts)
+            facts = op_state_facts(op)
+            st = op_primary_state(facts)
             tally[st] = tally.get(st, 0) + 1
             if facts["has_warning"]:
                 warnings += 1
@@ -617,7 +619,7 @@ def get_cam_operations_handler(setup: str = "") -> dict:
     })
 
 
-def _validity_basis():
+def validity_basis():
     """'manufacture_verified' iff the Manufacture (CAM) workspace is active - op state/toolpath_valid is
     only trustworthy there (the cam_get description's caveat). Otherwise 'unverified_design_workspace'."""
     try:
@@ -656,7 +658,7 @@ def _operations_summary(op_records) -> dict:
         if blocked:
             exceptions.append({"name": r.get("name"), "blocked_by": blocked})
 
-    basis = _validity_basis()
+    basis = validity_basis()
     summary = {"states": states, "active_count": active_total, "exceptions": exceptions,
                "validity_basis": basis}
     if basis == "manufacture_verified":

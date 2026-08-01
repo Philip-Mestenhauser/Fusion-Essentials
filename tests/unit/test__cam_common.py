@@ -4,7 +4,7 @@ Covers the bounded-read caps (CLAUDE.md "Bound it"): setups_handler's top-level 
 and per-setup 'model_lists_truncated', operations_handler's per-setup 'operations_truncated', and
 get_setup_references_handler's per-setup 'references_truncated'. Also covers the pure Tier-1 logic:
 ``_invalidation_reasons`` (parsing op.messageLog into categorical reasons / parameter-change count /
-machine-changed flag), ``_op_primary_state`` (the one-bucket-per-op priority order), ``_hms`` (seconds
+machine-changed flag), ``op_primary_state`` (the one-bucket-per-op priority order), ``_hms`` (seconds
 -> h:m:s), and the machining-time estimate's feed_scale/rapid_feed/tool_change constants.
 
 Plus the shared CAM tree walk + resolvers - walk_cam_tree / resolve_cam_node / operations_under and
@@ -169,7 +169,7 @@ class TestOperationsFilterNamedBranch:
 
 class TestOperationSummaryStateNaming:
     def test_operation_state_1_is_named_out_of_date(self, install, operation_cast_passthrough):
-        # the op-level state name (_OP_STATE_NAMES) must agree with _op_primary_state's own vocabulary.
+        # the op-level state name (_OP_STATE_NAMES) must agree with op_primary_state's own vocabulary.
         op = SimpleNamespace(name="Op1", tool=None, strategy="adaptive", operationState=1,
                              hasWarning=False, hasError=False, hasToolpath=True,
                              isToolpathValid=False, isGenerating=False, isSuppressed=False,
@@ -282,37 +282,37 @@ class TestInvalidationReasons:
         assert reasons == [] and param_changes == 0 and machine_changed is False
 
 
-# ── _op_primary_state: one bucket per op, priority-ordered ────────────────────────────────────────
-# _op_primary_state classifies from the _op_state_facts dict (the same raw facts op_state_tally
-# shares) rather than a live op, so each test builds the raw op then reads it through _op_state_facts
+# ── op_primary_state: one bucket per op, priority-ordered ────────────────────────────────────────
+# op_primary_state classifies from the op_state_facts dict (the same raw facts op_state_tally
+# shares) rather than a live op, so each test builds the raw op then reads it through op_state_facts
 # first - exercising the two functions exactly as every real caller composes them.
 
 class TestOpPrimaryState:
     def _facts(self, **kw):
         base = dict(isSuppressed=False, hasError=False, isGenerating=False, operationState=0)
         base.update(kw)
-        return cc._op_state_facts(SimpleNamespace(**base))
+        return cc.op_state_facts(SimpleNamespace(**base))
 
     def test_suppressed_outranks_error_generating_and_state(self):
         facts = self._facts(isSuppressed=True, hasError=True, isGenerating=True, operationState=1)
-        assert cc._op_primary_state(facts) == "suppressed"
+        assert cc.op_primary_state(facts) == "suppressed"
 
     def test_error_outranks_generating_and_state(self):
         facts = self._facts(hasError=True, isGenerating=True, operationState=3)
-        assert cc._op_primary_state(facts) == "error"
+        assert cc.op_primary_state(facts) == "error"
 
     def test_generating_outranks_operation_state(self):
         facts = self._facts(isGenerating=True, operationState=3)
-        assert cc._op_primary_state(facts) == "generating"
+        assert cc.op_primary_state(facts) == "generating"
 
     def test_state_3_is_no_toolpath(self):
-        assert cc._op_primary_state(self._facts(operationState=3)) == "no_toolpath"
+        assert cc.op_primary_state(self._facts(operationState=3)) == "no_toolpath"
 
     def test_state_1_is_out_of_date(self):
-        assert cc._op_primary_state(self._facts(operationState=1)) == "out_of_date"
+        assert cc.op_primary_state(self._facts(operationState=1)) == "out_of_date"
 
     def test_state_0_is_valid(self):
-        assert cc._op_primary_state(self._facts(operationState=0)) == "valid"
+        assert cc.op_primary_state(self._facts(operationState=0)) == "valid"
 
 
 # ── _operations_summary: readiness derives from the per-op error state it ships beside ──────────
@@ -328,7 +328,7 @@ class TestOperationsSummaryErrorGate:
         return base
 
     def test_errored_op_is_not_ready_to_post(self, monkeypatch):
-        monkeypatch.setattr(cc, "_validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
         records = [self._rec("Face1"),
                    self._rec("Drill1", has_error=True)]   # toolpath reads valid but the op is errored
         summary = cc._operations_summary(records)
@@ -337,7 +337,7 @@ class TestOperationsSummaryErrorGate:
         assert "operation_error" in drill["blocked_by"]
 
     def test_all_valid_no_errors_is_ready(self, monkeypatch):
-        monkeypatch.setattr(cc, "_validity_basis", lambda: "manufacture_verified")
+        monkeypatch.setattr(cc, "validity_basis", lambda: "manufacture_verified")
         summary = cc._operations_summary([self._rec("Face1"), self._rec("Adaptive1")])
         assert "ready to post" in summary["readiness"]
         assert summary["exceptions"] == []

@@ -29,6 +29,9 @@ _DENYLIST = {
     "walk_operations": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
+    "op_state_facts": ("_cam_common", "def"),
+    "op_primary_state": ("_cam_common", "def"),
+    "validity_basis": ("_cam_common", "def"),
     # The ONE CAM tree traversal + refusal resolver (setups/ops/folders/patterns; a duplicated name
     # is refused with each hit's setup path) - every cam_* tool resolves names through these.
     "walk_cam_tree": ("_cam_common", "def"),

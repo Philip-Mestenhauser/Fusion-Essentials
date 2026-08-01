@@ -368,7 +368,9 @@ def _install_bodies(named=None, handle_map=None, components=None):
             return [e] if e is not None else []
         @property
         def allComponents(self):
-            return _Coll(comp_objs) if comp_objs else []
+            # allComponents is a COUNTED collection (count/item) on the live API even when there are
+            # no named sub-components - never a bare list.
+            return _Coll(comp_objs)
     comp = FakeComp()
     inp._common.design = lambda: FakeDesign()
     inp._common.target_component = lambda d: comp

@@ -1,15 +1,12 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Launch CAM toolpath generation asynchronously (cam_generate, returns a poll handle) and poll it
-(cam_get_status). The live GenerateToolpathFuture must stay referenced across calls - see
-_GENERATIONS - or Fusion abandons the in-progress generation."""
+"""Launch CAM toolpath generation asynchronously (cam_generate, returns a handle) and read its
+progress (cam_get_status). Generation runs in the background at its own pace once launched. The
+live GenerateToolpathFuture must stay referenced across calls - see _GENERATIONS - or Fusion
+abandons the in-progress generation."""
 
 import time
-
-import adsk.core
-
-app = adsk.core.Application.get()
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -17,10 +14,11 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _outputs
 from . import _cam_common   # the shared CAM substrate: live_readiness (the single job-health source)
+from ._write_guard import _active_identity   # the one active-document identity read
 
-# What this tool RETURNS: an async generation handle the agent polls with cam_get_status.
+# What this tool RETURNS: an async generation handle the agent checks with cam_get_status.
 RETURNS = [
-    _outputs.ReturnsValue("handle", "a generation handle - poll cam_get_status(handle) until "
+    _outputs.ReturnsValue("handle", "a generation handle - check cam_get_status(handle) until "
                           "completed", consumers=["cam_get_status"]),
 ]
 
@@ -34,6 +32,28 @@ RETURNS = [
 # the future, and only pop an entry once generation has completed.
 _GENERATIONS = {}
 _HANDLE_SEQ = [0]
+
+
+def register_future(future, target, scope, skip_valid):
+    """Mint a handle and register a live generation Future - the ONE registration path (also used by
+    cam_select_geometry's inline launch). Keeps the Future referenced and records which DOCUMENT the
+    generation belongs to, so a later status read taken while another document is active reports the
+    Future's own progress instead of the wrong document's tallies. Returns (handle, total)."""
+    _HANDLE_SEQ[0] += 1
+    handle = f"gen{_HANDLE_SEQ[0]}"
+    total = safe(lambda: future.numberOfOperations, None)
+    doc_name, doc_urn = _active_identity()
+    _GENERATIONS[handle] = {
+        "future": future,
+        "target": target,
+        "scope": scope,
+        "skip_valid": bool(skip_valid),
+        "started_at": time.time(),
+        "total": total,
+        "doc_name": doc_name,
+        "doc_urn": doc_urn,
+    }
+    return handle, total
 
 
 def _collect_op_health():
@@ -109,66 +129,56 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
     if not future:
         return error("Generation launch returned no future (nothing to generate?).")
 
-    _HANDLE_SEQ[0] += 1
-    handle = f"gen{_HANDLE_SEQ[0]}"
-    total = safe(lambda: future.numberOfOperations, None)
-    _GENERATIONS[handle] = {
-    "future": future,
-    "target": target_desc,
-    "scope": scope,
-    "skip_valid": bool(skip_valid),
-    "started_at": time.time(),
-    "total": total,
-    }
+    handle, total = register_future(future, target_desc, scope, skip_valid)
 
     # NOTE: future.numberOfOperations raises "Generation not started" if read on this same launch
-    # tick - the count only populates after the message loop spins once. safe() above already
-    # turned that into None; surface it as "pending" rather than implying nothing will generate.
+    # tick - the count only populates once generation has spun up. safe() above already turned that
+    # into None; surface it as "pending" rather than implying nothing will generate.
     return ok({
         "launched": True,
         "handle": handle,
         "target": target_desc,
         "skip_valid": bool(skip_valid),
-        "operations_to_generate": (total if total is not None else "pending (read on first poll)"),
-        "note": ("Generation is launched. Fusion advances it on the main-thread loop, which the "
-            "POLL pumps - so call cam_get_status(handle) repeatedly until "
-            "completed=true (each poll nudges it forward a bounded burst and returns; it never "
-            "blocks for the full compute). The op count/progress populate on the first poll."),
+        "operations_to_generate": (total if total is not None else "pending (read on first status check)"),
+        "note": ("Generation is launched and runs in the background at its own pace - the compute "
+            "is often minutes. Check cam_get_status(handle) at whatever cadence you need the "
+            "progress, until completed=true. The op count/progress populate on the first check."),
     })
 
 
 # ---------------------------------------------------------------------------
-# cam_get_status  (poll)
+# cam_get_status  (a plain progress read)
 # ---------------------------------------------------------------------------
 #
-# Two ways to poll, one pump. Fusion advances toolpath generation on the MAIN thread's event loop
-# (not a background thread); adsk.doEvents() pumps that loop, so a bounded burst nudges generation
-# forward regardless of what launched it. A cam_generate call mints a Future we scope to (the handle
-# path); an op generated INLINE (cam_create_operation(generate=true), cam_select_geometry, or the UI)
-# has no self-minted Future - so the no-handle path pumps the same way and reads live op state
-# directly (via live_readiness for the document, or a scoped op walk for a named target).
+# Generation runs in the background at its own pace once launched (live-verified: an unattended
+# 34-op job kept completing operations across minutes with zero status calls) - this tool only
+# READS progress; it does not advance anything. Two ways to read: a cam_generate call mints a
+# Future we scope to (the handle path); an op generated INLINE (cam_create_operation(generate=true),
+# cam_select_geometry, or the UI) has no self-minted Future - the no-handle path reads live op
+# state directly (via live_readiness for the document, or a scoped op walk for a named target).
 
 
 def _incomplete_note(live: dict) -> str:
-    """The note for a still-generating poll (shared by both poll paths). live is live_readiness-shaped.
-    An errored op/setup/program will NEVER finish, so flag the BLOCKER and tell the poller to STOP now;
-    otherwise report the plain 'still generating' (with the nothing-generating-yet stall warning)."""
+    """The note for a still-generating status read (shared by both paths). live is
+    live_readiness-shaped. An errored op/setup/program will NEVER finish, so flag the BLOCKER and
+    tell the caller to STOP waiting; otherwise report the plain 'still generating' (with the
+    nothing-generating-yet stall warning)."""
     readiness = live.get("readiness", "")
     samples = live.get("samples") or {}
     blocked = bool(live.get("errored") or live.get("setups_errored") or live.get("programs_errored"))
     if blocked:
-        note = (readiness + " Further polling will NOT complete the errored items - fix them, "
+        note = (readiness + " Waiting will NOT complete the errored items - fix them, "
                 "then re-run cam_generate. ")
         samp = samples.get("op") or samples.get("setup") or samples.get("program") or {}
         if samp.get("name"):
             note += f"e.g. '{samp['name']}': {samp.get('error', '')}. "
         note += "cam_get(include=['operations']) for every errored item + full text."
     elif live.get("generating", 0) == 0 and live.get("out_of_date", 0) > 0:
-        note = ("Still generating - poll again. WARNING: nothing is actively generating yet "
-                "out-of-date ops remain - they may be failing (broken input geometry / a mis-posed "
-                "fixture or stock). cam_get(include=['operations']) shows why.")
+        note = ("Not complete. WARNING: nothing is actively generating yet out-of-date ops "
+                "remain - they may be failing (broken input geometry / a mis-posed fixture or "
+                "stock). cam_get(include=['operations']) shows why.")
     else:
-        note = "Still generating - poll again to advance it further."
+        note = "Still generating in the background - check again later."
     return note
 
 
@@ -183,28 +193,20 @@ def _attach_op_health(payload: dict) -> None:
                          "empty_toolpaths": len(health["empty"])}
 
 
-def _clamp_budget(pump_seconds) -> float:
-    try:
-        return max(0.0, min(float(pump_seconds), 10.0))
-    except Exception:
-        return 1.5
-
-
 def status_handler(handle: str = "", target: str = "", include_operations: bool = True,
-                   pump_seconds: float = 1.5) -> dict:
-    """Poll toolpath generation and nudge it forward. handle is OPTIONAL: pass the id from
-    cam_generate (or 'latest') to scope to that launched generation; OR omit it (and pass a setup/
-    operation NAME as target, or nothing for the whole document) to poll a generation launched inline
-    - cam_create_operation(generate=true), cam_select_geometry, or the Fusion UI - with no handle.
-    include_operations: when complete, also report each op's final state + warnings/errors. pump_seconds:
-    how long to nudge generation forward on THIS poll (default 1.5s, capped at 10s). Read-only (does not
-    mutate the design; it only advances an already-authorized generation)."""
+                   pump_seconds=None) -> dict:
+    """Read toolpath generation progress. handle is OPTIONAL: pass the id from cam_generate (or
+    'latest') to scope to that launched generation; OR omit it (and pass a setup/operation NAME as
+    target, or nothing for the whole document) to read a generation launched inline -
+    cam_create_operation(generate=true), cam_select_geometry, or the Fusion UI - with no handle.
+    include_operations: when complete, also report each op's final state + warnings/errors.
+    pump_seconds is accepted-and-ignored: a stale cached client schema may still send it."""
     key = (handle or "").strip()
     want_target = (target or "").strip()
 
-    # 1. An explicit target picks the live-poll path (no handle needed) - poll that setup/op by name.
+    # 1. An explicit target picks the live path (no handle needed) - read that setup/op by name.
     if want_target:
-        return _status_live(want_target, include_operations, pump_seconds)
+        return _status_live(want_target, include_operations)
 
     # 2. An explicit handle (not 'latest') scopes to that launched generation's Future.
     if key and key.lower() != "latest":
@@ -212,44 +214,62 @@ def status_handler(handle: str = "", target: str = "", include_operations: bool 
         if not entry:
             return error(
                 f"No generation with handle '{handle}'. Active handles: "
-                f"{', '.join(_GENERATIONS.keys()) or '(none)'}. Omit 'handle' to poll live document "
-                "state, or pass 'target' (a setup/operation name) to poll an inline generation by name.")
-        return _status_future(entry, key, include_operations, pump_seconds)
+                f"{', '.join(_GENERATIONS.keys()) or '(none)'}. Omit 'handle' to read live document "
+                "state, or pass 'target' (a setup/operation name) to read an inline generation by name.")
+        return _status_future(entry, key, include_operations)
 
     # 3. handle omitted/'latest': the most recent launched generation if there is one...
     if _GENERATIONS:
         key = f"gen{_HANDLE_SEQ[0]}"
         entry = _GENERATIONS.get(key)
         if entry:
-            return _status_future(entry, key, include_operations, pump_seconds)
+            return _status_future(entry, key, include_operations)
 
-    # 4. ...otherwise poll live DOCUMENT state - an inline/UI generation with no self-minted handle.
-    return _status_live("document", include_operations, pump_seconds)
+    # 4. ...otherwise read live DOCUMENT state - an inline/UI generation with no self-minted handle.
+    return _status_live("document", include_operations)
 
 
-def _status_future(entry: dict, key: str, include_operations: bool, pump_seconds: float) -> dict:
-    """The handle path: scope to a cam_generate-launched Future, pump it, report its live_states.
+def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
+    """The handle path: scope to a cam_generate-launched Future and report its progress.
 
     CRITICAL: holding the GenerateToolpathFuture (in _GENERATIONS) keeps the background work alive.
-    Each poll pumps the main-thread loop for a bounded burst then returns - never blocks for the full
-    multi-minute compute; progress accrues across successive polls. Stop early the moment it completes.
-    """
+
+    The per-op tallies (live_readiness) read the ACTIVE document - so they are only attached when
+    the generating document IS the active one. When another document is active, the Future's own
+    counters still report progress, the payload says whose generation this is, and completion falls
+    back to the Future alone (a wrong-document tally must never gate it)."""
     future = entry["future"]
-    budget = _clamp_budget(pump_seconds)
-    pumped = 0.0
-    if budget > 0 and not safe(lambda: future.isGenerationCompleted, False):
-        deadline = time.time() + budget
-        while time.time() < deadline:
-            adsk.doEvents()
-            time.sleep(0.1)
-            if safe(lambda: future.isGenerationCompleted, False):
-                break
-        pumped = round(time.time() - (deadline - budget), 2)
 
     total = safe(lambda: future.numberOfOperations, entry.get("total"))
     done_count = safe(lambda: future.numberOfCompleted, None)
     future_done = bool(safe(lambda: future.isGenerationCompleted, False))
     elapsed = round(time.time() - entry["started_at"], 1)
+
+    active_name, active_urn = _active_identity()
+    doc_urn, doc_name = entry.get("doc_urn"), entry.get("doc_name")
+    same_doc = (doc_urn and doc_urn == active_urn) or (not doc_urn and doc_name == active_name)
+
+    payload = {
+    "handle": key,
+    "target": entry["target"],
+    "generating_document": {"name": doc_name, "document_id": doc_urn},
+    "operations_total": total,
+    "operations_completed": done_count,
+    "elapsed_seconds": elapsed,
+    }
+
+    if not same_doc:
+        # Per-op tallies would describe the WRONG document - report Future progress only.
+        payload["completed"] = future_done
+        payload["note"] = (
+            (f"Generation complete ({done_count} of {total} operations)." if future_done else
+             "Still generating in the background - check again later.")
+            + f" The generating document '{doc_name}' is NOT the active document - per-op "
+            "tallies and warnings were skipped (they read the active document). "
+            f"doc_activate '{doc_name}' for the full read.")
+        if future_done:
+            _GENERATIONS.pop(key, None)
+        return ok(payload)
 
     # Health/readiness is NOT re-derived here - it is the _cam_common domain (the single CAM-health
     # source cam_get exposes). live_readiness() walks ops + setup/NC-program errors and returns the
@@ -257,22 +277,13 @@ def _status_future(entry: dict, key: str, include_operations: bool, pump_seconds
     live, _live_err = _cam_common.live_readiness()
     live = live or {}
 
-    # The Future flips isGenerationCompleted a poll BEFORE live op state settles (observed: completed
-    # while live_states still showed generating=3). Gate completed on BOTH agreeing - the Future is
-    # done AND nothing is still generating - so the caller never reads a premature done. An errored op
-    # is its own bucket (never counted as generating), so this can't hang on a fault.
+    # The Future flips isGenerationCompleted a beat BEFORE live op state settles (observed:
+    # completed while live_states still showed generating=3). Gate completed on BOTH agreeing - the
+    # Future is done AND nothing is still generating - so the caller never reads a premature done.
+    # An errored op is its own bucket (never counted as generating), so this can't hang on a fault.
     completed = future_done and (live.get("generating", 0) == 0)
-
-    payload = {
-    "handle": key,
-    "target": entry["target"],
-    "completed": completed,
-    "operations_total": total,
-    "operations_completed": done_count,
-    "live_states": live,           # valid/out_of_date/errored/generating/suppressed + setup/program errors
-    "elapsed_seconds": elapsed,
-    "pumped_seconds": pumped,
-    }
+    payload["completed"] = completed
+    payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed + setup/program errors
 
     if not completed:
         payload["note"] = _incomplete_note(live)
@@ -332,43 +343,27 @@ def _scope_state(cam, target: str):
     return tally, f"{kind} '{node.name or want}'", None
 
 
-def _status_live(target: str, include_operations: bool, pump_seconds: float) -> dict:
-    """The no-handle path: pump the main-thread loop the same bounded way, then report the live
-    generation state of the target (a setup/operation name) or the whole document - reading op state
-    DIRECTLY, so an op generated inline (cam_create_operation(generate=true) / the UI) is pollable
-    with no cam_generate handle. completed=true only when nothing in scope is still generating."""
+def _status_live(target: str, include_operations: bool) -> dict:
+    """The no-handle path: report the live generation state of the target (a setup/operation name)
+    or the whole document - reading op state DIRECTLY off the ACTIVE document, so an op generated
+    inline (cam_create_operation(generate=true) / the UI) is readable with no cam_generate handle.
+    completed=true only when nothing in scope is still generating."""
     cam, err = _cam_common.get_cam()
     if err:
         return error(err)
-    budget = _clamp_budget(pump_seconds)
 
     live, scope_label, serr = _scope_state(cam, target)
     if serr:
         return error(serr)
 
-    pumped = 0.0
-    if budget > 0 and (live or {}).get("generating", 0) > 0:
-        start = time.time()
-        deadline = start + budget
-        while time.time() < deadline:
-            adsk.doEvents()
-            time.sleep(0.1)
-            live, scope_label, serr = _scope_state(cam, target)
-            if serr:
-                return error(serr)
-            if (live or {}).get("generating", 0) == 0:   # nothing left generating in scope - stop early
-                break
-        pumped = round(time.time() - start, 2)
-
     live = live or {}
     completed = live.get("generating", 0) == 0
     payload = {
-    "handle": None,                # live poll: no self-minted handle needed
+    "handle": None,                # live read: no self-minted handle needed
     "target": scope_label,
     "completed": completed,
     "operations_total": live.get("total"),
     "live_states": live,           # valid/out_of_date/errored/generating/suppressed (+ setup/program for document)
-    "pumped_seconds": pumped,
     }
 
     if not completed:
@@ -387,8 +382,9 @@ def _status_live(target: str, include_operations: bool, pump_seconds: float) -> 
 # ---------------------------------------------------------------------------
 
 GENERATE_DESCRIPTION = (
-    "Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle (the compute is often "
-    "minutes; poll cam_get_status(handle), never block). 'target': omit/'document' for the whole "
+    "Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle; generation runs in "
+    "the background at its own pace (often minutes) - check cam_get_status(handle) at any cadence "
+    "until completed=true. 'target': omit/'document' for the whole "
     "document, or a setup/folder/operation NAME. 'skip_valid' (default true) regenerates only "
     "out-of-date ops; false forces all in scope. Be in the MANUFACTURE workspace first: "
     "out-of-date state isn't re-evaluated against changed geometry until Manufacture is active, so from "
@@ -409,37 +405,30 @@ generate_item = Item.create_tool_item(tool=generate_tool, write="write", handler
                                        run_on_main_thread=True)
 
 STATUS_DESCRIPTION = (
-    "Poll toolpath generation AND nudge it forward. 'handle' is OPTIONAL: pass the cam_generate id (or "
-    "'latest') to scope to that launched generation; OR omit it and pass 'target' (a setup/operation NAME, "
-    "or nothing for the whole document) to poll a generation launched INLINE - cam_create_operation("
-    "generate=true), cam_select_geometry, or the Fusion UI - with NO cam_generate handle. Each poll pumps "
-    "Fusion's main-thread event loop for a bounded burst ('pump_seconds', default 1.5s, max 10s); "
-    "generation only advances while pumping, so poll repeatedly until completed=true (nothing in "
-    "scope is still generating). live_states tallies valid / out_of_date / ERRORED / generating, "
-    "plus setups_errored / programs_errored for the document scope: an ERRORED op (parameter/geometry fault) "
-    "will NEVER finish, and a faulted SETUP or NC PROGRAM blocks the whole job from posting - the note flags "
-    "these (with one sample each) so you stop waiting, and points at cam_get for the full error text + "
-    "readiness verdict. Bounded, never blocks for the full compute."
+    "Read toolpath generation progress - generation runs in the background on its own once "
+    "launched; this is a plain status read, so check at whatever cadence you need the information. "
+    "'handle' is OPTIONAL: pass the cam_generate id (or 'latest') to scope to that launched "
+    "generation; OR omit it and pass 'target' (a setup/operation NAME, or nothing for the whole "
+    "document) to read a generation launched INLINE - cam_create_operation(generate=true), "
+    "cam_select_geometry, or the Fusion UI - with NO cam_generate handle. live_states tallies "
+    "valid / out_of_date / ERRORED / generating, plus setups_errored / programs_errored for the "
+    "document scope: an ERRORED op (parameter/geometry fault) will NEVER finish, and a faulted "
+    "SETUP or NC PROGRAM blocks the whole job from posting - the note flags these (with one sample "
+    "each) so you stop waiting, and points at cam_get for the full error text + readiness verdict. "
+    "Per-op tallies read the ACTIVE document; a handle whose generating document is not active "
+    "still reports the Future's own progress and says so."
 )
 
 status_tool = (
     Tool.create_simple(name="cam_get_status", description=STATUS_DESCRIPTION)
     .add_input_property("handle", {"type": "string",
-            "description": "Optional generation handle from cam_generate, or 'latest'. Omit to poll live state (see target)."})
+            "description": "Optional generation handle from cam_generate, or 'latest'. Omit to read live state (see target)."})
     .add_input_property("target", {"type": "string",
-            "description": "Poll an inline/UI generation with no handle: a setup/operation NAME, or omit (or 'document') for the whole document."})
+            "description": "Read an inline/UI generation with no handle: a setup/operation NAME, or omit (or 'document') for the whole document."})
     .add_input_property("include_operations", {"type": "boolean",
             "description": "When complete, include per-operation warnings/errors + empty toolpaths (default true)."})
-    .add_input_property("pump_seconds", {"type": "number",
-            "description": "How long this poll nudges generation forward (default 1.5s, max 10s). Larger = more progress per poll but longer call."})
     .strict_schema()
 )
-# write="read" is DELIBERATE despite the bounded pump. cam_get_status does not mutate the DESIGN: it
-# reports a generation's progress. The pump (adsk.doEvents() + a short capped sleep, see status_handler)
-# only advances an ALREADY-launched future on the main-thread loop - the mutation was authorized by the
-# separate write="write" cam_generate call. So from a permission/gating standpoint this is a read of
-# generation state, not a new write. The fire-and-pump split is the deliberate exception to the
-# no-sleep/no-polling rule; the alternative is blocking an MCP call for the full multi-minute compute.
 status_item = Item.create_tool_item(tool=status_tool, write="read", handler=status_handler,
                                     run_on_main_thread=True)
 

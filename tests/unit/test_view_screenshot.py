@@ -5,6 +5,10 @@ visibility bookkeeping: find the named occurrence, hide the others, return a res
 them back on. That's exactly the bug-prone part (matching + restore), so it gets unit coverage.
 """
 
+from types import SimpleNamespace
+
+import pytest
+
 from conftest import load_tool
 
 gs = load_tool("view_screenshot")
@@ -116,6 +120,60 @@ class TestActiveComponentNote:
 # ── _keep_visible: fit_to isolate keeps the target + its ancestors + descendants visible, matched ──
 # ── by fullPathName (NOT Python `is`, which never matches across fresh occurrence proxies and would ──
 # ── hide the target itself -> a BLANK image). Nesting boundary is '+' per level. ──────────────────
+
+class TestCaptureSwitchPassThrough:
+    """transparent_background/anti_aliased reach the ONE shared capture seam unchanged, and stay
+    absent (None) when the caller omits them - the plain-overload default the seam keys on."""
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=SimpleNamespace()))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        calls = []
+
+        def fake_capture(viewport, width, height, prefix="fe_mcp_shot",
+                         transparent_background=None, anti_aliased=None):
+            calls.append({"width": width, "height": height,
+                          "transparent_background": transparent_background,
+                          "anti_aliased": anti_aliased})
+            return "B64DATA", None
+
+        monkeypatch.setattr(gs._view_common, "capture_png_b64", fake_capture)
+        return calls
+
+    def test_omitting_both_leaves_the_capture_on_the_plain_path(self, rig):
+        result = gs.handler()
+        assert result["isError"] is False
+        assert rig == [{"width": 800, "height": 600,
+                        "transparent_background": None, "anti_aliased": None}]
+
+    def test_transparent_background_reaches_the_capture(self, rig):
+        gs.handler(transparent_background=True)
+        assert rig[0]["transparent_background"] is True
+        assert rig[0]["anti_aliased"] is None       # the switch not asked for stays absent
+
+    def test_anti_aliased_false_is_forwarded_not_dropped(self, rig):
+        # False must survive as False, not collapse to "unset" - otherwise an explicit
+        # anti_aliased=False silently renders anti-aliased.
+        gs.handler(anti_aliased=False)
+        assert rig[0]["anti_aliased"] is False
+        assert rig[0]["transparent_background"] is None
+
+    def test_both_switches_forwarded_together(self, rig):
+        gs.handler(transparent_background=False, anti_aliased=True)
+        assert rig[0]["transparent_background"] is False and rig[0]["anti_aliased"] is True
+
+    def test_image_content_block_still_returned(self, rig):
+        result = gs.handler(transparent_background=True)
+        assert [c["type"] for c in result["content"]] == ["image"]
+        assert result["content"][0]["data"] == "B64DATA"
+
+    def test_capture_failure_is_an_error(self, rig, monkeypatch):
+        monkeypatch.setattr(gs._view_common, "capture_png_b64",
+                            lambda *a, **k: (None, "Viewport capture failed."))
+        result = gs.handler(transparent_background=True)
+        assert result["isError"] is True and "capture failed" in result["message"]
+
 
 class TestKeepVisible:
     def test_target_itself_kept(self):

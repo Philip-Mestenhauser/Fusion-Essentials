@@ -6,7 +6,11 @@ desync.
 """
 
 import math
+from types import SimpleNamespace
 
+import pytest
+
+import live_api_facts
 from conftest import load_tool
 
 vc = load_tool("_view_common")
@@ -110,6 +114,14 @@ class _FakeCam:
         self.cameraType = "initial"
 
 
+def _fake_options(filename):
+    """A SaveImageFileOptions stand-in at the initial values a freshly created options object
+    carries - width/height 0, isBackgroundTransparent false, isAntiAliased true - measured live
+    as BEHAVIOR['save_image_options_defaults'], which the tests below gate on."""
+    return SimpleNamespace(filename=filename, width=0, height=0,
+                           isBackgroundTransparent=False, isAntiAliased=True)
+
+
 class _FakeViewport:
     def __init__(self, cam=None, save_ok=True, png=b"PNGBYTES"):
         self._cam = cam or _FakeCam()
@@ -118,6 +130,7 @@ class _FakeViewport:
         self.calls = []
         self._save_ok = save_ok
         self._png = png
+        self.options_used = None
 
     @property
     def camera(self):
@@ -140,6 +153,24 @@ class _FakeViewport:
         with open(path, "wb") as f:
             f.write(self._png)
         return True
+
+    def saveAsImageFileWithOptions(self, options):
+        self.calls.append("save_with_options")
+        self.options_used = options
+        if not self._save_ok:
+            return False
+        with open(options.filename, "wb") as f:
+            f.write(self._png)
+        return True
+
+
+@pytest.fixture
+def options_kind(monkeypatch):
+    """SaveImageFileOptions.create -> the local stand-in, so the options capture path runs on real
+    attribute writes instead of a Mock that swallows every assignment."""
+    import adsk.core
+    monkeypatch.setattr(adsk.core, "SaveImageFileOptions",
+                        SimpleNamespace(create=_fake_options), raising=False)
 
 
 class TestApplyNamedView:
@@ -185,3 +216,71 @@ class TestCapturePngB64:
         vp = _FakeViewport(save_ok=False)
         b64, err = vc.capture_png_b64(vp, 100, 80)
         assert b64 is None and "capture failed" in err.lower()
+        assert "saveAsImageFile returned false" in err       # the overload that actually answered
+
+    def test_empty_file_is_an_error_not_an_empty_base64_ok(self):
+        # mkstemp already created the file, so file-exists proves nothing - a success that wrote no
+        # bytes must not come back as an ok with an empty image.
+        vp = _FakeViewport(png=b"")
+        b64, err = vc.capture_png_b64(vp, 100, 80)
+        assert b64 is None and "0-byte" in err
+
+
+class TestCaptureOptionsPath:
+    """transparent_background/anti_aliased route the grab through SaveImageFileOptions +
+    saveAsImageFileWithOptions; with neither given the plain overload stays untouched."""
+
+    def test_neither_switch_uses_the_plain_overload(self, options_kind):
+        vp = _FakeViewport()
+        b64, err = vc.capture_png_b64(vp, 100, 80)
+        assert err is None
+        assert "save" in vp.calls and "save_with_options" not in vp.calls
+        assert vp.options_used is None
+
+    def test_transparent_background_switches_to_the_options_overload(self, options_kind):
+        vp = _FakeViewport()
+        b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
+        assert err is None
+        assert "save_with_options" in vp.calls and "save" not in vp.calls
+        assert vp.options_used.isBackgroundTransparent is True
+
+    def test_anti_aliased_alone_switches_to_the_options_overload(self, options_kind):
+        vp = _FakeViewport()
+        vc.capture_png_b64(vp, 100, 80, anti_aliased=False)
+        assert vp.options_used.isAntiAliased is False
+        # the switch NOT given is left at the options object's own measured initial value
+        assert live_api_facts.BEHAVIOR["save_image_options_defaults"]
+        assert vp.options_used.isBackgroundTransparent is False
+
+    def test_false_is_a_request_not_an_absence(self, options_kind):
+        # transparent_background=False must still take the options path (False != unset), otherwise
+        # an explicit "opaque, anti-aliased" request silently falls back to the plain capture.
+        vp = _FakeViewport()
+        vc.capture_png_b64(vp, 100, 80, transparent_background=False)
+        assert "save_with_options" in vp.calls
+        assert vp.options_used.isBackgroundTransparent is False
+
+    def test_requested_size_is_assigned_onto_the_options(self, options_kind):
+        # a fresh options object starts at width/height 0
+        # (BEHAVIOR['save_image_options_defaults']), so the requested pixel size is only
+        # honoured if the capture assigns it.
+        assert live_api_facts.BEHAVIOR["save_image_options_defaults"]
+        vp = _FakeViewport()
+        vc.capture_png_b64(vp, 1024, 768, anti_aliased=True)
+        assert (vp.options_used.width, vp.options_used.height) == (1024, 768)
+
+    def test_options_path_still_refreshes_first(self, options_kind):
+        vp = _FakeViewport()
+        vc.capture_png_b64(vp, 100, 80, transparent_background=True)
+        assert vp.calls.index("refresh") < vp.calls.index("save_with_options")
+
+    def test_options_path_returns_the_png_as_base64(self, options_kind):
+        import base64
+        vp = _FakeViewport(png=b"TRANSPARENTPNG")
+        b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
+        assert err is None and base64.b64decode(b64) == b"TRANSPARENTPNG"
+
+    def test_options_failure_names_the_options_overload(self, options_kind):
+        vp = _FakeViewport(save_ok=False)
+        b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
+        assert b64 is None and "saveAsImageFileWithOptions returned false" in err

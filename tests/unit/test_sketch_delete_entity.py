@@ -49,16 +49,22 @@ class _RaisesOnDelete(FakeEntity):
 
 
 class FakeSketchCurves:
-    def __init__(self, lines, arcs, circles):
+    def __init__(self, lines, arcs, circles, ellipses=(), splines=(), cv_splines=(), fixed_splines=()):
         self.sketchLines = _DelColl(lines)
         self.sketchArcs = _DelColl(arcs)
         self.sketchCircles = _DelColl(circles)
+        self.sketchEllipses = _DelColl(ellipses)
+        self.sketchFittedSplines = _DelColl(splines)
+        self.sketchControlPointSplines = _DelColl(cv_splines)
+        self.sketchFixedSplines = _DelColl(fixed_splines)
 
 
 class FakeSketch:
-    def __init__(self, name, lines=(), arcs=(), circles=(), points=(), constraints=()):
+    def __init__(self, name, lines=(), arcs=(), circles=(), points=(), constraints=(), ellipses=(),
+                splines=(), cv_splines=(), fixed_splines=()):
         self.name = name
-        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles))
+        self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles), list(ellipses),
+                                             list(splines), list(cv_splines), list(fixed_splines))
         self.sketchPoints = _DelColl(list(points))
         self.geometricConstraints = _DelColl(list(constraints))
 
@@ -111,6 +117,16 @@ def _sketch():
                       constraints=[FakeEntity("K0"), FakeEntity("K1"), FakeEntity("K2")])
 
 
+def _full_sketch():
+    """Also holds an ellipse and one of each spline kind, for P0.1's new-kind delete coverage."""
+    return FakeSketch("S",
+                      lines=[FakeEntity("L0")],
+                      ellipses=[FakeEntity("E0")],
+                      splines=[FakeEntity("SP0"), FakeEntity("SP1")],
+                      cv_splines=[FakeEntity("CV0")],
+                      fixed_splines=[FakeEntity("FX0")])
+
+
 # ── curve/point deletion ─────────────────────────────────────────────────────
 
 class TestDeleteCurve:
@@ -151,6 +167,47 @@ class TestDeleteCurve:
         assert res["isError"] is True and "consumed by a dimension" in res["message"]
 
 
+# ── P0.1: ellipse/spline/cv_spline/fixed_spline delete through the shared resolver ────────────
+
+class TestDeleteNewKinds:
+    def test_delete_ellipse(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="ellipse:0"))
+        assert out["deleted"] is True
+        assert out["ellipses_before"] == 1 and out["ellipses_after"] == 0
+
+    def test_delete_fitted_spline(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="spline:0"))
+        assert out["deleted"] is True
+        assert out["splines_before"] == 2 and out["splines_after"] == 1
+        assert [e.name for e in s.sketchCurves.sketchFittedSplines._i] == ["SP1"]
+
+    def test_delete_control_point_spline(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="cv_spline:0"))
+        assert out["deleted"] is True
+        assert out["cv_splines_before"] == 1 and out["cv_splines_after"] == 0
+
+    def test_delete_fixed_spline(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="fixed_spline:0"))
+        assert out["deleted"] is True
+        assert out["fixed_splines_before"] == 1 and out["fixed_splines_after"] == 0
+
+    def test_new_kind_out_of_range_errors_like_the_old_kinds(self):
+        s = _full_sketch(); _install(s)
+        res = sd.handler(sketch_name="S", target="cv_spline:9")
+        assert res["isError"] is True and "resolve" in res["message"].lower()
+
+    def test_new_kind_delete_that_removed_nothing_is_an_error(self):
+        s = FakeSketch("S", splines=[FakeEntity("SP0", delete_ok=False)])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="spline:0")
+        assert res["isError"] is True and "did not take" in res["message"].lower()
+        assert s.sketchCurves.sketchFittedSplines.count == 1     # still there
+
+
 # ── constraint deletion (the F39 recovery path) ──────────────────────────────
 
 class TestDeleteConstraint:
@@ -187,9 +244,17 @@ class TestGuards:
         assert res["isError"] is True and "<type>:<index>" in res["message"]
 
     def test_unknown_type(self):
+        # a token that is not one of _common.ENTITY_REF_KINDS (nor 'constraint') at all
+        s = _sketch(); _install(s)
+        res = sd.handler(sketch_name="S", target="helix:0")
+        assert res["isError"] is True and "helix" in res["message"].lower()
+
+    def test_recognized_kind_absent_from_this_sketch_is_a_clean_resolve_error(self):
+        # 'spline' IS a valid ENTITY_REF_KINDS type - this sketch (via _sketch(), no splines) just
+        # has none - same miss behavior as an out-of-range line/circle index, not "unknown type".
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="spline:0")
-        assert res["isError"] is True and "spline" in res["message"].lower()
+        assert res["isError"] is True and "resolve" in res["message"].lower()
 
     def test_noninteger_index(self):
         s = _sketch(); _install(s)

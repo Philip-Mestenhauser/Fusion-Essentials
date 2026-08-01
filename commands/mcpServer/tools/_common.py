@@ -101,6 +101,27 @@ def all_components(d):
     return out or [root]
 
 
+def all_meshes(d):
+    """Every MeshBody in the design, as (component, mesh) pairs - walks EVERY component's meshBodies
+    (root + every sub-component, via ``all_components``), regardless of which component is ACTIVE.
+
+    LIVE-VERIFIED: an Occurrence proxy exposes ``bRepBodies`` but NOT ``meshBodies`` - the
+    occurrence-based walk ``_inputs._collect_bodies_by_name`` uses to find a BRep body anywhere in the
+    design silently finds NOTHING for a mesh living outside the active/root component. This is the ONE
+    design-wide mesh traversal both mesh name-resolution (``_inputs.MeshBodyRef``) and a post-delete
+    survivor check (``mesh_delete``) build their name-match leaf op on top of, so a mesh in a child
+    component resolves the same way it survivor-checks."""
+    out = []
+    for comp in all_components(d):
+        coll = safe(lambda c=comp: c.meshBodies)
+        n = safe(lambda c=coll: c.count, 0) if coll else 0
+        for i in range(n or 0):
+            m = safe(lambda c=coll, i=i: c.item(i))
+            if m is not None:
+                out.append((comp, m))
+    return out
+
+
 def design_wide_counts(d):
     """(bodies, sketches) summed across every component (root + sub-components) via ``all_components``.
     ``bRepBodies``/``sketches`` are per-COMPONENT collections: reading them off the root alone reports
@@ -323,9 +344,44 @@ def target_sketch(comp, name):
     return (coll.item(n - 1) if n else None), nm
 
 
+# The '<type>:<index>' ref kinds resolve_entity_ref addresses - the single source of truth for
+# "which kinds exist"; sketch tools defer to this tuple, never a local copy that can drift.
+# spline = fitted, cv_spline = control-point, fixed_spline = fixed/NURBS-referenced: three distinct
+# SketchCurves collections, each with its own creation-order index space.
+ENTITY_REF_KINDS = ("line", "arc", "circle", "ellipse", "point", "spline", "cv_spline", "fixed_spline")
+
+# kind -> the SketchCurves sub-collection attribute it indexes ('point' is handled separately below,
+# it lives on the sketch itself, not under sketchCurves).
+_ENTITY_REF_CURVE_ATTR = {
+    "line": "sketchLines",
+    "arc": "sketchArcs",
+    "circle": "sketchCircles",
+    "ellipse": "sketchEllipses",
+    "spline": "sketchFittedSplines",
+    "cv_spline": "sketchControlPointSplines",
+    "fixed_spline": "sketchFixedSplines",
+}
+
+
+def entity_collection(sketch, kind):
+    """The raw collection a '<type>:<index>' ref of this ``kind`` (one of ENTITY_REF_KINDS) indexes,
+    or None if the kind is unknown or the collection is unavailable. The one place that knows which
+    SketchCurves sub-collection (or sketchPoints) each ref token names - reuse this instead of
+    re-deriving the mapping (e.g. for a before/after count read-back)."""
+    if kind == "point":
+        return safe(lambda: sketch.sketchPoints)
+    attr = _ENTITY_REF_CURVE_ATTR.get(kind)
+    if attr is None:
+        return None
+    curves = safe(lambda: sketch.sketchCurves)
+    if curves is None:
+        return None
+    return safe(lambda: getattr(curves, attr))
+
+
 def resolve_entity_ref(sketch, ref):
-    """A sketch entity from a '<type>:<index>' ref (type = line/arc/circle/point), indexing that
-    curve/point collection in creation order. Returns the entity, or None."""
+    """A sketch entity from a '<type>:<index>' ref, indexing that curve/point collection in creation
+    order. type is one of ENTITY_REF_KINDS. Returns the entity, or None."""
     s = (ref or "").strip().lower()
     if ":" not in s:
         return None
@@ -334,16 +390,9 @@ def resolve_entity_ref(sketch, ref):
         i = int(idx)
     except Exception:
         return None
-    curves = safe(lambda: sketch.sketchCurves)
-    coll = None
-    if kind == "line":
-        coll = safe(lambda: curves.sketchLines)
-    elif kind == "arc":
-        coll = safe(lambda: curves.sketchArcs)
-    elif kind == "circle":
-        coll = safe(lambda: curves.sketchCircles)
-    elif kind == "point":
-        coll = safe(lambda: sketch.sketchPoints)
+    if kind not in ENTITY_REF_KINDS:
+        return None
+    coll = entity_collection(sketch, kind)
     if coll is None:
         return None
     if i < 0 or i >= safe(lambda: coll.count, 0):

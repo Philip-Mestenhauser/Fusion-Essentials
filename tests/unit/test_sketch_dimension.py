@@ -56,6 +56,15 @@ class FakeCircle:
     centerSketchPoint = "center_sp"   # no startSketchPoint - a circle has no endpoints
 
 
+class FakeEllipse:
+    centerSketchPoint = "ellipse_center_sp"   # anchors like a circle
+
+
+class FakeFittedSpline:
+    startSketchPoint = "spline_sp"
+    endSketchPoint = "spline_ep"     # an open spline has endpoints, like a line
+
+
 class FakeColl:
     def __init__(self, items):
         self._i = items
@@ -72,8 +81,13 @@ class FakeSketch:
         self.sketchDimensions = FakeDims()
         lines = FakeColl([FakeLine(), FakeLine()])
         circles = FakeColl([FakeCircle()])
+        ellipses = FakeColl([FakeEllipse()])
+        splines = FakeColl([FakeFittedSpline()])
         self.sketchCurves = type("C", (), {"sketchLines": lines, "sketchArcs": FakeColl([]),
-                                           "sketchCircles": circles})()
+                                           "sketchCircles": circles, "sketchEllipses": ellipses,
+                                           "sketchFittedSplines": splines,
+                                           "sketchControlPointSplines": FakeColl([]),
+                                           "sketchFixedSplines": FakeColl([])})()
         self.sketchPoints = FakeColl([])
 
 
@@ -146,6 +160,26 @@ class TestDispatch:
         assert kind == "distance"
         assert p1 == "center_sp"
         assert p2 == "sp"
+
+    def test_distance_to_an_ellipse_anchors_at_its_center(self):
+        # P0.1: 'ellipse:<index>' is now a resolvable ref - it completes to its center point exactly
+        # like a circle.
+        s = _install()
+        _payload(sd.handler(dim_type="distance", entity_one="ellipse:0", entity_two="line:0"))
+        kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
+        assert kind == "distance"
+        assert p1 == "ellipse_center_sp"
+        assert p2 == "sp"
+
+    def test_lone_fitted_spline_dimensions_its_own_length(self):
+        # P0.1: 'spline:<index>' is now resolvable - an open fitted spline has start/end sketch
+        # points like a line, so a lone spline dimensions its own length the same way a lone line does.
+        s = _install()
+        out = _payload(sd.handler(dim_type="distance", entity_one="spline:0"))
+        kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
+        assert kind == "distance"
+        assert (p1, p2) == ("spline_sp", "spline_ep")
+        assert out["dimensioned"] is True
 
 
 # ── _radial_text_point: the offset-from-center math (the module's key bug-fix) ──

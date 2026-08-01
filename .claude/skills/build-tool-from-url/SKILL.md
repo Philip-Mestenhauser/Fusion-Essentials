@@ -90,8 +90,8 @@ gate catches and reports rather than silently adding a wrong tool.
 ## Phase 1 - Discover the live `from_type` vocabulary (READ)
 
 `cam_edit_tools` clones a sample tool of a requested geometry family (`from_type`) from Fusion's
-bundled sample libraries; there is no fixed enum, and the set is whatever `Milling Tools (Metric)`,
-`Hole Making Tools (Metric)`, and `Cutting Tools (Metric)` currently contain. Read it directly:
+bundled sample libraries; there is no fixed enum, and the set is whatever those libraries currently
+contain. Read it directly:
 
 `cam_edit_tools(action='list_types')`
 

@@ -102,7 +102,7 @@ def registered_tools():
     return sorted(t["name"] for t in out["result"]["tools"])
 
 
-# ── the DAG ──────────────────────────────────────────────────────────────────
+# â”€â”€ the DAG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ctx keys written by steps (via "save") and read by later args-callables.
 
 def _ctx_get(ctx, key, what):
@@ -150,7 +150,7 @@ def _watch(occurrence):
             "ok", None)
 
 
-# ── the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document ──────
+# â”€â”€ the build, as ACTS: one recognizable gyroscope, end to end, in one unsaved document â”€â”€â”€â”€â”€â”€
 # The sweep is a STORY, not a scratch pile: a three-axis gyroscope is cast (skeleton + parameters),
 # turned solid (rings, rotor, frame, crank), jointed and DRIVEN on every axis, detailed, machined,
 # resized parametrically, and discarded. Every covered tool's receipt step is woven into that story
@@ -176,6 +176,16 @@ _OVERTURE = [
     ("sys_get_api_doc", {"searchPattern": "RevolveFeatures", "max_results": 3}, "ok", None),
     ("view_list_workspaces", {}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
+    # camera projection: a perspective orient carries the angle through to the camera and reads it
+    # back; the follow-up orient returns the projection to orthographic for the rest of the story.
+    ("view_set", {"action": "orient", "orientation": "iso-top-right", "projection": "perspective",
+                  "perspective_angle_deg": 45},
+     lambda p: p.get("applied", {}).get("perspective_angle_deg") == 45.0, None),
+    ("view_set", {"action": "orient", "orientation": "iso-top-right", "projection": "orthographic"},
+     "ok", None),
+    # capture options: the transparent + anti-aliased overload at an explicit size produces an image.
+    ("view_screenshot", {"width": 320, "height": 240, "transparent_background": True,
+                         "anti_aliased": True}, "ok", None),
     ("sys_get_selection", {}, "refused", None),   # nothing picked yet - the expected empty-selection refusal
 ]
 
@@ -471,6 +481,38 @@ _DETAILS = [
     ("design_delete_feature", {"feature": "WartPlane"}, "ok", None),
     ("model_create_component", {"name": "ScratchOcc", "activate": False}, "ok", None),
     ("design_delete_occurrence", {"occurrence": "ScratchOcc:1"}, "ok", None),
+    # scale + offset-face beats on a scratch block: push a face and read the volume move, then the
+    # scale contract - uniform f^3, per-axis x*y*z, the three refusal shapes (unresolvable /
+    # length-carrying / angle-carrying expression), a bare unitless parameter accepted, and a
+    # vertex-anchored scale.
+    ("model_create_component", {"name": "ScaleBlock", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "ScaleS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 470, "y1": 0, "x2": 490, "y2": 20,
+                             "sketch_name": "ScaleS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ScaleS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("find_geometry", {"target": "ScaleBlock", "kind": "planar_face", "nearest_to": [480, 10, 20],
+                       "max_results": 1}, "ok", _fg("scale_top")),
+    ("model_offset_face", lambda c: {"faces": [_ctx_get(c, "scale_top", "block top")],
+                                     "distance": 2}, "ok", None),
+    ("param_add", {"name": "ShrinkProbe", "expression": "0.5", "unit": ""}, "ok", None),
+    ("param_add", {"name": "TiltProbe", "expression": "30 deg", "unit": "deg"}, "ok", None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "factor": 2},
+     lambda p: p.get("scale_check") == "volume_ratio"
+     and abs(p.get("volume_ratio", 0) - 8.0) < 1e-6, None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "x_factor": 3, "y_factor": 2, "z_factor": 1},
+     lambda p: abs(p.get("expected_volume_ratio", 0) - 6.0) < 1e-6, None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "factor": "NoSuchParamXyz * 2"}, "refused", None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "factor": "5 mm"}, "refused", None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "factor": "TiltProbe"}, "refused", None),
+    ("model_scale", {"bodies": ["ScaleBlock"], "factor": "ShrinkProbe"},
+     lambda p: abs(p.get("expected_volume_ratio", 0) - 0.125) < 1e-6, None),
+    ("find_geometry", {"target": "ScaleBlock", "kind": "vertex", "max_results": 1}, "ok",
+     _fg("scale_vtx")),
+    ("model_scale", lambda c: {"bodies": ["ScaleBlock"], "factor": 1.5,
+                               "anchor": _ctx_get(c, "scale_vtx", "block vertex")},
+     lambda p: abs(p.get("volume_ratio", 0) - 3.375) < 1e-6, None),
+    ("param_delete", {"name": "ShrinkProbe"}, "ok", None),
+    ("param_delete", {"name": "TiltProbe"}, "ok", None),
     # Section view: cut through the gimbal center, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
@@ -515,7 +557,7 @@ _FINALE = [
     ("doc_close", {"save_changes": False}, "ok", None),
 ]
 
-# ── the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) ─────
+# â”€â”€ the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) â”€â”€â”€â”€â”€
 # When an act's precondition read fails (an upstream act could not build the geometry it consumes),
 # the act runs one of these instead, so its tools are still covered - each row marked "(fallback
 # fixture)". These are the minimal self-contained scratch fixtures the sweep has always used.
@@ -637,7 +679,7 @@ _RESIZE_FB = [
     ("param_delete", {"name": "FbParam"}, "ok", None),
 ]
 
-# ── the CAMEO acts: surface-prep, mesh, and CAM families ride scratch fixtures in the SAME doc ──
+# â”€â”€ the CAMEO acts: surface-prep, mesh, and CAM families ride scratch fixtures in the SAME doc â”€â”€
 # These families have no natural home on the mechanism itself, so the spec places them as cameos.
 
 # ACT 5: MACHINING PREP - surfaces, sheet ops, split/stitch/arrange/base-feature, holder read.
@@ -760,12 +802,18 @@ _MESH = [
     ("mesh_remesh", {"mesh": "MC", "density": 1}, "ok", None),
     ("mesh_plane_cut", {"mesh": "MD", "plane": "MshMid", "cut_type": "trim"}, "ok", None),
     ("mesh_combine", {"target": "ME", "tools": ["MF"], "operation": "join"}, "ok", None),
+    # a pristine scratch mesh deleted with the survivor check: the payload's own claim is the
+    # re-scan. A mesh another feature already transformed (e.g. the plane-cut MD) carries a
+    # different lineage; this beat exercises the plain-delete contract.
+    ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MDEL",
+                                "quality": "low"}, "ok", None),
+    ("mesh_delete", {"mesh": "MDEL"}, "ok", None),
     ("mesh_export", {"target": "MA", "file_path": EXPORT_DIR + "/eval_mesh", "format": "stl"}, "ok", None),
     ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns"}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
-# ── the SPATIAL value-checks: the fusion-spatial add-in's raw TCP protocol (stdlib only) ────────
+# â”€â”€ the SPATIAL value-checks: the fusion-spatial add-in's raw TCP protocol (stdlib only) â”€â”€â”€â”€â”€â”€â”€â”€
 # A closed port 8767 SKIPS a spatial phase (one skipped row, never a FAIL); a check that returns
 # false is a FAIL row - it means the STORY's geometry is wrong, which blocks the receipt.
 SPATIAL_PORT = 8767
@@ -1022,6 +1070,35 @@ _CAM_STORY = [
                         "parameters": {"tool_number": "1"}}, "ok", None),
     ("cam_edit_tools", {"action": "edit", "scope": "document", "tool": 1,
                         "parameters": {"tool_number": "2"}}, "ok", None),
+    # preset beats: the from_type vocabulary spans all five sample libraries (center drill lives
+    # only in Hole Making Tools (Inch)); presets round-trip with read-back, unit, and refusal gates.
+    ("cam_edit_tools", {"action": "list_types", "scope": "document"},
+     lambda p: "center drill" in p["types"] and "turning general" in p["types"], None),
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": "turning general"},
+                                      {"from_type": "center drill"}]}, "ok", None),
+    # a turning-general preset carries surface speed, not spindle speed - the refusal names what
+    # the preset actually has instead of applying nothing.
+    ("cam_edit_tools", {"action": "add_preset", "scope": "document", "tool": 2,
+                        "preset": {"name": "SweepTurn", "spindle_speed": 400}}, "refused", None),
+    ("cam_edit_tools", {"action": "add_preset", "scope": "document", "tool": 0,
+                        "preset": {"name": "SweepMM", "feed": 900, "spindle_speed": 12000}},
+     lambda p: "SweepMM" in p["presets"], None),
+    # a units-carrying expression is stored verbatim and evaluated (35in/min -> 889 mm/min).
+    ("cam_edit_tools", {"action": "add_preset", "scope": "document", "tool": 0,
+                        "preset": {"name": "Sweep35", "feed": "35in/min"}},
+     lambda p: "Sweep35" in p["presets"], None),
+    # a numeric-leading expression that fails evaluation is refused and rolled back, never a
+    # silent zero.
+    ("cam_edit_tools", {"action": "add_preset", "scope": "document", "tool": 0,
+                        "preset": {"name": "SweepBad", "spindle_speed": "900 * NoSuchParamXyz"}},
+     "refused", None),
+    ("cam_edit_tools", {"action": "remove_preset", "scope": "document", "tool": 0,
+                        "preset": {"name": "SweepMM"}},
+     lambda p: "SweepMM" not in p["presets"] and isinstance(p.get("removed_index"), int), None),
+    ("cam_edit_tools", {"action": "remove_preset", "scope": "document", "tool": 0,
+                        "preset": {"name": "Sweep35"}},
+     lambda p: "Sweep35" not in p["presets"], None),
     ("cam_create_setup", {"models": ["Carrier"], "name": "DemoSetup"}, "ok", None),
     # the REAL stock solid and the REAL fixture bodies - the shop-template selection shape.
     ("cam_edit_setup", {"setup": "DemoSetup", "stock": ["STOCK"],
@@ -1077,6 +1154,12 @@ _CAM_STORY = [
     ("cam_edit_folders", {"action": "move", "setup": "DemoSetup", "folder": "Drilling",
                           "operations": ["Drill1"]}, "ok", None),
     ("cam_show_toolpath", {"action": "list"}, "ok", None),
+    # the validity verdict BEFORE generation: false, with the not-yet-generated ops named; a scoped
+    # check resolves through the shared resolver and a bogus scope is refused listing what exists.
+    ("cam_inspect_toolpaths", {},
+     lambda p: p["passed"] is False and len(p["measured"]["not_valid"]) > 0, None),
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup"}, lambda p: p["passed"] is False, None),
+    ("cam_inspect_toolpaths", {"scope": "NoSuchScopeXyz"}, "refused", None),
     ("cam_generate", {"target": "DemoSetup", "skip_valid": False}, "ok", None),
     # generation completion is gated by the bounded poll run() performs after this act (an
     # errored op or an EMPTY toolpath - a 'valid' op that cuts nothing - fails the run).
@@ -1085,6 +1168,10 @@ _CAM_STORY = [
 # ACT 10b: CAM read-back + deliverables on the generated job - toolpath shown, NC posted,
 # template saved and re-applied.
 _CAM_DELIVER = [
+    # the validity verdict flips true once generation completed (the act boundary's poll certified
+    # it); the not-valid breakdown is empty.
+    ("cam_inspect_toolpaths", {"scope": "DemoSetup"},
+     lambda p: p["passed"] is True and p["measured"]["not_valid"] == [], None),
     ("cam_get", {"include": ["operations"], "setup": "DemoSetup"}, "ok", None),
     ("cam_show_toolpath", {"action": "isolate", "operation": "Face1", "fit": True}, "ok", None),
     ("view_screenshot", {"view": "iso-top-right", "width": 500, "height": 400}, "ok", None),
@@ -1104,10 +1191,14 @@ _CAM_DELIVER = [
 
 
 def poll_generation(rows, notes, setup, max_polls=40):
-    """Pump cam_get_status until completed (bounded). An errored op, an EMPTY toolpath (a 'valid'
-    op that cuts nothing - the silent version of wrong), or an exhausted budget FAILs."""
-    for _ in range(max_polls):
-        is_error, payload = call("cam_get_status", {"target": setup, "pump_seconds": 10})
+    """Read cam_get_status until completed (bounded). Generation free-runs in the background and a
+    status read returns immediately, so real wall-clock sits between reads. An errored op, an EMPTY
+    toolpath (a 'valid' op that cuts nothing - the silent version of wrong), or an exhausted budget
+    FAILs."""
+    for i in range(max_polls):
+        if i:
+            time.sleep(5)
+        is_error, payload = call("cam_get_status", {"target": setup})
         if is_error:
             rows.append(("cam_get_status", "FAIL", str(payload)[:160]))
             return
@@ -1170,7 +1261,7 @@ _CAM = (
         ("cam_compare_operations", {"operation_a": "Face1", "operation_b": "Adaptive1"}, "ok", None),
         ("cam_show_toolpath", {"action": "list"}, "ok", None),
         ("cam_generate", {"target": "Setup1", "skip_valid": False}, "ok", None),
-        ("cam_get_status", {"target": "Setup1", "pump_seconds": 10}, "ok", None),
+        ("cam_get_status", {"target": "Setup1"}, "ok", None),
     ]
 )
 
@@ -1185,7 +1276,7 @@ _CAM_FB_DELIVER = [
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
 ]
 
-# ── the ACT program ────────────────────────────────────────────────────────────────────────────
+# â”€â”€ the ACT program â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # (name, precondition, narrative, fallback). A precondition read that ERRORS routes the act to its
 # fallback (its tools are still covered, each marked "(fallback fixture)"). None precondition = an
 # opening/cameo act that always runs its narrative.
@@ -1287,6 +1378,10 @@ STORY = {
     "model_fillet": "fillet the outer ring edge",
     "model_chamfer": "chamfer the frame edge",
     "model_shell": "shell a scratch cap cameo",
+    "model_offset_face": "push a scratch block's top face outward",
+    "model_scale": ("uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, "
+                    "length, and angle expressions refused; a bare unitless parameter accepted; "
+                    "a vertex-anchored scale"),
     "design_delete_feature": "add a wart feature then delete it; health diff",
     "design_delete_occurrence": "delete a scratch occurrence",
     "view_section": "section cut through the gimbal center",
@@ -1317,13 +1412,15 @@ STORY = {
     "mesh_remesh": "remesh a copy",
     "mesh_plane_cut": "plane-cut a mesh copy",
     "mesh_combine": "combine two mesh copies",
+    "mesh_delete": "delete a scratch mesh body with the design-wide survivor re-scan",
     "mesh_export": "export a mesh to STL",
     "mesh_insert": "re-import the STL mesh",
     "param_set": "bump GimbalDia +33%, then restore it",
     "param_delete": "delete a scratch parameter",
     "view_switch_workspace": "switch to Manufacture, then back to Design",
     "cam_get": "read the CAM job structure",
-    "cam_edit_tools": "add a flat end mill + a 3mm drill to the document library",
+    "cam_edit_tools": ("add mill/drill/turning/center-drill tools; preset add/remove round-trip "
+                       "with unit, refusal, and rollback gates"),
     "cam_create_setup": "create the milling setup on the Carrier in the vise",
     "cam_create_operation": "create the face, adaptive, silhouette, and drill operations",
     "cam_select_geometry": "select stock-top face, zero-handle silhouette, and the bolt-circle holes",
@@ -1335,6 +1432,8 @@ STORY = {
     "cam_compare_operations": "compare the two operations",
     "cam_show_toolpath": "leave the toolpath visible on camera",
     "cam_generate": "generate the toolpaths against the real part in the real fixture",
+    "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
+                              "bogus-scope refusal, verdict true after generation"),
     "cam_get_status": "poll the generation to completion (empty toolpaths fail)",
     "cam_post": "post the NC program to disk",
     "cam_set_nc_comment": "stamp the NC program comment",

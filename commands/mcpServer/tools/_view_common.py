@@ -105,20 +105,47 @@ def apply_named_view(vp, name):
     vp.fit()
 
 
-def capture_png_b64(vp, width, height, prefix="fe_mcp_shot"):
+def _write_image(vp, path, width, height, transparent_background, anti_aliased):
+    """Render the viewport to 'path' at width x height. Both switches unset -> the plain
+    Viewport.saveAsImageFile(path, width, height) overload. Either set -> SaveImageFileOptions +
+    Viewport.saveAsImageFileWithOptions, the only overload carrying isBackgroundTransparent /
+    isAntiAliased. Returns (did, api_name) - api_name names which overload answered."""
+    if transparent_background is None and anti_aliased is None:
+        return bool(vp.saveAsImageFile(path, width, height)), "saveAsImageFile"
+    opts = adsk.core.SaveImageFileOptions.create(path)
+    # A fresh options object starts at width/height 0 (live-measured:
+    # behavior.save_image_options_defaults), so the requested size is assigned explicitly.
+    opts.width = width
+    opts.height = height
+    if transparent_background is not None:
+        opts.isBackgroundTransparent = bool(transparent_background)
+    if anti_aliased is not None:
+        opts.isAntiAliased = bool(anti_aliased)
+    return bool(vp.saveAsImageFileWithOptions(opts)), "saveAsImageFileWithOptions"
+
+
+def capture_png_b64(vp, width, height, prefix="fe_mcp_shot", transparent_background=None,
+                    anti_aliased=None):
     """Grab the viewport as a base64 PNG string via a temp file (always removed). Forces a viewport
     refresh FIRST - the capture can otherwise race an un-refreshed frame (a camera/visibility change
-    that hasn't drawn yet reads as blank). Returns (b64, error)."""
+    that hasn't drawn yet reads as blank). transparent_background/anti_aliased are tri-state: None
+    leaves the plain capture path untouched, True/False routes through the options overload.
+    Returns (b64, error)."""
     temp_path = None
     try:
         fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=".png")
         os.close(fd)
         _common.safe(lambda: vp.refresh())
-        did = vp.saveAsImageFile(temp_path, width, height)
+        did, api = _write_image(vp, temp_path, width, height, transparent_background, anti_aliased)
         if not did or not os.path.exists(temp_path):
-            return None, "Viewport capture failed (saveAsImageFile returned false)."
+            return None, f"Viewport capture failed ({api} returned false)."
         with open(temp_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("ascii"), None
+            raw = f.read()
+        # mkstemp already created the file, so existence proves nothing about the render - a
+        # zero-byte file is a capture that reported success and wrote no image.
+        if not raw:
+            return None, f"Viewport capture failed ({api} wrote a 0-byte file)."
+        return base64.b64encode(raw).decode("ascii"), None
     finally:
         if temp_path and os.path.exists(temp_path):
             try:

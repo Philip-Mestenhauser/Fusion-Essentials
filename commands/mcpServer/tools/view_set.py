@@ -10,6 +10,7 @@ survives between MCP calls (one session).
 """
 
 import json
+import math
 
 import adsk.core
 import adsk.fusion
@@ -64,6 +65,43 @@ _STYLES = {
 "wireframe-hidden-edges": "WireframeWithHiddenEdgesVisualStyle",
 "wireframe-edges": "WireframeWithVisibleEdgesOnlyVisualStyle",
 }
+
+# Camera projection: a wire key -> its adsk.core.CameraTypes member name. Fusion's third camera
+# type, PerspectiveWithOrthoFaces, is deliberately NOT settable here: assigning it does not stick.
+# Live-measured, both halves: wrote 2, read back 1, and the probe that measured it had isFitView
+# set - so the coercion is not a stale-extents artifact. Offering the value would promise a state
+# the platform will not hold.
+_PROJECTIONS = {
+    "orthographic": "OrthographicCameraType",
+    "perspective": "PerspectiveCameraType",
+}
+
+
+def _camera_type(key):
+    """The adsk.core.CameraTypes member a projection key names."""
+    return getattr(adsk.core.CameraTypes, _PROJECTIONS[key])
+
+
+def _projection_key(value):
+    """The projection key a CameraTypes value carries. Names perspective_ortho_faces too - a user's
+    camera can already BE in that mode even though view_set cannot set it - and falls back to the
+    stringified value, so a read-back mismatch names what it actually found. Not settable is not
+    unusable: an angle written on a PerspectiveWithOrthoFaces camera LANDS exactly (wrote 30 deg,
+    read 30 deg, live-measured) while the TYPE coerces to plain Perspective."""
+    for key in _PROJECTIONS:
+        if _camera_type(key) == value:
+            return key
+    if value == adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType:
+        return "perspective_ortho_faces"
+    return str(value)
+
+
+def _is_perspective(value):
+    """True for either of Fusion's perspective camera types - the ones Camera.perspectiveAngle
+    applies to. PerspectiveWithOrthoFaces counts: view_set cannot SET that mode, but a camera
+    already in it ACCEPTS a written angle exactly (30 deg written, 30 deg read, live-measured)."""
+    return value in (_camera_type("perspective"),
+                     adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType)
 
 
 def _doc_key():
@@ -137,7 +175,7 @@ def _do_snapshot(design):
         "Explore freely; call view_set(restore) to put it all back."})
 
 
-def _do_orient(design, orientation, focus, fit):
+def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
     vp = app.activeViewport
     applied = {}
     cam = vp.camera  # build the FINAL camera on ONE object, assign once (no double move)
@@ -164,7 +202,6 @@ def _do_orient(design, orientation, focus, fit):
             return error(f"Unknown orientation '{orientation}'. Valid: {', '.join(_ORIENTATIONS)}.")
         dx, dy, dz = _ORIENTATIONS[key]
         ux, uy, uz = _view_common.up_vector(key)
-        import math
         dmag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
         # distance from current camera (so we don't zoom wildly before the fit)
         e0, t0 = cam.eye, cam.target
@@ -183,12 +220,90 @@ def _do_orient(design, orientation, focus, fit):
                                            e0.z + (target.z - t0.z))
         cam.target = target
 
-    if fit:
+    # Projection rides the SAME camera object as the orientation, so one assignment applies both.
+    want_key = ""
+    if projection:
+        want_key = projection.strip().lower()
+        if want_key not in _PROJECTIONS:
+            return error(f"Unknown projection '{projection}'. Valid: {', '.join(_PROJECTIONS)}.")
+    angle_deg = None
+    if perspective_angle_deg is not None:
+        try:
+            angle_deg = float(perspective_angle_deg)
+        except (TypeError, ValueError):
+            return error(f"'perspective_angle_deg' must be a number (got '{perspective_angle_deg}').")
+        if not 0 < angle_deg < 180:
+            return error("'perspective_angle_deg' is a field-of-view angle and must be greater "
+                         f"than 0 and less than 180 (got {angle_deg}).")
+        # The angle is only meaningful on a perspective camera: honour an explicit 'projection',
+        # else read the camera's current type rather than assuming one.
+        if want_key:
+            effective = _camera_type(want_key)
+        else:
+            effective = safe(lambda: cam.cameraType)
+            # An UNREADABLE type leaves no projection to name - say that, rather than reporting a
+            # projection whose name is the missing read.
+            if effective is None:
+                return error(f"'perspective_angle_deg'={angle_deg} needs a perspective camera, but "
+                             "the camera's cameraType could not be read - pass "
+                             "projection='perspective' in the same call to set it explicitly.")
+        if not _is_perspective(effective):
+            return error(f"'perspective_angle_deg'={angle_deg} needs a perspective camera, but the "
+                         f"projection in effect is '{_projection_key(effective)}'. Pass "
+                         "projection='perspective' in the same call.")
+    if want_key:
+        cam.cameraType = _camera_type(want_key)
+    if angle_deg is not None:
+        # Assigned AFTER cameraType - perspectiveAngle is valid only on a perspective camera.
+        # The property is RADIANS: a fresh perspective camera reads 0.39479, which is Fusion's
+        # 22.62 deg default field of view (live-verified).
+        cam.perspectiveAngle = math.radians(angle_deg)
+
+    # Flipping cameraType leaves the camera's extents inconsistent with the type it now carries:
+    # assigning such a camera raises "Camera type must be orthographic for extents" unless
+    # isFitView recomputes them (live-verified). So a projection change fits whether or not
+    # 'fit' asked for it.
+    if fit or want_key:
         cam.isFitView = True       # reliable framing (preferred over guessing extents)
     vp.camera = cam                # single assignment -> single move
     vp.refresh()
-    return ok({"action": "orient", "applied": applied,
-        "note": "Camera aimed. Call view_screenshot to capture."})
+    note = "Camera aimed. Call view_screenshot to capture."
+    if want_key:
+        # None means the property was UNREADABLE, which is a different report from a read that
+        # shows the change did not take.
+        got_type = safe(lambda: vp.camera.cameraType)
+        if got_type is None:
+            return error(f"Set projection '{want_key}' but the camera's cameraType could not be "
+                         "read back - the projection is unverified.")
+        got_key = _projection_key(got_type)
+        if got_key != want_key:
+            return error(f"Set projection '{want_key}' but the viewport camera reads back "
+                         f"'{got_key}' - the change did not take.")
+        applied["projection"] = got_key
+        if not fit:
+            note += (" Changing the projection recomputes the camera extents, so the view was "
+                     "fitted even though fit was false.")
+    if angle_deg is not None:
+        # Read BACK off the camera. A written angle survives the assignment bit-exactly, and a
+        # 45 deg angle written WITH isFitView set reads back bit-exact too - the forced fit does
+        # not move it (both live-measured). So this comparison reports a write the platform
+        # dropped, not an expected fit artifact. None means the property was unreadable, which is
+        # NOT an angle of zero.
+        raw = safe(lambda: vp.camera.perspectiveAngle)
+        if raw is None:
+            # Name the projection only when it READS - an unreadable type has no name to report.
+            got_type = safe(lambda: vp.camera.cameraType)
+            where = f" (projection '{_projection_key(got_type)}')" if got_type is not None else ""
+            return error(f"Set 'perspective_angle_deg'={angle_deg} but the camera's "
+                         f"perspectiveAngle could not be read back{where} - the field of view is "
+                         "unverified.")
+        actual = round(math.degrees(raw), 4)
+        applied["perspective_angle_deg"] = actual
+        if abs(actual - angle_deg) > 0.05:
+            applied["perspective_angle_requested_deg"] = round(angle_deg, 4)
+            note += (" The camera settled on a different perspective angle than requested - "
+                     "'perspective_angle_deg' is what it reads back.")
+    return ok({"action": "orient", "applied": applied, "note": note})
 
 
 def _do_visibility(design, action, target):
@@ -398,13 +513,15 @@ def _do_list_views(design):
     return ok({"action": "list_views", "count": len(views), "named_views": views})
 
 
-def _trace(action, target, orientation, focus, style, view_name):
+def _trace(action, target, orientation, focus, style, view_name, projection="",
+           perspective_angle_deg=None):
     """A fresh per-call tracer: a monotonic seq + an echo of the args the handler received."""
     global _CALL_SEQ
     _CALL_SEQ += 1
     echo = {"action": action}
     for k, v in (("target", target), ("orientation", orientation), ("focus", focus),
-                 ("style", style), ("view_name", view_name)):
+                 ("style", style), ("view_name", view_name), ("projection", projection),
+                 ("perspective_angle_deg", perspective_angle_deg)):
         if v:
             echo[k] = v
     return {"seq": _CALL_SEQ, "received": echo}
@@ -424,20 +541,27 @@ def _with_trace(result, trace):
 
 
 def handler(action: str = "", target=None, orientation: str = "", focus: str = "",
-            style: str = "", fit: bool = True, view_name: str = "") -> dict:
+            style: str = "", fit: bool = True, view_name: str = "", projection: str = "",
+            perspective_angle_deg=None) -> dict:
     """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
+    # Camera-projection inputs only reach the camera through 'orient' - accepting them on another
+    # action would report ok while changing no projection at all.
+    if action != "orient" and (projection or perspective_angle_deg is not None):
+        return error("'projection'/'perspective_angle_deg' apply to action='orient', not "
+                     f"action='{action}'.")
     design = _common.design()
     if not design:
         return error("No active design. Open a document with design geometry first.")
-    trace = _trace(action, target, orientation, focus, style, view_name)
+    trace = _trace(action, target, orientation, focus, style, view_name, projection,
+                   perspective_angle_deg)
     try:
         if action == "snapshot":
             result = _do_snapshot(design)
         elif action == "orient":
-            result = _do_orient(design, orientation, focus, fit)
+            result = _do_orient(design, orientation, focus, fit, projection, perspective_angle_deg)
         elif action in ("isolate", "show", "hide", "clear_isolation"):
             result = _do_visibility(design, action, target)
         elif action == "style":
@@ -461,7 +585,8 @@ TOOL_DESCRIPTION = (
     "View-state verbs to inspect the model from different angles, then restore - no geometry changes. "
     "'snapshot' (save camera+style+all visibility; call before exploring) | 'restore' (put "
     "them back to the last snapshot) | 'orient' ('orientation' and/or 'focus'=fit to a named "
-    "occurrence) | 'isolate'/'show'/'hide'/'clear_isolation' "
+    "occurrence; 'projection' sets the camera projection, 'perspective_angle_deg' its "
+    "field of view) | 'isolate'/'show'/'hide'/'clear_isolation' "
     "('target'=occurrence(s); hide/show also take BODIES (root-level / one of a multi-body "
     "component); ambiguous names refused; 'show' lights ancestors) | "
     "'style' (visual style) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent "
@@ -480,6 +605,11 @@ tool = (
     .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),
             description="Camera preset for 'orient'.").as_property())
     .add_input_property(*_FOCUS.as_property())
+    .add_input_property(*_inputs.Choice("projection", list(_PROJECTIONS),
+            description="Camera projection for 'orient'.").as_property())
+    .add_input_property("perspective_angle_deg", {"type": "number",
+            "description": "Field-of-view angle in degrees for a perspective 'orient' "
+                           "(over 0, under 180)."})
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
             description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",

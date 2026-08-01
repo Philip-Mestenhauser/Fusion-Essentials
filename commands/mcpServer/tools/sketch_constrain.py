@@ -79,7 +79,7 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     e1 = _common.resolve_entity_ref(sketch, entity_one)
     if not e1:
         return error(f"Could not resolve entity_one '{entity_one}' "
-                     "(use '<type>:<index>', type = line/arc/circle/point).")
+                     f"(use '<type>:<index>', type = {'/'.join(_common.ENTITY_REF_KINDS)}).")
 
     gc = safe(lambda: sketch.geometricConstraints)
 
@@ -130,7 +130,8 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 TOOL_DESCRIPTION = (
     "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is "
     "parametric (captures design intent). Reference entities as '<type>:<index>' within "
-    "'sketch_name', type = line/arc/circle/point (e.g. 'line:0', 'arc:1', 'point:2'). Two-curve "
+    "'sketch_name', type = line/arc/circle/ellipse/point/spline/cv_spline/fixed_spline (e.g. 'line:0', "
+    "'arc:1', 'point:2'). Two-curve "
     "constraints (perpendicular/parallel/tangent/equal/concentric/collinear) take "
     "entity_one+entity_two; horizontal/vertical/fix/unfix take one entity; symmetry takes "
     "entity_one+entity_two+symmetry_line (the axis). COINCIDENT/midpoint take a POINT as entity_one. "

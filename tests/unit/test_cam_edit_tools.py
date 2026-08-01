@@ -13,6 +13,7 @@ The tool exposes seams so the test supplies a target without the real adsk plumb
 """
 
 import json
+import re
 
 from conftest import load_tool
 
@@ -49,6 +50,25 @@ class _Param:
             # a bare integer expression evaluates into the value (mirrors a ModelParameter set that
             # way - e.g. tool_number, which cam_edit_tools sets via .expression and reads via .value)
             self.value = _Val(int(v))
+        elif isinstance(v, str):
+            evaluated = _evaluate(v)
+            if evaluated is not None:
+                self.value = _Val(evaluated)
+
+
+_IN_PER_MIN = re.compile(r"^([+-]?[\d.]+)\s*in/min$")
+
+
+def _evaluate(expr):
+    """A CAM parameter's evaluated value for the expression forms these tests use, or None when the
+    expression evaluates to nothing (leaving .value where it was, which is what a preset parameter
+    given an unevaluable expression does live). A feed carrying inch units converts to mm/min."""
+    try:
+        return float(expr.strip())
+    except ValueError:
+        pass
+    m = _IN_PER_MIN.match(expr.strip())
+    return float(m.group(1)) * 25.4 if m else None
 
 
 class _Params:
@@ -63,32 +83,52 @@ class _Params:
         return list(self._d.values())[i]
 
 
+# A preset's parameter set is the owning tool's cutting data, and that set varies by tool CLASS: a
+# mill turns at a spindle speed, a turning tool that cuts at constant surface speed carries
+# tool_surfaceSpeed and no tool_spindleSpeed at all.
+_MILL_CUTTING_DATA = {"tool_spindleSpeed": "0", "tool_feedCutting": "0"}
+_TURNING_CUTTING_DATA = {"tool_surfaceSpeed": "0", "tool_feedCutting": "0"}
+
+
 class _Preset:
-    def __init__(self):
-        self.parameters = _Params({"tool_spindleSpeed": "0", "tool_feedCutting": "0"})
+    def __init__(self, name="", params=None):
+        self.name = name
+        self.parameters = _Params(dict(params if params is not None else _MILL_CUTTING_DATA))
 
 
 class _Presets:
-    def __init__(self):
-        self._p = []
+    """ToolPresets: add() appends a preset carrying the owning tool's cutting-data parameters,
+    remove(index) deletes by index and reports whether it deleted."""
+    def __init__(self, names=(), owner=None):
+        self._owner_params = dict(owner.preset_params) if owner is not None else dict(_MILL_CUTTING_DATA)
+        self._p = [_Preset(n, self._owner_params) for n in names]
     @property
     def count(self):
         return len(self._p)
     def item(self, i):
         return self._p[i]
     def add(self):
-        p = _Preset(); self._p.append(p); return p
+        p = _Preset("", self._owner_params); self._p.append(p); return p
+    def remove(self, index):
+        del self._p[index]
+        return True
+
+
+def _preset_names(tool):
+    return [tool.presets.item(i).name for i in range(tool.presets.count)]
 
 
 class _Tool:
-    def __init__(self, desc, **params):
+    def __init__(self, desc, preset_params=None, **params):
         params.setdefault("tool_description", desc)
         params.setdefault("tool_diameter", params.get("tool_diameter", "1.0"))
         params.setdefault("tool_productId", "")
         params.setdefault("tool_vendor", "")
         params.setdefault("tool_number", params.get("tool_number", "0"))
         self.parameters = _Params(params)
-        self.presets = _Presets()
+        # the cutting data this tool's presets carry (mill unless the test says otherwise)
+        self.preset_params = dict(preset_params if preset_params is not None else _MILL_CUTTING_DATA)
+        self.presets = _Presets(owner=self)
         self.desc = desc
         self.holder = None      # set when a holder JSON is assigned (build via json)
     def toJson(self):
@@ -130,6 +170,10 @@ class _Target:
         # edit reads back its own 'after'; a test overrides this to simulate a non-landing persist.
         p = self.tools[index].parameters.itemByName(name)
         return p.expression if p is not None else None
+    def reread_preset_names(self, index):
+        # same in-memory re-read for presets; a test overrides it to simulate a persist that the
+        # library did not store.
+        return _preset_names(self.tools[index])
     def add(self, tool):
         self.tools.append(tool)
     def remove(self, index):
@@ -793,9 +837,9 @@ class TestCreateLibrary:
         assert len(libs.imported) == 0
 
 
-# ── _preset_feed_param: the {feed} preset value maps per tool CLASS (a drill preset has no ──────
-# ── 'tool_feedCutting'); the resolver falls through to the plunge feed, and names what exists ───
-# ── when nothing matches instead of asserting the mill-only parameter. ──────────────────────────
+# ── _preset_param_of: a preset value maps per tool CLASS (a drill preset has no 'tool_feedCutting', ─
+# ── a constant-surface-speed turning preset has no 'tool_spindleSpeed'); the resolver falls through ─
+# ── the candidates, and names what exists when none match instead of asserting one class's name. ────
 
 class _PParams:
     def __init__(self, names):
@@ -815,21 +859,489 @@ def _preset_with(names):
     return SimpleNamespace(parameters=_PParams(names))
 
 
-class TestPresetFeedParam:
+def _feed_param(preset):
+    return ct._preset_param_of(preset, ct._FEED_PARAM_CANDIDATES, "feed")
+
+
+def _speed_param(preset):
+    return ct._preset_param_of(preset, ct._SPEED_PARAM_CANDIDATES, "speed")
+
+
+class TestPresetParamOf:
     def test_mill_uses_tool_feed_cutting(self):
-        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedCutting"]))
+        p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedCutting"]))
         assert p is not None and p.name == "tool_feedCutting" and avail is None
 
     def test_drill_falls_back_to_plunge_feed(self):
         # a drill preset carries NO tool_feedCutting - the {feed} value goes to its plunge feed
-        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedPlunge"]))
+        p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedPlunge"]))
         assert p is not None and p.name == "tool_feedPlunge"
 
     def test_no_known_feed_names_what_exists(self):
         # nothing from the candidate list -> refuse, naming the feed-ish params actually present
-        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed", "tool_feedGizmo"]))
+        p, avail = _feed_param(_preset_with(["tool_spindleSpeed", "tool_feedGizmo"]))
         assert p is None and avail == ["tool_feedGizmo"]
 
     def test_no_feed_params_at_all(self):
-        p, avail = ct._preset_feed_param(_preset_with(["tool_spindleSpeed"]))
+        p, avail = _feed_param(_preset_with(["tool_spindleSpeed"]))
         assert p is None and avail == []
+
+    def test_mill_uses_tool_spindle_speed(self):
+        p, avail = _speed_param(_preset_with(["tool_spindleSpeed", "tool_feedCutting"]))
+        assert p is not None and p.name == "tool_spindleSpeed" and avail is None
+
+    def test_surface_speed_preset_has_no_spindle_speed_and_names_what_it_has(self):
+        # a turning preset cutting at constant surface speed - the spindle_speed value has nowhere
+        # to go, and the refusal must name tool_surfaceSpeed rather than a mill-only parameter
+        p, avail = _speed_param(_preset_with(["tool_surfaceSpeed", "tool_feedCutting"]))
+        assert p is None and avail == ["tool_surfaceSpeed"]
+
+
+# ── the from_type vocabulary comes from the bundled Fusion360 sample libraries ──────────────────
+
+class _AssetURL:
+    def __init__(self, leaf):
+        self.leafName = leaf
+    def toString(self):
+        return "systemlibraryroot://Samples/" + self.leafName
+
+
+class _SampleAssets:
+    """ToolLibraries over the bundled Fusion360 sample assets: leaf name -> the tool types it holds."""
+    def __init__(self, by_leaf):
+        self._by_leaf = by_leaf
+    def urlByLocation(self, loc):
+        return _AssetURL("Fusion360")
+    def childAssetURLs(self, url):
+        return [_AssetURL(leaf) for leaf in self._by_leaf]
+    def toolLibraryAtURL(self, url):
+        return _SrcLib([_Tool(ty, tool_type=ty) for ty in self._by_leaf.get(url.leafName, [])])
+
+
+def _install_samples(monkeypatch, by_leaf):
+    from types import SimpleNamespace
+    import adsk.cam as _c
+    import adsk.core as _core
+    mgr = SimpleNamespace(libraryManager=SimpleNamespace(toolLibraries=_SampleAssets(by_leaf)))
+    monkeypatch.setattr(_c.CAMManager, "get", lambda: mgr)
+    # a type-map entry stores the library's url STRING; _source_tool turns it back into a URL
+    monkeypatch.setattr(_core.URL, "create", lambda s: _AssetURL(s.rsplit("/", 1)[-1]))
+    monkeypatch.setattr(ct, "_type_map_cache", None)      # the map is built once and cached
+
+
+# A miniature stand-in for the bundled Fusion360 sample assets - a handful of leaf names and the
+# tool types behind them, shaped like the real set (an Inch library repeating its Metric twin, and
+# a Hole Making Tools (Inch) that adds 'center drill') so the walk can be pinned without them.
+_SAMPLE_ASSETS = {
+    "Milling Tools (Metric)": ["flat end mill", "ball end mill"],
+    "Milling Tools (Inch)": ["flat end mill"],
+    "Hole Making Tools (Metric)": ["drill"],
+    "Hole Making Tools (Inch)": ["drill", "center drill"],
+    "Cutting Tools (Metric)": ["laser cutter"],
+    "Turning Tools (Metric)": ["turning general", "turning threading"],
+    "Turning Tools (Inch)": ["turning general"],
+    "Probes": ["probe"],
+}
+
+
+class TestSampleTypeMap:
+    def test_turning_types_resolve_to_the_turning_sample_library(self, monkeypatch):
+        # without the Turning sample library in the walk, add_tools[].from_type cannot clone a
+        # turning tool at all - no turning type is in the vocabulary.
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        tmap = ct._build_type_map()
+        assert "turning general" in tmap and "turning threading" in tmap
+        url, index = tmap["turning general"]
+        assert url.endswith("Turning Tools (Metric)") and index == 0
+
+    def test_center_drill_comes_from_the_inch_hole_making_library(self, monkeypatch):
+        # the one type no Metric sample library holds - without that Inch library in the walk it is
+        # not cloneable at all.
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        url, index = ct._build_type_map()["center drill"]
+        assert url.endswith("Hole Making Tools (Inch)") and index == 1
+
+    def test_a_shared_type_keeps_its_metric_library(self, monkeypatch):
+        # 'drill' is in both hole-making libraries; the Metric one is walked first and wins the key,
+        # so adding the Inch library never re-points an existing type at an inch tool.
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        url, _ = ct._build_type_map()["drill"]
+        assert url.endswith("Hole Making Tools (Metric)")
+
+    def test_map_walks_only_the_named_libraries(self, monkeypatch):
+        # Milling/Turning Inch add nothing their Metric twins lack, and Probes is not a cutting-tool
+        # sample - none of the three is walked.
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        assert set(ct._build_type_map()) == {"flat end mill", "ball end mill", "drill",
+                                             "center drill", "laser cutter", "turning general",
+                                             "turning threading"}
+
+    def test_a_turning_type_clones_through_the_add_path(self, monkeypatch):
+        # _sample_for_type resolves 'turning general' through the same map to a real source tool.
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        src, serr = ct._sample_for_type("turning general")
+        assert serr is None and src.desc == "turning general"
+
+    def test_unknown_type_lists_the_turning_types_too(self, monkeypatch):
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        src, serr = ct._sample_for_type("banana mill")
+        assert src is None and "turning general" in serr
+
+
+# ── presets on an EXISTING tool: add_preset / remove_preset ─────────────────────────────────────
+
+def _tool_with_presets(desc, names=(), **params):
+    t = _Tool(desc, **params)
+    t.presets = _Presets(names, owner=t)
+    return t
+
+
+class TestAddPreset:
+    def test_adds_a_named_preset_with_its_values(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                                  preset={"name": "Alu 6061", "spindle_speed": 12000, "feed": 900}))
+        assert _preset_names(tool) == ["Alu 6061"]
+        p = tool.presets.item(0)
+        assert p.parameters.itemByName("tool_spindleSpeed").expression == "12000"
+        assert p.parameters.itemByName("tool_feedCutting").expression == "900"
+        assert out["preset_index"] == 0 and out["preset_count"] == 1
+        assert out["presets"] == ["Alu 6061"]
+        assert tgt.updated and tgt.persisted == 0        # document scope commits via update_tool
+
+    def test_shared_scope_persists_the_library(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Steel"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=False))
+        out = _payload(ct.handler(action="add_preset", scope="cloud", library="L", tool=0,
+                                  preset={"name": "Alu 6061"}))
+        assert tgt.persisted == 1 and tgt.updated == []
+        assert out["presets"] == ["Steel", "Alu 6061"]   # appended after the existing preset
+
+    def test_duplicate_name_refused(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Alu 6061"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "alu 6061"})       # same name, different case
+        assert res["isError"] is True and "already has a preset" in res["message"]
+        assert tool.presets.count == 1
+
+    def test_detached_preset_that_never_lands_in_the_collection_errors(self, monkeypatch):
+        # add() hands back a preset that is NOT in the collection - the values apply to an object
+        # nobody can reach again, so a bare 'added' would be a lie.
+        class _Detached(_Presets):
+            def add(self):
+                return _Preset()
+
+        tool = _tool_with_presets("EM")
+        tool.presets = _Detached()
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_name_that_does_not_land_errors_and_rolls_the_preset_back(self, monkeypatch):
+        # The assigned name is read back, so a name that does not store is an error and the empty
+        # preset add() created is not left behind.
+        class _Unnamed(_Preset):
+            def __setattr__(self, key, value):
+                if key == "name" and getattr(self, "name", None) is not None:
+                    return                              # the assignment is accepted and ignored
+                object.__setattr__(self, key, value)
+
+        class _UnnamedPresets(_Presets):
+            def add(self):
+                p = _Unnamed(); self._p.append(p); return p
+
+        tool = _tool_with_presets("EM")
+        tool.presets = _UnnamedPresets()
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert tool.presets.count == 0                  # rolled back, no half-populated preset
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_missing_spindle_speed_parameter_rolls_back_and_errors(self, monkeypatch):
+        class _Bare(_Preset):
+            def __init__(self, name=""):
+                super().__init__(name)
+                self.parameters = _Params({})
+
+        class _BarePresets(_Presets):
+            def add(self):
+                p = _Bare(); self._p.append(p); return p
+
+        tool = _tool_with_presets("EM")
+        tool.presets = _BarePresets()
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "spindle_speed": 9000})
+        assert res["isError"] is True and "tool_spindleSpeed" in res["message"]
+        assert tool.presets.count == 0                  # nothing half-built survives
+
+    def test_persisted_library_without_the_preset_bites(self, monkeypatch):
+        # update_tool/updateToolLibrary returning is not proof - the tool re-read from the library
+        # has no such preset, so the add did not persist.
+        tool = _tool_with_presets("EM")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        tgt.reread_preset_names = lambda index: []
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "did not reach the library" in res["message"]
+
+    def test_requires_a_name(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"spindle_speed": 900})
+        assert res["isError"] is True and "'name'" in res["message"]
+
+    def test_bad_tool_index(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=4, preset={"name": "Alu"})
+        assert res["isError"] is True and "0..0" in res["message"]
+
+    def test_document_scope_note_claims_presence_not_persistence(self, monkeypatch):
+        # a re-read of the document library returns the document's own unsaved state, so the note
+        # may claim the preset is there - not that anything was stored.
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=True))
+        out = _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                                  preset={"name": "Alu"}))
+        assert "persist" not in out["note"].lower() and "doc_save" in out["note"]
+
+    def test_shared_scope_note_claims_persistence(self, monkeypatch):
+        # the shared branch round-trips through the library url, which does prove the write stored
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=False))
+        out = _payload(ct.handler(action="add_preset", scope="cloud", library="L", tool=0,
+                                  preset={"name": "Alu"}))
+        assert "persisted" in out["note"]
+
+
+# ── preset VALUES: a CAM parameter stores an expression it cannot evaluate and still reads a ────
+# ── finite 0.0 back, so setting one is only done when .error is clear AND the value read back ───
+# ── agrees with what was asked for. ─────────────────────────────────────────────────────────────
+
+class _BrokenParam(_Param):
+    """A CAM parameter whose expression is stored verbatim but never evaluates: .error carries the
+    platform's message and .value stays where it was."""
+    error = "Failed to evaluate expression."
+    warning = ""
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, v):
+        self._expr = v
+
+
+class _StuckParam(_Param):
+    """A parameter that accepts the expression, reports no error, and evaluates to something else."""
+    error = ""
+    warning = ""
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, v):
+        self._expr = v
+        self.value = _Val(0.0)
+
+
+def _preset_param_tool(cls, pname):
+    """A tool whose presets carry `pname` as an instance of the misbehaving parameter class."""
+    tool = _tool_with_presets("EM")
+
+    class _Presets2(_Presets):
+        def add(self):
+            p = super().add()
+            p.parameters._d[pname] = cls(pname, "0")
+            return p
+
+    tool.presets = _Presets2(owner=tool)
+    return tool
+
+
+class TestPresetValues:
+    def test_expression_that_does_not_evaluate_errors_and_rolls_back(self, monkeypatch):
+        tool = _preset_param_tool(_BrokenParam, "tool_spindleSpeed")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        # the expression opens with a number, so it clears the spec gate and reaches the parameter,
+        # which stores it verbatim and reads a finite value back - only .error reveals the break
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "spindle_speed": "900 * NoSuchParamXyz"})
+        assert res["isError"] is True and "failed to evaluate" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_value_that_reads_back_different_errors_and_rolls_back(self, monkeypatch):
+        tool = _preset_param_tool(_StuckParam, "tool_feedCutting")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "feed": 900})
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "mm/min" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_units_carrying_expression_is_accepted_and_stored_verbatim(self, monkeypatch):
+        # a bare number is a fixed unit whatever the document uses, so a string carries its own. The
+        # read-back must judge such a value by what the parameter EVALUATED to - judging it by
+        # comparing against the text would fail this add, so _payload's no-error gate is the assert.
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                                  preset={"name": "Alu", "feed": "35in/min"}))
+        assert out["preset_count"] == 1 and out["presets"] == ["Alu"]
+        p = tool.presets.item(0).parameters.itemByName("tool_feedCutting")
+        assert p.expression == "35in/min"        # stored verbatim, units and all
+
+    def test_turning_preset_without_spindle_speed_names_its_surface_speed(self, monkeypatch):
+        # a turning preset cutting at constant surface speed carries no tool_spindleSpeed - the
+        # refusal names what it DOES carry instead of asserting the mill parameter.
+        tool = _tool_with_presets("Turning General", preset_params=_TURNING_CUTTING_DATA)
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Steel", "spindle_speed": 400})
+        assert res["isError"] is True
+        assert "tool_surfaceSpeed" in res["message"] and "tool_spindleSpeed" in res["message"]
+        assert tool.presets.count == 0                  # rolled back
+
+    def test_turning_preset_takes_a_feed(self, monkeypatch):
+        # the same turning preset still carries a cutting feed - only the speed has nowhere to go
+        tool = _tool_with_presets("Turning General", preset_params=_TURNING_CUTTING_DATA)
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                            preset={"name": "Steel", "feed": 250}))
+        assert tool.presets.item(0).parameters.itemByName("tool_feedCutting").expression == "250"
+
+    def test_a_mistyped_key_is_refused_not_silently_dropped(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "spindel_speed": 12000})
+        assert res["isError"] is True and "spindel_speed" in res["message"]
+        assert tool.presets.count == 0                  # nothing was created
+
+    def test_a_value_that_is_not_a_number_or_expression_is_refused(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "feed": "fast"})
+        assert res["isError"] is True and "'fast'" in res["message"]
+        assert "does not open with a number" in res["message"]     # refused, never handed to a param
+        assert tool.presets.count == 0
+
+    def test_a_non_scalar_value_is_refused(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "spindle_speed": [12000]})
+        assert res["isError"] is True and "rpm" in res["message"]
+        assert tool.presets.count == 0
+
+    def test_creation_time_presets_are_validated_too(self, monkeypatch):
+        # add_tools[].presets[] runs the same spec gate, before any preset is created
+        tgt = _install(monkeypatch)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "presets": [{"feed_rate": 900}]}])
+        assert res["isError"] is True and "feed_rate" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+
+class TestRemovePreset:
+    def test_removes_the_named_preset_by_index(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Steel", "Alu 6061", "Brass"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                                  preset={"name": "Alu 6061"}))
+        assert _preset_names(tool) == ["Steel", "Brass"]
+        assert out["removed_index"] == 1 and out["preset_count"] == 2
+        assert out["presets"] == ["Steel", "Brass"] and tgt.updated
+
+    def test_matches_case_insensitively(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Alu 6061"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                            preset={"name": "ALU 6061"}))
+        assert _preset_names(tool) == []
+
+    def test_a_name_is_never_a_wildcard_pattern(self, monkeypatch):
+        # ToolPresets.itemsByName reads '*' as a wild-card; the preset NAME must not, or 'Alu*'
+        # would target 'Alu 6061' instead of the preset actually called 'Alu*'.
+        tool = _tool_with_presets("EM", ["Alu 6061", "Alu*"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                                  preset={"name": "Alu*"}))
+        assert out["removed_index"] == 1 and _preset_names(tool) == ["Alu 6061"]
+
+    def test_ambiguous_name_refused_with_candidates(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Alu", "Steel", "alu"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "0, 2" in res["message"]                  # both candidate indices named
+        assert _preset_names(tool) == ["Alu", "Steel", "alu"]     # nothing removed
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_unknown_name_lists_what_the_tool_has(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Steel", "Brass"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "Steel, Brass" in res["message"] and tool.presets.count == 2
+
+    def test_no_presets_at_all_says_none(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "(none)" in res["message"]
+
+    def test_remove_reporting_failure_errors(self, monkeypatch):
+        # ToolPresets.remove returns false for an unsuccessful deletion - never report it as removed.
+        class _Refuses(_Presets):
+            def remove(self, index):
+                return False
+
+        tool = _tool_with_presets("EM", ["Alu"])
+        tool.presets = _Refuses(["Alu"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "reported failure" in res["message"]
+
+    def test_survivor_of_the_same_name_errors(self, monkeypatch):
+        # remove() claims success but the preset is still on the tool - a lying delete, not an ok.
+        class _NoOp(_Presets):
+            def remove(self, index):
+                return True
+
+        tool = _tool_with_presets("EM")
+        tool.presets = _NoOp(["Alu"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_persisted_library_that_still_holds_it_bites(self, monkeypatch):
+        tool = _tool_with_presets("EM", ["Alu"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        tgt.reread_preset_names = lambda index: ["Alu"]
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "did not reach the library" in res["message"]
+
+    def test_preset_must_be_an_object(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM", ["Alu"])], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0, preset="Alu")
+        assert res["isError"] is True and "'preset' must be an object" in res["message"]
+
+
+class TestCreationTimePresetName:
+    def test_add_tools_preset_name_is_applied(self, monkeypatch):
+        # the creation-time preset path and add_preset share one value applier, so a named preset
+        # requested at creation carries that name.
+        tgt = _install(monkeypatch)
+        _payload(ct.handler(action="add", scope="cloud", library="L",
+                            add_tools=[{"from_type": "drill",
+                                        "presets": [{"name": "Alu 6061", "spindle_speed": 8000}]}]))
+        built = tgt.tools[-1]
+        assert _preset_names(built) == ["Alu 6061"]
+        assert built.presets.item(0).parameters.itemByName("tool_spindleSpeed").expression == "8000"

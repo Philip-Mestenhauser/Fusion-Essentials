@@ -69,7 +69,7 @@ _PER_FILE_BASELINE = {
     "test_design_configure.py": 3,
     "test_design_delete_feature.py": 3,
     "test_design_delete_occurrence.py": 6,
-    "test_design_export.py": 14,
+    "test_design_export.py": 15,   # FakeOptions: an *ExportOptions attribute bag with a poison .units property - no conftest fake models an options object
     "test_design_mode.py": 3,
     "test_design_ops.py": 3,
     "test_doc_insert_derive.py": 17,
@@ -90,6 +90,7 @@ _PER_FILE_BASELINE = {
     "test_joint_drive.py": 6,
     "test_joint_motion_link.py": 6,
     "test_mesh_combine.py": 3,
+    "test_mesh_delete.py": 5,   # meshBodies + MeshRemoveFeatures: an object graph the conftest solid-body fakes do not model
     "test_mesh_edit.py": 4,
     "test_mesh_export.py": 15,
     "test_mesh_ops.py": 6,
@@ -103,6 +104,8 @@ _PER_FILE_BASELINE = {
     "test_model_fillet_chamfer.py": 15,
     "test_model_hole.py": 5,
     "test_model_mirror.py": 3,
+    "test_model_offset_face.py": 5,   # OffsetFacesFeatures createInput/add transaction graph - no conftest fake models a feature-collection input factory
+    "test_model_scale.py": 3,   # ScaleFeatures createInput/setToNonUniform/add graph - no conftest fake models a feature-collection input factory (bodies/bounding boxes come from the shared fakes)
     "test_model_pattern.py": 9,
     "test_model_revolve.py": 9,
     "test_model_shell.py": 5,
@@ -118,7 +121,8 @@ _PER_FILE_BASELINE = {
     "test_sketch_constrain.py": 7,
     "test_sketch_core.py": 3,
     "test_sketch_delete_entity.py": 6,
-    "test_sketch_dimension.py": 11,
+    "test_sketch_detail.py": 5,   # the three spline SketchCurves collections with per-kind shape properties - not modeled by the conftest solid fakes
+    "test_sketch_dimension.py": 13,   # ellipse + fitted-spline dimension operands: sketch-entity shapes the conftest solid fakes do not model
     "test_sketch_get_merge.py": 1,
     "test_sketch_project.py": 1,
     "test_sketch_set_text.py": 8,

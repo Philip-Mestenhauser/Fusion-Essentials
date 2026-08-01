@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2704.1.39"
-VERIFIED_ON = "2026-07-31"
+VERIFIED_ON = "2026-08-01"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -103,6 +103,12 @@ ENUMS = {
         "SuppressedFeatureHealthState": 3,
         "RolledBackFeatureHealthState": 4,
         "UnknownFeatureHealthState": 5,
+    },
+    "fusion.HoleTapTypes": {
+        "SimpleHoleTapType": 0,
+        "ClearanceHoleTapType": 1,
+        "TappedHoleTapType": 2,
+        "TaperTappedHoleTapType": 3,
     },
     "fusion.JointDirections": {
         "XAxisJointDirection": 0,
@@ -272,6 +278,7 @@ BEHAVIOR = {
     "meshbodies_has_itembyname": False,
     "number_of_completed_is_completion_signal": False,
     "open_base_feature_hidden": True,
+    "save_image_options_defaults": True,
     "vector3d_normalize_true_on_zero": True,
     "viewport_camera_returns_copy": True,
 }

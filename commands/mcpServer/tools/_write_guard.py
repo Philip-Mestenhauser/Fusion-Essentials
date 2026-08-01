@@ -10,7 +10,8 @@ when the active document no longer matches the one the agent meant, and 'acted_o
 write result with the document actually mutated {name, document_id}. A bare NAME shared by several
 open documents is REFUSED too (blocked_by:['ambiguous_document_name'], candidates listed) - a URN
 is always exact. Applied generically at registration (Item.create_tool_item) for write/destructive
-tools; read tools are untouched.
+tools. READ tools get the lighter wrap_read: no guard, but every result is stamped with
+'active_document' - the document the read actually came from.
 """
 
 import json
@@ -158,9 +159,9 @@ def _document_refusal(expect, name, urn):
     return None
 
 
-def _stamp_acted_on(result, name, urn):
-    """Inject acted_on={name,document_id} into a successful JSON result. Leaves errors + non-JSON
-    results untouched (an error wasn't an action on a document)."""
+def _stamp(result, key, name, urn):
+    """Inject {key: {name,document_id}} into a successful JSON result. Leaves errors + non-JSON
+    results (e.g. an image block) untouched."""
     if not isinstance(result, dict) or result.get("isError"):
         return result
     content = result.get("content")
@@ -175,9 +176,30 @@ def _stamp_acted_on(result, name, urn):
         return result                      # non-JSON text result; nothing to stamp
     if not isinstance(payload, dict):
         return result
-    payload.setdefault("acted_on", {"name": name, "document_id": urn})
+    payload.setdefault(key, {"name": name, "document_id": urn})
     block["text"] = json.dumps(payload, indent=2)
     return result
+
+
+def _stamp_acted_on(result, name, urn):
+    """Inject acted_on={name,document_id} into a successful JSON result (an error wasn't an action
+    on a document)."""
+    return _stamp(result, "acted_on", name, urn)
+
+
+def wrap_read(handler):
+    """Wrap a READ handler with the active_document stamp: every read result reports the document it
+    read from ({name, document_id}), so a read taken while the WRONG document is active is
+    distinguishable from a right one - without this, two tallies from two documents look identical.
+    No guard, no expect_document: reads stay safe to call blind. Only for main-thread tools (the
+    identity read touches adsk)."""
+    def stamped(**kwargs):
+        result = handler(**kwargs)
+        name, urn = _active_identity()
+        return _stamp(result, "active_document", name, urn)
+    stamped.__name__ = getattr(handler, "__name__", "stamped")
+    stamped.__wrapped__ = handler
+    return stamped
 
 
 def wrap(handler):

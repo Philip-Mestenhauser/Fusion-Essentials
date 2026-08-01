@@ -4,8 +4,9 @@ The guard wraps every WRITE handler: an optional expect_document REFUSES the wri
 moved (active_document_changed) OR if a bare NAME is shared by several open documents
 (ambiguous_document_name, candidates listed - name-equality alone cannot prove the active doc is the
 one the agent read; a URN match is always exact). Every successful write result is stamped with
-acted_on={name,urn}. Read tools are untouched. We patch the guard's _active_identity and
-_open_documents seams.
+acted_on={name,urn}. READ tools get wrap_read: no guard, but every result is stamped with
+active_document={name,urn} - the document the read came from. We patch the guard's
+_active_identity and _open_documents seams.
 """
 
 import json
@@ -56,6 +57,48 @@ class TestActedOnStamp:
         h = wg.wrap(lambda **kw: seen.update(kw) or _ok({"ok": True}))
         h(expect_document="Bracket", distance=5)
         assert "expect_document" not in seen and seen == {"distance": 5}   # consumed by the guard
+
+
+class TestReadStamp:
+    """wrap_read: every read result says which document it was read from - two identical tallies
+    from two different documents are otherwise indistinguishable."""
+
+    def test_read_result_stamped_with_active_document(self):
+        _set_active("Bracket", "urn:lineage:abc")
+        h = wg.wrap_read(lambda **kw: _ok({"bodies": 3}))
+        out = _decode(h())
+        assert out["bodies"] == 3
+        assert out["active_document"] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+
+    def test_handler_payload_wins_over_stamp(self):
+        # setdefault semantics: a tool that already reports its own active_document keeps it.
+        _set_active("Bracket", "urn:abc")
+        h = wg.wrap_read(lambda **kw: _ok({"active_document": {"name": "X", "document_id": "y"}}))
+        out = _decode(h())
+        assert out["active_document"] == {"name": "X", "document_id": "y"}
+
+    def test_error_result_not_stamped(self):
+        _set_active("Bracket", "urn:abc")
+        h = wg.wrap_read(lambda **kw: {"content": [{"type": "text", "text": "boom"}],
+                                       "isError": True, "message": "boom"})
+        out = h()
+        assert out["isError"] is True and "active_document" not in out["content"][0]["text"]
+
+    def test_image_result_untouched(self):
+        # a screenshot-style result (image block) has no JSON to stamp - passes through unchanged.
+        _set_active("Bracket", "urn:abc")
+        result = {"content": [{"type": "image", "data": "abc", "mimeType": "image/png"}],
+                  "isError": False}
+        h = wg.wrap_read(lambda **kw: result)
+        assert h() is result
+
+    def test_kwargs_pass_through_unconsumed(self):
+        # reads have no expect_document contract - every kwarg reaches the handler.
+        _set_active("Bracket", "urn:abc")
+        seen = {}
+        h = wg.wrap_read(lambda **kw: seen.update(kw) or _ok({"ok": True}))
+        h(include=["tree"], max_depth=3)
+        assert seen == {"include": ["tree"], "max_depth": 3}
 
 
 class TestExpectDocumentGuard:

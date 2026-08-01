@@ -590,16 +590,47 @@ class FakeUnitsManager:
     RAISES, matching the live FusionUnitsManager (it errors on an unresolvable or dimension-
     incompatible expression). The shared engine for a tool that accepts a parameter-EXPRESSION
     string routed through ValueInput.createByString (model_extrude's distance, model_construction's
-    offset). model_extrude.py still keeps a local copy pending migration to this one."""
+    offset). model_extrude.py still keeps a local copy pending migration to this one.
+
+    A resolvable expression evaluates to `value`, and the `units` argument acts the four measured
+    live ways - which is what lets a caller tell the shapes apart:
+      arithmetic (the default)   scales with the argument      '5'   -> 5.0 "", 0.5 "mm", 0.0873 "deg"
+      `dimensioned` names        carries its own unit          '5 mm'-> 0.5 under "" and "mm"
+      `angle_dimensioned` names  carries its own ANGULAR unit  30 deg-> its radian value under "" and
+                                                                "deg", RAISES under a length unit
+      `strict_unitless` names    RAISES under ANY unit         a bare unitless PARAMETER is readable
+                                                                only with no units at all
+    `value` sets the number a case needs (e.g. a non-positive one)."""
     defaultLengthUnits = "mm"
 
-    def __init__(self, valid=("25 mm", "StockZ/2")):
+    # internal units per display unit - Fusion holds lengths in cm and angles in radians, so a
+    # unitless expression read as mm returns a tenth of its plain number and one read as deg returns
+    # its radian equivalent.
+    _CM_PER_UNIT = {"": 1.0, "mm": 0.1, "cm": 1.0, "in": 2.54,
+                    "deg": 0.017453292519943295, "rad": 1.0}
+
+    _ANGLE_UNITS = ("deg", "rad")
+
+    def __init__(self, valid=("25 mm", "StockZ/2"), value=2.5, dimensioned=(), strict_unitless=(),
+                 angle_dimensioned=()):
         self._valid = set(valid)
+        self._value = value
+        self._dimensioned = set(dimensioned)
+        self._strict_unitless = set(strict_unitless)
+        self._angle_dimensioned = set(angle_dimensioned)
 
     def evaluateExpression(self, expr, units=None):
         if expr not in self._valid:
             raise RuntimeError(f"unresolved parameter in '{expr}'")
-        return 2.5
+        if expr in self._dimensioned:
+            return self._value
+        if expr in self._angle_dimensioned:
+            if units and units not in self._ANGLE_UNITS:
+                raise RuntimeError(f"'{expr}' is not a valid expression in a {units} context")
+            return self._value
+        if units and expr in self._strict_unitless:
+            raise RuntimeError(f"'{expr}' is not a valid expression in a {units} context")
+        return self._value * self._CM_PER_UNIT.get(units or "", 1.0)
 
 
 class _Vertex:

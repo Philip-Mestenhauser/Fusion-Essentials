@@ -2,9 +2,10 @@
 
 The logic pinned here, no live Fusion: occurrence resolution (exact, then substring;
 missing reported), the ground_to_parent lock (isGroundToParent), assembly_move
-building a Matrix3D translation/rotation and applying it to occurrence.transform, and
-assembly_rigid_group collecting occurrences into RigidGroups.add. Fakes expose the real
-attributes the handlers set so we can assert on them.
+building a Matrix3D translation/rotation and applying it to occurrence.transform2 (the
+same property assembly_get's own read path prefers), and assembly_rigid_group
+collecting occurrences into RigidGroups.add. Fakes expose the real attributes the
+handlers set so we can assert on them.
 """
 
 import json
@@ -110,6 +111,11 @@ class FakeOcc:
         self.isGrounded = False
         self.isGroundToParent = True
         self.transform = FakeMatrix()
+        # transform2 is a SEPARATE property from transform (real Fusion API) - assembly_move reads/
+        # writes transform2 (matching assembly_get's own read path); assembly_ground's position
+        # reporting still reads transform. Modeled as independent fakes so a test using the wrong one
+        # would fail instead of silently passing off a shared object.
+        self.transform2 = FakeMatrix()
         self.transform_applied = None
         # the occurrence's joints collection (what the move-guard inspects)
         self.joints = _FakeJointColl(joints)
@@ -333,7 +339,7 @@ class TestMove:
             def asArray(self):
                 return (1.0,) * 16          # constant pose: the assignment never takes
 
-        occs[0].transform = FrozenMatrix()
+        occs[0].transform2 = FrozenMatrix()
         res = asm.move_handler(occurrence="Block:1", dx=10)
         assert res["isError"] is True
         assert "did not move" in res["message"]
@@ -342,17 +348,28 @@ class TestMove:
         _, occs, _ = _install(["Block:1"])
         out = _payload(asm.move_handler(occurrence="Block:1", dx=10, dy=0, dz=5, units="mm"))
         o = _occ(occs, "Block:1")
-        # a new transform matrix was assigned
-        assert o.transform is not None
+        # a new transform2 matrix was assigned (transform2, not transform - matches assembly_get's
+        # own read path)
+        assert o.transform2 is not None
         assert out["moved"] is True
         assert out["translation"] == {"x": 10, "y": 0, "z": 5}
+
+    def test_writes_transform2_not_transform(self):
+        # the move path writes Occurrence.transform2 - the property assembly_get's read path
+        # prefers - not the legacy Occurrence.transform, which must stay untouched by the move.
+        _, occs, _ = _install(["Block:1"])
+        o = _occ(occs, "Block:1")
+        original_transform = o.transform
+        _payload(asm.move_handler(occurrence="Block:1", dx=10, units="mm"))
+        assert o.transform2 is not original_transform
+        assert o.transform is original_transform
 
     def test_translation_scaled_to_cm(self):
         _, occs, _ = _install(["Block:1"])
         _payload(asm.move_handler(occurrence="Block:1", dx=10, units="mm"))
         o = _occ(occs, "Block:1")
         # the Vector3D used for translation should be in cm (10mm -> 1cm)
-        vec = o.transform.translation
+        vec = o.transform2.translation
         assert vec is not None and abs(vec[1] - 1.0) < 1e-9
 
     def test_missing_occurrence_errors(self):
@@ -370,7 +387,7 @@ class TestMove:
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=90, rotate_axis="y"))
         o = _occ(occs, "Block:1")
         # setToRotation takes RADIANS: 90 deg in must reach the API as pi/2, about world Y
-        angle, axis, _origin = o.transform.rotation
+        angle, axis, _origin = o.transform2.rotation
         assert angle == pytest.approx(math.radians(90))
         assert axis == ("vec", 0, 1, 0)
         assert out["rotate_axis"] == "y"
@@ -380,10 +397,10 @@ class TestMove:
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_x=90, rotate_z=45))
         o = _occ(occs, "Block:1")
         # The handler builds ONE working matrix (per-axis rotations composed onto it), then composes
-        # that onto the occurrence's original transform - so o.transform.composed holds the working
+        # that onto the occurrence's original transform2 - so o.transform2.composed holds the working
         # matrix, and the per-axis rotations are ITS composed list: X then Z, each angle in RADIANS.
-        assert len(o.transform.composed) == 1
-        working = o.transform.composed[0]
+        assert len(o.transform2.composed) == 1
+        working = o.transform2.composed[0]
         rots = [m.rotation for m in working.composed if getattr(m, "rotation", None) is not None]
         assert [(r[0], r[1]) for r in rots] == [
             (pytest.approx(math.radians(90)), ("vec", 1, 0, 0)),
@@ -410,7 +427,7 @@ class TestMove:
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=180, rotate_axis="x"))
         # it MOVED (pose path is allowed)
         assert out["moved"] is True
-        assert _occ(occs, "Block:1").transform.rotation is not None
+        assert _occ(occs, "Block:1").transform2.rotation is not None
         # and it WARNED, naming the joints + the capture/health-check next step
         assert "Flywheel_Spin" in out["jointed_joints"]
         assert "capture_position" in out["jointed_warning"]
@@ -450,7 +467,7 @@ class TestMove:
         o = _occ(occs, "Block:1")
         # rotation set about the edge's derived unit direction + a point ON the edge (5,0,0),
         # not the occ origin; the 45 deg input reaches setToRotation in RADIANS
-        angle, axis, origin = o.transform.rotation
+        angle, axis, origin = o.transform2.rotation
         assert angle == pytest.approx(math.radians(45))
         assert (axis.x, axis.y, axis.z) == (1.0, 0.0, 0.0)
         assert (origin.x, origin.y, origin.z) == (5, 0, 0)
@@ -475,7 +492,7 @@ class TestMove:
         asm._common.design = lambda: real
         asm._inputs._common.design = lambda: real
         out = _payload(asm.move_handler(occurrence="Block:1", rotate_deg=30, rotate_axis=h))
-        angle, axis, origin = _occ(occs, "Block:1").transform.rotation
+        angle, axis, origin = _occ(occs, "Block:1").transform2.rotation
         assert angle == pytest.approx(math.radians(30))
         assert (axis.x, axis.y, axis.z) == (0, 0, 1)
         assert (origin.x, origin.y, origin.z) == (2, 2, 0)

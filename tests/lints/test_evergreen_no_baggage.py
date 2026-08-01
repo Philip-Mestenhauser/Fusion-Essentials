@@ -62,6 +62,15 @@ _PHRASE_NAMES = (
     "verified earlier", "verified yesterday", "as of now", "going red",
     "prior run", "first run", "earlier run", "prior note", "prior scenario",
     "the first pipeline", "this batch", "last batch",
+    # uncertainty markers - an API claim in shipped code is live-verified or it is not made at all.
+    # An unverified contract (arity, arg order, enum semantics, member existence) is a PROBE REQUEST
+    # in the campaign ledger for whoever holds the live session, never a coded guess with a hedge
+    # comment: the hedge rots into an authoritative-looking lie the day the code is read without it.
+    # (bare "guessed"/"unverified"/"unconfirmed" stay legal: house style uses them in POSITIVE
+    # claims - "refused, not guessed", tool_verify's pending vocabulary, _assert's soft kind)
+    "needs live verification", "needs verification", "not live-verified", "not yet verified",
+    "pending live", "pending confirmation", "assumed to", "by analogy", "best guess",
+    "see final summary", "see the summary",
     # attribution - a rule stands (or falls) on its stated reason, never on who decreed it
     "owner rule", "owner's rule", "owner-picked", "owner-diagnosed", "owner-calibrated",
     "owner-requested", "owner decision",
@@ -214,6 +223,10 @@ class TestNoHistoricalOrPlanBaggage:
             "# Item 6: folder-resolution retry\n": True,                 # backlog item label
             "# owner-picked topology, do not change\n": True,            # attribution
             "# verified live: the parameter lands\n": False,             # undated marker is house style
+            "# arg order assumed to match the STEP family\n": True,      # uncertainty marker
+            "# the signature is not live-verified\n": True,              # uncertainty marker
+            "# NEEDS LIVE VERIFICATION before trusting the enum\n": True,  # uncertainty marker
+            "# an ambiguous name is refused rather than guessed\n": False,  # positive claim is house style
             "# answers protocolVersion 2025-03-26 to older clients\n": False,  # spec-pinned id
             "# the itemized report lists every body\n": False,           # word boundary: not 'item-N'
         }

@@ -78,8 +78,16 @@ def _polygon_count(mb):
     return safe(lambda: mb.mesh.polygonCount)
 
 
-def _mesh_summary(mb, include_polygon=True):
-    """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler."""
+def _mesh_summary(mb, include_polygon=True, inv_scale=1.0):
+    """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler.
+
+    area/volume are read per-field with safe(): a non-CLOSED mesh has no enclosed volume and
+    MeshBody.volume can raise on it, so that field reports null rather than sinking the whole record
+    (mirrors is_closed - check that flag before trusting volume). inv_scale is 1/(units->cm factor),
+    same convention as _bbox_record - area scales by inv_scale^2, volume by inv_scale^3 from the
+    internal cm^2/cm^3 the API reports (see model_inspect._full_props for the same cm-based idiom)."""
+    area = safe(lambda: mb.area)
+    volume = safe(lambda: mb.volume)
     rec = {
     "name": safe(lambda: mb.name),
     "handle": safe(lambda: mb.entityToken),
@@ -87,6 +95,8 @@ def _mesh_summary(mb, include_polygon=True):
     "node_count": _node_count(mb),
     "is_closed": safe(lambda: bool(mb.isClosed)),
     "is_oriented": safe(lambda: bool(mb.isOriented)),
+    "area": round(area * (inv_scale ** 2), 6) if area is not None else None,
+    "volume": round(volume * (inv_scale ** 3), 6) if volume is not None else None,
     }
     if include_polygon:
         pc = _polygon_count(mb)
@@ -132,12 +142,17 @@ def _iter_meshes(comp):
 
 # ── mesh_get ────────────────────────────────────────────────────────────────────────────────────
 
-def mesh_get_handler(target: str = "", max_results: int = 50) -> dict:
+def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm") -> dict:
     """List the MeshBody objects in a component (target name) or the whole design (target='')."""
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
     name = (target or "").strip()
+
+    sf, uerr = _MEASURE_UNITS.resolve(units)
+    if uerr:
+        return error(uerr)
+    inv_scale = 1.0 / sf if sf else 1.0
 
     comps = []
     if not name:
@@ -175,7 +190,7 @@ def mesh_get_handler(target: str = "", max_results: int = 50) -> dict:
             if key in seen:
                 continue
             seen.add(key)
-            meshes.append(_mesh_summary(mb))
+            meshes.append(_mesh_summary(mb, inv_scale=inv_scale))
 
     total = len(meshes)
     cap = max(1, int(max_results))
@@ -184,7 +199,8 @@ def mesh_get_handler(target: str = "", max_results: int = 50) -> dict:
 
     note = ("These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh "
             "stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with "
-            "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it.")
+            "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it. "
+            "'volume' is null for a mesh that is not watertight (is_closed=false).")
     if truncated:
         note += f" meshes was capped at {cap} of {total}; raise max_results to see the rest."
 
@@ -193,6 +209,7 @@ def mesh_get_handler(target: str = "", max_results: int = 50) -> dict:
     "meshes": meshes_out,
     "truncated": truncated,
     "scope": name or "(whole design)",
+    "units": (units or "mm").strip().lower(),
     "note": note,
     })
 
@@ -209,7 +226,7 @@ def mesh_measure_of_body(mb, units="mm") -> dict:
     if uerr:
         return error(uerr)
     inv_scale = 1.0 / sf if sf else 1.0
-    rec = _mesh_summary(mb)
+    rec = _mesh_summary(mb, inv_scale=inv_scale)
     rec["bbox"] = _bbox_record(mb, inv_scale)
     rec["units"] = (units or "mm").strip().lower()
     if rec.get("is_closed") is False:
@@ -721,14 +738,16 @@ mesh_get_tool = (
     Tool.create_simple(
         name="mesh_get",
         description=("List the MESH bodies (adsk.fusion.MeshBody - STL/OBJ/3MF imports) in a "
-            "component or the whole design, with triangle/vertex counts and watertight "
-            "(is_closed) health. Meshes are a SEPARATE body type from BRep solids/surfaces, "
-            "so the BRep tools (find_geometry / model_inspect) can't see them as solids - this "
-            "is how you find them. Inspect one with model_inspect (mesh target), edit with "
-            "mesh_reduce / mesh_remesh, convert with mesh_to_brep. 'meshes' is capped (max_results, "
-            "default 50); 'truncated' flags when the cap was hit."))
+            "component or the whole design, with triangle/vertex counts, area/volume, and "
+            "watertight (is_closed) health. Meshes are a SEPARATE body type from BRep "
+            "solids/surfaces, so the BRep tools (find_geometry / model_inspect) can't see them "
+            "as solids - this is how you find them. Inspect one with model_inspect (mesh "
+            "target), edit with mesh_reduce / mesh_remesh, convert with mesh_to_brep, remove "
+            "with mesh_delete. 'volume' is null for a mesh that is not watertight. 'meshes' is "
+            "capped (max_results, default 50); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
     .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50)."})
+    .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
     .strict_schema()
 )
 mesh_get_item = Item.create_tool_item(tool=mesh_get_tool, write="read", handler=mesh_get_handler, run_on_main_thread=True)

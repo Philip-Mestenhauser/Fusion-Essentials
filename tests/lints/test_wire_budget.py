@@ -42,10 +42,11 @@ _TOOL_WEIGHTS = {
     "cam_edit_folders": 1442,
     "cam_edit_operation": 1244,
     "cam_edit_setup": 3055,
-    "cam_edit_tools": 2784,
-    "cam_generate": 1324,
+    "cam_edit_tools": 3447,   # turning+hole-making(inch) sample sources, add/remove_preset actions, preset units contract
+    "cam_generate": 1386,
     "cam_get": 3298,
-    "cam_get_status": 1854,
+    "cam_get_status": 1684,
+    "cam_inspect_toolpaths": 1320,
     "cam_post": 2974,
     "cam_reorder": 1066,
     "cam_save_template": 1331,
@@ -64,7 +65,7 @@ _TOOL_WEIGHTS = {
     "design_configure": 2741,
     "design_delete_feature": 1149,
     "design_delete_occurrence": 1047,
-    "design_export": 2572,
+    "design_export": 4222,   # 3MF/OBJ/USD/f3d/SMT formats, STL binary+units, DXF options, invisible flags
     "design_get": 1465,
     "design_recompute": 571,
     "design_set_mode": 969,
@@ -80,7 +81,7 @@ _TOOL_WEIGHTS = {
     "doc_save": 796,
     "doc_save_as": 1834,
     "doc_update_xref": 1266,
-    "drawing_create": 3821,
+    "drawing_create": 4452,   # parts-list, from-template, custom sheet size, hole annotations, drafting display
     "drawing_export": 1740,
     "drawing_update": 1274,
     "find_geometry": 1985,
@@ -92,9 +93,10 @@ _TOOL_WEIGHTS = {
     "joint_edit": 3356,
     "joint_motion_link": 1032,
     "mesh_combine": 1642,
+    "mesh_delete": 1081,
     "mesh_export": 1847,
     "mesh_generate_face_groups": 1061,
-    "mesh_get": 913,
+    "mesh_get": 1091,   # area/volume fields + units input
     "mesh_insert": 1320,
     "mesh_plane_cut": 1452,
     "mesh_reduce": 1280,
@@ -110,15 +112,17 @@ _TOOL_WEIGHTS = {
     "model_draft": 2057,
     "model_extrude": 3141,
     "model_fillet": 1534,
-    "model_hole": 2837,
+    "model_hole": 4492,   # placement modes (center/on_edge/plane_offsets), modeled thread, tap_type, tip_angle
     "model_inspect": 1566,
     "model_loft": 1710,
     "model_measure_between": 1193,
     "model_measure_relation": 2988,
     "model_mirror": 1333,
+    "model_offset_face": 1275,
     "model_pattern_circular": 1668,
     "model_pattern_rectangular": 2036,
     "model_revolve": 2270,
+    "model_scale": 1999,   # two scale modes (uniform + three per-axis factors), anchor input, unitless-expression guard, resolved-value echo
     "model_set_material": 1356,
     "model_shell": 1741,
     "model_split": 2192,
@@ -137,10 +141,10 @@ _TOOL_WEIGHTS = {
     "save_as_mesh": 1239,
     "sketch_add_3d_line": 1780,
     "sketch_add_geometry": 2741,
-    "sketch_constrain": 2016,
+    "sketch_constrain": 2054,   # ref vocabulary names ellipse/spline kinds
     "sketch_create": 1400,
-    "sketch_delete_entity": 1368,
-    "sketch_dimension": 1973,
+    "sketch_delete_entity": 1463,   # ref vocabulary names ellipse/spline kinds
+    "sketch_dimension": 2011,   # ref vocabulary names ellipse/spline kinds
     "sketch_get": 1162,
     "sketch_project": 1604,
     "sketch_set_text": 1773,
@@ -162,10 +166,10 @@ _TOOL_WEIGHTS = {
     "sys_reload_addin": 1290,
     "sys_request_selection": 1956,
     "view_list_workspaces": 462,
-    "view_screenshot": 1460,
-    "view_screenshot_multi": 1142,
+    "view_screenshot": 1747,   # transparent-background + anti-aliased capture options
+    "view_screenshot_multi": 1390,   # transparent-background + anti-aliased capture options
     "view_section": 2222,
-    "view_set": 2440,
+    "view_set": 2791,   # camera projection Choice + perspective angle with read-back
     "view_switch_workspace": 803,
     "workspace_orient": 895,
 }
