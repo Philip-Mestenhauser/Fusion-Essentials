@@ -134,7 +134,7 @@ TOOL_DESCRIPTION = (
     "constraints (perpendicular/parallel/tangent/equal/concentric/collinear) take "
     "entity_one+entity_two; horizontal/vertical/fix/unfix take one entity; symmetry takes "
     "entity_one+entity_two+symmetry_line (the axis). COINCIDENT/midpoint take a POINT as entity_one. "
-    "IMPORTANT: coincident(point, CURVE) puts the point ONTO that curve (point-on-curve) - it does "
+    "Coincident(point, CURVE) puts the point ONTO that curve (point-on-curve) - it does "
     "NOT center anything. To CENTER a circle/arc at a location (e.g. its center on the origin), "
     "coincident its CENTER point to the target POINT: entity_one='point:<circle center>', "
     "entity_two='point:<origin/other point>' - point-to-point, not point-to-curve. A wrong constraint "

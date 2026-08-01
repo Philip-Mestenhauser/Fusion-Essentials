@@ -153,9 +153,9 @@ TOOL_DESCRIPTION = (
     "DERIVE links (each result row's 'kind' says which). By default it updates every reference that "
     "is OUT OF DATE; pass 'name' to target one reference by its source document name, or "
     "only_out_of_date=false to force-refresh matched references regardless. Reports each "
-    "reference's version before/after. WRITES to the design. Use this when a referenced part was "
-    "edited after it was inserted and the host still shows an outdated version (or is missing a "
-    "feature like a joint origin added after insertion)."
+    "reference's version before/after. Use this when a referenced part was edited after it was "
+    "inserted and the host still shows an outdated version (or is missing a feature like a joint "
+    "origin added after insertion)."
 )
 
 tool = (

@@ -825,7 +825,7 @@ _copy_document_tool = (
             "external references so you can confirm they came along. 'folder' may be a nested "
             "path; set create_path=true to create missing destination folders (mkdir -p). "
             "NOTE: this does NOT share lineage, so Fusion will not auto-repair joints from "
-            "the copy. WRITES to the cloud data model."
+            "the copy."
         ),
     )
     # document_id is OPTIONAL, not required: the handler also accepts the by-name path
@@ -860,8 +860,7 @@ _delete_document_tool = (
         "the file's current name - the tool refuses on mismatch so you cannot delete the "
         "wrong file. It also refuses a file that is currently OPEN, or that is REFERENCED "
         "by other files (deleting it would orphan them) unless force=true. Get the URN and "
-        "name from data_get or doc_get. WRITES to the cloud data "
-        "model (deletes)."
+        "name from data_get or doc_get."
         ),
         input_param_name="document_id",
         input_param_description="Lineage id (URN) of the document to delete.",
@@ -888,8 +887,7 @@ _save_document_as_tool = (
             "version the existing file by opening its URN and using doc_save. Result 'document_id' "
             "is the new lineage URN (resolves asynchronously). A large assembly's saveAs can run "
             "minutes and outlive a client timeout while still SUCCEEDING - on timeout verify "
-            "with doc_get before retrying (a retry forks a duplicate). WRITES to the cloud data "
-            "model."
+            "with doc_get before retrying (a retry forks a duplicate)."
         ),
         input_param_name="name",
         input_param_description="Name to save the active document as.",

@@ -25,6 +25,7 @@ class _FakeAnn:
         self.isOutOfDate = False
         self.isSuppressed = False
         self.errorOrWarningMessage = ""
+        self.segments = []
 
 
 class _FakeNotes:
@@ -61,6 +62,7 @@ def rig(monkeypatch):
                                                           holeThreadNotes=hole_notes))
     design = SimpleNamespace(rootComponent=comp)
     monkeypatch.setattr(pc._common, "design", lambda: design)
+    monkeypatch.setattr(pc._pmi, "segments_markup", lambda a: None)
 
     def stub_geometry(ents):
         monkeypatch.setattr(pc._GEOMETRY, "resolve", lambda raw: (ents, None))
@@ -95,10 +97,48 @@ class TestHoleNoteGuards:
         rig.stub_geometry([BRepEdge(None)])
         assert "FACE handles" in error_message(pc.handler(kind="hole_note", geometry=["a"]))
 
-    def test_hole_note_refuses_text(self, rig):
+    def test_hole_note_appends_text_after_the_callout(self, rig):
         rig.stub_geometry([_face(rig.comp)])
-        msg = error_message(pc.handler(kind="hole_note", geometry=["a"], text="custom"))
-        assert "does not take 'text'" in msg
+        out = _payload(pc.handler(kind="hole_note", geometry=["a"], text=" REAM FINAL"))
+        assert out["annotation"] == "Hole Note1"
+        assert len(rig.hole_notes.ann.segments) == 1     # appended to the (empty) fake callout
+
+    def test_hole_note_refuses_note_only_inputs(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="hole_note", geometry=["a"], plane="xy"))
+        assert "kind='note' only" in msg
+
+    def test_note_refuses_hole_only_inputs(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X",
+                                       flags={"quantity_note": False}))
+        assert "hole_note" in msg
+
+    def test_unknown_flag_is_refused_with_the_vocabulary(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="hole_note", geometry=["a"],
+                                       flags={"bogus_flag": True}))
+        assert "bogus_flag" in msg and "quantity_note" in msg
+
+    def test_unknown_value_key_is_refused(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="hole_note", geometry=["a"],
+                                       values={"bogus": 5}))
+        assert "bogus" in msg and "diameter" in msg
+
+
+class TestToleranceSpec:
+    def test_missing_type_is_refused(self):
+        tol, err = pc._pmi.build_tolerance({}, 0.1)
+        assert tol is None and "'type'" in err and "symmetric" in err
+
+    def test_unknown_type_is_refused(self):
+        tol, err = pc._pmi.build_tolerance({"type": "wonky"}, 0.1)
+        assert tol is None and "wonky" in err
+
+    def test_display_units_vocabulary_is_enforced(self):
+        ds, err = pc._pmi.build_display({"units": "furlong"})
+        assert ds is None and "must be one of" in err
 
 
 class TestCreate:

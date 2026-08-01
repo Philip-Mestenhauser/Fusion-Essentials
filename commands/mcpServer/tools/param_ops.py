@@ -317,8 +317,8 @@ tool = (
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
 
 _SET_DESCRIPTION = (
-"Set a design parameter's expression (value). WRITES to the design - parameters drive "
-"geometry, stock, and suppression downstream. 'expression' is interpreted like the "
+"Set a design parameter's expression (value). Parameters drive geometry, stock, and "
+"suppression downstream. 'expression' is interpreted like the "
 "Parameters dialog: a number/expression ('2 in', '6.25', 'StockX/2', a reference to "
 "other parameters), or a quoted text value for text parameters (\"'Roughing'\"). "
 "Function ARGUMENTS separate with ';' not ',' - if(StockX>=2 in; 10 mm; 5 mm), max(a; b) "

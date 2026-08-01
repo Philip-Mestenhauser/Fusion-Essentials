@@ -81,7 +81,7 @@ TOOL_DESCRIPTION = (
     "V-bank, a left/right part, a symmetric housing). 'bodies' is the body handle(s)/name(s) to "
     "mirror (a list or comma-separated). 'plane' is an origin alias (xy/xz/yz), a construction-plane "
     "name, or a planar-face/plane handle from find_geometry. 'join' combines the mirror with the "
-    "original into one body (default false = separate). WRITES; returns the resulting body names."
+    "original into one body (default false = separate). Returns the resulting body names."
 )
 
 mirror_tool = (

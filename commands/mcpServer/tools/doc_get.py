@@ -488,8 +488,8 @@ TOOL_DESCRIPTION = (
     "REVERSE view (where-used) - documents "
     "that reference THIS one (a drawing made from it, a parent assembly that inserts it), each with "
     "name/type/version/URN and a by-type rollup. open_documents is capped (max_results, default 50) and "
-    "each slice is capped too; 'truncated' flags when a cap was hit. Read-only (roll a version back with "
-    "doc_restore_version).\n"
+    "each slice is capped too; 'truncated' flags when a cap was hit. Roll a version back with "
+    "doc_restore_version.\n"
     + _outputs.produces_block(RETURNS)
 )
 

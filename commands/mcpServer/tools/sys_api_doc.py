@@ -195,9 +195,7 @@ TOOL_DESCRIPTION = (
     "hosted. Use it BEFORE writing an sys_execute_script to confirm exact signatures and behaviour "
     "(e.g. how getOrientedBoundingBox orients its box, what generateAllToolpaths returns). "
     "'searchPattern' is a case-insensitive regex over names (and over docstrings when apiCategory is "
-    "'description' or 'all'). 'apiCategory': class | member | description | all (default all). "
-    "'filter': optional 'adsk.<namespace>' or 'adsk.<namespace>.<Class>' to scope the search "
-    "(e.g. 'adsk.cam', 'adsk.fusion.Extrude')."
+    "'description' or 'all')."
 )
 
 api_doc_tool = (

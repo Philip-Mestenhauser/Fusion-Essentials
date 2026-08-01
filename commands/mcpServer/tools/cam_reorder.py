@@ -63,7 +63,7 @@ TOOL_DESCRIPTION = (
     "REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or "
     "'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_edit_folders). Works on operations, "
     "folders, and patterns, anywhere in the tree. An illegal move (e.g. out of its setup) is reported as "
-    "an error, not a false success. WRITES CAM data (doesn't invalidate toolpaths)."
+    "an error, not a false success. Reordering does not invalidate existing toolpaths."
 )
 
 tool = (

@@ -724,7 +724,7 @@ mesh_get_tool = (
             "component or the whole design, with triangle/vertex counts and watertight "
             "(is_closed) health. Meshes are a SEPARATE body type from BRep solids/surfaces, "
             "so the BRep tools (find_geometry / model_inspect) can't see them as solids - this "
-            "is how you find them. reads. Inspect one with model_inspect (mesh target), edit with "
+            "is how you find them. Inspect one with model_inspect (mesh target), edit with "
             "mesh_reduce / mesh_remesh, convert with mesh_to_brep. 'meshes' is capped (max_results, "
             "default 50); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
@@ -737,12 +737,11 @@ mesh_insert_tool = (
     Tool.create_simple(
         name="mesh_insert",
         description=("Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active (or "
-            "named) component. IMPORTANT: in a PARAMETRIC design the import MUST run "
-            "inside a BaseFeature edit scope (the API forbids a bare MeshBodies.add); this "
-            "tool opens that scope for you and reports the base_feature it created. In a "
-            "DIRECT design no scope is needed. To import a data-model file, first resolve it "
-            "to a local path with the data_* tools, then pass that path. Convert the result "
-            "to BRep with mesh_to_brep to use it with the BRep/CAM tools."))
+            "named) component. In a PARAMETRIC design the import MUST run inside a BaseFeature edit "
+            "scope (the API forbids a bare MeshBodies.add); this tool opens that scope for you and "
+            "reports the base_feature it created. DIRECT needs none. To import a data-model file, "
+            "first resolve it to a local path with the data_* tools, then pass that path. Convert "
+            "the result to BRep with mesh_to_brep to use it with the BRep/CAM tools."))
     .add_input_property("file_path", {"type": "string", "description": "Full path to a .stl / .obj / .3mf file (required)."})
     .add_input_property("target_component", {"type": "string", "description": "Component name to import into (default: active component)."})
     .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm)."})
@@ -758,9 +757,9 @@ mesh_reduce_tool = (
         Tool.create_simple(
             name="mesh_reduce",
             description=("Decimate (reduce the triangle count of) a MESH body to a target proportion "
-                         "(percent), face_count, or max_deviation. WRITES a MeshReduceFeature. Big "
-                         "scans (millions of triangles) can exceed the 30s handler cap - the result "
-                         "notes when a fire-and-poll wrapper is advisable.")),
+                         "(percent), face_count, or max_deviation. Big scans (millions of triangles) "
+                         "can exceed the 30s handler cap - the result notes when a fire-and-poll "
+                         "wrapper is advisable.")),
         _REDUCE_SPEC)
     .add_input_property("value", {"type": "number", "description": "Percent (0,100] for proportion; a positive integer for face_count; a positive length (in 'units') for max_deviation."})
     .add_required_input("value")
@@ -772,8 +771,8 @@ mesh_remesh_tool = (
     Tool.create_simple(
         name="mesh_remesh",
         description=("Regenerate a cleaner, more uniform triangulation of a MESH body (repair / even "
-                     "density). WRITES a MeshRemeshFeature. Big meshes can exceed the 30s cap - the "
-                     "result notes when fire-and-poll is advisable."))
+                     "density). Big meshes can exceed the 30s cap - the result notes when "
+                     "fire-and-poll is advisable."))
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
     .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Field names vary by build; set best-effort."})
@@ -787,7 +786,7 @@ mesh_to_brep_tool = (
         Tool.create_simple(
             name="mesh_to_brep",
             description=("Convert a MESH body into a BRep solid/surface - the bridge back to the BRep "
-                         "tools (find_geometry / fillet / chamfer / CAM). WRITES a MeshConvertFeature. "
+                         "tools (find_geometry / fillet / chamfer / CAM). "
                          "method='prismatic' (default) merges flat face groups (fewest faces, best for "
                          "machined/scanned parts); 'faceted' makes one BRep face per triangle (exact, "
                          "heavy); 'organic' rebuilds smooth surfaces but REQUIRES the Product Design "

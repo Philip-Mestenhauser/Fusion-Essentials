@@ -118,10 +118,9 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
 
 TOOL_DESCRIPTION = (
     "Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives "
-    "the other proportionally - a gear pair, belt/chain drive, or coupling (e.g. wheel-spin to "
-    "crank-rotation). joint_one/joint_two are joint names (see assembly_get); ratio is joint_two's "
-    "motion per unit of joint_one (2 = twice as fast). Both joints must permit motion "
-    "(revolute/slider/cylindrical)."
+    "the other proportionally - a gear pair, belt/chain drive, or coupled rotation. joint_one/"
+    "joint_two are joint names (see assembly_get); ratio is joint_two's motion per unit of "
+    "joint_one (2 = twice as fast). Both joints must permit motion (revolute/slider/cylindrical)."
 )
 
 motion_link_tool = (

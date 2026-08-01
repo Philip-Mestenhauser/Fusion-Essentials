@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 143  |  **description breadcrumbs:** 549  |  **note/error breadcrumbs:** 270
+**Tools:** 143  |  **description breadcrumbs:** 552  |  **note/error breadcrumbs:** 271
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -29,7 +29,7 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 68  (desc 10, note 58)
-- `find_geometry`  <- 64  (desc 51, note 13)
+- `find_geometry`  <- 63  (desc 51, note 12)
 - `view_screenshot`  <- 47  (desc 20, note 27)
 - `sketch_create`  <- 30  (desc 19, note 11)
 - `cam_get`  <- 28  (desc 19, note 9)
@@ -68,12 +68,20 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Nothing to revert - there are no captured positions.
 - Fusion declined to revert the latest captured position.
 - Latest captured position discarded (back to the joint-defined state).
-- has_pending = a moved-but-uncaptured position exists. Use capture to record it into the timeline, or revert to drop the latest capture.
+- has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does). Use capture to record it into the timeline, revert to drop the latest capture, or de...
 - Nothing to capture - there is no pending position change. Move a jointed component first (its pose is transient until captured).
 - snapshots.add() returned nothing - the position was not captured.
 - Capture reported success but the snapshot count did not advance (
 - after) - the position was not captured.
 - Current position captured into the timeline.
+- action='delete' needs 'marker' (the captured position's name, from action='status').
+- Nothing to delete - there are no captured positions.
+- No captured position named '
+- captured positions - marker names should be unique; check the timeline directly.
+- Fusion declined to delete captured position '
+- Delete reported success but '
+- ' is still present in the snapshot collection.
+- Captured position removed from the timeline; later captured positions (if any) survive a recompute unchanged.
 
 ### `assembly_constrain`
 - No active design with components.
@@ -224,16 +232,20 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . Omit 'handle' to poll live document state, or pass 'target' (a setup/operation name) to poll an inline generation by name.
 
 ### `cam_post`
-- Only valid toolpaths were posted (out-of-date/errored ops are omitted); cam_get(include=['nc_programs']) shows the program, cam_get(include=['operations']) any ops that were skipped.
 - Post did not report clean success - review before running.
-- Provide 'output_folder' - the directory where the NC file(s) will be written.
+- ' posted AS-IS from its stored configuration -
+- No operations/post/output-folder settings were changed.
+- Only valid toolpaths were posted (out-of-date/errored ops are omitted); cam_get(include=['nc_programs']) shows the program, cam_get(include=['operations']) any ops that were skipped.
 - Provide 'program_name' - the NC Program name or number (some posts require a number).
+- Provide 'output_folder' - the directory where the NC file(s) will be written.
 - No valid toolpaths to post - every operation is out-of-date, errored, or ungenerated. Run cam_generate (in the Manufacture workspace) first. (
+- Omit 'scope' to post the whole document.
+- ' already exists and its stored operations differ from what 'scope' resolves to - reconfiguring would overwrite a program that may be machinist-curated. Omit 'scope', 'post', and 'output_folder' to...
+- ' output folder to post as-is against - configure it once with 'output_folder' and 'post'.
 - (the API returned null).
 - The NC Program has no '
 - ' parameter, so the output folder could not be set to '
 - '. Unresolved parameters:
-- Omit 'scope' to post the whole document.
 - Post processing raised:
 - ; check the post matches the machine/operations.)
 
@@ -704,7 +716,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - cm). Rolled the origin back; nothing changed.
 
 ### `joint_drive`
-- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This poses the model; it does not add a timeline feature, and a later recompute resets the pose. There is no...
+- Joint driven (the Drive Joints command) - the mechanism followed along this joint's DOF. This pose is TRANSIENT: a recompute resets it unless captured. Call assembly_capture_position (action='captu...
 - Provide 'angle_deg' (revolute/cylindrical) and/or 'distance' (slider/cylindrical) to drive the joint to.
 - '. Use mm, cm, or in.
 - No active design with components.
@@ -1156,16 +1168,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Verify placement visually with view_screenshot; read all PMI with pmi_get.
 - No active design. Create or open a document first (see doc_new).
 - '. Use mm, cm, or in.
-- The PMI add() returned nothing - no annotation was created. The geometry may not support this note kind (e.g. hole_note on a non-hole face).
-- ' has no PMI collection - this Fusion build may not support PMI authoring.
-- kind='hole_note' takes FACE handles only (got
-- ). Use find_geometry(kind='cylinder_face') on the hole.
-- kind='hole_note' composes its callout from the hole geometry - it does not take 'text'. Create it plain, then pmi_edit(action='set_text') to append custom segments.
+- 'flags'/'values'/'display' apply to kind='hole_note' only.
+- 'plane'/'plane_face'/'leader_point' apply to kind='note' only - a hole note derives its plane and leader from the hole faces.
 - (the annotation WAS created: '
 - ' - reposition with pmi_edit)
-- Leader note creation failed:
-- Hole/thread note creation failed:
-- . The faces must belong to geometric holes (cylinder/counterbore/countersink faces) or cylindrical bosses.
+- 'leader_extension' must be a number (in 'units').
 
 ### `pmi_delete`
 - No active design. Create or open a document first (see doc_new).
@@ -1181,7 +1188,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use mm, cm, or in.
 
 ### `pmi_get`
-- - 'segments' adds the {symbol} markup (round-trips into pmi_create/pmi_edit text), 'detail' adds health/references/hole numerics. geometry= narrows to specific faces/edges.
+- - 'segments' adds the {symbol} markup (round-trips into pmi_create/pmi_edit text), 'detail' adds per-kind structure (placement/format, hole values+tolerances+thread+display, imported dimension/GDT/...
 - Light records. Pull deeper with include=
 - No active design. Create or open a document first (see doc_new).
 - '. Use mm, cm, or in.

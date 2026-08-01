@@ -292,7 +292,7 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
 LOFT_DESCRIPTION = (
 "Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order "
 "given - order is load-bearing), optionally shaped by 'rails' (guide curves) OR a single "
-"'centerline' (mutually exclusive). 'operation': new | join | cut | intersect. 'as_surface' forces "
+"'centerline' (mutually exclusive). 'as_surface' forces "
 "a surface loft (isSolid=False). Reports 'is_solid' read back off the feature. "
 "Pair with model_stitch to close surfaces, or view_screenshot to view."
 )

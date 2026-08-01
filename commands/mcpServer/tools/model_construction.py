@@ -538,20 +538,19 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-    "Add construction geometry (reference datums) in the active component. 'kind': point|axis|"
-    "plane; 'mode' picks the method within kind (default: legacy - offset/edge-or-world/"
-    "coordinate). Modes + extra inputs:\n"
+    "Add a construction point, axis, or plane (a reference datum) in the active component. "
+    "'mode' picks the build method for the chosen 'kind' (default: legacy - offset/edge-or-"
+    "world/coordinate). Modes and their extra inputs:\n"
     "plane: offset (plane, offset) | at_angle (1 edge, angle, plane) | three_points (3 points) | "
     "midplane (plane, plane2) | tangent_at_point (face, 1 point) | two_edges (2 edges).\n"
-    "axis: edge/world (axis, unchanged) | circular_face (face) | two_points (2 points) | "
+    "axis: edge/world (axis) | circular_face (face) | two_points (2 points) | "
     "two_planes (plane, plane2) | perpendicular_at_point (face, 1 point).\n"
     "point: coordinate (x, y, z) | circle_center (1 edge) | two_edges (2 edges) | three_planes "
     "(plane, plane2, plane3) | edge_plane (1 edge, plane).\n"
-    "'edges'/'points' are find_geometry handle LISTS (edge/vertex, not sketch/construction "
-    "points); 'face' a find_geometry face handle. Coordinates/offset in 'units' (mm default), "
-    "'angle' in degrees. IMPORTANT: only a bare coordinate point / world-axis-through-a-point "
-    "needs DIRECT-modeling; every geometry-based mode is parametric-legal. 'name' optionally "
-    "names the result."
+    "'edges'/'points' are find_geometry handle lists (edge/vertex, not sketch/construction "
+    "points); 'face' a find_geometry face handle. Coordinates/offset use 'units' (mm default), "
+    "'angle' in degrees. Only a bare coordinate point or world-axis-through-a-point needs Direct "
+    "modeling; every geometry-based mode works in Parametric. 'name' optionally names the result."
 )
 
 construction_tool = (
@@ -570,7 +569,7 @@ construction_tool = (
     .add_input_property(*_POINTS.as_property())
     .add_input_property(*_FACE.as_property())
     .add_input_property("angle", {"type": "number", "description": "Angle in degrees (mode=at_angle)."})
-    .add_input_property("offset", {"type": ["number", "string"], "description": "mode=offset: offset distance in 'units', OR a parameter EXPRESSION string ('StockZ/2', '25 mm') that ties the plane to a live parameter (retargetable via param_set)."})
+    .add_input_property("offset", {"type": ["number", "string"], "description": "mode=offset: offset distance in 'units', or a parameter expression string ('StockZ/2', '25 mm') that ties the plane to a live parameter (retargetable via param_set)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("name", {"type": "string", "description": "Optional name for the datum."})
     .strict_schema()

@@ -112,11 +112,10 @@ _compare_tool = (
     Tool.create_with_string_input(
         name="cam_compare_operations",
         description=(
-            "Compare two CAM operations (by name) and report exactly which of their "
-            "parameters differ - and the value on each side. Use this to understand what "
-            "makes one machining strategy different from a similar one. Also reports the "
-            "tool each uses and how many parameters match. 'differences' is capped "
-            "(max_results, default 200); 'truncated' flags when the cap was hit."
+            "Compare two CAM operations by name and report which parameters differ, with the value on "
+            "each side. Use to see what makes one machining strategy different from a similar one. Also "
+            "reports the tool each uses and how many parameters match. 'differences' is capped "
+            "(max_results, default 200); 'truncated' flags a hit cap."
         ),
         input_param_name="operation_a",
         input_param_description="Name of the first operation.",

@@ -458,14 +458,14 @@ def _normalize_include(include):
 
 
 TOOL_DESCRIPTION = (
-    "Read the active DESIGN by zoom level (one rich read for mode + tree + timeline + health + "
-    "configs). Default (no 'include'): the orientation slice - modelling mode, a shallow component-tree "
+    "Read the active DESIGN by zoom level (one call for mode + tree + timeline + health + "
+    "configs). Default (no 'include'): modelling mode, a shallow component-tree "
     "summary, and timeline_healthy (timeline errors/warnings ONLY - NOT stale references, which appear "
     "as is_out_of_date on tree nodes; the whole-document verdict is workspace_orient.is_healthy). "
     "'include' pulls deeper: 'tree' (full component/occurrence tree; "
     "'max_depth'/'component' scope it), 'timeline' (the feature list; 'group'/'include_suppressed' "
-    "scope it), 'mode' (full capability map), 'configurations' (the config table). Read-only; the "
-    "default is safe to call blind and names its deeper slices."
+    "scope it), 'mode' (full capability map), 'configurations' (the config table). The default is "
+    "safe to call blind and names its deeper slices."
 )
 
 tool = (

@@ -205,7 +205,7 @@ TOOL_DESCRIPTION = (
     "surface, by find_geometry handle or name) - give exactly one. 'target' is the body to split "
     "(split=body); 'faces' are the faces to split (split=face). 'extend_tool' auto-extends the cutter "
     "to fully cross the target (default true). A split that does not actually divide anything is "
-    "reported as an error, never a silent success. WRITES."
+    "reported as an error, never a silent success."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

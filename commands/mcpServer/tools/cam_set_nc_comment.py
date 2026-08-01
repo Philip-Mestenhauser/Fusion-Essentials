@@ -134,7 +134,7 @@ TOOL_DESCRIPTION = (
     "Set the COMMENT field of the active document's NC programs (post/output jobs) - what most "
     "posts emit near the top of the G-code. 'comment' is the text to write. 'program' limits the "
     "change to one NC program by name (omit to update ALL programs). 'set_name' optionally also "
-    "sets each program's Name field. WRITES to the CAM data; reports before/after per program. "
+    "sets each program's Name field. Reports before/after per program. "
     "Works without switching to the Manufacture workspace. (Use cam_get(include=['nc_programs']) to list program "
     "names - note it reports post parameters, not the comment, which this tool edits directly.)"
 )

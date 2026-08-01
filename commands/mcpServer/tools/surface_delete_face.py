@@ -128,7 +128,7 @@ surface_delete_face_tool = (
     Tool.create_simple(name="surface_delete_face", description=_DESC)
     .add_input_property("faces", _FACES.schema())
     .add_input_property("heal", {"type": "boolean",
-        "description": "Heal/fill the opening (default false = leave it open; a solid becomes a surface)."})
+        "description": "Heal/fill the opening (default false = leave it open)."})
     .add_required_input("faces")
     .strict_schema()
 )

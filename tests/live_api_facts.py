@@ -140,6 +140,16 @@ ENUMS = {
         "BallJointType": 6,
         "InferredJointType": 7,
     },
+    "fusion.LeaderLineNotePlaneTypes": {
+        "UnknownLeaderLineNotePlaneType": 0,
+        "NormalToFaceLeaderLineNotePlaneType": 1,
+        "NormalToCustomFaceLeaderLineNotePlaneType": 2,
+        "NormalToCircularEdgeLeaderLineNotePlaneType": 3,
+        "AxisCylinderAndConeLeaderLineNotePlaneType": 4,
+        "PrincipalXYLeaderLineNotePlaneType": 5,
+        "PrincipalYZLeaderLineNotePlaneType": 6,
+        "PrincipalZXLeaderLineNotePlaneType": 7,
+    },
     "fusion.MeshCombineAlgorithmTypes": {
         "LegacyMeshCombineAlgorithmType": 0,
         "EnhancedMeshCombineAlgorithmType": 1,
@@ -223,6 +233,14 @@ ENUMS = {
         "SurfaceProfilePMISymbolType": 27,
         "ParallelismPMISymbolType": 28,
         "CircularRunoutPMISymbolType": 29,
+    },
+    "fusion.PMIUnitTypes": {
+        "UseDocumentUnitPMIUnitType": 0,
+        "MillimetersPMIUnitType": 1,
+        "CentimetersPMIUnitType": 2,
+        "MetersPMIUnitType": 3,
+        "InchesPMIUnitType": 4,
+        "FeetPMIUnitType": 5,
     },
     "fusion.SurfaceExtendTypes": {
         "NaturalSurfaceExtendType": 0,

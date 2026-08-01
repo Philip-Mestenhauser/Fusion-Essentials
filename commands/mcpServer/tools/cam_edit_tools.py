@@ -817,10 +817,9 @@ TOOL_DESCRIPTION = (
     "'list' with a shared scope and NO 'library' lists the libraries there, else that library's tools "
     "(each carries a (library_url,index) reference); 'list_types' lists the from_type vocabulary; "
     "'parameters' reads one tool's FULL parameter list (name/expression/value, flags formula-derived). "
-    "WRITES persist; Hub is shared TEAM data and network-slow. 'where_used' is document-scope only. "
-    "list/list_types/parameters/"
-    "where_used read-only. 'add' auto-assigns each new tool a free tool number (in assigned_tool_numbers; "
-    "cam_post refuses duplicates)."
+    "list/list_types/parameters/where_used are read-only; the rest write and persist. Hub is shared "
+    "TEAM data and network-slow; 'where_used' is document-scope only. 'add' auto-assigns each new "
+    "tool a free tool number (in assigned_tool_numbers; cam_post refuses duplicates)."
 )
 
 tool = (

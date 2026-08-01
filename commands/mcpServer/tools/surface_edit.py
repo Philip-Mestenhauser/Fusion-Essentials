@@ -450,8 +450,8 @@ surface_extend_item = Item.create_tool_item(tool=surface_extend_tool, write="wri
 _OFFSET_DESC = (
                                             "Offset faces by a distance into ANOTHER surface (positive = along the face normal). 'faces' need "
                                             "not be one body; 'distance' in 'units'; chaining=true expands across TANGENT-connected faces "
-                                            "(reported as faces_offset); "
-                                            "'operation': new | new_component. Produces a SURFACE (isSolid=false)."
+                                            "(reported as faces_offset). "
+                                            "Produces a SURFACE (isSolid=false)."
 )
 surface_offset_tool = (
     Tool.create_simple(name="surface_offset", description=_OFFSET_DESC)
@@ -472,7 +472,7 @@ _THICKEN_DESC = (
                                             "Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes "
                                             "a wall, stitch closes a watertight surface set). 'faces' (or patch bodies) need not be connected "
                                             "or from one body; 'thickness' (non-zero) in 'units'; 'symmetric' thickens both sides; "
-                                            "'operation': new | join | cut; 'chaining' selects the connected face set (default true). Produces "
+                                            "'chaining' selects the connected face set (default true). Produces "
                                             "a SOLID (isSolid=true)."
 )
 surface_thicken_tool = (

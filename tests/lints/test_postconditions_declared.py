@@ -49,7 +49,7 @@ def _postconditions_of(item):
 # A few async/system entries keep bespoke reasons. This table only shrinks.
 _EXEMPT = {
     'appearance_set': 'inline: each appearance= assignment is read back; a mismatch lands in failed or errors',
-    'assembly_capture_position': 'inline: snaps.add() is gated and the snapshot count must advance',
+    'assembly_capture_position': 'inline: snaps.add() is gated and the snapshot count must advance; delete gates deleteMe() and re-reads the collection for a survivor',
     'assembly_constrain': 'inline: constraint healthState is read after add(); a failed solve is an error',
     'assembly_ground': 'inline: the isGroundToParent= assignment is re-read (safe) and a flag that did not take is an error',
     'assembly_move': 'inline: the transform is re-read after the transform= set; an unchanged pose errors, position is the actual',

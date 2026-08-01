@@ -116,7 +116,7 @@ TOOL_DESCRIPTION = (
     "'uploading' (bytes still transferring), 'processing' (transfer done, cloud is still translating/"
     "finishing the file), 'complete' (the cloud confirms the file has fully landed - file_id/"
     "version_id/fusion_web_url are included), or 'failed'. Bounded and NON-BLOCKING: reports the "
-    "current state and returns immediately, it never sleeps or waits for completion. Read-only."
+    "current state and returns immediately, it never sleeps or waits for completion."
 )
 
 tool = (

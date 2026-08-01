@@ -439,15 +439,14 @@ RETURNS = [
 
 TOOL_DESCRIPTION = (
     "Insert a DERIVE of another document's design into a component of the active document - a "
-    "one-way linked copy: it updates FROM the source, and modeling done here on top never travels "
-    "back (the source stays authoritative). Derives the WHOLE source by default; scope it with "
-    "source_components / source_bodies (names in the SOURCE), and exclude_components / "
-    "exclude_bodies to omit some. For a linked INSTANCE instead, use doc_insert_occurrence. "
-    "Requires a parametric design and the source document already OPEN (doc_open - Fusion loads "
-    "documents asynchronously, so it cannot be opened in the same call). Derives the source's last "
-    "SAVED cloud version (unsaved in-session source edits are not included - save first). Freshness: "
-    "doc_get(include=['xref_tree']) shows kind='derive' rows; doc_update_xref refreshes, else "
-    "delete and re-derive.\n"
+    "one-way linked copy: it updates from the source; edits made here never travel back. Derives "
+    "the whole source by default; scope with source_components / source_bodies (source-side "
+    "names), and exclude_components / exclude_bodies to omit some. For a linked INSTANCE instead, "
+    "use doc_insert_occurrence. Requires a parametric design and the source document already OPEN "
+    "(doc_open - Fusion loads documents asynchronously, so it can't open within the same call). "
+    "Derives the source's last SAVED cloud version (unsaved source edits aren't included - save "
+    "first). Freshness: doc_get(include=['xref_tree']) shows kind='derive' rows; doc_update_xref "
+    "refreshes, else delete and re-derive.\n"
     + _outputs.produces_block(RETURNS)
 )
 

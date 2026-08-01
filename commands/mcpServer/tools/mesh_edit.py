@@ -241,13 +241,12 @@ mesh_generate_face_groups_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_generate_face_groups",
-            description=("Segment a MESH body into planar FACE GROUPS. WRITES a "
-                         "MeshGenerateFaceGroupsFeature. This is the REQUIRED pre-step for a PRISMATIC "
-                         "mesh_to_brep: without face groups, prismatic convert fails with "
-                         "'MESH_FAILED_BREP - Use Generate Face Groups'. Run this first, then "
-                         "mesh_to_brep(method='prismatic'). method='accurate' (default) is slower but "
-                         "cleaner; 'fast' is quicker. In a PARAMETRIC design the feature runs inside a "
-                         "BaseFeature edit scope (handled for you); in DIRECT no scope is needed.")),
+            description=("Segment a MESH body into planar FACE GROUPS - required before a PRISMATIC "
+                         "mesh_to_brep, which otherwise fails with 'MESH_FAILED_BREP - Use Generate "
+                         "Face Groups'. Run this first, then mesh_to_brep(method='prismatic'). "
+                         "method='accurate' (default) is slower but cleaner; 'fast' is quicker. In a "
+                         "PARAMETRIC design the feature runs inside a BaseFeature edit scope (handled "
+                         "for you); DIRECT needs none.")),
         _FG_SPEC)
     .strict_schema()
 )
@@ -260,11 +259,11 @@ mesh_plane_cut_tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(
             name="mesh_plane_cut",
-            description=("Cut a MESH body with a plane. WRITES a MeshPlaneCutFeature. cut_type='trim' "
-                "(default) keeps one side; 'split_body' makes two separate mesh bodies; "
-                "'split_faces' cuts the triangulation in place. fill: none | minimal (default) | "
-                "uniform. flip keeps/cuts the OTHER side. In PARAMETRIC the cut runs inside a "
-                "BaseFeature scope (handled for you); DIRECT needs none.")),
+            description=("Cut a MESH body with a plane. cut_type='trim' (default) keeps one side; "
+                "'split_body' makes two separate mesh bodies; 'split_faces' cuts the triangulation "
+                "in place. fill: none | minimal (default) | uniform. flip keeps/cuts the OTHER side. "
+                "In PARAMETRIC the cut runs inside a BaseFeature scope (handled for you); DIRECT "
+                "needs none.")),
         _CUT_SPEC)
     .add_input_property("flip", {"type": "boolean",
             "description": "Keep/cut the OTHER side of the plane (default false)."})

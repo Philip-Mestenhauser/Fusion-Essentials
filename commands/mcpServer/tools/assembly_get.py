@@ -389,17 +389,15 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Read the active assembly's KINEMATIC STATE as clean JSON. "
-    "For every TOP-LEVEL occurrence: its world position (origin + "
-    "bodies-only bbox center/size in 'units'), its rotation as three basis axes (x_axis / y_axis / z_axis unit "
-    "vectors), ground flags (grounded / ground_to_parent), and the joints it "
-    "participates in. Plus a design-level joint list (type, degrees of freedom, the two occurrences "
-    "each connects) and which occurrences are grounded. Use it to verify grounding (is the block "
-    "fixed, the crank free?), joint wiring (did it connect the right parts?), and part positions "
-    "from NUMBERS. include_joints=false for just positions/grounding. include=['joint_origins'] adds each "
-    "Joint Origin (WCS frame): qualified name + handle (feed joint_create / cam_edit_setup wcs), world "
-    "position/axes, consuming joints. occurrences/joints capped (max_occurrences 50, max_joints 100); "
-    "*_truncated flags a hit cap."
+    "Read the active assembly's kinematic state as JSON. For every top-level occurrence: its world "
+    "position (origin + bodies-only bbox center/size in 'units'), rotation as three basis axes "
+    "(x_axis/y_axis/z_axis unit vectors), ground flags (grounded/ground_to_parent), and its joints. "
+    "Plus a design-level joint list (type, degrees of freedom, the two occurrences each connects) and "
+    "which occurrences are grounded. Use it to verify grounding, joint wiring, and part positions from "
+    "numbers instead of a screenshot. include_joints=false for just positions/grounding. "
+    "include=['joint_origins'] adds each Joint Origin (WCS frame): qualified name + handle (feed "
+    "joint_create / cam_edit_setup wcs), world position/axes, consuming joints. occurrences/joints are "
+    "capped (max_occurrences 50, max_joints 100); *_truncated flags a hit cap."
 )
 
 tool = (

@@ -495,7 +495,7 @@ TOOL_DESCRIPTION = (
     "BUILD or SWITCH a Configured Design (read the table with design_get(include=['configurations'])). "
     "'action' is the verb: create | activate | add_configuration | rename_configuration | add_parameter "
     "| add_suppress | add_visibility | set_appearance | add_insert (each action's inputs are documented "
-    "on the properties below). WRITES. Non-obvious runtime rules: 'create' needs a SAVED document and the "
+    "on the properties below). Non-obvious runtime rules: 'create' needs a SAVED document and the "
     "Configurations dropdown only appears after you SAVE and REOPEN the doc; a parameter column changes "
     "geometry only if that parameter drives a dimension; appearances for set_appearance must already "
     "exist in the design; add_insert's part must be in the same project."

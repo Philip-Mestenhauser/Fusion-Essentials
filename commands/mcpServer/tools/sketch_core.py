@@ -557,7 +557,7 @@ _CREATE_DESC = (
                                         "precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges into it, so re-read "
                                         "sketch_get and pick the region by its area/centroid handle, not a guessed index. "
                                         "Optional 'name' renames the sketch. For a sketch in a nested or offset component, the "
-                                        "returned 'frame' is component-LOCAL, not world. WRITES; then draw on it with "
+                                        "returned 'frame' is component-LOCAL, not world. Then draw on it with "
                                         "sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
@@ -577,11 +577,10 @@ _ADD_DESC = (
                                            "Draw one geometry entity on a sketch. Params per 'kind' (coords/sizes in 'units' = mm "
                                            "[default]/cm/in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
                                            "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
-                                           "cx,cy,radius,sides. polyline/closed_path take 'points' (a list of [x,y]) and draw a CONNECTED "
-                                           "chain sharing endpoints (continuous + parametric); 'closed_path' closes the boundary "
-                                           "(delegates to a repeated-first-point loop, so it scales to large outlines). center_rectangle "
+                                           "cx,cy,radius,sides; polyline/closed_path/spline take 'points' (see its own description; "
+                                           "closed_path scales to large outlines). center_rectangle "
                                            "adds NO center/symmetry constraints (unlike native) - constrain/dimension it after. Targets "
-                                           "'sketch_name' (else the most recent sketch). WRITES; pair with view_screenshot to view it."
+                                           "'sketch_name' (else the most recent sketch). Pair with view_screenshot to view it."
 )
 add_geometry_tool = (
     Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
@@ -613,7 +612,7 @@ _3DLINE_DESC = (
                                           "the x-y plane). The start defaults to the origin; "
                                           "coincident_start_to_origin=true locks it there with a coincident constraint. "
                                           "Coordinates in 'units' (mm default). Reports each "
-                                          "endpoint's resolved coordinates and whether the end is off-plane. WRITES. "
+                                          "endpoint's resolved coordinates and whether the end is off-plane. "
                                           "View from an iso angle with view_screenshot (a top view hides the out-of-plane component)."
 )
 draw_3d_line_tool = (

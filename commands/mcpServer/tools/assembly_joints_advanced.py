@@ -3,9 +3,9 @@
 
 """MCP building blocks: assembly_capture_position, joint_create_as_built, assembly_constrain.
 
-Capture/revert a jointed occurrence's transient pose into the timeline; joint two occurrences rigidly
-where they already are; or mate two occurrences' geometry via Constrain Components (flush/coincident/
-concentric/angle, inferred from the geometry). All three WRITE.
+Capture/revert/delete a jointed occurrence's transient pose in the timeline; joint two occurrences
+rigidly where they already are; or mate two occurrences' geometry via Constrain Components
+(flush/coincident/concentric/angle, inferred from the geometry). All three WRITE.
 """
 
 import adsk.core
@@ -24,7 +24,12 @@ from .joint_create_edit import _resolve_snap_entity, _parse_snap
 
 app = adsk.core.Application.get()
 
-_CAPTURE_ACTIONS = ("capture", "revert", "status")
+_CAPTURE_ACTIONS = ("capture", "revert", "status", "delete")
+_CAPTURE_ACTION = _inputs.Choice(
+    "action", options=list(_CAPTURE_ACTIONS), default="status",
+    description="capture records the current pending position as a new marker; revert discards the "
+                "latest captured marker; delete removes one captured marker by 'marker' name; status "
+                "reports the pending flag and lists the captured markers.")
 
 
 def _find_one(design, name):
@@ -36,16 +41,43 @@ def _find_one(design, name):
 
 # ------------------------------------------------------------- assembly_capture_position
 
-def capture_position_handler(action: str = "status") -> dict:
-    """Capture / revert / report the assembly's flexible position in the timeline.
+def _capture_markers(snaps, count):
+    """[{name, timeline_index}] for every captured position - bounded by nature (snapshot counts
+    stay small), so no truncation is needed. timeline_index is safe-guarded: a marker's
+    timelineObject.index is read defensively since the property can raise on a stale reference."""
+    out = []
+    for i in range(count):
+        s = safe(lambda i=i: snaps.item(i))
+        if s is None:
+            continue
+        out.append({"name": safe(lambda s=s: s.name),
+                    "timeline_index": safe(lambda s=s: s.timelineObject.index)})
+    return out
 
-    action: 'capture' (write the current pose into the timeline - only valid when a move is
-    pending), 'revert' (discard the latest captured position), or 'status' (report whether a move
-    is pending and how many positions are captured).
+
+def _find_captured(snaps, count, want):
+    """Every captured marker whose name matches 'want' case-insensitively (exact, not substring) -
+    a list so the caller can refuse an unexpected duplicate instead of grabbing the first hit."""
+    hits = []
+    for i in range(count):
+        s = safe(lambda i=i: snaps.item(i))
+        nm = safe(lambda s=s: s.name) if s is not None else None
+        if nm and nm.lower() == want.lower():
+            hits.append((s, nm))
+    return hits
+
+
+def capture_position_handler(action: str = "status", marker: str = "") -> dict:
+    """Capture / revert / delete / report the assembly's flexible position in the timeline.
+
+    action: 'capture' (write the current pose into the timeline as a new marker - only valid when
+    a move is pending), 'revert' (discard the latest captured marker), 'delete' (remove one
+    captured marker by 'marker' name), or 'status' (report whether a move is pending and list the
+    captured markers).
     """
-    act = (action or "status").strip().lower()
-    if act not in _CAPTURE_ACTIONS:
-        return error(f"Unknown action '{action}'. Valid: {', '.join(_CAPTURE_ACTIONS)}.")
+    act, aerr = _CAPTURE_ACTION.resolve(action)
+    if aerr:
+        return error(aerr)
     design = _common.design()
     if not design:
         return error("No active design.")
@@ -58,8 +90,10 @@ def capture_position_handler(action: str = "status") -> dict:
 
     if act == "status":
         return ok({"has_pending": pending, "snapshot_count": count,
-        "note": "has_pending = a moved-but-uncaptured position exists. Use capture to "
-        "record it into the timeline, or revert to drop the latest capture."})
+        "markers": _capture_markers(snaps, count),
+        "note": "has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it "
+        "the same way a free move does). Use capture to record it into the timeline, revert to "
+        "drop the latest capture, or delete a specific marker by name."})
 
     if act == "capture":
         if not pending:
@@ -78,6 +112,37 @@ def capture_position_handler(action: str = "status") -> dict:
         return ok({"captured": True, "snapshot": safe(lambda: snap.name),
         "snapshot_count": count_after if count_after is not None else count + 1,
         "note": "Current position captured into the timeline."})
+
+    if act == "delete":
+        want = (marker or "").strip()
+        if not want:
+            return error("action='delete' needs 'marker' (the captured position's name, from "
+                         "action='status').")
+        if count < 1:
+            return error("Nothing to delete - there are no captured positions.")
+        hits = _find_captured(snaps, count, want)
+        if not hits:
+            names = sorted(m["name"] for m in _capture_markers(snaps, count) if m["name"])
+            return error(f"No captured position named '{marker}'. Captured: "
+                         f"{', '.join(names) or 'none'}.")
+        if len(hits) > 1:
+            return error(f"'{marker}' matches {len(hits)} captured positions - marker names should "
+                         "be unique; check the timeline directly.")
+        snap, found_name = hits[0]
+        try:
+            did = snap.deleteMe()
+        except Exception as e:
+            return error(f"Delete failed: {e}")
+        if not did:
+            return error(f"Fusion declined to delete captured position '{found_name}'.")
+        count_after = safe(lambda: snaps.count, 0) or 0
+        survivors = _find_captured(snaps, count_after, want)
+        if survivors:
+            return error(f"Delete reported success but '{found_name}' is still present in the "
+                         "snapshot collection.")
+        return ok({"deleted": True, "marker": found_name, "snapshot_count": count_after,
+        "note": "Captured position removed from the timeline; later captured positions (if any) "
+        "survive a recompute unchanged."})
 
     # revert
     if count < 1:
@@ -253,16 +318,19 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
 # ----------------------------------------------------------------------- tools
 
 _CAPTURE_DESC = (
-"Capture / revert / report the assembly's flexible POSITION in the timeline. When you move a "
-"jointed component its pose is transient; 'capture' records the current position into the "
-"timeline (valid only when a move is pending), 'revert' discards the latest captured position, "
-"'status' reports whether a move is pending and how many positions are captured. Capture/revert "
-"WRITE."
+"Capture / revert / delete / report the assembly's flexible POSITION in the timeline. Fusion keeps "
+"geometry history (timeline features) separate from assembly positions - a pose only enters the "
+"timeline as an explicit captured Position marker. When you move a jointed component - by hand or "
+"via joint_drive, both set the same pending-position flag - its pose is transient; 'capture' "
+"records it as a new marker (valid only when a move is pending), 'delete' removes one captured "
+"marker by 'marker' name, 'revert' discards the latest captured marker, 'status' reports whether a "
+"move is pending and lists the captured markers."
 )
 capture_tool = (
-    Tool.create_with_string_input(
-        name="assembly_capture_position", description=_CAPTURE_DESC,
-        input_param_name="action", input_param_description="capture | revert | status.")
+    Tool.create_simple(name="assembly_capture_position", description=_CAPTURE_DESC)
+    .add_input_property("action", _CAPTURE_ACTION.schema())
+    .add_input_property("marker", {"type": "string",
+        "description": "delete: the captured position's name (exact, case-insensitive; from action='status')."})
     .strict_schema()
 )
 capture_item = Item.create_tool_item(tool=capture_tool, write="write", handler=capture_position_handler,

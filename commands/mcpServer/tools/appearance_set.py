@@ -208,7 +208,7 @@ _DESC = (
 "Set the color/appearance of a FACE, body, occurrence, or component (all its bodies) as a revertible "
 "override. 'target' = a find_geometry FACE handle (colors one face) or body, an occurrence name/"
 "fullPath, a body name, or a component name (empty = whole design). 'color' = '#RRGGBB', 'RRGGBB', or "
-"'r,g,b' (0-255); 'opacity' 0-255 (default 255). WRITES. Pair with view_screenshot."
+"'r,g,b' (0-255); 'opacity' 0-255 (default 255). Pair with view_screenshot to verify."
 )
 
 tool = (

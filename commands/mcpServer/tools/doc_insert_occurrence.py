@@ -133,8 +133,8 @@ TOOL_DESCRIPTION = (
     "documents requires a shared project (an unsaved host references fine). Optional "
     "'remove_existing' = an existing occurrence to delete first (its joints go with it). Place it "
     "with x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine later with a "
-    "joint. WRITES to the design. Inserts the source's last SAVED cloud version - unsaved "
-    "in-session source edits are not included (save the source first)."
+    "joint. Inserts the source's last SAVED cloud version - unsaved in-session source edits are "
+    "not included (save the source first)."
 )
 
 tool = (

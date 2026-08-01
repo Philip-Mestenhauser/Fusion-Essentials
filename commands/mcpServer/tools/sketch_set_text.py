@@ -203,9 +203,9 @@ TOOL_DESCRIPTION = (
 "the active design. 'text' is the new string. 'sketch_name' limits the change to sketch "
 "texts inside the sketch with that exact name (omit to update EVERY sketch text in the "
 "design - use a name like 'File_Name' to target one). 'index' picks one text if a sketch "
-"has several (0-based; default all). WRITES to the design; reports each text's before/after. "
-"Read sketch names with sketch_get. Generic: it just edits the text - stamping a part/file "
-"name onto a fixture is a common use but not the only one."
+"has several (0-based; default all). Reports each text's before/after. Read sketch names "
+"with sketch_get. Generic: it just edits the text - stamping a part/file name onto a "
+"fixture is a common use but not the only one."
 )
 
 tool = (

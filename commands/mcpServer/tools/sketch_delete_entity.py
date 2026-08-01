@@ -138,7 +138,7 @@ TOOL_DESCRIPTION = (
     "sketch_get. Use it to undo a WRONG constraint (e.g. a coincident that pinned a circle to a curve "
     "instead of centering it - see sketch_constrain) without losing the rest of the sketch. The delete "
     "is verified by reading the collection count back: a delete that removed nothing is returned as an "
-    "error, never a false ok. WRITES."
+    "error, never a false ok."
 )
 
 tool = (

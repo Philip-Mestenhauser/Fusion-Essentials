@@ -469,13 +469,12 @@ def handler(entity_a: str = "", entity_b: str = "", relation: str = "",
 TOOL_DESCRIPTION = (
     "Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the "
     "measured angle / axis offset / min distance and the tolerance it judged against, never a bare "
-    "boolean. relation = coaxial | parallel | perpendicular | flush | clearance | touching | "
-    "concentric. Each entity is a find_geometry handle (a cylindrical face gives an axis; a planar "
-    "face gives a plane/normal; a circular edge gives a center for concentric) or a "
-    "body/occurrence/component name. 'tolerance' is the linear tolerance in 'units' "
-    "(default 0.1 mm); 'tolerance_deg' the angular one (default 0.5 deg). coaxial checks BOTH parallel "
-    "AND zero axis offset - the trap model_measure_between alone can't catch. For the raw distance or "
-    "angle, use model_measure_between. Read-only.\n"
+    "boolean (see 'relation' for the option meanings). Each entity is a find_geometry handle (a "
+    "cylindrical face gives an axis; a planar face gives a plane/normal; a circular edge gives a "
+    "center for concentric) or a body/occurrence/component name. 'tolerance' is the linear "
+    "tolerance in 'units' (default 0.1 mm); 'tolerance_deg' the angular one (default 0.5 deg). "
+    "coaxial checks BOTH parallel AND zero axis offset - the trap model_measure_between alone "
+    "can't catch. For the raw distance or angle, use model_measure_between.\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -563,7 +563,7 @@ TOOL_DESCRIPTION = (
 "'extent': distance (default, negative reverses, + 'symmetric'/'taper_deg') | "
 "through_all ('distance' sign picks direction; no taper) | to_face (up to 'to_object', a face) "
 "| two_side ('distance' + 'distance2', one per side; no taper). 'component' = where "
-"material landed; an unscoped cut into co-located parts warns (pass 'target_bodies'). WRITES."
+"material landed; an unscoped cut into co-located parts warns (pass 'target_bodies')."
 )
 
 extrude_tool = (

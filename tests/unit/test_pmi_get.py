@@ -77,8 +77,21 @@ class TestSlices:
     def test_detail_slice_scales_hole_numbers_to_units(self, two_notes):
         recs = _payload(pg.handler(include=["detail"], units="mm"))["annotations"]
         hole = recs[1]
-        assert hole["diameter"] == 6.0          # 0.6 cm -> 6 mm
+        assert hole["diameter"] == {"value": 6.0}      # 0.6 cm -> 6 mm, no override/tolerance
         assert hole["quantity"] == 2 and hole["is_through"] is True
+
+    def test_kind_filter_narrows(self, two_notes):
+        out = _payload(pg.handler(kind="hole_note"))
+        assert out["total"] == 1 and out["annotations"][0]["kind"] == "hole_note"
+
+    def test_component_filter_narrows(self, monkeypatch):
+        c1 = SimpleNamespace(name="A")
+        c2 = SimpleNamespace(name="B")
+        monkeypatch.setattr(pg._common, "design", lambda: object())
+        monkeypatch.setattr(pg._pmi, "walk_annotations",
+                            lambda d: iter([(c1, _ann("N1")), (c2, _ann("N2"))]))
+        out = _payload(pg.handler(component="B"))
+        assert [r["name"] for r in out["annotations"]] == ["N2"]
 
     def test_unknown_include_is_refused(self, two_notes):
         msg = error_message(pg.handler(include=["bogus"]))

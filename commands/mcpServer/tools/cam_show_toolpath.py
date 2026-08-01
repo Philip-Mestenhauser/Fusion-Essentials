@@ -149,13 +149,12 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
 
 TOOL_DESCRIPTION = (
-    "Show/hide individual CAM TOOLPATHS (the displayed blue paths) so you can look at one "
-    "operation's path at a time. 'action': "
-    "'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
+    "Show or hide CAM toolpaths (the displayed blue paths) to inspect one operation's path at a time. "
+    "'action': 'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
     "+ state). 'fit' fits the camera to the scene after showing (show/isolate). Toolpaths render "
-    "only in the MANUFACTURE workspace; pair with view_screenshot. Toggles "
-    "Operation.isLightBulbOn - does NOT touch simulation/in-process-stock commands (those are "
+    "only in the Manufacture workspace; pair with view_screenshot. Toggles "
+    "Operation.isLightBulbOn - does not touch simulation/in-process-stock commands (those are "
     "unsafe to drive from here)."
 )
 

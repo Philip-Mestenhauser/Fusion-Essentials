@@ -405,22 +405,22 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
 TOOL_DESCRIPTION = (
     "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
-    "hole/thread metadata. 'hole_type': simple / counterbore / countersink. 'diameter' e.g. '8 mm'. "
+    "hole/thread metadata. 'diameter' e.g. '8 mm'. "
     "'face' = a find_geometry planar-face handle to drill into; 'points' = list of [x,y,z] (mm) in "
     "the FACE'S LOCAL frame - the SAME frame sketch_create(on_face=...) reports for that face "
     "(sketch (0,0) at its origin_mm, axes x_world/y_world); z is off-plane, so [x,y,0] drills at "
-    "x,y on it. Multiple points => one patterned hole feature. 'extent': 'blind' (needs 'depth') or "
-    "'through'. counterbore needs 'cbore_diameter'/'cbore_depth'; countersink needs "
+    "x,y on it. Multiple points => one patterned hole feature. counterbore needs "
+    "'cbore_diameter'/'cbore_depth'; countersink needs "
     "'csink_diameter'/'csink_angle'. 'tap' = a thread designation like 'M5x0.8' to make it tapped. "
     "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit' close/normal/loose) sizes + "
-    "tags the hole for that fastener (overrides 'diameter'). WRITES. For a bolt circle, pass every "
+    "tags the hole for that fastener (overrides 'diameter'). For a bolt circle, pass every "
     "position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hole features."
 )
 
 tool = (
     Tool.create_simple(name="model_hole", description=TOOL_DESCRIPTION)
     .add_input_property("hole_type", {"type": "string", "enum": list(_TYPES),
-            "description": "simple / counterbore / countersink."})
+            "description": "Hole style."})
     .add_input_property("diameter", {"type": "string", "description": "Hole diameter, e.g. '8 mm'."})
     .add_input_property("face", _FACE.schema())
     .add_input_property("points", {"type": "array", "items": {"type": "array", "items": {"type": "number"}},

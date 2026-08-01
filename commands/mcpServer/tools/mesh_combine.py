@@ -31,7 +31,9 @@ _TARGET = _inputs.MeshBodyRef("target", required=True,
 _TOOLS = _inputs.BodyRefList("tools", kind="mesh", required=True,
                              description="The MESH bodies combined INTO the target.")
 _OPERATION = _inputs.Choice("operation", ["join", "cut", "intersect", "merge"], default="join",
-                            description="join | cut | intersect | merge.")
+                            description="join (combine by enclosing volumes) | cut (remove the "
+                            "tools' overlap from the target) | intersect (keep only the shared "
+                            "volume) | merge (combine without altering faces).")
 _ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanced",
                             description="legacy | enhanced (default - fewer triangles).")
 
@@ -174,12 +176,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
 TOOL_DESCRIPTION = (
     "Boolean-combine MESH bodies - the MeshCombine feature (the mesh analogue of model_combine, which "
     "only sees BRep solids). 'target' is the mesh body kept/modified; 'tools' is the mesh body "
-    "handle(s)/name(s) to combine into it (a list, or comma-separated). 'operation': join (combine by "
-    "enclosing volumes) | cut (remove the tools' overlap from the target) | intersect (keep only the "
-    "shared volume) | merge (combine without altering faces). 'algorithm': enhanced (default, fewer "
-    "triangles) | legacy. Every input is validated to be a MESH body (a BRep handle is redirected to "
-    "the BRep tools). In a PARAMETRIC design the combine is wrapped in a BaseFeature edit scope "
-    "(API-required for mesh writes)."
+    "handle(s)/name(s) to combine into it (a list, or comma-separated). Every input is validated to "
+    "be a MESH body (a BRep handle is redirected to the BRep tools). In a PARAMETRIC design the "
+    "combine is wrapped in a BaseFeature edit scope (API-required for mesh writes)."
 )
 
 mesh_combine_tool = _inputs.apply_to_tool(

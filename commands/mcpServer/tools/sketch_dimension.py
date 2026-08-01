@@ -250,8 +250,8 @@ TOOL_DESCRIPTION = (
 "scheme; point:0 is ALWAYS the sketch ORIGIN, point:1..N are geometry points in creation order. To "
 "pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
 "mis-attaches when points share coordinates): append ':start'/':end'/':mid' (line) or ':center' "
-"(circle/arc), e.g. 'line:0:end'. 'value' drives it by expression ('25 mm', '90 deg', 'StockX/2'); "
-"omit to keep the measured value. The dimension becomes a param drivable with param_set."
+"(circle/arc), e.g. 'line:0:end'. 'value' drives it by expression; omit to keep the measured value. "
+"The dimension becomes a param drivable with param_set."
 )
 
 tool = (

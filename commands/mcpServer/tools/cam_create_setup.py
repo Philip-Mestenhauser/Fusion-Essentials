@@ -104,8 +104,7 @@ TOOL_DESCRIPTION = (
     "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its contents are "
     "swapped - the shop-template pattern. 'name' optionally names the setup. After this, add "
     "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "
-    "cam_generate. The CAM product must exist (when it does not, the error names the next call). "
-    "WRITES to the document's CAM data."
+    "cam_generate. The CAM product must exist (when it does not, the error names the next call)."
 )
 
 tool = (

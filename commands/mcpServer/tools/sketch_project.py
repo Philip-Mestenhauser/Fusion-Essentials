@@ -123,8 +123,8 @@ TOOL_DESCRIPTION = (
     "curves/points from edges, faces (all of their edges), or vertices. 'entities' are find_geometry "
     "handles; 'sketch_name' is the target sketch (omit = most recent). 'link' = true keeps the "
     "projected curves parametrically LINKED to the source (they update when it moves); false makes an "
-    "independent static copy. WRITES to the design; reports the created '<type>:<index>' entity refs "
-    "so you can immediately sketch_constrain / sketch_dimension them, or extrude a resulting profile.\n"
+    "independent static copy. Reports the created '<type>:<index>' entity refs so you can "
+    "immediately sketch_constrain / sketch_dimension them, or extrude a resulting profile.\n"
     + _outputs.produces_block(RETURNS)
 )
 

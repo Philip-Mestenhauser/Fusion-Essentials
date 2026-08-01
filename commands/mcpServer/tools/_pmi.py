@@ -19,7 +19,10 @@ MAP_BLURB = ("walk_annotations (the ONE design-wide PMI walk) + find_annotation 
              "name, a name found in several components is REFUSED naming each) + "
              "build_segments/segments_markup (the {symbol} text markup <-> PMISegment codec) + "
              "annotation_record (the shared light record) + kind_of (objectType -> kind label) + "
-             "LEADER_EXT floor facts (created-note extension edits gate on them)")
+             "enum_label (adsk PMI enum int -> snake name) + build_tolerance/tolerance_record + "
+             "build_display/display_record (PMIDisplaySettings codec) + apply_note_format + "
+             "set_text_point/set_leader_target (verified anchor moves) + PLANE_TYPES/H_ALIGN/"
+             "V_ALIGN (the closed choice vocabularies) + LEADER_EXT floor facts")
 
 # Live-verified extension facts: a created note whose leaderLineExtension sits below half the
 # annotation size (0.25 cm at the default size) refuses EVERY later segment/extension edit with
@@ -226,6 +229,315 @@ def set_text_point(ann, xyz, f):
     if got is None:
         return None, "The text point did not take (re-read returned nothing)."
     return got, None
+
+
+# choice token -> LeaderLineNotePlaneTypes member ('face' needs an adjacent face; 'custom_face'
+# any face; the platform enforces both at setAnnotationPlane time).
+PLANE_TYPES = {
+    "face": "NormalToFaceLeaderLineNotePlaneType",
+    "custom_face": "NormalToCustomFaceLeaderLineNotePlaneType",
+    "circular_edge": "NormalToCircularEdgeLeaderLineNotePlaneType",
+    "cylinder_axis": "AxisCylinderAndConeLeaderLineNotePlaneType",
+    "xy": "PrincipalXYLeaderLineNotePlaneType",
+    "yz": "PrincipalYZLeaderLineNotePlaneType",
+    "zx": "PrincipalZXLeaderLineNotePlaneType",
+}
+H_ALIGN = {"left": "LeftHorizontalAlignment", "center": "CenterHorizontalAlignment",
+           "right": "RightHorizontalAlignment"}
+V_ALIGN = {"top": "TopVerticalAlignment", "middle": "MiddleVerticalAlignment",
+           "bottom": "BottomVerticalAlignment"}
+DISPLAY_UNITS = {"document": "UseDocumentUnitPMIUnitType", "mm": "MillimetersPMIUnitType",
+                 "cm": "CentimetersPMIUnitType", "m": "MetersPMIUnitType",
+                 "in": "InchesPMIUnitType", "ft": "FeetPMIUnitType"}
+
+# The numeric fields a hole/thread note carries as PMIGeometricValue, by wire key. Angle fields
+# resolve in radians, lengths in cm.
+HOLE_VALUE_PROPS = ("diameter", "radius", "depth", "counterbore_diameter", "counterbore_radius",
+                    "counterbore_depth", "countersink_diameter", "countersink_angle_deg",
+                    "thread_depth")
+HOLE_VALUE_ATTR = {"diameter": "diameter", "radius": "radius", "depth": "depth",
+                    "counterbore_diameter": "counterboreDiameter",
+                    "counterbore_radius": "counterboreRadius",
+                    "counterbore_depth": "counterboreDepth",
+                    "countersink_diameter": "countersinkDiameter",
+                    "countersink_angle_deg": "countersinkAngle",
+                    "thread_depth": "threadDepth"}
+
+
+def enum_label(owner, cls_name, suffix, value):
+    """The snake_case name of `value` in enum class `cls_name` on module `owner` (adsk.fusion /
+    adsk.core), with `suffix` stripped - e.g. (fusion, 'PMIStandardTypes', 'PMIStandardType', 1)
+    -> 'iso'. Falls back to the raw int as a string when unmapped."""
+    cls = getattr(owner, cls_name, None)
+    for m in dir(cls or ()):
+        if m.startswith("_") or m == "thisown":
+            continue
+        if safe(lambda m=m: getattr(cls, m)) == value and m.endswith(suffix):
+            base = m[: -len(suffix)]
+            out, prev = [], ""
+            for ch in base:
+                if ch.isupper() and prev and (not prev.isupper()):
+                    out.append("_")
+                out.append(ch.lower())
+                prev = ch
+            return "".join(out).strip("_")
+    return str(value)
+
+
+def build_tolerance(spec, f):
+    """(PMIGeometricValueTolerance, error) from a wire spec dict: type= symmetric (value) |
+    deviation (upper, lower) | limits | limits_linear (min, max) | max | min | fits_stacked |
+    fits_linear | fits_size_limits | fits_tolerance (size, hole_fit, shaft_fit). Lengths are in
+    display units and scale by f to cm. Every set*() bool is gated."""
+    if not isinstance(spec, dict) or not spec.get("type"):
+        return None, ("'tolerance' must be an object with 'type' - one of: symmetric, deviation, "
+                      "limits, limits_linear, max, min, fits_stacked, fits_linear, "
+                      "fits_size_limits, fits_tolerance.")
+    t = str(spec["type"]).strip().lower()
+    tol = adsk.fusion.PMIGeometricValueTolerance.create()
+    def num(key):
+        v = spec.get(key)
+        return None if v is None else float(v) * f
+    try:
+        if t == "symmetric":
+            done = tol.setSymmetric(num("value") or 0.0)
+        elif t == "deviation":
+            done = tol.setDeviation(num("upper") or 0.0, num("lower") or 0.0)
+        elif t == "limits":
+            done = tol.setLimitsStacked(num("min") or 0.0, num("max") or 0.0)
+        elif t == "limits_linear":
+            done = tol.setLimitsLinear(num("min") or 0.0, num("max") or 0.0)
+        elif t == "max":
+            done = tol.setMAX()
+        elif t == "min":
+            done = tol.setMIN()
+        elif t in ("fits_stacked", "fits_linear", "fits_size_limits", "fits_tolerance"):
+            setter = {"fits_stacked": tol.setLimitsFitsStacked,
+                      "fits_linear": tol.setLimitsFitsLinear,
+                      "fits_size_limits": tol.setLimitsFitsSizeLimits,
+                      "fits_tolerance": tol.setLimitsFitsTolerance}[t]
+            done = setter(num("size") or 0.0, str(spec.get("hole_fit") or ""),
+                          str(spec.get("shaft_fit") or ""))
+        else:
+            return None, (f"Unknown tolerance type '{t}'. Use symmetric, deviation, limits, "
+                          "limits_linear, max, min, or fits_stacked/linear/size_limits/tolerance.")
+    except Exception as e:
+        return None, f"Tolerance '{t}' construction failed: {e}"
+    if not done:
+        return None, (f"Tolerance '{t}' was declined by the platform (set returned false) - "
+                      "check the values (fits need size + hole_fit/shaft_fit like 'H7'/'h6').")
+    return tol, None
+
+
+def tolerance_record(tol, out_f):
+    """The readable record of a PMIGeometricValueTolerance (lengths scaled by out_f), or None."""
+    if tol is None or not safe(lambda: tol.hasTolerances, False):
+        return None
+    rec = {"type": enum_label(adsk.fusion, "PMIToleranceTypes", "PMIToleranceType",
+                              safe(lambda: tol.toleranceType))}
+    if safe(lambda: tol.hasUpperTolerance, False):
+        rec["upper"] = round(safe(lambda: tol.upperTolerance, 0.0) * out_f, 6)
+    if safe(lambda: tol.hasLowerTolerance, False):
+        rec["lower"] = round(safe(lambda: tol.lowerTolerance, 0.0) * out_f, 6)
+    if safe(lambda: tol.hasToleranceClass, False):
+        rec["hole_fit"] = "%s%s" % (safe(lambda: tol.toleranceClassDeviation, ""),
+                                    safe(lambda: tol.toleranceClassGrade, ""))
+    if safe(lambda: tol.hasShaftToleranceClass, False):
+        rec["shaft_fit"] = "%s%s" % (safe(lambda: tol.shaftToleranceClassDeviation, ""),
+                                     safe(lambda: tol.shaftToleranceClassGrade, ""))
+    return rec
+
+
+def value_record(gv, out_f, angle=False):
+    """The readable record of a PMIGeometricValue {value, overridden?, tolerance?}, or None.
+    Angles report degrees, lengths in display units."""
+    if gv is None or not safe(lambda: gv.hasValue, False):
+        return None
+    import math
+    raw = safe(lambda: gv.value)
+    if raw is None:
+        return None
+    rec = {"value": round(math.degrees(raw), 4) if angle else round(raw * out_f, 6)}
+    if safe(lambda: gv.isOverriddenValue, False):
+        rec["overridden"] = True
+    tr = tolerance_record(safe(lambda: gv.tolerance), out_f)
+    if tr:
+        rec["tolerance"] = tr
+    return rec
+
+
+def build_display(spec):
+    """(PMIDisplaySettings, error) from a wire spec dict: precision (0-8), units
+    (document/mm/cm/m/in/ft), leading_zeros, trailing_zeros, unit_abbreviation."""
+    if not isinstance(spec, dict):
+        return None, "'display' must be an object: {precision, units, leading_zeros, trailing_zeros, unit_abbreviation}."
+    ds = adsk.fusion.PMIDisplaySettings.create()
+    try:
+        if spec.get("precision") is not None:
+            ds.precision = int(spec["precision"])
+        if spec.get("units") is not None:
+            attr = DISPLAY_UNITS.get(str(spec["units"]).strip().lower())
+            if attr is None:
+                return None, f"display.units must be one of: {', '.join(sorted(DISPLAY_UNITS))}."
+            ds.unitType = getattr(adsk.fusion.PMIUnitTypes, attr)
+        for key, prop in (("leading_zeros", "hasLeadingZeros"), ("trailing_zeros", "hasTrailingZeros"),
+                          ("unit_abbreviation", "hasUnitAbbreviation")):
+            if spec.get(key) is not None:
+                setattr(ds, prop, bool(spec[key]))
+    except Exception as e:
+        return None, f"Display settings construction failed: {e}"
+    return ds, None
+
+
+def display_record(ds):
+    """The readable record of a PMIDisplaySettings, or None."""
+    if ds is None:
+        return None
+    return {
+        "precision": safe(lambda: ds.precision),
+        "units": enum_label(adsk.fusion, "PMIUnitTypes", "PMIUnitType", safe(lambda: ds.unitType)),
+        "leading_zeros": bool(safe(lambda: ds.hasLeadingZeros, False)),
+        "trailing_zeros": bool(safe(lambda: ds.hasTrailingZeros, False)),
+        "unit_abbreviation": bool(safe(lambda: ds.hasUnitAbbreviation, False)),
+    }
+
+
+def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm=None):
+    """Apply the shared leader/text format knobs to a note or note-input `obj`; each set is
+    re-read. Returns an error string, or None."""
+    try:
+        if align:
+            attr = H_ALIGN.get(align.strip().lower())
+            if attr is None:
+                return f"'align' must be one of: {', '.join(sorted(H_ALIGN))}."
+            want = getattr(adsk.core.HorizontalAlignments, attr)
+            obj.horizontalAlignment = want
+            if safe(lambda: obj.horizontalAlignment) != want:
+                return f"'align'={align} did not take on this annotation."
+        if valign:
+            attr = V_ALIGN.get(valign.strip().lower())
+            if attr is None:
+                return f"'valign' must be one of: {', '.join(sorted(V_ALIGN))}."
+            want = getattr(adsk.core.VerticalAlignments, attr)
+            obj.verticalAlignment = want
+            if safe(lambda: obj.verticalAlignment) != want:
+                return f"'valign'={valign} did not take on this annotation."
+        if perpendicular is not None:
+            obj.isPerpendicularLine = bool(perpendicular)
+        if extension_cm is not None:
+            if extension_cm < LEADER_EXT_FLOOR:
+                return (f"'leader_extension' is below the platform floor ({LEADER_EXT_FLOOR} cm - "
+                        "half the annotation size); a note below it refuses every later edit.")
+            obj.leaderLineExtension = float(extension_cm)
+    except Exception as e:
+        return f"Note format set failed: {e}"
+    return None
+
+
+def set_leader_target(note, xyz, f):
+    """Move a leader note's target point (where the leader meets the geometry) via
+    setAnnotationTargetPoint; the bool and the re-read gate the claim. Returns (Point3D, error)."""
+    try:
+        x, y, z = (float(v) for v in xyz)
+    except Exception:
+        return None, "'leader_point' must be [x, y, z] numbers (model space, in 'units')."
+    try:
+        done = bool(note.setAnnotationTargetPoint(
+            adsk.core.Point3D.create(x * f, y * f, z * f)))
+    except Exception as e:
+        return None, f"setAnnotationTargetPoint failed: {e}"
+    if not done:
+        return None, ("setAnnotationTargetPoint declined the point - it must lie on the "
+                      "annotated geometry.")
+    got = safe(lambda: note.annotationTargetPoint)
+    if got is None:
+        return None, "The leader point did not take (re-read returned nothing)."
+    return got, None
+
+
+# wire key -> hole note bool property; the flags object edits these in one call.
+HOLE_FLAGS = {"quantity_note": "isWantQuantityNote", "all_matching": "isWantSelectAllMatchingHoles",
+              "flip_normal": "isFlipHoleNormal", "through": "isThrough", "threaded": "isThreaded",
+              "threaded_through": "isThreadedThrough",
+              "show_imported_geometry": "isShowImportedGeometry"}
+
+
+def apply_hole_flags(note, flags):
+    """Apply a {wire_key: bool} flags dict to a hole/thread note; every set is re-read and a flag
+    that did not take is an error. Returns (applied_dict, error)."""
+    if not isinstance(flags, dict):
+        return None, f"'flags' must be an object with any of: {', '.join(sorted(HOLE_FLAGS))}."
+    applied = {}
+    for key, val in flags.items():
+        prop = HOLE_FLAGS.get(str(key).strip().lower())
+        if prop is None:
+            return None, f"Unknown flag '{key}'. Legal flags: {', '.join(sorted(HOLE_FLAGS))}."
+        try:
+            setattr(note, prop, bool(val))
+        except Exception as e:
+            return None, f"Flag '{key}' set failed: {e}"
+        got = bool(safe(lambda p=prop: getattr(note, p), not bool(val)))
+        if got != bool(val):
+            return None, f"Flag '{key}'={val} did not take (re-read {got})."
+        applied[key] = got
+    return applied, None
+
+
+def apply_hole_values(note, values, f):
+    """Override a hole note's geometric values from a {wire_key: number} dict (display units;
+    countersink_angle_deg in degrees) and/or attach a tolerance: a value spec may also be
+    {value: n, tolerance: {...}}. Each PMIGeometricValue is get-modify-set and re-read.
+    Returns (applied_dict, error)."""
+    import math
+    if not isinstance(values, dict):
+        return None, f"'values' must be an object with any of: {', '.join(HOLE_VALUE_PROPS)}."
+    applied = {}
+    for key, spec in values.items():
+        attr = HOLE_VALUE_ATTR.get(str(key).strip().lower())
+        if attr is None:
+            return None, f"Unknown value '{key}'. Legal values: {', '.join(HOLE_VALUE_PROPS)}."
+        angle = key == "countersink_angle_deg"
+        num = spec.get("value") if isinstance(spec, dict) else spec
+        tol_spec = spec.get("tolerance") if isinstance(spec, dict) else None
+        gv = safe(lambda a=attr: getattr(note, a))
+        if gv is None:
+            return None, (f"'{key}' is not readable on this note (not applicable to this "
+                          "hole/boss shape).")
+        try:
+            if num is not None:
+                gv.value = math.radians(float(num)) if angle else float(num) * f
+            if tol_spec is not None:
+                tol, terr = build_tolerance(tol_spec, 1.0 if angle else f)
+                if terr:
+                    return None, f"'{key}'.tolerance: {terr}"
+                gv.tolerance = tol
+            setattr(note, attr, gv)
+        except Exception as e:
+            return None, f"'{key}' set failed: {e}"
+        back = value_record(safe(lambda a=attr: getattr(note, a)), 1.0 / f if not angle else 1.0,
+                            angle=angle)
+        if back is None:
+            return None, f"'{key}' did not read back after the set."
+        applied[key] = back
+    return applied, None
+
+
+def suppressed_pmi_features(d):
+    """[(timeline_item, name)] for every SUPPRESSED timeline feature. A suppressed PMI leaves the
+    pmiAnnotations collections entirely and its timeline entity degrades to a bare Feature
+    (live-verified), so the NAME is the only surviving identity - callers must verify the
+    annotation reappears in the collection after unsuppressing, and roll back if it does not."""
+    out = []
+    tl = safe(lambda: d.timeline)
+    n = int(safe(lambda: tl.count, 0) or 0) if tl else 0
+    for i in range(n):
+        item = safe(lambda i=i: tl.item(i))
+        if item is None or not safe(lambda: item.isSuppressed, False):
+            continue
+        nm = safe(lambda: item.entity.name)
+        if nm:
+            out.append((item, nm))
+    return out
 
 
 def annotation_record(comp, ann):

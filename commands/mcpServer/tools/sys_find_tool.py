@@ -94,13 +94,11 @@ def handler(query: str = "", include_kinds: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "SEARCH this server's own tools + the typed input-kinds (in _inputs.py) by keyword - to find "
-    "what ALREADY EXISTS before building or hand-rolling it. 'query' matches tool names/descriptions/"
-    "input names and kind names/docs (e.g. 'profile', 'cam geometry', 'reference a body'). Returns "
-    "ranked tools (name + inputs + one-line summary) and matching input-kinds. LIVE (reads the "
-    "registry each call, never stale). Use it before adding a tool or a name/index input - there's "
-    "usually already a tool or a ProfileRef/BodyRef/GeometryHandle kind for it. For the BREADTH view "
-    "(what families exist) see sys_capability_map. Read-only."
+    "SEARCH this server's tools by keyword when you do not know which tool does a job. 'query' "
+    "matches tool names, descriptions, and input names (e.g. 'profile', 'cam geometry', "
+    "'reference a body'). Returns ranked matches (name + inputs + one-line summary) plus the "
+    "reusable input reference types, read live from the running server - never stale. For the "
+    "BREADTH view (what tool families exist) see sys_capability_map."
 )
 
 tool = (

@@ -237,14 +237,14 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
 
 TOOL_DESCRIPTION = (
-    "Scan a part's faces/edges/vertices and return HANDLES to them (entity tokens), each with its kind, "
+    "Scan a part's faces/edges/vertices and return handles to them (entity tokens), each with kind, "
     "world position, and shape data (cylinder radius+axis, edge radius, face area, face outward "
-    "normal, linear-edge direction). 'target' = "
+    "normal, linear-edge direction). 'target' is an "
     "occurrence/component/body name ('' = whole design); a name matching several occurrences (e.g. "
-    "every instance of a patterned component) scans ALL of them and returns candidates from each - by "
+    "every instance of a patterned component) scans all of them and returns candidates from each - by "
     "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. 'kind' "
     "filters by geometry type; 'radius' keeps matching round geometry; 'nearest_to'=[x,y,z] sorts by "
-    "distance. Handles are SHORT-LIVED - use them in the next call(s); if one is rejected as stale, "
+    "distance. Handles are short-lived - use them in the next call(s); if one is rejected as stale, "
     "re-run find_geometry for a fresh one.\n"
     + _outputs.produces_block(RETURNS)
 )

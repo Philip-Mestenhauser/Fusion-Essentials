@@ -147,6 +147,79 @@ class TestUpToDateAndConvert:
         assert out["converted_to"] == "hole_note"
 
 
+class TestNewActions:
+    def test_set_flags_on_a_leader_note_is_refused(self, rig):
+        assert "hole/thread callouts only" in error_message(
+            pe.handler(action="set_flags", annotation="Note1", flags={"quantity_note": False}))
+
+    def test_set_values_on_a_leader_note_is_refused(self, rig):
+        assert "hole/thread callouts only" in error_message(
+            pe.handler(action="set_values", annotation="Note1", values={"diameter": 6}))
+
+    def test_set_extension_below_the_floor_is_refused(self, rig):
+        msg = error_message(pe.handler(action="set_extension", annotation="Note1",
+                                       leader_extension=1))     # 1 mm < 2.5 mm floor
+        assert "floor" in msg
+
+    def test_set_extension_reads_back(self, rig):
+        out = _payload(pe.handler(action="set_extension", annotation="Note1",
+                                  leader_extension=6))
+        assert out["leader_extension"] == 6.0
+        assert rig.ann.leaderLineExtension == pytest.approx(0.6)
+
+    def test_suppress_without_a_timeline_feature_is_refused(self, rig):
+        rig.ann.timelineObject = None
+        assert "timeline" in error_message(pe.handler(action="suppress", annotation="Note1"))
+
+    def test_suppress_gates_on_the_reread(self, rig):
+        tl = SimpleNamespace(isSuppressed=False)
+        rig.ann.timelineObject = tl
+        out = _payload(pe.handler(action="suppress", annotation="Note1"))
+        assert out["suppressed"] is True and tl.isSuppressed is True
+
+    def test_unsuppress_reaches_a_suppressed_pmi_through_the_timeline(self, rig):
+        # suppressed PMI leaves the collections; only the suppressed timeline feature's name
+        # survives - unsuppress flips it and verifies the annotation reappears.
+        item = SimpleNamespace(isSuppressed=True)
+        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
+        rig.monkeypatch.setattr(
+            pe._pmi, "find_annotation",
+            lambda d, n, c="": ((None, None, "No PMI named 'Note1'.") if item.isSuppressed
+                                else (rig.ann, rig.comp, None)))
+        out = _payload(pe.handler(action="unsuppress", annotation="Note1"))
+        assert out["suppressed"] is False and item.isSuppressed is False
+
+    def test_unsuppress_rolls_back_a_wrong_same_named_feature(self, rig):
+        item = SimpleNamespace(isSuppressed=True)
+        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (None, None, "No PMI named 'Note1'."))
+        msg = error_message(pe.handler(action="unsuppress", annotation="Note1"))
+        assert "not a PMI" in msg and item.isSuppressed is True
+
+    def test_set_leader_point_on_a_hole_note_is_refused(self, rig):
+        rig.ann.objectType = "adsk::fusion::PMIHoleThreadNote"
+        assert "leader notes only" in error_message(
+            pe.handler(action="set_leader_point", annotation="Note1", leader_point=[1, 2, 3]))
+
+    def test_set_leader_point_gates_on_the_platform_bool(self, rig):
+        rig.ann.setAnnotationTargetPoint = lambda p: False
+        assert "declined" in error_message(
+            pe.handler(action="set_leader_point", annotation="Note1", leader_point=[1, 2, 3]))
+
+    def test_set_alignment_needs_at_least_one_knob(self, rig):
+        assert "needs" in error_message(pe.handler(action="set_alignment", annotation="Note1"))
+
+    def test_set_plane_refuses_an_unsupported_type(self, rig):
+        rig.ann.supportedAnnotationPlaneTypes = [99]
+        assert "not supported" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+
+    def test_set_display_on_a_leader_note_is_refused(self, rig):
+        assert "hole/thread callouts only" in error_message(
+            pe.handler(action="set_display", annotation="Note1", display={"precision": 2}))
+
+
 class TestGuards:
     def test_resolver_error_surfaces(self, rig):
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",

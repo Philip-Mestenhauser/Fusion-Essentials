@@ -150,7 +150,7 @@ TOOL_DESCRIPTION = (
     "setup name; 'strategy' = face / adaptive / pocket2d / drill / bore / contour2d / ... (validated "
     "against the setup's compatible strategies). TOOL ref: 'tool_scope=document' + 'tool_index' (this "
     "doc's library - what cam_edit_tools scope='document' adds; no URL needed) OR 'tool_library_url' "
-    "+ 'tool_index' (a shared library). 'generate' (default true) computes the toolpath. WRITES. Then "
+    "+ 'tool_index' (a shared library). 'generate' (default true) computes the toolpath. Then "
     "cam_select_geometry targets the geometry. cam_create_setup makes the setup first."
 )
 

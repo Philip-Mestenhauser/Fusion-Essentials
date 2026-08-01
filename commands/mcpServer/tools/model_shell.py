@@ -161,8 +161,8 @@ TOOL_DESCRIPTION = (
     "handle or name; omit = most recent solid body) to hollow it into a CLOSED shell, OR pass "
     "'remove_faces' = face handles from find_geometry to OPEN the shell on those faces (the body is "
     "then implied by the faces). 'thickness' is the wall thickness in 'units' (mm default); "
-    "'direction' offsets the wall from the original surface. WRITES to the design. Pair with "
-    "view_section or view_screenshot to inspect the resulting wall.\n"
+    "'direction' offsets the wall from the original surface. Pair with view_section or "
+    "view_screenshot to inspect the resulting wall.\n"
     + _outputs.produces_block(RETURNS)
 )
 

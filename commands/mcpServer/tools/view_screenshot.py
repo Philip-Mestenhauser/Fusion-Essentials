@@ -180,7 +180,7 @@ TOOL_DESCRIPTION = (
     "'view' to reorient the camera (default 'current' = leave as-is). "
     "'width'/'height' set the pixel size (default 800x600, max 4096). 'zoom' scales the view after "
     "fitting (>1 zooms OUT, <1 zooms IN; default 1). 'fit_to' frames the camera on ONE occurrence "
-    "by name (best-effort: it isolates that occurrence for the shot, then restores visibility). "
+    "by name. "
     "Take a screenshot before editing to understand the model, and after to confirm changes."
 )
 

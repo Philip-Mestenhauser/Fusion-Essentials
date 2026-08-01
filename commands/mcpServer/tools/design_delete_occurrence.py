@@ -96,11 +96,11 @@ def handler(occurrence: str = "") -> dict:
 
 
 _DESC = (
-"Delete ONE component occurrence from the active design (e.g. a stray/duplicate from a botched "
-"pattern). 'occurrence' = a fullPathName (from design_get(include=['tree'])) or name (ambiguous names refused). "
-"The result names any joints the delete removed; if it was the last instance of its component, the "
-"component goes too. A pattern/mirror child can't be deleted individually (delete its owning feature "
-"with design_delete_feature). DESTRUCTIVE - undo in Fusion if unintended."
+"Delete one component occurrence from the active design (e.g. a stray/duplicate from a botched "
+"pattern). 'occurrence' is a fullPathName (from design_get(include=['tree'])) or name (ambiguous "
+"names refused). The result names any joints the delete removed; if it was the last instance of its "
+"component, the component goes too. A pattern/mirror child can't be deleted individually - delete its "
+"owning feature with design_delete_feature instead. Undo in Fusion if unintended."
 )
 
 tool = (

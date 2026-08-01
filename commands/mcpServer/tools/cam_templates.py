@@ -521,10 +521,10 @@ _apply_tool = (
             "in that setup. Identify the template by 'template_url' (the precise asset URL "
             "from cam_get(include=['templates'])) or 'template_name' (searched under 'location'). "
             "'generate' controls toolpath generation: 'skip' (default - just create "
-            "operations) or 'generate' (also compute the toolpaths). WRITES to the document "
-            "(adds operations to the setup). Note: with generate='generate' a large template "
-            "can exceed the 30s call limit and return a timeout even though the work is still "
-            "running - do NOT blindly retry; verify with cam_get(include=['operations']) / view_screenshot first."
+            "operations) or 'generate' (also compute the toolpaths), adding operations to the "
+            "setup. Note: with generate='generate' a large template can exceed the 30s call "
+            "limit and return a timeout even though the work is still running - do NOT blindly "
+            "retry; verify with cam_get(include=['operations']) / view_screenshot first."
         ),
         input_param_name="setup",
         input_param_description="Name of the setup to apply the template to.",
@@ -545,8 +545,8 @@ _save_tool = (
         "Bundle a subset of a setup's operations into a NEW toolpath template in the "
         "library. 'operations' is a comma-separated list of operation names within "
         "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
-        "if missing). Optional 'description'. Always creates a new template. WRITES to the "
-        "template library. Verify with cam_get(include=['templates'])."
+        "if missing). Optional 'description'. Always creates a new template. Verify with "
+        "cam_get(include=['templates'])."
         ),
         input_param_name="template_name",
         input_param_description="Name for the new template.",

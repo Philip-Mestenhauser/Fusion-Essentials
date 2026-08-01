@@ -102,8 +102,8 @@ TOOL_DESCRIPTION = (
     "version_number (integer) or version_id (from doc_get include=['versions']). This PROMOTES that "
     "version to be the latest - it does NOT erase history; a NEW tip version is created whose content "
     "matches the restored one. Reports the latest version number before/after and confirms the new tip "
-    "actually appeared (or flags 'pending' if the cloud is still processing). WRITES to the cloud data "
-    "model. The active in-session document keeps showing its currently-open version until reopened."
+    "actually appeared (or flags 'pending' if the cloud is still processing). The active in-session "
+    "document keeps showing its currently-open version until reopened."
 )
 
 tool = (

@@ -117,8 +117,8 @@ TOOL_DESCRIPTION = (
     "Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part "
     "needs so it releases from its tooling. 'faces' is a list of face handles from find_geometry; "
     "'pull_direction' is the plane the faces taper relative to (an origin alias, a construction-plane "
-    "name, or a planar-face handle). 'angle_deg' is the taper in degrees (non-zero, magnitude < 90); "
-    "sign plus 'flip' set which way it leans. 'symmetric' splits the faces at the pull plane and "
+    "name, or a planar-face handle). 'angle_deg' is the taper in degrees; sign plus 'flip' set which "
+    "way it leans. 'symmetric' splits the faces at the pull plane and "
     "tapers both sides equally. 'tangent_chain' also drafts faces tangent to the selected ones "
     "(default true). WRITES; verifies the feature computed and returns the drafted-face count."
 )

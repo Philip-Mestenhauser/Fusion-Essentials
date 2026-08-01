@@ -103,10 +103,9 @@ TOOL_DESCRIPTION = (
 "Boolean-combine solid BODIES - the Combine feature. 'target' is the body to keep/modify; "
 "'tools' is the body name(s) to combine into it (a list, or comma-separated). 'operation': "
 "join (fuse into one) | cut (subtract the tools from the target - e.g. bore a hole with a "
-"cylinder body) | intersect (keep only the shared volume). 'keep_tools' leaves the tool bodies "
-"(default false = consume them). This is the body-on-body boolean that model_extrude/"
-"model_revolve's cut/join can't do (those act on a profile). Bodies are referenced by handle "
-"or name within the active component."
+"cylinder body) | intersect (keep only the shared volume). This is the body-on-body boolean "
+"that model_extrude/model_revolve's cut/join can't do (those act on a profile). Bodies are "
+"referenced by handle or name within the active component."
 )
 
 combine_tool = (

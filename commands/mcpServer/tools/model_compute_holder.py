@@ -96,12 +96,11 @@ def handler(body: str = "", axis: str = "", end_datum: str = "",
 
 TOOL_DESCRIPTION = (
     "Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool "
-    "Holder command. Pass three find_geometry handles: 'body' (the solid), 'axis' (a cylindrical/"
-    "conical face or straight edge = the axis of rotation), and 'end_datum' (a planar face/edge/vertex "
-    "NORMAL to the axis, fixing z=0). Returns the holder as (height, lower/upper-diameter) segments in "
-    "mm plus the full library JSON in 'holder_json'. Optional name/product_id/product_link/vendor stamp "
-    "the JSON. READ-ONLY: it computes + returns; it does NOT add the holder to a tool library (do that "
-    "yourself with the JSON - a holder in a document is a fork of library data, not a live link)."
+    "Holder command. Pass three find_geometry handles: 'body', 'axis', and 'end_datum'. Returns the "
+    "holder as (height, lower/upper-diameter) segments in mm plus the full library JSON in "
+    "'holder_json'. Optional name/product_id/product_link/vendor stamp the JSON. READ-ONLY: it "
+    "computes + returns; it does NOT add the holder to a tool library (do that yourself with the "
+    "JSON - a holder in a document is a fork of library data, not a live link)."
 )
 
 tool = (

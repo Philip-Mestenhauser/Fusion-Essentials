@@ -697,16 +697,15 @@ TOOL_DESCRIPTION = (
     "Create a Joint between two inputs. Each input ('occurrence_one'/'occurrence_two'), most precise "
     "first: a find_geometry handle (joints AT that exact face/edge - a real offset); a Joint Origin "
     "name - bare ('Center of Model') or scoped '<occurrence>:<JO name>' for a JO inside an inserted/"
-    "referenced part (either way the tool proxies it into assembly context; do NOT script this "
-    "yourself); or a snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar "
-    "face) | top | bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. Note ':origin' collapses to "
-    "the part origin AND aligns its FULL local frame (un-rotating a pre-rotated part) - use "
-    "a handle for a real offset. Creating a joint MOVES the free "
-    "(ungrounded) part so its snap/JO point lands on the other input's location - do not pre-place "
-    "it. 'joint_type' = rigid (default)/"
-    "revolute/slider/cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing "
-    "one (for pin_slot it is the rotation axis, and 'slide_axis' sets the perpendicular slide "
-    "direction). Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
+    "referenced part (the tool proxies it into assembly context; do NOT script this yourself); or a "
+    "snap-string '<occurrence>:<snap>' where snap = origin | center (largest planar face) | top | "
+    "bottom | cylinder (cyl-face axis), e.g. 'Boom:1:top'. ':origin' collapses to the part origin AND "
+    "aligns its FULL local frame (un-rotating a pre-rotated part) - use a handle for a real offset. "
+    "Creating a joint MOVES the free (ungrounded) part so its snap/JO point lands on the other "
+    "input's location - do not pre-place it. 'joint_type' = rigid (default)/revolute/slider/"
+    "cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing one (for "
+    "pin_slot it is the rotation axis, and 'slide_axis' sets the perpendicular slide direction). "
+    "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
 )
 
 tool = (
@@ -714,7 +713,7 @@ tool = (
         name="joint_create",
         description=TOOL_DESCRIPTION,
         input_param_name="occurrence_one",
-        input_param_description="First input: a find_geometry 'handle' (joints AT real geometry), a Joint Origin name (bare, or '<occurrence>:<JO name>' for a JO inside an inserted part), OR a snap '<occurrence>:<snap>' (origin/center/top/bottom/left/right/front/back/cylinder).",
+        input_param_description="First input: a find_geometry handle, a Joint Origin name (bare or '<occurrence>:<JO name>'), or a snap '<occurrence>:<snap>' - see the tool description for the accepted forms.",
     )
     .add_input_property("occurrence_two", {"type": "string",
             "description": "Second input: same forms as occurrence_one."})

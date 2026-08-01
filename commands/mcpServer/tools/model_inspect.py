@@ -340,7 +340,7 @@ TOOL_DESCRIPTION = (
     "bounding box (X/Y/Z extents + center in 'units'; 'frame'=<Joint Origin> measures in part space). "
     "include=['mass'] adds full physical properties (mass/volume/area/CoM/inertia; 'accuracy', "
     "'per_body'). A MESH target reports triangle/vertex counts + watertight instead. For the distance "
-    "or angle BETWEEN two entities, use model_measure_between. Read-only."
+    "or angle BETWEEN two entities, use model_measure_between."
 )
 
 tool = (

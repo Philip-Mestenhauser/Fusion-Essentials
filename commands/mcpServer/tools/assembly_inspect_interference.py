@@ -99,11 +99,11 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Check the active assembly for INTERFERENCE - parts overlapping in solid space - and report each "
-    "interfering PAIR by occurrence name with its overlap volume (cm^3), in measured.interferences. "
-    "The physical-fit 'check my work' tool (assembly_get checks joint wiring; this checks that "
-    "nothing clips through anything). Coincident/flush faces are excluded by default (set "
-    "include_coincident_faces=true to include intended mates). passed=true when nothing interferes.\n"
+    "Check the active assembly for interference - parts overlapping in solid space - and report each "
+    "interfering pair by occurrence name with its overlap volume (cm^3), in measured.interferences. "
+    "Complements assembly_get, which checks joint wiring rather than physical overlap. Coincident/flush "
+    "faces are excluded by default (set include_coincident_faces=true to include intended mates). "
+    "passed=true when nothing interferes.\n"
     + _outputs.produces_block(RETURNS)
 )
 

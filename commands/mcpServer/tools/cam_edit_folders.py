@@ -118,11 +118,12 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
 
 
 TOOL_DESCRIPTION = (
-    "CAM FOLDERS in a setup. 'action': 'list' (folders + their operation/pattern/subfolder counts), "
-    "'create' (new folder by 'name'), 'rename' ('folder' -> 'new_name'), 'move' ('operations' names INTO "
-    "'folder'). 'setup' = the setup name throughout. WRITES (except list). NOTE: patterns "
-    "(mirror/linear/rotary) can be READ + their parameters EDITED (via cam_edit_operation) but NOT "
-    "created via the API - make those in the Manufacture UI."
+    "Manage a CAM setup's folders: list them, create one, rename one, or move operations into one. "
+    "'action': 'list' (folders + their operation/pattern/subfolder counts), 'create' (new folder by "
+    "'name'), 'rename' ('folder' -> 'new_name'), 'move' ('operations' names into 'folder'). 'setup' is "
+    "the setup name throughout. Only 'list' is read-only. Patterns (mirror/linear/rotary) can be read "
+    "and have their parameters edited (via cam_edit_operation) but cannot be created through the API - "
+    "create those in the Manufacture UI."
 )
 
 tool = (

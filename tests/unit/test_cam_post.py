@@ -425,6 +425,99 @@ class TestCreateOrReuse:
         assert prog.operations == [s1]                      # a plain LIST of exactly the named setup
 
 
+# -- as-is mode: an EXISTING program posts exactly as stored, no config writes -------------------
+
+class TestAsIsMode:
+    def _configured_existing(self, cam, name, folder, post_config=None):
+        """An 'existing' fake program pre-configured as if a prior configure call had run: its own
+        output-folder/name params set and a postConfiguration assigned - what as-is mode reads."""
+        prog = cam.ncPrograms.itemByName(name)
+        prog.parameters.itemByName("nc_program_output_folder").expression = str(folder).replace("\\", "/")
+        prog.parameters.itemByName("nc_program_name").expression = name
+        prog.postConfiguration = post_config if post_config is not None else object()
+        return prog
+
+    def test_as_is_triggers_for_existing_program_with_no_config_knobs(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        prog = self._configured_existing(cam, "JOB1", tmp_path)
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert data["mode"] == "as_is" and data["posted"] is True
+        assert data["program_reused"] is True and data["file_count"] == 1
+        assert data["files"][0]["file_path"].endswith("JOB1.nc")
+        assert os.path.isfile(data["files"][0]["file_path"])
+
+    def test_as_is_writes_no_operations_or_post_config_or_params(self, monkeypatch, tmp_path):
+        # THE as-is bite: operations/postConfiguration/output params are untouched - only postProcess runs.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        sentinel_post = object()
+        prog = self._configured_existing(cam, "JOB1", tmp_path, post_config=sentinel_post)
+        prog.operations = None                      # never (re)assigned by a prior configure call
+        name_param_before = prog.parameters.itemByName("nc_program_name").expression
+        data = _payload(cp.handler(program_name="JOB1"))
+        assert prog.operations is None               # as-is never sets .operations
+        assert prog.postConfiguration is sentinel_post   # as-is never reassigns postConfiguration
+        assert prog.parameters.itemByName("nc_program_name").expression == name_param_before
+        assert "params_applied" not in data and "post_scope" not in data and "units" not in data
+
+    def test_as_is_not_triggered_when_scope_given_even_as_document(self, monkeypatch, tmp_path):
+        # 'scope' was NOT omitted (an explicit "document" still counts as given) - falls to the
+        # configure path, which then requires output_folder/post like a fresh configuration would.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        self._configured_existing(cam, "JOB1", tmp_path)
+        res = cp.handler(scope="document", program_name="JOB1")
+        assert res["isError"] is True and "output_folder" in res["message"]
+
+    def test_as_is_missing_stored_output_folder_param_is_error(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"],
+                                         missing=("nc_program_output_folder",)))
+        res = cp.handler(program_name="JOB1")
+        assert res["isError"] is True and "nc_program_output_folder" in res["message"]
+
+    def test_as_is_refuses_when_no_valid_toolpaths(self, monkeypatch, tmp_path):
+        # The live_readiness gate applies to as-is too - a stale program still writes wrong G-code.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]), valid=0)
+        self._configured_existing(cam, "JOB1", tmp_path)
+        res = cp.handler(program_name="JOB1")
+        assert res["isError"] is True and "valid" in res["message"].lower()
+
+
+# -- overwrite guard: reconfiguring an EXISTING program with a DIFFERENT scope --------------------
+
+class TestOverwriteGuard:
+    def test_refuses_when_stored_operations_differ_from_requested_scope(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [_Op("SomeOtherOp")]           # a DIFFERENT stored configuration
+        prog.postConfiguration = object()
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="JOB1")
+        assert res["isError"] is True
+        assert "JOB1" in res["message"] and "overwrite" in res["message"].lower()
+        assert prog.operations[0].name == "SomeOtherOp"   # refused BEFORE any write - untouched
+
+    def test_overwrite_true_proceeds_despite_differing_operations(self, monkeypatch, tmp_path):
+        s1 = _Setup("S1", [_Op("Face1")])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [_Op("SomeOtherOp")]
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="JOB1", overwrite=True))
+        assert data["posted"] is True
+        assert prog.operations == [s1]                   # reconfigured to the requested scope
+
+    def test_identical_operation_sets_proceed_without_overwrite(self, monkeypatch, tmp_path):
+        # The idempotent re-post case: the stored set and the requested scope resolve to the SAME
+        # operations - no friction, overwrite is never required.
+        face1 = _Op("Face1")
+        s1 = _Setup("S1", [face1])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [face1]                         # same operation object the scope resolves to
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="JOB1"))
+        assert data["posted"] is True and data.get("partial") is not True
+
+
 # -- the honesty gate: a real file must land -----------------------------------
 
 class TestPostWritesFile:

@@ -122,7 +122,7 @@ TOOL_DESCRIPTION = (
     "exposes Data.activeHub getter-only (no public setter), so the switch is best-effort: it verifies "
     "the hub actually changed and returns an honest error if not (switch from the Fusion data panel "
     "instead). When a switch DOES take effect it CLOSES open documents and URNs are hub-scoped - so "
-    "save first, then re-resolve projects/URNs (data_get) and reopen what you need. WRITES."
+    "save first, then re-resolve projects/URNs (data_get) and reopen what you need."
 )
 
 tool = (

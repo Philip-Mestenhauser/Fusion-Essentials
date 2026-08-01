@@ -496,12 +496,12 @@ TOOL_DESCRIPTION = (
     "'models' = lists of bodies (find_geometry handles or names) OR component occurrence names "
     "that REPLACE that collection: 'stock' switches to from-solid stock, 'fixtures' auto-enables fixtures. "
     "Select the COMPONENT occurrence (not the body inside) so the setup keeps its selection when contents are swapped "
-    "(the shop-template pattern). 'wcs' = {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin "
-    "(handle/name)} BINDS the WCS to it as a live reference - a self-centering Joint Origin keeps the WCS "
-    "centered as its anchor updates (associative). 'parameters' = {name: expression} for "
+    "(the shop-template pattern). 'wcs' binds the WCS to a find_geometry handle or Joint Origin as a "
+    "live reference (see its own description) - a self-centering Joint Origin keeps the WCS "
+    "centered as its anchor updates. 'parameters' = {name: expression} for "
     "any other setup parameter (box-point WCS, stock size); validated all-before-any - a "
     "non-evaluating expression is rejected and rolled back. Every write is read back. Regenerate "
-    "toolpaths after with cam_generate. WRITES CAM data."
+    "toolpaths after with cam_generate."
 )
 
 tool = (

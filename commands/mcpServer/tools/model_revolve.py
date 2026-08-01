@@ -178,7 +178,7 @@ TOOL_DESCRIPTION = (
 "one half and revolve that. 'angle_deg' is "
 "the sweep (360 = full revolve). 'operation': new | join | cut | "
 "intersect. 'symmetric' splits the angle both ways. The feature/body land in "
-"the sketch's OWNING component (reported as 'component'). WRITES; returns body names."
+"the sketch's OWNING component (reported as 'component'). Returns the resulting body names."
 )
 
 revolve_tool = (

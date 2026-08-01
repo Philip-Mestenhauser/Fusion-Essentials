@@ -117,7 +117,7 @@ TOOL_DESCRIPTION = (
     "fusionWebURL); 'folder'=<path> scopes to one folder, 'recursive' descends or not. "
     "include=['folders'] (with a project): the folder TREE instead. include=['hubs']: all hubs. Every "
     "call is a NETWORK read (can be slow / fail offline); results are capped (see 'truncated'). For the "
-    "in-memory open-document SESSION use doc_get instead. Read-only."
+    "in-memory open-document SESSION use doc_get instead."
 )
 
 tool = (

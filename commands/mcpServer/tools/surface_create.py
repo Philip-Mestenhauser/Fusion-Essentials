@@ -364,9 +364,9 @@ _EXTRUDE_DESC = (
 "isSolid == false, the entry point to surface modelling. Provide EITHER 'curves' (an open chain of "
 "edge/curve handles from find_geometry) OR a 'sketch_name' whose open curves form the profile "
 "(omit = most recent). 'distance' (non-zero) is the depth in 'units'; 'symmetric' extrudes both "
-"sides. 'operation': new | join (cut/intersect don't apply to a new sheet). The profile is swept as "
+"sides. 'operation' excludes cut/intersect (not meaningful for a new sheet). The profile is swept as "
 "an OPEN sheet - a closed boundary becomes a tube/wall, NOT a capped solid (use model_extrude for a "
-"solid). WRITES; returns the body + is_solid (read back, expected false)."
+"solid). Returns the body + is_solid (read back, expected false)."
 )
 
 surface_extrude_tool = (
@@ -387,8 +387,8 @@ surface_extrude_item = Item.create_tool_item(tool=surface_extrude_tool, write="w
 _REVOLVE_DESC = (
                                              "Revolve an OPEN profile (sketch open chain, or 'curves' handles) about an x/y/z axis into a SHEET "
                                              "(surface) body - isSolid == false. 'angle_deg' (non-zero) is the sweep (360 = full); 'symmetric' "
-                                             "splits it both ways. 'operation': new | join. The profile is spun as an OPEN sheet - a closed "
-                                             "boundary becomes a shell, NOT a capped solid (use model_revolve for a solid). WRITES; returns "
+                                             "splits it both ways. The profile is spun as an OPEN sheet - a closed "
+                                             "boundary becomes a shell, NOT a capped solid (use model_revolve for a solid). Returns "
                                              "the body + is_solid (read back, expected false)."
 )
 
@@ -414,8 +414,8 @@ _PATCH_DESC = (
                                              "the single-seed form succeeds), OR 'boundaries' (a LIST of loops, patched ALL in one "
                                              "call - each element is one edge handle Fusion auto-completes, or a list of handles forming one "
                                              "loop). Use 'boundaries' to patch every hole of a part at once (pass each hole's rim edge). "
-                                             "'continuity': connected | tangent | curvature. 'operation': new | new_component. In the multi "
-                                             "form a loop that fails is reported per-loop without aborting the rest. WRITES; returns the patch "
+                                             "In the multi "
+                                             "form a loop that fails is reported per-loop without aborting the rest. Returns the patch "
                                              "body/bodies (isSolid=false)."
 )
 

@@ -447,12 +447,11 @@ mesh_export_tool = (
                 "disk (OBJ / 3MF / STL) - the mesh-aware sibling of design_export (which does neutral "
                 "BRep formats). 'target' is a body HANDLE from find_geometry (precise; works for BRep "
                 "AND mesh bodies) OR a body/mesh/component/occurrence NAME, or omit it to export the "
-                "whole design. 'format' is obj/3mf/stl (default 3mf). 'file_path' is the local output "
-                "path (the extension is appended if missing; the directory is created if needed). "
-                "'refinement' (high|medium|low) sets mesh density where the format supports it. Set "
-                "split_by_component=true to export EACH top-level occurrence to its own file (one per "
-                "part - what 3D printing wants) into the DIRECTORY 'file_path' ('target' ignored). "
-                "WRITES a file to disk (does NOT modify the design).")),
+                "whole design. 'format' is obj/3mf/stl (default 3mf); 'refinement' (high|medium|low) "
+                "sets mesh density where the format supports it. split_by_component=true exports EACH "
+                "top-level occurrence to its own file (one per part - what 3D printing wants); "
+                "'target' is ignored in that mode. WRITES a file to disk (does NOT modify the "
+                "design).")),
         _EXPORT_SPEC)
     .add_input_property("file_path", {"type": "string",
             "description": "Local output path (a file; or a DIRECTORY when split_by_component=true). Extension appended if missing; directory created if needed."})
@@ -475,11 +474,10 @@ save_as_mesh_tool = (
             description=(
                 "Tessellate a BRep solid/surface into a persistent MESH body IN the design - the "
                 "inverse of mesh_to_brep ('save as mesh'). 'body' is a BRep body HANDLE from "
-                "find_geometry (precise) or a body NAME; 'quality' is low|normal|high|very_high "
-                "(default normal) - the tessellation level of detail. WRITES a MeshBody. In a "
-                "PARAMETRIC design the mesh write is wrapped in a BaseFeature edit scope automatically "
-                "(the API requires it); in DIRECT no scope is needed. The new mesh lands beside the "
-                "source body. Inspect/edit it with the mesh_* tools.")),
+                "find_geometry (precise) or a body NAME; 'quality' controls tessellation level of "
+                "detail (default normal). In a PARAMETRIC design the mesh write is wrapped in a "
+                "BaseFeature edit scope automatically (the API requires it); DIRECT needs none. The "
+                "new mesh lands beside the source body. Inspect/edit it with the mesh_* tools.")),
         _SAVE_SPEC)
     .add_input_property("name", {"type": "string",
             "description": "Optional name for the new mesh body."})

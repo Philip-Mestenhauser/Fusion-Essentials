@@ -4,7 +4,8 @@
 """DRIVES a revolute/slider/cylindrical joint to a commanded angle and/or distance (the API's Drive
 Joints command), moving the mechanism along that joint's DOF - e.g. swing a revolute to 30 deg, extend
 a slider 50 mm. Rigid has no value; ball/planar/pin-slot aren't drivable this way (pose those with
-assembly_move). WRITES (mutates part poses - no new timeline feature).
+assembly_move). WRITES (mutates part poses); the pose is TRANSIENT until assembly_capture_position
+(action='capture') writes it into the timeline - a recompute resets an uncaptured pose.
 """
 
 import math
@@ -208,11 +209,13 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         "value_now": read_back,
         "units": units,
         "note": "Joint driven (the Drive Joints command) - the mechanism followed along this joint's "
-                "DOF. This poses the model; it does not add a timeline feature, and a later recompute "
-                "resets the pose. There is no parameter for a slide/rotation VALUE (the 'offset' "
-                "param moves a DIFFERENT axis - the frame Z - so it cannot persist a drive); build the "
-                "mechanism at its rest pose. Pair with assembly_get to confirm the kinematics and "
-                "view_screenshot to see it.",
+                "DOF. This pose is TRANSIENT: a recompute resets it unless captured. Call "
+                "assembly_capture_position (action='capture') to write it into the timeline as a "
+                "Position marker - a captured pose survives a full recompute. Driving again after a "
+                "capture arms a NEW pending snapshot; capture again to persist the new pose. There is "
+                "no parameter for a slide/rotation VALUE (the 'offset' param moves a DIFFERENT axis - "
+                "the frame Z - so it cannot persist a drive). Pair with assembly_get to confirm the "
+                "kinematics and view_screenshot to see it.",
     }
     if warnings:
         result["limit_warnings"] = warnings
@@ -232,18 +235,20 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 
 
 TOOL_DESCRIPTION = (
-    "DRIVE a joint to a value - the API's Drive Joints command. Set a revolute / slider / cylindrical "
+    "Drive a joint to a value - the API's Drive Joints command. Set a revolute, slider, or cylindrical "
     "joint to a commanded angle and/or distance and the mechanism moves along that joint's DOF. "
     "'joint_name' is the joint (from assembly_get). 'angle_deg' = rotation in degrees (revolute or "
     "cylindrical); 'distance' = slide in 'units' (slider or cylindrical); give one, or both for a "
-    "cylindrical. Respects the joint's enabled limits (warns + reports the clamped value). Only revolute / "
-    "slider / cylindrical are drivable (rigid has no value; pose a ball joint with assembly_move). A "
-    "driven pose does NOT survive a timeline recompute - a later feature edit re-zeros it - so build "
-    "the mechanism at the REST pose, not a driven one. MOTION-LINKED pairs: drive "
-    "ONE member and read the partner back (the link moves it). In an XREF/referenced assembly, driving "
-    "the OTHER member is REFUSED for the session - driving both members there has killed the Fusion "
-    "process; in a plain in-document assembly it is allowed with a warning. Rebuilding the partner "
-    "clears the refusal. WRITES (poses the model; adds no timeline feature)."
+    "cylindrical. Respects the joint's enabled limits (warns and reports the clamped value). Only "
+    "revolute, slider, and cylindrical are drivable (rigid has no value; pose a ball joint with "
+    "assembly_move). A drive is TRANSIENT: it arms a pending snapshot; a recompute resets it unless "
+    "captured. Call assembly_capture_position (action='capture') to write the pose into the timeline - "
+    "it then survives a recompute. Re-driving after a capture arms a NEW pending snapshot; capture "
+    "again to persist it. The 'offset' param moves a DIFFERENT axis (frame Z) and cannot persist a "
+    "drive. Motion-linked pairs: drive one member and read the partner back (the link moves it). In an "
+    "xref/referenced assembly, driving the other member is refused for the session - it has killed the "
+    "Fusion process; a plain in-document assembly allows it with a warning. Rebuilding the partner "
+    "clears the refusal."
 )
 
 tool = (

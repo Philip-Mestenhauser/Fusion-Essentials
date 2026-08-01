@@ -100,9 +100,9 @@ TOOL_DESCRIPTION = (
     "GETTING STARTED / overview / start here / help: LIST every tool FAMILY this server has - each with a "
     "one-line summary, its entry-point tool, and tool count. The BREADTH map: answers 'what CAN this "
     "server do?' for a cold agent that doesn't yet know which capabilities exist (surface? mesh? "
-    "config?). Then call workspace_orient for the active document's state. LIVE from the registry "
-    "(never stale). Pair with sys_find_tool to search WITHIN a family. Factual index - no workflow "
-    "advice. Read-only, no args."
+    "config?). Then call workspace_orient for the active document's state. Read live from the "
+    "running server - never stale. Pair with sys_find_tool to search WITHIN a family. Factual "
+    "index - no workflow advice. Takes no arguments."
 )
 
 tool = Tool.create_simple(name="sys_capability_map", description=TOOL_DESCRIPTION).strict_schema()

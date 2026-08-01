@@ -122,12 +122,12 @@ def handler(feature: str = "") -> dict:
 
 
 _DESC = (
-"Delete ONE timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched pattern/mirror, "
-"which removes all the instances it created. An ambiguous name is refused (candidates listed; pick one "
-"with the 'name@index' form, e.g. 'Extrude1@4'); a timeline GROUP is refused; the result reports if "
-"the delete left a downstream feature in error. Timeline indices SHIFT after every delete - in a "
-"batch, re-read the timeline before each 'name@index' rather than reusing cached positions. "
-"DESTRUCTIVE - undo in Fusion if unintended."
+"Delete one timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched "
+"pattern/mirror, which removes all the instances it created. An ambiguous name is refused (candidates "
+"listed; pick one with the 'name@index' form, e.g. 'Extrude1@4'); a timeline group is refused; the "
+"result reports if the delete left a downstream feature in error. Timeline indices shift after every "
+"delete - in a batch, re-read the timeline before each 'name@index' rather than reusing cached "
+"positions. Undo in Fusion if unintended."
 )
 
 tool = (

@@ -429,24 +429,19 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint Origin (a reusable coordinate frame / WCS anchor). Orientation follows the "
-    "anchor:\n"
-    "- anchor='coordinates' (default): at x,y,z (target='at', units mm/cm/in) or target='origin'. "
-    "World-aligned and ROOT-ABSOLUTE (never follows an occurrence's transform); held by "
-    "parametric offsetX/Y/Z from the model origin (the result names the dNN params to "
-    "param_set).\n"
-    "- anchor='sketch_line': on a sketch line (sketch_name + entity_index + 'keypoint') - frame Z "
-    "runs along the line.\n"
-    "- anchor='sketch_point': on a sketch point (position only).\n"
-    "- anchor='geometry': on a find_geometry handle - planar FACE (Z=normal), cyl/cone face or EDGE "
-    "(axis from geometry), or VERTEX (position); 'keypoint' picks where on an edge.\n"
-    "- anchor='bbox_center': at the world bbox CENTER of 'bbox_target' (a body/occurrence/component), "
-    "frame Z aligned to 'orient_axis' (world x/y/z or an edge/line handle; 'flip' reverses it).\n"
-    "- anchor='face_center': at a planar FACE's centroid (the 'geometry' handle), Z = the face normal.\n"
-    "Optional 'name'. WRITES; 'frame_axes' reports Z/X/Y. The origin lands on the ROOT component "
-    "(not the active one). Placement is a SNAPSHOT - bbox_center/face_center do NOT follow a "
-    "parametric resize; to TRACK a resizable part use anchor='coordinates' with offset "
-    "expressions on the dNN params."
+    "Create a Joint Origin (a reusable coordinate frame anchor). 'anchor' picks how it's placed:\n"
+    "- coordinates (default): at x,y,z, or target='origin'. World-aligned, root-absolute; held by "
+    "parametric offsetX/Y/Z from the model origin (dNN params named in the result for param_set).\n"
+    "- sketch_line: on a sketch line (sketch_name + entity_index + keypoint); Z runs along it.\n"
+    "- sketch_point: on a sketch point (position only).\n"
+    "- geometry: on a find_geometry handle - planar face (Z=normal), cylinder/cone face or edge "
+    "(axis), or vertex (position); 'keypoint' picks where on an edge.\n"
+    "- bbox_center: at bbox_target's world bounding-box center, Z aligned to 'orient_axis' (world "
+    "x/y/z or an edge/line handle; 'flip' reverses it).\n"
+    "- face_center: at a planar face's centroid ('geometry'), Z = the face normal.\n"
+    "Optional 'name'. Returns frame_axes (Z/X/Y). Lands on the root component, not the active one. "
+    "Placement is a snapshot - bbox_center/face_center don't track a later resize; for that, use "
+    "anchor='coordinates' with offset expressions on the dNN params."
 )
 
 tool = (

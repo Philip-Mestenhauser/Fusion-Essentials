@@ -1,10 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""RICH READ: pmi_get - the design's PMI (3D annotations: notes, hole/thread notes, imported
-GD&T/dimensions) by zoom level. Default: counts by kind + light per-annotation records.
-include=['segments'|'detail'] deepens; geometry= narrows to the PMI attached to specific
-faces/edges. Read-only."""
+"""RICH READ: pmi_get - the design's PMI (3D annotations: notes, hole/thread callouts, imported
+GD&T/dimensions/datums/surface textures) by zoom level. Default: counts by kind + light records.
+include=['segments'|'detail'] deepens (detail is per-kind structured data); kind=/component=/
+geometry= narrow. Design.pmiSettings is never read - the getter raises when no settings object
+exists (platform defect, live-verified). Read-only."""
 
 import adsk.core
 import adsk.fusion
@@ -24,9 +25,15 @@ _SLICES = ("segments", "detail")
 _MAX_RESULTS_DEFAULT = 50
 _MAX_RESULTS_CAP = 200
 
+_KINDS = ("note", "hole_note", "imported_dimension", "imported_note", "imported_gdt_datum",
+          "imported_geometric_tolerance", "imported_surface_texture", "imported_graphical",
+          "imported_folder")
+
 _GEOMETRY = _inputs.GeometryHandleList(
     "geometry", require="any",
     description="Narrow to the PMI attached to THESE faces/edges/vertices (find_geometry handles).")
+_KIND_FILTER = _inputs.Choice("kind", options=list(_KINDS),
+                              description="Narrow to one PMI kind.")
 
 
 def _normalize_include(include):
@@ -44,8 +51,9 @@ def _slice_segments(rec, ann):
         rec["markup"] = markup
 
 
-def _slice_detail(rec, ann, out_f):
-    """Health + geometry references + hole-note numerics (scaled to the call's units)."""
+# ── per-kind detail builders ────────────────────────────────────────────────
+
+def _detail_common(rec, ann):
     rec["parametric"] = bool(safe(lambda: ann.isParametric, False))
     tl = safe(lambda: ann.timelineObject)
     if tl is not None:
@@ -53,22 +61,193 @@ def _slice_detail(rec, ann, out_f):
     refs = safe(lambda: ann.referencedEntities) or []
     rec["referenced_entities"] = [
         (safe(lambda r=r: r.objectType, "") or "").split("::")[-1] for r in refs]
-    if rec.get("kind") == "hole_note":
-        for key, get in (("diameter", lambda: ann.diameter),
-                         ("depth", lambda: ann.depth),
-                         ("counterbore_diameter", lambda: ann.counterboreDiameter),
-                         ("counterbore_depth", lambda: ann.counterboreDepth),
-                         ("countersink_diameter", lambda: ann.countersinkDiameter)):
-            gv = safe(get)
-            v = safe(lambda gv=gv: gv.value) if gv is not None and safe(lambda gv=gv: gv.hasValue) else None
-            if v is not None:
-                rec[key] = round(v * out_f, 6)
-        rec["quantity"] = safe(lambda: ann.quantity)
-        rec["is_through"] = bool(safe(lambda: ann.isThrough, False))
-        rec["is_threaded"] = bool(safe(lambda: ann.isThreaded, False))
 
 
-def handler(include=None, geometry=None, max_results=None, units="mm") -> dict:
+def _detail_created(rec, ann, out_f):
+    """Placement + format shared by both Fusion-authored kinds."""
+    tp = safe(lambda: ann.annotationTextPoint)
+    if tp is not None:
+        rec["text_point"] = _common.ptxyz(tp, out_f)
+    lp = safe(lambda: ann.annotationTargetPoint)
+    if lp is not None:
+        rec["leader_point"] = _common.ptxyz(lp, out_f)
+    rec["align"] = _pmi.enum_label(adsk.core, "HorizontalAlignments", "HorizontalAlignment",
+                                   safe(lambda: ann.horizontalAlignment))
+    rec["valign"] = _pmi.enum_label(adsk.core, "VerticalAlignments", "VerticalAlignment",
+                                    safe(lambda: ann.verticalAlignment))
+    if safe(lambda: ann.isPerpendicularLine, False):
+        rec["perpendicular"] = True
+    ext = safe(lambda: ann.leaderLineExtension)
+    if ext is not None:
+        rec["leader_extension"] = round(ext * out_f, 6)
+
+
+def _detail_note(rec, ann, out_f):
+    rec["plane"] = _pmi.enum_label(adsk.fusion, "LeaderLineNotePlaneTypes",
+                                   "LeaderLineNotePlaneType",
+                                   safe(lambda: ann.annotationPlaneType))
+    supported = list(safe(lambda: ann.supportedAnnotationPlaneTypes) or [])
+    if supported:
+        rec["supported_planes"] = [
+            _pmi.enum_label(adsk.fusion, "LeaderLineNotePlaneTypes", "LeaderLineNotePlaneType", v)
+            for v in supported]
+
+
+def _detail_hole_note(rec, ann, out_f):
+    rec["is_hole"] = bool(safe(lambda: ann.isHoleAnnotation, True))
+    rec["quantity"] = safe(lambda: ann.quantity)
+    for key, on in (("is_through", "isThrough"), ("is_threaded", "isThreaded"),
+                    ("threaded_through", "isThreadedThrough"),
+                    ("quantity_note", "isWantQuantityNote"),
+                    ("all_matching", "isWantSelectAllMatchingHoles"),
+                    ("flip_normal", "isFlipHoleNormal")):
+        rec[key] = bool(safe(lambda o=on: getattr(ann, o), False))
+    for key in _pmi.HOLE_VALUE_PROPS:
+        angle = key == "countersink_angle_deg"
+        vr = _pmi.value_record(safe(lambda k=key: getattr(ann, _pmi.HOLE_VALUE_ATTR[k])),
+                               out_f, angle=angle)
+        if vr is not None:
+            rec[key] = vr
+    st = _pmi.tolerance_record(safe(lambda: ann.shaftTolerance), out_f)
+    if st:
+        rec["shaft_tolerance"] = st
+    ti = safe(lambda: ann.threadInfo)
+    if ti is not None:
+        rec["thread"] = {"designation": safe(lambda: ti.threadDesignation),
+                         "thread_class": safe(lambda: ti.threadClass),
+                         "thread_type": safe(lambda: ti.threadType)}
+    ds = _pmi.display_record(safe(lambda: ann.primaryDisplaySettings))
+    if ds:
+        rec["display"] = ds
+    if safe(lambda: ann.hasSecondaryDisplaySettings, False):
+        ds2 = _pmi.display_record(safe(lambda: ann.secondaryDisplaySettings))
+        if ds2:
+            rec["display_secondary"] = ds2
+
+
+def _detail_imported_dimension(rec, ann, out_f):
+    nv = _pmi.value_record(safe(lambda: ann.nominalDistance), out_f)
+    if nv is not None:
+        rec["nominal"] = nv
+    st = _pmi.tolerance_record(safe(lambda: ann.shaftTolerance), out_f)
+    if st:
+        rec["shaft_tolerance"] = st
+    rec["angle_relator"] = _pmi.enum_label(adsk.fusion, "PMIAngleRelatorTypes",
+                                           "PMIAngleRelatorType",
+                                           safe(lambda: ann.angleRelatorType))
+
+
+def _detail_imported_geometric_tolerance(rec, ann, out_f):
+    tv = safe(lambda: ann.tolerance)
+    if tv is not None:
+        rec["tolerance"] = round(tv * out_f, 6)
+    datums = []
+    for dr in safe(lambda: ann.datumReferences) or []:
+        ref = safe(lambda dr=dr: dr.referenceDatum)
+        entry = {"datum": safe(lambda: ref.label) if ref is not None else None}
+        mods = []
+        for m in safe(lambda dr=dr: dr.modifiers) or []:
+            mrec = {"type": _pmi.enum_label(adsk.fusion, "PMIDatumModifierTypes",
+                                            "PMIDatumModifierType", safe(lambda m=m: m.type))}
+            if safe(lambda m=m: m.hasValue, False):
+                mrec["value"] = safe(lambda m=m: m.value)
+            mods.append(mrec)
+        if mods:
+            entry["modifiers"] = mods
+        datums.append(entry)
+    if datums:
+        rec["datum_references"] = datums
+
+
+def _detail_imported_gdt_datum(rec, ann, out_f):
+    rec["label"] = safe(lambda: ann.label)
+    targets = []
+    for t in safe(lambda: ann.datumTargets) or []:
+        trec = {"id": safe(lambda t=t: t.targetId),
+                "type": _pmi.enum_label(adsk.fusion, "PMIDatumTargetTypes", "PMIDatumTargetType",
+                                        safe(lambda t=t: t.type))}
+        if safe(lambda t=t: t.hasPointTarget, False):
+            trec["point"] = _common.ptxyz(safe(lambda t=t: t.pointTarget), out_f)
+        lens = list(safe(lambda t=t: t.lengths) or [])
+        if lens:
+            trec["lengths"] = [round(v * out_f, 6) for v in lens]
+        targets.append(trec)
+    if targets:
+        rec["datum_targets"] = targets
+
+
+def _detail_imported_note(rec, ann, out_f):
+    rec["note_text"] = safe(lambda: ann.note)
+    ref = safe(lambda: ann.reference)
+    if ref is not None:
+        rec["references_pmi"] = safe(lambda: ref.name)
+
+
+def _roughness(r):
+    if r is None or not safe(lambda: r.hasValue, False):
+        return None
+    return {"value": safe(lambda: r.value),
+            "parameter": _pmi.enum_label(adsk.fusion, "PMISurfaceTextureParameterTypes",
+                                         "PMISurfaceTextureParameterType",
+                                         safe(lambda: r.parameterType)),
+            "is_maximum": bool(safe(lambda: r.isMaximum, False))}
+
+
+def _detail_imported_surface_texture(rec, ann, out_f):
+    rec["standard"] = _pmi.enum_label(adsk.fusion, "PMISurfaceTextureStandardTypes",
+                                      "PMISurfaceTextureStandardType", safe(lambda: ann.standard))
+    rec["texture_type"] = _pmi.enum_label(adsk.fusion, "PMISurfaceTextureTypes",
+                                          "PMISurfaceTextureType",
+                                          safe(lambda: ann.surfaceTextureType))
+    rec["lay"] = _pmi.enum_label(adsk.fusion, "PMILaySymbolTypes", "PMILaySymbolType",
+                                 safe(lambda: ann.laySymbolType))
+    if safe(lambda: ann.hasRoughness, False):
+        rec["roughness_um"] = safe(lambda: ann.roughness)
+    if safe(lambda: ann.hasRoughnessLimits, False):
+        rec["roughness_min_um"] = safe(lambda: ann.minimumRoughness)
+        rec["roughness_max_um"] = safe(lambda: ann.maximumRoughness)
+    mm = safe(lambda: ann.machineMethod)
+    if mm:
+        rec["machine_method"] = mm
+    if safe(lambda: ann.hasProcessingAllowance, False):
+        rec["processing_allowance"] = safe(lambda: ann.processingAllowance)
+    for key, get in (("cutoff", lambda: ann.cutoff), ("waviness", lambda: ann.waviness),
+                     ("secondary_roughness", lambda: ann.secondaryRoughness),
+                     ("tertiary_roughness", lambda: ann.tertiaryRoughness)):
+        rr = _roughness(safe(get))
+        if rr:
+            rec[key] = rr
+
+
+def _detail_imported_folder(rec, ann, out_f):
+    rec["contains"] = [safe(lambda a=a: a.name) for a in safe(lambda: ann.containedPMI) or []]
+
+
+_DETAIL_BY_KIND = {
+    "note": _detail_note,
+    "hole_note": _detail_hole_note,
+    "imported_dimension": _detail_imported_dimension,
+    "imported_geometric_tolerance": _detail_imported_geometric_tolerance,
+    "imported_gdt_datum": _detail_imported_gdt_datum,
+    "imported_note": _detail_imported_note,
+    "imported_surface_texture": _detail_imported_surface_texture,
+    "imported_folder": _detail_imported_folder,
+}
+
+
+def _slice_detail(rec, ann, out_f):
+    """Health + references + per-kind structured data (values/tolerances scale to 'units')."""
+    _detail_common(rec, ann)
+    kind = rec.get("kind")
+    if kind in _pmi.CREATED_KINDS:
+        _detail_created(rec, ann, out_f)
+    builder = _DETAIL_BY_KIND.get(kind)
+    if builder:
+        builder(rec, ann, out_f)
+
+
+def handler(include=None, geometry=None, kind="", component="", max_results=None,
+            units="mm") -> dict:
     """See TOOL_DESCRIPTION."""
     d = _common.design()
     if not d:
@@ -82,6 +261,10 @@ def handler(include=None, geometry=None, max_results=None, units="mm") -> dict:
     bad = [s for s in inc if s not in _SLICES]
     if bad:
         return error(f"Unknown include slice(s) {bad}. Available: {list(_SLICES)}.")
+    kind_v, kerr = _KIND_FILTER.resolve(kind)
+    if kerr:
+        return error(kerr)
+    comp_want = (component or "").strip().lower()
 
     cap = int(max_results or _MAX_RESULTS_DEFAULT)
     if cap < 1 or cap > _MAX_RESULTS_CAP:
@@ -109,11 +292,16 @@ def handler(include=None, geometry=None, max_results=None, units="mm") -> dict:
     total = 0
     truncated = False
     for comp, ann in _pmi.walk_annotations(d):
-        if only is not None and (safe(lambda: comp.name), safe(lambda: ann.name)) not in only:
+        cname = safe(lambda: comp.name)
+        if comp_want and (cname or "").lower() != comp_want:
+            continue
+        if only is not None and (cname, safe(lambda: ann.name)) not in only:
+            continue
+        akind = _pmi.kind_of(ann)
+        if kind_v and akind != kind_v:
             continue
         total += 1
-        kind = _pmi.kind_of(ann)
-        by_kind[kind] = by_kind.get(kind, 0) + 1
+        by_kind[akind] = by_kind.get(akind, 0) + 1
         if len(records) >= cap:
             truncated = True
             continue
@@ -127,23 +315,34 @@ def handler(include=None, geometry=None, max_results=None, units="mm") -> dict:
     out = {"total": total, "by_kind": by_kind, "annotations": records, "units": units}
     if truncated:
         out["truncated"] = True
+    # A suppressed PMI leaves the collections entirely and its timeline entity degrades to a bare
+    # Feature (live-verified) - list suppressed feature names so it cannot vanish silently.
+    suppressed = [nm for _item, nm in _pmi.suppressed_pmi_features(d)]
+    if suppressed:
+        out["suppressed_features"] = suppressed
+        out["suppressed_note"] = ("Suppressed timeline features (a suppressed PMI is among these "
+                                  "but indistinguishable from other features until unsuppressed - "
+                                  "pmi_edit(action='unsuppress', annotation=<name>)).")
     remaining = [s for s in _SLICES if s not in inc]
     if remaining:
         out["note"] = ("Light records. Pull deeper with include=" + str(remaining) +
                        " - 'segments' adds the {symbol} markup (round-trips into pmi_create/"
-                       "pmi_edit text), 'detail' adds health/references/hole numerics. "
-                       "geometry= narrows to specific faces/edges.")
+                       "pmi_edit text), 'detail' adds per-kind structure (placement/format, hole "
+                       "values+tolerances+thread+display, imported dimension/GDT/datum/surface-"
+                       "texture data). kind=/component=/geometry= narrow.")
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
 "Read the design's PMI (Product Manufacturing Information - 3D annotations attached to model "
-"faces/edges): Fusion-authored leader notes and hole/thread notes, plus PMI imported with a STEP/"
-"model (dimensions, GD&T, datums, surface textures). Default: counts by kind + light records "
-"(name, kind, component, text, visibility), bounded by max_results. include=['segments'] adds "
-"each note's {symbol} markup; include=['detail'] adds health, referenced geometry, and hole-note "
-"numerics scaled to 'units'. geometry= (find_geometry handles) narrows to the PMI attached to "
-"those entities. Author/change PMI with pmi_create / pmi_edit / pmi_delete."
+"faces/edges): Fusion-authored leader notes and hole/thread callouts, plus PMI imported with a "
+"STEP/model (dimensions, GD&T frames, datums, surface textures, folders). Default: counts by "
+"kind + light records (name, kind, component, text, visibility), bounded by max_results. "
+"include=['segments'] adds each note's {symbol} markup; include=['detail'] adds per-kind "
+"structure - placement/plane/alignment for notes, values+tolerances+thread+display for hole "
+"callouts, nominal/tolerance/datum-frame/roughness data for imported PMI - scaled to 'units'. "
+"kind=, component=, and geometry= (find_geometry handles) narrow. Author/change PMI with "
+"pmi_create / pmi_edit / pmi_delete."
 )
 
 tool = (
@@ -152,6 +351,9 @@ tool = (
         "type": "array", "items": {"type": "string", "enum": list(_SLICES)},
         "description": "Deeper slices to include (default none)."})
     .add_input_property("geometry", _GEOMETRY.schema())
+    .add_input_property("kind", _KIND_FILTER.schema())
+    .add_input_property("component", {"type": "string",
+        "description": "Narrow to one component's PMI (exact name)."})
     .add_input_property("max_results", {
         "type": "integer",
         "description": f"Cap on returned records (default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CAP})."})

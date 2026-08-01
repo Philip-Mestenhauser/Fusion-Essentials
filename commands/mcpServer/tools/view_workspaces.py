@@ -139,7 +139,7 @@ _switch_tool = Tool.create_with_string_input(
     "('FusionSolidEnvironment', 'CAMEnvironment'), a visible name ('Design', "
     "'Manufacture'), or an alias ('design', 'manufacture'/'cam'). Switching to "
     "Manufacture is required for some CAM UI actions, though CAM data can be "
-    "read without switching (see cam_get). Changes the active workspace."
+    "read without switching (see cam_get)."
     ),
     input_param_name="workspace",
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",

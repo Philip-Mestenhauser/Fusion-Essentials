@@ -113,8 +113,7 @@ TOOL_DESCRIPTION = (
     "Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an "
     "occurrence/component/body name. mode='distance' (default) returns the minimum gap (clearance / wall "
     "thickness; 0 = touching) + the two closest points, in 'units'. mode='angle' returns the angle "
-    "between them in degrees. The relational complement to model_inspect (which measures one target). "
-    "Read-only."
+    "between them in degrees. The relational complement to model_inspect (which measures one target)."
 )
 
 tool = (

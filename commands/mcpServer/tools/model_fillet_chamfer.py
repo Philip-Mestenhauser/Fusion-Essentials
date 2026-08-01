@@ -249,13 +249,13 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 _FILLET_DESC = (
     "Round (fillet) edges with a constant radius - for edges where a RADIUS is the design intent "
     "(the standard machined edge break is model_chamfer). TARGET via 'edges' = find_geometry edge "
-    "handles (SPECIFIC; takes precedence), OR 'body_name' (omit = most recent) + an explicit "
-    "'edge_filter' (required; an omitted scope refuses). 'radius' in 'units' (mm default)."
+    "handles (takes precedence), OR 'body_name' (omit = most recent) + 'edge_filter'. 'radius' in "
+    "'units' (mm default)."
 )
 _CHAMFER_DESC = (
 "Bevel (chamfer) edges with a constant distance - the machinist's default deburr/edge-break. "
-"TARGET via 'edges' = find_geometry edge handles (SPECIFIC; takes precedence), OR 'body_name' + "
-"an explicit 'edge_filter' (required; an omitted scope refuses). 'distance' in 'units' (mm default)."
+"TARGET via 'edges' = find_geometry edge handles (takes precedence), OR 'body_name' + "
+"'edge_filter'. 'distance' in 'units' (mm default)."
 )
 
 fillet_tool = (

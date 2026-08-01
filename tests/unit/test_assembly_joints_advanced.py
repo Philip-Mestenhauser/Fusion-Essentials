@@ -25,12 +25,20 @@ ja = load_tool("assembly_joints_advanced")
 # ── fakes ───────────────────────────────────────────────────────────────────
 
 class FakeSnapshot:
-    def __init__(self, name="Snapshot1"):
+    def __init__(self, name="Snapshot1", timeline_index=0, delete_ok=True, survives_delete=False):
         self.name = name
         self.deleted = False
+        self.timelineObject = type("TL", (), {"index": timeline_index})()
+        self._delete_ok = delete_ok
+        self._survives_delete = survives_delete   # simulate deleteMe()==True but no actual removal
+        self._parent = None
 
     def deleteMe(self):
+        if not self._delete_ok:
+            return False
         self.deleted = True
+        if self._parent is not None and not self._survives_delete:
+            self._parent._remove(self)
         return True
 
 
@@ -38,6 +46,8 @@ class FakeSnapshots:
     def __init__(self, pending=False, items=()):
         self.hasPendingSnapshot = pending
         self._items = list(items)
+        for it in self._items:
+            it._parent = self
         self.added = False
 
     @property
@@ -50,9 +60,14 @@ class FakeSnapshots:
     def add(self):
         self.added = True
         snap = FakeSnapshot(f"Snapshot{len(self._items) + 1}")
+        snap._parent = self
         self._items.append(snap)
         self.hasPendingSnapshot = False
         return snap
+
+    def _remove(self, snap):
+        if snap in self._items:
+            self._items.remove(snap)
 
 
 class FakeOcc:
@@ -169,6 +184,61 @@ class TestCapturePosition:
         assert out["has_pending"] is True
         assert out["snapshot_count"] == 1
 
+    def test_status_lists_captured_markers(self):
+        _install([], snapshot_items=[FakeSnapshot("Position1", timeline_index=3),
+                                     FakeSnapshot("Position2", timeline_index=5)])
+        out = _payload(ja.capture_position_handler(action="status"))
+        assert out["markers"] == [{"name": "Position1", "timeline_index": 3},
+                                  {"name": "Position2", "timeline_index": 5}]
+
+    def test_delete_removes_named_marker(self):
+        snap1, snap2 = FakeSnapshot("Position1"), FakeSnapshot("Position2")
+        _, snaps, _, _ = _install([], snapshot_items=[snap1, snap2])
+        out = _payload(ja.capture_position_handler(action="delete", marker="Position1"))
+        assert out["deleted"] is True and out["marker"] == "Position1"
+        assert snap1.deleted is True
+        assert snaps.count == 1
+        assert snaps.item(0).name == "Position2"
+
+    def test_delete_is_case_insensitive(self):
+        snap = FakeSnapshot("Position1")
+        _install([], snapshot_items=[snap])
+        out = _payload(ja.capture_position_handler(action="delete", marker="position1"))
+        assert out["deleted"] is True
+
+    def test_delete_declining_bool_errors(self):
+        # Fusion declines the delete (deleteMe() returns False) -> error, not a false success.
+        snap = FakeSnapshot("Position1", delete_ok=False)
+        _install([], snapshot_items=[snap])
+        res = ja.capture_position_handler(action="delete", marker="Position1")
+        assert res["isError"] is True
+        assert "declined" in res["message"].lower()
+        assert snap.deleted is False
+
+    def test_delete_unknown_name_lists_candidates(self):
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")])
+        res = ja.capture_position_handler(action="delete", marker="Ghost")
+        assert res["isError"] is True
+        assert "Position1" in res["message"] and "Position2" in res["message"]
+
+    def test_delete_survivor_after_delete_is_error(self):
+        # deleteMe() reports True but the snapshot is still in the collection on re-read -> error.
+        snap = FakeSnapshot("Position1", survives_delete=True)
+        _install([], snapshot_items=[snap])
+        res = ja.capture_position_handler(action="delete", marker="Position1")
+        assert res["isError"] is True
+        assert "still present" in res["message"].lower()
+
+    def test_delete_needs_marker_argument(self):
+        _install([], snapshot_items=[FakeSnapshot("Position1")])
+        res = ja.capture_position_handler(action="delete", marker="")
+        assert res["isError"] is True and "marker" in res["message"].lower()
+
+    def test_delete_with_no_snapshots_errors(self):
+        _install([], snapshot_items=[])
+        res = ja.capture_position_handler(action="delete", marker="Position1")
+        assert res["isError"] is True and "nothing to delete" in res["message"].lower()
+
     def test_revert_deletes_latest_snapshot(self):
         snap = FakeSnapshot()
         _, snaps, _, _ = _install([], snapshot_items=[snap])
@@ -184,7 +254,7 @@ class TestCapturePosition:
     def test_unknown_action(self):
         _install([])
         res = ja.capture_position_handler(action="frobnicate")
-        assert res["isError"] is True and "Unknown action" in res["message"]
+        assert res["isError"] is True and "must be one of" in res["message"]
 
 
 # ── joint_create_as_built ───────────────────────────────────────────────────────────

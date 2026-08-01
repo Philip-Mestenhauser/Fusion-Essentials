@@ -247,12 +247,10 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
 TOOL_DESCRIPTION = (
 "Sweep a sketch profile along a path into a 3D solid - a cross-section driven along a curve (pipes, "
 "handrails, cables, moulding, path-following extrusions). Companion to model_extrude / model_revolve. "
-"'profile' is a profile 'handle' from sketch_get OR a {sketch, profile_index} selector (an open-curve "
-"sketch makes a SURFACE). 'path' is a find_geometry edge 'handle' (a single one auto-chains connected "
-"edges; a JSON list is used exactly), OR 'sketch:<name>' to sweep along a path sketch's curves. "
+"See 'profile' and 'path' for their accepted forms. "
 "'operation': new | join | cut | intersect - cut/intersect act on existing bodies. 'orientation': "
 "perpendicular (default) | parallel to the path. 'as_surface' forces an open (no-caps) surface. "
-"WRITES to the design; every result reports 'is_solid' and the resulting body names.\n\n"
+"Every result reports 'is_solid' and the resulting body names.\n\n"
 + _outputs.produces_block(RETURNS)
 )
 

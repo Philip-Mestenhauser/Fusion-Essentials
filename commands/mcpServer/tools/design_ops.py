@@ -68,7 +68,7 @@ _recompute_tool = Tool.create_simple(
     name="design_recompute",
     description=("Force a full recompute (computeAll) of the active design so downstream features "
         "rebuild against current values (e.g. after changing text an emboss consumes). "
-        "Reports timeline health afterwards. WRITES (rebuilds features)."),
+        "Reports timeline health afterwards."),
 ).strict_schema()
 recompute_item = Item.create_tool_item(tool=_recompute_tool, write="write", handler=recompute_handler, run_on_main_thread=True)
 

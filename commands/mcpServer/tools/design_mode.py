@@ -466,11 +466,11 @@ def run_in_base_feature(design, comp, inner_op):
 _set_mode_tool = (
     Tool.create_simple(
         name="design_set_mode",
-        description=("Convert the active design between PARAMETRIC and DIRECT modeling. "
+        description=("Convert the active design between parametric and direct modeling. "
             "target=parametric|direct. Direct->Parametric is free. Parametric->Direct "
-            "DESTROYS the timeline and ALL design history (irreversible) - it REFUSES unless "
-            "confirm_history_loss=true. Idempotent: already in target -> no-op. WRITES "
-            "(destructive one-way). Re-run design_get(include=['mode']) afterwards."))
+            "destroys the timeline and all design history (irreversible) - it refuses unless "
+            "confirm_history_loss=true. Idempotent: already in target -> no-op. "
+            "Re-run design_get(include=['mode']) afterwards."))
     .add_input_property("target", {"type": "string",
             "description": "parametric | direct (required)."})
     .add_input_property("confirm_history_loss", {"type": "boolean",
@@ -485,17 +485,16 @@ set_mode_item = Item.create_tool_item(
 _base_feature_tool = (
     Tool.create_simple(
         name="model_base_feature",
-        description=("Manage a BASE-FEATURE edit scope in a parametric design (a base feature is a "
+        description=("Manage a base-feature edit scope in a parametric design (a base feature is a "
             "direct-edit scope inside parametric - required for mesh inserts / imported-body "
-            "edits). action='start' OPENS a scope (subsequent calls' geometry lands inside "
-            "it); action='finish' CLOSES the scope this session opened (no name needed). "
-            "IMPORTANT: while a scope is open the design READS as 'direct' and the timeline is "
-            "inaccessible - that is the open scope itself, not a real mode change; it reverts "
-            "on finish. ALWAYS finish what you start. For a SINGLE mesh/import op, PREFER the "
-            "auto-wrapped tools (save_as_mesh, mesh_insert, mesh_*) which open+finish a scope "
-            "atomically and cannot leak - use this explicit start/finish only for multi-step "
-            "work that must span several calls inside one scope. Base features exist ONLY in "
-            "PARAMETRIC mode (start refuses in direct with the correct remedy)."))
+            "edits). action='start' opens a scope; subsequent calls' geometry lands inside it. "
+            "action='finish' closes the scope this session opened (no name needed). While a scope "
+            "is open the design reads as 'direct' and the timeline is inaccessible - that is the "
+            "open scope itself, not a real mode change; it reverts on finish. Always finish what "
+            "you start. For a single mesh/import op, prefer the auto-wrapped tools (save_as_mesh, "
+            "mesh_insert, mesh_*), which open and finish a scope atomically and cannot leak - use "
+            "this explicit start/finish only for multi-step work spanning several calls. Base "
+            "features exist only in parametric mode; start refuses in direct."))
     .add_input_property("action", {"type": "string",
             "description": "start | finish (default start)."})
     .add_input_property("base_feature", {"type": "string",
@@ -511,13 +510,12 @@ base_feature_item = Item.create_tool_item(
 _activate_component_tool = (
     Tool.create_simple(
         name="design_activate_component",
-        description=("Make an EXISTING component the active EDIT TARGET (or return to the root). The "
-            "counterpart to model_create_component(activate=true): use it to go BACK to a "
-            "component you created earlier so subsequent sketch_create / model_extrude / "
-            "sketch_dimension / sketch_constrain build into it (the modelling tools and the "
-            "by-name sketch tools target the ACTIVE component). 'occurrence' is the occurrence "
-            "to activate; pass '' or 'root' to return to the root component. WRITES (changes "
-            "the edit target, not geometry)."))
+        description=("Make an existing component the active edit target (or return to the root). The "
+            "counterpart to model_create_component(activate=true) - use it to go back to a "
+            "component created earlier so subsequent sketch_create / model_extrude / "
+            "sketch_dimension / sketch_constrain build into it (those tools target the active "
+            "component). 'occurrence' is the occurrence to activate; pass '' or 'root' to return "
+            "to the root component. This changes the edit target, not geometry."))
     .add_input_property(*_OCCURRENCE.as_property())
     .strict_schema()
 )

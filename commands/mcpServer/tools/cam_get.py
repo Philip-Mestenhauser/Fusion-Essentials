@@ -368,21 +368,20 @@ def _normalize_include(include):
 
 
 TOOL_DESCRIPTION = (
-    "Read the active document's CAM (Manufacture) state by zoom level. Default (no 'include'): the "
-    "orientation slice - per setup: op_states (valid/out_of_date/suppressed/error/warning tally), "
-    "invalidation_reasons (why ops are stale), and machine_out_of_date. 'include' deepens, "
-    "and you SCOPE before you deepen: 'operations' (per-op state; 'setup' filters; cam_compare_operations "
-    "diffs two by name) -> 'parameters' or "
-    "'tool' WITH 'operation'=<name> for ONE op's machining settings (grouped by section) or its tool + "
-    "presets -> 'preset'=<name> for that preset's feeds/speeds expressions. Document-level slices: "
-    "'references' (X-ref source docs), 'nc_programs', 'time' (cycle estimate), 'tools' (the tool sheet "
-    "ops USE), 'library' (a tool LIBRARY's catalog you can add FROM; 'scope'=document/local/cloud/hub, "
-    "'library'=shared-lib name/url, 'tool_type' filters; the add/remove/edit writes stay on "
-    "cam_edit_tools), 'library_types' (the add_tools[].from_type vocabulary), 'machines' (MACHINE "
-    "catalog cam_edit_setup assigns; 'vendor'/'machine_type' filter), 'templates' (the toolpath "
-    "TEMPLATE library; apply/save stay on cam_apply_template / cam_save_template). "
-    "Read-only; works without switching to Manufacture (op "
-    "VALIDITY is only trustworthy once Manufacture has been entered)."
+    "Read the active document's CAM (Manufacture) state by zoom level. Default (no 'include'): "
+    "per setup, op_states (valid/out_of_date/suppressed/error/warning tally), "
+    "invalidation_reasons (why ops are stale), and machine_out_of_date. 'include' deepens; scope "
+    "before you deepen: 'operations' (per-op state; 'setup' filters; cam_compare_operations diffs "
+    "two by name) -> 'parameters' or 'tool' with 'operation'=<name> for one op's machining settings "
+    "(grouped by section) or its tool + presets -> 'preset'=<name> for that preset's feeds/speeds "
+    "expressions. Document-level slices: 'references' (X-ref source docs), 'nc_programs', 'time' "
+    "(cycle estimate), 'tools' (the tool sheet ops use), 'library' (a tool library's catalog to add "
+    "from; 'scope'=document/local/cloud/hub, 'library'=shared-lib name/url, 'tool_type' filters - "
+    "add/remove/edit stay on cam_edit_tools), 'library_types' (the add_tools[].from_type "
+    "vocabulary), 'machines' (the machine catalog cam_edit_setup assigns; 'vendor'/'machine_type' "
+    "filter), 'templates' (the toolpath template library; apply/save stay on cam_apply_template / "
+    "cam_save_template). Works without switching to Manufacture, but operation validity is only "
+    "trustworthy once Manufacture has been entered."
 )
 
 tool = (

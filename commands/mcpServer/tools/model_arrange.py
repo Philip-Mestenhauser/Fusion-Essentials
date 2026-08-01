@@ -122,9 +122,9 @@ TOOL_DESCRIPTION = (
 "ARRANGE (nest/pack) component occurrences within a 2D boundary defined by a sketch profile - "
 "the Arrange command. 'boundary_sketch' = the sketch whose closed profile is the envelope to "
 "pack into; 'shapes' = the occurrence name(s) to lay out (comma-separated). "
-"'spacing' = minimum clearance between parts (in 'units'). WRITES an Arrange feature. Note: "
-"true-shape nesting can need a Fusion extension on some accounts (the tool reports that and you "
-"can fall back to a rectangular solver). Pair with view_screenshot (top view) to see the layout."
+"'spacing' = minimum clearance between parts (in 'units'). True-shape nesting can need a Fusion "
+"extension on some accounts (the tool reports that and you can fall back to a rectangular "
+"solver). Pair with view_screenshot (top view) to see the layout."
 )
 
 tool = (

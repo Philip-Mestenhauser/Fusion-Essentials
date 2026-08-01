@@ -261,19 +261,17 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 
 
 TOOL_DESCRIPTION = (
-    "Create a 2D DRAWING document from the active design - automatic drawing creation (the only mode the "
-    "API supports). Configures the auto-generator: 'standard' (ISO first-angle / ASME third-angle), "
-    "'units', 'content' (full assembly or visible-only), 'sheet_size', 'orientation', 'sheet_scope' "
-    "(first-level components only or all levels), 'sheet_types' (which sheet kinds to generate), "
-    "'auto_dimension' (off or a placement strategy), 'omit_fasteners' (+ 'fastener_keywords'), "
-    "'view_style', and 'isometric' (add an iso view). The source design MUST be saved to the cloud (it "
-    "is drawn from its DataFile) - an unsaved design is refused. The drawing is created as a CLOUD file "
-    "and is NOT opened; its file_id (lineage URN) is returned. IMPORTANT: opening a never-reviewed "
-    "auto-drawing surfaces an interactive view pane that blocks a headless open - open it ONCE in the "
-    "Fusion UI to review and save, after which doc_open / drawing_export work headlessly. Per-view "
-    "orientation/scale and hand-placed views are NOT API-controllable. Generation blocks and can exceed "
-    "a normal call, so this tool waits it out instead of false-failing on a timeout. WRITES a new "
-    "drawing document."
+    "Create a 2D drawing document from the active design, using Fusion's automatic drawing "
+    "generator (the only creation mode the API supports). The inputs below configure the "
+    "generator: standard, units, content, sheet size/orientation/scope, sheet types, auto-"
+    "dimensioning, fastener omission, view style, and an optional isometric view. The source "
+    "design must be saved to the cloud (the drawing is generated from its DataFile) - an unsaved "
+    "design is refused. The result is a CLOUD file that is NOT opened; its file_id (lineage URN) "
+    "is returned. Opening a never-reviewed auto-drawing surfaces an interactive view pane that "
+    "blocks a headless open - open it ONCE in the Fusion UI to review and save; after that "
+    "doc_open and drawing_export work headlessly. Per-view orientation/scale and hand-placed "
+    "views are not API-controllable. Generation can run past a normal call duration; this tool "
+    "waits it out instead of false-failing on a timeout."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

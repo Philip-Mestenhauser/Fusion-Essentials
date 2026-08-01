@@ -124,7 +124,7 @@ TOOL_DESCRIPTION = (
     "named parameter (e.g. tool_feedCutting='3000', tool_spindleSpeed='12000', maximumStepdown='1.5', "
     "tool_stepover='2.', tolerance='0.025'). Every parameter must EXIST and every expression "
     "EVALUATE (read back; a failure rolls back ALL params in the call). After editing, the toolpath "
-    "is out of date - regenerate with cam_generate. WRITES CAM data."
+    "is out of date - regenerate with cam_generate."
 )
 
 tool = (

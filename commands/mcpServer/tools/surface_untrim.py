@@ -143,7 +143,7 @@ def untrim_handler(faces=None, loop_type="all", extension=None, units="mm") -> d
 _DESC = (
 "Untrim surface faces - restore a trimmed face to its underlying (natural) extent, or remove an "
 "internal hole loop. 'faces' are find_geometry face handles on OPEN surface bodies (a solid face is "
-"rejected). 'loop_type': all | external | internal (which boundary loops to remove); 'extension' "
+"rejected). 'extension' "
 "optionally extends past the natural boundary (all/external only). Only loops with no connected face "
 "can be untrimmed. Reports 'area_after' vs 'area_before' as the read-back that the extent actually grew.\n"
 + _outputs.produces_block(RETURNS)

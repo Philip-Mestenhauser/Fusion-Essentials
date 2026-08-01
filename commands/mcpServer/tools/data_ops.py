@@ -486,8 +486,7 @@ _create_project_tool = (
         name="data_create_project",
         description=(
         "Create a new project in the user's active Autodesk hub. Returns the new "
-        "project's name and id. Fails if a project with the same name already exists. "
-        "WRITES to the cloud data model."
+        "project's name and id. Fails if a project with the same name already exists."
         ),
         input_param_name="name",
         input_param_description="Name for the new project.",
@@ -507,7 +506,7 @@ _create_folder_tool = (
         "'parent_folder' may be a nested path like 'Fixtures/Vises' - any missing "
         "folders along the path are created automatically (mkdir -p). Fails only on a "
         "duplicate name in the same target location. Use data_get(include=['folders']) first to see the "
-        "existing structure. WRITES to the cloud data model."
+        "existing structure."
         ),
         input_param_name="folder_name",
         input_param_description="Name for the new folder.",
@@ -532,7 +531,7 @@ _upload_tool = (
         "data_get_upload_status(handle=upload_handle) for the real uploading/processing/complete/"
         "failed state - do not guess from re-listing data_get. The destination folder path must "
         "exist unless create_path=true (then missing folders are created). Use "
-        "data_get(include=['folders']) to see the structure. WRITES to the cloud data model.\n"
+        "data_get(include=['folders']) to see the structure.\n"
         + _outputs.produces_block(RETURNS)
         ),
         input_param_name="file_path",
@@ -562,8 +561,7 @@ _delete_folder_tool = (
             "deletes directly. A NON-EMPTY folder is a RECURSIVE wipe of its whole subtree (and "
             "bypasses the per-file reference-orphan check), so it needs BOTH force=true AND "
             "'recursive_confirm' = the folder's name (a deliberate second acknowledgment). Without "
-            "recursive_confirm, force returns a full-subtree PREVIEW (the blast radius) and refuses. "
-            "WRITES to the cloud data model (deletes)."
+            "recursive_confirm, force returns a full-subtree PREVIEW (the blast radius) and refuses."
         ),
         input_param_name="folder_id",
         input_param_description="Id of the folder to delete (from data_get(include=['folders'])).",

@@ -30,7 +30,7 @@ RETURNS = [
 
 # Only PDF is available - the drawing export API exposes no DXF (the enum carries the legal value).
 _FORMAT = _inputs.Choice("format", ["pdf"], default="pdf",
-                         description="Output format. Only PDF is available - the drawing API has no DXF export.")
+                         description="Output format. Only PDF is available.")
 
 
 def _active_drawing_doc():
@@ -101,14 +101,14 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export the ACTIVE 2D DRAWING document to a PDF on local disk. Only PDF is supported - the drawing "
-    "export API exposes no DXF. Exports whichever drawing is the active document, so open the drawing "
+    "Export the active 2D drawing document to a PDF on local disk (only PDF is supported - the drawing "
+    "export API exposes no DXF). Exports whichever drawing is the active document, so open the drawing "
     "first (drawing_create makes one; open it in the Fusion UI to review, or doc_open a reviewed "
-    "drawing), then export. 'sheet_range' (e.g. '1-3' or '1-2,5') exports selected sheets; omit it to "
-    "export all sheets. 'line_weights' toggles line-weight rendering. Success is gated on a non-empty "
-    "file actually landing on disk (an export that writes nothing is returned as an error, never a "
-    "false ok). This tool does NOT open a drawing by id - opening a never-reviewed auto-drawing blocks "
-    "the session. WRITES a file to disk (does not modify the drawing)."
+    "drawing), then export. 'sheet_range' (e.g. '1-3' or '1-2,5') exports selected sheets; omit to "
+    "export all. 'line_weights' toggles line-weight rendering. Success is gated on a non-empty file "
+    "actually landing on disk (an export that writes nothing returns an error, never a false ok). This "
+    "tool does not open a drawing by id - opening a never-reviewed auto-drawing blocks the session. "
+    "WRITES a file to disk (does not modify the drawing)."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
