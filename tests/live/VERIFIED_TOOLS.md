@@ -15,9 +15,9 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 86402594f0d174e315752ae1cb0841ebfc312ea3db887b31c3d195e1b19b1cc6 | Fusion 2704.1.36 | verified 2026-07-28
+Stamp: source 23e9a54b3d4eef93ff47f8a205c675a533850691d83c4895f9dddc10c3de6b68 | Fusion 2704.1.39 | verified 2026-07-31
 
-114 covered / 25 skipped(reason) / 0 pending
+118 covered / 25 skipped(reason) / 0 pending
 
 | tool | status | step (the demo's shot list) |
 |---|---|---|
@@ -126,6 +126,10 @@ Stamp: source 86402594f0d174e315752ae1cb0841ebfc312ea3db887b31c3d195e1b19b1cc6 |
 | param_get | covered | read the parameter table; a fresh GimbalDia read sizes the CAM stock |
 | param_set | covered | bump GimbalDia +33%, then restore it |
 | param_set_favorite | covered | mark GimbalDia the favorite driving dimension |
+| pmi_create | covered | author a flatness note on the frame plate and a hole note on a carrier bore |
+| pmi_delete | covered | delete the flatness note; the count read-back confirms it |
+| pmi_edit | covered | restate the flatness note's markup, then hide and show it |
+| pmi_get | covered | read the PMI back with segments and detail |
 | save_as_mesh | covered | mesh a scratch solid (one per destructive op) |
 | sketch_add_3d_line | covered | draw the yaw axis as the skeleton's 3D line |
 | sketch_add_geometry | covered | draw the concentric rings and part footprints |
