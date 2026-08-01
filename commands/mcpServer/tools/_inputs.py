@@ -999,11 +999,20 @@ class AxisRef(InputKind):
     face -> its NORMAL, a cylindrical/conical face -> its AXIS). Resolves to a tagged value:
     ('world', (vx,vy,vz)) for a world axis OR a face-derived direction (a fixed direction vector), or
     ('edge', BRepEdge | SketchLine) for a line entity. Lets construction axes / patterns / joints /
-    revolves define their axis from real geometry, not just world directions."""
+    revolves define their axis from real geometry, not just world directions.
+
+    entity_only=True refuses a face handle: a face yields a direction VECTOR, and a feature input
+    that wants a linear ENTITY (a BRepEdge / SketchLine / ConstructionAxis) cannot consume one."""
 
     MAP_HINT = "a direction: world x/y/z, a straight-edge/sketch-line handle, OR a face normal/axis"
 
+    def __init__(self, name, entity_only=False, **kw):
+        super().__init__(name, **kw)
+        self.entity_only = entity_only
+
     def contract_note(self) -> str:
+        if self.entity_only:
+            return "A world axis x/y/z, or a 'handle' at a straight edge or sketch line."
         return ("A world axis x/y/z, a 'handle' at a straight edge or sketch line (axis runs along it), "
                 "or a planar-face handle (axis = its normal) / cylindrical-face handle (axis = its axis).")
 
@@ -1038,6 +1047,10 @@ class AxisRef(InputKind):
             if isinstance(ent, adsk.fusion.SketchLine):
                 return ("edge", ent), None      # a SketchLine is always straight by construction
             if _isinstance(ent, adsk.fusion.BRepFace):
+                if self.entity_only:
+                    return None, (f"'{self.name}': a face gives a direction VECTOR, and this input "
+                                  "needs a linear ENTITY. Pass a world axis (x/y/z) or a handle at "
+                                  "a straight edge or sketch line.")
                 return _axis_from_face(self.name, ent)   # planar normal / cylinder-cone axis
             return None, (f"'{self.name}': handle points at a {type(ent).__name__}, not an edge, "
                           "sketch line, or face.")

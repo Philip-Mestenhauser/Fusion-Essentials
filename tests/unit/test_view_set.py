@@ -656,12 +656,27 @@ class TestPerspectiveAngle:
                             rel_tol=1e-9)
         assert out["applied"]["perspective_angle_deg"] == 45.0
 
-    def test_angle_outside_zero_to_one_eighty_is_refused(self, monkeypatch):
-        for bad in (0, 180, -10, 200):
+    def test_angle_outside_the_accepted_range_is_refused(self, monkeypatch):
+        # Fusion's setter accepts [1, 150) degrees and raises "3 : Invalid parameter value" outside
+        # it, so the guard refuses by name rather than letting a raw platform error surface.
+        for bad in (0, 0.99, -10, 150, 179.9, 200):
             _install(monkeypatch, [self._part()])
             res = iv.handler(action="orient", projection="perspective", perspective_angle_deg=bad)
             assert res["isError"] is True, bad
             assert str(float(bad)) in res["message"], bad
+            assert "1 to just under 150" in res["message"], bad
+            assert iv.app.activeViewport.camera.perspectiveAngle == 0.0, bad   # never written
+
+    def test_the_accepted_boundaries_are_allowed(self, monkeypatch):
+        # 1.0 is accepted (0.99 raises) and 149.99 is accepted (150 raises) - both live-measured,
+        # so neither may be refused by our own guard.
+        import math
+        for good in (1, 149.99):
+            _install(monkeypatch, [self._part()])
+            out = _payload(iv.handler(action="orient", projection="perspective",
+                                      perspective_angle_deg=good))
+            assert out["applied"]["perspective_angle_deg"] == float(good), good
+            assert iv.app.activeViewport.camera.perspectiveAngle == math.radians(good), good
 
     def test_non_numeric_angle_is_refused(self, monkeypatch):
         _install(monkeypatch, [self._part()])

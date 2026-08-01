@@ -227,6 +227,48 @@ class FeatureHealthy(Postcondition):
         return "", evidence
 
 
+class SketchCurvesChanged(Postcondition):
+    """After a sketch-curve edit: the target sketch's curve set differs. Keyed entityToken ->
+    length (cm), so an in-place extend (same curve, longer) registers as readily as an add or a
+    delete - and a spline split, which deletes the original and returns two new curves, registers
+    even though the count is unchanged. Resolves the sketch through the same name-or-most-recent
+    contract the handler uses. NEVER mutates - capture/verify are safe() reads."""
+
+    name = "sketch_curves_changed"
+    read_tool = "sketch_get"
+
+    def _fingerprint(self, kwargs):
+        from ._common import design, resolve_or_recent_sketch
+        d = design()
+        if d is None:
+            return None
+        sketch, _requested = resolve_or_recent_sketch(d, kwargs.get("sketch_name") or "")
+        if sketch is None:
+            return None
+        curves = safe(lambda: sketch.sketchCurves)
+        n = (safe(lambda: curves.count, 0) or 0) if curves is not None else 0
+        marks = {}
+        for i in range(n):
+            c = safe(lambda i=i: curves.item(i))
+            if c is None:
+                continue
+            marks[safe(lambda c=c: c.entityToken) or f"#{i}"] = round(
+                safe(lambda c=c: c.length, 0.0) or 0.0, 7)
+        return marks
+
+    def capture(self, kwargs):
+        return self._fingerprint(kwargs)
+
+    def verify(self, kwargs, payload, before):
+        after = self._fingerprint(kwargs)
+        if before is None or after is None:
+            return "", {}                    # no sketch to read - nothing to gate
+        if after == before:
+            return ("the edit reported success but the sketch's curves are unchanged - nothing was "
+                    "added, removed, shortened or lengthened."), {}
+        return "", {"curve_count_after": len(after)}
+
+
 class ChildGeometryMoved(Postcondition):
     """After a joint mutation: a part the joint REPOSITIONED carried its NESTED geometry with it. A
     transform is a CLAIM; a body vertex/bbox corner is EVIDENCE. Per top-level occurrence, this captures

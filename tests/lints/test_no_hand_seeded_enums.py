@@ -22,7 +22,12 @@ import live_api_facts
 UNIT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "unit")
 
 _MEMBERS = sorted({m for members in live_api_facts.ENUMS.values() for m in members})
-_ASSIGN = re.compile(r"\.(?:" + "|".join(map(re.escape, _MEMBERS)) + r")\s*=(?!=)")
+_NAMES = "|".join(map(re.escape, _MEMBERS))
+# `x.Member = ...` (attribute install) and `{"Member": ...}` / `dict(Member=...)` (the literal form
+# a type()-built stand-in class uses) both re-seed a measured member by hand.
+_ASSIGN = re.compile(r"\.(?:" + _NAMES + r")\s*=(?!=)"
+                     r"|[\"'](?:" + _NAMES + r")[\"']\s*:"
+                     r"|(?:" + _NAMES + r")\s*=(?!=)")
 
 # file -> why its sentinel installer is tolerated. Shrink-only.
 _ALLOWLIST = {}

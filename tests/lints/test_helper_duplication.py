@@ -66,6 +66,12 @@ _DENYLIST = {
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),
     "body_aabb": ("_geom", "def"),
+    "owning_bodies": ("_geom", "def"),
+    "volumes": ("_geom", "def"),
+    "volume_delta": ("_geom", "def"),
+    # The thread-table walk that turns a designation into a ThreadInfo, shared by the tapped hole
+    # and the thread-an-existing-cylinder tools.
+    "resolve_thread_info": ("_threads", "def"),
     "build_joint_geometry": ("_joints", "def"),
     "apply_motion": ("_joints", "def"),
     "find_joint": ("_joints", "def"),

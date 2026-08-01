@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 147  |  read: 27  |  write: 108  |  destructive: 11  |  script-hatch: 1
+**Tools:** 151  |  read: 27  |  write: 112  |  destructive: 11  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -51,7 +51,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (108)
+### write - ask (112)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -85,6 +85,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__doc_activate`
 - `mcp__fusion-essentials__doc_copy`
 - `mcp__fusion-essentials__doc_insert_derive`
+- `mcp__fusion-essentials__doc_insert_import`
 - `mcp__fusion-essentials__doc_insert_occurrence`
 - `mcp__fusion-essentials__doc_new`
 - `mcp__fusion-essentials__doc_open`
@@ -122,6 +123,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__model_hole`
 - `mcp__fusion-essentials__model_loft`
 - `mcp__fusion-essentials__model_mirror`
+- `mcp__fusion-essentials__model_move`
 - `mcp__fusion-essentials__model_offset_face`
 - `mcp__fusion-essentials__model_pattern_circular`
 - `mcp__fusion-essentials__model_pattern_rectangular`
@@ -132,6 +134,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__model_split`
 - `mcp__fusion-essentials__model_stitch`
 - `mcp__fusion-essentials__model_sweep`
+- `mcp__fusion-essentials__model_thread`
 - `mcp__fusion-essentials__model_unstitch`
 - `mcp__fusion-essentials__param_add`
 - `mcp__fusion-essentials__param_set`
@@ -144,6 +147,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__sketch_constrain`
 - `mcp__fusion-essentials__sketch_create`
 - `mcp__fusion-essentials__sketch_dimension`
+- `mcp__fusion-essentials__sketch_edit_curve`
 - `mcp__fusion-essentials__sketch_project`
 - `mcp__fusion-essentials__sketch_set_text`
 - `mcp__fusion-essentials__surface_delete_face`
@@ -249,6 +253,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__doc_activate",
       "mcp__fusion-essentials__doc_copy",
       "mcp__fusion-essentials__doc_insert_derive",
+      "mcp__fusion-essentials__doc_insert_import",
       "mcp__fusion-essentials__doc_insert_occurrence",
       "mcp__fusion-essentials__doc_new",
       "mcp__fusion-essentials__doc_open",
@@ -286,6 +291,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__model_hole",
       "mcp__fusion-essentials__model_loft",
       "mcp__fusion-essentials__model_mirror",
+      "mcp__fusion-essentials__model_move",
       "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
       "mcp__fusion-essentials__model_pattern_rectangular",
@@ -296,6 +302,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__model_split",
       "mcp__fusion-essentials__model_stitch",
       "mcp__fusion-essentials__model_sweep",
+      "mcp__fusion-essentials__model_thread",
       "mcp__fusion-essentials__model_unstitch",
       "mcp__fusion-essentials__param_add",
       "mcp__fusion-essentials__param_set",
@@ -308,6 +315,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__sketch_constrain",
       "mcp__fusion-essentials__sketch_create",
       "mcp__fusion-essentials__sketch_dimension",
+      "mcp__fusion-essentials__sketch_edit_curve",
       "mcp__fusion-essentials__sketch_project",
       "mcp__fusion-essentials__sketch_set_text",
       "mcp__fusion-essentials__surface_delete_face",
@@ -434,6 +442,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__model_hole",
       "mcp__fusion-essentials__model_loft",
       "mcp__fusion-essentials__model_mirror",
+      "mcp__fusion-essentials__model_move",
       "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
       "mcp__fusion-essentials__model_pattern_rectangular",
@@ -444,6 +453,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__model_split",
       "mcp__fusion-essentials__model_stitch",
       "mcp__fusion-essentials__model_sweep",
+      "mcp__fusion-essentials__model_thread",
       "mcp__fusion-essentials__model_unstitch",
       "mcp__fusion-essentials__param_add",
       "mcp__fusion-essentials__param_set",
@@ -456,6 +466,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__sketch_constrain",
       "mcp__fusion-essentials__sketch_create",
       "mcp__fusion-essentials__sketch_dimension",
+      "mcp__fusion-essentials__sketch_edit_curve",
       "mcp__fusion-essentials__sketch_project",
       "mcp__fusion-essentials__sketch_set_text",
       "mcp__fusion-essentials__surface_delete_face",
@@ -489,6 +500,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__doc_close",
       "mcp__fusion-essentials__doc_copy",
       "mcp__fusion-essentials__doc_insert_derive",
+      "mcp__fusion-essentials__doc_insert_import",
       "mcp__fusion-essentials__doc_insert_occurrence",
       "mcp__fusion-essentials__doc_new",
       "mcp__fusion-essentials__doc_open",

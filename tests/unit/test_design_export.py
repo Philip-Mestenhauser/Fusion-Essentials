@@ -628,50 +628,56 @@ class TestSplitByComponent:
 # ── _export_one (per-file write result) ───────────────────────────────────────
 
 class TestExportOne:
-    def test_stl_arg_order_is_geom_then_path(self):
+    def test_stl_arg_order_is_geom_then_path(self, tmp_path):
         em = FakeExportManager()
-        okk, err, applied = dx._export_one(em, "createSTLExportOptions", True, "GEOM", "C:/out.stl")
+        out = str(tmp_path / "out.stl")
+        okk, err, applied = dx._export_one(em, "createSTLExportOptions", True, "GEOM", out)
         assert okk is True and err is None and applied == {}
         # STL records (geom, path); the call captured the geometry, not the path, as geom
-        assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == "C:/out.stl"
+        assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == out
 
-    def test_non_stl_arg_order_is_path_then_geom(self):
+    def test_non_stl_arg_order_is_path_then_geom(self, tmp_path):
         em = FakeExportManager()
-        dx._export_one(em, "createSTEPExportOptions", False, "GEOM", "C:/out.step")
-        assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == "C:/out.step"
+        out = str(tmp_path / "out.step")
+        dx._export_one(em, "createSTEPExportOptions", False, "GEOM", out)
+        assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == out
 
-    def test_execute_false_is_a_failure(self):
+    def test_execute_false_is_a_failure(self, tmp_path):
         em = FakeExportManager()
         em.execute = lambda opts: False
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                           str(tmp_path / "out"))
         assert okk is False and "nothing was written" in err and applied == {}
 
-    def test_exception_captured_as_error_string(self):
+    def test_exception_captured_as_error_string(self, tmp_path):
         em = FakeExportManager()
         def boom(path, geom=None):
             raise RuntimeError("disk full")
         em.createSTEPExportOptions = boom
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p")
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                           str(tmp_path / "out"))
         assert okk is False and "disk full" in err
 
-    def test_configure_callback_runs_before_execute(self):
+    def test_configure_callback_runs_before_execute(self, tmp_path):
         em = FakeExportManager()
         seen = {}
         def configure(opts):
             seen["kind"] = opts.kind
             opts.customFlag = True
             return {"custom": True}
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p", configure)
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                           str(tmp_path / "out"), configure)
         assert okk is True
         assert seen["kind"] == "step"
         assert em.calls[-1].customFlag is True
         assert applied == {"custom": True}
 
-    def test_configure_never_blocks_a_failed_execute(self):
+    def test_configure_never_blocks_a_failed_execute(self, tmp_path):
         # a decorative-option configure step must not stop the real failure from being reported.
         em = FakeExportManager()
         em.execute = lambda opts: False
-        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G", "p",
+        okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
+                                           str(tmp_path / "out"),
                                            lambda opts: {"x": True})
         assert okk is False and "nothing was written" in err
 

@@ -26,6 +26,20 @@ _MESH = _inputs.MeshBodyRef("mesh", required=True,
     description="The mesh body to delete (find_geometry handle, preferred, or a mesh name).")
 
 
+def _count_named_in_component(design, comp_name, name):
+    """How many meshes named `name` live in the component named `comp_name`, via the ONE design-wide
+    mesh traversal (_common.all_meshes).
+
+    A handle resolves to one of several same-named meshes (the ambiguity refusal only fires for a
+    NAME), so the count is scoped to the owning component: a same-named mesh in another component
+    is irrelevant to this delete, while one in the SAME component still keeps the check honest."""
+    n = 0
+    for c, m in _common.all_meshes(design):
+        if safe(lambda c=c: c.name) == comp_name and safe(lambda m=m: m.name) == name:
+            n += 1
+    return n
+
+
 def handler(mesh: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
@@ -39,6 +53,7 @@ def handler(mesh: str = "") -> dict:
     name = safe(lambda: mb.name)
     comp = safe(lambda: mb.parentComponent) or _common.target_component(design)
     comp_name = safe(lambda: comp.name)
+    n_before = _count_named_in_component(design, comp_name, name)
 
     mode = _inputs.current_design_type(design)
 
@@ -48,18 +63,10 @@ def handler(mesh: str = "") -> dict:
             return error("This design has no meshRemoveFeatures collection (parametric mesh delete "
                          "unavailable here).")
 
-        # createInput -> add at NORMAL parametric scope - NOT inside a base-feature edit scope.
-        #
-        # LIVE-VERIFIED (two distinct traps):
-        # 1) createInput wants a PLAIN PYTHON LIST of MeshBody, NOT an adsk.core.ObjectCollection - an
-        #    ObjectCollection raises "argument 2 of type 'std::vector< adsk::core::Ptr<
-        #    adsk::fusion::MeshBody > >'" (mesh_to_brep's meshConvertFeatures.createInput([mb]) takes
-        #    the same list shape).
-        # 2) UNLIKE mesh_reduce/mesh_remesh (which edit mesh GEOMETRY and require a base-feature edit
-        #    scope), MeshRemoveFeatures is a timeline feature in its own right and must run OUTSIDE
-        #    one: wrapping this add() in run_in_base_feature raises "Mesh remove only available in
-        #    parametric mode" - inside an open base-feature scope the design PRESENTS as direct (see
-        #    design_mode.py), so the remove feature refuses.
+        # Live-verified: createInput binds std::vector, so it takes a plain list - an
+        # ObjectCollection raises a type error. And unlike mesh_reduce/mesh_remesh, this add() must
+        # run OUTSIDE a base-feature scope: inside one the design presents as direct and the remove
+        # raises "Mesh remove only available in parametric mode".
         try:
             inp = feats.createInput([mb])
         except Exception as e:
@@ -85,26 +92,15 @@ def handler(mesh: str = "") -> dict:
         deleted_via = "MeshBody.deleteMe"
         feature_name = None
 
-    # Survivor re-read: confirm the mesh no longer resolves ANYWHERE in the design - via the fresh
-    # COLLECTION WALK's name match ONLY. Never trust entityToken re-resolution or isValid on the held
-    # `mb` wrapper here.
-    #
-    # LIVE-VERIFIED (three measured facts, right after meshRemoveFeatures.add()/deleteMe() succeeds):
-    # 1) the COLLECTIONS (every component's meshBodies) empty immediately - a fresh walk is accurate.
-    # 2) the held wrapper's `mb.isValid` stays TRUE regardless - not a signal of anything.
-    # 3) an entityToken lookup (comparing a fresh mesh's entityToken to the pre-delete token, or
-    #    findEntityByToken) still resolves the PRE-REMOVE body - the same historical-resolution trap
-    #    pmi_delete documents for a suppressed PMI. Both (2) and (3) are stale/historical-resolution
-    #    artifacts, not evidence of survival - a false alarm if trusted.
-    survivor = False
-    remaining = 0
-    for _c, m in _common.all_meshes(design):
-        remaining += 1
-        if safe(lambda m=m: m.name) == name:
-            survivor = True
-    if survivor:
-        return error(f"Delete reported success but a mesh named '{name}' still resolves in the "
-                     "design (fresh collection walk) - treat the delete as failed.")
+    # Survivor check: only the fresh collection walk is trustworthy after a remove. Live-verified,
+    # the collections empty immediately, while the held wrapper's isValid stays True and an
+    # entityToken lookup still resolves the pre-remove body (the historical-resolution trap
+    # pmi_delete documents for suppressed PMI).
+    remaining = len(_common.all_meshes(design))
+    n_after = _count_named_in_component(design, comp_name, name)
+    if n_after != n_before - 1:
+        return error(f"Delete reported success but a mesh named '{name}' still resolves in "
+                     f"component '{comp_name}' - treat the delete as failed.")
 
     return ok({
         "deleted": name,

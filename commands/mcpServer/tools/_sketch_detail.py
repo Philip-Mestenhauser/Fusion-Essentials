@@ -44,10 +44,8 @@ def _round(v, f):
     return round(float(v) * f, 4) if v is not None else None
 
 
-def _build_token_map(sketch):
-    """Map entityToken -> '<type>:<index>' for every entity kind resolve_entity_ref addresses (line/
-    arc/circle/ellipse/point/spline/cv_spline/fixed_spline)."""
-    tok2id = {}
+def _curve_collections(sketch):
+    """(kind, collection) for every curve kind resolve_entity_ref addresses, in id order."""
     curves = safe(lambda: sketch.sketchCurves)
     for kind, coll_get in (("line", lambda: curves.sketchLines),
                            ("arc", lambda: curves.sketchArcs),
@@ -56,7 +54,25 @@ def _build_token_map(sketch):
                            ("spline", lambda: curves.sketchFittedSplines),
                            ("cv_spline", lambda: curves.sketchControlPointSplines),
                            ("fixed_spline", lambda: curves.sketchFixedSplines)):
-        coll = safe(coll_get)
+        yield kind, safe(coll_get)
+
+
+def curve_id(sketch, curve):
+    """'<type>:<index>' for one curve, matched by IDENTITY against the sketch's own collections, or
+    None when it is not among them. entityToken is NOT unique across sketch curves - the two pieces
+    a split returns carry ONE shared token - so only identity tells them apart."""
+    for kind, coll in _curve_collections(sketch):
+        for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
+            if safe(lambda coll=coll, i=i: coll.item(i) == curve) is True:
+                return f"{kind}:{i}"
+    return None
+
+
+def _build_token_map(sketch):
+    """Map entityToken -> '<type>:<index>' for every entity kind resolve_entity_ref addresses (line/
+    arc/circle/ellipse/point/spline/cv_spline/fixed_spline)."""
+    tok2id = {}
+    for kind, coll in _curve_collections(sketch):
         for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
             tok = safe(lambda coll=coll, i=i: coll.item(i).entityToken)
             if tok:

@@ -1,0 +1,368 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""MCP building block: import a CAD file from LOCAL DISK through adsk.core.ImportManager - into a
+component of the open design, into an existing sketch, or into a new document.
+ImportManager.importToNewDocument does not accept DXF2DImportOptions or SVGImportOptions, so those
+two formats import only into an open design.
+"""
+
+import os
+
+import adsk.core
+import adsk.fusion
+
+from ..mcp_primitives.tool import Tool
+from ..mcp_primitives.item import Item
+from ..mcp_primitives.registry import register
+from ._common import error, ok, safe
+from . import _common
+from . import _inputs
+from . import _assert
+
+app = adsk.core.Application.get()
+
+_EXT_TO_FORMAT = {
+    ".step": "step", ".stp": "step",
+    ".iges": "iges", ".igs": "iges",
+    ".sat": "sat",
+    ".smt": "smt",
+    ".f3d": "f3d",
+    ".dxf": "dxf",
+    ".svg": "svg",
+}
+
+# createFusionArchiveImportOptions accepts f3d only; an f3z archive has no ImportManager path.
+_REFUSED_EXT = {
+    ".f3z": ("'.f3z' cannot be imported - createFusionArchiveImportOptions takes .f3d only. Upload "
+             "the archive with data_upload_file, then reference it with doc_insert_occurrence."),
+}
+
+_OPTIONS_FACTORY = {
+    "step": "createSTEPImportOptions",
+    "iges": "createIGESImportOptions",
+    "sat": "createSATImportOptions",
+    "smt": "createSMTImportOptions",
+    "f3d": "createFusionArchiveImportOptions",
+}
+
+_SKETCH_FORMATS = ("dxf", "svg")
+
+_FORMAT = _inputs.Choice("format", ["step", "iges", "sat", "smt", "f3d", "dxf", "svg"],
+                         description="Taken from the file extension when omitted.")
+_INTO_COMPONENT = _inputs.OccurrenceRef(
+    "into_component",
+    description="Occurrence whose component receives a solid/DXF import (default: active component).")
+_PLANE = _inputs.PlaneRef("plane", default="xy",
+                          description="DXF only: plane the sketches are created on.")
+
+
+def _resolve_format(path, raw):
+    """(format, error_text) - the file extension names the format."""
+    ext = os.path.splitext(path)[1].lower()
+    chosen, cerr = _FORMAT.resolve(raw)
+    if cerr:
+        return None, cerr
+    refusal = _REFUSED_EXT.get(ext)
+    if refusal:
+        return None, refusal
+    derived = _EXT_TO_FORMAT.get(ext)
+    if derived is None:
+        return None, (f"'{ext or path}' is not an importable extension. Supported: "
+                      + ", ".join(sorted(_EXT_TO_FORMAT)) + ".")
+    if chosen and chosen != derived:
+        return None, (f"format='{chosen}' contradicts the file extension '{ext}', which is "
+                      f"{derived}. Pass format='{derived}' or point file_path at a {chosen} file.")
+    return derived, None
+
+
+def _options(mgr, fmt, path):
+    """(options, error_text) from the format's ImportManager factory. Creating the options object
+    does NOT import - it only prepares the file."""
+    factory_name = _OPTIONS_FACTORY[fmt]
+    factory = safe(lambda: getattr(mgr, factory_name))
+    if factory is None:
+        return None, (f"This Fusion build has no ImportManager.{factory_name}, so {fmt.upper()} "
+                      "import is unavailable.")
+    options = safe(lambda: factory(path))
+    if options is None:
+        return None, (f"{factory_name} returned nothing for '{path}' - the file could not be "
+                      f"prepared as {fmt.upper()} (corrupt or not really a {fmt.upper()} file?).")
+    return options, None
+
+
+def _created_objects(collection):
+    n = safe(lambda: collection.count, 0) or 0
+    out = []
+    for i in range(n):
+        obj = safe(lambda i=i: collection.item(i))
+        if obj is not None:
+            out.append(obj)
+    return out
+
+
+def _describe(objects, cap=20):
+    return [{"name": safe(lambda o=o: o.name), "type": type(o).__name__} for o in objects[:cap]]
+
+
+def _run_import(mgr, options, target):
+    """(objects, error_text). importToTarget2 returns the objects the import created, and returns
+    null when the import failed."""
+    try:
+        created = mgr.importToTarget2(options, target)
+    except Exception as e:
+        return None, f"Import failed (importToTarget2 raised): {e}"
+    if created is None:
+        return None, ("importToTarget2 returned null, which the API reports for a FAILED import - "
+                      "nothing was created.")
+    return _created_objects(created), None
+
+
+def _component_counts(comp):
+    """What a component directly owns. An assembly file lands as occurrences, a single part as
+    bodies, a DXF as sketches."""
+    return {"bodies": safe(lambda: comp.bRepBodies.count, 0) or 0,
+            "sketches": safe(lambda: comp.sketches.count, 0) or 0,
+            "occurrences": safe(lambda: comp.occurrences.count, 0) or 0}
+
+
+def _gained(before, after):
+    return {k: after[k] - before[k] for k in before}
+
+
+def _target_of(design, into_component):
+    """(component, label, error_text) for the component an import lands in."""
+    raw = (into_component or "").strip() if isinstance(into_component, str) else ""
+    if not raw:
+        comp = _common.target_component(design)
+        if comp is None:
+            return None, None, "The active design exposes no component to import into."
+        return comp, f"component '{safe(lambda: comp.name)}'", None
+    occ, oerr = _INTO_COMPONENT.resolve(raw)
+    if oerr:
+        return None, None, oerr
+    comp = safe(lambda: occ.component)
+    if comp is None:
+        return None, None, f"Occurrence '{raw}' has no component to import into."
+    return comp, f"component '{safe(lambda: comp.name)}'", None
+
+
+def _import_solid(mgr, design, path, fmt, into_component):
+    comp, label, terr = _target_of(design, into_component)
+    if terr:
+        return error(terr)
+    options, oerr = _options(mgr, fmt, path)
+    if oerr:
+        return error(oerr)
+
+    before = _component_counts(comp)
+    objects, ierr = _run_import(mgr, options, comp)
+    if ierr:
+        return error(ierr)
+    gained = _gained(before, _component_counts(comp))
+
+    if not objects and gained["bodies"] <= 0 and gained["occurrences"] <= 0:
+        return error(f"The {fmt.upper()} import reported no failure but nothing landed in {label}: "
+                     "importToTarget2 returned no objects and the component gained no body and no "
+                     "occurrence. The file may hold no geometry, or the geometry went somewhere "
+                     "else - check design_get(include=['tree']).")
+
+    return ok({
+        "imported": True,
+        "format": fmt,
+        "file": path,
+        "into": label,
+        "objects_created": len(objects),
+        "bodies_added": gained["bodies"],
+        "occurrences_added": gained["occurrences"],
+        "created": _describe(objects),
+        "note": ("Imported as solid/surface geometry. An assembly file lands as sub-occurrences, a "
+                 "single part as bodies. Inspect it with design_get(include=['tree']) and pick "
+                 "faces/edges for the model tools with find_geometry."),
+    })
+
+
+def _import_dxf(mgr, design, path, into_component, plane):
+    comp, label, terr = _target_of(design, into_component)
+    if terr:
+        return error(terr)
+    planar_entity, perr = _PLANE.resolve(plane)
+    if perr:
+        return error(perr)
+    options = safe(lambda: mgr.createDXF2DImportOptions(path, planar_entity))
+    if options is None:
+        return error(f"createDXF2DImportOptions returned nothing for '{path}' - the file could not "
+                     "be prepared as DXF, or the plane is not a construction plane / planar face.")
+
+    before = _component_counts(comp)
+    objects, ierr = _run_import(mgr, options, comp)
+    if ierr:
+        return error(ierr)
+    # DXF2DImportOptions.results holds the created sketches - one per DXF layer carrying 2D
+    # geometry, named after that layer. 3D geometry in the file is ignored.
+    landed = objects or _created_objects(safe(lambda: options.results))
+    gained = _gained(before, _component_counts(comp))
+
+    if not landed and gained["sketches"] <= 0:
+        return error(f"The DXF import reported no failure but no sketch landed in {label}: "
+                     "importToTarget2 returned no objects, DXF2DImportOptions.results is empty and "
+                     "the component gained no sketch. A DXF holding only 3D geometry imports "
+                     "nothing - a 2D import ignores it.")
+
+    return ok({
+        "imported": True,
+        "format": "dxf",
+        "file": path,
+        "into": label,
+        "plane": plane or "xy",
+        "sketches_added": gained["sketches"],
+        "created": _describe(landed),
+        "note": ("One sketch per DXF layer that carries 2D geometry, named after the layer. Read "
+                 "the curves with sketch_get, then extrude a profile with model_extrude."),
+    })
+
+
+def _import_svg(mgr, design, path, sketch):
+    target, requested = _common.resolve_or_recent_sketch(design, sketch)
+    if target is None:
+        if requested:
+            names = _common.all_sketch_names(design)
+            return error(f"No sketch named '{requested}'. Available: "
+                         + (", ".join(n for n in names if n) or "(none)")
+                         + ". SVG imports into an EXISTING sketch - make one with sketch_create.")
+        return error("No sketch to import the SVG into. SVG curves land in an EXISTING sketch - "
+                     "make one with sketch_create, then name it in 'sketch'.")
+    options = safe(lambda: mgr.createSVGImportOptions(path))
+    if options is None:
+        return error(f"createSVGImportOptions returned nothing for '{path}' - the file could not be "
+                     "prepared as SVG.")
+
+    sketch_name = safe(lambda: target.name)
+    before = safe(lambda: target.sketchCurves.count, 0) or 0
+    objects, ierr = _run_import(mgr, options, target)
+    if ierr:
+        return error(ierr)
+    after = safe(lambda: target.sketchCurves.count, 0) or 0
+
+    if not objects and after <= before:
+        return error(f"The SVG import reported no failure but sketch '{sketch_name}' gained no "
+                     f"curves (still {after}) and importToTarget2 returned no objects. The file may "
+                     "hold no path geometry.")
+
+    return ok({
+        "imported": True,
+        "format": "svg",
+        "file": path,
+        "into": f"sketch '{sketch_name}'",
+        "objects_created": len(objects),
+        "curves_added": after - before,
+        "note": ("SVG curves landed in the sketch. They import at the SVG's own scale - measure one "
+                 "with model_measure_between and scale the sketch if the size is wrong."),
+    })
+
+
+def _import_to_new_document(mgr, fmt, path):
+    options, oerr = _options(mgr, fmt, path)
+    if oerr:
+        return error(oerr)
+    try:
+        doc = mgr.importToNewDocument(options)
+    except Exception as e:
+        return error(f"Import failed (importToNewDocument raised): {e}")
+    if doc is None:
+        return error("importToNewDocument returned null, which the API reports for a FAILED import "
+                     "- no document was created.")
+
+    new_design = safe(lambda: adsk.fusion.Design.cast(
+        doc.products.itemByProductType('DesignProductType')))
+    if new_design is None:
+        return error(f"A new document was opened for '{path}' but it carries no Design product to "
+                     "read the imported geometry back from. The document is open - inspect it with "
+                     "workspace_orient.")
+    bodies, _sketches = _common.design_wide_counts(new_design)
+    root = safe(lambda: new_design.rootComponent)
+    occurrences = (safe(lambda: root.occurrences.count, 0) or 0) if root is not None else 0
+
+    if bodies <= 0 and occurrences <= 0:
+        return error(f"A new document was created for '{path}' but holds no body and no occurrence "
+                     "- the import landed nothing. Discard it with doc_close.")
+
+    return ok({
+        "imported": True,
+        "format": fmt,
+        "file": path,
+        "into": f"new document '{safe(lambda: doc.name)}'",
+        "bodies": bodies,
+        "occurrences": occurrences,
+        "note": ("The new document is UNSAVED and is now the active document. Save it with "
+                 "doc_save_as to give it a cloud identity, or discard it with doc_close."),
+    })
+
+
+def handler(file_path: str = "", format: str = "", into_component: str = "", sketch: str = "",
+            plane: str = "xy", new_document: bool = False) -> dict:
+    """See TOOL_DESCRIPTION."""
+    path = (file_path or "").strip()
+    if not path:
+        return error("file_path is required - the full path to a CAD file on this machine's disk.")
+
+    fmt, ferr = _resolve_format(path, format)
+    if ferr:
+        return error(ferr)
+    if new_document and fmt in _SKETCH_FORMATS:
+        return error(f"A {fmt.upper()} file cannot be imported to a new document - "
+                     "importToNewDocument does not accept DXF or SVG options. Import into the open "
+                     "design instead (new_document=false): DXF creates sketches in a component, SVG "
+                     "imports into an existing sketch.")
+    if not safe(lambda: os.path.isfile(path), False):
+        return error(f"No readable file at '{path}'. Pass a full path on THIS machine's disk; a "
+                     "cloud file must be downloaded first, or referenced with doc_insert_occurrence.")
+
+    mgr = safe(lambda: app.importManager)
+    if mgr is None:
+        return error("Application.importManager is unavailable - nothing can be imported.")
+
+    if new_document:
+        return _import_to_new_document(mgr, fmt, path)
+
+    design = _common.design()
+    if not design:
+        return error("No active design to import into. Open or create a document first (see "
+                     "doc_new), or pass new_document=true.")
+    if fmt == "svg":
+        return _import_svg(mgr, design, path, sketch)
+    if fmt == "dxf":
+        return _import_dxf(mgr, design, path, into_component, plane)
+    return _import_solid(mgr, design, path, fmt, into_component)
+
+
+TOOL_DESCRIPTION = (
+    "Import a CAD file from LOCAL DISK: STEP/IGES/SAT/SMT/F3D as solid geometry into a component, "
+    "DXF as one sketch per 2D layer on a plane, SVG curves into an EXISTING sketch. 'format' comes "
+    "from the file extension; an explicit one contradicting it is refused. new_document=true "
+    "imports to a fresh unsaved document - solid formats only, since DXF and SVG need a target in "
+    "the open design. For a cloud upload use data_upload_file; for a linked cloud reference use "
+    "doc_insert_occurrence."
+)
+
+tool = (
+    Tool.create_simple(name="doc_insert_import", description=TOOL_DESCRIPTION)
+    .add_input_property("file_path", {"type": "string",
+            "description": "Full path to the CAD file on local disk."})
+    .add_input_property(*_FORMAT.as_property())
+    .add_input_property(*_INTO_COMPONENT.as_property())
+    .add_input_property("sketch", {"type": "string",
+            "description": "SVG only: sketch to import into (default: the most recent sketch)."})
+    .add_input_property(*_PLANE.as_property())
+    .add_input_property("new_document", {"type": "boolean",
+            "description": "Import to a new unsaved document instead of the open design (solid formats only)."})
+    .add_required_input("file_path")
+    .strict_schema()
+)
+
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.FeatureHealthy()])
+
+
+def register_tool():
+    register(item)

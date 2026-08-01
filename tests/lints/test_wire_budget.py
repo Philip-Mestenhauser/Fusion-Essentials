@@ -74,6 +74,7 @@ _TOOL_WEIGHTS = {
     "doc_copy": 2091,
     "doc_get": 2273,
     "doc_insert_derive": 2995,
+    "doc_insert_import": 1923,   # three targeting modes: component, plane for DXF, sketch for SVG
     "doc_insert_occurrence": 2450,
     "doc_new": 685,
     "doc_open": 1774,
@@ -112,12 +113,13 @@ _TOOL_WEIGHTS = {
     "model_draft": 2057,
     "model_extrude": 3141,
     "model_fillet": 1534,
-    "model_hole": 4492,   # placement modes (center/on_edge/plane_offsets), modeled thread, tap_type, tip_angle
+    "model_hole": 4497,   # placement modes (center/on_edge/plane_offsets) incl. the point frame, modeled thread, tip_angle, thread_type
     "model_inspect": 1566,
     "model_loft": 1710,
     "model_measure_between": 1193,
     "model_measure_relation": 2988,
     "model_mirror": 1333,
+    "model_move": 2557,   # four move modes (translate/along-entity/rotate/point-to-point); the faces input carries its own refusal
     "model_offset_face": 1275,
     "model_pattern_circular": 1668,
     "model_pattern_rectangular": 2036,
@@ -128,6 +130,7 @@ _TOOL_WEIGHTS = {
     "model_split": 2192,
     "model_stitch": 1567,
     "model_sweep": 2394,
+    "model_thread": 2062,   # face list, designation + thread_type (540 of 1510 call-outs sit in several standards), cosmetic/modeled, handedness, partial-thread length/offset/location
     "model_unstitch": 1228,
     "param_add": 1533,
     "param_delete": 705,
@@ -141,10 +144,11 @@ _TOOL_WEIGHTS = {
     "save_as_mesh": 1239,
     "sketch_add_3d_line": 1780,
     "sketch_add_geometry": 2741,
-    "sketch_constrain": 2054,   # ref vocabulary names ellipse/spline kinds
+    "sketch_constrain": 2055,   # ref vocabulary names ellipse/spline kinds
     "sketch_create": 1400,
     "sketch_delete_entity": 1463,   # ref vocabulary names ellipse/spline kinds
     "sketch_dimension": 2011,   # ref vocabulary names ellipse/spline kinds
+    "sketch_edit_curve": 2118,   # seven curve-edit actions with per-curve pick points
     "sketch_get": 1162,
     "sketch_project": 1604,
     "sketch_set_text": 1773,
@@ -169,7 +173,7 @@ _TOOL_WEIGHTS = {
     "view_screenshot": 1747,   # transparent-background + anti-aliased capture options
     "view_screenshot_multi": 1390,   # transparent-background + anti-aliased capture options
     "view_section": 2222,
-    "view_set": 2791,   # camera projection Choice + perspective angle with read-back
+    "view_set": 2793,   # camera projection Choice + perspective angle with read-back
     "view_switch_workspace": 803,
     "workspace_orient": 895,
 }

@@ -104,6 +104,7 @@ _PER_FILE_BASELINE = {
     "test_model_fillet_chamfer.py": 15,
     "test_model_hole.py": 5,
     "test_model_mirror.py": 3,
+    "test_model_move.py": 3,   # MoveFeatures createInput2/define*/add graph - no conftest fake models a feature-collection input factory (bodies/faces/bounding boxes come from the shared fakes)
     "test_model_offset_face.py": 5,   # OffsetFacesFeatures createInput/add transaction graph - no conftest fake models a feature-collection input factory
     "test_model_scale.py": 3,   # ScaleFeatures createInput/setToNonUniform/add graph - no conftest fake models a feature-collection input factory (bodies/bounding boxes come from the shared fakes)
     "test_model_pattern.py": 9,
@@ -111,6 +112,7 @@ _PER_FILE_BASELINE = {
     "test_model_shell.py": 5,
     "test_model_split.py": 7,
     "test_model_sweep.py": 7,
+    "test_model_thread.py": 5,   # ThreadFeatures createInput/add plus the thread-table query graph - no conftest fake models a feature-collection input factory or a thread library
     "test_param_ops.py": 5,
     # PMI annotations/collections are an object graph no conftest shared fake models (not in
     # live_api_facts.SHAPES); the fakes stay minimal until a PMI shape measurement lands.

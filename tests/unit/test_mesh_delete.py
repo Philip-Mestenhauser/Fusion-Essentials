@@ -1,17 +1,12 @@
 """Tests for `mesh_delete` - the mode branch (MeshRemoveFeatures parametric / deleteMe direct), the
-gated delete, and the design-wide survivor re-check: a delete only claims success when the mesh
-body is actually gone. Modeled on pmi_delete's test file (gated delete, survivor re-read, ambiguity
-refusal) - resolution itself is monkeypatched at `_MESH.resolve` (the same seam pmi_delete patches
-at `_pmi.find_annotation`) for most tests, so they exercise mesh_delete's OWN logic, not
-MeshBodyRef's; `TestDesignWideMeshResolution` at the bottom exercises the REAL resolver against a
-multi-component design to prove mesh name resolution is design-wide, not just active-component.
+gated delete, and the component-scoped, count-based survivor re-check. Modeled on pmi_delete's test
+file; `_MESH.resolve` is monkeypatched for most tests so they exercise mesh_delete's own logic, and
+`TestDesignWideMeshResolution` drives the real resolver against a multi-component design.
 
-LIVE-VERIFIED facts these tests encode (a Fusion sweep, not a guess):
-  - an Occurrence proxy exposes bRepBodies but NOT meshBodies, so a mesh outside the active/root
-    component is invisible to an occurrence-based name walk.
-  - right after a successful delete, a held wrapper's `isValid` stays TRUE and an entityToken lookup
-    still resolves the PRE-REMOVE body - neither is evidence of survival. Only a FRESH collection
-    walk, matched by NAME, is trustworthy."""
+Live-verified behavior these tests pin: an Occurrence proxy exposes bRepBodies but not meshBodies;
+after a successful delete a held wrapper's isValid stays True and an entityToken lookup still
+resolves the pre-remove body; and a same-named mesh in another component is not a survivor of this
+delete, so the verdict is n_after == n_before - 1 within the owning component."""
 
 import json
 from types import SimpleNamespace
@@ -179,9 +174,7 @@ class TestDirectDelete:
         assert "still resolves" in error_message(md.handler(mesh="H"))
 
     def test_stale_isValid_true_is_not_a_false_alarm(self, rig):
-        # LIVE FACT: a held wrapper's isValid stays TRUE even after a genuinely successful delete -
-        # the fixture never flips it (see _FakeMesh). A real delete (collection emptied) must still
-        # report success; trusting isValid here would be the exact false alarm the sweep caught.
+        # A held wrapper's isValid stays True after a genuine delete, so it is never consulted.
         out = _payload(md.handler(mesh="H"))
         assert out["deleted"] == "Scan1"
         assert rig.mesh.isValid is True   # still true - and that's fine, it isn't consulted
@@ -198,17 +191,42 @@ class TestDirectDelete:
         # the stale lookup still "finds" it - proving the handler never consulted this path
         assert rig.design.findEntityByToken(rig.mesh.entityToken) == [rig.mesh]
 
-    def test_same_named_survivor_from_a_different_object_is_an_error(self, rig):
-        # the RESOLVED mesh is genuinely deleted (removed from the collection, a different token) but
-        # a DIFFERENT mesh object sharing the SAME NAME is still sitting in the fresh collection walk
-        # - proving the check is a NAME match over the collection, not tied to the specific
-        # object/token that was resolved.
+    def test_two_same_named_meshes_in_one_component_deleting_one_still_succeeds(self, rig):
+        # two meshes named 'Scan1' sit in the SAME component. Deleting the resolved one is a genuine
+        # success even though its same-named sibling remains: the count-based check only requires
+        # exactly ONE FEWER 'Scan1' in this component (n_after == n_before - 1 == 1), not zero - a
+        # bare "does this name still appear" check would wrongly fail this.
         duplicate = _FakeMesh(name="Scan1", token="MTOK::Other")
         duplicate.parentComponent = rig.comp
         rig.comp.meshBodies._items.append(duplicate)   # a second "Scan1" already present pre-delete
-        assert "still resolves" in error_message(md.handler(mesh="H"))
+        out = _payload(md.handler(mesh="H"))
+        assert out["deleted"] == "Scan1"
         assert rig.mesh not in rig.comp.meshBodies._items   # the resolved one really is gone
-        assert duplicate in rig.comp.meshBodies._items       # the name-alike survivor triggered it
+        assert duplicate in rig.comp.meshBodies._items       # its same-named sibling is untouched
+        assert out["remaining_meshes"] == 1
+
+    def test_same_named_mesh_in_a_different_component_is_not_a_false_alarm(self, monkeypatch):
+        # A handle resolves one of two same-named meshes across components; the untouched copy in
+        # the other component is not a survivor of this delete.
+        comp_a = _FakeComp("CompA", meshes=[])
+        comp_b = _FakeComp("CompB", meshes=[])
+        mesh_a = _FakeMesh(name="Twin", token="MTOK::A")
+        mesh_a.parentComponent = comp_a
+        comp_a.meshBodies._items.append(mesh_a)
+        mesh_b = _FakeMesh(name="Twin", token="MTOK::B")
+        mesh_b.parentComponent = comp_b
+        comp_b.meshBodies._items.append(mesh_b)
+
+        design = _FakeDesign(comp_a, design_type=0, all_components=[comp_a, comp_b])
+        monkeypatch.setattr(md._common, "design", lambda: design)
+        monkeypatch.setattr(md._MESH, "resolve", lambda raw: (mesh_a, None))   # a HANDLE, not a name
+
+        out = _payload(md.handler(mesh="<handle for CompA's Twin>"))
+        assert out["deleted"] == "Twin"
+        assert out["component"] == "CompA"
+        assert mesh_a not in comp_a.meshBodies._items   # CompA's copy is genuinely gone
+        assert mesh_b in comp_b.meshBodies._items        # CompB's copy is untouched and irrelevant
+        assert out["remaining_meshes"] == 1              # only CompB's 'Twin' remains, design-wide
 
     def test_no_active_design_is_an_error(self, rig):
         rig.monkeypatch.setattr(md._common, "design", lambda: None)

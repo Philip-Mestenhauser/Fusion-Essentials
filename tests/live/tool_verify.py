@@ -373,6 +373,41 @@ _SOLIDS = [
     # world (5,5), a point off this pad entirely: the hole silently cut whatever body sat near
     # the origin, and the axis-count read-back cannot see a wrong-body cut. Measured live.)
     ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"), "hole_type": "simple", "diameter": "4 mm", "extent": "blind", "depth": "8 mm", "points": [[220, 20, 0]]}, "ok", None),
+    # the three additive placement modes. Each act re-acquires its own edge: the center act below
+    # consumes the 4 mm rim by drilling an 8 mm bore concentric with it, so a handle captured once
+    # and reused would be pointing at geometry that no longer exists.
+    ("find_geometry", {"target": "FeatureCameo", "kind": "circular_edge", "radius": 2,
+                       "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_hole_edge")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
+                              "placement": "center", "edge": _ctx_get(c, "fc_hole_edge", "hole rim"),
+                              "diameter": "8 mm", "extent": "blind", "depth": "3 mm"},
+     lambda p: p.get("placement") == "center" and p.get("holes_verified") is True, None),
+    ("find_geometry", {"target": "FeatureCameo", "kind": "line_edge", "nearest_to": [220, 0, 20],
+                       "max_results": 1}, "ok", _fg("fc_edge")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
+                              "placement": "on_edge", "edge": _ctx_get(c, "fc_edge", "pad edge"),
+                              "edge_position": "middle", "diameter": "3 mm",
+                              "extent": "blind", "depth": "3 mm"},
+     lambda p: p.get("placement") == "on_edge", None),
+    # on_edge at the edge's START vertex, on a STRAIGHT edge the earlier acts left alone
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
+                              "placement": "on_edge", "edge": _ctx_get(c, "fc_edge", "pad edge"),
+                              "edge_position": "start", "diameter": "3 mm",
+                              "extent": "blind", "depth": "3 mm"}, "ok", None),
+    # plane_offsets measures from STRAIGHT edges - a circular one is refused by name
+    ("find_geometry", {"target": "FeatureCameo", "kind": "circular_edge",
+                       "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_rim2")),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
+                              "placement": "plane_offsets", "point": [215, 15, 20],
+                              "offset_edge_one": _ctx_get(c, "fc_rim2", "a round rim"),
+                              "offset_one": "5 mm", "diameter": "3 mm", "extent": "blind",
+                              "depth": "3 mm"}, "refused", None),
+    ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
+                              "placement": "plane_offsets", "point": [215, 15, 20],
+                              "offset_edge_one": _ctx_get(c, "fc_edge", "pad edge"),
+                              "offset_one": "6 mm", "diameter": "3 mm", "extent": "blind",
+                              "depth": "3 mm"},
+     lambda p: p.get("placement") == "plane_offsets", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_body")),
     ("model_mirror", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "plane": "yz"}, "ok", None),
     ("model_pattern_rectangular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")], "quantity_one": 2, "spacing_one": 60, "direction_one": "y"}, "ok", None),
@@ -513,6 +548,121 @@ _DETAILS = [
      lambda p: abs(p.get("volume_ratio", 0) - 3.375) < 1e-6, None),
     ("param_delete", {"name": "ShrinkProbe"}, "ok", None),
     ("param_delete", {"name": "TiltProbe"}, "ok", None),
+    ("model_move", {"bodies": ["ScaleBlock"], "dx": 10},
+     lambda p: abs(p.get("displacement", 0) - 10.0) < 1e-3, None),
+    ("model_move", {"mode": "along_entity", "bodies": ["ScaleBlock"], "axis": "y",
+                    "distance": 5}, lambda p: abs(p.get("displacement", 0) - 5.0) < 1e-3, None),
+    ("model_move", {"mode": "rotate", "bodies": ["ScaleBlock"], "axis": "z", "angle_deg": 15},
+     "ok", None),
+    ("model_move", lambda c: {"mode": "along_entity", "bodies": ["ScaleBlock"],
+                              "axis": _ctx_get(c, "scale_top", "block top"), "distance": 5},
+     "refused", None),
+    ("model_move", lambda c: {"bodies": ["ScaleBlock"],
+                              "faces": [_ctx_get(c, "scale_top", "block top")], "dx": 5},
+     "refused", None),
+    # point_to_point: the tool refuses a travel that does not equal the two vertices' own
+    # separation, so a plain ok here IS the distance check
+    ("find_geometry", {"target": "ScaleBlock", "kind": "vertex", "max_results": 8}, "ok",
+     _fgn("mv_verts")),
+    ("model_move", lambda c: {"mode": "point_to_point", "bodies": ["ScaleBlock"],
+                              "from_point": _ctx_get(c, "mv_verts", "block vertices")[0],
+                              "to_point": _ctx_get(c, "mv_verts", "block vertices")[1]},
+     lambda p: p.get("moved") is True and p.get("displacement", 0) > 0, None),
+    ("model_create_component", {"name": "ThreadPost", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "ThreadS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 530, "cy": 10, "radius": 5,
+                             "sketch_name": "ThreadS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadS", "profile_index": 0, "distance": 25}, "ok", None),
+    ("find_geometry", {"target": "ThreadPost", "kind": "cylinder_face", "max_results": 1}, "ok",
+     _fg("post_wall")),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
+                                "designation": "M99x9"}, "refused", None),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
+                                "designation": "M10x1.5", "offset": 2}, "refused", None),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
+                                "designation": "M10x1.5", "length": 12, "offset": 2},
+     lambda p: p.get("internal") is False and p.get("designation") == "M10x1.5"
+     and p.get("right_handed") is True and p.get("length") == 12, None),
+    # the partial extent is read back off the feature, and a metric call-out sits in several
+    # standards, so the alternatives ride along
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
+                                "designation": "M10x1.5", "length": 12, "offset": 2,
+                                "thread_type": "ISO Metric profile"},
+     lambda p: p.get("thread_type") == "ISO Metric profile"
+     and len(p.get("thread_type_alternatives") or []) > 1, None),
+    # a modeled designation far too big for the post grows the body instead of cutting it
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post_wall", "post wall")],
+                                "designation": "M30x3.5", "modeled": True}, "refused", None),
+    # a modeled thread that FITS must cut real material - the rung-4 gate's own regression net
+    ("model_create_component", {"name": "ThreadPost2", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "ThreadS2"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 570, "cy": 10, "radius": 5,
+                             "sketch_name": "ThreadS2"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadS2", "profile_index": 0, "distance": 25}, "ok", None),
+    ("find_geometry", {"target": "ThreadPost2", "kind": "cylinder_face", "max_results": 1}, "ok",
+     _fg("post2_wall")),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "post2_wall", "second post wall")],
+                                "designation": "M10x1.5", "modeled": True},
+     lambda p: p.get("modeled") is True and p.get("volume_delta_cm3", 0) < 0, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # sketch_edit_curve: one sketch per action, so no edit can perturb the next.
+    ("sketch_create", {"plane": "xy", "name": "EditTrim"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditTrim"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
+                             "sketch_name": "EditTrim"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditTrim", "action": "trim", "entity_one": "line:0",
+                           "x1": 610, "y1": 0},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0], None),
+    ("sketch_create", {"plane": "xy", "name": "EditExt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 10, "x2": 630, "y2": 10,
+                             "sketch_name": "EditExt"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 680, "y1": -20, "x2": 680, "y2": 40,
+                             "sketch_name": "EditExt"}, "ok", None),
+    # extend returns an EMPTY collection on success, so the verdict is the curve's own length:
+    # 30 mm reaching the crossing line at x=680 makes it 80.
+    ("sketch_edit_curve", {"sketch_name": "EditExt", "action": "extend", "entity_one": "line:0",
+                           "x1": 628, "y1": 10},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [80.0], None),
+    ("sketch_create", {"plane": "xy", "name": "EditSplit"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditSplit"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 650, "y1": -50, "x2": 650, "y2": 50,
+                             "sketch_name": "EditSplit"}, "ok", None),
+    # both halves are 50 long and must carry DISTINCT ids - the two pieces share one entityToken,
+    # so an id resolved by token would report the same curve twice.
+    ("sketch_edit_curve", {"sketch_name": "EditSplit", "action": "split", "entity_one": "line:0",
+                           "x1": 650, "y1": 0},
+     lambda p: [r.get("length") for r in p.get("resulting", [])] == [50.0, 50.0]
+     and len({r.get("id") for r in p.get("resulting", [])}) == 2, None),
+    ("sketch_create", {"plane": "xy", "name": "EditCorner"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
+                             "sketch_name": "EditCorner"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
+                             "sketch_name": "EditCorner"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditCorner", "action": "fillet", "entity_one": "line:0",
+                           "x1": 655, "y1": 0, "entity_two": "line:1", "x2": 660, "y2": 5,
+                           "radius": 10},
+     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 15.708) < 0.01, None),
+    ("sketch_create", {"plane": "xy", "name": "EditChamfer"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 660, "y2": 0,
+                             "sketch_name": "EditChamfer"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 660, "y1": 0, "x2": 660, "y2": 40,
+                             "sketch_name": "EditChamfer"}, "ok", None),
+    ("sketch_edit_curve", {"sketch_name": "EditChamfer", "action": "chamfer",
+                           "entity_one": "line:0", "x1": 655, "y1": 0, "entity_two": "line:1",
+                           "x2": 660, "y2": 5, "distance": 8},
+     lambda p: abs((p.get("resulting") or [{}])[0].get("length", 0) - 11.3137) < 0.01, None),
+    ("sketch_create", {"plane": "xy", "name": "EditOffset"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 700, "y2": 0,
+                             "sketch_name": "EditOffset"}, "ok", None),
+    # the direction point picks the side: above the line offsets to +y
+    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "offset", "entity_one": "line:0",
+                           "x1": 650, "y1": 20, "distance": 15},
+     lambda p: p.get("curve_count_after") == 2, None),
+    ("sketch_edit_curve", {"sketch_name": "EditOffset", "action": "chamfer", "entity_one": "line:0",
+                           "x1": 650, "y1": 0, "entity_two": "line:1", "x2": 650, "y2": 15,
+                           "distance": 5}, "refused", None),
     # Section view: cut through the gimbal center, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
@@ -1187,6 +1337,7 @@ _CAM_DELIVER = [
     ("cam_delete", {"entity": "Adaptive1"}, "ok", None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export",
                        "target": "Carrier"}, "ok", None),
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, "ok", None),
 ]
 
 
@@ -1274,6 +1425,7 @@ _CAM_FB_DELIVER = [
     ("cam_apply_template", {"setup": "Setup2", "template_name": "GyroTmpl", "location": "local", "generate": "skip"}, "ok", None),
     ("cam_delete", {"entity": "Adaptive1"}, "ok", None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export", "target": "GyroStock"}, "ok", None),
+    ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, "ok", None),
 ]
 
 # â”€â”€ the ACT program â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1348,7 +1500,9 @@ STORY = {
     "model_mirror": "mirror a cameo body",
     "model_pattern_rectangular": "rectangular-pattern a cameo body",
     "model_pattern_circular": "circular-pattern a cameo body",
-    "model_hole": "drill a cameo mounting hole",
+    "model_hole": ("drill a cameo mounting hole, then the three additive placements - centred on "
+                   "its rim, on an edge at middle and at start, and by plane offsets; a circular "
+                   "offset edge refused"),
     "model_combine": "join two overlapping cameo pads",
     "appearance_set": "give each gyroscope part its own color",
     "model_set_material": "assign the rotor a physical steel material",
@@ -1379,9 +1533,20 @@ STORY = {
     "model_chamfer": "chamfer the frame edge",
     "model_shell": "shell a scratch cap cameo",
     "model_offset_face": "push a scratch block's top face outward",
+    "model_thread": ("thread a scratch post M10x1.5 over part of its length with the extent read "
+                     "back, an explicit thread standard with its alternatives disclosed, and a "
+                     "modeled thread on a second post proving it cut material; an unknown "
+                     "call-out, an offset with no length, and a modeled call-out too big for the "
+                     "cylinder all refused"),
+    "sketch_edit_curve": ("trim, extend, split, fillet, chamfer and offset on one scratch sketch "
+                          "per action, with length read-backs; split's two halves must carry "
+                          "distinct ids; a chamfer across an offset pair refused"),
     "model_scale": ("uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, "
                     "length, and angle expressions refused; a bare unitless parameter accepted; "
                     "a vertex-anchored scale"),
+    "model_move": ("translate, along-axis, rotate and point-to-point move features on a scratch "
+                   "block, each checked against the distance it was asked for; a face as the axis "
+                   "and any faces selection refused"),
     "design_delete_feature": "add a wart feature then delete it; health diff",
     "design_delete_occurrence": "delete a scratch occurrence",
     "view_section": "section cut through the gimbal center",
@@ -1441,6 +1606,7 @@ STORY = {
     "cam_apply_template": "apply the template to a second setup",
     "cam_delete": "delete a scratch operation; count diff",
     "design_export": "export the machined part to STEP",
+    "doc_insert_import": "re-import that STEP from disk into the live design",
     "design_get": "final design read: the whole cast",
     "doc_get": "read the document identity before discarding",
     "doc_close": "discard the document on camera - clean teardown",

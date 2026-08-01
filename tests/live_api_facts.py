@@ -14,6 +14,15 @@ ENUMS = {
         "SkipGeneration": 1,
         "UserPreference": 2,
     },
+    "cam.LibraryLocations": {
+        "LocalLibraryLocation": 0,
+        "CloudLibraryLocation": 1,
+        "NetworkLibraryLocation": 2,
+        "OnlineSamplesLibraryLocation": 3,
+        "ExternalLibraryLocation": 4,
+        "Fusion360LibraryLocation": 5,
+        "HubLibraryLocation": 6,
+    },
     "cam.OperationStates": {
         "IsValidOperationState": 0,
         "IsInvalidOperationState": 1,
@@ -104,11 +113,10 @@ ENUMS = {
         "RolledBackFeatureHealthState": 4,
         "UnknownFeatureHealthState": 5,
     },
-    "fusion.HoleTapTypes": {
-        "SimpleHoleTapType": 0,
-        "ClearanceHoleTapType": 1,
-        "TappedHoleTapType": 2,
-        "TaperTappedHoleTapType": 3,
+    "fusion.HoleEdgePositions": {
+        "EdgeStartPointPosition": 0,
+        "EdgeMidPointPosition": 1,
+        "EdgeEndPointPosition": 2,
     },
     "fusion.JointDirections": {
         "XAxisJointDirection": 0,
@@ -256,6 +264,10 @@ ENUMS = {
     "fusion.SweepOrientationTypes": {
         "ParallelOrientationType": 0,
         "PerpendicularOrientationType": 1,
+    },
+    "fusion.ThreadLocations": {
+        "HighEndThreadLocation": 0,
+        "LowEndThreadLocation": 1,
     },
     "fusion.UntrimLoopTypes": {
         "AllLoopsUntrimType": 0,

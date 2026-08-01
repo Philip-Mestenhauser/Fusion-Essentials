@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 147  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 151  |  **Input-kinds:** 17  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -50,6 +50,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | · | `model_measure_between` | Measure the distance or angle BETWEEN two targets - each a find_geometry handle (face/body) or an occurrence/component/body name |
 | · | `model_measure_relation` | Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - the measured angle / axis offset / min distance and the tolerance i... |
 | ✎ | `model_mirror` | Mirror solid BODIES across a plane - make the symmetric half (the other side of a V-bank, a left/right part, a symmetric housing) |
+| ✎ | `model_move` | Move BODIES as a feature in the TIMELINE, so the move replays on every recompute |
 | ✎ | `model_offset_face` | Push or pull one or more faces along their normal by a signed distance, without redrawing the sketch that created them |
 | ✎ | `model_pattern_circular` | Pattern component OCCURRENCES evenly around an axis |
 | ✎ | `model_pattern_rectangular` | Pattern component OCCURRENCES in a rectangular grid |
@@ -60,6 +61,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_split` | Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / SplitFace feature |
 | ✎ | `model_stitch` | Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance' |
 | ✎ | `model_sweep` | Sweep a sketch profile along a path into a 3D solid - a cross-section driven along a curve (pipes, handrails, cables, moulding, path-following extrusions) |
+| ✎ | `model_thread` | Thread an EXISTING cylindrical face - external on a shaft or boss, internal in a bore (model_hole taps the holes it drills) |
 | ✎ | `model_unstitch` | Explode a body (or specific faces) into per-face SURFACE bodies - the inverse of model_stitch, so one face can be patched/trimmed/offset then re-stitched |
 
 ### surface
@@ -102,6 +104,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `sketch_create` | Create a new sketch on a plane OR on an existing planar face |
 | ⚠ | `sketch_delete_entity` | Delete ONE sketch entity or constraint from a named sketch - the surgical alternative to deleting and rebuilding the whole sketch |
 | ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint to a sketch and (optionally) drive its value - the sizing half of parametric sketching (sketch_constrain does the geometric half) |
+| ✎ | `sketch_edit_curve` | Edit an EXISTING sketch curve in place instead of deleting and redrawing it |
 | · | `sketch_get` | Read sketches by zoom level |
 | ✎ | `sketch_project` | Project existing model geometry into a sketch - Fusion's Project command - creating sketch curves/points from edges, faces (all of their edges), or vertices |
 | ✎ | `sketch_set_text` | Set the displayed string of sketch text entities (e.g |
@@ -177,6 +180,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `doc_copy` | Copy an existing cloud document (a saved DataFile, identified by its lineage 'document_id' URN - preferred - or by 'name' within a 'source_project') INTO a dest... |
 | · | `doc_get` | Read the SESSION's documents in one call: the ACTIVE document - name, save state, and lineage id (URN, the 'document_id' doc_copy/doc_open use) - plus the list ... |
 | ✎ | `doc_insert_derive` | Insert a DERIVE of another document's design into a component of the active document - a one-way linked copy: it updates from the source; edits made here never ... |
+| ✎ | `doc_insert_import` | Import a CAD file from LOCAL DISK: STEP/IGES/SAT/SMT/F3D as solid geometry into a component, DXF as one sketch per 2D layer on a plane, SVG curves into an EXIST... |
 | ✎ | `doc_insert_occurrence` | Insert a SAVED cloud document into the active design as a new component occurrence - the API equivalent of Insert into Current Design |
 | ✎ | `doc_new` | Create and open a new, empty Fusion design document; it becomes the active document |
 | ✎ | `doc_open` | Open a Fusion document by data-model id |

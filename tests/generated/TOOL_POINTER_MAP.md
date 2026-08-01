@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 147  |  **description breadcrumbs:** 568  |  **note/error breadcrumbs:** 284
+**Tools:** 151  |  **description breadcrumbs:** 576  |  **note/error breadcrumbs:** 298
   |  **guidance smells flagged:** 2
 ## Blindspots to engineer
 
@@ -17,29 +17,30 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_inspect_toolpaths`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (24)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `drawing_update`, `model_arrange`, `model_draft`, `model_hole`, `model_offset_face`, `model_scale`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
+**Edit (26)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `doc_insert_derive`, `doc_insert_import`, `drawing_update`, `model_arrange`, `model_draft`, `model_move`, `model_scale`, `model_set_material`, `model_shell`, `model_split`, `model_sweep`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `sketch_set_text`, `surface_delete_face`, `surface_reverse_normal`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **42x** across 30 module(s): "No active design. Create or open a document first (see doc_new)."
+- **45x** across 33 module(s): "No active design. Create or open a document first (see doc_new)."
 - **15x** across 10 module(s): "No active design. Open or create a document first (see doc_new)."
+- **7x** across 2 module(s): "' with design_delete_feature."
 - **7x** across 4 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 71  (desc 10, note 61)
-- `find_geometry`  <- 67  (desc 54, note 13)
+- `doc_new`  <- 75  (desc 10, note 65)
+- `find_geometry`  <- 69  (desc 54, note 15)
 - `view_screenshot`  <- 47  (desc 20, note 27)
-- `sketch_create`  <- 30  (desc 19, note 11)
+- `sketch_create`  <- 31  (desc 19, note 12)
 - `cam_get`  <- 29  (desc 20, note 9)
 - `data_get`  <- 28  (desc 16, note 12)
 - `design_get`  <- 23  (desc 11, note 12)
 - `model_extrude`  <- 23  (desc 21, note 2)
-- `sketch_get`  <- 19  (desc 8, note 11)
-- `design_delete_feature`  <- 16  (desc 9, note 7)
+- `sketch_get`  <- 21  (desc 9, note 12)
+- `design_delete_feature`  <- 20  (desc 11, note 9)
+- `data_upload_file`  <- 16  (desc 13, note 3)
 - `doc_get`  <- 16  (desc 11, note 5)
-- `assembly_get`  <- 15  (desc 10, note 5)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -559,6 +560,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Derive landed at the ROOT component (
 - - the target activation did not take, so the nesting failed. The derive EXISTS at root: delete its feature (design_delete_feature) and retry, or keep it and move on.
 
+### `doc_insert_import`
+- file_path is required - the full path to a CAD file on this machine's disk.
+- file cannot be imported to a new document - importToNewDocument does not accept DXF or SVG options. Import into the open design instead (new_document=false): DXF creates sketches in a component, SV...
+- No readable file at '
+- '. Pass a full path on THIS machine's disk; a cloud file must be downloaded first, or referenced with doc_insert_occurrence.
+- Application.importManager is unavailable - nothing can be imported.
+- No active design to import into. Open or create a document first (see doc_new), or pass new_document=true.
+
 ### `doc_insert_occurrence`
 - Provide 'document_id' - the lineage URN (or web URL) of the saved cloud document to insert.
 - No active design. Open the host document first.
@@ -791,7 +800,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `mesh_delete`
 - No active design. Create or open a document first (see doc_new).
 - Delete reported success but a mesh named '
-- ' still resolves in the design (fresh collection walk) - treat the delete as failed.
+- ' still resolves in component '
+- ' - treat the delete as failed.
 - Mesh body removed. (design_delete_feature / design_delete_occurrence don't reach mesh bodies - this is the mesh-side delete.)
 - This design has no meshRemoveFeatures collection (parametric mesh delete unavailable here).
 - meshRemoveFeatures.createInput returned nothing.
@@ -1002,33 +1012,38 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - A counterbore hole needs 'cbore_diameter' and 'cbore_depth'.
 - A countersink hole needs 'csink_diameter' and 'csink_angle' (e.g. '90 deg').
 - 'modeled' (a real helical thread) only applies to a tapped hole; pass 'tap' too.
-- 'tap_type' only applies to a tapped hole; pass 'tap' too.
 - '. Use 'blind' (with 'depth') or 'through'.
 - A blind hole needs 'depth' (e.g. '10 mm'). For a hole through the body use extent='through'.
-- 'tip_angle' only applies to a blind hole (the drill tip forms the hole's bottom); this hole's extent is 'through'.
+- Could not resolve 'face' to a planar face. Pass a find_geometry face handle.
 - This component does not support hole features.
+- '. Use mm, cm, or in.
 - holeFeatures.add returned no feature.
 - hole point(s) cut NOTHING - the feature created
 - Provide 'points' - a list of [x, y, z] positions on the face to drill at.
-- Could not resolve 'face' to a planar face. Pass a find_geometry face handle.
-- Could not create a placement sketch on the face (sketches.add returned nothing).
-- '. Use mm, cm, or in.
-- placement='center' needs 'edge' - a find_geometry handle at the circular/elliptical edge to center the hole on.
 - Could not resolve 'edge' to an edge. Pass a find_geometry edge handle.
-- Could not resolve 'plane'. Pass a plane alias/name or a planar-face handle.
+- Could not create a placement sketch on the face (sketches.add returned nothing).
+- The hole was drilled but carries no tap, so '
+- ' did not take. Remove '
+- ' with design_delete_feature.
+- The hole was tapped '
+- ', not the requested '
+- placement='center' needs 'edge' - a find_geometry handle at the circular/elliptical edge to center the hole on.
 - Could not resolve 'offset_edge_one' to an edge.
-- Could not resolve 'offset_edge_two' to an edge.
 - Could not create a placement sketch on the face:
 - Could not add a sketch point at
 - Could not set tip_angle '
-- is not available on this Fusion version.
+- A modeled thread was requested, but the hole's thread feature could not be read back, so there is no proof the helix was cut. Remove '
+- The tap was requested
 - placement='on_edge' needs 'edge' - a find_geometry handle at the edge to position the hole along.
-- placement='on_edge' needs 'edge_offset' - the distance along 'edge', e.g. '5 mm'.
-- placement='plane_offsets' needs
+- placement='on_edge' needs 'edge_position' - one of:
+- placement='plane_offsets' needs 'point' - an approximate [x, y, z] hole location (picks the solution when several are possible).
+- placement='plane_offsets' needs 'offset_edge_one' and 'offset_one'.
+- placement='plane_offsets': 'offset_edge_two' and 'offset_two' must be given together.
+- Could not resolve 'offset_edge_two' to an edge.
 - ; expected [x, y, z] in '
 - Could not position the hole at the edge's center:
+- is not available on this Fusion version.
 - Could not set the tapped hole to a MODELED (helical) thread:
-- Could not set tap_type '
 - Could not position the hole on the edge:
 - Could not position the hole by plane and offsets:
 
@@ -1074,6 +1089,23 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No valid bodies resolved to mirror.
 - Mirror returned no feature.
 - Bodies mirrored across the plane. Pair with view_screenshot to view.
+
+### `model_move`
+- Geometry repositioned by a move feature in the timeline, so it replays on every recompute. To reposition a component instance instead, use assembly_move.
+- A move feature cannot move FACES - pass 'bodies'. createInput2 accepts a BRepFace collection and then raises InternalValidationError inside the kernel (measured in a parametric design). To push or ...
+- 'bodies' is required - the bodies to move.
+- No active design. Create or open a document first (see doc_new).
+- Move returned no feature.
+- Move feature was created but failed to compute:
+- . Try a smaller move, or a different axis/point selection.
+- ' move definition, so nothing was moved.
+- mode 'along_entity' needs 'axis' - the linear entity the move runs along.
+- mode 'rotate' needs 'axis' - the linear entity to rotate about.
+- mode 'rotate' needs 'angle_deg' - the rotation in degrees.
+- 'angle_deg' must be non-zero - a 0 deg rotation moves nothing.
+- mode 'point_to_point' needs
+- - a vertex handle from find_geometry.
+- 'angle_deg' must be a number (rotation in degrees), got
 
 ### `model_offset_face`
 - Face(s) pushed/pulled along their normal. Positive extends outward (adds material); negative pushes inward (removes material).
@@ -1181,6 +1213,42 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
 - . (A 'cut'/'intersect' needs existing geometry to act on; the profile and path must form a valid sweep.)
 - Could not scope to target_bodies:
+
+### `model_thread`
+- Provide 'designation' - the thread call-out, e.g. 'M8x1.25' or '1/4-20 UNC'.
+- 'offset' positions a partial thread, so it needs 'length' too; without 'length' the thread runs the whole cylinder and the offset is ignored.
+- 'location' picks which end a partial thread is measured from, so it needs 'length' too.
+- No active design. Create or open a document first (see doc_new).
+- Could not read the outward normal of face(s)
+- (0-based), so whether they are bores or shafts is unknown. Re-run find_geometry for fresh handles and pass faces whose 'normal' it reports.
+- One Thread feature cannot mix internal and external faces: face(s)
+- (0-based) are bores and the rest are shafts. Thread each side in its own call.
+- This component does not support thread features.
+- 'faces' resolved to face(s) with no readable owning body, so a modeled thread's cut cannot be verified. Re-run find_geometry for fresh handles.
+- threadFeatures.createInput returned nothing for '
+- threadFeatures.add returned no feature.
+- The thread was created but failed to compute:
+- . It remains in the timeline - remove it with design_delete_feature (feature '
+- The thread was created but carries designation '
+- ', not the requested '
+- '. Remove it with design_delete_feature (feature '
+- The thread was created as an
+- thread, but the face(s) are
+- . Remove it with design_delete_feature (feature '
+- Thread input could not be built for '
+- Could not apply the thread settings:
+- A partial thread was requested, but the feature's own extent could not be read back, so there is no proof it took. Remove '
+- ' with design_delete_feature.
+- A partial thread was requested (length
+- ' reads back as full length - the partial extent did not take. Remove it with design_delete_feature.
+- The thread was created but sits at the wrong end of the cylinder - '
+- ' was requested. Remove '
+- The thread was created, but no affected body's volume could be read, so there is no proof the helix was cut. The feature remains in the timeline; remove it with design_delete_feature (feature '
+- A modeled thread cuts the helix into the cylinder, but the affected body's volume is unchanged - nothing was cut. The feature remains in the timeline; remove it with design_delete_feature (feature '
+- A modeled thread cuts material away, but the body's volume GREW by
+- ' does not fit this cylinder, so the thread form was built outside it. Check the designation against the cylinder's diameter. The feature remains in the timeline; remove it with design_delete_featu...
+- is not available on this Fusion version.
+- The thread was created but its
 
 ### `model_unstitch`
 - No active design. Create or open a document first (see doc_new).
@@ -1295,7 +1363,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `sketch_constrain`
 - Could not resolve entity_one '
 - ' (use '<type>:<index>', type =
-- returned nothing (entities may be incompatible for it).
+- returned no constraint object.
 - Geometric constraint applied - the sketch is now parametric for this relationship.
 - ' needs 'entity_two' (a second '<type>:<index>'). Got '
 - unsupported constraint kind '
@@ -1340,6 +1408,24 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (Check the entity types match the dimension - radius/diameter need an arc/circle, angle needs two lines.)
 - ' needs entity_two ('<type>:<index>'). '
 - Dimension added but could not set value '
+
+### `sketch_edit_curve`
+- Curve ids are creation-order indexes per kind, so removing or adding a curve RENUMBERS the rest - re-read sketch_get(include_entities=true) before the next edit.
+- The whole curve was consumed: a trim on a curve with no intersections deletes it outright.
+- '. Valid: mm, cm, in.
+- No active design. Create or open a document first (see doc_new).
+- No sketch to edit. Draw one first with sketch_create + sketch_add_geometry.
+- ' needs the pick point x1,y1 (in 'units') - it chooses which segment, end, quadrant or side of the curve the edit applies to.
+- ' needs a pick point on EACH curve: x1,y1 on entity_one and x2,y2 on entity_two - together they choose the quadrant to build in.
+- fillet needs 'radius' > 0 (in 'units'); got
+- extend changed nothing - the end nearest the pick point could not be extended. The sketch still holds
+- curve(s). Re-read sketch_get(include_entities=true) and pick a point ON the curve.
+- . The sketch still holds
+- chamfer needs 'distance' > 0 (in 'units') - the setback along entity_one; got
+- chamfer takes EITHER 'distance_two' (a second setback) OR 'angle_deg' (the angle from entity_one), not both.
+- 'distance_two' must be > 0; got
+- 'angle_deg' must be between 0 and 180 exclusive; got
+- offset needs 'distance' > 0 (in 'units'); the SIDE comes from the pick point x1,y1, so the distance is a magnitude. Got
 
 ### `sketch_project`
 - Extrude a resulting profile via sketch_get -> model_extrude.

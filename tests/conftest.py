@@ -403,11 +403,13 @@ class BRepBody:
     are optional (all real BRepBody attributes per live_api_facts.SHAPES) for a before/after
     read-back check (e.g. a cut's volume delta). Visibility mirrors the live contract:
     isLightBulbOn is the body's OWN settable browser bulb; isVisible is the EFFECTIVE state
-    (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter."""
+    (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter. `vertices`
+    takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry."""
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
-                 light_bulb=True, hidden_by_ancestor=False):
+                 light_bulb=True, hidden_by_ancestor=False, vertices=()):
         self.name = name
         self.boundingBox = bbox
+        self.vertices = _NamedCollection([_Vertex(p) for p in vertices])
         self.volume = volume
         self.isSolid = is_solid
         self.entityToken = entity_token or name
@@ -646,14 +648,24 @@ class BRepFace:
     via kwargs in tests that assert on them. `entity_token` is None by default (matching a fake
     built before handle-minting needed it - safe() degrades a None token the same as a missing
     attribute); set it for a test that mints/asserts on a find_geometry-style handle.
+
+    `body` supplies the owning BRepBody itself (for a volume/token read); `body_name` is the
+    lighter name-only stand-in. `normal` installs a surface evaluator whose getNormalAtPoint
+    returns it - the live (bool, Vector3D) tuple. Without `normal` the face carries no evaluator,
+    which is how a face whose normal cannot be sampled reads.
     """
-    def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None, entity_token=None):
+    def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
+                 entity_token=None, body=None, point_on_face=None, normal=None):
         self.geometry = surface
         self.area = area
         self.centroid = centroid
         self.edges = _NamedCollection([None] * edge_count)
-        self.body = _SimpleNamed(body_name) if body_name else None
+        self.body = body if body is not None else (_SimpleNamed(body_name) if body_name else None)
         self.entityToken = entity_token
+        self.pointOnFace = point_on_face
+        if normal is not None:
+            self.evaluator = types.SimpleNamespace(
+                getNormalAtPoint=lambda _pt, n=normal: (True, n))
 
 
 class _SimpleNamed:
@@ -690,12 +702,13 @@ class MakeComp:
     (e.g. a fake `features`) can be attached by the caller after construction, or pass a ready-made
     component to `make_design(comp=...)` instead.
     """
-    def __init__(self, name="Root", bodies=(), occurrences=()):
+    def __init__(self, name="Root", bodies=(), occurrences=(), sketches=()):
         self.name = name
         norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
         self.bRepBodies = _NamedCollection(norm)
         self.occurrences = _NamedCollection(list(occurrences))
         self.allOccurrences = list(occurrences)
+        self.sketches = _NamedCollection(list(sketches))
         self.boundingBox = None
 
 
@@ -721,12 +734,53 @@ class MakeDesign:
         return [e] if e is not None else []
 
 
-def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None):
+def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
+                sketches=()):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
     fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences)."""
     if comp is None:
-        comp = MakeComp(bodies=bodies, occurrences=occurrences)
+        comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches)
     return MakeDesign(comp=comp, tokens=tokens, all_components=all_components)
+
+
+def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
+    """One sketch curve: entityToken + length (cm), the pair a curve-edit read-back keys on. Only a
+    fitted spline reports isClosed live, so it is set only when given. Attach the in-place edit
+    methods a test drives (trim/extend/breakCurve/split) to the returned object."""
+    curve = types.SimpleNamespace(entityToken=token, length=length, isConstruction=False)
+    if is_closed is not None:
+        curve.isClosed = is_closed
+    return curve
+
+
+def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=()):
+    """A Sketch fake: sketchCurves (flat, plus the per-kind sub-collections a '<type>:<index>' ref
+    indexes), sketchPoints and name. Members come from make_sketch_curve; a collection-level factory
+    a test drives (sketchArcs.addFillet, sketchLines.addDistanceChamfer) is attached to the returned
+    collection."""
+    members = list(lines) + list(arcs) + list(circles) + list(ellipses) + list(splines)
+    curves = _NamedCollection(members)
+    curves.sketchLines = _NamedCollection(lines)
+    curves.sketchArcs = _NamedCollection(arcs)
+    curves.sketchCircles = _NamedCollection(circles)
+    curves.sketchEllipses = _NamedCollection(ellipses)
+    curves.sketchFittedSplines = _NamedCollection(splines)
+    curves.sketchControlPointSplines = _NamedCollection()
+    curves.sketchFixedSplines = _NamedCollection()
+    return types.SimpleNamespace(name=name, sketchCurves=curves,
+                                 sketchPoints=_NamedCollection(points))
+
+
+def sketch_curves_edit(sketch, collection, add=(), remove=()):
+    """Apply a curve add/remove to a sketch fake. A sketch curve sits in TWO collections - the flat
+    sketchCurves a count read-back walks and the per-kind sub-collection a '<type>:<index>' ref
+    indexes - so both are updated together."""
+    for curve in remove:
+        sketch.sketchCurves._items.remove(curve)
+        collection._items.remove(curve)
+    for curve in add:
+        sketch.sketchCurves._items.append(curve)
+        collection._items.append(curve)
 
 
 def install(mod, design, *, cast_design=True, object_collection=True):

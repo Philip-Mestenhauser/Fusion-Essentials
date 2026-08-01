@@ -19,20 +19,21 @@ from . import _inputs
 app = adsk.core.Application.get()
 
 
-# The entity kinds each constraint requires - prefixed onto a wrong-kind API failure so the caller
-# sees what the constraint needs ahead of the raw SWIG text ("invalid argument entityOne", a signature
-# dump). These match the live-verified refusals pinned in test_sketch_constrain.py.
 _REQUIRES = {
-    "perpendicular": "two lines/curves",
-    "parallel": "two lines/curves",
-    "tangent": "two curves (line/arc/circle), not a point",
-    "equal": "two curves of the same type",
-    "concentric": "two circles/arcs (each has a center), not a line",
+    # live-verified: perpendicular/parallel/collinear/horizontal/vertical are LINE-ONLY - their
+    # curve argument is typed SketchLine.
+    "perpendicular": "two lines",
+    "parallel": "two lines",
+    "tangent": "two curves",
+    # live-verified: equal refuses mismatched kinds, and refuses two ellipses, two fitted splines
+    # or two control-point splines even though those kinds match ("3 : invalid argument value").
+    "equal": "two lines, two arcs, or two circles",
+    "concentric": "two curves with a center point",
     "collinear": "two lines",
     "midpoint": "a POINT as entity_one and a line/curve as entity_two",
     "coincident": "a POINT as entity_one (coincident onto a curve puts that point on it)",
-    "horizontal": "one line (not a circle/arc)",
-    "vertical": "one line (not a circle/arc)",
+    "horizontal": "one line",
+    "vertical": "one line",
     "symmetry": "two entities plus an axis line (symmetry_line)",
     "fix": "one sketch entity",
     "unfix": "one sketch entity",
@@ -108,14 +109,13 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         else:
             return error(f"unsupported constraint kind '{kind}'.")
     except Exception as e:
-        # A wrong-kind entity makes the API raise raw SWIG text; lead with what the constraint needs,
-        # keep the raw text as the tail so nothing is lost.
+        # The API raises the same way for a wrong operand type and for an unsolvable sketch.
         req = _REQUIRES.get(cname)
         if req:
-            return error(f"'{cname}' needs {req}. API rejected it: {e}")
+            return error(f"Could not apply {cname}: {e} | '{cname}' takes {req}.")
         return error(f"Could not apply {cname}: {e}")
     if not result_obj:
-        return error(f"Applying {cname} returned nothing (entities may be incompatible for it).")
+        return error(f"Applying {cname} returned no constraint object.")
 
     return ok({
     "applied": cname,
@@ -131,7 +131,7 @@ TOOL_DESCRIPTION = (
     "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch is "
     "parametric (captures design intent). Reference entities as '<type>:<index>' within "
     "'sketch_name', type = line/arc/circle/ellipse/point/spline/cv_spline/fixed_spline (e.g. 'line:0', "
-    "'arc:1', 'point:2'). Two-curve "
+    "'arc:1', 'point:2'). Two-entity "
     "constraints (perpendicular/parallel/tangent/equal/concentric/collinear) take "
     "entity_one+entity_two; horizontal/vertical/fix/unfix take one entity; symmetry takes "
     "entity_one+entity_two+symmetry_line (the axis). COINCIDENT/midpoint take a POINT as entity_one. "

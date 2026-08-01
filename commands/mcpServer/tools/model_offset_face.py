@@ -24,6 +24,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _assert
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -42,21 +43,6 @@ _DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True,
     description="Offset along each face's normal, positive outward / negative inward.")
 
 app = adsk.core.Application.get()
-
-
-def _owning_bodies(face_ents):
-    """Distinct bodies owning the given faces, first-seen order, deduped by entityToken (mirrors
-    surface_edit._created_bodies)."""
-    bodies, seen = [], set()
-    for f in face_ents:
-        b = safe(lambda f=f: f.body)
-        if b is None:
-            continue
-        key = safe(lambda b=b: b.entityToken) or id(b)
-        if key not in seen:
-            seen.add(key)
-            bodies.append(b)
-    return bodies
 
 
 def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
@@ -79,12 +65,12 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
     if ferr:
         return error(ferr)
 
-    bodies = _owning_bodies(face_ents)
+    bodies = _geom.owning_bodies(face_ents)
     if not bodies:
         return error("'faces' resolved to face(s) with no readable owning body - cannot offset.")
     # Pre-mutation read-back: the offset must move SOME body's volume, whichever direction the
     # selected faces face.
-    vol_before = {id(b): safe(lambda b=b: b.volume) for b in bodies}
+    vol_before = _geom.volumes(bodies)
 
     # createInput wants a Python list of BRepFace (a SWIG vector), NOT an ObjectCollection - live-
     # verified: an ObjectCollection raises a vector-type argument error.
@@ -108,14 +94,7 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
                      "or a different face selection.")
 
     # Post-mutation read-back: prove the body actually moved rather than trust the API's success.
-    vol_after = {id(b): safe(lambda b=b: b.volume) for b in bodies}
-    delta_total = 0.0
-    any_readable = False
-    for b in bodies:
-        vb, va = vol_before[id(b)], vol_after[id(b)]
-        if isinstance(vb, (int, float)) and isinstance(va, (int, float)):
-            any_readable = True
-            delta_total += (va - vb)
+    delta_total, any_readable = _geom.volume_delta(bodies, vol_before)
     if any_readable and abs(delta_total) < 1e-9:
         return error("Offset face reported success but the affected body's volume is unchanged - "
                      "nothing was actually pushed or pulled. The feature remains in the timeline; "

@@ -49,20 +49,42 @@ class FakeConstraints:
         if k not in kinds:
             raise TypeError(f"invalid argument: a {k or 'unknown'} entity where "
                             f"{'/'.join(kinds)} is required")
-    def addPerpendicular(self, a, b): return self._rec("perpendicular", a, b)
-    def addParallel(self, a, b): return self._rec("parallel", a, b)
+    def _require_same(self, a, b, *kinds):
+        self._require(a, *kinds)
+        self._require(b, *kinds)
+        ka, kb = getattr(a, "kind", None), getattr(b, "kind", None)
+        if ka != kb:
+            raise TypeError(f"invalid argument value: {ka} and {kb} are different kinds")
+    # live-verified type gates: perpendicular/parallel/collinear/horizontal/vertical and
+    # symmetry's axis take a typed SketchLine; coincident/midpoint take a typed SketchPoint.
+    def addPerpendicular(self, a, b):
+        self._require(a, "line")
+        self._require(b, "line")
+        return self._rec("perpendicular", a, b)
+    def addParallel(self, a, b):
+        self._require(a, "line")
+        self._require(b, "line")
+        return self._rec("parallel", a, b)
     def addTangent(self, a, b):
-        # live-verified: a point arg raises at the SWIG boundary (SketchCurve required)
-        self._require(a, "line", "arc", "circle")
-        self._require(b, "line", "arc", "circle")
+        # live-verified: a point arg raises at the SWIG boundary (SketchCurve required), while an
+        # ellipse and a fitted spline both pass the type gate
+        self._require(a, "line", "arc", "circle", "ellipse", "spline")
+        self._require(b, "line", "arc", "circle", "ellipse", "spline")
         return self._rec("tangent", a, b)
-    def addEqual(self, a, b): return self._rec("equal", a, b)
+    def addEqual(self, a, b):
+        # live-verified: matching kinds AND only these three - arc+circle, ellipse+ellipse and
+        # cv_spline+cv_spline all raise "3 : invalid argument value"
+        self._require_same(a, b, "line", "arc", "circle")
+        return self._rec("equal", a, b)
     def addConcentric(self, a, b):
-        # live-verified: a line arg raises "3 : invalid argument entityOne"
-        self._require(a, "arc", "circle")
-        self._require(b, "arc", "circle")
+        # live-verified: a line arg raises "3 : invalid argument entityOne"; ellipse+circle passes
+        self._require(a, "arc", "circle", "ellipse")
+        self._require(b, "arc", "circle", "ellipse")
         return self._rec("concentric", a, b)
-    def addCollinear(self, a, b): return self._rec("collinear", a, b)
+    def addCollinear(self, a, b):
+        self._require(a, "line")
+        self._require(b, "line")
+        return self._rec("collinear", a, b)
     def addMidPoint(self, p, c):
         self._require(p, "point")
         return self._rec("midpoint", p, c)
@@ -75,7 +97,9 @@ class FakeConstraints:
     def addVertical(self, l):
         self._require(l, "line")
         return self._rec("vertical", l)
-    def addSymmetry(self, a, b, line): return self._rec("symmetry", a, b, line)
+    def addSymmetry(self, a, b, line):
+        self._require(line, "line")
+        return self._rec("symmetry", a, b, line)
 
 
 class FakeSketchCurves:
@@ -145,11 +169,11 @@ def _two_line_sketch():
                               FakeCurve("P2", "point")])
 
 
-def _full_sketch():
+def _full_sketch(circles=(), ellipses=(FakeCurve("E0", "ellipse"),)):
     """A sketch also holding an ellipse and one of each spline kind, for resolver round-trip
     coverage over the full ENTITY_REF_KINDS set."""
-    return FakeSketch("S", lines=[FakeCurve("L0", "line")],
-                      ellipses=[FakeCurve("E0", "ellipse")],
+    return FakeSketch("S", lines=[FakeCurve("L0", "line")], circles=list(circles),
+                      ellipses=list(ellipses),
                       splines=[FakeCurve("SP0", "spline"), FakeCurve("SP1", "spline")],
                       cv_splines=[FakeCurve("CV0", "cv_spline")],
                       fixed_splines=[FakeCurve("FX0", "fixed_spline")])
@@ -174,9 +198,8 @@ class TestResolveEntity:
         assert sc._common.resolve_entity_ref(s, "helix:0") is None
 
     def test_recognized_kind_missing_from_this_sketch_still_misses_cleanly(self):
-        # 'ellipse'/'spline' ARE valid ENTITY_REF_KINDS, but this sketch holds none of either - the
-        # resolver must still return None (not raise), same miss behavior as before these kinds
-        # existed.
+        # 'ellipse'/'spline' ARE valid ENTITY_REF_KINDS; a sketch holding none of either resolves
+        # to None rather than raising.
         s = _two_line_sketch()
         assert sc._common.resolve_entity_ref(s, "ellipse:0") is None
         assert sc._common.resolve_entity_ref(s, "spline:0") is None
@@ -203,7 +226,7 @@ class TestResolveEntity:
 
 
 class TestResolveNewKinds:
-    """P0.1: ellipse and the three spline collections join line/arc/circle/point as addressable
+    """Ellipse and the three spline collections are addressable ENTITY_REF_KINDS alongside
     ENTITY_REF_KINDS - a spline sketch_add_geometry(kind='spline') just created must be reachable by
     sketch_constrain/sketch_dimension/sketch_delete_entity, not just by sketch_get."""
 
@@ -257,7 +280,6 @@ class TestTwoCurve:
         assert out["applied"] == "perpendicular"
 
     def test_parallel_equal_tangent_concentric_collinear(self):
-        # entity kinds per constraint match live legality: concentric needs circles/arcs,
         # tangent needs curves (line+circle is the canonical pair).
         cases = (("parallel", "line:0", "line:1"), ("equal", "line:0", "line:1"),
                  ("tangent", "line:0", "circle:0"), ("concentric", "circle:0", "arc:0"),
@@ -316,11 +338,10 @@ class TestSingleLine:
         assert out["entity_two"] is None and out["symmetry_line"] is None
 
     def test_constraint_returning_nothing_is_error(self):
-        # If the add* method returns a falsy result (entities incompatible), surface an error.
         s = _two_line_sketch(); _install(s)
         s.geometricConstraints.addHorizontal = lambda l: None
         res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0")
-        assert res["isError"] is True and "returned nothing" in res["message"]
+        assert res["isError"] is True and "returned no constraint object" in res["message"]
 
     def test_fix_sets_isfixed(self):
         s = _two_line_sketch(); _install(s)
@@ -335,9 +356,6 @@ class TestSingleLine:
         assert s.sketchCurves.sketchLines.item(0).isFixed is False
 
     def test_fix_failure_is_reported_not_a_false_success(self):
-        # If setting isFixed raises (Fusion rejects it), the handler must surface an error — not the
-        # old behaviour of safe()-swallowing it and unconditionally reporting applied='fix'. Swap a
-        # single line for one whose isFixed setter raises (a local class, so no shared fake is mutated).
         s = _two_line_sketch(); _install(s)
 
         class _RejectsFix:
@@ -422,16 +440,15 @@ class TestWrongKindRefusals:
         assert "midpoint" in res["message"] and "line" in res["message"]
         assert s.geometricConstraints.calls == []
 
-    def test_error_names_required_kinds_ahead_of_the_raw_text(self):
-        # the wrong-kind error PREFIXES the required kinds before the raw API text (which stays
-        # as the tail). Each constraint states what it needs, not just a SWIG signature dump.
+    def test_the_raw_api_reason_leads_and_the_operand_rule_follows(self):
         s = _two_line_sketch(); _install(s)
         r_tan = sc.handler(constraint="tangent", sketch_name="S",
                            entity_one="point:0", entity_two="circle:0")
-        assert "two curves" in r_tan["message"] and "API rejected" in r_tan["message"]
+        msg = r_tan["message"]
+        assert msg.index("invalid argument") < msg.index("two curves")
         r_con = sc.handler(constraint="concentric", sketch_name="S",
                            entity_one="line:0", entity_two="circle:0")
-        assert "circles/arcs" in r_con["message"]
+        assert "center point" in r_con["message"]
         r_hor = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
         assert "one line" in r_hor["message"]
 
@@ -439,23 +456,32 @@ class TestWrongKindRefusals:
 # ── the handler accepts ellipse/spline refs end-to-end (no per-tool kind list to update) ────────
 
 class TestHandlerAcceptsNewKinds:
-    def test_equal_between_a_spline_and_an_ellipse(self):
+    def test_a_spline_ref_reaches_the_api_unchanged(self):
         s = _full_sketch(); _install(s)
-        out = _payload(sc.handler(constraint="equal", sketch_name="S",
-                                  entity_one="spline:0", entity_two="ellipse:0"))
+        out = _payload(sc.handler(constraint="tangent", sketch_name="S",
+                                  entity_one="spline:0", entity_two="line:0"))
         name, args = s.geometricConstraints.calls[0]
-        assert name == "equal"
-        assert args[0].name == "SP0" and args[1].name == "E0"
-        assert out["applied"] == "equal"
+        assert name == "tangent"
+        assert args[0].name == "SP0" and args[1].name == "L0"
+        assert out["applied"] == "tangent"
 
-    def test_parallel_with_a_control_point_and_fixed_spline(self):
-        # 'parallel' (like 'equal'/'collinear'/'perpendicular') isn't kind-restricted in the fake -
-        # mirrors that the RESOLVER doesn't gate on entity kind: the live API is the authority on
-        # which constraint accepts which curve type, and its refusal surfaces as the tool's error.
+    def test_an_ellipse_ref_reaches_the_api_unchanged(self):
+        s = _full_sketch(circles=[FakeCurve("C0", "circle")]); _install(s)
+        out = _payload(sc.handler(constraint="concentric", sketch_name="S",
+                                  entity_one="ellipse:0", entity_two="circle:0"))
+        name, args = s.geometricConstraints.calls[0]
+        assert name == "concentric"
+        assert args[0].name == "E0" and args[1].name == "C0"
+        assert out["applied"] == "concentric"
+
+    def test_control_point_and_fixed_spline_refs_are_fixable(self):
         s = _full_sketch(); _install(s)
-        out = _payload(sc.handler(constraint="parallel", sketch_name="S",
-                                  entity_one="cv_spline:0", entity_two="fixed_spline:0"))
-        assert out["applied"] == "parallel"
+        for ref in ("cv_spline:0", "fixed_spline:0"):
+            _payload(sc.handler(constraint="fix", sketch_name="S", entity_one=ref))
+        assert [c.name for c in (s.sketchCurves.sketchControlPointSplines.item(0),
+                                 s.sketchCurves.sketchFixedSplines.item(0))] == ["CV0", "FX0"]
+        assert s.sketchCurves.sketchControlPointSplines.item(0).isFixed is True
+        assert s.sketchCurves.sketchFixedSplines.item(0).isFixed is True
 
     def test_unresolvable_new_kind_ref_is_a_clean_error(self):
         s = _full_sketch(); _install(s)
@@ -481,3 +507,54 @@ class TestGuards:
         s = _two_line_sketch(); _install(s)
         res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:9")
         assert res["isError"] is True and "line:9" in res["message"]
+
+
+class TestOperandRulesReachTheWire:
+    """Each constraint's operand rule is readable off its own error message."""
+
+    def test_perpendicular_names_two_lines(self):
+        s = _full_sketch(); _install(s)
+        res = sc.handler(constraint="perpendicular", sketch_name="S",
+                         entity_one="line:0", entity_two="spline:0")
+        assert "'perpendicular' takes two lines." in res["message"]
+
+    def test_parallel_names_two_lines(self):
+        s = _full_sketch(); _install(s)
+        res = sc.handler(constraint="parallel", sketch_name="S",
+                         entity_one="line:0", entity_two="ellipse:0")
+        assert "'parallel' takes two lines." in res["message"]
+
+    def test_equal_names_only_lines_arcs_and_circles(self):
+        s = _full_sketch(); _install(s)
+        res = sc.handler(constraint="equal", sketch_name="S",
+                         entity_one="spline:0", entity_two="spline:1")
+        assert "'equal' takes two lines, two arcs, or two circles." in res["message"]
+
+    def test_equal_refuses_two_ellipses_despite_matching_kinds(self):
+        s = _full_sketch(ellipses=[FakeCurve("E0", "ellipse"), FakeCurve("E1", "ellipse")])
+        _install(s)
+        res = sc.handler(constraint="equal", sketch_name="S",
+                         entity_one="ellipse:0", entity_two="ellipse:1")
+        assert res["isError"] is True
+        assert s.geometricConstraints.calls == []
+
+    def test_equal_refuses_two_curves_of_different_kinds(self):
+        # the matching-kind half of the rule: arc+circle is refused live even though both are
+        # legal 'equal' kinds on their own
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="equal", sketch_name="S",
+                         entity_one="arc:0", entity_two="circle:0")
+        assert res["isError"] is True
+        assert s.geometricConstraints.calls == []
+
+    def test_symmetry_refuses_a_non_line_axis(self):
+        s = _two_line_sketch(); _install(s)
+        res = sc.handler(constraint="symmetry", sketch_name="S", entity_one="line:0",
+                         entity_two="line:1", symmetry_line="circle:0")
+        assert res["isError"] is True and "axis line" in res["message"]
+
+    def test_tangent_accepts_an_ellipse(self):
+        s = _full_sketch(); _install(s)
+        out = _payload(sc.handler(constraint="tangent", sketch_name="S",
+                                  entity_one="ellipse:0", entity_two="line:0"))
+        assert out["applied"] == "tangent"

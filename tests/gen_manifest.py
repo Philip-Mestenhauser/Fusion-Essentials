@@ -156,7 +156,7 @@ def _collect_kinds():
 # MAP_BLURB on the module — the same self-disclosing pattern as a kind's MAP_HINT. (test conftest's
 # load_tool is the importer; _data_common etc. import cleanly under mocked adsk.)
 _HELPER_MODULES = ("_common", "_inputs", "_outputs", "_holder", "_data_common", "_cam_common", "_export",
-                   "_joints", "_view_common")
+                   "_joints", "_view_common", "_threads", "_geom")
 
 
 def _collect_helpers():

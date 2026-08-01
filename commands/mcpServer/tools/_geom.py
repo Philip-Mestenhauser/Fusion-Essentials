@@ -20,7 +20,9 @@ MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-d
              "find_geometry and sys_get_selection both need; evaluator_normal_at - the "
              "evaluator.getNormalAtPoint sample find_geometry uses for every face's normal; "
              "body_aabb - the bodies-only (solid+surface+mesh) AABB of an occurrence/component/"
-             "body that model_inspect and assembly_get size reads share")
+             "body that model_inspect and assembly_get size reads share; owning_bodies/volumes/"
+             "volume_delta - the owning-body set and the before/after volume diff every "
+             "material-changing feature verifies its cut with")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
@@ -41,6 +43,41 @@ def body_aabb(entity):
     if callable(bb2):
         return safe(lambda: bb2(_BODY_BBOX_TYPES))
     return safe(lambda: entity.boundingBox)
+
+
+def owning_bodies(faces):
+    """The distinct BRepBodies owning `faces`, in first-seen order, deduped by entityToken - the
+    sample set a face-editing feature reads volume off before and after. A face whose body cannot be
+    read is skipped, so an empty result means no body was reachable."""
+    bodies, seen = [], set()
+    for f in faces:
+        b = safe(lambda f=f: f.body)
+        if b is None:
+            continue
+        key = safe(lambda b=b: b.entityToken) or id(b)
+        if key not in seen:
+            seen.add(key)
+            bodies.append(b)
+    return bodies
+
+
+def volumes(bodies):
+    """{id(body): volume-or-None} - the pre/post sample a material-changing feature compares."""
+    return {id(b): safe(lambda b=b: b.volume) for b in bodies}
+
+
+def volume_delta(bodies, before):
+    """(total cm3 moved, readable) between `before` (from volumes()) and the bodies' volumes NOW.
+    readable is False when no body's volume could be read at both ends, so a caller can tell a real
+    zero from an unmeasurable one instead of reporting an unverified success."""
+    after = volumes(bodies)
+    delta, readable = 0.0, False
+    for b in bodies:
+        vb, va = before.get(id(b)), after.get(id(b))
+        if isinstance(vb, (int, float)) and isinstance(va, (int, float)):
+            readable = True
+            delta += (va - vb)
+    return delta, readable
 
 
 def unit_vector(v, decimals: int = 6):

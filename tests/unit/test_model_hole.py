@@ -47,12 +47,18 @@ class FakeHoleInput:
         self.placed = ("point", sp); return True
     def setPositionBySketchPoints(self, coll):
         self.placed = ("points", list(coll.items)); return True
-    def setPositionAtCenter(self, edge):
-        self.placed = ("center", edge); return True
-    def setPositionOnEdge(self, edge, offset):
-        self.placed = ("on_edge", (edge, offset)); return True
-    def setPositionByPlaneAndOffsets(self, plane, edge_one, offset_one, edge_two, offset_two):
-        self.placed = ("plane_offsets", (plane, edge_one, offset_one, edge_two, offset_two)); return True
+    def setPositionAtCenter(self, planar_entity, center_edge):
+        assert planar_entity == "FACE"
+        assert isinstance(center_edge, BRepEdge)
+        self.placed = ("center", (planar_entity, center_edge)); return True
+    def setPositionOnEdge(self, planar_entity, edge, position):
+        assert planar_entity == "FACE"
+        assert isinstance(edge, BRepEdge)
+        self.placed = ("on_edge", (planar_entity, edge, position)); return True
+    def setPositionByPlaneAndOffsets(self, *args):
+        assert len(args) in (4, 6)
+        assert args[0] == "FACE"
+        self.placed = ("plane_offsets", args); return True
     def setDistanceExtent(self, v):
         self.extent = ("distance", v); return True
     def setAllExtent(self, direction):
@@ -61,6 +67,17 @@ class FakeHoleInput:
         self.tap = ti; self.holeTapType = 2; return True
     def setToClearanceHole(self, chi):
         self.clearance = chi; return True
+
+
+class _Param:
+    def __init__(self, value):
+        self.value = value
+
+
+def _deg_to_rad(tip):
+    """The fake's tipAngle input is ('V', '<n> deg'); a live ModelParameter reads radians."""
+    import math as _m
+    return _m.radians(float(str(tip[1]).split()[0]))
 
 
 class _Axis:
@@ -89,10 +106,18 @@ class _FaceColl:
 class FakeHoleFeature:
     """Mirrors the live partial-failure shape: a point that misses the body creates NO faces, yet
     add() still returns the feature with only a warning ('N Reference Failures' - live-verified)."""
-    def __init__(self, inp, miss_indices=()):
+    def __init__(self, inp, miss_indices=(), modeled_readback=True):
+        modeled_readback = inp.isModeled if modeled_readback is True else modeled_readback
         self.name = "Hole1"
         self._inp = inp
         self.deleted = False
+        # A live HoleFeature reports these back, and each lives on a DIFFERENT object: the tap
+        # designation on tappedHoleInfo, the helix flag on the thread feature a tapped hole also
+        # creates, and the tip angle as a ModelParameter carrying RADIANS.
+        self.tappedHoleInfo = inp.tap
+        self.thread = (type("T", (), {"isModeled": modeled_readback})()
+                       if inp.tap and modeled_readback is not None else None)
+        self.tipAngle = _Param(_deg_to_rad(inp.tipAngle)) if inp.tipAngle else None
         kind = inp.placed[0]
         if kind == "points":
             pts = inp.placed[1]
@@ -118,6 +143,9 @@ class FakeHoleFeatures:
     def __init__(self):
         self.added = []
         self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
+        # True echoes the input; a bool models a flag that read back different; None models one
+        # that could not be read at all
+        self.modeled_readback = True
     def __bool__(self):
         # a real Fusion collection is FALSY when empty (count==0). The tool must test `is None`,
         # not `not holes`, or an empty-but-valid HoleFeatures collection is wrongly rejected.
@@ -133,23 +161,35 @@ class FakeHoleFeatures:
     def add(self, inp):
         if inp.placed is None or inp.extent is None:
             raise RuntimeError("InternalValidationError : logicalSelection")
-        f = FakeHoleFeature(inp, miss_indices=self.miss_indices); self.added.append(f); return f
+        f = FakeHoleFeature(inp, miss_indices=self.miss_indices,
+                            modeled_readback=self.modeled_readback)
+        self.added.append(f); return f
 
 
 class _ThreadInfo:
     def __init__(self, internal, ttype, desig, cls):
         self.internal, self.ttype, self.desig, self.cls = internal, ttype, desig, cls
+        # the live ThreadInfo's own member names, which the read-back path reads
+        self.threadDesignation = desig
+        self.threadType = ttype
 
 
 class FakeThreadDataQuery:
+    """The thread library the shared resolver walks. Shaped as it reads live: a designation can sit
+    in SEVERAL types - 'M5x0.5' is in both metric profiles here, as 540 of the 1510 live
+    designations are - while 'M5x0.8' and the inch call-out sit in exactly one."""
     def __init__(self):
-        self.types = ["ANSI Metric M Profile", "ANSI Unified Screw Threads"]
+        self.types = ["ANSI Metric M Profile", "ISO Metric profile", "ANSI Unified Screw Threads"]
     @property
     def allThreadTypes(self):
         return tuple(self.types)
     def allSizes(self, t):
         return ("5.0", "6.0")
     def allDesignations(self, t, size):
+        if t == "ANSI Unified Screw Threads":
+            return ("1/4-20 UNC",) if size.startswith("5") else ()
+        if t == "ISO Metric profile":
+            return ("M5x0.5",) if size.startswith("5") else ()
         return ("M5x0.8", "M5x0.5") if size.startswith("5") else ("M6x1",)
     def allClasses(self, internal, t, desig):
         return ("6H",) if internal else ("6g",)
@@ -159,6 +199,9 @@ class FakeThreadFeatures:
     def __init__(self):
         self.threadDataQuery = FakeThreadDataQuery()
         self.created = []
+    def __len__(self):
+        # a live ThreadFeatures collection is falsy while empty
+        return len(self.created)
     def createThreadInfo(self, internal, ttype, desig, cls):
         ti = _ThreadInfo(internal, ttype, desig, cls); self.created.append(ti); return ti
 
@@ -251,9 +294,9 @@ def _install():
     # additive-placement resolvers — default to a circular edge (so placement='center' works
     # out of the box); a test that needs a different shape overrides the seam directly.
     mh._resolve_edge = lambda d, h: (BRepEdge(Circle3D(None)), None)
-    mh._resolve_plane = lambda d, h: ("PLANE", None)
-    mh._resolve_offset_edge_one = lambda d, h: ("EDGE1", None)
-    mh._resolve_offset_edge_two = lambda d, h: ("EDGE2", None)
+    # setPositionByPlaneAndOffsets measures from LINEAR edges, so the defaults are straight ones
+    mh._resolve_offset_edge_one = lambda d, h: (BRepEdge(Line3D()), None)
+    mh._resolve_offset_edge_two = lambda d, h: (BRepEdge(Line3D()), None)
     # ObjectCollection + ValueInput + ExtentDirections seams
     mh._object_collection = _ObjColl.create
     mh._value = lambda s: ("V", s)
@@ -553,9 +596,8 @@ class TestClearanceFastener:
 
 # ── additive placement modes: center / on_edge / plane_offsets ──────────────────────────────────
 #
-# The sketch-point path (default 'sketch_points') is unchanged and stays covered above. These modes
-# skip the placement sketch entirely and call setPositionAtCenter/setPositionOnEdge/
-# setPositionByPlaneAndOffsets directly - so 'face'/'points' must NOT be required for them.
+# HoleFeatureInput.setPositionAtCenter/setPositionOnEdge/setPositionByPlaneAndOffsets each take the
+# planar entity ('face') as their first argument (fusion.py bindings).
 
 class TestPlacementModes:
     def test_unknown_placement_errors(self):
@@ -582,56 +624,92 @@ class TestPlacementModes:
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
                                   placement="center", edge="e1"))
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
-        assert inp.placed == ("center", edge_obj)
+        assert inp.placed == ("center", ("FACE", edge_obj))
         assert out["holes"] == 1 and out["placement"] == "center"
 
     def test_on_edge_missing_edge_errors(self):
         _install()
         res = mh.handler(hole_type="simple", diameter="5 mm", extent="through", placement="on_edge",
-                         edge_offset="5 mm")
+                         edge_position="start")
         assert res["isError"] is True and "edge" in res["message"].lower()
 
-    def test_on_edge_missing_offset_errors(self):
+    def test_on_edge_missing_position_errors(self):
         _install()
         res = mh.handler(hole_type="simple", diameter="5 mm", extent="through", placement="on_edge",
                          edge="e1")
-        assert res["isError"] is True and "edge_offset" in res["message"].lower()
+        assert res["isError"] is True and "edge_position" in res["message"].lower()
 
     def test_on_edge_happy_path(self):
         d = _install()
         edge_obj = BRepEdge(Line3D())
         mh._resolve_edge = lambda d_, h: (edge_obj, None)
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
-                                  placement="on_edge", edge="e1", edge_offset="5 mm"))
+                                  placement="on_edge", edge="e1", edge_position="middle"))
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
         assert inp.placed[0] == "on_edge"
-        edge_arg, offset_arg = inp.placed[1]
+        face_arg, edge_arg, pos_arg = inp.placed[1]
+        assert face_arg == "FACE"
         assert edge_arg is edge_obj
-        assert offset_arg == ("V", "5 mm")
+        assert pos_arg is mh.adsk.fusion.HoleEdgePositions.EdgeMidPointPosition
         assert out["holes"] == 1
 
-    def test_plane_offsets_missing_inputs_errors(self):
+    def test_plane_offsets_missing_point_errors(self):
         _install()
         res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
-                         placement="plane_offsets", plane="xy")
-        assert res["isError"] is True
-        assert "offset_edge_one" in res["message"]
+                         placement="plane_offsets", offset_edge_one="e1", offset_one="4 mm")
+        assert res["isError"] is True and "point" in res["message"].lower()
 
-    def test_plane_offsets_happy_path(self):
+    def test_plane_offsets_missing_offset_one_errors(self):
+        _install()
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="plane_offsets", point=[1, 2, 0])
+        assert res["isError"] is True and "offset_edge_one" in res["message"]
+
+    def test_plane_offsets_offset_two_needs_its_edge(self):
+        _install()
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="plane_offsets", point=[1, 2, 0],
+                         offset_edge_one="e1", offset_one="4 mm", offset_two="6 mm")
+        assert res["isError"] is True
+        assert "offset_edge_two" in res["message"] and "offset_two" in res["message"]
+
+    def test_plane_offsets_one_edge_happy_path(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create",
+                            staticmethod(lambda x, y, z: FakePoint(x, y, z)))
         d = _install()
+        e1 = BRepEdge(Line3D())
+        mh._resolve_offset_edge_one = lambda d_, h: (e1, None)
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", extent="through",
-                                  placement="plane_offsets", plane="xy", offset_edge_one="e1",
-                                  offset_one="4 mm", offset_edge_two="e2", offset_two="6 mm"))
+                                  placement="plane_offsets", point=[1, 2, 0],
+                                  offset_edge_one="e1", offset_one="4 mm"))
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
         assert inp.placed[0] == "plane_offsets"
-        plane_arg, e1, o1, e2, o2 = inp.placed[1]
-        assert plane_arg == "PLANE" and e1 == "EDGE1" and e2 == "EDGE2"
-        assert o1 == ("V", "4 mm") and o2 == ("V", "6 mm")
+        args = inp.placed[1]
+        assert len(args) == 4
+        assert args[0] == "FACE"
+        assert (args[1].x, args[1].y, args[1].z) == (0.1, 0.2, 0.0)   # mm -> cm, factor 0.1
+        assert args[2] is e1 and args[3] == ("V", "4 mm")
         assert out["holes"] == 1
 
-    def test_non_sketch_placement_ignores_face_and_points(self):
-        # placement != 'sketch_points' never builds a placement sketch, even if 'face'/'points'
-        # happen to be omitted (the default path's requirements don't leak into these modes).
+    def test_plane_offsets_two_edges_happy_path(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create",
+                            staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+        d = _install()
+        e1, e2 = BRepEdge(Line3D()), BRepEdge(Line3D())
+        mh._resolve_offset_edge_one = lambda d_, h: (e1, None)
+        mh._resolve_offset_edge_two = lambda d_, h: (e2, None)
+        mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                   placement="plane_offsets", point=[1, 2, 0],
+                   offset_edge_one="e1", offset_one="4 mm",
+                   offset_edge_two="e2", offset_two="6 mm")
+        args = d.rootComponent.features.holeFeatures.added[0]._inp.placed[1]
+        assert len(args) == 6
+        assert args[2] is e1 and args[3] == ("V", "4 mm")
+        assert args[4] is e2 and args[5] == ("V", "6 mm")
+
+    def test_non_sketch_placement_skips_the_sketch(self):
         d = _install()
         edge_obj = BRepEdge(Circle3D(None))
         mh._resolve_edge = lambda d_, h: (edge_obj, None)
@@ -640,9 +718,6 @@ class TestPlacementModes:
         assert d.rootComponent.sketches.created_on == []
 
     def test_center_miss_rolls_back_and_errors(self):
-        # a placement that misses the target body creates NO faces (count==0), which _drill_axes
-        # treats as a VERIFIED zero - the honesty check must still catch and roll it back for the
-        # non-sketch placement modes, not just the sketch-point path.
         d = _install()
         edge_obj = BRepEdge(Circle3D(None))
         mh._resolve_edge = lambda d_, h: (edge_obj, None)
@@ -681,46 +756,9 @@ class TestModeledThread:
         assert out["modeled"] is False
 
 
-# ── tap type (straight / taper) ──────────────────────────────────────────────────────────────────
-
-class TestTapType:
-    def test_tap_type_without_tap_errors(self):
-        _install()
-        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
-                         extent="through", tap_type="straight")
-        assert res["isError"] is True and "tap_type" in res["message"].lower()
-
-    def test_unknown_tap_type_errors(self):
-        _install()
-        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
-                         extent="blind", depth="10 mm", tap="M5x0.8", tap_type="bogus")
-        assert res["isError"] is True and "tap_type" in res["message"].lower()
-
-    def test_tap_type_maps_to_the_real_hole_tap_members(self):
-        # HoleTapTypes carries Tapped/TaperTapped (live-dump verified) - straight and taper must
-        # land on those two distinct members, not phantom Simple/Tapered spellings.
-        d = _install()
-        mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[5, 3, 0]],
-                   extent="blind", depth="12 mm", tap="M5x0.8", tap_type="straight")
-        straight_val = d.rootComponent.features.holeFeatures.added[0]._inp.holeTapType
-        assert straight_val is mh.adsk.fusion.HoleTapTypes.TappedHoleTapType
-
-        d2 = _install()
-        mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[5, 3, 0]],
-                   extent="blind", depth="12 mm", tap="M5x0.8", tap_type="taper")
-        taper_val = d2.rootComponent.features.holeFeatures.added[0]._inp.holeTapType
-        assert taper_val is mh.adsk.fusion.HoleTapTypes.TaperTappedHoleTapType
-
-
-# ── drill tip angle (blind holes only) ───────────────────────────────────────────────────────────
+# ── drill tip angle ───────────────────────────────────────────────────────────────────────────────
 
 class TestTipAngle:
-    def test_tip_angle_with_through_extent_errors(self):
-        _install()
-        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
-                         extent="through", tip_angle="118 deg")
-        assert res["isError"] is True and "tip_angle" in res["message"].lower()
-
     def test_tip_angle_blind_sets_value(self):
         d = _install()
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
@@ -728,3 +766,95 @@ class TestTipAngle:
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
         assert inp.tipAngle == ("V", "118 deg")
         assert out["tip_angle"] == "118 deg"
+
+    def test_tip_angle_sets_value_on_a_through_hole_too(self):
+        d = _install()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
+                                  extent="through", tip_angle="90 deg"))
+        inp = d.rootComponent.features.holeFeatures.added[0]._inp
+        assert inp.tipAngle == ("V", "90 deg")
+        assert out["tip_angle"] == "90 deg"
+
+
+class TestPlacementGuardsBite:
+    def test_a_circular_offset_edge_is_refused_naming_the_input(self):
+        _install()
+        mh._resolve_offset_edge_one = lambda d_, h: (BRepEdge(Circle3D(None)), None)
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="plane_offsets", point=[1, 2, 0],
+                         offset_edge_one="e1", offset_one="4 mm")
+        assert res["isError"] is True
+        assert "offset_edge_one" in res["message"] and "circular" in res["message"]
+
+    def test_a_circular_second_offset_edge_is_refused_naming_the_input(self):
+        _install()
+        mh._resolve_offset_edge_one = lambda d_, h: (BRepEdge(Line3D()), None)
+        mh._resolve_offset_edge_two = lambda d_, h: (BRepEdge(Circle3D(None)), None)
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="plane_offsets", point=[1, 2, 0],
+                         offset_edge_one="e1", offset_one="4 mm",
+                         offset_edge_two="e2", offset_two="6 mm")
+        assert res["isError"] is True
+        assert "offset_edge_two" in res["message"]
+
+    def test_an_unresolvable_face_is_refused_under_a_non_sketch_placement(self):
+        d = _install()
+        mh._resolve_face = lambda d_, h: (None, "no planar face for that handle")
+        mh._resolve_edge = lambda d_, h: (BRepEdge(Circle3D(None)), None)
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="center", edge="e1")
+        assert res["isError"] is True and "planar face" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+
+class TestTapReadBackIsHonest:
+    def test_a_tap_that_did_not_take_is_error(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        orig = hf.add
+        def _untapped(inp):
+            f = orig(inp); f.tappedHoleInfo = None; return f
+        hf.add = _untapped
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
+                         extent="through", tap="M5x0.8")
+        assert res["isError"] is True
+        assert "carries no tap" in res["message"] and "Hole1" in res["message"]
+
+    def test_a_tap_that_reads_back_a_different_designation_is_error(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        orig = hf.add
+        def _other(inp):
+            f = orig(inp); f.tappedHoleInfo.threadDesignation = "M6x1"; return f
+        hf.add = _other
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
+                         extent="through", tap="M5x0.8")
+        assert res["isError"] is True and "'M6x1'" in res["message"]
+
+    def test_a_modeled_flag_that_reads_back_different_is_error(self):
+        d = _install()
+        d.rootComponent.features.holeFeatures.modeled_readback = False
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
+                         extent="through", tap="M5x0.8", modeled=True)
+        assert res["isError"] is True
+        assert "modeled" in res["message"] and "cosmetic" in res["message"]
+
+    def test_an_ambiguous_designation_discloses_the_alternatives(self):
+        _install()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[1, 2, 0]], extent="through", tap="M5x0.5"))
+        assert out["thread_type"] == "ANSI Metric M Profile"
+        assert out["thread_type_alternatives"] == ["ANSI Metric M Profile", "ISO Metric profile"]
+
+    def test_thread_type_picks_the_standard(self):
+        _install()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[1, 2, 0]], extent="through", tap="M5x0.5",
+                                  thread_type="ISO Metric profile"))
+        assert out["thread_type"] == "ISO Metric profile"
+
+    def test_an_unambiguous_designation_reports_no_alternatives(self):
+        _install()
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[1, 2, 0]], extent="through", tap="M5x0.8"))
+        assert "thread_type_alternatives" not in out

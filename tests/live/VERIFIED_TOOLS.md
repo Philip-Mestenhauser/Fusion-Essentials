@@ -15,9 +15,9 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 | Fusion 2704.1.39 | verified 2026-08-01
+Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 | Fusion 2704.1.39 | verified 2026-08-01
 
-122 covered / 25 skipped(reason) / 0 pending
+126 covered / 25 skipped(reason) / 0 pending
 
 | tool | status | step (the demo's shot list) |
 |---|---|---|
@@ -70,6 +70,7 @@ Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 |
 | doc_copy | skipped: cloud write (opt-in tier) |  |
 | doc_get | covered | read the document identity before discarding |
 | doc_insert_derive | skipped: needs an ALREADY-OPEN saved cloud source to derive from (opt-in tier) |  |
+| doc_insert_import | covered | re-import that STEP from disk into the live design |
 | doc_insert_occurrence | skipped: needs a saved cloud source in-project (opt-in tier) |  |
 | doc_new | covered | open the one document the whole gyroscope lives in |
 | doc_open | skipped: opens cloud files; can wedge on CAM templates (opt-in tier) |  |
@@ -108,12 +109,13 @@ Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 |
 | model_draft | covered | draft a cameo face |
 | model_extrude | covered | extrude the ring bands symmetric about the ring plane |
 | model_fillet | covered | fillet the outer ring edge |
-| model_hole | covered | drill a cameo mounting hole |
+| model_hole | covered | drill a cameo mounting hole, then the three additive placements - centred on its rim, on an edge at middle and at start, and by plane offsets; a circular offset edge refused |
 | model_inspect | covered | read the rotor's volume back |
 | model_loft | covered | loft the pedestal base-to-post transition |
 | model_measure_between | covered | measure the outer-ring-to-inner-ring gap |
 | model_measure_relation | covered | read rotor/shaft coaxiality |
 | model_mirror | covered | mirror a cameo body |
+| model_move | covered | translate, along-axis, rotate and point-to-point move features on a scratch block, each checked against the distance it was asked for; a face as the axis and any faces selection refused |
 | model_offset_face | covered | push a scratch block's top face outward |
 | model_pattern_circular | covered | circular-pattern a cameo body |
 | model_pattern_rectangular | covered | rectangular-pattern a cameo body |
@@ -124,6 +126,7 @@ Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 |
 | model_split | covered | split a scratch pin by a plane |
 | model_stitch | covered | re-stitch two faces |
 | model_sweep | covered | sweep the crank handle along its path |
+| model_thread | covered | thread a scratch post M10x1.5 over part of its length with the extent read back, an explicit thread standard with its alternatives disclosed, and a modeled thread on a second post proving it cut material; an unknown call-out, an offset with no length, and a modeled call-out too big for the cylinder all refused |
 | model_unstitch | covered | unstitch a scratch box's faces |
 | param_add | covered | add GimbalDia and the derived ring/rotor radii |
 | param_delete | covered | delete a scratch parameter |
@@ -141,6 +144,7 @@ Stamp: source e2539c51e99e493137da3355c1d40327545e6d306339faf8f877fabfda5280b7 |
 | sketch_create | covered | draw each part's sketch on its plane |
 | sketch_delete_entity | covered | delete a helper constraint; count drops |
 | sketch_dimension | covered | drive ring/rotor radii by parameter expression |
+| sketch_edit_curve | covered | trim, extend, split, fillet, chamfer and offset on one scratch sketch per action, with length read-backs; split's two halves must carry distinct ids; a chamfer across an offset pair refused |
 | sketch_get | covered | read the skeleton and ring profiles back |
 | sketch_project | covered | project the machining boundary |
 | sketch_set_text | covered | engrave the FUSION ESSENTIALS nameplate |

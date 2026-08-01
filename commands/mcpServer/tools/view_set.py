@@ -232,9 +232,11 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             angle_deg = float(perspective_angle_deg)
         except (TypeError, ValueError):
             return error(f"'perspective_angle_deg' must be a number (got '{perspective_angle_deg}').")
-        if not 0 < angle_deg < 180:
-            return error("'perspective_angle_deg' is a field-of-view angle and must be greater "
-                         f"than 0 and less than 180 (got {angle_deg}).")
+        # The field-of-view range Fusion's setter actually accepts, live-measured: 1.0 is accepted
+        # and 0.99 raises; 149.99 is accepted and 150 raises ("3 : Invalid parameter value").
+        if not 1 <= angle_deg < 150:
+            return error("'perspective_angle_deg' is a field-of-view angle Fusion accepts from 1 "
+                         f"to just under 150 degrees (got {angle_deg}).")
         # The angle is only meaningful on a perspective camera: honour an explicit 'projection',
         # else read the camera's current type rather than assuming one.
         if want_key:
@@ -609,7 +611,7 @@ tool = (
             description="Camera projection for 'orient'.").as_property())
     .add_input_property("perspective_angle_deg", {"type": "number",
             "description": "Field-of-view angle in degrees for a perspective 'orient' "
-                           "(over 0, under 180)."})
+                           "(1 to just under 150)."})
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
             description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",

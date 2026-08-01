@@ -53,7 +53,7 @@ TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 # NOT swept: …Options families - those are factory-OBJECT classes (…Options.create()), not int
 # enums, so they carry no members to dump. A family is only counted from a REAL reference, never a
 # comment (a stale name in a comment must not drive a live measurement).
-_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam)\.([A-Za-z]*(?:Types|States|Modes|Directions))\b")
+_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam)\.([A-Za-z]*(?:Types|States|Modes|Directions|Locations|Positions))\b")
 
 
 def referenced_enum_families():
