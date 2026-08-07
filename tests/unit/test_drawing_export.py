@@ -439,6 +439,19 @@ class TestWaitForFile:
         assert err is None
         assert size == len("SETTLED")
 
+    def test_a_file_that_keeps_growing_times_out_in_this_tools_own_wording(self, tmp_path,
+                                                                          monkeypatch):
+        # the size never settles across two samples, so the bounded wait gives up - and the give-up
+        # sentence is drawing_export's own, not the shared pump's.
+        path = tmp_path / "growing.pdf"
+        path.write_text("x")
+        monkeypatch.setattr(de, "_LAND_DEADLINE_S", 0.05)
+        monkeypatch.setattr(adsk, "doEvents",
+                            lambda: path.write_text(path.read_text() + "xx"), raising=False)
+        size, err = de._wait_for_file(str(path))
+        assert size == 0
+        assert "still growing" in err and str(path) in err
+
     def test_the_shipped_wait_is_long_enough_for_the_measured_landing(self):
         # The measured in-call landing is ~3s; a wait that short would false-fail a real export.
         assert _SHIPPED_DEADLINE_S >= 10

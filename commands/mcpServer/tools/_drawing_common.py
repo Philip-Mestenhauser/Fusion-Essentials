@@ -9,11 +9,28 @@ from ._common import safe
 MAP_BLURB = (
     "active_drawing (the ONE active-document -> Drawing read every drawing tool gates on - "
     "None when the active document is not a drawing), sheet_units (the ONE "
-    "documentSettings.units decode -> 'mm' / 'in' / None, never a guessed default), "
+    "documentSettings.units decode -> the drawing's DIMENSION display unit 'mm' / 'in' / None, "
+    "never a guessed default - it does NOT describe Sheet.width/height), SHEET_EXTENT_UNIT (the "
+    "ONE honest label for Sheet.width/height: 'mm' on EVERY drawing, a constant fact, not a read), "
+    "enum_value (the ONE adsk.drawing enum member read BY NAME -> its value, None on a build "
+    "carrying neither the family nor the member), standard_label (the ONE documentSettings.standard "
+    "decode -> 'iso' / 'asme' / None), "
+    "NO_PORTRAIT (the ONE measured (standard, sheet size) table Fusion refuses portrait on), "
     "resolve_sheet (the ONE sheet-by-name resolver: case-insensitive EXACT - sheet names are "
     "measured case-insensitively unique, a duplicate add RAISES and a duplicate rename "
     "silently no-ops - a miss returns the available names)"
 )
+
+# Sheet.width/height are MILLIMETRES on every drawing, ISO and ASME alike: an ASME B sheet (17 x 11
+# inches) reads 431.8 x 279.4. documentSettings.units - what sheet_units decodes - is the DIMENSION
+# display unit and says nothing about those two numbers, so a payload labels them with THIS.
+SHEET_EXTENT_UNIT = "mm"
+
+# The (standard, sheet size) pairs Fusion refuses portrait on, both measured from its own words:
+# ISO A0 answers "Portrait orientation is not supported for ISO A0 sheet size." and ASME E answers
+# "3 : Portrait orientation is not supported for ASME E sheet size.". A raise inside a drawing
+# document is not reliably rolled back, so both consumers pre-guard on this table instead.
+NO_PORTRAIT = {("iso", "a0"), ("asme", "e")}
 
 
 def active_drawing():
@@ -24,10 +41,12 @@ def active_drawing():
 
 
 def sheet_units(dwg):
-    """'mm' or 'in' from the drawing's own documentSettings.units; None when unreadable.
+    """The drawing's DIMENSION display unit - 'mm' or 'in' from its own documentSettings.units;
+    None when unreadable.
 
-    A None is published as null, never replaced with a guessed 'mm' - the caller cannot
-    recover a wrong unit claim.
+    This is the unit dimensions are displayed in, NOT the unit Sheet.width/height come back in
+    (those are millimetres on every drawing - see SHEET_EXTENT_UNIT). A None is published as null,
+    never replaced with a guessed 'mm' - the caller cannot recover a wrong unit claim.
     """
     units = safe(lambda: dwg.documentSettings.units)
     if units is None:
@@ -38,6 +57,33 @@ def sheet_units(dwg):
         return "mm"
     if inch is not None and units == inch:
         return "in"
+    return None
+
+
+def enum_value(cls_name, member):
+    """One adsk.drawing enum member's value by NAME, or None when this Fusion build lacks it.
+
+    Both the family and the member are looked up by name: a build without either answers None
+    here instead of raising into the caller's read.
+    """
+    return safe(lambda: getattr(getattr(adsk.drawing, cls_name), member))
+
+
+def standard_label(dwg):
+    """'iso' or 'asme' from the drawing's own documentSettings.standard; None when unreadable.
+
+    DrawingStandardTypes carries exactly these two members, and the standard is fixed at creation
+    (documentSettings.standard has no setter). Fusion refuses a sheet size belonging to the other
+    standard, and refuses portrait on the standard's largest sheet, so this read is what those two
+    guards turn on.
+    """
+    value = safe(lambda: dwg.documentSettings.standard)
+    if value is None:
+        return None
+    for key, member in (("iso", "ISODrawingStandardType"), ("asme", "ASMEDrawingStandardType")):
+        known = enum_value("DrawingStandardTypes", member)
+        if known is not None and value == known:
+            return key
     return None
 
 

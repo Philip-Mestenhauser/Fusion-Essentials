@@ -256,8 +256,10 @@ def _import_svg(mgr, design, path, sketch):
         "into": f"sketch '{sketch_name}'",
         "objects_created": len(objects),
         "curves_added": after - before,
-        "note": ("SVG curves landed in the sketch. They import at the SVG's own scale - measure one "
-                 "with model_measure_between and scale the sketch if the size is wrong."),
+        "note": ("SVG curves landed in the sketch at 1/96 inch per SVG unit (measured: a 96-unit "
+                 "square lands 25.4 mm), with SVG's y-down axis landing as NEGATIVE sketch y. "
+                 "Measure one curve with model_measure_between and scale the sketch if the size "
+                 "is wrong."),
     })
 
 

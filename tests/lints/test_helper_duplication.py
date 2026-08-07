@@ -49,6 +49,14 @@ _DENYLIST = {
     "sanitize": ("_export", "def"),
     "component_by_name": ("_export", "def"),
     "verify_written": ("_export", "def"),
+    # The ONE clock-bounded doEvents-pumping wait an async Fusion write is gated on - one home so
+    # the bound, the pump and the give-up cannot be right in one export tool and stale in the next.
+    "pump_until": ("_export", "def"),
+    # The ONE adsk.drawing enum member read BY NAME (None on an absent family/member, never a
+    # raise) and the ONE drawing-standard decode - behaviorally identical re-rolls survive every
+    # test, so this entry is the only thing that keeps them from coming back.
+    "enum_value": ("_drawing_common", "def"),
+    "standard_label": ("_drawing_common", "def"),
     "ptxyz": ("_common", "def"),
     "target_sketch": ("_common", "def"),
     "resolve_or_recent_sketch": ("_common", "def"),

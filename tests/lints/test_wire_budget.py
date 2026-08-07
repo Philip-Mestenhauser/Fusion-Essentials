@@ -95,9 +95,9 @@ _TOOL_WEIGHTS = {
     "doc_save_as": 1834,
     "doc_update_xref": 1266,
     "drawing_add_sketch": 1892,   # over P40 (1364): five 2D factories with different point arities are the contract (the kind enum is schema-checked, the per-kind arity cannot be), plus two caller-unrecoverable facts - coordinates are drawing units not cm, and Drawing.deleteEntities raises not-implemented so a sheet's geometry must go in one call; in-family peers drawing_edit_sheet, sketch_add_geometry
-    "drawing_create": 4449,   # parts-list, from-template, custom sheet size, hole annotations, drafting display; every enum-backed setting resolves fail-fast against the measured member tables
+    "drawing_create": 4486,   # +37: center_line/center_mark now state the refusal their resolver enforces instead of advertising a capability adsk.drawing carries no enum family for; 14 under the hard ceiling
     "drawing_dimension": 1364,   # at the fleet P40 (1364) - add and go
-    "drawing_edit_sheet": 1857,   # over P40 (1364): seven actions over one object - the add/copy/delete/rename lifecycle, size and orientation (each with the refusal Fusion raises on, pre-guarded), and tidy_up; the add-vs-copy inheritance split is a measured wire claim
+    "drawing_edit_sheet": 1944,   # +87: Sheet.width/height are millimetres on EVERY drawing while sheet_units is the dimension unit - the two are told apart on the wire, and a caller cannot recover a wrong unit claim
     "drawing_export": 1948,   # + the dxf/dwg formats, their factories and extensions, and three format-scoped inputs (dwg_variant enum, splines_as_splines, and the PDF-only scoping on sheet_range/line_weights)
     "drawing_insert_image": 1308,   # under the fleet P40 (1364) - add and go
     "drawing_update": 1274,
@@ -148,7 +148,7 @@ _TOOL_WEIGHTS = {
     "model_pattern_path": 1987,   # the family's occurrence+body target pair plus the path selector (edge handles or a path sketch) and the distance/distance_type/start_point run controls
     "model_pattern_rectangular": 2225,   # the two direction inputs carry the AxisRef contract (a world axis OR a straight-edge/sketch-line handle) instead of a bare x/y/z enum
     "model_replace_face": 1287,   # under the fleet P40 (1373) - add and go
-    "model_revolve": 2309,
+    "model_revolve": 2329,   # +20: the axis-defining face family named on the wire (cylindrical/conical/toroidal, each measured accepted), the fact a caller cannot recover from a refusal
     "model_scale": 2039,   # two scale modes (uniform + three per-axis factors), anchor input, unitless-expression guard, resolved-value echo; + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)
     "model_set_material": 1346,
     "model_shell": 1741,

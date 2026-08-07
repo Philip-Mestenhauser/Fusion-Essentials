@@ -2,15 +2,22 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Export-to-disk substrate: filename sanitizing, a component-by-name resolver, a file-landed
-verifier, and the one-file-per-top-level-occurrence split orchestration."""
+verifier, the bounded doEvents wait an asynchronous write lands under, and the
+one-file-per-top-level-occurrence split orchestration."""
 
 import os
+import time
+
+import adsk.core
 
 from ._common import safe, all_components
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk "
-             "substrate shared by design_export + mesh_export")
+             "substrate shared by design_export + mesh_export; pump_until - the shared "
+             "CLOCK-BOUNDED doEvents-pumping wait for an asynchronous write (the caller passes its "
+             "own probe - a file appearing, a size going stable, a version tip advancing - and "
+             "words its own give-up); a TRY-COUNT-bounded pump stays local")
 
 
 def sanitize(name):
@@ -39,6 +46,26 @@ def verify_written(path):
     if not exists or not size:
         return 0, f"no file was written to '{path}' (file_exists={exists}, size_bytes={size})"
     return size, None
+
+
+def pump_until(probe, timeout_s, poll_sleep):
+    """Pump the main thread until probe() reports its signal settled, bounded by timeout_s.
+
+    An asynchronous Fusion write (a setup sheet, an exported drawing, a cloud version) only advances
+    while the main thread is pumped, so the wait pumps adsk.doEvents rather than sleeping through it.
+    probe() -> (settled, reading): the caller's OWN signal and whatever it just read. Returns
+    (settled, reading) with the LAST reading either way, so a caller words its give-up from what it
+    actually read. probe() runs BEFORE the first pump and once more after every pump; the bound is
+    checked between the two, so a probe that is already settled costs no pump at all."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        settled, reading = probe()
+        if settled:
+            return True, reading
+        if time.monotonic() >= deadline:
+            return False, reading
+        safe(lambda: adsk.doEvents())
+        time.sleep(poll_sleep)
 
 
 def top_level_occurrences(design):

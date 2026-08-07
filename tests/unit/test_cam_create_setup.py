@@ -178,6 +178,20 @@ class TestModelSelection:
         res = cs.handler()
         assert res["isError"] is True and "body" in res["message"].lower()
 
+    def test_the_refusal_describes_the_set_the_walk_actually_takes(self, monkeypatch):
+        # The default set is every root BRep body, so a refusal claiming SOLID bodies would send a
+        # caller looking for a filter the tool does not apply. It names the way out instead.
+        _install(monkeypatch, bodies=[])
+        msg = cs.handler()["message"]
+        assert "solid" not in msg.lower()
+        assert "'models'" in msg and "sub-component" in msg
+
+    def test_the_description_claims_the_same_default_set_as_the_walk(self):
+        # The wire claim and the walk are one fact - a description promising SOLID bodies while the
+        # walk returns every BRep body is the mismatch a caller cannot see.
+        assert "omit for EVERY body in the root component" in cs.TOOL_DESCRIPTION
+        assert "solid" not in cs.TOOL_DESCRIPTION.lower()
+
 
 # ── naming + guards ──────────────────────────────────────────────────────────
 

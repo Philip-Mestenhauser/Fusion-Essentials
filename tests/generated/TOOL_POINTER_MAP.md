@@ -802,15 +802,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not prepare destination path '
 
 ### `doc_save_milestone`
-- saveMilestone returned true but the cloud tip has NOT advanced after
-- s of re-fetching (latest reads
-- ). A real milestone save's new version is visible on a fresh fetch at 4.4s (measured), so this is the signature of a save that versioned nothing - the same result an unmodified document gives. Chec...
 - Provide 'milestone_name'. Fusion accepts an empty name and invents one, but an unnamed milestone cannot be found by name in the version history afterwards.
 - No active document to milestone.
 - The active document has never been saved to the cloud (no DataFile), and saveMilestone cannot create one. Save it first with doc_save_as, then milestone the next change.
 - ' has no unsaved changes. On an unmodified document saveMilestone reports success but creates NO version and NO milestone, so this call is refused instead of returning a false success. This tool on...
 - saveMilestone returned false for milestone '
 - '; no version and no milestone were created.
+- saveMilestone returned true, but
+- - so whether a NEW version was created is not decidable here (the fresh read after the save reports
+- ). Read the history back with doc_get include=['versions'].
+- saveMilestone returned true but the cloud tip has NOT advanced after
+- s of re-fetching (latest reads
+- ). A real milestone save's new version is visible on a fresh fetch at 4.4s (measured), so this is the signature of a save that versioned nothing - the same result an unmodified document gives. Chec...
 - was created and IS the milestone '
 - ' (confirmed on a fresh read of the cloud file). Read the history back with doc_get include=['versions'].
 - yet. A milestone becomes readable
@@ -1581,7 +1584,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not start revolve:
 - . (The axis must not pass through the profile in a way that self-intersects.)
 - Could not set revolve angle:
-- . (A 'cut'/'intersect' needs existing geometry to act on; the axis and profile must be coplanar.)
+- . (A 'cut'/'intersect' needs existing geometry to act on. An axis outside the profile's plane is projected onto it, so that is not the cause; a profile that CROSSES the axis is refused.)
 - Fusion refused a two-sided revolve extent (
 - deg), so nothing was revolved.
 - deg, so nothing was revolved.
@@ -1886,7 +1889,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Dimension added but could not set value '
 
 ### `sketch_edit_curve`
-- Curve ids are creation-order indexes per kind, so removing or adding a curve RENUMBERS the rest - re-read sketch_get(include_entities=true) before the next edit.
+- Curve ids are creation-order indexes per kind: removing a curve RENUMBERS the ones after it, while an added curve APPENDS at the end (both measured) - re-read sketch_get(include_entities=true) befo...
 - The whole curve was consumed: a trim on a curve with no intersections deletes it outright.
 - '. Valid: mm, cm, in.
 - No active design. Create or open a document first (see doc_new).

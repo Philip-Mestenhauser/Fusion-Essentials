@@ -15,7 +15,7 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 49be44864b6afc835c9f926a08e95243a2b477b64794aad1c9f457ccd2f89bbc | Fusion 2705.0.87 | verified 2026-08-06
+Stamp: source df945a6fd922084955843e958378eebdc6c859bb0df10eecf35e5c3488b58dc1 | Fusion 2705.0.87 | verified 2026-08-06
 
 152 covered / 31 skipped(reason) / 0 pending
 
@@ -129,7 +129,7 @@ Stamp: source 49be44864b6afc835c9f926a08e95243a2b477b64794aad1c9f457ccd2f89bbc |
 | model_create_component | covered | cast the eight parts, Pedestal nested in Frame |
 | model_draft | covered | draft a cameo face |
 | model_emboss | covered | raise then engrave a circular profile on a scratch block's top face, each checked against the volume direction; a zero depth refused |
-| model_extrude | covered | extrude the ring bands symmetric about the ring plane |
+| model_extrude | covered | extrude the ring bands symmetric about the ring plane, then a three-bay frame with 'all' whose payload NAMES the regions enclosed by another selected one - the bays that filled with material |
 | model_fillet | covered | fillet the outer ring edge |
 | model_hole | covered | drill a cameo mounting hole, then the three additive placements - centred on its rim, on an edge at middle and at start, and by plane offsets; a circular offset edge refused |
 | model_inspect | covered | read the rotor's volume back |
@@ -144,7 +144,7 @@ Stamp: source 49be44864b6afc835c9f926a08e95243a2b477b64794aad1c9f457ccd2f89bbc |
 | model_pattern_rectangular | covered | rectangular-pattern a cameo body |
 | model_pipe | covered | run a hollow pipe along its path with the wall read back off the feature, then a half-path pipe whose bounding box proves the extent is a FRACTION; the reverse extent refused on an open path |
 | model_replace_face | covered | replace a scratch block's top face with an open sheet above it, the measured volume move pinning the effect; a solid face as the target refused |
-| model_revolve | covered | revolve the rotor disc about the spin axis |
+| model_revolve | covered | revolve the rotor disc about the spin axis, then about an off-origin cylinder FACE - the resolved label reads BRepFace and the ring's measured bounding box stands around x=30, not around the origin; a planar face as the axis refused |
 | model_scale | covered | uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, length, and angle expressions refused; a bare unitless parameter accepted; a vertex-anchored scale |
 | model_set_material | covered | assign the rotor a physical steel material |
 | model_shell | covered | shell a scratch cap cameo |

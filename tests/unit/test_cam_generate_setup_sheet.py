@@ -5,6 +5,7 @@ IMMEDIATELY while the sheet file lands only later, advanced by adsk.doEvents() p
 handler that trusted the bool would report a deliverable that does not exist yet.
 """
 
+import itertools
 import json
 import types
 
@@ -16,61 +17,69 @@ from conftest import load_tool
 
 gs = load_tool("cam_generate_setup_sheet")
 
+# The SHIPPED bound, read before any test shortens it.
+_PUMP_SECONDS_SHIPPED = gs._PUMP_SECONDS
+
 
 class FakeSetup:
     def __init__(self, name):
         self.name = name
 
 
-class FakeCAM:
-    """generateSetupSheet answers True at once; the FILE is written only when the pump has run
-    `lands_after_pumps` doEvents cycles - the async shape measured live."""
+_QUIET, _PARTIAL, _FINAL = 0, 120, 800
 
-    def __init__(self, out_writer, result=True, lands_after_pumps=2):
+
+class FakeCAM:
+    """generateSetupSheet answers True at once; the FILE is written only as the pump runs, one
+    `sizes` stage per doEvents cycle. Measured: the sheet APPEARS at 0 bytes and is written after.
+    The non-zero PARTIAL stage is not a measurement - it is a size a write still in flight can be
+    sampled at, which the landing gate must not mistake for the deliverable. When the stages run
+    out the file stops changing, which is what a finished write looks like from outside."""
+
+    def __init__(self, out_writer, result=True, quiet_pumps=1, sizes=(0, _PARTIAL, _FINAL)):
         self.calls = []
         self.result = result
-        self.lands_after_pumps = lands_after_pumps
-        self._writer = out_writer            # callable(folder) -> writes the sheet file
-        self.pending = None
+        self.quiet_left = quiet_pumps
+        self._sizes = iter(sizes)
+        self._writer = out_writer            # callable(folder, size_bytes) -> writes the sheet file
+        self.written = []
+        self.folder = None
 
     def generateSetupSheet(self, target, fmt, folder, open_doc):
         self.calls.append(("one", target, fmt, folder, open_doc))
         if self.result:
-            self.pending = (self.lands_after_pumps, folder)
+            self.folder = folder
         return self.result
 
     def generateAllSetupSheets(self, fmt, folder, open_doc):
         self.calls.append(("all", None, fmt, folder, open_doc))
         if self.result:
-            self.pending = (self.lands_after_pumps, folder)
+            self.folder = folder
         return self.result
 
     def pump(self):
-        # the live shape: the file APPEARS empty one pump before its content is written - a gate
-        # that breaks on appearance reports a 0-byte deliverable
-        if self.pending is None:
+        if self.folder is None:
             return
-        left, folder = self.pending
-        if left == 2:
-            self._writer(folder, empty=True)
-            self.pending = (1, folder)
-        elif left <= 1:
-            self._writer(folder)
-            self.pending = None
-        else:
-            self.pending = (left - 1, folder)
+        if self.quiet_left > 0:                      # generation is still working; nothing on disk
+            self.quiet_left -= 1
+            return
+        size = next(self._sizes, None)
+        if size is None:                             # the write is done - the file stops changing
+            return
+        self._writer(self.folder, size)
+        self.written.append(size)
 
 
 @pytest.fixture
 def rig(monkeypatch, tmp_path):
     """Wire a CAM product with one setup; doEvents advances the fake's async write."""
-    def _make(result=True, lands_after_pumps=2, sheet_name="Untitled.html"):
+    def _make(result=True, quiet_pumps=1, sizes=(0, _PARTIAL, _FINAL), sheet_name="Untitled.html"):
         out = {}
 
-        def writer(folder, empty=False):
-            (tmp_path / sheet_name).write_text("" if empty else "<html>sheet</html>" * 40)
+        def writer(folder, size):
+            (tmp_path / sheet_name).write_text("x" * size)
 
-        cam = FakeCAM(writer, result=result, lands_after_pumps=lands_after_pumps)
+        cam = FakeCAM(writer, result=result, quiet_pumps=quiet_pumps, sizes=sizes)
         setup = FakeSetup("SheetSetup")
         monkeypatch.setattr(gs, "get_cam", lambda: (cam, None))
 
@@ -132,20 +141,61 @@ class TestRouting:
 
 class TestFileLandedGate:
     def test_the_async_landing_is_pumped_and_the_file_reported(self, rig, tmp_path):
-        rig(lands_after_pumps=4)
+        r = rig(quiet_pumps=3)
         out = _payload(gs.handler(output_folder=str(tmp_path)))
         assert out["generated"] is True
         assert out["file_path"].endswith("Untitled.html")
-        assert out["size_bytes"] > 0
         assert out["overwrote_existing"] is False
+        assert r["cam"].written == [0, _PARTIAL, _FINAL]      # every stage was pumped through
+
+    def test_a_partial_write_is_never_reported_as_the_deliverable(self, rig, tmp_path):
+        # a sheet sampled while its write is in flight can read a non-zero size that is not the
+        # final one, so a gate that reports the first non-empty sample can publish a half-written
+        # sheet as the deliverable.
+        rig()
+        out = _payload(gs.handler(output_folder=str(tmp_path)))
+        assert out["size_bytes"] == _FINAL
+        assert (tmp_path / "Untitled.html").stat().st_size == _FINAL
+
+    def test_a_sheet_that_keeps_growing_is_refused_at_the_bound(self, rig, tmp_path, monkeypatch):
+        # non-empty on every sample but never the same size twice: the write is still in flight, so
+        # there is no settled deliverable to report.
+        rig(sizes=itertools.count(100, 10))
+        monkeypatch.setattr(gs, "_PUMP_SECONDS", 0.05)
+        msg = _message(gs.handler(output_folder=str(tmp_path)))
+        assert "no html sheet landed" in msg and "no deliverable" in msg
+
+    def test_a_sheet_stuck_at_zero_bytes_is_refused_not_reported(self, rig, tmp_path, monkeypatch):
+        # the file APPEARS and then never grows: a stable size is not enough, an empty sheet is not
+        # a deliverable.
+        rig(sizes=(0,))
+        monkeypatch.setattr(gs, "_PUMP_SECONDS", 0.05)
+        msg = _message(gs.handler(output_folder=str(tmp_path)))
+        assert "no html sheet landed" in msg and "no deliverable" in msg
+        assert (tmp_path / "Untitled.html").stat().st_size == 0
 
     def test_true_with_nothing_landing_is_an_error_not_a_success(self, rig, tmp_path, monkeypatch):
         # the bool is True but the async write never completes - trusting it reports a deliverable
         # that does not exist
-        rig(lands_after_pumps=10_000)
+        rig(sizes=())
         monkeypatch.setattr(gs, "_PUMP_SECONDS", 0.0)
         msg = _message(gs.handler(output_folder=str(tmp_path)))
         assert "no html sheet landed" in msg and "no deliverable" in msg
+
+    def test_a_generation_that_ate_the_budget_leaves_no_wait_for_the_landing(self, rig, tmp_path,
+                                                                             monkeypatch):
+        # _PUMP_SECONDS bounds generation AND landing together: a generation that already spent the
+        # budget must not then get the full budget again to wait in.
+        rig()
+        clock = types.SimpleNamespace(calls=[], sleep=lambda s: None)
+
+        def spent():
+            clock.calls.append(1)
+            return 0.0 if len(clock.calls) == 1 else _PUMP_SECONDS_SHIPPED + 2.0
+        clock.time = spent
+        monkeypatch.setattr(gs, "time", clock)
+        msg = _message(gs.handler(output_folder=str(tmp_path)))
+        assert "no html sheet landed" in msg
 
     def test_a_declined_generation_is_an_error_naming_the_scope(self, rig, tmp_path):
         rig(result=False)

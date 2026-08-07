@@ -16,6 +16,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _drawing_common
 from . import _outputs
 from . import _inputs
 from ._data_common import _resolve_data_file
@@ -36,8 +37,17 @@ _SHEET_SIZE_MAP = {
     "a": ("asme", "AASMESheetSize"), "b": ("asme", "BASMESheetSize"), "c": ("asme", "CASMESheetSize"),
     "d": ("asme", "DASMESheetSize"), "e": ("asme", "EASMESheetSize"),
 }
-# Portrait is rejected by Fusion for the largest sheet of each standard (A0 ISO / E ASME).
-_NO_PORTRAIT = {("iso", "a0"), ("asme", "e")}
+# sheet_size value -> SheetSizes member, the shape _resolve_members resolves. 'default' is absent:
+# it is not a request, so nothing is set and Fusion picks the sheet.
+_SHEET_SIZE_MEMBERS = dict({key: member for key, (_std, member) in _SHEET_SIZE_MAP.items()},
+                           custom="CustomSizeSheetSize")
+_CONTENT_MAP = {"full": "FullAssemblyDrawingContentType",
+                "visible": "VisibleOnlyDrawingContentType"}
+_SHEET_SCOPE_MAP = {"all_levels": "AllLevelsSheetCreationType",
+                    "first_level": "FirstLevelOnlySheetCreationType"}
+# baseDocumentType is a request only when a template_file resolved; a scratch drawing leaves the
+# property alone, so the map carries the template member only.
+_BASE_DOCUMENT_MAP = {"template": "FromTemplateBaseDocumentType"}
 
 # DrawingViewStyleTypes carries exactly these four members: the two shaded ones pair shading with
 # HIDDEN edges or with VISIBLE edges - there is no plain shaded member.
@@ -92,6 +102,10 @@ _ORIENTATION_MAP = {"landscape": "LandscapeSheetOrientationType",
 _ENUM_INPUTS = (
     ("standard", "DrawingStandardTypes", _STANDARD_MAP),
     ("units", "DrawingUnitTypes", _UNITS_MAP),
+    ("content", "DrawingContentTypes", _CONTENT_MAP),
+    ("sheet_size", "SheetSizes", _SHEET_SIZE_MEMBERS),
+    ("sheet_scope", "SheetCreationTypes", _SHEET_SCOPE_MAP),
+    ("base_document", "BaseDocumentTypes", _BASE_DOCUMENT_MAP),
     ("orientation", "SheetOrientationTypes", _ORIENTATION_MAP),
     ("view_style", "DrawingViewStyleTypes", _VIEW_STYLE_MAP),
     ("auto_dimension", "DimensionStrategyTypes", _DIM_STRATEGY_MAP),
@@ -138,11 +152,11 @@ _HOLE_ANNOTATIONS = _inputs.Choice("hole_annotations",
                              default="default",
                              description="Hole/thread callout style.")
 _CENTER_LINE = _inputs.Choice("center_line", ["default", "off", "cylindrical", "holes"], default="default",
-                             description="Center lines on generated views.")
+                             description="Refused unless 'default': no enum exists.")
 _CENTER_MARK = _inputs.Choice("center_mark",
                              ["default", "off", "holes", "fillets", "edges", "punches"],
                              default="default",
-                             description="Center marks.")
+                             description="Refused unless 'default': no enum exists.")
 _TANGENT_EDGES = _inputs.Choice("tangent_edges", ["default", "off", "full_length", "shortened"],
                              default="default",
                              description="Tangent-edge display.")
@@ -166,6 +180,22 @@ def _source_datafile(design):
 _MANUAL_GATE = "Manual drawing creation requires a template with view placeholder information."
 
 
+# The bare sentence Fusion raises while the source design's cloud DataFile is still processing: a
+# design saved seconds earlier fails with exactly this, and the identical call succeeds about a
+# minute later. The failure is the one place that can teach it - the handler never sleeps or retries
+# (it runs on the main thread).
+_PROCESSING_LAG_SENTENCE = "Failed to create drawing document"
+
+
+def _processing_lag_hint(ex):
+    """The measured cause behind Fusion's bare create refusal, or '' for any other failure."""
+    if _PROCESSING_LAG_SENTENCE not in str(ex):
+        return ""
+    return (" Nothing was created. A source design saved seconds ago fails with exactly this "
+            "sentence while its cloud DataFile is still processing; the same call succeeds about a "
+            "minute later. Wait about a minute, then retry this call unchanged.")
+
+
 def _resolve_members(cfg):
     """Every enum member this tool sets, as {input name: member}, or (None, error). Resolved BEFORE
     the create transaction: a family or member this Fusion version does not carry is reported as a
@@ -176,8 +206,10 @@ def _resolve_members(cfg):
         name = member_map.get(value)
         if not name:
             continue
+        # The family is probed separately from the member: the two are different failures on the
+        # wire (an absent family names adsk.drawing.<family>, an absent member names <family>.<name>).
         fam = safe(lambda f=family: getattr(adsk.drawing, f))
-        member = None if fam is None else safe(lambda f=fam, n=name: getattr(f, n))
+        member = None if fam is None else _drawing_common.enum_value(family, name)
         if member is None:
             missing = f"adsk.drawing.{family}" if fam is None else f"{family}.{name}"
             return None, (f"{input_name} '{value}' needs {missing}, which is not available on this "
@@ -193,29 +225,26 @@ def _apply_input_settings(di, cfg, members, template_data_file=None):
     requested values are echoed to the caller as 'settings_requested' rather than read back. 'members'
     is _resolve_members' {input name: enum member} and 'template_data_file' a resolved DataFile -
     neither is JSON-safe, so both stay out of cfg."""
-    d = adsk.drawing
     safe(lambda: setattr(di, "standard", members["standard"]))
     safe(lambda: setattr(di, "units", members["units"]))
-    safe(lambda: setattr(di, "content",
-         d.DrawingContentTypes.VisibleOnlyDrawingContentType if cfg["content"] == "visible"
-         else d.DrawingContentTypes.FullAssemblyDrawingContentType))
+    safe(lambda: setattr(di, "content", members["content"]))
+    # A resolved enum value can be 0, so every member is tested against None, never truthiness.
+    size_member = members.get("sheet_size")
+    if size_member is not None:
+        safe(lambda m=size_member: setattr(di, "sheetSize", m))
     if cfg["sheet_size"] == "custom":
-        safe(lambda: setattr(di, "sheetSize", d.SheetSizes.CustomSizeSheetSize))
         cs = safe(lambda: di.customSize)
         if cs is not None:
             safe(lambda: setattr(cs, "width", cfg["custom_width_cm"]))
             safe(lambda: setattr(cs, "height", cfg["custom_height_cm"]))
-    elif cfg["sheet_size"] != "default":
-        member = _SHEET_SIZE_MAP[cfg["sheet_size"]][1]
-        safe(lambda m=member: setattr(di, "sheetSize", getattr(d.SheetSizes, m)))
     safe(lambda: setattr(di, "orientationType", members["orientation"]))
-    safe(lambda: setattr(di, "sheetCreationType",
-         d.SheetCreationTypes.FirstLevelOnlySheetCreationType if cfg["sheet_scope"] == "first_level"
-         else d.SheetCreationTypes.AllLevelsSheetCreationType))
+    safe(lambda: setattr(di, "sheetCreationType", members["sheet_scope"]))
 
-    # Only touch baseDocumentType/templateFile when a template was resolved.
-    if template_data_file is not None:
-        safe(lambda: setattr(di, "baseDocumentType", d.BaseDocumentTypes.FromTemplateBaseDocumentType))
+    # baseDocumentType and templateFile move together, and only when a template_file resolved: the
+    # base_document member exists exactly when cfg carries 'template', so this ONE gate holds both.
+    base_member = members.get("base_document")
+    if base_member is not None:
+        safe(lambda m=base_member: setattr(di, "baseDocumentType", m))
         safe(lambda: setattr(di, "templateFile", template_data_file))
 
     gp = safe(lambda: di.automationPreferences.globalPreferences)
@@ -349,7 +378,7 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
             fam = [k for k, v in _SHEET_SIZE_MAP.items() if v[0] == std]
             return error(f"sheet_size '{size_v}' is a {need_std.upper()} size but standard is '{std}'. "
                          f"Use an {std.upper()} size ({', '.join(fam)}) or switch the standard.")
-        if orient_v == "portrait" and (std, size_v) in _NO_PORTRAIT:
+        if orient_v == "portrait" and (std, size_v) in _drawing_common.NO_PORTRAIT:
             return error(f"portrait orientation is not supported for the largest {std.upper()} sheet "
                          f"('{size_v}'); use landscape or a smaller sheet.")
 
@@ -412,6 +441,7 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         "parts_list": (bool(parts_list) if parts_list is not None else None),
         "parts_list_location": loc_v,
         "template_file": tf_raw,
+        "base_document": "template" if template_df is not None else None,
         "custom_width_mm": custom_width_mm, "custom_height_mm": custom_height_mm,
         "custom_width_cm": custom_w_cm, "custom_height_cm": custom_h_cm,
         "hole_annotations": hole_v, "center_line": cl_v, "center_mark": cmk_v, "tangent_edges": te_v,
@@ -451,7 +481,7 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
     try:
         df = dm.createDrawing(di)
     except Exception as ex:
-        return error(f"createDrawing failed: {ex}")
+        return error(f"createDrawing failed: {ex}{_processing_lag_hint(ex)}")
     if not df:
         return error("createDrawing returned null - Fusion did not generate a drawing (nothing created).")
 

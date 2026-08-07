@@ -31,15 +31,63 @@ _PROFILE = _inputs.ProfileRef("profile_index")
 
 _VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
 
-# axis: world x/y/z, or a straight-edge/sketch-line 'handle' - resolved via the shared AxisRef kind.
-_AXIS = _inputs.AxisRef("axis", default="z")
+# The revolve axis. RevolveFeatures.createInput's axis takes the entity that DEFINES the axis - "a
+# sketch line, construction axis, linear edge or a face that defines an axis (cylinder, cone, torus,
+# etc.)" (the installed API's own doc) - so face_entity hands the FACE itself through. A face resolved
+# to a direction VECTOR drops the axis POSITION: a cylinder face at x=30 would revolve about the world
+# axis through the ORIGIN, which is silent wrong geometry.
+_AXIS = _inputs.AxisRef("axis", face_entity=True, default="z")
 
 
-def _axis_entity(comp, sketch, axis):
+def _in_context(ent, comp, design):
+    """(entity, error) - the axis entity in a form the revolve's component can consume. Mirrors
+    model_pattern._in_context, the sibling running the same face_entity AxisRef.
+
+    MEASURED: a NATIVE entity (assemblyContext None) owned by ANOTHER component kills the call
+    outright - the cross-component face took the whole script host down, not a catchable raise -
+    while the same face proxied into the occurrence that carries it is accepted and revolves about
+    the correct off-origin axis. An entity that already has an assembly context, or one owned by
+    `comp` itself, passes untouched.
+
+    A component placed SEVERAL times is refused rather than proxied into an arbitrary instance: each
+    instance carries that axis at a different place, so a guess makes a healthy-looking body turn
+    about the wrong line."""
+    if safe(lambda: ent.assemblyContext) is not None:
+        return ent, None
+    owner = _inputs.entity_component(ent)
+    # _common.same_component, never `owner is comp`: component wrappers are measured NEVER
+    # identity-stable (two reads of one component are different Python objects sharing an
+    # entityToken), so `is` reads False even for the revolve's OWN component.
+    if owner is None or _common.same_component(owner, comp):
+        return ent, None
+    root = safe(lambda: design.rootComponent)
+    occs = safe(lambda: root.allOccurrencesByComponent(owner)) if root is not None else None
+    count = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+    owner_name = safe(lambda: owner.name) or "another component"
+    if count == 1:
+        proxy = safe(lambda: ent.createForAssemblyContext(occs.item(0)))
+        if proxy is None:
+            return None, (f"it belongs to component '{owner_name}' and could not be brought into the "
+                          "revolve's assembly context. Pass a handle at geometry in the sketch's own "
+                          "component, or a world axis (x/y/z).")
+        return proxy, None
+    if count > 1:
+        paths = ", ".join(str(safe(lambda i=i: occs.item(i).fullPathName)) for i in range(count))
+        return None, (f"it belongs to component '{owner_name}', which is placed {count} times "
+                      f"({paths}). Each instance holds that axis in a different place, so the "
+                      "instance must not be guessed. Pass a handle at geometry in the sketch's own "
+                      "component, or a world axis (x/y/z).")
+    return None, (f"it belongs to component '{owner_name}', which is not placed in the assembly, so "
+                  "it cannot be brought into the revolve's context. Pass a handle at geometry in the "
+                  "sketch's own component, or a world axis (x/y/z).")
+
+
+def _axis_entity(design, comp, sketch, axis):
     """Resolve the revolve axis to an entity: world x/y/z -> that origin ConstructionAxis; a
-    find_geometry/sketch 'handle' -> the resolved straight edge/sketch-line (via the shared AxisRef
-    kind); or 'line:<index>' -> a line by position in the profile's OWN sketch - the one selector
-    AxisRef can't express generically, since it has no notion of "this profile's sketch".
+    find_geometry/sketch 'handle' -> the resolved straight edge / sketch line / construction axis, or
+    the axis-defining FACE itself (via the shared AxisRef kind); or 'line:<index>' -> a line by
+    position in the profile's OWN sketch - the one selector AxisRef can't express generically, since
+    it has no notion of "this profile's sketch".
     Returns (axis_entity, label) on success, or (None, error_detail) on failure."""
     a = (axis or "z").strip().lower()
     if a.startswith("line:"):
@@ -61,7 +109,16 @@ def _axis_entity(comp, sketch, axis):
         key = _VEC_TO_KEY.get(val)
         ent = _inputs.world_construction_axis(comp, key) if key else None
         return ent, f"{key}-axis"
-    return val, "edge handle"          # kind == "edge": a straight BRepEdge or sketch line
+    # kind == "edge": the resolved axis ENTITY - a straight BRepEdge, sketch line, construction axis
+    # or, on this face_entity input, the axis-defining face - brought into `comp`'s assembly context
+    # when it is native to another component. Labelled as model_pattern._direction_label labels one:
+    # the entity's own NAME when it has one (a construction axis does), else its type (no BRepEdge or
+    # BRepFace carries a name) - never a world key the revolve did not use.
+    ent, cerr = _in_context(val, comp, design)
+    if cerr:
+        return None, cerr
+    name = safe(lambda: ent.name)
+    return ent, (name if isinstance(name, str) and name else type(ent).__name__)
 
 
 def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
@@ -114,7 +171,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     # Host the feature on the sketch's OWNING component (see profile_host_component) and take origin
     # axes from that same component - a revolve input mixes contexts otherwise.
     host = _inputs.profile_host_component(profile, sketch, comp)
-    axis_entity, axis_label = _axis_entity(host, sketch, axis)
+    axis_entity, axis_label = _axis_entity(design, host, sketch, axis)
     if not axis_entity:
         return error(f"Could not resolve axis '{axis}': {axis_label or 'use x | y | z, a straight-edge/sketch handle, or line:<index>.'}")
 
@@ -145,8 +202,11 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     try:
         feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
-        return error(f"Revolve failed: {e}. (A 'cut'/'intersect' needs existing geometry to act "
-    "on; the axis and profile must be coplanar.)")
+        # No coplanarity claim: the API projects an axis that is not in the profile's plane ONTO that
+        # plane, so out-of-plane is not itself a cause. A profile CROSSING the axis is.
+        return error(f"Revolve failed: {e}. (A 'cut'/'intersect' needs existing geometry to act on. "
+    "An axis outside the profile's plane is projected onto it, so that is not the cause; a profile "
+    "that CROSSES the axis is refused.)")
     if not feature:
         return error(_common.no_feature_error(design, "Revolve"))
 
@@ -176,8 +236,8 @@ TOOL_DESCRIPTION = (
 "Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part). The companion "
 "to model_extrude. 'sketch_name' selects the sketch "
 "(omit = most recent); 'profile_index' picks the region (0-based index, OR a sketch_get profile "
-"'handle' for a multi-profile sketch). 'axis' is x|y|z "
-"(component origin), a find_geometry straight-edge 'handle', OR 'line:<index>' for a sketch line. "
+"'handle' for a multi-profile sketch). A find_geometry handle at a CYLINDRICAL, conical or toroidal "
+"face turns about that face's OWN axis line, so an off-origin axis works. "
 "The profile must NOT CROSS the axis - a full-width section self-intersects and is refused; sketch "
 "one half and revolve that. 'angle_deg' is "
 "the sweep (360 = full revolve). 'operation': new | join | cut | "

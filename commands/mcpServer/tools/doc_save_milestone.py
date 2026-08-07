@@ -8,8 +8,6 @@ the milestone. On a CLEAN document it returns true and creates nothing (measured
 with no unsaved changes is refused here rather than reported as a false success.
 """
 
-import time
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -18,6 +16,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._data_common import _agent_description
 from . import _assert
+from . import _export
 from . import _outputs
 
 app = adsk.core.Application.get()
@@ -48,17 +47,19 @@ def _refetch(lineage):
 
 def _confirm_new_version(lineage, latest_before):
     """Re-fetch by lineage URN until the tip version passes latest_before, bounded by
-    _VERSION_DEADLINE_S. Returns (fresh_datafile_or_None, latest_after_or_None)."""
-    deadline = time.monotonic() + _VERSION_DEADLINE_S
-    while True:
+    _VERSION_DEADLINE_S. Returns (fresh_datafile_or_None, latest_after_or_None) - the LAST reading
+    either way, so a tip that never advanced is reported as read, not as a failure to read.
+
+    The bounded pump loop is _export.pump_until; the tip-advanced signal is this tool's own."""
+    def probe():
         fresh = _refetch(lineage)
         latest_after = safe(lambda: fresh.latestVersionNumber) if fresh is not None else None
-        if latest_before is None or (latest_after is not None and latest_after > latest_before):
-            return fresh, latest_after
-        if time.monotonic() >= deadline:
-            return fresh, latest_after
-        safe(lambda: adsk.doEvents())
-        time.sleep(_POLL_SLEEP)
+        advanced = (latest_before is None
+                    or (latest_after is not None and latest_after > latest_before))
+        return advanced, (fresh, latest_after)
+
+    _advanced, reading = _export.pump_until(probe, _VERSION_DEADLINE_S, _POLL_SLEEP)
+    return reading
 
 
 def _milestone_facts(fresh, name):
@@ -151,8 +152,12 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
               and lineage.startswith("urn:") and lineage_now.startswith("urn:")
               and lineage_now != lineage)
     confirm_lineage = lineage_now if forked else lineage
+    # The wait settles on a COMPARISON, so it needs a baseline: a fork restarts the version stream,
+    # and an unreadable pre-save tip leaves nothing to compare against. In both cases the confirming
+    # read runs once and the payload reports what it read instead of a verdict it cannot support.
+    comparable = not forked and latest_before is not None
     fresh, latest_after = _confirm_new_version(confirm_lineage,
-                                               None if forked else latest_before)
+                                               latest_before if comparable else None)
     is_milestone, count_after, name_present = _milestone_facts(fresh, name)
     version_confirmed = (forked and latest_after is not None) or (
         latest_before is not None and latest_after is not None
@@ -175,18 +180,32 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
     if forked:
         result["lineage_changed"] = {"from": lineage, "to": lineage_now}
     if not version_confirmed:
-        # Not lag: a fresh fetch shows a real milestone save's new version at 4.4s (measured), and
-        # this waited _VERSION_DEADLINE_S. A tip that has not moved by now is the signature of a
-        # saveMilestone that versioned NOTHING - measured on a clean document, where the call still
-        # returns true.
         seen = latest_after if latest_after is not None else "unreadable"
         result["pending"] = True
-        result["note"] = (f"saveMilestone returned true but the cloud tip has NOT advanced after "
-                          f"{_VERSION_DEADLINE_S:.0f}s of re-fetching (latest reads {seen}, was "
-                          f"{latest_before}). A real milestone save's new version is visible on a "
-                          "fresh fetch at 4.4s (measured), so this is the signature of a save that "
-                          "versioned nothing - the same result an unmodified document gives. Check "
-                          "doc_get include=['versions'] before calling again.")
+        if not comparable:
+            # With no usable BASELINE the wait has nothing to settle against and returns on its
+            # first read: no duration was spent and non-advancement was never observed. Report the
+            # missing baseline and the tip that was read - a "versioned nothing" verdict here would
+            # diagnose a comparison that did not happen.
+            why = ("the save moved the document onto a NEW lineage, whose version stream does not "
+                   f"continue the pre-save number ({latest_before})" if forked else
+                   "the document's latestVersionNumber could not be read BEFORE the save")
+            result["note"] = (f"saveMilestone returned true, but {why} - so whether a NEW version "
+                              f"was created is not decidable here (the fresh read after the save "
+                              f"reports {seen}). Read the history back with "
+                              "doc_get include=['versions'].")
+        else:
+            # Not lag: a fresh fetch shows a real milestone save's new version at 4.4s (measured),
+            # and this waited _VERSION_DEADLINE_S. A tip that has not moved by now is the signature
+            # of a saveMilestone that versioned NOTHING - measured on a clean document, where the
+            # call still returns true.
+            result["note"] = (f"saveMilestone returned true but the cloud tip has NOT advanced "
+                              f"after {_VERSION_DEADLINE_S:.0f}s of re-fetching (latest reads "
+                              f"{seen}, was {latest_before}). A real milestone save's new version "
+                              "is visible on a fresh fetch at 4.4s (measured), so this is the "
+                              "signature of a save that versioned nothing - the same result an "
+                              "unmodified document gives. Check doc_get include=['versions'] "
+                              "before calling again.")
     elif milestone_confirmed:
         result["note"] = (f"Version {latest_after} was created and IS the milestone '{name}' "
                           "(confirmed on a fresh read of the cloud file). Read the history back with "

@@ -85,6 +85,100 @@ def _resolve_profile_indices(profile_index, pcount, profiles=None):
     return (idxs or [0]), None
 
 
+# A region 'all' selected is ENCLOSED when it fills a HOLE of another selected region: a frame
+# outline and its bays come out of ONE sketch as a profile carrying an inner loop per bay PLUS one
+# profile per bay, so the bay is not merely inside the frame's overall extent - it occupies the
+# frame's inner loop. A ProfileLoop carries no bounding box of its own, so a hole's extent is the
+# union of its curves' boxes. The comparison runs with a tolerance because a bay's extent and the
+# hole it fills are the same curves read twice.
+_ENCLOSED_TOL_CM = 1e-6
+
+
+def _extent3(bbox):
+    """(xmin, ymin, zmin, xmax, ymax, zmax) of a BoundingBox3D, or None unless all six read as real
+    numbers - an unreadable extent must produce NO verdict, never a false 'nothing is enclosed'.
+
+    All THREE axes are kept: a sketch on a vertical plane (XZ/YZ, or a face) holds one axis constant
+    for every region in it, so a comparison that drops an axis collapses to an interval overlap on
+    the others and calls a far-away region enclosed."""
+    mn, mx = safe(lambda: bbox.minPoint), safe(lambda: bbox.maxPoint)
+    if mn is None or mx is None:
+        return None
+    lo = (safe(lambda: mn.x), safe(lambda: mn.y), safe(lambda: mn.z))
+    hi = (safe(lambda: mx.x), safe(lambda: mx.y), safe(lambda: mx.z))
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in lo + hi):
+        return None
+    return (tuple(min(a, b) for a, b in zip(lo, hi))
+            + tuple(max(a, b) for a, b in zip(lo, hi)))
+
+
+def _union(a, b):
+    """The extent covering both - how a loop's curves add up to the loop's own extent."""
+    return (tuple(min(a[k], b[k]) for k in range(3))
+            + tuple(max(a[k], b[k]) for k in range(3, 6)))
+
+
+def _hole_extents(profile):
+    """The extent of each HOLE (a loop with isOuter false) of one profile - the openings another
+    selected profile can fill.
+
+    None when ANY read behind them fails: the loops, one loop's isOuter, its curves, or a curve's
+    box. A dropped or shrunk hole publishes a false 'nothing is enclosed' - so an unreadable profile
+    withdraws the verdict instead of answering with the holes that happened to read."""
+    loops = safe(lambda: profile.profileLoops)
+    n = safe(lambda: loops.count) if loops is not None else None
+    if not isinstance(n, int) or isinstance(n, bool):
+        return None
+    out = []
+    for i in range(n):
+        loop = safe(lambda i=i: loops.item(i))
+        if loop is None:
+            return None
+        outer = safe(lambda loop=loop: loop.isOuter)
+        if not isinstance(outer, bool):     # unreadable: neither 'a hole' nor 'not a hole'
+            return None
+        if outer:
+            continue
+        curves = safe(lambda loop=loop: loop.profileCurves)
+        cn = safe(lambda: curves.count) if curves is not None else None
+        if not isinstance(cn, int) or isinstance(cn, bool):
+            return None
+        box = None
+        for j in range(cn):
+            cb = _extent3(safe(lambda j=j: curves.item(j).boundingBox))
+            if cb is None:
+                return None
+            box = cb if box is None else _union(box, cb)
+        if box is None:                     # an inner loop no curve of which could be measured
+            return None
+        out.append(box)
+    return out
+
+
+def _within(inner, outer):
+    """True when the `inner` extent sits inside `outer` on every axis (tolerance-inclusive, since a
+    bay's own extent and the hole it fills are the same curves)."""
+    return (all(inner[k] >= outer[k] - _ENCLOSED_TOL_CM for k in range(3))
+            and all(inner[k] <= outer[k] + _ENCLOSED_TOL_CM for k in range(3, 6)))
+
+
+def _enclosed_regions(profiles, indices):
+    """The SELECTED profile indices that fill a hole of ANOTHER selected profile - the regions 'all'
+    took sight-unseen. None (no verdict) when any selected profile's extent or loops cannot be read:
+    the note then says what it could not rule out instead of claiming a count it did not measure."""
+    extents, holes = {}, {}
+    for i in indices:
+        p = safe(lambda i=i: profiles.item(i))
+        if p is None:
+            return None
+        extent, hole = _extent3(safe(lambda p=p: p.boundingBox)), _hole_extents(p)
+        if extent is None or hole is None:
+            return None
+        extents[i], holes[i] = extent, hole
+    return [i for i in indices
+            if any(_within(extents[i], h) for j in indices if j != i for h in holes[j])]
+
+
 def _through_all_direction_key(symmetric, distance):
     """'positive' | 'negative' | 'symmetric' - which way extent='through_all' cuts. The SIGN of
     'distance' (its magnitude is unused for through_all) picks a one-sided direction - the same
@@ -507,16 +601,24 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         adv = root_body_advisory(design, host)          # advise on where the body actually landed
         if adv:
             note += " " + adv
-    # 'all' takes every closed region with no containment analysis, so a region ENCLOSED by another
-    # selected one is extruded too - measured on a 'new' extrude: a frame sketch's 5 bays between the
-    # members came out filled, turning the frame into a plate, and the call reported plain success.
-    # The sentence stays operation-neutral because what a bay does under cut/intersect differs.
+    # 'all' takes every closed region, so a bay inside a frame extrudes into material and the
+    # payload cannot show it - the enclosed regions are COUNTED and named here instead (behind
+    # safe(): a containment read that misbehaves must not sink an extrude that landed). The sentence
+    # stays operation-neutral because what a bay does under cut/intersect differs.
+    enclosed = None
     if took_all and len(indices) > 1:
-        note += (f" 'all' selected every closed region in this sketch ({len(indices)}), INCLUDING "
-                 "any region enclosed by another selected one - the openings inside a frame outline "
-                 f"are closed regions too, so this {op_key} acted on them as well. To act on only "
-                 "the regions you mean, read them with sketch_get (area/centroid per region) and "
-                 "pass a profile 'handle' or an index list.")
+        enclosed = safe(lambda: _enclosed_regions(profiles, indices))
+        note += f" 'all' selected every closed region in this sketch ({len(indices)})"
+        if enclosed is not None and not enclosed:
+            note += "; none of them sits inside another selected region."
+        else:
+            note += ((", INCLUDING any region enclosed by another selected one" if enclosed is None
+                      else (f", INCLUDING {len(enclosed)} region(s) enclosed by another selected one "
+                            f"(profile index {', '.join(str(i) for i in enclosed)})"))
+                     + " - the openings inside a frame outline are closed regions too, so this "
+                     f"{op_key} acted on them as well. To act on only the regions you mean, read "
+                     "them with sketch_get (area/centroid per region) and pass a profile 'handle' "
+                     "or an index list.")
 
     if use_to_object:
         extent_report, distance_report = "to_object", None
@@ -554,6 +656,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     }
     if model_params:
         result["model_parameters"] = model_params
+    if enclosed:
+        result["enclosed_profile_indices"] = enclosed
     if ext_key == "two_side":
         result["distance2"] = _inputs.expression_report(distance2)
     if ext_key == "through_all":

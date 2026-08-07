@@ -18,15 +18,17 @@ ex = load_tool("model_extrude")
 # ── fakes ───────────────────────────────────────────────────────────────────
 
 class FakeProfiles:
-    def __init__(self, n):
-        self._items = list(range(n))   # opaque profile tokens
+    def __init__(self, n, items=None):
+        # Opaque tokens by default - a profile carries geometry only where a test reads it (the
+        # containment walk behind the 'all' disclosure).
+        self._items = list(items) if items is not None else [("profile", i) for i in range(n)]
 
     @property
     def count(self):
         return len(self._items)
 
     def item(self, i):
-        return ("profile", i)
+        return self._items[i]
 
 
 class FakeSketchCurves:
@@ -40,9 +42,9 @@ class FakeSketchCurves:
 
 
 class FakeSketch:
-    def __init__(self, name, profile_count=1, curve_count=0):
+    def __init__(self, name, profile_count=1, curve_count=0, profiles=None):
         self.name = name
-        self.profiles = FakeProfiles(profile_count)
+        self.profiles = FakeProfiles(profile_count, profiles)
         self.sketchCurves = FakeSketchCurves(curve_count)
 
 
@@ -296,6 +298,248 @@ class TestAllIncludesEnclosedRegions:
         _install([FakeSketch("S", profile_count=3)])
         out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="*"))
         assert "enclosed" in out["note"] and out["profiles_extruded"] == 3
+
+
+class _Pt:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = float(x), float(y), float(z)
+
+
+class _Box:
+    """A BoundingBox3D as the containment walk reads it: minPoint / maxPoint."""
+    def __init__(self, x0, y0, x1, y1, z0=0.0, z1=0.0):
+        self.minPoint, self.maxPoint = _Pt(x0, y0, z0), _Pt(x1, y1, z1)
+
+
+def _vbox(x0, z0, x1, z1):
+    """A box on a VERTICAL sketch plane (XZ): every region in such a sketch shares one constant y,
+    so containment there is decided by x and z."""
+    return _Box(x0, 0.0, x1, 0.0, z0, z1)
+
+
+class _Loop:
+    """A ProfileLoop: isOuter plus the curves whose boxes give the loop its extent (a loop carries
+    no bounding box of its own, so several curves each cover part of it)."""
+    def __init__(self, *boxes, is_outer=False):
+        self.isOuter = is_outer
+        self.profileCurves = _NamedCollection(
+            [type("PC", (), {"boundingBox": b})() for b in boxes])
+
+
+class _Profile:
+    def __init__(self, box, loops=()):
+        self.boundingBox = box
+        self.profileLoops = _NamedCollection(loops)
+
+
+def _frame(*bays):
+    """A frame outline whose material profile carries ONE inner loop per bay, plus the bay profiles
+    themselves - the sketch topology a frame drawn with double lines produces. Profile 0 is the
+    frame; profiles 1..N are the bays, in the order given."""
+    frame = _Profile(_Box(0, 0, 100, 50), [_Loop(_Box(0, 0, 100, 50), is_outer=True)]
+                     + [_Loop(_Box(*b)) for b in bays])
+    return [frame] + [_Profile(_Box(*b), [_Loop(_Box(*b), is_outer=True)]) for b in bays]
+
+
+def _vframe(*bays):
+    """The same frame drawn on a VERTICAL plane: constant y, the regions spread over x and z. Each
+    bay is given as (x0, z0, x1, z1)."""
+    frame = _Profile(_vbox(0, 0, 100, 50), [_Loop(_vbox(0, 0, 100, 50), is_outer=True)]
+                     + [_Loop(_vbox(*b)) for b in bays])
+    return [frame] + [_Profile(_vbox(*b), [_Loop(_vbox(*b), is_outer=True)]) for b in bays]
+
+
+class TestEnclosedRegionCount:
+    """The 'all' disclosure COUNTS the regions that fill a hole of another selected region, so a
+    frame extruded solid says how many bays it swallowed instead of only that it might have."""
+
+    def test_the_note_counts_and_names_the_regions_that_filled_a_hole(self):
+        _install([FakeSketch("S", profiles=_frame((10, 10, 40, 40), (60, 10, 90, 40)))])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING 2 region(s) enclosed by another selected one (profile index 1, 2)" in out["note"]
+        assert out["enclosed_profile_indices"] == [1, 2]
+
+    def test_regions_that_enclose_nothing_are_told_apart_from_an_unknown_count(self):
+        # three side-by-side regions, no holes anywhere: the honest answer is 'none', not a warning
+        side_by_side = [_Profile(_Box(x, 0, x + 5, 5), [_Loop(_Box(x, 0, x + 5, 5), is_outer=True)])
+                        for x in (0, 10, 20)]
+        _install([FakeSketch("S", profiles=side_by_side)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "none of them sits inside another selected region" in out["note"]
+        assert "INCLUDING" not in out["note"] and "enclosed_profile_indices" not in out
+
+    def test_an_outer_loop_is_not_a_hole(self):
+        # the frame's OUTER loop spans every bay; counting it as an opening would call each bay
+        # enclosed even for a sketch with no openings at all
+        no_holes = [_Profile(_Box(0, 0, 100, 50), [_Loop(_Box(0, 0, 100, 50), is_outer=True)]),
+                    _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])]
+        _install([FakeSketch("S", profiles=no_holes)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "none of them sits inside another selected region" in out["note"]
+
+    def test_a_region_that_overhangs_the_opening_is_not_counted(self):
+        # each overhang leaves the opening on ONE side: a containment test missing that axis (or
+        # that end of it) would report a region enclosed that sticks out of the frame
+        for box in ((10, 10, 60, 40), (10, 10, 40, 45), (5, 10, 40, 40), (10, 5, 40, 40)):
+            overhang = _frame((10, 10, 40, 40))
+            overhang[1] = _Profile(_Box(*box), [_Loop(_Box(*box), is_outer=True)])
+            _install([FakeSketch("S", profiles=overhang)])
+            out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+            assert "none of them sits inside another selected region" in out["note"], box
+
+    def test_an_opening_drawn_as_several_curves_takes_their_whole_extent(self):
+        # a loop is a chain of curves, each covering part of the opening - reading one of them as
+        # the hole's extent shrinks the opening and loses the bay that fills it
+        split_loop = _Profile(_Box(0, 0, 100, 50),
+                              [_Loop(_Box(0, 0, 100, 50), is_outer=True),
+                               _Loop(_Box(10, 10, 25, 40), _Box(25, 10, 40, 40))])
+        bay = _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=[split_loop, bay])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING 1 region(s) enclosed by another selected one (profile index 1)" in out["note"]
+
+    def test_a_bay_matching_its_opening_exactly_still_counts(self):
+        # a bay's extent and the hole it fills are the SAME curves - an exclusive comparison would
+        # count zero on every real frame
+        same = (10.0, 10.0, 0.0, 40.0, 40.0, 0.0)
+        assert ex._within(same, same) is True
+
+    def test_a_profile_whose_geometry_cannot_be_read_yields_no_count(self):
+        # opaque profiles: the note must fall back to what it could not rule out, never to 'none'
+        _install([FakeSketch("S", profile_count=6)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "none of them sits inside" not in out["note"]
+
+    def test_one_unreadable_profile_withdraws_the_verdict_for_the_whole_sketch(self):
+        mixed = _frame((10, 10, 40, 40))
+        mixed.append(("profile", 2))            # a region whose extent cannot be read
+        _install([FakeSketch("S", profiles=mixed)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+
+    def test_a_vertical_plane_sketch_is_judged_on_all_three_axes(self):
+        # every region of a vertical-plane sketch shares one constant coordinate, so a containment
+        # test that skips an axis matches on the remaining interval alone: the tab parked far above
+        # the frame shares the bay's x span and would be called enclosed
+        vertical = _vframe((10, 10, 40, 40))
+        vertical.append(_Profile(_vbox(10, 150, 40, 180),
+                                 [_Loop(_vbox(10, 150, 40, 180), is_outer=True)]))
+        _install([FakeSketch("S", profiles=vertical)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING 1 region(s) enclosed by another selected one (profile index 1)" in out["note"]
+        assert out["enclosed_profile_indices"] == [1]
+
+    def test_an_unreadable_is_outer_withdraws_the_verdict(self):
+        # isOuter decides whether a loop IS an opening: read it as 'outer' on a raise and the hole
+        # vanishes, so the payload would claim nothing is enclosed while a bay sits in one
+        class _RaisingOuter:
+            profileCurves = _NamedCollection(
+                [type("PC", (), {"boundingBox": _Box(10, 10, 40, 40)})()])
+
+            @property
+            def isOuter(self):
+                raise RuntimeError("3 : bad index parameter")
+
+        frame = _Profile(_Box(0, 0, 100, 50), [_Loop(_Box(0, 0, 100, 50), is_outer=True),
+                                               _RaisingOuter()])
+        bay = _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=[frame, bay])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "none of them sits inside" not in out["note"]
+        assert "enclosed_profile_indices" not in out
+
+    def test_a_loop_the_collection_will_not_hand_over_withdraws_the_verdict(self):
+        # the loop that raises IS the opening: skipping it drops the hole, and the payload would
+        # tell a caller nothing is enclosed while the bay sits inside that very loop
+        class _RaisingLoops:
+            def __init__(self, items):
+                self._items = list(items)
+
+            @property
+            def count(self):
+                return len(self._items)
+
+            def item(self, i):
+                if i == 1:
+                    raise RuntimeError("3 : bad index parameter")
+                return self._items[i]
+
+        frame = _Profile(_Box(0, 0, 100, 50))
+        frame.profileLoops = _RaisingLoops([_Loop(_Box(0, 0, 100, 50), is_outer=True),
+                                            _Loop(_Box(10, 10, 40, 40))])
+        bay = _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=[frame, bay])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "none of them sits inside" not in out["note"]
+        assert "enclosed_profile_indices" not in out
+
+    def test_an_unreadable_curve_box_withdraws_the_verdict(self):
+        # a hole measured from the curves that happened to read is a SHRUNK hole - it would report
+        # the bay that fills it as enclosed by nothing
+        class _RaisingCurve:
+            @property
+            def boundingBox(self):
+                raise RuntimeError("3 : bad index parameter")
+
+        hole = _Loop(_Box(10, 10, 25, 40))
+        hole.profileCurves = _NamedCollection(
+            [type("PC", (), {"boundingBox": _Box(10, 10, 25, 40)})(), _RaisingCurve()])
+        frame = _Profile(_Box(0, 0, 100, 50), [_Loop(_Box(0, 0, 100, 50), is_outer=True), hole])
+        bay = _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=[frame, bay])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "none of them sits inside" not in out["note"]
+
+    def test_a_hole_whose_curves_do_not_read_withdraws_the_verdict(self):
+        # no curve of the loop answers, so the opening has no measurable extent at all - dropping
+        # the hole here is the same false 'nothing is enclosed' as shrinking it
+        blind_hole = _Loop(_Box(10, 10, 40, 40))
+        blind_hole.profileCurves = _NamedCollection([])
+        frame = _Profile(_Box(0, 0, 100, 50),
+                         [_Loop(_Box(0, 0, 100, 50), is_outer=True), blind_hole])
+        bay = _Profile(_Box(10, 10, 40, 40), [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=[frame, bay])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "none of them sits inside" not in out["note"]
+
+    def test_a_coordinate_that_is_not_a_number_withdraws_the_verdict(self):
+        # an unmodelled/absent coordinate reads as something that is not a number; treating it as a
+        # zero would place the region at the origin and invent a containment answer
+        bad = _Box(10, 10, 40, 40)
+        bad.minPoint = type("P", (), {"x": "10", "y": 10.0, "z": 0.0})()
+        profiles = _frame((10, 10, 40, 40))
+        profiles[1] = _Profile(bad, [_Loop(_Box(10, 10, 40, 40), is_outer=True)])
+        _install([FakeSketch("S", profiles=profiles)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "INCLUDING any region enclosed by another selected one" in out["note"]
+        assert "enclosed_profile_indices" not in out
+
+    def test_a_hole_read_that_raises_cannot_sink_the_extrude(self):
+        class _Exploding:
+            @property
+            def boundingBox(self):
+                raise RuntimeError("3 : bad index parameter")
+
+            @property
+            def profileLoops(self):
+                raise RuntimeError("3 : bad index parameter")
+
+        _install([FakeSketch("S", profiles=[_Exploding(), _Exploding()])])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert out["extruded"] is True and out["profiles_extruded"] == 2
+
+    def test_the_count_is_over_the_selection_not_the_whole_sketch(self):
+        # the two bays alone enclose nothing - the profile whose holes they fill was NOT selected,
+        # so a walk over every profile in the sketch would over-report them
+        sketch = FakeSketch("S", profiles=_frame((10, 10, 40, 40), (60, 10, 90, 40)))
+        _install([sketch])
+        assert ex._enclosed_regions(sketch.profiles, [1, 2]) == []
+        assert ex._enclosed_regions(sketch.profiles, [0, 1, 2]) == [1, 2]
 
 
 class TestMultiProfileExtrude:

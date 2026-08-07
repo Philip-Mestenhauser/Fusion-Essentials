@@ -10,7 +10,6 @@ file-landed gate WAITS for the write rather than stat-ing once. WRITES a file.
 """
 
 import os
-import time
 
 import adsk.core
 import adsk.drawing
@@ -129,9 +128,6 @@ def _apply_options(fmt, opts, rng, line_weights, variant, splines):
     return fields, ""
 
 
-# The wait lives here rather than in _export: its siblings each poll a DIFFERENT signal
-# (cam_generate_setup_sheet a directory of sheet files, doc_lifecycle a settled lineage URN,
-# doc_save_milestone a version tip), so there is one shape to share, not one implementation.
 def _wait_for_file(path):
     """Poll until a non-empty file at `path` reports the SAME size on two consecutive samples,
     bounded by _LAND_DEADLINE_S. Returns (size_bytes, error_or_None).
@@ -139,18 +135,21 @@ def _wait_for_file(path):
     Measured: execute() returns true while the file is still absent, and the file appears about 3s
     later - inside the same call - once the main thread is pumped. The two-equal-samples gate costs
     one extra pump when the first non-zero size is already final (measured: it is), and refuses to
-    report a size that is still climbing when it is not."""
-    deadline = time.monotonic() + _LAND_DEADLINE_S
+    report a size that is still climbing when it is not. The bounded pump loop is
+    _export.pump_until; the size-went-stable signal is this tool's own."""
     prev = None
-    while True:
+
+    def probe():
+        nonlocal prev
         size, verr = _export.verify_written(path)
-        if not verr and size == prev:
-            return size, None
+        stable = not verr and size == prev
         prev = None if verr else size
-        if time.monotonic() >= deadline:
-            return 0, verr or f"the file at '{path}' was still growing (size_bytes={size})"
-        safe(lambda: adsk.doEvents())
-        time.sleep(_LAND_POLL_SLEEP)
+        return stable, (size, verr)
+
+    stable, (size, verr) = _export.pump_until(probe, _LAND_DEADLINE_S, _LAND_POLL_SLEEP)
+    if stable:
+        return size, None
+    return 0, verr or f"the file at '{path}' was still growing (size_bytes={size})"
 
 
 def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",

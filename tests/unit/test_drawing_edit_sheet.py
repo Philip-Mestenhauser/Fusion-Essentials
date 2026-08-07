@@ -27,9 +27,12 @@ from conftest import error_message, load_tool, payload
 es = load_tool("drawing_edit_sheet")
 
 # fake SheetSizes / SheetOrientationTypes values -> the landscape (width, height) the fake sheet
-# derives, the way Fusion derives its read-only width/height from size + orientation.
+# derives, the way Fusion derives its read-only width/height from size + orientation. Every pair is
+# in MILLIMETRES, including the ASME ones: an ASME B sheet (17 x 11 in) reads 431.8 x 279.4 and an
+# ASME E sheet reads 863.6 x 1117.6 - Sheet.width/height are mm on every drawing.
 _SIZE_EXTENT = {"A4": (297.0, 210.0), "A3": (420.0, 297.0), "A2": (594.0, 420.0),
-                "A0": (1189.0, 841.0), "B": (431.8, 279.4)}
+                "A0": (1189.0, 841.0), "B": (431.8, 279.4), "C": (558.8, 431.8),
+                "E": (863.6, 1117.6)}
 
 
 class FakeSheet:
@@ -417,6 +420,42 @@ class TestSetSize:
         wire([FakeSheet("Front")])
         assert "sheet_size" in error_message(es.handler(action="set_size", sheet="Front"))
 
+    def test_a_size_this_build_has_no_member_for_is_refused_before_anything_is_set(self, wire,
+                                                                                   monkeypatch):
+        # the member is read BY NAME and answers None on a build that lacks it - assigning that None
+        # would set the sheet to nothing, so the guard names the member and stops
+        state = wire([FakeSheet("Front", size="A3")])
+        monkeypatch.setattr(adsk.drawing, "SheetSizes",
+                            SimpleNamespace(A3ISOSheetSize="A3"))
+        msg = error_message(es.handler(action="set_size", sheet="Front", sheet_size="a4"))
+        assert "A4ISOSheetSize" in msg and "a4" in msg
+        assert state.sheets[0].size_sets == 0
+        assert state.sheets[0].sheetSize == "A3"
+
+
+class TestExtentUnits:
+    def test_width_and_height_are_labelled_mm_on_an_inch_drawing(self, wire):
+        # the defect this closes: an ASME B sheet reads 431.8 x 279.4 MILLIMETRES while the
+        # drawing's dimension unit reads inches, so publishing the numbers under sheet_units
+        # labelled millimetres as inches
+        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["facts"]["width"] == 431.8 and out["facts"]["height"] == 279.4
+        assert out["facts"]["width_height_unit"] == "mm"
+        assert out["sheet_units"] == "in"
+
+    def test_a_resize_labels_the_extent_it_publishes(self, wire):
+        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        out = payload(es.handler(action="set_size", sheet="Front", sheet_size="c"))
+        assert out["width"] == 558.8 and out["width_height_unit"] == "mm"
+        assert out["sheet_units"] == "in"
+
+    def test_a_reorientation_labels_the_extent_it_publishes(self, wire):
+        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        out = payload(es.handler(action="set_orientation", sheet="Front", orientation="portrait"))
+        assert out["width"] == 279.4 and out["width_height_unit"] == "mm"
+        assert out["sheet_units"] == "in"
+
 
 class TestSetOrientation:
     def test_orientation_swaps_the_extent(self, wire):
@@ -438,6 +477,23 @@ class TestSetOrientation:
         assert state.sheets[0].orientation == "LAND"
         assert state.sheets[0].orientation_sets == 0  # the assignment was never attempted
 
+    def test_portrait_on_the_largest_asme_sheet_is_refused_before_anything_is_set(self, wire):
+        # measured: Fusion answers "3 : Portrait orientation is not supported for ASME E sheet
+        # size." - the same refusal as ISO A0, and the shared table carries both pairs
+        state = wire([FakeSheet("Front", size="E", orientation_raises=True)], standard="ASME")
+        msg = error_message(es.handler(action="set_orientation", sheet="Front",
+                                       orientation="portrait"))
+        assert "portrait orientation on the ASME E sheet size" in msg
+        assert state.sheets[0].orientation == "LAND"
+        assert state.sheets[0].orientation_sets == 0
+
+    def test_portrait_on_a_smaller_sheet_of_the_same_standard_is_not_pre_refused(self, wire):
+        # only the pairs Fusion actually refuses are guarded - a blanket ASME refusal would block
+        # an orientation the platform accepts
+        state = wire([FakeSheet("Front", size="B")], standard="ASME")
+        out = payload(es.handler(action="set_orientation", sheet="Front", orientation="portrait"))
+        assert out["orientation"] == "portrait" and state.sheets[0].orientation_sets == 1
+
     def test_an_unreadable_current_orientation_is_named_as_such(self, wire):
         # the refusal publishes what it READ - an orientation it cannot decode says so
         wire([FakeSheet("Front", size="A0", orientation="SIDEWAYS")], standard="ISO")
@@ -456,6 +512,17 @@ class TestSetOrientation:
         wire([FakeSheet("Front", size="A4", orientation_ignored=True)])
         assert "did not take" in error_message(es.handler(action="set_orientation", sheet="Front",
                                                           orientation="portrait"))
+
+    def test_an_orientation_this_build_has_no_member_for_is_refused_before_anything_is_set(
+            self, wire, monkeypatch):
+        state = wire([FakeSheet("Front", size="A4")])
+        monkeypatch.setattr(adsk.drawing, "SheetOrientationTypes",
+                            SimpleNamespace(LandscapeSheetOrientationType="LAND"))
+        msg = error_message(es.handler(action="set_orientation", sheet="Front",
+                                       orientation="portrait"))
+        assert "PortraitSheetOrientationType" in msg and "portrait" in msg
+        assert state.sheets[0].orientation_sets == 0
+        assert state.sheets[0].orientation == "LAND"
 
     def test_an_unknown_orientation_is_refused(self, wire):
         wire([FakeSheet("Front")])
@@ -511,3 +578,9 @@ class TestDescriptionClaims:
         # carries the SOURCE sheet's. A swap is a wrong wire claim on every add or copy.
         assert "An ADDED sheet inherits the ACTIVE sheet" in es.TOOL_DESCRIPTION
         assert "a COPY the SOURCE sheet" in es.TOOL_DESCRIPTION
+
+    def test_the_two_units_are_told_apart_on_the_wire(self):
+        # width/height are millimetres on EVERY drawing; sheet_units is the dimension unit. A
+        # description that reads them as one unit is the wire half of the same wrong claim.
+        assert "millimetres on EVERY drawing" in es.TOOL_DESCRIPTION
+        assert "sheet_units reports the drawing's dimension display unit" in es.TOOL_DESCRIPTION

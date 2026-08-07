@@ -254,8 +254,9 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
     errors_after, _warn_after, _total_after = _common.timeline_health(design)
     broke = [n for n in errors_after if n not in errors_before]
 
-    note = ("Curve ids are creation-order indexes per kind, so removing or adding a curve RENUMBERS "
-            "the rest - re-read sketch_get(include_entities=true) before the next edit.")
+    note = ("Curve ids are creation-order indexes per kind: removing a curve RENUMBERS the ones "
+            "after it, while an added curve APPENDS at the end (both measured) - re-read "
+            "sketch_get(include_entities=true) before the next edit.")
     if not created and after_n < before_n:
         note = ("The whole curve was consumed: a trim on a curve with no intersections deletes it "
                 "outright. " + note)

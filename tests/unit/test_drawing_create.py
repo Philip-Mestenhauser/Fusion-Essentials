@@ -108,7 +108,9 @@ class FakeDM:
 
     def createDrawing(self, di):
         if self.raise_on_create:
-            raise RuntimeError("boom-create")
+            # a str raises that exact platform sentence; True raises a generic failure
+            raise RuntimeError(self.raise_on_create if isinstance(self.raise_on_create, str)
+                               else "boom-create")
         self.created_with = di
         return self.result_df
 
@@ -307,6 +309,23 @@ class TestGuards:
         assert res["isError"] is True
         assert "portrait" in res["message"].lower()
 
+    def test_portrait_on_the_largest_asme_sheet_is_refused(self):
+        # measured: "3 : Portrait orientation is not supported for ASME E sheet size." - the second
+        # pair of the shared table, and the one a table holding only ISO A0 would let through
+        _, dm = _install()
+        res = dc.handler(standard="asme", sheet_size="e", orientation="portrait")
+        assert res["isError"] is True
+        assert "portrait" in res["message"].lower() and "e" in res["message"].lower()
+        assert dm.created_with is None
+
+    def test_portrait_on_a_smaller_sheet_of_each_standard_is_allowed(self):
+        # only the measured pairs are refused: a blanket largest-sheet rule would block sizes
+        # Fusion accepts in portrait
+        for standard, size in (("iso", "a1"), ("asme", "d")):
+            _install()
+            out = _payload(dc.handler(standard=standard, sheet_size=size, orientation="portrait"))
+            assert out["created"] is True, (standard, size)
+
     def test_unknown_sheet_type_is_refused(self):
         _install()
         res = dc.handler(sheet_types=["component", "bogus"])
@@ -429,6 +448,20 @@ class TestMeasuredMemberSpellings:
         assert dc._UNITS_MAP == {"mm": "MillimeterDrawingUnitType", "inch": "InchDrawingUnitType"}
         assert dc._ORIENTATION_MAP == {"landscape": "LandscapeSheetOrientationType",
                                        "portrait": "PortraitSheetOrientationType"}
+        assert dc._CONTENT_MAP == {"full": "FullAssemblyDrawingContentType",
+                                   "visible": "VisibleOnlyDrawingContentType"}
+        assert dc._SHEET_SCOPE_MAP == {"all_levels": "AllLevelsSheetCreationType",
+                                       "first_level": "FirstLevelOnlySheetCreationType"}
+        assert dc._BASE_DOCUMENT_MAP == {"template": "FromTemplateBaseDocumentType"}
+
+    def test_the_sheet_size_member_map_covers_every_preset_plus_custom(self):
+        # 'default' is deliberately absent - it is not a request, so nothing is set
+        assert dc._SHEET_SIZE_MEMBERS == {
+            "a4": "A4ISOSheetSize", "a3": "A3ISOSheetSize", "a2": "A2ISOSheetSize",
+            "a1": "A1ISOSheetSize", "a0": "A0ISOSheetSize", "a": "AASMESheetSize",
+            "b": "BASMESheetSize", "c": "CASMESheetSize", "d": "DASMESheetSize",
+            "e": "EASMESheetSize", "custom": "CustomSizeSheetSize"}
+        assert "default" not in dc._SHEET_SIZE_MEMBERS
 
     def test_dimension_strategy_map_names_the_measured_members(self):
         assert dc._DIM_STRATEGY_MAP == {
@@ -458,6 +491,61 @@ class TestEnumFamilyResolution:
     def test_an_absent_family_is_ignored_when_the_input_is_not_requested(self, monkeypatch):
         _, dm = _install()
         monkeypatch.delattr(_DRAWING, "TangentEdgeDisplayTypes")
+        out = _payload(dc.handler())
+        assert out["created"] is True
+
+    def test_an_absent_content_family_fails_the_call_naming_it(self, monkeypatch):
+        # an absent family swallowed inside safe() would create the drawing with the wrong content
+        # while the call reported ok - the resolver names the family and creates nothing instead
+        _, dm = _install()
+        monkeypatch.delattr(_DRAWING, "DrawingContentTypes")
+        res = dc.handler(content="visible")
+        assert res["isError"] is True
+        assert "adsk.drawing.DrawingContentTypes" in res["message"]
+        assert "content" in res["message"]
+        assert dm.mode is None and dm.created_with is None
+
+    def test_an_absent_sheet_creation_family_fails_the_call_naming_it(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.delattr(_DRAWING, "SheetCreationTypes")
+        res = dc.handler(sheet_scope="first_level")
+        assert res["isError"] is True
+        assert "adsk.drawing.SheetCreationTypes" in res["message"]
+        assert "sheet_scope" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_absent_sheet_size_member_fails_the_call_naming_it(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.setattr(_DRAWING, "SheetSizes",
+                            types.SimpleNamespace(A4ISOSheetSize="A4"))
+        res = dc.handler(sheet_size="a2")
+        assert res["isError"] is True
+        assert "SheetSizes.A2ISOSheetSize" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_absent_custom_size_member_fails_the_call_naming_it(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.setattr(_DRAWING, "SheetSizes",
+                            types.SimpleNamespace(A4ISOSheetSize="A4"))
+        res = dc.handler(sheet_size="custom", custom_width_mm=420, custom_height_mm=297)
+        assert res["isError"] is True
+        assert "SheetSizes.CustomSizeSheetSize" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_absent_base_document_family_fails_a_template_create(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.setattr(dc, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Shop Template"), raw, [raw]))
+        monkeypatch.delattr(_DRAWING, "BaseDocumentTypes")
+        res = dc.handler(template_file="urn:x")
+        assert res["isError"] is True
+        assert "adsk.drawing.BaseDocumentTypes" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_absent_base_document_family_does_not_block_a_scratch_create(self, monkeypatch):
+        # without a template there is no baseDocumentType request, so the family is never needed
+        _install()
+        monkeypatch.delattr(_DRAWING, "BaseDocumentTypes")
         out = _payload(dc.handler())
         assert out["created"] is True
 
@@ -611,9 +699,10 @@ class TestTemplateFile:
         _, dm = _install()
         template_df = FakeDataFile("Shop Template", file_id="urn:adsk.wipprod:dm.lineage:TEMPLATE")
         monkeypatch.setattr(dc, "_resolve_data_file", lambda raw: (template_df, raw, [raw]))
-        dc.handler(template_file="urn:adsk.wipprod:dm.lineage:TEMPLATE")
+        out = _payload(dc.handler(template_file="urn:adsk.wipprod:dm.lineage:TEMPLATE"))
         assert dm.input_obj.baseDocumentType == "TEMPLATE"
         assert dm.input_obj.templateFile is template_df
+        assert out["settings_requested"]["base_document"] == "template"
 
     def test_no_template_file_leaves_base_document_type_untouched(self):
         _, dm = _install()
@@ -746,3 +835,53 @@ class TestPerViewDraftingDisplay:
         _install()
         out = _payload(dc.handler(center_line="default", center_mark="default"))
         assert out["created"] is True
+
+    def test_the_two_input_descriptions_state_the_refusal_their_resolver_enforces(self):
+        # the schema advertises values the handler refuses outright; a description that sells them
+        # as a capability is the only place an agent could learn otherwise before it calls
+        for kind in (dc._CENTER_LINE, dc._CENTER_MARK):
+            desc = kind.as_property()[1]["description"]
+            assert "Refused unless 'default'" in desc, kind.name
+            assert "no enum exists" in desc, kind.name
+
+
+class TestJustSavedLag:
+    # measured: a design saved seconds earlier fails with exactly "3 : Failed to create drawing
+    # document" while its cloud DataFile is still processing, and the identical call succeeds about
+    # a minute later. The handler never sleeps or retries - the error is the one place to teach it.
+    _SENTENCE = "3 : Failed to create drawing document"
+
+    def test_the_bare_create_refusal_teaches_the_cloud_processing_lag(self):
+        _install(raise_on_create=self._SENTENCE)
+        res = dc.handler()
+        assert res["isError"] is True
+        assert self._SENTENCE in res["message"]
+        assert "still processing" in res["message"]
+        assert "minute" in res["message"] and "retry" in res["message"]
+
+    def test_a_sibling_platform_sentence_carries_no_lag_claim(self):
+        # the lag is measured for exactly one sentence. A Fusion failure that SHARES its shape and
+        # prefix is a different failure - sending the caller away to wait it out would waste a
+        # minute and then fail again identically.
+        sibling = "3 : Failed to create drawing view"
+        _install(raise_on_create=sibling)
+        res = dc.handler()
+        assert res["isError"] is True
+        assert sibling in res["message"]          # the platform sentence is carried verbatim
+        for claim in ("still processing", "minute", "retry"):
+            assert claim not in res["message"], claim
+
+    def test_any_other_create_failure_carries_no_lag_claim(self):
+        # the lag is a claim about ONE platform sentence; attaching it to every failure would
+        # send a caller to wait out a failure waiting cannot fix
+        _install(raise_on_create=True)
+        res = dc.handler()
+        assert res["isError"] is True
+        assert "boom-create" in res["message"]
+        assert "minute" not in res["message"]
+
+    def test_a_null_create_is_not_reported_as_the_lag(self):
+        _install(result_df=None)
+        res = dc.handler()
+        assert res["isError"] is True
+        assert "minute" not in res["message"]

@@ -1,7 +1,10 @@
 """Unit tests for ``_export.py`` - the export-to-disk substrate shared by design_export/mesh_export:
-filename sanitizing, the component-by-name resolver, the file-landed verifier, and the
-one-file-per-top-level-occurrence split orchestration.
+filename sanitizing, the component-by-name resolver, the file-landed verifier, the bounded
+doEvents-pumping wait, and the one-file-per-top-level-occurrence split orchestration.
 """
+
+import adsk
+import pytest
 
 from conftest import load_tool
 
@@ -91,6 +94,86 @@ class TestVerifyWritten:
         assert size == 0
         assert "no file was written" in err.lower()
         assert "size_bytes=0" in err
+
+
+# ── pump_until ────────────────────────────────────────────────────────────────
+
+class _Clock:
+    """A deterministic stand-in for the time module: sleep advances the clock instead of blocking,
+    so the bound is exercised in exact steps rather than against the wall clock."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def wait(monkeypatch):
+    """pump_until on a fake clock with a counted pump. Returns (call, clock, pumps)."""
+    clock = _Clock()
+    pumps = []
+    monkeypatch.setattr(ex, "time", clock)
+    monkeypatch.setattr(adsk, "doEvents", lambda: pumps.append(1), raising=False)
+    return (lambda probe, timeout_s=1.0, poll_sleep=0.25:
+            ex.pump_until(probe, timeout_s, poll_sleep)), clock, pumps
+
+
+class TestPumpUntil:
+    def test_an_already_settled_probe_costs_no_pump(self, wait):
+        call, clock, pumps = wait
+        assert call(lambda: (True, "landed")) == (True, "landed")
+        assert pumps == [] and clock.slept == []
+
+    def test_the_probe_reruns_after_every_pump_until_it_settles(self, wait):
+        call, clock, pumps = wait
+        readings = iter([(False, "absent"), (False, "0 bytes"), (True, "720 bytes")])
+        assert call(lambda: next(readings)) == (True, "720 bytes")
+        assert pumps == [1, 1]                      # one pump between each pair of probes
+        assert clock.slept == [0.25, 0.25]
+
+    def test_gives_up_at_the_bound_and_hands_back_the_last_reading(self, wait):
+        call, clock, pumps = wait
+        seen = []
+
+        def probe():
+            seen.append(len(seen))
+            return False, f"still growing {len(seen)}"
+
+        settled, reading = call(probe, timeout_s=1.0, poll_sleep=0.25)
+        assert settled is False
+        assert reading == "still growing 5"         # probes at 0.00 0.25 0.50 0.75 1.00
+        assert len(pumps) == 4 and clock.now == 1.0
+
+    def test_a_zero_bound_still_probes_once_before_giving_up(self, wait):
+        # the bound is checked BETWEEN the probe and the pump, so a wait with no budget left still
+        # reports what is on disk rather than a blind failure.
+        call, clock, pumps = wait
+        probes = []
+
+        def probe():
+            probes.append(1)
+            return False, "absent"
+
+        assert call(probe, timeout_s=0.0) == (False, "absent")
+        assert probes == [1] and pumps == []
+
+    def test_a_pump_that_raises_does_not_sink_the_wait(self, wait, monkeypatch):
+        # doEvents is a live Fusion call; one bad pump must not turn a landing into an exception.
+        call, _clock, _pumps = wait
+
+        def boom():
+            raise RuntimeError("pump exploded")
+
+        monkeypatch.setattr(adsk, "doEvents", boom, raising=False)
+        readings = iter([(False, "absent"), (True, "landed")])
+        assert call(lambda: next(readings)) == (True, "landed")
 
 
 # ── top_level_occurrences ──────────────────────────────────────────────────────

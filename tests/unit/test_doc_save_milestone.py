@@ -212,6 +212,43 @@ class TestVersionNeverAdvanced:
         assert "4.4s" in note
         assert "lag" not in note.lower()
 
+    def test_an_unreadable_pre_save_tip_is_reported_as_such_not_diagnosed(self, monkeypatch):
+        # With no PRE-save number there is no comparison to wait on: the confirming read runs once,
+        # so the payload may claim neither a duration it did not spend nor a non-advancement it
+        # never observed.
+        class _NoTipBefore:
+            id = "urn:lineage"
+            versionNumber = 1
+
+            @property
+            def latestVersionNumber(self):
+                raise RuntimeError("2 : InternalValidationError")
+
+        doc = _Doc(_NoTipBefore())
+        app = _use(monkeypatch, doc, _FreshFile(latest=7, is_milestone=True, names=("MS",)),
+                   deadline=5.0)
+        out = _payload(dsm.handler(milestone_name="MS"))
+        assert app.data.calls == 1                  # nothing to settle against - no fake wait
+        assert out["latest_version_before"] is None
+        assert out["latest_version_after"] == 7     # what WAS read is still reported
+        assert out["version_confirmed"] is False and out["pending"] is True
+        note = out["note"]
+        assert "could not be read BEFORE the save" in note and "7" in note
+        assert "versioned nothing" not in note      # a verdict on a comparison that never happened
+        assert "of re-fetching" not in note         # no duration was spent
+
+    def test_the_bounded_retry_gives_up_and_reports_the_tip_it_last_read(self, monkeypatch):
+        # a tip that never moves must end the wait at the bound with the reading it actually got -
+        # never an unbounded retry, and never a None that would read as "could not be read".
+        doc = _Doc(_StaleFile(latest=3))
+        app = _use(monkeypatch, doc, _FreshFile(latest=3, is_milestone=False, names=()),
+                   deadline=0.02)
+        out = _payload(dsm.handler(milestone_name="MS"))
+        assert app.data.calls >= 2                  # it retried rather than single-shotting
+        assert out["latest_version_after"] == 3     # the LAST reading, not a dropped one
+        assert out["version_confirmed"] is False
+        assert "versioned nothing" in out["note"]
+
 
 class TestHonesty:
     def test_clean_document_is_refused_not_falsely_saved(self, monkeypatch):
@@ -272,6 +309,27 @@ class TestLineageFork:
         assert out["version_confirmed"] is True      # the new lineage answered with its tip
         assert out["pending"] is True                # the mark is unconfirmed there
         assert "NEW LINEAGE" in out["note"] and "NOT applied" in out["note"]
+
+    def test_a_fork_whose_new_lineage_reads_back_nothing_is_not_diagnosed(self, monkeypatch):
+        # The pre-save number belongs to the ABANDONED stream, so it is no baseline for the new
+        # lineage: the confirming read runs once, and the payload may claim neither a duration it
+        # did not spend nor a non-advancement it measured against the wrong stream.
+        doc = _Doc(_StaleFile(lineage="urn:old", vnum=3, latest=3))
+
+        def fork(name, desc):
+            doc.calls.append((name, desc))
+            doc.dataFile = _StaleFile(lineage="urn:new", vnum=1, latest=1)
+            return True
+        doc.saveMilestone = fork
+        app = _use(monkeypatch, doc, None, deadline=5.0)   # findFileById answers nothing
+        out = _payload(dsm.handler(milestone_name="MS"))
+        assert app.data.calls == 1                  # no baseline to settle against - no fake wait
+        assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
+        assert out["version_confirmed"] is False and out["pending"] is True
+        note = out["note"]
+        assert "NEW lineage" in note and "not decidable" in note
+        assert "versioned nothing" not in note      # a verdict against an abandoned version stream
+        assert "of re-fetching" not in note         # no duration was spent
 
     def test_a_same_lineage_save_reports_no_fork(self, monkeypatch):
         doc = _Doc(_StaleFile(lineage="urn:same", vnum=1, latest=1))

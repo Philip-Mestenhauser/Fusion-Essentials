@@ -528,6 +528,51 @@ _SOLIDS = [
                                  "operation": "join"}, "refused", None),
     ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"), "tools": [_ctx_get(c, "cc_b", "combine tool")], "operation": "join"}, "ok", None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # the revolve axis as a CYLINDRICAL FACE, off the origin - the case a world key cannot express.
+    # A face mapped to a direction VECTOR keeps the direction and DROPS the location, so the ring is
+    # turned about the world axis through the ORIGIN and reported as success: the label is checked
+    # AND the geometry measured. Live: a cylinder at x=30, a 2x3 mm profile at x 36-38 on the XZ
+    # plane, ring bbox x 22..38. The cameo sits at z=100, clear of the gyroscope and the other cameos.
+    ("model_create_component", {"name": "RevolveCameo", "activate": True}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 100, "name": "RevAxisPlane"}, "ok", None),
+    ("sketch_create", {"plane": "RevAxisPlane", "name": "RevAxisS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 30, "cy": 0, "radius": 5, "sketch_name": "RevAxisS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "RevAxisS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("find_geometry", {"target": "RevolveCameo", "kind": "cylinder_face", "radius": 5, "max_results": 1}, "ok", _fg("rv_cyl")),
+    ("sketch_create", {"plane": "xz", "name": "RevRingS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 36, "y1": 100, "x2": 38, "y2": 103,
+                             "sketch_name": "RevRingS"}, "ok", None),
+    ("model_revolve", lambda c: {"sketch_name": "RevRingS", "profile_index": 0,
+                                 "axis": _ctx_get(c, "rv_cyl", "the off-origin cylinder face"),
+                                 "angle_deg": 360},
+     lambda p: p.get("axis") == "BRepFace", None),
+    # the label alone cannot see wrong geometry: the ring must stand AROUND x=30, never around the
+    # origin (about the world z axis this profile spans x -38..38, so a positive min x is the tell).
+    ("model_inspect", {"target": "RevolveCameo:1"},
+     lambda p: (p["min_point"]["x"] >= 20 and p["max_point"]["x"] <= 40
+                and p["min_point"]["x"] > 0), None),
+    # a PLANAR face carries a normal, not an axis - refused by name (only a cylindrical/conical/
+    # toroidal face defines one) instead of turned into a direction the caller never asked for.
+    ("find_geometry", {"target": "RevolveCameo", "kind": "planar_face", "nearest_to": [30, 0, 120],
+                       "max_results": 1}, "ok", _fg("rv_flat")),
+    ("model_revolve", lambda c: {"sketch_name": "RevRingS", "profile_index": 0,
+                                 "axis": _ctx_get(c, "rv_flat", "a planar cap face"),
+                                 "angle_deg": 360}, "refused", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # 'all' takes EVERY closed region, and the bays inside a frame outline are closed regions too -
+    # so this extrude fills them with material. The payload cannot show a solid bay, so the enclosed
+    # regions are NAMED: an outer rectangle plus three bays reports the three that sit inside another.
+    ("model_create_component", {"name": "BayCameo", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "BayS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 900, "x2": 290, "y2": 960, "sketch_name": "BayS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 210, "y1": 910, "x2": 230, "y2": 950, "sketch_name": "BayS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 240, "y1": 910, "x2": 260, "y2": 950, "sketch_name": "BayS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 270, "y1": 910, "x2": 285, "y2": 950, "sketch_name": "BayS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "BayS", "profile_index": "all", "distance": 8},
+     lambda p: (isinstance(p.get("enclosed_profile_indices"), list)
+                and len(p["enclosed_profile_indices"]) > 0
+                and "enclosed" in p.get("note", "")), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
 # --- ACT 3: MOTION - four gimbal axes + a crank->rotor link, driven live (mirrors scenario S3) -
@@ -2986,8 +3031,13 @@ STORY = {
                         "with the text count proving nothing landed, the same name refused on an "
                         "edit with the following read showing the string untouched, and a call "
                         "with no font_name publishing no font key at all"),
-    "model_extrude": "extrude the ring bands symmetric about the ring plane",
-    "model_revolve": "revolve the rotor disc about the spin axis",
+    "model_extrude": ("extrude the ring bands symmetric about the ring plane, then a three-bay "
+                      "frame with 'all' whose payload NAMES the regions enclosed by another "
+                      "selected one - the bays that filled with material"),
+    "model_revolve": ("revolve the rotor disc about the spin axis, then about an off-origin "
+                      "cylinder FACE - the resolved label reads BRepFace and the ring's measured "
+                      "bounding box stands around x=30, not around the origin; a planar face as "
+                      "the axis refused"),
     "model_loft": "loft the pedestal base-to-post transition",
     "model_sweep": "sweep the crank handle along its path",
     "model_draft": "draft a cameo face",

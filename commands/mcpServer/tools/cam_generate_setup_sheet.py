@@ -17,6 +17,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from . import _assert
+from . import _export
 from . import _inputs
 from . import _outputs
 from ._cam_common import get_cam, resolve_cam_node
@@ -26,6 +27,7 @@ app = adsk.core.Application.get()
 
 # The async landing is sub-second live (~0.3s of pumping); the cap only bounds a wedged generation.
 _PUMP_SECONDS = 10.0
+_PUMP_POLL_SLEEP = 0.05
 _SHEET_SUFFIXES = {"html": (".html", ".htm"), "excel": (".xlsx", ".xls")}
 
 _FORMAT = _inputs.Choice(
@@ -102,20 +104,25 @@ def handler(scope: str = "", format: str = "html", output_folder: str = "") -> d
                      f"{kind} scope '{want or 'document'}' - nothing was written.")
 
     # True is NOT the deliverable: the sheet lands asynchronously and only advances while the main
-    # thread pumps. Judged by a NEW or MODIFIED sheet file - never by the bool - and the file must
-    # be NON-EMPTY and STABLE across two pumps: it appears at 0 bytes first and is written after
+    # thread pumps (_export.pump_until does the pumping; the signal below is this tool's own).
+    # Judged by a NEW or MODIFIED sheet file - never by the bool - and the file must be NON-EMPTY
+    # and STABLE across two samples: it appears at 0 bytes first and is written after
     # (live-measured), so breaking on appearance reports a 0-byte deliverable.
-    landed, prev_sizes = {}, None
-    while time.time() - started < _PUMP_SECONDS:
-        safe(lambda: adsk.doEvents())
-        time.sleep(0.05)
+    prev_sizes = None
+
+    def probe():
+        nonlocal prev_sizes
         now = _sheet_files(out_dir, suffixes)
         fresh = {p: v for p, v in now.items() if p not in before or v != before[p]}
         sizes = {p: v[1] for p, v in fresh.items()}
-        if fresh and all(sz > 0 for sz in sizes.values()) and sizes == prev_sizes:
-            landed = fresh
-            break
+        stable = bool(fresh) and all(sz > 0 for sz in sizes.values()) and sizes == prev_sizes
         prev_sizes = sizes
+        return stable, fresh
+
+    # _PUMP_SECONDS bounds generation AND landing together, so the wait gets what is left of it.
+    stable, fresh = _export.pump_until(probe, _PUMP_SECONDS - (time.time() - started),
+                                       _PUMP_POLL_SLEEP)
+    landed = fresh if stable else {}
     if not landed:
         return error(f"generateSetupSheet returned true but no {fmt_key} sheet landed in "
                      f"'{out_dir}' within {int(_PUMP_SECONDS)}s - the generation did not complete, "

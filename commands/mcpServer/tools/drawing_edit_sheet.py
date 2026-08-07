@@ -2,9 +2,9 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Manage the ACTIVE 2D drawing document's sheets: add, copy, delete, rename, set size, set
-orientation, tidy up. Sheet.width/height are read-only and derive from size + orientation (an ISO
-drawing reports them in millimetres, not the adsk-standard centimetres). WRITES (destructive:
-Sheet.deleteMe cannot be undone).
+orientation, tidy up. Sheet.width/height are read-only and derive from size + orientation, and
+EVERY drawing reports them in millimetres - not the adsk-standard centimetres, and not the
+drawing's own dimension unit. WRITES (destructive: Sheet.deleteMe cannot be undone).
 """
 
 import adsk.core
@@ -33,15 +33,6 @@ _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"],
 # orientation key -> SheetOrientationTypes member.
 _ORIENTATION_MEMBERS = {"landscape": "LandscapeSheetOrientationType",
                         "portrait": "PortraitSheetOrientationType"}
-# (standard, size) pairs Fusion is MEASURED to raise portrait for: an ISO A0 sheet answers
-# 'Portrait orientation is not supported for ISO A0 sheet size.'. Any other refusal reaches the
-# caller as the platform's own raise, carried by the set_orientation assignment.
-_PORTRAIT_REFUSED = {("iso", "a0")}
-
-
-def _enum_value(cls_name, member):
-    """One adsk.drawing enum member's value by NAME, or None when this Fusion build lacks it."""
-    return safe(lambda: getattr(getattr(adsk.drawing, cls_name), member))
 
 
 def _size_label(value):
@@ -49,7 +40,7 @@ def _size_label(value):
     if value is None:
         return None
     for key, (_standard, member) in _SHEET_SIZE_MAP.items():
-        if value == _enum_value("SheetSizes", member):
+        if value == _drawing_common.enum_value("SheetSizes", member):
             return key
     return None
 
@@ -59,29 +50,17 @@ def _orientation_label(value):
     if value is None:
         return None
     for key, member in _ORIENTATION_MEMBERS.items():
-        if value == _enum_value("SheetOrientationTypes", member):
-            return key
-    return None
-
-
-def _standard_label(dwg):
-    """'iso'/'asme' for the drawing's own standard, or None when it cannot be read. Fusion refuses a
-    sheet size belonging to the other standard, so this read is what the size guard turns on.
-    DrawingStandardTypes carries exactly these two members."""
-    value = safe(lambda: dwg.documentSettings.standard)
-    if value is None:
-        return None
-    for key, member in (("iso", "ISODrawingStandardType"), ("asme", "ASMEDrawingStandardType")):
-        if value == _enum_value("DrawingStandardTypes", member):
+        if value == _drawing_common.enum_value("SheetOrientationTypes", member):
             return key
     return None
 
 
 def _sheet_facts(sheet):
-    """One sheet's readable state. width/height are read-only and derive from size + orientation, in
-    the drawing's own length units (an ISO drawing reads millimetres) - the payload publishes
-    sheet_units beside them. Sheet.tidyUp is deliberately NOT read here: it is a property whose READ
-    tidies the sheet."""
+    """One sheet's readable state. width/height are read-only, derive from size + orientation, and
+    are MILLIMETRES on every drawing - width_height_unit carries that constant fact beside them, so
+    the numbers are never read against sheet_units (the drawing's DIMENSION display unit, which on
+    an inch drawing reads 'in' while these two still read mm). Sheet.tidyUp is deliberately NOT read
+    here: it is a property whose READ tidies the sheet."""
     size = safe(lambda: sheet.sheetSize)
     orientation = safe(lambda: sheet.orientation)
     return {
@@ -90,6 +69,7 @@ def _sheet_facts(sheet):
         "orientation": _orientation_label(orientation),
         "width": measured(lambda: sheet.width, 1.0, 3),
         "height": measured(lambda: sheet.height, 1.0, 3),
+        "width_height_unit": _drawing_common.SHEET_EXTENT_UNIT,
         "views": safe(lambda: sheet.views.count, 0),
         "sketches": safe(lambda: sheet.sketches.count, 0),
         "custom_tables": safe(lambda: sheet.customTables.count, 0),
@@ -238,11 +218,11 @@ def _do_rename(sheet, new_name):
 
 def _do_set_size(dwg, sheet, size_key):
     size_standard, member = _SHEET_SIZE_MAP[size_key]
-    value = _enum_value("SheetSizes", member)
+    value = _drawing_common.enum_value("SheetSizes", member)
     if value is None:
         return error(f"This Fusion build has no sheet size '{member}', so '{size_key}' cannot be set.")
     name = safe(lambda: sheet.name)
-    standard = _standard_label(dwg)
+    standard = _drawing_common.standard_label(dwg)
     if standard is not None and standard != size_standard:
         # Fusion RAISES on a size belonging to the other standard, and a raise inside a drawing
         # document is not reliably rolled back - so the mismatch is refused before anything is set.
@@ -267,6 +247,7 @@ def _do_set_size(dwg, sheet, size_key):
         "height": after["height"],
         "previous_width": before["width"],
         "previous_height": before["height"],
+        "width_height_unit": _drawing_common.SHEET_EXTENT_UNIT,
         "sheet_units": _drawing_common.sheet_units(dwg),
         "note": ("Sheet size set and read back - width and height follow the size and cannot be set "
                  "directly. action='tidy_up' lays the sheet's views out again."),
@@ -275,15 +256,15 @@ def _do_set_size(dwg, sheet, size_key):
 
 def _do_set_orientation(dwg, sheet, orientation_key):
     member = _ORIENTATION_MEMBERS[orientation_key]
-    value = _enum_value("SheetOrientationTypes", member)
+    value = _drawing_common.enum_value("SheetOrientationTypes", member)
     if value is None:
         return error(f"This Fusion build has no sheet orientation '{member}', so "
                      f"'{orientation_key}' cannot be set.")
     name = safe(lambda: sheet.name)
     before = _sheet_facts(sheet)
-    standard = _standard_label(dwg)
+    standard = _drawing_common.standard_label(dwg)
     if (orientation_key == "portrait" and standard is not None
-            and (standard, before["sheet_size"]) in _PORTRAIT_REFUSED):
+            and (standard, before["sheet_size"]) in _drawing_common.NO_PORTRAIT):
         # Fusion RAISES portrait on this size, and a raise inside a drawing document is not
         # reliably rolled back - refused before anything is set.
         return error(f"Fusion does not support portrait orientation on the {standard.upper()} "
@@ -308,6 +289,7 @@ def _do_set_orientation(dwg, sheet, orientation_key):
         "height": after["height"],
         "previous_width": before["width"],
         "previous_height": before["height"],
+        "width_height_unit": _drawing_common.SHEET_EXTENT_UNIT,
         "sheet_units": _drawing_common.sheet_units(dwg),
         "note": ("Orientation set and read back - the sheet's width and height swap with it. "
                  "action='tidy_up' lays the sheet's views out again."),
@@ -397,8 +379,9 @@ TOOL_DESCRIPTION = (
     "along; it lands last), 'delete' one, 'rename' one, 'set_size', 'set_orientation', or 'tidy_up' "
     "(lay a sheet's views out again). An ADDED sheet inherits the ACTIVE sheet's size and "
     "orientation, a COPY the SOURCE sheet's; either way the new sheet becomes active, which is the "
-    "only way a sheet becomes active. Sheet width and height are read-only and follow the size, "
-    "reported beside the drawing's own sheet_units. A DELETE is not "
+    "only way a sheet becomes active. Sheet width and height are read-only, follow the size, and "
+    "are millimetres on EVERY drawing (width_height_unit); sheet_units reports the drawing's "
+    "dimension display unit, which is not theirs. A DELETE is not "
     "visible inside the call that makes it: the result carries Fusion's own true/false, and the "
     "sheets the drawing holds must be re-read in a later call. Acts on whichever drawing is the "
     "active document; drawing_export is the only way to see a sheet (a drawing has no viewport)."
