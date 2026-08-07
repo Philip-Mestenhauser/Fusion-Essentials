@@ -8,13 +8,20 @@ guards (exact counts, missing scalars, wrong geometry kind), the setBy*-returned
 the geometry sanity read-back (normal/direction/origin read off the CREATED datum).
 """
 
+import collections
+import io
 import json
 import math
+import re
 
 from conftest import (BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakePoint, FakeUnitsManager,
-                      FakeVector3D, Line3D, Plane, load_tool)
+                      FakeVector3D, Line3D, Plane, _Vertex, load_tool)
 
 cn = load_tool("model_construction")
+
+
+def _tool_source():
+    return io.open(cn.__file__, encoding="utf-8").read()
 
 
 class _CollOut:
@@ -28,18 +35,29 @@ class _CollOut:
         self.named = None
         self.next_result = True
         self.result_geometry = None
+        self.proxy_geometry = None
+        self.result_token = None      # the created datum's entityToken; None = an unreadable token
+        self.result_definition = None  # the created datum's definition; None = nothing to read back
+        self.no_to_object = False     # True models a ConstructionPointInput (no setByPathToObject)
+        self.added = 0
     def createInput(self):
         self.captured = {}
         outer = self
         class Inp:
+            # every setBy* is documented "Returns true if successful" - the fake answers, so a
+            # handler that drops the answer can be caught dropping it
             def setByPoint(self, p):
                 outer.captured["point"] = p
+                return outer.next_result
             def setByLine(self, line):
                 outer.captured["line"] = line
+                return outer.next_result
             def setByEdge(self, edge):              # parametric-legal edge-axis path
                 outer.captured["edge"] = edge
+                return outer.next_result
             def setByOffset(self, base, val):
                 outer.captured["offset"] = (base, val)
+                return outer.next_result
             def setByAngle(self, linear, angle_val, planar):
                 outer.captured["angle"] = (linear, angle_val, planar)
                 return outer.next_result
@@ -73,11 +91,44 @@ class _CollOut:
             def setByEdgePlane(self, edge, plane):
                 outer.captured["edge_plane"] = (edge, plane)
                 return outer.next_result
+            def setByAngleOnCurvedFace(self, curved, angle_val, planar):
+                outer.captured["angle_on_face"] = (curved, angle_val, planar)
+                return outer.next_result
+            def setByOffsetThroughPoint(self, planar, pt):
+                outer.captured["offset_through_point"] = (planar, pt)
+                return outer.next_result
+            def setByPath(self, path, distance_type, distance_val):
+                outer.captured["on_path"] = (path, distance_type, distance_val)
+                return outer.next_result
+            def setByPathToObject(self, path, to_object, offset_val):
+                # PLANE inputs only - ConstructionPointInput carries no such member, and the fake
+                # keeps that asymmetry by refusing to answer for a point (see _CollOut.no_to_object)
+                if outer.no_to_object:
+                    raise AttributeError("setByPathToObject")
+                outer.captured["on_path_to_object"] = (path, to_object, offset_val)
+                return outer.next_result
         self._inp = Inp()
         return self._inp
     def add(self, inp):
-        obj = type("O", (), {"name": "Datum", "geometry": self.result_geometry})()
+        # `result_geometry` is what plain .geometry reads. `proxy_geometry` is what
+        # createForAssemblyContext(occurrence).geometry reads - the measured split: a datum created
+        # while an occurrence is active reads component-LOCAL directly and WORLD through the proxy,
+        # so a gate that skips the proxy compares two different spaces.
+        self.added += 1
+        proxy = (type("OProxy", (), {"name": "Datum", "geometry": self.proxy_geometry})()
+                 if self.proxy_geometry is not None else None)
+        obj = type("O", (), {"name": "Datum", "geometry": self.result_geometry,
+                             "entityToken": self.result_token,
+                             "definition": self.result_definition,
+                             "createForAssemblyContext": lambda _s, _occ, _p=proxy: _p})()
         return obj
+
+
+# An origin ConstructionPlane carries a .name; the payload publishes THAT (via
+# _inputs.surface_ref_label) rather than echoing the request token back. An origin plane resolved
+# from an 'xy'/'xz'/'yz' alias reads its name back UPPERCASE. A namedtuple keeps the tuple identity
+# the setBy* argument assertions compare against while supplying that name.
+_OriginPlane = collections.namedtuple("_OriginPlane", "kind name")
 
 
 class FakeComp:
@@ -86,26 +137,29 @@ class FakeComp:
         self.constructionPoints = _CollOut()
         self.constructionAxes = _CollOut()
         self.constructionPlanes = _CollOut()
-        self.xYConstructionPlane = ("plane", "xy")
-        self.xZConstructionPlane = ("plane", "xz")
-        self.yZConstructionPlane = ("plane", "yz")
+        self.xYConstructionPlane = _OriginPlane("plane", "XY")
+        self.xZConstructionPlane = _OriginPlane("plane", "XZ")
+        self.yZConstructionPlane = _OriginPlane("plane", "YZ")
 
 
 class FakeDesign:
     # designType: 0 = Direct (setByPoint/setByLine legal), 1 = Parametric (they fail).
-    def __init__(self, comp, design_type=0):
+    # activeOccurrence is None when the ROOT component is active (the live contract) - set it to
+    # drive the created datum's geometry through its assembly-context proxy.
+    def __init__(self, comp, design_type=0, active_occurrence=None):
         self.activeComponent = comp
         self.rootComponent = comp
         self.designType = design_type
+        self.activeOccurrence = active_occurrence
 
 
-def _install(raise_env=False, design_type=0):
+def _install(raise_env=False, design_type=0, active_occurrence=None):
     comp = FakeComp()
     if raise_env:
         def boom():
             raise RuntimeError("3 : Environment is not supported")
         comp.constructionPoints.createInput = boom
-    design = FakeDesign(comp, design_type)
+    design = FakeDesign(comp, design_type, active_occurrence)
     cn.app = type("A", (), {"activeProduct": design})()
     cn._common.app = cn.app
     import adsk.fusion, adsk.core
@@ -145,8 +199,11 @@ def _planar_face(normal_xyz=(0, 0, 1), origin_xyz=None):
     return BRepFace(Plane(FakeVector3D(*normal_xyz), origin))
 
 
-def _cylinder_face(axis_xyz=(0, 0, 1)):
-    return BRepFace(Cylinder(FakeVector3D(*axis_xyz)))
+def _cylinder_face(axis_xyz=(0, 0, 1), origin_xyz=None):
+    # Cylinder.origin is the centre of the base - a point ON the axis, which is what the
+    # at_angle_on_face containment check projects onto the created plane.
+    origin = FakePoint(*origin_xyz) if origin_xyz else None
+    return BRepFace(Cylinder(FakeVector3D(*axis_xyz), origin))
 
 
 def _cone_face(axis_xyz=(0, 0, 1)):
@@ -215,9 +272,18 @@ class TestConstruction:
     def test_plane_offset_from_named_plane(self):
         comp = _install()
         out = _payload(cn.handler(kind="plane", plane="xz", offset=15, units="mm"))
-        assert out["kind"] == "plane" and out["offset_from"] == "xz"
+        # 'XZ' - the resolved origin plane's own name, not the 'xz' alias that was asked for
+        assert out["kind"] == "plane" and out["offset_from"] == "XZ"
         base, val = comp.constructionPlanes.captured["offset"]
-        assert base == ("plane", "xz") and val == ("real", 1.5)   # 15mm -> 1.5cm
+        assert base == ("plane", "XZ") and val == ("real", 1.5)   # 15mm -> 1.5cm
+
+    def test_offset_from_names_the_resolved_plane_not_the_request_token(self, monkeypatch):
+        # 'plane' also takes a face handle; the payload reports what the input BECAME, so a
+        # lowercased handle string can never reach it
+        _install()
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face())
+        out = _payload(cn.handler(kind="plane", plane="<FACE-HANDLE-AbC>", offset=5))
+        assert out["offset_from"] == "BRepFace"
 
     def test_point_scales_inches(self):
         comp = _install()
@@ -264,6 +330,40 @@ class TestConstruction:
 # setByPoint(Point3D)/setByLine(InfiniteLine3D) FAIL in parametric mode (live API docstrings).
 # These pin the contract: in parametric, refuse coordinate point/axis with an actionable message;
 # the EDGE-axis path uses parametric-legal setByEdge; an offset plane works in BOTH modes.
+
+class TestSetByRefusals:
+    """A setBy* answering false means the definition was NOT accepted. The handler reports that and
+    never reaches add() - a datum built from an input Fusion refused is not the one asked for."""
+
+    def test_a_refused_offset_is_an_error(self):
+        comp = _install()
+        comp.constructionPlanes.next_result = False
+        res = cn.handler(kind="plane", mode="offset", plane="xy", offset=10)
+        assert res["isError"] is True and "setByOffset returned false" in res["message"]
+        assert comp.constructionPlanes.added == 0
+
+    def test_a_refused_point_is_an_error(self):
+        comp = _install()
+        comp.constructionPoints.next_result = False
+        res = cn.handler(kind="point", mode="coordinate", x=1, y=2, z=3)
+        assert res["isError"] is True and "setByPoint returned false" in res["message"]
+        # the mode it names must be one an agent can actually pass back
+        assert "mode='coordinate'" in res["message"]
+        assert comp.constructionPoints.added == 0
+
+    def test_a_refused_world_axis_names_the_world_mode(self):
+        comp = _install()
+        comp.constructionAxes.next_result = False
+        res = cn.handler(kind="axis", axis="x", x=1)
+        assert res["isError"] is True and "setByLine returned false" in res["message"]
+        assert "mode='world'" in res["message"]
+        assert comp.constructionAxes.added == 0
+
+    def test_every_refusal_names_a_mode_the_tool_accepts(self):
+        # a refusal naming a mode that is not in the vocabulary sends an agent to a dead end
+        legal = set(cn._MODE_OPTIONS)
+        named = set(re.findall(r"mode='([a-z_]+)'", _tool_source()))
+        assert named <= legal, f"errors name modes that do not exist: {sorted(named - legal)}"
 
 class TestParametricConstraint:
     def test_point_at_coord_refused_in_parametric(self):
@@ -371,6 +471,212 @@ class TestPlaneAtAngle:
         assert res["isError"] is True and "setByAngle returned false" in res["message"]
 
 
+class TestPlaneAtAngleOnFace:
+    """setByAngleOnCurvedFace rotates the plane about the axis INFERRED from a cylindrical/conical
+    face, measured from 'plane'. createByReal takes radians; the created plane contains that axis."""
+
+    def test_calls_setByAngleOnCurvedFace_with_radians_and_reports_containment(self, monkeypatch):
+        comp = _install()
+        base_plane = _planar_face((0, 1, 0))
+        _stub_resolve(monkeypatch, cn._PLANE, base_plane)
+        face = _cylinder_face((0, 0, 1), (0, 0, 0))
+        _stub_resolve(monkeypatch, cn._FACE, face)
+        # a plane whose normal is perpendicular to the +Z axis and whose origin sits on that axis
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, 5))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", plane="xz", angle=90))
+        curved, angle_val, planar = comp.constructionPlanes.captured["angle_on_face"]
+        assert curved is face and planar is base_plane
+        assert math.isclose(angle_val[1], math.radians(90))     # createByReal(RADIANS)
+        assert out["angle_deg"] == 90.0
+        # the zero-angle reference is the planarEntity, so the payload names the RESOLVED plane -
+        # a face handle became a BRepFace, and echoing the request token back would say '<face-h>'
+        assert out["angle_from"] == "BRepFace"
+        assert out["contains_face_axis"] is True
+
+    def test_containment_is_false_when_the_normal_runs_along_the_face_axis(self, monkeypatch):
+        # ORIENTATION alone is wrong: the plane's origin sits exactly ON the axis, so only the
+        # normal-vs-axis term can reject it
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 0))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=90))
+        assert out["contains_face_axis"] is False
+
+    def test_containment_is_false_when_the_plane_misses_the_axis_point(self, monkeypatch):
+        # POSITION alone is wrong: the axis direction lies in the plane, so only the on-the-axis
+        # term can reject it
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(3, 0, 5))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=90))
+        assert out["contains_face_axis"] is False
+
+    def test_containment_survives_an_off_axis_cylinder_at_a_long_lever_arm(self, monkeypatch):
+        # a normal whose components do not round exactly, 50 cm from the axis point: rounding the
+        # gate's vectors to display precision reports a miss on a plane that exactly contains the
+        # axis. Axis (1,2,3)/|.|, an in-plane normal perpendicular to it, origin 50 cm along the axis.
+        comp = _install()
+        m = 14.0 ** 0.5
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((1 / m, 2 / m, 3 / m), (0, 0, 0)))
+        # (2,-1,0) is perpendicular to (1,2,3); the origin sits 50 cm along the axis itself
+        n = 5.0 ** 0.5
+        comp.constructionPlanes.result_geometry = Plane(
+            FakeVector3D(2 / n, -1 / n, 0.0), FakePoint(50 / m, 100 / m, 150 / m))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=30))
+        assert out["contains_face_axis"] is True
+
+    def test_containment_reads_the_datum_through_its_assembly_context(self, monkeypatch):
+        # with an occurrence active the datum's own .geometry is component-LOCAL while the resolved
+        # face reads WORLD; only the assembly-context proxy puts both in one space
+        comp = _install(active_occurrence=("occ", "CompC:1"))
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(3, 0, 5))
+        comp.constructionPlanes.proxy_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, 5))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=30))
+        assert out["contains_face_axis"] is True
+
+    def test_containment_is_withheld_when_the_context_proxy_cannot_be_built(self, monkeypatch):
+        # comparing across two spaces would be a fabricated verdict either way - so the claim is
+        # published as an explicit null with the reason, not dropped (a missing key reads as
+        # "not applicable" when the truth is "not checked")
+        comp = _install(active_occurrence=("occ", "CompC:1"))
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, 5))
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=30))
+        assert out["contains_face_axis"] is None
+        assert "NOT measured" in out["note"] and "occurrence is active" in out["note"]
+        assert "space_unread" not in out          # the flag drives the note, it is not wire noise
+
+    def test_rejects_planar_face(self, monkeypatch):
+        _install()
+        _stub_resolve(monkeypatch, cn._FACE, _planar_face())
+        res = cn.handler(kind="plane", mode="at_angle_on_face", angle=30)
+        assert res["isError"] is True
+        assert "CYLINDRICAL or CONICAL" in res["message"] and "planar" in res["message"]
+
+    def test_a_degenerate_reference_plane_surfaces_the_platform_refusal(self, monkeypatch):
+        # a reference plane whose normal is parallel to the inferred axis leaves the angle
+        # undefined: setByAngleOnCurvedFace returns true and add() raises. The tool carries no
+        # pre-guard, so the platform's self-naming message must reach the caller intact.
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 0, 1)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        def boom(inp):
+            raise RuntimeError("3 : reference planarEntity must not be perpendicular with axis input")
+        comp.constructionPlanes.add = boom
+        res = cn.handler(kind="plane", mode="at_angle_on_face", plane="xy", angle=30)
+        assert res["isError"] is True
+        assert "reference planarEntity must not be perpendicular" in res["message"]
+
+    def test_accepts_conical_face(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._FACE, _cone_face())
+        out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", angle=30))
+        assert out["mode"] == "at_angle_on_face"
+        assert "angle_on_face" in comp.constructionPlanes.captured
+
+    def test_needs_face(self):
+        _install()
+        res = cn.handler(kind="plane", mode="at_angle_on_face", angle=30)
+        assert res["isError"] is True and "needs 'face'" in res["message"]
+
+    def test_setByAngleOnCurvedFace_false_is_reported(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face())
+        comp.constructionPlanes.next_result = False
+        res = cn.handler(kind="plane", mode="at_angle_on_face", angle=30)
+        assert res["isError"] is True
+        assert "setByAngleOnCurvedFace returned false" in res["message"]
+
+
+class TestPlaneOffsetThroughPoint:
+    """The point DEFINES the offset, so the created plane passes through it exactly - a plane that
+    misses it is a success report over the wrong geometry and must come back as an error."""
+
+    def test_calls_setByOffsetThroughPoint_and_confirms_the_plane_passes_through_it(self, monkeypatch):
+        comp = _install()
+        v = _Vertex(FakePoint(0, 0, 2))
+        _stub_resolve(monkeypatch, cn._POINTS, [v])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 2))
+        out = _payload(cn.handler(kind="plane", mode="offset_through_point", plane="xy"))
+        planar, pt = comp.constructionPlanes.captured["offset_through_point"]
+        assert planar == ("plane", "XY") and pt is v
+        assert out["passes_through_point"] is True
+
+    def test_an_exactly_on_plane_vertex_survives_a_skew_normal_at_a_long_lever_arm(self, monkeypatch):
+        # the gate's own precision, not Fusion's: a normal whose components do not round exactly
+        # (1,2,3)/|.| plus a lever arm of tens of cm turns display rounding into a phantom miss.
+        # The vertex is constructed exactly ON the plane, so the ONLY honest answer is ok.
+        comp = _install()
+        m = 14.0 ** 0.5
+        # (3,6,-5) is perpendicular to (1,2,3) with no zero component, so no pair of rounding
+        # errors can cancel: 40 cm along it stays exactly in the plane, and a display-rounded
+        # normal reports it 2.4e-5 cm off.
+        s = 40.0 / (70.0 ** 0.5)
+        origin = FakePoint(1, 2, 3)
+        on_plane = FakePoint(1 + 3 * s, 2 + 6 * s, 3 - 5 * s)
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(on_plane)])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1 / m, 2 / m, 3 / m), origin)
+        out = _payload(cn.handler(kind="plane", mode="offset_through_point", plane="xy"))
+        assert out["passes_through_point"] is True
+
+    def test_the_gate_reads_the_datum_through_its_assembly_context(self, monkeypatch):
+        # measured: with an occurrence active the plane's own .geometry is component-LOCAL while a
+        # proxy-resolved vertex reads WORLD, and the two differ by exactly the occurrence offset -
+        # comparing them directly fails every correct call into a transformed component.
+        comp = _install(active_occurrence=("occ", "CompC:1"))
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(FakePoint(6, 3, 2))])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, -1))
+        comp.constructionPlanes.proxy_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 2))
+        out = _payload(cn.handler(kind="plane", mode="offset_through_point", plane="xy"))
+        assert out["passes_through_point"] is True
+
+    def test_the_claim_is_withheld_when_the_context_proxy_cannot_be_built(self, monkeypatch):
+        comp = _install(active_occurrence=("occ", "CompC:1"))
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(FakePoint(0, 0, 2))])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 2))
+        out = _payload(cn.handler(kind="plane", mode="offset_through_point", plane="xy"))
+        assert out["passes_through_point"] is None       # null + reason, not a missing key
+        assert "NOT measured" in out["note"]
+
+    def test_a_plane_that_misses_the_point_is_an_error(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(FakePoint(0, 0, 2))])
+        # created 1 cm short of the vertex
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 1))
+        res = cn.handler(kind="plane", mode="offset_through_point", plane="xy")
+        assert res["isError"] is True
+        assert "misses the point by 1.000000 cm" in res["message"]
+        assert "still in the design" in res["message"]
+
+    def test_unreadable_point_geometry_omits_the_claim_rather_than_faking_it(self, monkeypatch):
+        # a resolved point whose coordinates cannot be read proves nothing either way
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._POINTS, [FakePoint(0, 0, 2)])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 9))
+        out = _payload(cn.handler(kind="plane", mode="offset_through_point", plane="xy"))
+        assert "passes_through_point" not in out
+
+    def test_needs_exactly_one_point(self, monkeypatch):
+        _install()
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(FakePoint()), _Vertex(FakePoint())])
+        res = cn.handler(kind="plane", mode="offset_through_point")
+        assert res["isError"] is True and "needs exactly 1 'points'" in res["message"]
+
+    def test_setByOffsetThroughPoint_false_is_reported(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._POINTS, [_Vertex(FakePoint())])
+        comp.constructionPlanes.next_result = False
+        res = cn.handler(kind="plane", mode="offset_through_point")
+        assert res["isError"] is True
+        assert "setByOffsetThroughPoint returned false" in res["message"]
+
+
 class TestPlaneThreePoints:
     def test_calls_setByThreePoints(self, monkeypatch):
         comp = _install()
@@ -403,7 +709,7 @@ class TestPlaneMidplane:
         out = _payload(cn.handler(kind="plane", mode="midplane", plane="xz"))
         assert out["mode"] == "midplane"
         p1, p2_captured = comp.constructionPlanes.captured["two_planes"]
-        assert p1 == ("plane", "xz") and p2_captured is p2
+        assert p1 == ("plane", "XZ") and p2_captured is p2
 
     def test_needs_plane2(self):
         _install()
@@ -519,7 +825,7 @@ class TestAxisTwoPlanes:
         out = _payload(cn.handler(kind="axis", mode="two_planes", plane="yz"))
         assert out["mode"] == "two_planes"
         p1, p2_captured = comp.constructionAxes.captured["two_planes"]
-        assert p1 == ("plane", "yz") and p2_captured is p2
+        assert p1 == ("plane", "YZ") and p2_captured is p2
 
     def test_needs_plane2(self):
         _install()
@@ -594,7 +900,7 @@ class TestPointThreePlanes:
         out = _payload(cn.handler(kind="point", mode="three_planes", plane="xz"))
         assert out["mode"] == "three_planes"
         p1, p2_captured, p3_captured = comp.constructionPoints.captured["three_planes"]
-        assert p1 == ("plane", "xz") and p2_captured is p2 and p3_captured is p3
+        assert p1 == ("plane", "XZ") and p2_captured is p2 and p3_captured is p3
 
     def test_needs_plane3(self, monkeypatch):
         _install()
@@ -611,13 +917,526 @@ class TestPointEdgePlane:
         out = _payload(cn.handler(kind="point", mode="edge_plane", plane="xz"))
         assert out["mode"] == "edge_plane"
         e, p = comp.constructionPoints.captured["edge_plane"]
-        assert e is edge and p == ("plane", "xz")
+        assert e is edge and p == ("plane", "XZ")
 
     def test_needs_exactly_one_edge(self, monkeypatch):
         _install()
         _stub_resolve(monkeypatch, cn._EDGES, [])
         res = cn.handler(kind="point", mode="edge_plane")
         assert res["isError"] is True and "needs exactly 1 'edges'" in res["message"]
+
+
+# ── on_path (legal for BOTH plane and point) ────────────────────────────────────────────────────
+#
+# setByPath takes the shared path resolver's adsk.fusion.Path, a PathDistanceTypes member, and the
+# distance. Proportional reads a 0-1 ratio and RAISES outside it (the raise rolls the whole call's
+# transaction back, so the range must be refused before the call); absolute reads a length from the
+# path start and is NOT clamped at the end. setByPathToObject is a PLANE-only member.
+
+_DEFAULT_PATH = object()
+
+
+def _stub_path(monkeypatch, path=_DEFAULT_PATH, label="1 edge(s)", err=None):
+    """Stub the shared path resolver. The default path is an opaque object with no readable curve
+    evaluator - the shape a path takes when its length cannot be measured; pass _measurable_path()
+    for one that can."""
+    if path is _DEFAULT_PATH:
+        path = type("Path", (), {})()
+    monkeypatch.setattr(cn._common, "build_path", lambda comp, raw: (path, label, err))
+    return path
+
+
+def _param(name, expression, value=None):
+    """A ModelParameter behind an on-path placement: the landed expression plus its dNN name.
+    `value` is the parameter's INTERNAL value - cm for an absolute distance, the bare ratio for a
+    proportional one - which is what the path-extent comparison reads."""
+    return type("MP", (), {"name": name, "expression": expression, "value": value})()
+
+
+def _raising_param(name, expression):
+    """A ModelParameter that is PRESENT but whose .value raises - the shape a stale/deleted proxy
+    takes live ('An API Object refers to a deleted Object'). Distinct from a readable None: a read
+    that raises must still yield no verdict."""
+    def boom(_self):
+        raise RuntimeError("4 : An API Object refers to a deleted Object")
+    return type("MP", (), {"name": name, "expression": expression, "value": property(boom)})()
+
+
+def _measurable_path(*entity_lengths_cm):
+    """A Path whose entities carry real curve evaluators, so the tool can measure its total length
+    (Path itself has no length member): getParameterExtents answers (True, start, end) and
+    getLengthAtParameter answers (True, length) over that span."""
+    curves = []
+    for length in entity_lengths_cm:
+        ev = type("Ev", (), {
+            "getParameterExtents": lambda _s: (True, 0.0, 1.0),
+            "getLengthAtParameter": lambda _s, a, b, _n=length: (True, _n)})()
+        curves.append(type("PE", (), {"curve": type("C", (), {"evaluator": ev})()})())
+    return type("Path", (), {"count": len(curves),
+                             "item": lambda _s, i, _c=curves: _c[i]})()
+
+
+def _path_defn(distance, **offset):
+    """A ConstructionPlanePathDefinition / ConstructionPointPathDefinition. Pass offset=... for the
+    plane definition's offset member (None unless the plane was built to an object); OMIT it for a
+    point definition, which carries no such member at all."""
+    return type("Def", (), dict(distance=distance, **offset))()
+
+
+def _PDT(name):
+    return getattr(cn.adsk.fusion.PathDistanceTypes, name)
+
+
+class TestOnPath:
+    def test_plane_proportional_passes_the_ratio_and_the_proportional_type(self, monkeypatch):
+        comp = _install()
+        path = _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<edge-handle>", at=0.5))
+        p, dtype, val = comp.constructionPlanes.captured["on_path"]
+        assert p is path and val == ("real", 0.5)     # createByReal(ratio), NOT a scaled length
+        assert dtype is _PDT("ProportionalPathDistanceType")
+        # 'at_ratio', not 'at': the coordinate mode's top-level 'at' is a point, so one payload key
+        # would otherwise mean a fraction in one mode and a coordinate in another
+        assert out["at_ratio"] == 0.5 and out["path"] == "1 edge(s)"
+        assert out["distance_type"] == "proportional" and "at" not in out
+        # the datum is added to the PLANE collection - a plane input handed to another collection
+        # is a different datum kind than the one asked for
+        assert comp.constructionPlanes.added == 1 and comp.constructionPoints.added == 0
+
+    def test_point_routes_to_its_own_collection(self, monkeypatch):
+        comp = _install()
+        path = _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<edge-handle>", at=0.25))
+        p, dtype, val = comp.constructionPoints.captured["on_path"]
+        assert p is path and val == ("real", 0.25)
+        assert dtype is _PDT("ProportionalPathDistanceType")
+        assert comp.constructionPlanes.captured is None
+        assert comp.constructionPoints.added == 1 and comp.constructionPlanes.added == 0
+        assert out["mode"] == "on_path"
+        # the POINT kind is where the key collision lives: mode=coordinate publishes a top-level
+        # 'at' COORDINATE, so the ratio must never claim that name on the same kind
+        assert out["at_ratio"] == 0.25 and "at" not in out
+
+    def test_the_ratio_ignores_units(self, monkeypatch):
+        # a proportional 'at' is a fraction of the path, so a units change must not scale it
+        comp = _install()
+        _stub_path(monkeypatch)
+        _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5, units="in"))
+        _p, _dtype, val = comp.constructionPlanes.captured["on_path"]
+        assert val == ("real", 0.5)
+
+    def test_endpoints_are_legal(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0))
+        assert comp.constructionPlanes.captured["on_path"][2] == ("real", 0.0)
+        _payload(cn.handler(kind="point", mode="on_path", path="<h>", at=1))
+        assert comp.constructionPoints.captured["on_path"][2] == ("real", 1.0)
+
+    def test_above_one_is_refused_before_the_mutation(self, monkeypatch):
+        # setByPath RAISES on a proportional value outside [0, 1] and the raise rolls the whole
+        # transaction back, so nothing may reach the input
+        comp = _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="point", mode="on_path", path="<h>", at=1.5)
+        assert res["isError"] is True
+        assert "'at' must be between 0 and 1" in res["message"] and "1.5" in res["message"]
+        assert "absolute" in res["message"]        # the refusal names the type that takes a length
+        assert comp.constructionPoints.captured is None
+
+    def test_below_zero_is_refused(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at=-0.1)
+        assert res["isError"] is True and "-0.1" in res["message"]
+
+    def test_missing_at_is_refused_naming_the_mode(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>")
+        assert res["isError"] is True
+        assert "mode='on_path' needs 'at'" in res["message"]
+
+    def test_non_numeric_at_is_refused(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at="halfway")
+        assert res["isError"] is True and "must be a number" in res["message"]
+
+    def test_a_path_that_cannot_be_built_is_reported(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch, path=None, label=None, err="Path build returned nothing.")
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5)
+        assert res["isError"] is True and "Path build returned nothing." in res["message"]
+
+    def test_setByPath_false_is_reported(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        comp.constructionPlanes.next_result = False
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5)
+        assert res["isError"] is True and "setByPath returned false" in res["message"]
+
+    def test_on_path_is_not_a_legal_axis_mode(self):
+        _install()
+        res = cn.handler(kind="axis", mode="on_path", path="<h>", at=0.5)
+        assert res["isError"] is True and "not valid for kind='axis'" in res["message"]
+
+    def test_an_unknown_distance_type_is_refused(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5, distance_type="ratio")
+        assert res["isError"] is True and "proportional" in res["message"]
+
+    def test_the_retired_distance_on_path_call_is_gone(self):
+        # setByDistanceOnPath is retired on the installed API; setByPath/setByPathToObject replace it
+        assert "setByDistanceOnPath" not in _tool_source()
+
+
+class TestOnPathAbsolute:
+    def test_absolute_scales_the_length_and_uses_the_physical_type(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        p, dtype, val = comp.constructionPlanes.captured["on_path"]
+        assert dtype is _PDT("PhysicalPathDistanceType")
+        assert val == ("real", 3.0)               # 30 mm -> 3.0 cm, the internal unit
+        assert out["at_distance"] == 30.0 and out["distance_type"] == "absolute"
+        assert "at_ratio" not in out              # a length is not a ratio
+
+    def test_absolute_takes_a_parameter_expression(self, monkeypatch):
+        comp = _install()
+        _with_units_mgr(FakeUnitsManager(valid=("85 mm",)))
+        _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<h>", at="85 mm",
+                                  distance_type="absolute"))
+        _p, dtype, val = comp.constructionPoints.captured["on_path"]
+        assert dtype is _PDT("PhysicalPathDistanceType")
+        assert val == ("str", "85 mm")            # createByString - keeps the parametric link
+        assert out["at_distance"] == "85 mm"
+
+    def test_an_unresolvable_expression_is_refused_by_name(self, monkeypatch):
+        comp = _install()
+        _with_units_mgr()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", at="NoSuchParam/2",
+                         distance_type="absolute")
+        assert res["isError"] is True and "NoSuchParam/2" in res["message"]
+        assert comp.constructionPlanes.captured is None
+
+    def test_a_negative_absolute_distance_places_before_the_path_start(self, monkeypatch):
+        # measured: setByPath takes a negative physical distance, places the datum exactly that far
+        # BEFORE the path start and reports the feature healthy - a real placement, not an error
+        comp = _install()
+        _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<h>", at=-5,
+                                  distance_type="absolute", units="mm"))
+        _p, dtype, val = comp.constructionPoints.captured["on_path"]
+        assert dtype is _PDT("PhysicalPathDistanceType")
+        assert val == ("real", -0.5)              # -5 mm -> -0.5 cm, passed through unchanged
+        assert out["at_distance"] == -5.0
+
+    def test_a_negative_absolute_expression_is_placed_the_same_way(self, monkeypatch):
+        # the literal and the expression form must behave identically - a guard that reads only
+        # literals would let '-10 mm' through while refusing -10
+        comp = _install()
+        _with_units_mgr(FakeUnitsManager(valid=("-10 mm",)))
+        _stub_path(monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at="-10 mm",
+                                  distance_type="absolute"))
+        _p, _dtype, val = comp.constructionPlanes.captured["on_path"]
+        assert val == ("str", "-10 mm") and out["at_distance"] == "-10 mm"
+
+    def test_zero_is_the_path_start_and_is_accepted(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0,
+                            distance_type="absolute"))
+        assert comp.constructionPlanes.captured["on_path"][2] == ("real", 0.0)
+
+    def test_a_missing_absolute_at_names_the_units_it_reads(self, monkeypatch):
+        _install()
+        _stub_path(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", distance_type="absolute")
+        assert res["isError"] is True and "mode='on_path' needs 'at'" in res["message"]
+        assert "units" in res["message"]
+
+    def test_the_landed_model_parameter_is_read_back(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        comp.constructionPoints.result_definition = _path_defn(_param("d7", "30.00 mm"))
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        # the EXPRESSION Fusion landed, not an echo of the request
+        assert out["landed"] == {"distance": "30.00 mm"}
+        assert out["model_parameters"] == {"distance": "d7"}
+        assert "param_set" in out["note"]
+
+    def test_an_unreadable_expression_is_not_published_as_a_landed_reading(self, monkeypatch):
+        # a null is not a reading - but the parameter NAME is still worth publishing
+        comp = _install()
+        _stub_path(monkeypatch)
+        comp.constructionPoints.result_definition = _path_defn(_param("d9", None))
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert "landed" not in out
+        assert out["model_parameters"] == {"distance": "d9"}
+
+    def test_a_proportional_placement_publishes_its_landed_ratio(self, monkeypatch):
+        # a proportional definition reads back as the bare unitless ratio - publishable, and the
+        # parameter behind it is drivable
+        comp = _install()
+        _stub_path(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(_param("d7", "0.5", value=0.5))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5))
+        assert out["landed"] == {"distance": "0.5"}
+        assert out["model_parameters"] == {"distance": "d7"}
+
+    def test_a_proportional_placement_is_never_measured_against_the_path_length(self, monkeypatch):
+        # a proportional parameter's value is a RATIO, not cm - comparing it to a length would
+        # manufacture a nonsense verdict, so the extent reading is absolute-only
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(10.0))
+        comp.constructionPlanes.result_definition = _path_defn(_param("d7", "0.5", value=0.5))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5))
+        assert "path_length" not in out and "beyond_path" not in out
+        assert "not clamped" not in out["note"]
+
+    def test_absolute_warns_generically_when_the_path_length_cannot_be_measured(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)                        # a path with no readable evaluator
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=500,
+                                  distance_type="absolute"))
+        assert "not clamped at either end" in out["note"]
+        assert "path_extrapolates" not in out          # the flag drives the note, it is not payload
+        assert "path_length" not in out                # no number is invented
+        plain = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5))
+        assert "not clamped" not in plain["note"]
+
+
+class TestOnPathExtent:
+    """The measured path length vs where the datum actually landed. adsk.fusion.Path has no length
+    member, so the length is summed from each entity's curve evaluator."""
+
+    def _install_with_landing(self, at_cm, entity_lengths, monkeypatch, kind="plane"):
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(*entity_lengths))
+        coll = comp.constructionPlanes if kind == "plane" else comp.constructionPoints
+        coll.result_definition = _path_defn(_param("d1", "landed", value=at_cm))
+        return comp
+
+    def test_a_placement_inside_the_path_reports_both_numbers_and_no_warning(self, monkeypatch):
+        self._install_with_landing(3.0, [10.0], monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert out["path_length"] == 100.0 and out["along_path"] == 30.0   # cm read out in mm
+        assert out["beyond_path"] is False
+        assert "not clamped" not in out["note"]
+
+    def test_a_placement_past_the_end_is_flagged_with_the_numbers(self, monkeypatch):
+        self._install_with_landing(50.0, [10.0], monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=500,
+                                  distance_type="absolute", units="mm"))
+        assert out["beyond_path"] is True
+        assert out["path_length"] == 100.0 and out["along_path"] == 500.0
+        assert "OFF the path" in out["note"]
+
+    def test_a_negative_landing_is_flagged_too(self, monkeypatch):
+        # extrapolation is symmetric - before the start is as far off the curve as past the end
+        self._install_with_landing(-1.0, [10.0], monkeypatch, kind="point")
+        out = _payload(cn.handler(kind="point", mode="on_path", path="<h>", at=-10,
+                                  distance_type="absolute", units="mm"))
+        assert out["beyond_path"] is True and out["along_path"] == -10.0
+        assert "OFF the path" in out["note"]
+
+    def test_the_path_end_itself_is_inside(self, monkeypatch):
+        self._install_with_landing(10.0, [10.0], monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=100,
+                                  distance_type="absolute", units="mm"))
+        assert out["beyond_path"] is False
+
+    def test_a_multi_entity_path_sums_its_entities(self, monkeypatch):
+        # a chained path is only as long as ALL its entities - measuring the first one alone would
+        # call a legal placement off the path
+        self._install_with_landing(7.0, [4.0, 3.5], monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=70,
+                                  distance_type="absolute", units="mm"))
+        assert out["path_length"] == 75.0 and out["beyond_path"] is False
+
+    def test_an_unreadable_landed_value_publishes_no_verdict(self, monkeypatch):
+        # the length is measurable but the landed parameter is not - no verdict may be invented
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(10.0))
+        comp.constructionPlanes.result_definition = _path_defn(_param("d1", "30.00 mm"))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert "beyond_path" not in out and "path_length" not in out
+        assert "not clamped at either end" in out["note"]
+
+    def test_a_landed_value_that_RAISES_publishes_no_verdict(self, monkeypatch):
+        # the dangerous failure: a confident zero for an unreadable value would publish "sits
+        # exactly at the path start, on the path" - a measurement nobody took
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(10.0))
+        comp.constructionPlanes.result_definition = _path_defn(_raising_param("d1", "30.00 mm"))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert "path_length" not in out and "along_path" not in out and "beyond_path" not in out
+        assert "not clamped at either end" in out["note"]
+
+    def test_a_non_numeric_landed_value_publishes_no_verdict(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(10.0))
+        comp.constructionPlanes.result_definition = _path_defn(_param("d1", "30.00 mm", value="3"))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert "along_path" not in out and "beyond_path" not in out
+
+    def test_an_evaluator_that_answers_a_failure_flag_yields_no_length(self, monkeypatch):
+        # the evaluator's leading flag is the answer's validity - a false one is not a zero length
+        comp = _install()
+        path = _measurable_path(10.0)
+        path.item(0).curve.evaluator.getLengthAtParameter = lambda a, b: (False, 0.0)
+        _stub_path(monkeypatch, path=path)
+        comp.constructionPlanes.result_definition = _path_defn(_param("d1", "30.00 mm", value=3.0))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert "path_length" not in out and "beyond_path" not in out
+
+
+class TestOnPathToObject:
+    def _point_handle(self, monkeypatch):
+        pt = FakePoint(7, 0, 0)
+        _stub_resolve(monkeypatch, cn._TO_OBJECT, pt)
+        return pt
+
+    def test_plane_calls_setByPathToObject_with_the_scaled_offset(self, monkeypatch):
+        comp = _install()
+        path = _stub_path(monkeypatch)
+        pt = self._point_handle(monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=10, units="mm"))
+        p, to_obj, val = comp.constructionPlanes.captured["on_path_to_object"]
+        assert p is path and to_obj is pt and val == ("real", 1.0)   # 10 mm -> 1.0 cm
+        assert out["to_object"] is True and out["offset"] == 10.0
+        assert "on_path" not in (comp.constructionPlanes.captured or {})   # not the setByPath route
+        assert comp.constructionPlanes.added == 1
+
+    def test_the_offset_takes_a_parameter_expression(self, monkeypatch):
+        comp = _install()
+        _with_units_mgr()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset="25 mm"))
+        _p, _to, val = comp.constructionPlanes.captured["on_path_to_object"]
+        assert val == ("str", "25 mm") and out["offset"] == "25 mm"
+
+    def test_both_landed_parameters_are_read_back(self, monkeypatch):
+        # a to-object plane carries the along-path distance and the offset as SEPARATE parameters
+        comp = _install()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(
+            _param("d3", "70.00 mm"), offset=_param("d4", "10.00 mm"))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=10, units="mm"))
+        assert out["landed"] == {"distance": "70.00 mm", "offset": "10.00 mm"}
+        assert out["model_parameters"] == {"distance": "d3", "offset": "d4"}
+
+    def test_a_null_offset_parameter_is_not_published(self, monkeypatch):
+        # a plane built by distance carries definition.offset = None - a null must not be reported
+        # as a landed reading
+        comp = _install()
+        _stub_path(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(_param("d3", "30.00 mm"),
+                                                                    offset=None)
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=30,
+                                  distance_type="absolute", units="mm"))
+        assert out["landed"] == {"distance": "30.00 mm"}
+        assert out["model_parameters"] == {"distance": "d3"}
+
+    def test_the_extent_is_the_target_distance_PLUS_the_offset(self, monkeypatch):
+        # measured: a 40 mm path, a vertex at its end and a 5 mm offset land the plane 5 mm PAST
+        # the end - healthy, and silent unless the extent is reported
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(4.0))
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(
+            _param("d3", "40.00 mm", value=4.0), offset=_param("d4", "5.00 mm", value=0.5))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=5, units="mm"))
+        assert out["path_length"] == 40.0 and out["along_path"] == 45.0
+        assert out["beyond_path"] is True and "OFF the path" in out["note"]
+
+    def test_a_to_object_plane_inside_the_path_carries_no_warning(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(4.0))
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(
+            _param("d3", "20.00 mm", value=2.0), offset=_param("d4", "5.00 mm", value=0.5))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=5, units="mm"))
+        assert out["along_path"] == 25.0 and out["beyond_path"] is False
+        assert "OFF the path" not in out["note"] and "not clamped" not in out["note"]
+
+    def test_a_to_object_extent_needs_both_parameters(self, monkeypatch):
+        # the offset is half the position - without it there is no landed position to judge
+        comp = _install()
+        _stub_path(monkeypatch, path=_measurable_path(4.0))
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.result_definition = _path_defn(
+            _param("d3", "40.00 mm", value=4.0), offset=_param("d4", "5.00 mm"))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                                  offset=5, units="mm"))
+        assert "along_path" not in out and "beyond_path" not in out
+        assert "not clamped at either end" in out["note"]
+
+    def test_setByPathToObject_false_is_reported(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        comp.constructionPlanes.next_result = False
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>")
+        assert res["isError"] is True and "setByPathToObject returned false" in res["message"]
+        assert comp.constructionPlanes.added == 0
+
+    def test_to_object_with_at_is_refused(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>", at=0.5)
+        assert res["isError"] is True and "'at'" in res["message"]
+        assert comp.constructionPlanes.captured is None
+
+    def test_to_object_with_an_explicit_distance_type_is_refused(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>",
+                         distance_type="absolute")
+        assert res["isError"] is True and "distance_type" in res["message"]
+        assert comp.constructionPlanes.captured is None
+
+    def test_the_point_kind_refuses_to_object_naming_the_api_fact(self, monkeypatch):
+        # ConstructionPointInput has no setByPathToObject - the refusal must say so rather than
+        # silently dropping the input and placing the point somewhere else
+        comp = _install()
+        comp.constructionPoints.no_to_object = True
+        _stub_path(monkeypatch)
+        self._point_handle(monkeypatch)
+        res = cn.handler(kind="point", mode="on_path", path="<h>", to_object="<pt>")
+        assert res["isError"] is True
+        assert "setByPathToObject" in res["message"] and "kind='plane'" in res["message"]
+        assert comp.constructionPoints.captured is None
+
+    def test_an_unresolvable_to_object_handle_is_reported(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch)
+        monkeypatch.setattr(cn._TO_OBJECT, "resolve", lambda raw: (None, "no vertex for '<pt>'."))
+        res = cn.handler(kind="plane", mode="on_path", path="<h>", to_object="<pt>")
+        assert res["isError"] is True and "no vertex for '<pt>'." in res["message"]
+        assert comp.constructionPlanes.captured is None
 
 
 # ── the geometry sanity read-back (universal across modes) ─────────────────────────────────────
@@ -635,6 +1454,99 @@ class TestGeometryReadback:
         _install()
         out = _payload(cn.handler(kind="point", x=1, y=2, z=3))
         assert out["geometry"] == {}
+
+
+# ── the payload's coordinates come from the same space the gates verify in ──────────────────────
+#
+# Measured: a datum created while an occurrence is active reads component-LOCAL off .geometry, and
+# createForAssemblyContext(activeOccurrence) restores WORLD - the space a proxy-resolved
+# handle/vertex reads in. A payload built from the plain read publishes LOCAL coordinates beside a
+# gate that passed in WORLD, so an agent measuring off 'geometry' is a whole occurrence offset out.
+# The local/world pairs below are the measured ones (local (1,1,1) under an occurrence at (5,2,1)
+# reads world (6,3,2)).
+
+_OCC = ("occ", "CompC:1")
+
+
+def _axis_geometry(direction, origin):
+    return type("G", (), {"direction": FakeVector3D(*direction), "origin": FakePoint(*origin)})()
+
+
+class TestPayloadSpaceUnderAnActiveOccurrence:
+    def test_plane_origin_and_normal_are_the_world_read(self):
+        comp = _install(active_occurrence=_OCC)
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, -1))
+        comp.constructionPlanes.proxy_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 2))
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=5, units="mm"))
+        assert out["geometry"]["normal"] == [0.0, 0.0, 1.0]
+        assert out["geometry"]["origin"] == {"x": 0.0, "y": 0.0, "z": 20.0}   # 2 cm -> 20 mm
+
+    def test_point_coordinates_are_the_world_read(self, monkeypatch):
+        comp = _install(active_occurrence=_OCC)
+        _stub_resolve(monkeypatch, cn._EDGES, [_circular_edge()])
+        comp.constructionPoints.result_geometry = FakePoint(1, 1, 1)          # component-LOCAL
+        comp.constructionPoints.proxy_geometry = FakePoint(6, 3, 2)           # WORLD
+        out = _payload(cn.handler(kind="point", mode="circle_center", units="mm"))
+        assert out["geometry"]["at"] == {"x": 60.0, "y": 30.0, "z": 20.0}
+
+    def test_axis_payload_and_alignment_both_read_the_world_direction(self, monkeypatch):
+        comp = _install(active_occurrence=_OCC)
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        comp.constructionAxes.result_geometry = _axis_geometry((1, 0, 0), (0, 0, 0))
+        comp.constructionAxes.proxy_geometry = _axis_geometry((0, 0, 1), (0, 0, 3))
+        out = _payload(cn.handler(kind="axis", mode="circular_face", units="mm"))
+        assert out["geometry"]["direction"] == [0.0, 0.0, 1.0]
+        assert out["geometry"]["origin"] == {"x": 0.0, "y": 0.0, "z": 30.0}
+        # the face is proxy-resolved (WORLD); against the LOCAL direction this reads as misaligned
+        assert out["aligned_to_face_axis"] is True
+
+    def test_perpendicular_axis_alignment_reads_the_world_direction(self, monkeypatch):
+        comp = _install(active_occurrence=_OCC)
+        _stub_resolve(monkeypatch, cn._FACE, _planar_face((0, 0, 1)))
+        _stub_resolve(monkeypatch, cn._POINTS, [FakePoint()])
+        comp.constructionAxes.result_geometry = _axis_geometry((1, 0, 0), (0, 0, 0))
+        comp.constructionAxes.proxy_geometry = _axis_geometry((0, 0, 1), (0, 0, 0))
+        out = _payload(cn.handler(kind="axis", mode="perpendicular_at_point"))
+        assert out["aligned_to_face_normal"] is True
+
+    def test_geometry_is_withheld_when_the_context_proxy_cannot_be_built(self):
+        # publishing the LOCAL read here would hand back coordinates in a space the payload cannot
+        # name; the empty read-back is disclosed in the note rather than left to be guessed at
+        comp = _install(active_occurrence=_OCC)
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, -1))
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=5))
+        assert out["geometry"] == {}
+        assert "NOT measured" in out["note"] and "occurrence is active" in out["note"]
+
+    def test_at_angle_claims_the_rotation_when_both_operands_land_in_one_space(self, monkeypatch):
+        # the real shape of this mode under an occurrence: 'plane' resolved to a PROXY face, which
+        # already reads WORLD and must not be re-contexted, while the created plane is native and
+        # lifts. Both then sit in world: base (0,0,1) vs created (1,0,0) = the rotation took.
+        comp = _install(active_occurrence=_OCC)
+        base = _planar_face((0, 0, 1))
+        base.assemblyContext = _OCC              # measured: a proxy already reads WORLD
+        _stub_resolve(monkeypatch, cn._PLANE, base)
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 0))
+        comp.constructionPlanes.proxy_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, 0))
+        out = _payload(cn.handler(kind="plane", mode="at_angle", angle=90))
+        # against the datum's LOCAL read this same pair says the plane never rotated
+        assert out["normal_changed"] is True
+        assert "NOT measured" not in out["note"]
+
+    def test_at_angle_discloses_the_claim_when_the_base_cannot_be_lifted(self, monkeypatch):
+        # a NATIVE base whose lift is refused: its space is unknown, so the verdict is published as
+        # null with the reason rather than computed across two spaces
+        comp = _install(active_occurrence=_OCC)
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 0, 1)))
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(0, 0, 0))
+        comp.constructionPlanes.proxy_geometry = Plane(FakeVector3D(1, 0, 0), FakePoint(0, 0, 0))
+        out = _payload(cn.handler(kind="plane", mode="at_angle", angle=90))
+        assert out["normal_changed"] is None
+        assert "NOT measured" in out["note"]
+        # the payload's own geometry still reports the world read - only the base was unreadable
+        assert out["geometry"]["normal"] == [1.0, 0.0, 0.0]
 
 
 # ── offset-plane parameter EXPRESSIONS + the model-parameter (dNN) read-back ────────────────────
@@ -710,3 +1622,43 @@ class TestOffsetModelParameter:
         _install()
         out = _payload(cn.handler(kind="plane", plane="xy", offset=5))
         assert "model_parameters" not in out
+
+
+# ── the created datum's HANDLE ──────────────────────────────────────────────────────────────────
+#
+# A datum nothing can point at is unreachable: the payload publishes the created object's
+# entityToken so the next call can consume the axis/plane directly (AxisRef and PlaneRef both
+# resolve one), instead of the caller having to re-find it.
+
+class TestCreatedDatumHandle:
+    def test_axis_handle_is_the_created_objects_token(self):
+        comp = _install()
+        comp.constructionAxes.result_token = "AXIS-TOKEN"
+        out = _payload(cn.handler(kind="axis", axis="x"))
+        assert out["handle"] == "AXIS-TOKEN"
+
+    def test_plane_handle_is_the_created_objects_token(self):
+        comp = _install()
+        comp.constructionPlanes.result_token = "PLANE-TOKEN"
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=5))
+        assert out["handle"] == "PLANE-TOKEN"
+
+    def test_point_handle_is_the_created_objects_token(self):
+        comp = _install()
+        comp.constructionPoints.result_token = "POINT-TOKEN"
+        out = _payload(cn.handler(kind="point", x=1))
+        assert out["handle"] == "POINT-TOKEN"
+
+    def test_axis_note_names_where_the_handle_can_be_spent(self):
+        comp = _install()
+        comp.constructionAxes.result_token = "AXIS-TOKEN"
+        out = _payload(cn.handler(kind="axis", axis="x"))
+        assert "handle" in out["note"] and "model_pattern_circular" in out["note"]
+
+    def test_an_unreadable_token_publishes_null_and_promises_nothing(self):
+        # the fake's default object carries no entityToken: the key is present but null, and the
+        # note must NOT advertise a handle the payload does not have.
+        _install()
+        out = _payload(cn.handler(kind="axis", axis="x"))
+        assert out["handle"] is None
+        assert "handle" not in out["note"]

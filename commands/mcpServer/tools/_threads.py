@@ -26,9 +26,10 @@ def thread_types_for(tdq, designation):
     return hits
 
 
-def resolve_thread_info(comp, designation, internal=True, thread_type=""):
+def resolve_thread_info(comp, designation, internal=True, thread_type="", thread_class=""):
     """Build a ThreadInfo for a thread DESIGNATION like 'M5x0.8'. `thread_type` picks the standard
-    when several carry it. Returns (threadInfo, types_carrying_it, None) or (None, types, error)."""
+    when several carry it, `thread_class` the fit within that standard.
+    Returns (threadInfo, types_carrying_it, None) or (None, types, error)."""
     # An empty ThreadFeatures collection is falsy (count 0) but not None.
     tf = safe(lambda: comp.features.threadFeatures)
     if tf is None:
@@ -54,8 +55,18 @@ def resolve_thread_info(comp, designation, internal=True, thread_type=""):
         # round trip without changing the geometry.
         chosen = hits[0]
 
+    # The class carries the fit tolerance, so it is not interchangeable the way the standards
+    # sharing a designation are: 4g6g and 6g are different external fits of the same thread. Library
+    # order picks one, and the caller is told which and what else was on offer.
     classes = safe(lambda: list(tdq.allClasses(internal, chosen, designation)), []) or []
-    cls = classes[0] if classes else ""
+    want = (thread_class or "").strip()
+    if want:
+        cls = next((c for c in classes if c.lower() == want.lower()), None)
+        if cls is None:
+            return None, hits, (f"Thread class '{thread_class}' is not offered for '{designation}' "
+                                f"in '{chosen}'. Classes that are: {', '.join(classes) or '(none)'}.")
+    else:
+        cls = classes[0] if classes else ""
     ti = safe(lambda: tf.createThreadInfo(internal, chosen, designation, cls))
     if ti is None:
         return None, hits, f"createThreadInfo failed for '{designation}' in '{chosen}'."

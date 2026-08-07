@@ -33,7 +33,8 @@ _HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
-    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
+                         absent_when="no_timeline_feature"),
 ]
 
 # faces to offset (any BRep face; need not be one body - offsetFacesFeatures accepts a mixed set).
@@ -69,8 +70,10 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
     if not bodies:
         return error("'faces' resolved to face(s) with no readable owning body - cannot offset.")
     # Pre-mutation read-back: the offset must move SOME body's volume, whichever direction the
-    # selected faces face.
+    # selected faces face. Names too - a post-mutation proxy can stop answering .name, and a payload
+    # must not publish a null for a body it resolved.
     vol_before = _geom.volumes(bodies)
+    body_names = [safe(lambda b=b: b.name) for b in bodies]
 
     # createInput wants a Python list of BRepFace (a SWIG vector), NOT an ObjectCollection - live-
     # verified: an ObjectCollection raises a vector-type argument error.
@@ -84,8 +87,14 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         return error(f"Offset face failed: {e}. (The distance may be too large for the geometry, or "
                      "the faces may not support a uniform offset together - try a smaller distance or "
                      "fewer faces.)")
-    if not feature:
-        return error("Offset face returned no feature.")
+    # MEASURED: offsetFacesFeatures.add returns None in a DIRECT design while the offset LANDS - a
+    # 3.0/1.5-radius loft frustum 6 tall (~99 cm3 unoffset) read 117.248 after a +0.2 side-face
+    # offset. The verdict below is the volume delta on the OWNING BODIES, which needs no feature
+    # object, so in direct mode fall through to it; in parametric a None feature is unmeasured as a
+    # success and stays an honest error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Offset face"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:
@@ -95,15 +104,19 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
 
     # Post-mutation read-back: prove the body actually moved rather than trust the API's success.
     delta_total, any_readable = _geom.volume_delta(bodies, vol_before)
+    if direct_no_feature and not any_readable:
+        # With no feature object the volume delta is the ONLY evidence - unreadable means the offset
+        # is unverified, which is not a success.
+        return error("Offset face ran in a DIRECT design, which returns no feature object, and no "
+                     "affected body's volume could be read back - so whether the faces moved is "
+                     "UNVERIFIED. Re-read the body with model_inspect.")
     if any_readable and abs(delta_total) < 1e-9:
         return error("Offset face reported success but the affected body's volume is unchanged - "
-                     "nothing was actually pushed or pulled. The feature remains in the timeline; "
-                     "remove it with design_delete_feature.")
+                     "nothing was actually pushed or pulled. "
+                     + _common.failed_effect_remedy(design, feature))
 
-    body_names = [safe(lambda b=b: b.name) for b in bodies]
     payload = {
         "offset": True,
-        "feature": safe(lambda: feature.name),
         "faces_requested": len(face_ents),
         "bodies": body_names,
         "distance": round(float(distance), 6),
@@ -111,6 +124,13 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         "note": "Face(s) pushed/pulled along their normal. Positive extends outward (adds "
                 "material); negative pushes inward (removes material).",
     }
+    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
+    # against. Every other key here is measured off the BODIES, so it survives the missing feature.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
+    else:
+        payload["feature"] = safe(lambda: feature.name)
     if any_readable:
         payload["volume_delta_cm3"] = round(delta_total, 6)
     return ok(payload)

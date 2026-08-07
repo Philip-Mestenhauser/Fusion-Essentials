@@ -175,7 +175,9 @@ def _resolve_base_feature(design, comp, name):
     if comp is not None:
         candidates.append(comp)
     root = safe(lambda: design.rootComponent)
-    if root is not None and root is not comp:
+    # same_component, not `is`: component wrappers are never identity-stable, so `root is not comp`
+    # reads True even when comp IS the root and root would be searched twice.
+    if root is not None and not _common.same_component(root, comp):
         candidates.append(root)
     for c in _common.all_components(design):
         if c is not None and c not in candidates:

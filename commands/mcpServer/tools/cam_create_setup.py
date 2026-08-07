@@ -2,7 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Create a CAM (Manufacture) setup on a part: pick an operation type and the bodies to machine (or
-default to all root-component solids), producing a new Setup ready for cam_apply_template /
+default to every body in the root component), producing a new Setup ready for cam_apply_template /
 cam_create_operation."""
 
 import adsk.core
@@ -27,11 +27,14 @@ _OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="mi
 # A component OCCURRENCE is what a shop template selects, so the setup keeps its selection when the
 # component's contents are replaced (Setup.models accepts Occurrence, BRepBody, or MeshBody).
 _MODELS = _inputs.TargetRefList("models", required=False,
-                                description="Bodies OR component occurrences to machine (omit = all solid bodies).")
+                                description="Bodies OR component occurrences to machine (omit = every root-component body).")
 
 
 def _all_root_bodies(design):
-    """Every solid body in the root component (the default machining set)."""
+    """Every BRep body in the root component - solid AND surface - the default machining set.
+
+    Deliberately UNFILTERED: Setup.models is typed to BRepBody, not to solids, so an isSolid filter
+    here would silently drop bodies from the default set instead of letting the setup take them."""
     root = safe(lambda: design.rootComponent)
     bodies = safe(lambda: root.bRepBodies) if root else None
     n = safe(lambda: bodies.count, 0) if bodies else 0
@@ -60,8 +63,9 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
     else:
         body_list = _all_root_bodies(design)
     if not body_list:
-        return error("No bodies to machine. The design has no solid bodies in the root component "
-    "- add geometry first, or pass 'models' = body handles/names.")
+        return error("No bodies to machine. The root component holds no bodies "
+    "- add geometry first, or pass 'models' = body handles/names (a body inside a "
+    "sub-component is not in the default set).")
 
     try:
         op_enum = getattr(adsk.cam.OperationTypes, _OP_TYPES[op_key])
@@ -100,7 +104,7 @@ TOOL_DESCRIPTION = (
     "Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since "
     "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. 'operation_type' "
     "is milling (default) | turning. 'models' selects what to machine - find_geometry HANDLES, body "
-    "NAMES, OR a COMPONENT occurrence name (a list) - or omit for ALL root solid bodies. "
+    "NAMES, OR a COMPONENT occurrence name (a list) - or omit for EVERY body in the root component. "
     "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its contents are "
     "swapped - the shop-template pattern. 'name' optionally names the setup. After this, add "
     "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "

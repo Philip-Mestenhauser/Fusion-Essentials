@@ -58,7 +58,7 @@ def _curve_records(sketch, curves, f):
     out = []
     for c in curves:
         rec = {"id": _sketch_detail.curve_id(sketch, c),
-               "length": round((safe(lambda c=c: c.length, 0.0) or 0.0) * f, 4)}
+               "length": _common.measured(lambda c=c: c.length, f, 4)}
         if rec["id"] is None:
             rec["type"] = type(c).__name__
         out.append(rec)
@@ -98,13 +98,17 @@ def _single_curve_edit(action, curve, p1):
     return curve.split(p1)
 
 
-# trim/breakCurve/split report "nothing matched" by returning an EMPTY ObjectCollection, not by
-# raising. extend is NOT one of them: it lengthens the curve in place and returns an empty
-# collection either way, so its effect is read off the curve's own length instead.
-_EMPTY_CAUSE = {
-    "trim": "the pick point matched no segment to remove",
-    "break": "this curve crosses no other curve in the sketch, so there was nothing to break at",
-    "split": "the curve is CLOSED (split needs an open curve) or the point is not on it",
+# trim and split report "nothing matched" by returning an EMPTY ObjectCollection. breakCurve does
+# NOT: on a curve nothing crosses it RAISES "Break is not available for this segment point", so its
+# requirement rides the raised-error path instead. extend returns an empty collection either way -
+# it lengthens the curve in place - so its effect is read off the curve's own length.
+# What each action needs, appended AFTER the observation - reference, not a diagnosis: neither an
+# empty collection nor Fusion's own message says WHICH condition was unmet, and a pick point off the
+# curve produces the same result as a curve that had nothing to act on.
+_NEEDS = {
+    "trim": "a pick point on a segment bounded by a crossing curve",
+    "break": "a curve that crosses another curve in the sketch",
+    "split": "an OPEN curve and a point on it",
 }
 
 # cm; a length gain smaller than this is noise, not an extension.
@@ -225,8 +229,10 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
             source_curve_count = safe(lambda: chain.count, 0) or 0
             created = _collection_items(sketch.offset(chain, p1, distance * k))
     except Exception as e:
+        needs = _NEEDS.get(act)
         return error(f"Could not {act} '{entity_one}' in sketch "
-                     f"'{safe(lambda: sketch.name)}': {e}")
+                     f"'{safe(lambda: sketch.name)}': {e}"
+                     + (f" '{act}' needs {needs}." if needs else ""))
 
     after_n = _curve_count(sketch)
     if act == "extend":
@@ -239,9 +245,11 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
                          "sketch_get(include_entities=true) and pick a point ON the curve.")
         created = [e1]
     elif not created and after_n >= before_n:
-        cause = _EMPTY_CAUSE.get(act, "the API produced no curve")
-        return error(f"{act} changed nothing - {cause}. The sketch still holds {after_n} curve(s). "
-                     "Re-read sketch_get(include_entities=true) and pick a point ON the curve.")
+        needs = _NEEDS.get(act)
+        tail = f" '{act}' needs {needs}." if needs else ""
+        return error(f"{act} returned no curves and the sketch still holds {after_n} curve(s), so "
+                     f"nothing changed.{tail} Re-read sketch_get(include_entities=true) for the "
+                     "current ids and pick a point ON the curve.")
 
     errors_after, _warn_after, _total_after = _common.timeline_health(design)
     broke = [n for n in errors_after if n not in errors_before]

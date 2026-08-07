@@ -4,8 +4,8 @@
 """Creates a Joint Origin (a reusable coordinate frame / WCS anchor) at an agent-specified or COMPUTED
 anchor - anchor='coordinates'|'sketch_line'|'sketch_point'|'geometry'|'bbox_center'|'face_center'.
 bbox_center places the frame at a body/occurrence's world bounding-box CENTER, oriented so Z aligns to
-orient_axis (world x/y/z or an edge/line handle); face_center sits at a planar face's centroid with
-Z = the face normal. sketch_line/geometry/bbox_center/face_center orient the frame; a bare
+orient_axis (world x/y/z, or a handle/name at an edge, sketch line or construction axis);
+face_center sits at a planar face's centroid with Z = the face normal. sketch_line/geometry/bbox_center/face_center orient the frame; a bare
 coordinate/point is world-aligned (Z = world Z). A computed anchor is read back and reported so the
 caller can verify the point it landed on. WRITES.
 """
@@ -45,8 +45,8 @@ _GEOM = _inputs.GeometryHandle("geometry", require="any",
 _BBOX_TARGET = _inputs.TargetRef("bbox_target", allow=("body", "occurrence", "component"),
                                  description="anchor='bbox_center': the body/occurrence/component whose world bounding-box CENTER becomes the origin.")
 
-# anchor='bbox_center': the axis the frame's Z is aligned to (world x/y/z, or a straight-edge/sketch-line
-# handle the axis runs along). 'flip' reverses it 180 deg.
+# anchor='bbox_center': the axis the frame's Z is aligned to (world x/y/z, or a handle/name at a
+# straight edge, sketch line or construction axis the axis runs along). 'flip' reverses it 180 deg.
 _ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z",
                                description="anchor='bbox_center': the axis the frame's Z aligns to.")
 
@@ -74,24 +74,24 @@ def _bbox_center_cm(entity):
 
 
 def _axis_direction(raw_axis, flip):
-    """Resolve orient_axis (world x/y/z, or a straight-edge/sketch-line handle the axis runs along) to a
-    UNIT direction (dx,dy,dz), optionally flipped 180 deg. Returns (dir, error)."""
+    """Resolve orient_axis (world x/y/z, or a handle/name at a straight edge, sketch line or
+    construction axis) to a UNIT direction (dx,dy,dz), optionally flipped 180 deg. Returns
+    (dir, error)."""
     val, err = _ORIENT_AXIS.resolve(raw_axis)
     if err:
         return None, err
     tag, payload = val
     if tag == "world":
         d = [float(payload[0]), float(payload[1]), float(payload[2])]
-    else:  # ('edge', BRepEdge | SketchLine) - the axis runs ALONG the line
-        ent = payload
-        line = safe(lambda: ent.worldGeometry) or safe(lambda: ent.geometry)
-        sp = safe(lambda: line.startPoint)
-        ep = safe(lambda: line.endPoint)
-        if sp is None or ep is None:
-            return None, "orient_axis: could not read a direction from that edge/line handle."
-        d = [safe(lambda: ep.x, 0.0) - safe(lambda: sp.x, 0.0),
-             safe(lambda: ep.y, 0.0) - safe(lambda: sp.y, 0.0),
-             safe(lambda: ep.z, 0.0) - safe(lambda: sp.z, 0.0)]
+    else:
+        # ('edge', entity) - the axis runs ALONG the line. Read through the shared axis_line_of:
+        # a bounded edge/sketch line carries startPoint/endPoint while a construction axis carries
+        # origin/direction (and needs the world lift), and only that helper knows both shapes.
+        pair, aerr = _inputs.axis_line_of("orient_axis", payload)
+        if aerr:
+            return None, aerr
+        _point, vec = pair
+        d = [safe(lambda: vec.x, 0.0), safe(lambda: vec.y, 0.0), safe(lambda: vec.z, 0.0)]
     n = (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
     if n <= 1e-9:
         return None, "orient_axis: the direction is zero-length."

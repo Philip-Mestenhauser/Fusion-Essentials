@@ -1,21 +1,39 @@
-"""Unit tests for ``sketch_project.py`` - project existing model geometry into a sketch (Fusion's
-Project command, via Sketch.project2(entities, isLinked)).
+"""Unit tests for ``sketch_project.py`` - create sketch curves from existing model geometry, via
+Sketch.project2 (into_sketch), Sketch.projectToSurface (to_surface) and
+Sketch.intersectWithSketchPlane (intersect).
 
-Pinned here (no live Fusion): the link flag flows to project2, the created entities are reported as
-'<type>:<index>' refs computed from the per-collection count delta (matching resolve_entity_ref's
-indexing so a follow-up sketch_constrain resolves them), the honesty gate (a projection that adds
-NOTHING is an error, not a false ok), and the guards (no design, no sketch, entity-resolve failure).
-The actual BRep projection is a live side-effect covered by the post-reload verification pass.
+Pinned here (no live Fusion): the link flag flows to project2 and is refused on the other actions;
+projectToSurface receives FACES first, three arguments for closest_point and the direction ENTITY
+fourth for along_vector; a source sketch that IS the receiving sketch is refused with Fusion's own
+message; intersect's silent outcomes are gated by the tool (zero created is an error naming every
+entity and the plane, a partial result is an ok that names the zero contributors); and the created
+entities are reported as '<type>:<index>' refs computed from the per-collection count delta. The
+actual BRep projection is a live side-effect covered by the post-reload verification pass.
 """
+
+import types
 
 import pytest
 
-from conftest import load_tool, make_design, install, payload as _payload
+from conftest import BRepBody, MakeComp, load_tool, make_design, install, payload as _payload
 
 sp = load_tool("sketch_project")
 
 
-# ── fakes: a sketch whose project2 grows its curve/point collections ──────────
+def comp_with_axes(name="Comp1", token="comp-1"):
+    """A component carrying the three origin construction axes and an entityToken. MakeComp holds
+    the standard collections; a tool-specific surface is attached after construction (its own
+    contract). The token is what a same-component test must compare on - wrappers are never
+    identity-stable."""
+    comp = MakeComp(name=name)
+    comp.entityToken = token
+    comp.xConstructionAxis = object()
+    comp.yConstructionAxis = object()
+    comp.zConstructionAxis = object()
+    return comp
+
+
+# ── fakes: a sketch whose projections grow its curve/point collections ────────
 
 class _Coll:
     def __init__(self, n=0):
@@ -34,25 +52,100 @@ class _Curves:
         self.sketchCircles = _Coll(circles)
 
 
+class _Created:
+    """A created sketch entity stand-in - the three fields a projection's result is read back
+    through. is2D is False for a curve lying on a 3D face, True for one on the sketch x-y plane;
+    isReference marks a linked curve; referencedEntity is the source it is linked to, and reads null
+    for a non-parametric reference. `unreadable` drops a field entirely, the case a read-back must
+    not fold into either state."""
+    def __init__(self, is2d=True, referenced=None, is_reference=True, unreadable=()):
+        if "is2D" not in unreadable:
+            self.is2D = is2d
+        if "isReference" not in unreadable:
+            self.isReference = is_reference
+        self.referencedEntity = referenced
+
+
 class FakeSketch:
-    """A sketch whose project2 appends `creates` entities across its collections and returns a list of
-    that many stand-ins (mirrors the real return: the list of created SketchEntity)."""
-    def __init__(self, name="Sketch1", creates=None, base=None):
+    """A sketch whose projections append entities across its collections and return that many
+    stand-ins (mirroring the real returns: a list/vector of created SketchEntity).
+
+    ``creates`` drives project2; ``surface_creates`` drives projectToSurface; ``contributions`` maps a
+    source entityToken to how many curves intersectWithSketchPlane makes for it (None = one each), so
+    a non-crossing entity is modelled by giving it zero. ``ref_pattern`` sets isReference per created
+    curve, cycling (None = the field does not read). ``silent_growth`` grows the collections but
+    returns an EMPTY list - the case where the census is the only evidence."""
+
+    def __init__(self, name="Sketch1", creates=None, base=None, token=None,
+                 surface_creates=None, surface_is2d=False, contributions=None,
+                 surface_raises=None, intersect_raises=None, plane="XY", unreadable=(),
+                 is_reference=True, unreferenced=False, ref_pattern=None, silent_growth=False):
         self.name = name
         b = base or {}
         self.sketchCurves = _Curves(b.get("line", 0), b.get("arc", 0), b.get("circle", 0))
         self.sketchPoints = _Coll(b.get("point", 0))
         self.creates = creates if creates is not None else {"line": 2, "circle": 1, "point": 1}
+        self.surface_creates = surface_creates if surface_creates is not None else {"line": 1}
+        self.surface_is2d = surface_is2d
+        self.contributions = contributions
+        self.surface_raises = surface_raises
+        self.intersect_raises = intersect_raises
+        self.unreadable = unreadable
+        self.is_reference = is_reference
+        self.unreferenced = unreferenced
+        self.ref_pattern = ref_pattern
+        self.silent_growth = silent_growth
+        self.entityToken = token
+        self.parentComponent = comp_with_axes()
+        self.referencePlane = types.SimpleNamespace(name=plane)
         self.projected_with = None
-    def project2(self, entities, is_linked):
-        self.projected_with = (list(entities), is_linked)
-        c = self.creates
+        self.surface_args = None
+        self.intersect_args = None
+
+    def _grow(self, c):
         self.sketchCurves.sketchLines.grow(c.get("line", 0))
         self.sketchCurves.sketchArcs.grow(c.get("arc", 0))
         self.sketchCurves.sketchCircles.grow(c.get("circle", 0))
         self.sketchPoints.grow(c.get("point", 0))
-        total = sum(c.values())
-        return [object() for _ in range(total)]
+        return sum(c.values())
+
+    def _made(self, i, is2d, referenced=None):
+        """One created curve. ref_pattern cycles isReference per index; None drops the field."""
+        flag, unread = self.is_reference, tuple(self.unreadable)
+        if self.ref_pattern is not None:
+            flag = self.ref_pattern[i % len(self.ref_pattern)]
+            if flag is None:
+                unread += ("isReference",)
+        return _Created(is2d=is2d, referenced=referenced, is_reference=flag, unreadable=unread)
+
+    def project2(self, entities, is_linked):
+        self.projected_with = (list(entities), is_linked)
+        return [object() for _ in range(self._grow(self.creates))]
+
+    def projectToSurface(self, *args):
+        # SWIG binds both the 3-argument and the 4-argument prototype; record exactly what arrived so
+        # the argument ORDER and arity are assertable.
+        self.surface_args = args
+        if self.surface_raises:
+            raise RuntimeError(self.surface_raises)
+        n = self._grow(self.surface_creates)
+        if self.silent_growth:
+            return []
+        return [self._made(i, self.surface_is2d) for i in range(n)]
+
+    def intersectWithSketchPlane(self, entities):
+        self.intersect_args = list(entities)
+        if self.intersect_raises:
+            raise RuntimeError(self.intersect_raises)
+        out = []
+        for e in self.intersect_args:
+            n = 1 if self.contributions is None else self.contributions.get(
+                getattr(e, "entityToken", None), 0)
+            # a non-parametric reference reads referencedEntity as null, so the source is unknowable
+            src = None if self.unreferenced else e
+            out += [self._made(len(out) + k, True, referenced=src) for k in range(n)]
+        self._grow({"line": len(out)})
+        return [] if self.silent_growth else out
 
 
 @pytest.fixture
@@ -79,13 +172,46 @@ def call(monkeypatch):
     return _run
 
 
-# ── happy path: link flag + reported refs ─────────────────────────────────────
+def _stub(monkeypatch, kind, value, err=None):
+    monkeypatch.setattr(kind, "resolve", lambda raw, v=value, e=err: ((None, e) if e else (v, None)))
+
+
+@pytest.fixture
+def run(monkeypatch):
+    """Return a caller for the to_surface / intersect actions. Every typed input kind is stubbed to a
+    fixed resolution so the test exercises the per-action assembly, guards and read-back."""
+    install(sp, make_design())
+    curve = object()
+
+    def _run(action, sketch=None, source=None, faces_out=None, edges_out=None, bodies_out=None,
+             entities_out=None, raw=False, **kw):
+        """`*_out` are what each typed input kind RESOLVES to; **kw are the handler's own arguments."""
+        sk = sketch if sketch is not None else FakeSketch()
+        monkeypatch.setattr(sp._common, "resolve_or_recent_sketch", lambda d, n: (sk, n or None))
+        monkeypatch.setattr(sp._common, "resolve_sketch", lambda d, n: source)
+        monkeypatch.setattr(sp._common, "resolve_entity_ref",
+                            lambda s, r: curve if r == "line:0" else None)
+        _stub(monkeypatch, sp._TARGET_FACES, faces_out if faces_out is not None else ["FACE"])
+        _stub(monkeypatch, sp._CURVE_HANDLES, edges_out if edges_out is not None else ["EDGE"])
+        _stub(monkeypatch, sp._BODIES, bodies_out if bodies_out is not None else [])
+        _stub(monkeypatch, sp._ENTITIES, entities_out if entities_out is not None else [])
+        res = sp.handler(action=action, **kw)
+        return (res if raw else _payload(res)), sk
+    _run.curve = curve
+    return _run
+
+
+# ── into_sketch: link flag + reported refs ────────────────────────────────────
 
 class TestProject:
     def test_projects_and_reports_created_count(self, call):
         out, sk = call(sketch=FakeSketch(creates={"line": 2, "circle": 1, "point": 1}))
         assert out["projected"] is True
         assert out["created_count"] == 4
+
+    def test_default_action_is_into_sketch(self, call):
+        out, sk = call()
+        assert out["action"] == "into_sketch"
 
     def test_link_true_flows_to_project2(self, call):
         out, sk = call(link=True)
@@ -97,6 +223,11 @@ class TestProject:
         assert sk.projected_with[1] is False
         assert out["linked"] is False
         assert "Static copy" in out["note"]
+
+    def test_link_defaults_to_linked_when_omitted(self, call):
+        out, sk = call(link=None)
+        assert sk.projected_with[1] is True
+        assert out["linked"] is True
 
     def test_refs_are_type_index_from_count_delta(self, call):
         # empty sketch -> new line:0, line:1, circle:0, point:0
@@ -154,6 +285,345 @@ class TestGuards:
         sp._common.design = lambda: None
         res = sp.handler(entities="E1")
         assert res["isError"] is True and "design" in res["message"].lower()
+
+    def test_unknown_action_is_refused(self, call):
+        out, sk = call(raw=True, action="wrap")
+        assert out["isError"] is True and "into_sketch" in out["message"]
+
+
+# ── cross-action refusals: an input the chosen method cannot consume ──────────
+
+class TestForeignInputs:
+    def test_link_refused_on_intersect(self, run):
+        out, sk = run("intersect", raw=True, link=False, bodies="Body1")
+        assert out["isError"] is True
+        assert "'link' applies only to action='into_sketch'" in out["message"]
+
+    def test_bodies_refused_on_into_sketch(self, run):
+        out, sk = run("into_sketch", raw=True, bodies="Body1")
+        assert out["isError"] is True
+        assert "'bodies' applies only to action='intersect'" in out["message"]
+
+    def test_target_faces_refused_on_intersect(self, run):
+        out, sk = run("intersect", raw=True, target_faces=["h1"])
+        assert out["isError"] is True
+        assert "'target_faces' applies only to action='to_surface'" in out["message"]
+
+    def test_direction_refused_on_into_sketch(self, run):
+        out, sk = run("into_sketch", raw=True, direction="z")
+        assert out["isError"] is True
+        assert "'direction' applies only to action='to_surface'" in out["message"]
+
+    def test_entities_refused_on_to_surface(self, run):
+        # projectToSurface takes target_faces + curves; a silently dropped 'entities' would sit in
+        # the call looking like it steered the projection
+        out, sk = run("to_surface", raw=True, entities="h1", curve_handles=["h2"])
+        assert out["isError"] is True
+        assert "'entities' applies only to action='into_sketch' / 'intersect'" in out["message"]
+        assert sk.surface_args is None
+
+    def test_entities_accepted_on_both_of_its_owners(self, run):
+        b = BRepBody(name="Body1", entity_token="tok-1")
+        out, sk = run("intersect", entities_out=[b], entities="h1")
+        assert sk.intersect_args == [b]
+
+
+# ── to_surface: projectToSurface(faces, curves, projectType[, directionEntity]) ─
+
+class TestToSurface:
+    def test_faces_reach_the_call_before_the_curves(self, run):
+        out, sk = run("to_surface", faces_out=["F1", "F2"], edges_out=["E1"],
+                      curve_handles=["h1"])
+        assert sk.surface_args[0] == ["F1", "F2"]
+        assert sk.surface_args[1] == ["E1"]
+
+    def test_closest_point_calls_with_three_arguments(self, run):
+        out, sk = run("to_surface", curve_handles=["h1"])
+        assert len(sk.surface_args) == 3
+        assert sk.surface_args[2] is sp.adsk.fusion.SurfaceProjectTypes.ClosestPointSurfaceProjectType
+
+    def test_along_vector_passes_the_direction_entity_fourth(self, run):
+        sk = FakeSketch()
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"],
+                     project_type="along_vector", direction="z")
+        assert len(sk.surface_args) == 4
+        assert sk.surface_args[2] is sp.adsk.fusion.SurfaceProjectTypes.AlongVectorSurfaceProjectType
+        # a world axis key becomes the component's origin ConstructionAxis, not a direction vector
+        assert sk.surface_args[3] is sk.parentComponent.zConstructionAxis
+
+    def test_along_vector_without_direction_is_refused(self, run):
+        out, sk = run("to_surface", raw=True, curve_handles=["h1"], project_type="along_vector")
+        assert out["isError"] is True
+        assert "directionEntity" in out["message"]
+        assert sk.surface_args is None
+
+    def test_direction_with_closest_point_is_refused(self, run):
+        out, sk = run("to_surface", raw=True, curve_handles=["h1"], direction="z")
+        assert out["isError"] is True
+        assert "along_vector" in out["message"]
+        assert sk.surface_args is None
+
+    def test_curve_refs_resolve_against_the_source_sketch(self, run):
+        src = FakeSketch(name="Source", token="tok-src")
+        sk = FakeSketch(name="Target", token="tok-tgt")
+        out, _ = run("to_surface", sketch=sk, source=src,
+                     source_sketch="Source", curve_refs=["line:0"])
+        assert sk.surface_args[1] == [run.curve]
+
+    def test_source_sketch_that_is_the_target_is_refused(self, run):
+        sk = FakeSketch(name="Sketch1")
+        out, _ = run("to_surface", raw=True, sketch=sk, source=sk,
+                     source_sketch="Sketch1", curve_refs=["line:0"])
+        assert out["isError"] is True
+        assert "same sketch" in out["message"]
+
+    def test_same_sketch_detected_through_the_entity_token(self, run):
+        # a sketch read twice is a fresh proxy, so the refusal cannot rest on identity
+        sk = FakeSketch(name="Sketch1", token="tok-same")
+        proxy = FakeSketch(name="Sketch1", token="tok-same")
+        out, _ = run("to_surface", raw=True, sketch=sk, source=proxy,
+                     source_sketch="Sketch1", curve_refs=["line:0"])
+        assert out["isError"] is True
+        assert "same sketch" in out["message"]
+
+    def test_curve_refs_without_source_sketch_is_refused(self, run):
+        out, sk = run("to_surface", raw=True, curve_refs=["line:0"])
+        assert out["isError"] is True and "'source_sketch'" in out["message"]
+
+    def test_missing_source_sketch_lists_the_available_names(self, run):
+        out, sk = run("to_surface", raw=True, source=None,
+                      source_sketch="Ghost", curve_refs=["line:0"])
+        assert out["isError"] is True and "No sketch named 'Ghost'" in out["message"]
+
+    def test_unresolvable_curve_ref_is_refused(self, run):
+        src = FakeSketch(name="Source", token="tok-src")
+        out, sk = run("to_surface", raw=True, source=src, source_sketch="Source",
+                      curve_refs=["arc:9"])
+        assert out["isError"] is True and "arc:9" in out["message"]
+
+    def test_no_curves_names_both_inputs(self, run):
+        out, sk = run("to_surface", raw=True)
+        assert out["isError"] is True
+        assert "curve_refs" in out["message"] and "curve_handles" in out["message"]
+
+    def test_zero_created_is_error_not_false_ok(self, run):
+        out, sk = run("to_surface", raw=True, sketch=FakeSketch(surface_creates={}),
+                      curve_handles=["h1"])
+        assert out["isError"] is True
+        assert "created no curves" in out["message"]
+
+    def test_refs_offset_by_preexisting_entities(self, run):
+        sk = FakeSketch(base={"line": 2}, surface_creates={"line": 3})
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert out["entity_refs"] == ["line:2", "line:3", "line:4"]
+
+    def test_off_face_curves_are_counted(self, run):
+        sk = FakeSketch(surface_creates={"line": 2}, surface_is2d=False)
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert out["off_plane_count"] == 2
+        assert "All of them read as lying on the face" in out["note"]
+
+    def test_all_on_plane_curves_are_flagged_in_the_note(self, run):
+        sk = FakeSketch(surface_creates={"line": 2}, surface_is2d=True)
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert out["off_plane_count"] == 0
+        assert "All of them read as lying on the sketch x-y plane" in out["note"]
+
+    def test_unreadable_is2d_is_not_counted_as_on_the_plane(self, run):
+        # an is2D that will not read is evidence of neither state - it must not inflate either count
+        sk = FakeSketch(surface_creates={"line": 2}, unreadable=("is2D",))
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert out["off_plane_count"] == 0
+        assert "is2D did not read on 2" in out["note"]
+        assert "All of them read as" not in out["note"]
+
+    def test_linkage_is_stated_from_the_isreference_read_back(self, run):
+        sk = FakeSketch(surface_creates={"line": 2})
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert "All 2 read back as REFERENCE curves" in out["note"]
+
+    def test_curves_that_do_not_read_as_references_are_reported_as_such(self, run):
+        sk = FakeSketch(surface_creates={"line": 2}, is_reference=False)
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert "0 read back as REFERENCE curves" in out["note"] and "2 did not" in out["note"]
+
+    def test_a_mixed_split_keeps_unreadable_apart_from_read_false(self, run):
+        # True / False / unreadable across three curves - the failed read must not be folded into
+        # the "did not" count, which would report a definite state nothing measured
+        sk = FakeSketch(surface_creates={"line": 3}, ref_pattern=(True, False, None))
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert ("Of 3 created curves, 1 read back as REFERENCE curves" in out["note"]
+                and "1 did not" in out["note"]
+                and "isReference did not read on 1" in out["note"])
+
+    def test_an_empty_return_claims_nothing_about_where_the_curves_landed(self, run):
+        # the collections grew but the call returned nothing to read: a universal from ZERO reads
+        # would be a fabricated claim
+        sk = FakeSketch(surface_creates={"line": 2}, silent_growth=True)
+        out, _ = run("to_surface", sketch=sk, curve_handles=["h1"])
+        assert out["created_count"] == 0
+        assert out["entity_refs"] == ["line:0", "line:1"]
+        assert "All of them read as" not in out["note"]
+        assert "REFERENCE curves" not in out["note"]
+        assert "isReference did not read" not in out["note"]
+        assert "returned no entities" in out["note"]
+
+    def test_a_projection_that_misses_surfaces_fusions_message(self, run):
+        msg = "3 : Failed to project the selected geometries."
+        out, sk = run("to_surface", raw=True, sketch=FakeSketch(surface_raises=msg),
+                      curve_handles=["h1"])
+        assert out["isError"] is True and msg in out["message"]
+
+    def test_payload_reports_the_projection_shape(self, run):
+        out, sk = run("to_surface", faces_out=["F1", "F2"], edges_out=["E1"],
+                      curve_handles=["h1"])
+        assert out["action"] == "to_surface"
+        assert out["target_face_count"] == 2 and out["source_curve_count"] == 1
+        assert out["project_type"] == "closest_point"
+
+
+# ── intersect: intersectWithSketchPlane(entities) and its silent outcomes ─────
+
+class TestIntersect:
+    def test_bodies_and_entities_both_reach_the_call(self, run):
+        b, f = BRepBody(name="Body1", entity_token="tok-b"), BRepBody(name="Face1", entity_token="tok-f")
+        out, sk = run("intersect", bodies_out=[b], entities_out=[f],
+                      bodies="Body1", entities="h1")
+        assert sk.intersect_args == [f, b]
+
+    def test_no_sources_is_refused(self, run):
+        out, sk = run("intersect", raw=True)
+        assert out["isError"] is True
+        assert "'bodies'" in out["message"] and "'entities'" in out["message"]
+
+    def test_a_same_component_source_reaches_the_call(self, run):
+        sk = FakeSketch(contributions={"tok-1": 2})
+        b1 = BRepBody(name="Body1", entity_token="tok-1", parent_component=sk.parentComponent)
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert sk.intersect_args == [b1] and out["created_count"] == 2
+
+    def test_the_same_component_read_twice_is_not_refused(self, run):
+        # component wrappers are never identity-stable: a body's parentComponent and the sketch's
+        # are DIFFERENT objects for one component, sharing one entityToken. An identity test here
+        # would take the "different component" branch every time and refuse every legal call.
+        sk = FakeSketch(contributions={"tok-1": 2})
+        other_wrapper = MakeComp(name="Comp1-other-wrapper")
+        other_wrapper.entityToken = sk.parentComponent.entityToken
+        b1 = BRepBody(name="Body1", entity_token="tok-1", parent_component=other_wrapper)
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert sk.intersect_args == [b1] and out["created_count"] == 2
+
+    def test_an_occurrence_proxy_from_another_component_is_refused(self, run):
+        # measured: a root-context sketch handed an occurrence proxy creates nothing and does NOT
+        # raise, so the refusal has to happen here or the caller gets a wrong-cause plane error
+        sk = FakeSketch(name="Sketch1")
+        proxy = BRepBody(name="Body1", entity_token="tok-1",
+                         parent_component=MakeComp(name="CompX"))
+        proxy.assemblyContext = types.SimpleNamespace(name="CompX:1")
+        out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[proxy], bodies="Body1")
+        assert out["isError"] is True
+        assert "lives in component 'CompX'" in out["message"]
+        assert "owned by the sketch's own component" in out["message"]
+        assert "sketch_create" in out["message"]
+        assert sk.intersect_args is None
+
+    def test_a_foreign_components_native_body_is_refused(self, run):
+        # measured: this one RAISES InternalValidationError, which the refusal pre-empts
+        sk = FakeSketch(name="Sketch1")
+        native = BRepBody(name="Body2", entity_token="tok-2",
+                          parent_component=MakeComp(name="CompY"))
+        out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[native], bodies="Body2")
+        assert out["isError"] is True
+        assert "lives in component 'CompY'" in out["message"]
+        assert "InternalValidationError" in out["message"]
+        assert sk.intersect_args is None
+
+    def test_a_face_is_judged_by_its_owning_bodys_component(self, run):
+        sk = FakeSketch(name="Sketch1")
+        face = types.SimpleNamespace(
+            body=BRepBody(name="Body1", parent_component=MakeComp(name="CompX")))
+        out, _ = run("intersect", raw=True, sketch=sk, entities_out=[face], entities="h1")
+        assert out["isError"] is True and "lives in component 'CompX'" in out["message"]
+
+    def test_an_unreadable_owner_does_not_refuse(self, run):
+        # an owning component that will not read is evidence of nothing - it must not block the call
+        sk = FakeSketch(contributions={"tok-1": 1})
+        b1 = BRepBody(name="Body1", entity_token="tok-1")   # parent_component defaults to None
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert sk.intersect_args == [b1] and out["created_count"] == 1
+
+    def test_zero_created_names_every_entity_and_the_plane(self, run):
+        b1, b2 = BRepBody(name="Body1", entity_token="tok-1"), BRepBody(name="Body2", entity_token="tok-2")
+        sk = FakeSketch(name="Section", plane="XY", contributions={})
+        out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[b1, b2],
+                     bodies="Body1,Body2")
+        assert out["isError"] is True
+        assert "Body1" in out["message"] and "Body2" in out["message"]
+        assert "Section" in out["message"] and "XY" in out["message"]
+
+    def test_partial_result_is_ok_and_names_the_zero_contributors(self, run):
+        b1, b2 = BRepBody(name="Body1", entity_token="tok-1"), BRepBody(name="Body2", entity_token="tok-2")
+        sk = FakeSketch(contributions={"tok-1": 4, "tok-2": 0})
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1, b2], bodies="Body1,Body2")
+        assert out["created_count"] == 4
+        assert out["per_source"] == [{"source": "Body1", "created": 4},
+                                     {"source": "Body2", "created": 0}]
+        assert "Body2" in out["note"] and "contributed nothing" in out["note"]
+
+    def test_full_contribution_leaves_the_note_free_of_a_zero_claim(self, run):
+        b1, b2 = BRepBody(name="Body1", entity_token="tok-1"), BRepBody(name="Body2", entity_token="tok-2")
+        sk = FakeSketch(contributions={"tok-1": 2, "tok-2": 3})
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1, b2], bodies="Body1,Body2")
+        assert out["created_count"] == 5
+        assert "contributed nothing" not in out["note"]
+
+    def test_attribution_is_suppressed_when_a_curve_cannot_be_matched_back(self, run):
+        # a non-parametric reference reads referencedEntity as null; unmatched, that would otherwise
+        # read as "this source made nothing"
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(contributions=None, unreferenced=True)
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert out["created_count"] == 1
+        assert "per_source" not in out
+        assert "contributed nothing" not in out["note"]
+
+    def test_refs_are_tail_indexed(self, run):
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(base={"line": 5}, contributions={"tok-1": 4})
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert out["entity_refs"] == ["line:5", "line:6", "line:7", "line:8"]
+
+    def test_intersect_raise_is_surfaced(self, run):
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        out, sk = run("intersect", raw=True, sketch=FakeSketch(intersect_raises="boom"),
+                      bodies_out=[b1], bodies="Body1")
+        assert out["isError"] is True and "boom" in out["message"]
+
+    def test_linkage_is_stated_from_the_isreference_read_back(self, run):
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(contributions={"tok-1": 3})
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert "All 3 read back as REFERENCE curves" in out["note"]
+
+    def test_unreadable_isreference_falls_back_to_the_method_fact(self, run):
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(contributions={"tok-1": 2}, unreadable=("isReference",))
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert "isReference did not read" in out["note"]
+        assert "read back as REFERENCE curves" not in out["note"]
+
+    def test_an_empty_return_claims_no_linkage(self, run):
+        # the census grew while the call returned nothing to read - with zero reads there is no
+        # linkage to claim either way
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(contributions={"tok-1": 3}, silent_growth=True)
+        out, _ = run("intersect", sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert out["created_count"] == 0
+        assert out["entity_refs"] == ["line:0", "line:1", "line:2"]
+        assert "REFERENCE curves" not in out["note"]
+        assert "isReference did not read" not in out["note"]
+        assert "They lie on the sketch plane" not in out["note"]
+        assert "returned no entities" in out["note"]
 
 
 # ── RETURNS contract ──────────────────────────────────────────────────────────

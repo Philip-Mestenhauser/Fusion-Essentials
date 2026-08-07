@@ -80,8 +80,11 @@ class FakeExportManager:
     def __init__(self):
         self.calls = []
         self.executed = None
+        # A live options object can IGNORE a setter - the property keeps its own value however it
+        # is written. Swap this to model that, which is the only way the refusal path is reachable.
+        self.options_class = FakeOptions
     def _opt(self, kind, path, geom=None):
-        rec = FakeOptions(kind, path, geom)
+        rec = self.options_class(kind, path, geom)
         self.calls.append(rec)
         return rec
     def createSTEPExportOptions(self, path, geom=None):
@@ -296,6 +299,26 @@ class TestPathHandling:
 # ── invisible-content + per-format option knobs ─────────────────────────────
 
 class TestOptionsApplied:
+    def test_an_option_the_api_refuses_is_named_not_reported_as_applied(self, tmp_path, monkeypatch):
+        # A knob the platform ignores must NOT appear under options_applied: that key states the
+        # value the file was written with, so a refused option listed there is a false claim.
+        _, em, _ = _install(monkeypatch)
+
+        class Stubborn(FakeOptions):
+            @property
+            def isBinaryFormat(self):
+                return True          # always binary, whatever is written
+            @isBinaryFormat.setter
+            def isBinaryFormat(self, value):
+                pass
+
+        em.options_class = Stubborn
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"),
+                                  stl_binary=False))
+        assert out.get("options_applied", {}).get("stl_binary") is None
+        assert "stl_binary" in out["options_refused"]
+        assert "did not take these options" in out["note"]
+
     def test_default_call_sets_no_extra_options(self, tmp_path, monkeypatch):
         # the common case (no opt-in flags) must keep the plain export payload shape - no
         # 'options_applied' key when nothing was requested.
@@ -333,7 +356,9 @@ class TestOptionsApplied:
         _, em, _ = _install(monkeypatch)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_binary=False))
         assert em.calls[-1].isBinaryFormat is False
-        assert out["options_applied"]["stl_binary"] is True
+        # False here states the FILE IS ASCII - options_applied carries the value that landed,
+        # never a did-it-stick flag, which under this key would read as the value it is not
+        assert out["options_applied"]["stl_binary"] is False
 
     def test_stl_binary_omitted_leaves_factory_default_untouched(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
@@ -346,7 +371,9 @@ class TestOptionsApplied:
         _, em, _ = _install(monkeypatch)
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path / "p.stl"), stl_units="in"))
         assert em.calls[-1].unitType is dx.adsk.fusion.DistanceUnits.InchDistanceUnits
-        assert out["options_applied"]["stl_units"] is True
+        # the VALUE that landed, in the tool's own vocabulary - not a did-it-stick flag, which
+        # under this key would read as the value it is not
+        assert out["options_applied"]["stl_units"] == "in"
 
     def test_stl_units_omitted_leaves_factory_default_untouched(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch)
@@ -632,7 +659,7 @@ class TestExportOne:
         em = FakeExportManager()
         out = str(tmp_path / "out.stl")
         okk, err, applied = dx._export_one(em, "createSTLExportOptions", True, "GEOM", out)
-        assert okk is True and err is None and applied == {}
+        assert okk is True and err is None and applied == ({}, [])
         # STL records (geom, path); the call captured the geometry, not the path, as geom
         assert em.calls[-1]["geom"] == "GEOM" and em.calls[-1]["path"] == out
 
@@ -647,7 +674,7 @@ class TestExportOne:
         em.execute = lambda opts: False
         okk, err, applied = dx._export_one(em, "createSTEPExportOptions", False, "G",
                                            str(tmp_path / "out"))
-        assert okk is False and "nothing was written" in err and applied == {}
+        assert okk is False and "nothing was written" in err and applied == ({}, [])
 
     def test_exception_captured_as_error_string(self, tmp_path):
         em = FakeExportManager()

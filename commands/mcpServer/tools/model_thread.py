@@ -91,7 +91,7 @@ def _note(modeled):
 
 def handler(faces=None, designation: str = "", modeled: bool = False, left_handed: bool = False,
             length=None, offset=None, location: str = "", thread_type: str = "",
-            units: str = "mm") -> dict:
+            thread_class: str = "", units: str = "mm") -> dict:
     """See TOOL_DESCRIPTION."""
     scale_factor, uerr = _inputs.UNITS.resolve(units)
     if uerr:
@@ -140,7 +140,8 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
     internal = bool(sides[0])
 
     thread_info, carried_by, terr = _threads.resolve_thread_info(
-        comp, designation, internal=internal, thread_type=thread_type)
+        comp, designation, internal=internal, thread_type=thread_type,
+        thread_class=thread_class)
     if terr:
         return error(terr)
 
@@ -186,7 +187,7 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
     except Exception as e:
         return error(f"Thread failed for '{designation}': {e}")
     if not feature:
-        return error("threadFeatures.add returned no feature.")
+        return error(_common.no_feature_error(design, "Thread"))
 
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
@@ -213,13 +214,21 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
         "faces": len(face_ents),
         "designation": got or designation,
         "internal": internal,
-        "modeled": bool(safe(lambda: feature.isModeled, modeled)),
-        "right_handed": bool(safe(lambda: feature.isRightHanded, not left_handed)),
+        # Read off the FEATURE, never defaulted to the request: falling back to what was asked for
+        # turns an unreadable flag into a confirmation of itself, which is the one thing a
+        # read-back may not do. None means unreadable, and the note below names it.
+        "modeled": safe(lambda: bool(feature.isModeled)),
+        "right_handed": safe(lambda: bool(feature.isRightHanded)),
         "thread_type": safe(lambda: info.threadType) if info is not None else None,
         "thread_type_alternatives": carried_by if len(carried_by) > 1 else None,
         "thread_class": safe(lambda: info.threadClass) if info is not None else None,
         "note": _note(modeled),
     }
+    unread = [k for k in ("modeled", "right_handed") if payload[k] is None]
+    if unread:
+        payload["note"] += (" " + " and ".join(unread) + " could NOT be read back off the feature, "
+                            "so " + ("they are" if len(unread) > 1 else "it is") + " reported as "
+                            "null rather than as the value requested - confirm in Fusion.")
     if length_cm is not None:
         # threadLength/threadOffset are ModelParameters carrying centimetres.
         name = safe(lambda: feature.name)
@@ -298,6 +307,8 @@ thread_tool = (
     .add_input_property(*_LOCATION.as_property())
     .add_input_property("thread_type", {"type": "string",
             "description": "Thread standard to take the call-out from, when several carry it."})
+    .add_input_property("thread_class", {"type": "string",
+            "description": "Fit class within that standard, e.g. '6g'. Default: the first offered."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

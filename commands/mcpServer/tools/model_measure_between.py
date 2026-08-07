@@ -56,7 +56,13 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
         mr, derr = _common.min_distance(ent_a, ent_b)
         if derr:
             return derr
-        dist_cm = safe(lambda: mr.value, 0.0)
+        # No numeric fallback: 0 is a MEANING in this payload ("touching/overlapping"), so an
+        # unreadable distance published as 0.0 is a false measurement, not a missing one.
+        dist_cm = safe(lambda: mr.value)
+        if not isinstance(dist_cm, (int, float)):
+            return error("measureMinimumDistance returned a result whose value could not be read, "
+                         "so the distance is UNKNOWN - reporting it as 0 would read as touching. "
+                         "Re-run find_geometry for fresh handles and retry.")
         pa = safe(lambda: mr.positionOne)
         pb = safe(lambda: mr.positionTwo)
         out = {
@@ -97,7 +103,11 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
                      "rejected. Use find_geometry face/edge handles.)")
     if not mr:
         return error("measureAngle returned nothing for these two targets.")
-    rad = safe(lambda: mr.value, 0.0)
+    # 0 radians is "parallel" to a caller, so an unreadable angle must not be published as 0.
+    rad = safe(lambda: mr.value)
+    if not isinstance(rad, (int, float)):
+        return error("measureAngle returned a result whose value could not be read, so the angle is "
+                     "UNKNOWN - reporting it as 0 would read as parallel.")
     return ok({
         "mode": "angle",
         "a": f"{kind_a} '{safe(lambda: ent_a.name) or a}'",

@@ -459,32 +459,62 @@ class TestToolHolder:
         assert cc.tool_holder(_HolderTool("{not json")) is None
 
 
-# ── find_setup / find_operation / setup_names: the (obj, available_names) wrappers ───────────────
+# ── find_setup (setup, available_names, error) / find_operation (obj, available_names) / setup_names ──
 
 
 class TestFindSetup:
     def test_found_case_insensitive(self):
         cam = make_cam(FakeSetup("Setup1"), FakeSetup("Setup2"))
-        s, avail = cc.find_setup(cam, "setup2")          # lowercase input resolves 'Setup2'
+        s, avail, err = cc.find_setup(cam, "setup2")     # lowercase input resolves 'Setup2'
         assert s is not None and s.name == "Setup2"
         assert avail == ["Setup1", "Setup2"]
+        assert err is None                               # a hit carries no refusal
 
     def test_not_found_returns_available(self):
         cam = make_cam(FakeSetup("Setup1"))
-        s, avail = cc.find_setup(cam, "Ghost")
+        s, avail, err = cc.find_setup(cam, "Ghost")
         assert s is None and avail == ["Setup1"]
+        assert "No setup named 'Ghost'" in err and "Setup1" in err
 
     def test_empty_cam_is_safe(self):
-        s, avail = cc.find_setup(make_cam(), "x")
+        s, avail, err = cc.find_setup(make_cam(), "x")
         assert s is None and avail == []
+        assert "No setup named 'x'" in err
 
 
 class TestFindSetupDuplicate:
     def test_duplicate_setup_name_is_refused(self):
         cam = make_cam(FakeSetup("Dup"), FakeSetup("Dup"))
-        s, avail = cc.find_setup(cam, "Dup")
+        s, _avail, err = cc.find_setup(cam, "Dup")
         assert s is None                                  # refused, never the first hit
-        assert avail == ["Dup", "Dup"]
+        assert err is not None
+
+    def test_the_refusal_says_ambiguous_not_missing(self):
+        # a name found TWICE is not absent - the refusal a caller returns must not say it is.
+        cam = make_cam(FakeSetup("Dup"), FakeSetup("Other"), FakeSetup("Dup"))
+        s, _avail, err = cc.find_setup(cam, "Dup")
+        assert s is None
+        assert "is ambiguous" in err and "2 CAM items share that name" in err
+        assert "No setup named" not in err
+
+    def test_the_name_list_stays_a_name_list(self):
+        # the refusal travels in its OWN field: a sentence injected into available_names would be
+        # split into garbage by the ', '.join a caller builds a choice list with.
+        cam = make_cam(FakeSetup("Dup"), FakeSetup("Dup"), FakeSetup("Other"))
+        _s, avail, _err = cc.find_setup(cam, "Dup")
+        assert avail == ["Dup", "Dup", "Other"]
+        assert all("ambiguous" not in (n or "") for n in avail)
+
+    def test_the_duplicate_refusal_is_case_insensitive_like_the_match(self):
+        cam = make_cam(FakeSetup("Dup"), FakeSetup("DUP"))
+        s, _avail, err = cc.find_setup(cam, "dup")
+        assert s is None and "is ambiguous" in err
+
+    def test_a_plain_miss_is_worded_as_absence(self):
+        cam = make_cam(FakeSetup("Dup"), FakeSetup("Dup"), FakeSetup("Other"))
+        s, avail, err = cc.find_setup(cam, "Ghost")
+        assert s is None and avail == ["Dup", "Dup", "Other"]
+        assert "No setup named 'Ghost'" in err and "ambiguous" not in err
 
 
 class TestSetupNames:
@@ -609,3 +639,213 @@ class TestResolveCamNode:
         cam, *_ = _tree_cam()
         node, err = cc.resolve_cam_node(cam, "setup2", kinds=("setup",), label="setup")
         assert err is None and node.kind == "setup" and node.name == "Setup2"
+
+
+# â”€â”€ inspection results: the recorded probing measurements (cam_get(include=['inspection'])) â”€â”€â”€â”€â”€â”€â”€
+#
+# The fakes live in conftest beside the other CAM fakes: _InspMeasure carries NO .name, because a
+# measure folder exposes none live.
+
+import adsk.cam  # noqa: E402 - the state values below come from the mock enum, never hand-seeded
+
+from conftest import _InspMeasure, _InspPath, _InspPoint  # noqa: E402
+from conftest import make_gated_cam  # noqa: E402
+from conftest import make_inspection_cam as _inspection_cam  # noqa: E402
+
+_WITHIN = adsk.cam.InspectionPointState.WithinTolerance
+_ABOVE = adsk.cam.InspectionPointState.AboveTolerance
+_BELOW = adsk.cam.InspectionPointState.BelowTolerance
+_UNPROJECTED = adsk.cam.InspectionPointState.Unprojected
+
+
+class TestInspectionEmptyState:
+    def test_none_collection_publishes_an_empty_state_not_an_error(self, install):
+        # MEASURED: CAM.inspectionResults reads None (not an empty collection) on a CAM document
+        # with a setup and no probing operations.
+        install(_inspection_cam(None))
+        out = _payload(cc.get_inspection_results_handler())
+        assert out["available"] is False and out["readable"] is True
+        assert out["measure_count"] == 0 and out["measures"] == []
+        assert "None" in out["note"] and "probing" in out["note"]
+        assert "read_error" not in out          # nothing raised - this is an answer, not a failure
+
+    def test_a_raising_property_is_an_unreadable_state_carrying_the_reason(self, install):
+        # A gated CAM member RAISES rather than reading empty (measured on stockMaterialLibrary),
+        # which must not be collapsed into "this document has no results".
+        install(make_gated_cam(text="preview feature is not enabled"))
+        out = _payload(cc.get_inspection_results_handler())
+        assert out["available"] is False and out["readable"] is False
+        assert "preview feature is not enabled" in out["read_error"]
+        assert "RAISED" in out["note"]
+
+    def test_present_but_empty_collection_reads_available_with_zero_measures(self, install):
+        install(_inspection_cam([]))
+        out = _payload(cc.get_inspection_results_handler())
+        assert out["available"] is True and out["measure_count"] == 0
+        assert "no measures" in out["note"]
+
+    def test_null_path_results_is_zero_paths_not_a_crash(self, install):
+        # CAMMeasure.inspectionPathResults is documented to return null when the measure holds none.
+        install(_inspection_cam([_InspMeasure(None)]))
+        out = _payload(cc.get_inspection_results_handler())
+        assert out["measures"][0]["path_count"] == 0
+        assert out["measures"][0]["point_count"] == 0
+        assert "states" not in out["measures"][0]
+
+
+class TestInspectionRollup:
+    def _cam(self):
+        clean = _InspMeasure([_InspPath([_InspPoint(_WITHIN) for _ in range(4)])])
+        mixed = _InspMeasure([
+            _InspPath([_InspPoint(_WITHIN),
+                       _InspPoint(_ABOVE, deviation=0.5, error=0.2)]),
+            _InspPath([_InspPoint(_BELOW, deviation=0.9, error=0.7),
+                       _InspPoint(_UNPROJECTED),
+                       _InspPoint(_ABOVE, deviation=0.3, error=0.1)])])
+        return _inspection_cam([clean, mixed])
+
+    def test_clean_measure_drops_the_zero_buckets(self, install):
+        install(self._cam())
+        row = _payload(cc.get_inspection_results_handler())["measures"][0]
+        assert row["states"] == {"within_tolerance": 4}
+        assert row["out_of_tolerance"] == 0 and "worst" not in row
+
+    def test_out_of_tolerance_sums_above_below_and_unprojected(self, install):
+        install(self._cam())
+        row = _payload(cc.get_inspection_results_handler())["measures"][1]
+        assert row["states"] == {"within_tolerance": 1, "above_tolerance": 2,
+                                 "below_tolerance": 1, "unprojected": 1}
+        assert row["out_of_tolerance"] == 4
+        assert row["point_count"] == 5 and row["path_count"] == 2
+
+    def test_worst_point_is_the_highest_error_and_names_its_position(self, install):
+        install(self._cam())
+        worst = _payload(cc.get_inspection_results_handler())["measures"][1]["worst"]
+        # the below-tolerance point at path 1 / point 0 carries the largest error (0.7 cm -> 7 mm)
+        assert worst["path"] == 1 and worst["point"] == 0
+        assert worst["state"] == "below_tolerance" and worst["error"] == 7.0
+
+    def test_worst_is_the_largest_error_MAGNITUDE_and_publishes_the_raw_sign(self, install):
+        # error's sign semantics are not measured, so the pick ranks on abs(): identity when the
+        # value is unsigned, correct when it is signed. The row keeps the raw value.
+        install(_inspection_cam([_InspMeasure([_InspPath([
+            _InspPoint(_ABOVE, deviation=0.4, error=0.4),
+            _InspPoint(_BELOW, deviation=0.9, error=-0.9)])])]))
+        worst = _payload(cc.get_inspection_results_handler())["measures"][0]["worst"]
+        assert worst["point"] == 1 and worst["state"] == "below_tolerance"
+        assert worst["error"] == -9.0
+
+    def test_rows_are_indexed_and_carry_no_name(self, install):
+        install(self._cam())
+        out = _payload(cc.get_inspection_results_handler())
+        assert [r["index"] for r in out["measures"]] == [0, 1]
+        assert all("name" not in r for r in out["measures"])
+        assert "INDEX" in out["note"]
+
+
+class TestInspectionDeepRead:
+    def _oot_cam(self, count=300):
+        pts = [_InspPoint(_ABOVE, deviation=0.1, error=0.1) for _ in range(count)]
+        return _inspection_cam([_InspMeasure([_InspPath(pts)])])
+
+    def test_deep_read_filters_to_out_of_tolerance_points(self, install):
+        install(_inspection_cam([_InspMeasure([_InspPath(
+            [_InspPoint(_WITHIN), _InspPoint(_ABOVE, deviation=0.2, error=0.1),
+             _InspPoint(_WITHIN), _InspPoint(_UNPROJECTED)])])]))
+        out = _payload(cc.get_inspection_results_handler(measure="0"))
+        assert out["point_count"] == 4 and out["out_of_tolerance"] == 2
+        assert [p["index"] for p in out["points"]] == [1, 3]
+        assert out["filter"] == "out_of_tolerance" and out["truncated"] is False
+
+    def test_default_cap_truncates_and_reports_the_honest_totals(self, install):
+        install(self._oot_cam(300))
+        out = _payload(cc.get_inspection_results_handler(measure="0"))
+        assert out["returned"] == cc._INSPECTION_ROW_DEFAULT == len(out["points"])
+        assert out["truncated"] is True
+        assert out["point_count"] == 300 and out["out_of_tolerance"] == 300
+
+    def test_max_results_is_capped_hard(self, install):
+        install(self._oot_cam(300))
+        out = _payload(cc.get_inspection_results_handler(measure="0", max_results=1000))
+        assert out["returned"] == cc._INSPECTION_ROW_CAP and out["truncated"] is True
+
+    def test_path_scope_reads_only_that_path(self, install):
+        install(_inspection_cam([_InspMeasure([
+            _InspPath([_InspPoint(_ABOVE, deviation=0.1, error=0.1)]),
+            _InspPath([_InspPoint(_BELOW, deviation=0.2, error=0.2),
+                       _InspPoint(_BELOW, deviation=0.3, error=0.3)])])]))
+        out = _payload(cc.get_inspection_results_handler(measure="0/1"))
+        assert out["path"] == 1 and out["point_count"] == 2 and out["returned"] == 2
+        assert {p["state"] for p in out["points"]} == {"below_tolerance"}
+
+    def test_point_row_scales_every_length_out_of_cm(self, install):
+        install(_inspection_cam([_InspMeasure([_InspPath([
+            _InspPoint(_ABOVE, deviation=1.0, error=0.5, offset=0.2, nominal=(2.0, 0.0, -1.0),
+                       contact=(2.1, 0.0, -1.0), projected=(2.05, 0.0, -1.0),
+                       delta=(0.1, 0.0, 0.0))])])]))
+        row = _payload(cc.get_inspection_results_handler(measure="0"))["points"][0]
+        assert row["deviation"] == 10.0 and row["error"] == 5.0 and row["offset"] == 2.0
+        assert row["nominal"] == [20.0, 0.0, -10.0]
+        assert row["contact"] == [21.0, 0.0, -10.0]
+        assert row["projected"] == [20.5, 0.0, -10.0]
+        assert row["delta"] == [1.0, 0.0, 0.0]
+
+    def test_cm_units_leave_the_internal_value_alone(self, install):
+        install(_inspection_cam([_InspMeasure([_InspPath([
+            _InspPoint(_ABOVE, deviation=1.0, error=0.5)])])]))
+        row = _payload(cc.get_inspection_results_handler(measure="0", units="cm"))["points"][0]
+        assert row["deviation"] == 1.0 and row["error"] == 0.5
+
+    def test_unreadable_length_reads_null_never_zero(self, install):
+        # 0.0 is an ANSWER ("dead on nominal"), so an unreadable field must not report one.
+        install(_inspection_cam([_InspMeasure([_InspPath([
+            _InspPoint(_ABOVE, deviation=1.0, error=0.5, readable=False)])])]))
+        row = _payload(cc.get_inspection_results_handler(measure="0"))["points"][0]
+        assert row["deviation"] is None and row["error"] == 5.0
+
+
+class TestInspectionStateNames:
+    def test_unknown_state_value_degrades_to_str_and_is_not_called_out_of_tolerance(self, install):
+        install(_inspection_cam([_InspMeasure([_InspPath([_InspPoint(7)])])]))
+        row = _payload(cc.get_inspection_results_handler())["measures"][0]
+        assert row["states"] == {"7": 1}
+        assert row["out_of_tolerance"] == 0     # no verdict on a state this build cannot name
+
+    def test_unreadable_state_reads_unknown(self):
+        assert cc._point_state_name(None, {}) == "unknown"
+
+    def test_named_members_map_to_the_wire_names(self):
+        names = cc._point_state_map()
+        assert names[_WITHIN] == "within_tolerance" and names[_ABOVE] == "above_tolerance"
+        assert names[_BELOW] == "below_tolerance" and names[_UNPROJECTED] == "unprojected"
+
+
+class TestInspectionGuards:
+    def test_a_name_is_refused_because_measures_have_none(self, install):
+        install(_inspection_cam([_InspMeasure([])]))
+        res = cc.get_inspection_results_handler(measure="Measure1")
+        assert res["isError"] is True
+        assert "Measure1" in res["message"] and "index" in res["message"]
+
+    def test_measure_index_out_of_range_names_the_range(self, install):
+        install(_inspection_cam([_InspMeasure([]), _InspMeasure([])]))
+        res = cc.get_inspection_results_handler(measure="5")
+        assert res["isError"] is True
+        assert "5" in res["message"] and "2 measure(s)" in res["message"]
+
+    def test_path_index_out_of_range_names_the_path_count(self, install):
+        install(_inspection_cam([_InspMeasure([_InspPath([])])]))
+        res = cc.get_inspection_results_handler(measure="0/3")
+        assert res["isError"] is True
+        assert "path index 3" in res["message"] and "1 path(s)" in res["message"]
+
+    def test_unknown_units_refused_naming_the_value(self, install):
+        install(_inspection_cam([]))
+        res = cc.get_inspection_results_handler(units="furlong")
+        assert res["isError"] is True and "furlong" in res["message"]
+
+    def test_no_cam_product_surfaces_the_shared_gate(self, monkeypatch):
+        monkeypatch.setattr(cc, "get_cam", lambda: (None, "This document has no CAM product yet."))
+        res = cc.get_inspection_results_handler()
+        assert res["isError"] is True and "CAM" in res["message"]
+

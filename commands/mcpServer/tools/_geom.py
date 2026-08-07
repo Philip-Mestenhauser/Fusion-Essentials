@@ -22,7 +22,12 @@ MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-d
              "body_aabb - the bodies-only (solid+surface+mesh) AABB of an occurrence/component/"
              "body that model_inspect and assembly_get size reads share; owning_bodies/volumes/"
              "volume_delta - the owning-body set and the before/after volume diff every "
-             "material-changing feature verifies its cut with")
+             "material-changing feature verifies its cut with; signed_volume - ONE body's signed "
+             "volume or None, the single-read counterpart for a feature judged on the SIGN (a "
+             "reversed mesh reports a negative volume) or on a ratio rather than a delta; "
+             "face_counts/face_count_delta - the "
+             "same before/after pair over FACE counts, the signal a topology-changing feature "
+             "(delete-face, split-face) verifies with where volume does not move")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
@@ -45,12 +50,21 @@ def body_aabb(entity):
     return safe(lambda: entity.boundingBox)
 
 
-def owning_bodies(faces):
-    """The distinct BRepBodies owning `faces`, in first-seen order, deduped by entityToken - the
-    sample set a face-editing feature reads volume off before and after. A face whose body cannot be
-    read is skipped, so an empty result means no body was reachable."""
+def owning_bodies(entities):
+    """The distinct BRepBodies owning `entities` (faces OR edges), in first-seen order, deduped by
+    entityToken - the sample set a geometry-editing feature reads VOLUME or FACE COUNTS off before
+    and after, and the count an input kind reports as body_count. An entity whose body cannot be read
+    is skipped, so an empty result means no body was reachable.
+
+    The dedupe key is the TOKEN, never identity: both face.body and edge.body hand back a FRESH PROXY
+    on every read (live-measured - three faces of one box, and three edges of one open surface body,
+    each gave N distinct python ids and ONE entityToken, with `x0.body is x1.body` False). An
+    id()-keyed dedupe therefore keeps one body once PER entity, which inflates every per-body sum and
+    turns a legal single-body selection into a bogus "spans more than one body" refusal. The
+    entityToken read is measured NON-EMPTY (len 180) on both face.body and edge.body even in an
+    UNSAVED document, so the `or id(b)` fallback below is a true last resort, not the normal path."""
     bodies, seen = [], set()
-    for f in faces:
+    for f in entities:
         b = safe(lambda f=f: f.body)
         if b is None:
             continue
@@ -77,6 +91,41 @@ def volume_delta(bodies, before):
         if isinstance(vb, (int, float)) and isinstance(va, (int, float)):
             readable = True
             delta += (va - vb)
+    return delta, readable
+
+
+def signed_volume(body):
+    """ONE body's signed volume in internal cm3, or None when it cannot be read.
+
+    The single-read counterpart to volumes()/volume_delta(), for a feature judged on the volume's
+    SIGN or on a ratio rather than on a delta: a mesh whose normals were reversed reports the same
+    magnitude with the opposite sign. None (never 0.0) says the volume is unknown, so a caller can
+    tell an unmeasurable body from a genuinely empty one."""
+    v = volumes([body]).get(id(body))
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def face_counts(bodies):
+    """{id(body): face-count-or-None} - the pre/post sample a TOPOLOGY-changing feature compares.
+
+    The face-count counterpart to volumes(): a delete/split changes how many faces a body carries
+    without necessarily moving its volume (a healed face delete measured 7 -> 6 faces), so this is
+    the natural signal where volume is not."""
+    return {id(b): safe(lambda b=b: b.faces.count) for b in bodies}
+
+
+def face_count_delta(bodies, before):
+    """(total faces gained/lost, readable) between `before` (from face_counts()) and the bodies NOW.
+
+    readable is False when no body's count could be read at both ends - a caller can then tell a real
+    zero from an unmeasurable one instead of reporting an unverified success. Mirrors volume_delta."""
+    after = face_counts(bodies)
+    delta, readable = 0, False
+    for b in bodies:
+        cb, ca = before.get(id(b)), after.get(id(b))
+        if isinstance(cb, int) and isinstance(ca, int):
+            readable = True
+            delta += (ca - cb)
     return delta, readable
 
 

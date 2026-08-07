@@ -64,6 +64,7 @@ class FakeRevInput:
         self.two_sides = None
     def setAngleExtent(self, isSymmetric, angle):
         self.angle_extent = (isSymmetric, angle)
+        return True
     # Real API name (confirmed live). Only the real name is provided - a fake that also accepted
     # a wrong name like `setTwoSidesExtent` would let the test pass against a method that doesn't
     # exist on the real RevolveFeatureInput; here the wrong name raises AttributeError.
@@ -71,6 +72,7 @@ class FakeRevInput:
         self.two_sides = (a, b)
 
 
+        return True
 class FakeRevFeature:
     name = "Revolve1"
     class bodies:

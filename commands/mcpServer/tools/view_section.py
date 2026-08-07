@@ -76,6 +76,24 @@ def _aim_at_cut(normal, flipped):
     vp.refresh()
 
 
+def _context_remedy(design, exc):
+    """The remedy sentence for the assembly-context refusal, or '' for any other failure.
+
+    MEASURED (probe_w10.log "W10 P7"): with a SUB-COMPONENT active, an origin alias resolves to THAT
+    component's plane (PlaneRef resolves against the active component) and the section refuses it with
+    '3 : object is not in the assembly context of this component'; the same call with the root active
+    works. The platform text says what is wrong but not what to do, so the remedy is named here.
+    """
+    if "assembly context" not in str(exc).lower():
+        return ""
+    active = safe(lambda: _common.target_component(design).name)
+    where = f" The active component is '{active}'." if active else ""
+    return (f"{where} A plane alias (xy/xz/yz) and a construction-plane name both resolve against "
+            "the ACTIVE component, and a section taken on a sub-component's plane is refused this "
+            "way. Activate the root with design_activate_component and retry - the same cut works "
+            "with the root active.")
+
+
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
             units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
     """See TOOL_DESCRIPTION."""
@@ -160,7 +178,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         inp.isHatchShown = bool(show_hatch)
         sec = sections.add(inp)
     except Exception as e:
-        return error(f"Failed to create section ({desc}): {e}")
+        return error(f"Failed to create section ({desc}): {e}{_context_remedy(design, e)}")
     if not sec:
         return error(f"Section creation returned nothing ({desc}).")
     app.activeViewport.refresh()

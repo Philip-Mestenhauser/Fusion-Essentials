@@ -14,6 +14,8 @@ Pinned (the DoD):
   • MeshBodyRef rejects a BRep handle with the redirect message (both tools).
   • PlaneRef resolves an origin alias (xy) to the component's origin construction plane.
   • mesh_to_brep's prismatic error path now mentions mesh_generate_face_groups.
+  • the reported mode is the DESIGN's own, read before the scope opens - a null feature inside the
+    base-feature scope names that scope instead of claiming the design is non-parametric.
 """
 
 import json
@@ -281,7 +283,7 @@ class TestFaceGroups:
         assert out["feature"] == "FaceGroups1"
         assert fg.add_called is True
         # the accurate enum was set on the input
-        assert getattr(fg.last_input, "method", None) == _FG.AccurateMeshGenerateFaceGroupsMethodType
+        assert getattr(fg.last_input, "meshGenerateFaceGroupsMethodType", None) == _FG.AccurateGenerateFaceGroupsType
         # the convert-now-works note is present
         assert "prismatic" in out["note"].lower()
 
@@ -289,7 +291,7 @@ class TestFaceGroups:
         src, fg, _ = self._setup(parametric=False)
         out = _payload(me.mesh_generate_face_groups_handler(mesh="H", method="fast"))
         assert out["method"] == "fast"
-        assert getattr(fg.last_input, "method", None) == _FG.FastMeshGenerateFaceGroupsMethodType
+        assert getattr(fg.last_input, "meshGenerateFaceGroupsMethodType", None) == _FG.FastGenerateFaceGroupsType
 
     def test_parametric_routes_through_base_feature_scope(self):
         # PARAMETRIC -> run_in_base_feature opens the scope: the captured BaseFeature is started AND
@@ -315,24 +317,47 @@ class TestFaceGroups:
         assert res["isError"] is True and "face groups failed" in res["message"]
 
     def test_none_feature_with_face_groups_is_success(self):
-        # add() returns None in non-parametric mode but the face groups were created
+        # add() returns None in a DIRECT design but the face groups were created
         # (faceGroups.count > 0): success is judged by the side effect, not the feature return.
         self._setup(parametric=False, none_feature=True, face_groups=7)
         out = _payload(me.mesh_generate_face_groups_handler(mesh="H"))
         assert out["generated"] is True
-        assert out["non_parametric"] is True
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None          # direct opens no scope
         assert out["feature"] is None
         assert out["face_group_count"] == 7
+        assert me._common.DIRECT_FEATURE_NOTE in out["note"]
 
     def test_none_feature_in_parametric_scope_is_success(self):
-        # PARAMETRIC: the scoped add returns None (the base-feature scope makes it non-parametric) and
-        # the side effect is present -> SUCCESS, with the scope opened/closed around it.
+        # PARAMETRIC: the scoped add returns None (the base-feature scope suppresses the feature) and
+        # the side effect is present -> SUCCESS, with the scope opened/closed around it. The design's
+        # mode is reported as PARAMETRIC - the null feature says nothing about the mode.
         bf = _BaseFeature()
         self._setup(parametric=True, base_feature=bf, none_feature=True, face_groups=3)
         out = _payload(me.mesh_generate_face_groups_handler(mesh="H"))
-        assert out["generated"] is True and out["non_parametric"] is True
+        assert out["generated"] is True and out["feature"] is None
+        assert out["design_mode"] == "parametric"
+        assert out["base_feature"] == "BaseFeature1"    # where the generation actually landed
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
         assert out["face_group_count"] == 3
         assert bf.started is True and bf.finished is True
+
+    def test_mode_is_read_before_the_scope_opens(self):
+        # designType reads DIRECT while a base-feature edit scope is open, so a mode read taken after
+        # the generation would report 'direct' for a parametric design.
+        bf = _BaseFeature()
+        src, fg, _ = self._setup(parametric=True, base_feature=bf, none_feature=True, face_groups=3)
+        des = me.app.activeProduct
+        real_start = bf.startEdit
+
+        def start_and_flip():
+            des.designType = 0        # what the platform reports while the scope is open
+            return real_start()
+
+        bf.startEdit = start_and_flip
+        out = _payload(me.mesh_generate_face_groups_handler(mesh="H"))
+        assert out["design_mode"] == "parametric"
 
     def test_brep_handle_rejected_with_redirect(self):
         _wire_adsk()
@@ -412,8 +437,8 @@ class TestPlaneCut:
         assert out["result_body_count"] == 1
         assert out["result_bodies"][0]["name"] == "ScanTrimmed"
         # the right enums were set
-        assert getattr(pc.last_input, "cutType", None) == _CUT.TrimMeshPlaneCutType
-        assert getattr(pc.last_input, "fillType", None) == _FILL.MinimalMeshPlaneCutFillType
+        assert getattr(pc.last_input, "meshPlaneCutType", None) == _CUT.TrimMeshPlaneCutType
+        assert getattr(pc.last_input, "meshPlaneCutFillType", None) == _FILL.MinimalMeshPlaneCutFillType
         # the ConstructionPlane was passed straight to createInput (not reduced to .geometry)
         assert pc.create_args[1] is plane
 
@@ -431,7 +456,7 @@ class TestPlaneCut:
             self._install_plane_handle(plane, src, pc)
             out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type=ct_in))
             assert out["cut_type"] == ct_in
-            assert getattr(pc.last_input, "cutType", None) == ct_enum
+            assert getattr(pc.last_input, "meshPlaneCutType", None) == ct_enum
 
     def test_each_fill_resolves_enum(self):
         for fill_in, fill_enum in (("none", _FILL.NoFillMeshPlaneCutFillType),
@@ -442,7 +467,7 @@ class TestPlaneCut:
             self._install_plane_handle(plane, src, pc)
             out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", fill=fill_in))
             assert out["fill"] == fill_in
-            assert getattr(pc.last_input, "fillType", None) == fill_enum
+            assert getattr(pc.last_input, "meshPlaneCutFillType", None) == fill_enum
 
     def test_origin_alias_plane_resolves(self):
         # PlaneRef resolves the 'xy' origin alias to comp.xYConstructionPlane
@@ -460,7 +485,8 @@ class TestPlaneCut:
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
         assert out["result_body_count"] == 2
 
-    def _setup_with_count(self, start, end, cut_type_grows=True, none_feature=False):
+    def _setup_with_count(self, start, end, cut_type_grows=True, none_feature=False,
+                          is_closed=True):
         """Wire a plane cut whose meshBodies count goes start -> end on add (models split outcome)."""
         _wire_adsk()
         coll = _GrowingMeshBodies(start, end)
@@ -468,7 +494,7 @@ class TestPlaneCut:
         pc = _PlaneCutFeatures(result_bodies=[MeshBody("R")], none_feature=none_feature, on_add=on_add)
         feats = _Features(plane_cut=pc)
         comp = FakeComp("Comp", features=feats, mesh_bodies=coll)
-        src = MeshBody("Scan")
+        src = MeshBody("Scan", is_closed=is_closed)
         src.parentComponent = comp
         des = FakeDesign(comp, design_type=0)
         plane = ConstructionPlane("CP")
@@ -484,15 +510,26 @@ class TestPlaneCut:
         assert "did not separate" not in out["note"]
 
     def test_split_body_became_split_false_when_count_unchanged(self):
-        # Open (non-watertight) mesh: split_body applies but yields ONE body. became_split must
-        # be False and the honest note must fire. cut:true (the cut DID apply) - NOT an error.
-        self._setup_with_count(1, 1, cut_type_grows=False)
+        # OPEN mesh: split_body applies but yields ONE body. became_split must be False and the note
+        # may name the open mesh, because is_closed was READ. cut:true (the cut DID apply).
+        self._setup_with_count(1, 1, cut_type_grows=False, is_closed=False)
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
         assert out["cut"] is True
         assert out["became_split"] is False
         assert out["mesh_bodies_before"] == 1 and out["mesh_body_count"] == 1
+        assert out["mesh_is_closed"] is False
         assert "did not separate" in out["note"]
-        assert "watertight" in out["note"]
+        assert "is_closed=false" in out["note"]
+
+    def test_split_body_no_separation_on_a_CLOSED_mesh_does_not_blame_watertightness(self):
+        # The mesh reads is_closed=true, so the open-mesh explanation is ruled OUT rather than
+        # asserted - the tool may only name a cause it actually observed.
+        self._setup_with_count(1, 1, cut_type_grows=False, is_closed=True)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
+        assert out["became_split"] is False
+        assert out["mesh_is_closed"] is True
+        assert "did not separate" in out["note"]
+        assert "does not apply" in out["note"]
 
     def test_trim_has_no_became_split_signal(self):
         # trim never adds bodies by design — it must NOT carry a became_split flag (no false signal).
@@ -514,7 +551,7 @@ class TestPlaneCut:
         self._install_plane_handle(plane, src, pc)
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", flip=True))
         assert out["flipped"] is True
-        assert getattr(pc.last_input, "isFlipped", None) is True
+        assert getattr(pc.last_input, "isFlip", None) is True
 
     def test_parametric_routes_through_base_feature_scope(self):
         plane = ConstructionPlane("CP")
@@ -535,7 +572,7 @@ class TestPlaneCut:
         assert res["isError"] is True and "plane cut failed" in res["message"]
 
     def test_none_feature_is_success_via_mesh_body_set(self):
-        # REGRESSION: add() returns None in non-parametric mode (split_body grew the mesh body set
+        # REGRESSION: add() returns None in a DIRECT design (split_body grew the mesh body set
         # from 1 -> 2). No exception = applied. Report SUCCESS via the observed mesh body count, not
         # the (None) feature object.
         plane = ConstructionPlane("CP")
@@ -543,13 +580,15 @@ class TestPlaneCut:
         self._install_plane_handle(plane, src, pc)
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
         assert out["cut"] is True
-        assert out["non_parametric"] is True
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None           # direct opens no scope
         assert out["feature"] is None
         assert out["mesh_body_count"] == 2
+        assert me._common.DIRECT_FEATURE_NOTE in out["note"]
 
     def test_none_feature_in_parametric_scope_is_success(self):
-        # PARAMETRIC: the scoped add returns None (scope makes it non-parametric) -> SUCCESS, with the
-        # base-feature scope opened/closed around the cut.
+        # PARAMETRIC: the scoped add returns None (the scope suppresses the feature) -> SUCCESS, with
+        # the base-feature scope opened/closed around the cut. The reported mode is the DESIGN's own.
         plane = ConstructionPlane("CP")
         bf = _BaseFeature()
         src, pc, _ = self._setup(none_feature=True, parametric=True, base_feature=bf,
@@ -557,8 +596,42 @@ class TestPlaneCut:
         des = FakeDesign(src.parentComponent, design_type=1, edit_object=bf)
         _install(me, des, handle_map={"H": src, "P": plane})
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
-        assert out["cut"] is True and out["non_parametric"] is True
+        assert out["cut"] is True and out["feature"] is None
+        assert out["design_mode"] == "parametric"
+        assert out["base_feature"] == "BaseFeature1"   # where the cut actually landed
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
         assert bf.started is True and bf.finished is True
+
+    def test_mode_is_read_before_the_scope_opens(self):
+        # designType reads DIRECT while a base-feature edit scope is open; a mode read taken after
+        # the cut would report 'direct' for a parametric design.
+        plane = ConstructionPlane("CP")
+        bf = _BaseFeature()
+        src, pc, _ = self._setup(none_feature=True, parametric=True, base_feature=bf,
+                                 mesh_bodies=_Coll([MeshBody("A")]))
+        des = FakeDesign(src.parentComponent, design_type=1, edit_object=bf)
+        _install(me, des, handle_map={"H": src, "P": plane})
+        real_start = bf.startEdit
+
+        def start_and_flip():
+            des.designType = 0        # what the platform reports while the scope is open
+            return real_start()
+
+        bf.startEdit = start_and_flip
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["design_mode"] == "parametric"
+
+    def test_a_returned_feature_is_still_named_in_parametric(self):
+        # the feature path is unaffected: a real feature is named beside the parametric mode.
+        plane = ConstructionPlane("CP")
+        bf = _BaseFeature()
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], parametric=True, base_feature=bf)
+        des = FakeDesign(src.parentComponent, design_type=1, edit_object=bf)
+        _install(me, des, handle_map={"H": src, "P": plane})
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["feature"] == "PlaneCut1" and out["design_mode"] == "parametric"
+        assert "'feature' is null" not in out["note"]
 
     def test_brep_handle_rejected_with_redirect(self):
         _wire_adsk()

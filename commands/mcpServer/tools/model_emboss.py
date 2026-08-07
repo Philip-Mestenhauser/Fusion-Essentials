@@ -1,0 +1,199 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""MCP building block: stamp a closed sketch profile onto the faces of a body - raised or engraved.
+
+  model_emboss -> part marking, logos, ribs and recesses on an existing face, without the
+                  extrude-and-position dance. WRITES.
+
+EmbossFeatures.createInput takes PLAIN PYTHON LISTS for both collection arguments. MEASURED both
+ways: list/list is accepted and add() hands back a real EmbossFeature, while an ObjectCollection in
+EITHER position raises TypeError "argument 2/3 of type 'std::vector< adsk::core::Ptr< ... > > const
+&'" - the binding wants a vector, which a list marshals to and an ObjectCollection does not.
+"""
+
+import adsk.core
+import adsk.fusion
+
+from ..mcp_primitives.tool import Tool
+from ..mcp_primitives.item import Item
+from ..mcp_primitives.registry import register
+from ._common import error, ok, safe, target_component
+from . import _common
+from . import _assert
+from . import _geom
+from . import _inputs
+from . import _outputs
+
+# healthState value for a feature that computed with an ERROR (the convention model_offset_face,
+# model_draft and workspace_orient all read).
+_HEALTH_ERROR = 2
+
+# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
+RETURNS = [
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
+                         absent_when="no_timeline_feature"),
+]
+
+_PROFILES = _inputs.ProfileRefList("profiles", required=True,
+    description="The closed profile(s) to stamp.")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
+    description="The face(s) to stamp onto - all on ONE body.")
+# EmbossFeatureInput carries NO operation property and createInput takes no operation argument, so
+# the SIGN of depth is the whole raise-vs-engrave surface (stated once, in TOOL_DESCRIPTION).
+# MEASURED: depth +0.3 took a 12 cm3 box to 15.364 cm3 - a positive depth ADDS material. The
+# volume-direction gate below refuses any call whose effect disagrees with the sign asked for.
+_DEPTH = _inputs.Distance("depth", allow_zero=False, required=True)
+
+app = adsk.core.Application.get()
+
+
+def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") -> dict:
+    """See TOOL_DESCRIPTION."""
+    scale_factor, uerr = _inputs.UNITS.resolve(units)
+    if uerr:
+        return error(uerr)
+    depth_cm, derr = _DEPTH.resolve_scaled(depth, scale_factor)
+    if derr:
+        return error(derr)
+
+    design = _common.design()
+    if not design:
+        return error("No active design. Create or open a document first (see doc_new).")
+    comp = target_component(design)
+
+    prof_ents, perr = _PROFILES.resolve(profiles)
+    if perr:
+        return error(perr)
+    face_ents, ferr = _FACES.resolve(faces)
+    if ferr:
+        return error(ferr)
+
+    bodies = _geom.owning_bodies(face_ents)
+    if not bodies:
+        return error("'faces' resolved to face(s) with no readable owning body - cannot emboss.")
+    # EmbossFeatureInput.inputFaces (API doc): several input faces must all be on the SAME body.
+    # The names are read BEFORE the mutation: a post-mutation proxy can stop answering .name, and
+    # the payload must not publish a null for a body it resolved.
+    body_names = [safe(lambda b=b: b.name) for b in bodies]
+    if len(bodies) > 1:
+        listed = ", ".join(str(n) for n in body_names)
+        return error(f"'faces' spans {len(bodies)} bodies ({listed}) - an emboss stamps the faces of "
+                     "ONE body. Pass faces from a single body, one call per body.")
+
+    # A profile-consuming createInput runs on the component that OWNS the profile's sketch: handing
+    # another component's profile to features.createInput raises 'InternalValidationError : bSet'.
+    host = _inputs.profile_host_component(prof_ents[0], None, comp)
+    # So the faces must live in that same component. Stamping across components needs the input's
+    # creationOccurrence, which nothing here sets - refuse by name rather than emboss the wrong
+    # component. same_component compares by token: component wrappers are never identity-stable.
+    face_comp = safe(lambda: bodies[0].parentComponent)
+    if not _common.same_component(face_comp, host):
+        fname = safe(lambda: face_comp.name) or "unreadable"
+        hname = safe(lambda: host.name) or "unreadable"
+        return error(f"'faces' sit on a body in component '{fname}', but 'profiles' belong to "
+                     f"component '{hname}' - an emboss is built on the profile's component, so both "
+                     "must be the same one. Sketch the profile on the target body's component.")
+
+    # Pre-mutation sample: the volume the emboss must move, and in which direction.
+    vol_before = _geom.volumes(bodies)
+
+    mode = "raise" if depth_cm > 0 else "engrave"
+    depth_val = adsk.core.ValueInput.createByReal(depth_cm)
+
+    # PLAIN LISTS, not ObjectCollections - MEASURED: an ObjectCollection in either position raises
+    # TypeError "argument 2/3 of type 'std::vector< adsk::core::Ptr< ... > > const &'".
+    try:
+        emboss_input = host.features.embossFeatures.createInput(
+            list(prof_ents), list(face_ents), depth_val)
+    except Exception as e:
+        return error(f"Could not start the emboss: {e}")
+    if not emboss_input:
+        return error("EmbossFeatures.createInput returned nothing, so no emboss was attempted. "
+                     "Re-check that the profiles sit over the target face(s).")
+
+    try:
+        feature = host.features.embossFeatures.add(emboss_input)
+    except Exception as e:
+        return error(f"Emboss failed: {e}")
+
+    # A falsy add() carries no information in a DIRECT design; the volume verdict below needs no
+    # feature object, so fall through to it there. In a parametric design it stays an honest error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Emboss"))
+
+    # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
+    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+        msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
+        return error(f"Emboss was created but failed to compute: {msg}. Try a smaller depth, or move "
+                     "the profile fully onto the target face(s).")
+
+    # Post-mutation verdict. The volume delta is the ONLY evidence of which way the material went -
+    # a feature object does not carry that - so an unreadable volume is a failure, not a success
+    # with a caveat: this gate IS the tool's verdict.
+    delta_total, any_readable = _geom.volume_delta(bodies, vol_before)
+    if not any_readable:
+        return error("Emboss raised no error, but the affected body's volume could not be read back "
+                     "afterwards - whether the profile was raised or engraved is UNVERIFIED, so it "
+                     "is reported as a failure. Re-read the body with model_inspect.")
+    if abs(delta_total) < 1e-9:
+        return error("Emboss reported success but the body's volume is unchanged - nothing was "
+                     "raised or engraved. " + _common.failed_effect_remedy(design, feature))
+    if (delta_total > 0) != (depth_cm > 0):
+        moved = "removed" if delta_total < 0 else "added"
+        return error(f"Emboss went the wrong way: depth {depth} {units} asked to {mode}, but the "
+                     f"body {moved} {abs(round(delta_total, 6))} cm3 of material. "
+                     + _common.failed_effect_remedy(design, feature))
+
+    payload = {
+        "embossed": True,
+        "mode": mode,
+        "profiles_requested": len(prof_ents),
+        "faces_requested": len(face_ents),
+        "body": body_names[0],
+        "depth": round(float(depth), 6),
+        "units": units,
+        "note": "Profile stamped onto the face(s). 'mode' ECHOES the sign of the depth requested; "
+                "the call is refused when the body's measured volume moves the other way, so the "
+                "mode reported here is also the direction the material actually went.",
+        "volume_delta_cm3": round(delta_total, 6),
+    }
+    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
+    # against. The other keys survive the missing feature because none is read off it: mode, depth,
+    # units and the two counts ECHO the request; body and volume_delta_cm3 are READ off the model.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
+    else:
+        payload["feature"] = safe(lambda: feature.name)
+    # EmbossFeature.depth is a ModelParameter (not the ValueInput handed in), so the depth the
+    # feature actually holds is read off its .value, in internal cm.
+    applied_cm = safe(lambda: feature.depth.value) if feature else None
+    if isinstance(applied_cm, (int, float)) and not isinstance(applied_cm, bool) and scale_factor:
+        payload["applied_depth"] = round(applied_cm / scale_factor, 6)
+    return ok(payload)
+
+
+TOOL_DESCRIPTION = (
+    "Stamp sketch profile(s) onto solid face(s): part marking, logos, ribs. 'depth' is "
+    "signed: positive raises, negative engraves. WRITES; the returned 'mode' echoes that sign, and "
+    "the call is REFUSED unless the volume moved that way.\n"
+    + _outputs.produces_block(RETURNS)
+)
+
+emboss_tool = (
+    Tool.create_simple(name="model_emboss", description=TOOL_DESCRIPTION)
+    .add_input_property(_PROFILES.name, _PROFILES.schema())
+    .add_input_property(_FACES.name, _FACES.schema())
+    .add_input_property(_DEPTH.name, _DEPTH.schema())
+    .add_input_property(*_inputs.UNITS.as_property())
+    .strict_schema()
+)
+emboss_item = Item.create_tool_item(tool=emboss_tool, write="write", handler=handler,
+                                    run_on_main_thread=True,
+                                    postconditions=[_assert.FeatureHealthy()])
+
+
+def register_tool():
+    register(emboss_item)

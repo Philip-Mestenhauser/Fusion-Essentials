@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Cloud data-model READ cores: the project list + a project's file listing.
+"""Cloud data-model READ cores: the project list, a project's file listing, and ONE file's facts.
 
 These are the cores behind data_get (the registered cloud rich read); data_get delegates to them so
 the cloud-error guards and enumeration caps live in one place. Each file is read in its own
@@ -9,12 +9,14 @@ try/except and folder recursion is depth/count-capped, since these calls hit clo
 large project could otherwise blow the main-thread time budget.
 """
 
+import datetime
 import time
 
 import adsk.core
 
-from ._common import ok, error
-from ._data_common import _find_project, _child_folder_by_name
+from ._common import ok, error, safe
+from ._data_common import (_find_project, _child_folder_by_name, _folder_path_string,
+                           resolve_file_reference)
 
 app = adsk.core.Application.get()
 
@@ -247,6 +249,120 @@ def _file_summary(f, folder_path: str = "") -> dict:
     return out
 
 
-# list_projects_handler / list_project_files_handler are the project + file read cores that data_get
-# delegates to (data_get is the registered rich read; these carry the cloud-error guards + caps). No
-# register_tool() here - this module exposes cores, not tools.
+# ---------------------------------------------------------------------------
+# data_get(file=...) scope: ONE file's metadata + link state
+# ---------------------------------------------------------------------------
+
+def _epoch_iso(ts):
+    """A DataFile date (UNIX epoch SECONDS, per the binding) as an ISO-8601 UTC string, or None.
+
+    The raw integer is published beside it, so a caller that distrusts the conversion still has the
+    measured value."""
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    return safe(lambda: datetime.datetime.fromtimestamp(
+        ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def _user_facts(user):
+    """A DataFile's createdBy/lastUpdatedBy User flattened to the three fields it carries."""
+    if user is None:
+        return None
+    return {"display_name": safe(lambda: user.displayName),
+            "user_name": safe(lambda: user.userName),
+            "email": safe(lambda: user.email)}
+
+
+def _shared_link_facts(df):
+    """The file's SharedLink state, READ ONLY. Reading it while the file is unshared is safe
+    (is_shared false, an empty linkURL); SETTING isShared is what creates the share, and this server
+    does not offer that - so nothing here writes. linkURL is reported only when shared, since the
+    binding returns an empty string otherwise."""
+    link = safe(lambda: df.sharedLink)
+    if link is None:
+        return {"readable": False}
+    shared = safe(lambda: link.isShared)
+    out = {"is_shared": shared,
+           "is_download_allowed": safe(lambda: link.isDownloadAllowed),
+           "is_password_required": safe(lambda: link.isPasswordRequired)}
+    url = safe(lambda: link.linkURL)
+    if shared and url:
+        out["link_url"] = url
+    return out
+
+
+def _public_link_facts(df):
+    """The file's public link, or an honest 'not available' with the reason.
+
+    Measured live: reading publicLink RAISES ("No public link available. Use sharedLink.isShared to
+    create a public link.") while the file is unshared. Caught here - and the raised text is kept as
+    the reason rather than defaulted away - so an unshared file reports its state instead of sinking
+    the whole read."""
+    try:
+        url = df.publicLink
+    except Exception as e:
+        return {"available": False, "reason": str(e).strip()[:160]}
+    if isinstance(url, str) and url:
+        return {"available": True, "url": url}
+    return {"available": False, "reason": "the file reports an empty public link."}
+
+
+def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
+                       folder: str = "") -> dict:
+    """One cloud file's metadata + link state, resolved from a lineage URN or a name in a project."""
+    df, meta, err = resolve_file_reference(file, project=project, project_id=project_id,
+                                           folder=folder)
+    if err:
+        return error(err)
+
+    name = safe(lambda: df.name)
+    version = safe(lambda: df.versionNumber)
+    latest = safe(lambda: df.latestVersionNumber)
+    parent_folder = safe(lambda: df.parentFolder)
+    parent_project = safe(lambda: df.parentProject)
+    created = safe(lambda: df.dateCreated)
+    modified = safe(lambda: df.dateModified)
+
+    return ok({
+        "matched_by": meta.get("matched_by"),
+        "name_scope_truncated": bool(meta.get("scope_truncated")),
+        "file": {
+            "name": name,
+            "id": safe(lambda: df.id),                     # lineage URN (stable across versions)
+            "version_id": safe(lambda: df.versionId),
+            "file_extension": safe(lambda: df.fileExtension),
+            "description": safe(lambda: df.description),
+            "fusion_web_url": safe(lambda: df.fusionWebURL),
+        },
+        "version": {
+            "number": version,
+            "latest_number": latest,
+            "is_latest": (version == latest) if (version is not None and latest is not None) else None,
+            "version_count": safe(lambda: df.versions.count),
+            "is_milestone": safe(lambda: df.isMilestone),
+        },
+        "dates": {
+            "created_unix": created, "created_iso": _epoch_iso(created),
+            "modified_unix": modified, "modified_iso": _epoch_iso(modified),
+        },
+        "created_by": _user_facts(safe(lambda: df.createdBy)),
+        "last_updated_by": _user_facts(safe(lambda: df.lastUpdatedBy)),
+        "location": {
+            "project": {"name": safe(lambda: parent_project.name),
+                        "id": safe(lambda: parent_project.id)},
+            "parent_folder": {"name": safe(lambda: parent_folder.name),
+                              "path": _folder_path_string(parent_folder) or "(project root)"},
+        },
+        "state": {
+            "is_read_only": safe(lambda: df.isReadOnly),
+            "is_in_use": safe(lambda: df.isInUse),
+            "is_complete": safe(lambda: df.isComplete),
+        },
+        "shared_link": _shared_link_facts(df),
+        "public_link": _public_link_facts(df),
+    })
+
+
+# list_projects_handler / list_project_files_handler / file_facts_handler are the project, file-list
+# and single-file read cores that data_get delegates to (data_get is the registered rich read; these
+# carry the cloud-error guards + caps). No register_tool() here - this module exposes cores, not tools.

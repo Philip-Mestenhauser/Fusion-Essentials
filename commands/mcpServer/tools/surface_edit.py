@@ -27,6 +27,20 @@ _EXTEND_TYPES = {
 "tangent": "TangentSurfaceExtendType",
 "perpendicular": "PerpendicularSurfaceExtendType",
 }
+# SurfaceExtendAlignment's member names are BARE - no '...SurfaceExtendAlignment' suffix, unlike
+# every neighbouring enum. The names here are bindings-sourced until the enum sweep measures the
+# family; only the VALUE is measured (a fresh createInput's extendAlignment reads 0). set_verified
+# turns a name that does not resolve into a refusal rather than a silent default.
+_EXTEND_ALIGNMENTS = {
+"free_edges": "FreeEdges",
+"align_edges": "AlignEdges",
+}
+# Member names bindings-sourced until the enum sweep measures ThickenTypes; the measured fact is
+# the VALUE a fresh createInput's thickenType reads (0).
+_THICKEN_TYPES = {
+"sharp": "SharpThickenType",
+"rounded": "RoundedThickenType",
+}
 
 # inputs
 _SURFACE = _inputs.SurfaceBodyRef("surface", required=True,
@@ -39,6 +53,12 @@ _OFFSET_FACES = _inputs.GeometryHandleList("faces", require="face", required=Tru
     description="The faces to offset (need not be one body).")
 _THICKEN_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The faces (or patch-body faces) to thicken into a solid wall.")
+
+
+
+def _abort(trim_input):
+    """Cancel this tool's open TrimFeatureInput transaction - the shared abort, named for the trim."""
+    return _common.cancel_input(trim_input, "trim")
 
 
 def _select_cells(trim_input, keep):
@@ -111,11 +131,10 @@ def _select_cells(trim_input, keep):
 
 
 def _result_bodies(feature):
-    """(names, any_solid) for a feature's bodies - read name + isSolid LIVE per body."""
-    bodies = _common.result_bodies(feature)
-    names = [safe(lambda b=b: b.name) for b in bodies]
-    any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in bodies)
-    return names, any_solid
+    """(names, any_solid) for a feature's bodies - the tuple THIS tool's payloads want, collapsed
+    from the shared per-body {name, is_solid} projection."""
+    facts = _common.body_facts(_common.result_bodies(feature))
+    return [f["name"] for f in facts], any(f["is_solid"] for f in facts)
 
 
 def _created_bodies(feature):
@@ -168,8 +187,8 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         kept, kept_area, total, cerr = _select_cells(trim_input, keep)
         if cerr:
             # no cells -> genuinely no intersection; abort the open transaction and report honestly
-            safe(lambda: trim_input.cancel())
-            return error(f"Trim failed: {cerr} (The trim tool must INTERSECT the surface and divide it.)")
+            return error(f"Trim failed: {cerr} (The trim tool must INTERSECT the surface and "
+                         f"divide it.){_abort(trim_input)}")
         cell_info = {"cells_total": total, "cells_kept": kept,
     "cells_removed": [i for i in range(total) if i not in set(kept)],
     "kept_area": kept_area}
@@ -180,26 +199,24 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         # Cancel BEFORE add so no wrong feature lands. Live-verified: HIDING the overlapping surface
         # drops the phantom cells and the trim is correct (the cell compute is visibility-governed).
         if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
-            safe(lambda: trim_input.cancel())
+            aborted = _abort(trim_input)
             return error(
                 f"Trim aborted: the kept cell(s) total {round(kept_area * 100.0, 1)} mm2, larger than "
                 f"the target surface's own {round(area_before * 100.0, 1)} mm2 - so 'keep larger' latched "
                 "onto a cell from another surface that overlaps or touches this one (the trim computes "
                 "cells over every VISIBLE surface the tool crosses, not just the target). HIDE the "
-                "overlapping surface body, then trim again; or pass 'keep' with the explicit cell index. "
-                "The surface was left unchanged.")
+                "overlapping surface body, then trim again; or pass 'keep' with the explicit cell "
+                "index. The surface was left unchanged." + aborted)
         feature = comp.features.trimFeatures.add(trim_input)
     except Exception as e:
-        if trim_input is not None:
-            # abort the open partial-compute transaction so Fusion isn't left in a bad state
-            safe(lambda: trim_input.cancel())
-        return error(f"Trim failed: {e}. (The trim tool must INTERSECT the surface and divide it.)")
+        # abort the open partial-compute transaction so Fusion isn't left in a bad state
+        return error(f"Trim failed: {e}. (The trim tool must INTERSECT the surface and divide "
+                     f"it.){_abort(trim_input)}")
     if not feature:
         # add returned nothing but didn't raise - still must abort the transaction we opened
-        if trim_input is not None:
-            safe(lambda: trim_input.cancel())
-        return error("Trim returned no feature (the tool may not intersect the surface). "
-    "The open transaction was cancelled.")
+        return error(_common.no_feature_error(design, "Trim",
+                                              "(The tool may not intersect the surface.)")
+                     + (_abort(trim_input) or " The open transaction was cancelled."))
 
     names, any_solid = _result_bodies(feature)
     # Commit proof: removing cells must shrink the surface's area; unchanged area = no cell removed.
@@ -229,7 +246,8 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
 # ── surface_extend ──────────────────────────────────────────────────────────
 
 def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
-                   extend_type: str = "natural", chaining: bool = True) -> dict:
+                   extend_type: str = "natural", chaining: bool = True,
+                   extend_alignment: str = "") -> dict:
     """Extend a surface outward from its open edges."""
     k = scale(units)
     if k is None:
@@ -239,6 +257,9 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
     et_key = (extend_type or "natural").strip().lower()
     if et_key not in _EXTEND_TYPES:
         return error(f"Unknown extend_type '{extend_type}'. Use: natural, tangent, perpendicular.")
+    ea_key = (extend_alignment or "").strip().lower()
+    if ea_key and ea_key not in _EXTEND_ALIGNMENTS:
+        return error(f"Unknown extend_alignment '{extend_alignment}'. Use: free_edges, align_edges.")
 
     design = _common.design()
     if not design:
@@ -256,15 +277,24 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
     ext_type = getattr(adsk.fusion.SurfaceExtendTypes, _EXTEND_TYPES[et_key])
     try:
         ext_input = comp.features.extendFeatures.createInput(coll, dist_val, ext_type, bool(chaining))
+        # extendAlignment has no createInput slot, so it is a post-createInput write - and a fresh
+        # input's extendAlignment reads 0 (measured), so an omitted value writes nothing.
+        if ea_key:
+            align = safe(lambda: getattr(adsk.fusion.SurfaceExtendAlignment,
+                                         _EXTEND_ALIGNMENTS[ea_key]))
+            aerr = _common.set_verified(ext_input, "extendAlignment", align,
+                                        f"extend_alignment={ea_key}", "ExtendFeatureInput")
+            if aerr:
+                return error(aerr)
         feature = comp.features.extendFeatures.add(ext_input)
     except Exception as e:
         return error(f"Extend failed: {e}. (Extend the OUTER edges of ONE open body; tangent/"
     "perpendicular need edges connected at endpoints.)")
     if not feature:
-        return error("Extend returned no feature.")
+        return error(_common.no_feature_error(design, "Extend"))
 
     names, any_solid = _result_bodies(feature)
-    return ok({
+    payload = {
         "extended": True,
         "feature": safe(lambda: feature.name),
         "extend_type": et_key,
@@ -274,7 +304,10 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
         "distance": round(float(distance), 6),
         "units": units,
         "note": "Surface extended from its open edges.",
-    })
+    }
+    if ea_key:
+        payload["extend_alignment"] = ea_key
+    return ok(payload)
 
 
 # ── surface_offset (produces another surface) ───────────────────────────────
@@ -309,7 +342,7 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     except Exception as e:
         return error(f"Offset failed: {e}.")
     if not feature:
-        return error("Offset returned no feature.")
+        return error(_common.no_feature_error(design, "Offset"))
 
     # Read the CREATED surface back - feature.bodies also lists the pre-existing source solid, which
     # made is_solid report true for a genuine open surface (live-verified).
@@ -342,7 +375,8 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
 # ── surface_thicken (produces a solid) ──────────────────────────────────────
 
 def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
-                    symmetric: bool = False, chaining: bool = True, operation: str = "new") -> dict:
+                    symmetric: bool = False, chaining: bool = True, operation: str = "new",
+                    thicken_type: str = "") -> dict:
     """Thicken faces into a SOLID wall - the surface->solid bridge."""
     k = scale(units)
     if k is None:
@@ -352,6 +386,9 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     op_key = (operation or "new").strip().lower()
     if op_key not in _THICKEN_OPS:
         return error(f"Unknown operation '{operation}'. Thicken supports: new, join, cut.")
+    tt_key = (thicken_type or "").strip().lower()
+    if tt_key and tt_key not in _THICKEN_TYPES:
+        return error(f"Unknown thicken_type '{thicken_type}'. Use: sharp, rounded.")
 
     design = _common.design()
     if not design:
@@ -370,11 +407,19 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     try:
         thk_input = comp.features.thickenFeatures.createInput(coll, thick_val, bool(symmetric),
                                                               op, bool(chaining))
+        # thickenType has no createInput slot; a fresh input's thickenType reads 0 (measured), so
+        # an omitted value writes nothing.
+        if tt_key:
+            tt = safe(lambda: getattr(adsk.fusion.ThickenTypes, _THICKEN_TYPES[tt_key]))
+            terr = _common.set_verified(thk_input, "thickenType", tt,
+                                        f"thicken_type={tt_key}", "ThickenFeatureInput")
+            if terr:
+                return error(terr)
         feature = comp.features.thickenFeatures.add(thk_input)
     except Exception as e:
         return error(f"Thicken failed: {e}.")
     if not feature:
-        return error("Thicken returned no feature.")
+        return error(_common.no_feature_error(design, "Thicken"))
 
     # Gate on the bodies owning the faces the feature CREATED, not feature.bodies - the latter also
     # lists a pre-existing source solid (see _created_bodies), which would call a failed thicken
@@ -389,7 +434,7 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         return error("Thicken reported success but no CREATED body reads isSolid=true - the wall "
                      "did not close into a solid. The feature remains in the timeline; inspect it "
                      "with model_inspect or remove it with design_delete_feature.")
-    return ok({
+    payload = {
         "thickened": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -399,7 +444,10 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         "units": units,
         "symmetric": bool(symmetric),
         "note": "Faces thickened into a SOLID wall (isSolid=true). The surface->solid bridge.",
-    })
+    }
+    if tt_key:
+        payload["thicken_type"] = tt_key
+    return ok(payload)
 
 
 # ── tool / item wiring ──────────────────────────────────────────────────────
@@ -428,8 +476,9 @@ surface_trim_item = Item.create_tool_item(tool=surface_trim_tool, write="write",
 _EXTEND_DESC = (
                                           "Extend an OPEN surface outward from its OUTER open edges. 'edges' are the outer edges of ONE "
                                           "surface body (a multi-body set is rejected); 'distance' is the extend amount in 'units'; "
-                                          "'extend_type': natural | tangent | perpendicular (tangent/perpendicular need edges connected at "
-                                          "endpoints); 'chaining' follows the connected chain (default true)."
+                                          "'extend_type' picks how the new surface is generated (tangent/perpendicular need edges connected "
+                                          "at endpoints); 'chaining' follows the connected chain (default true); 'extend_alignment' aligns "
+                                          "the extended side edges to the neighbouring surface (omit = free_edges)."
 )
 surface_extend_tool = (
     Tool.create_simple(name="surface_extend", description=_EXTEND_DESC)
@@ -439,6 +488,8 @@ surface_extend_tool = (
     .add_input_property(*_inputs.Choice("extend_type", ["natural", "tangent", "perpendicular"],
         default="natural", description="How the surface is extended.").as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Follow the connected edge chain (default true)."})
+    .add_input_property(*_inputs.Choice("extend_alignment", ["free_edges", "align_edges"],
+        description="Alignment of the extended side edges.").as_property())
     .add_required_input("edges")
     .add_required_input("distance")
     .strict_schema()
@@ -451,7 +502,8 @@ _OFFSET_DESC = (
                                             "Offset faces by a distance into ANOTHER surface (positive = along the face normal). 'faces' need "
                                             "not be one body; 'distance' in 'units'; chaining=true expands across TANGENT-connected faces "
                                             "(reported as faces_offset). "
-                                            "Produces a SURFACE (isSolid=false)."
+                                            "An open-surface source produces a SURFACE (isSolid=false); offsetting a face of a "
+                                            "SOLID yields a body reading isSolid=true - check the payload's is_solid."
 )
 surface_offset_tool = (
     Tool.create_simple(name="surface_offset", description=_OFFSET_DESC)
@@ -472,7 +524,8 @@ _THICKEN_DESC = (
                                             "Thicken faces into a SOLID wall - the surface->solid bridge (competes with stitch: thicken makes "
                                             "a wall, stitch closes a watertight surface set). 'faces' (or patch bodies) need not be connected "
                                             "or from one body; 'thickness' (non-zero) in 'units'; 'symmetric' thickens both sides; "
-                                            "'chaining' selects the connected face set (default true). Produces "
+                                            "'chaining' selects the connected face set (default true); 'thicken_type' picks the corner "
+                                            "treatment (omit = sharp). Produces "
                                             "a SOLID (isSolid=true)."
 )
 surface_thicken_tool = (
@@ -483,6 +536,8 @@ surface_thicken_tool = (
     .add_input_property("symmetric", {"type": "boolean", "description": "Thicken both sides (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join", "cut"), default="new").as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Select the connected face set (default true)."})
+    .add_input_property(*_inputs.Choice("thicken_type", ["sharp", "rounded"],
+        description="Corner treatment of the thickened wall.").as_property())
     .add_required_input("faces")
     .add_required_input("thickness")
     .strict_schema()

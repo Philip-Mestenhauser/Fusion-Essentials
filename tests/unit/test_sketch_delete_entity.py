@@ -1,11 +1,13 @@
-"""Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point or constraint.
+"""Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point, constraint
+or text.
 
 The recovery tool for a wrong constraint: delete just that entity instead of rebuilding the
 whole sketch. Pinned here (no live Fusion): the '<type>:<index>' dispatch to the right collection
-(line/arc/circle/point via the shared resolver + constraint via geometricConstraints), and the
-VERIFY-THE-EFFECT read-back - the collection count must actually drop, or the delete is an error
-(never a false ok). The fakes model real deletion: deleteMe() removes the entity from its collection
-so the before/after counts genuinely change (a delete that doesn't shrink the collection must FAIL).
+(line/arc/circle/point via the shared resolver, constraint via geometricConstraints, text via
+sketchTexts), and the VERIFY-THE-EFFECT read-back - the collection count must actually drop, or the
+delete is an error (never a false ok). The fakes model real deletion: deleteMe() removes the entity
+from its collection so the before/after counts genuinely change (a delete that doesn't shrink the
+collection must FAIL).
 """
 
 import json
@@ -48,6 +50,22 @@ class _RaisesOnDelete(FakeEntity):
         raise RuntimeError("entity is consumed by a dimension")
 
 
+def FakeText(content, delete_ok=True):
+    """A SketchText: a deletable entity whose string is read off textParameter.expression, QUOTED
+    (as it is live)."""
+    t = FakeEntity(content, delete_ok=delete_ok)
+    t.textParameter = type("P", (), {"expression": f"'{content}'"})()
+    return t
+
+
+def _text_claiming_success(content):
+    """A SketchText whose deleteMe() returns TRUE while the collection keeps it - the platform's
+    'success that changed nothing', which only the count read-back can catch."""
+    t = FakeText(content)
+    t.deleteMe = lambda: True
+    return t
+
+
 class FakeSketchCurves:
     def __init__(self, lines, arcs, circles, ellipses=(), splines=(), cv_splines=(), fixed_splines=()):
         self.sketchLines = _DelColl(lines)
@@ -61,12 +79,13 @@ class FakeSketchCurves:
 
 class FakeSketch:
     def __init__(self, name, lines=(), arcs=(), circles=(), points=(), constraints=(), ellipses=(),
-                splines=(), cv_splines=(), fixed_splines=()):
+                splines=(), cv_splines=(), fixed_splines=(), texts=()):
         self.name = name
         self.sketchCurves = FakeSketchCurves(list(lines), list(arcs), list(circles), list(ellipses),
                                              list(splines), list(cv_splines), list(fixed_splines))
         self.sketchPoints = _DelColl(list(points))
         self.geometricConstraints = _DelColl(list(constraints))
+        self.sketchTexts = _DelColl(list(texts))
 
 
 class FakeSketches:
@@ -230,6 +249,76 @@ class TestDeleteConstraint:
         assert res["isError"] is True and "did not take" in res["message"].lower()
 
 
+# ── sketch-text deletion (sketch_set_text's only un-doer besides Fusion's undo) ───────────────
+
+class TestDeleteText:
+    def test_delete_the_only_text(self):
+        s = FakeSketch("S", texts=[FakeText("LABEL")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="text:0"))
+        assert out["deleted"] is True
+        assert out["texts_before"] == 1 and out["texts_after"] == 0
+        assert out["text"] == "LABEL"                # the string, unquoted, captured before the delete
+        assert s.sketchTexts.count == 0
+
+    def test_delete_one_of_several_keeps_the_rest_in_creation_order(self):
+        s = FakeSketch("S", texts=[FakeText("A"), FakeText("B"), FakeText("C")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="text:1"))
+        assert out["texts_before"] == 3 and out["texts_after"] == 2
+        assert out["text"] == "B"                    # index = creation order, so B went - not A
+        assert [t.name for t in s.sketchTexts._i] == ["A", "C"]
+
+    def test_no_texts_at_all_refuses_naming_the_count(self):
+        s = FakeSketch("S", texts=[])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True
+        assert "out of range" in res["message"]
+        assert "0 sketch text(s)" in res["message"]
+
+    def test_out_of_range_index_is_named_in_the_refusal(self):
+        s = FakeSketch("S", texts=[FakeText("A"), FakeText("B")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:5")
+        assert res["isError"] is True
+        assert "5" in res["message"] and "2 sketch text(s)" in res["message"]
+        assert s.sketchTexts.count == 2              # nothing was touched
+
+    def test_delete_that_removed_nothing_is_an_error(self):
+        # deleteMe() returns False -> the count never drops -> ERROR, never a false ok.
+        s = FakeSketch("S", texts=[FakeText("STUCK", delete_ok=False)])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True and "did not take" in res["message"].lower()
+        assert "text:0" in res["message"]
+        assert s.sketchTexts.count == 1              # still there
+
+    def test_a_delete_that_reports_true_but_removes_nothing_is_an_error(self):
+        # deleteMe() returns True while the count holds at 1 - the COUNT read-back, not the return
+        # value, is what convicts. Without it this false ok reaches the caller.
+        s = FakeSketch("S", texts=[_text_claiming_success("GHOST")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True
+        assert "sketch text count 1 -> 1" in res["message"]
+        assert s.sketchTexts.count == 1
+
+    def test_delete_exception_is_reported(self):
+        s = FakeSketch("S", texts=[])
+        s.sketchTexts = _DelColl([_RaisesOnDelete("T0")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True and "consumed by a dimension" in res["message"]
+
+    def test_a_sketch_without_the_collection_is_an_honest_refusal(self):
+        s = FakeSketch("S")
+        del s.sketchTexts                            # older/mocked sketch exposing no sketchTexts
+        _install(s)
+        res = sd.handler(sketch_name="S", target="text:0")
+        assert res["isError"] is True and "no sketch texts collection" in res["message"]
+
+
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
@@ -242,12 +331,14 @@ class TestGuards:
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="line")     # no ':<index>'
         assert res["isError"] is True and "<type>:<index>" in res["message"]
+        assert "text" in res["message"]                      # the vocabulary advertises every kind
 
     def test_unknown_type(self):
-        # a token that is not one of _common.ENTITY_REF_KINDS (nor 'constraint') at all
+        # a token that is not one of _common.ENTITY_REF_KINDS (nor 'constraint'/'text') at all
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="helix:0")
         assert res["isError"] is True and "helix" in res["message"].lower()
+        assert "text" in res["message"]                      # and points at the kinds that do work
 
     def test_recognized_kind_absent_from_this_sketch_is_a_clean_resolve_error(self):
         # 'spline' IS a valid ENTITY_REF_KINDS type - this sketch (via _sketch(), no splines) just

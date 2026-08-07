@@ -51,13 +51,38 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if lerr:
         return error(lerr)
 
+    # same-body guard: compared by entityToken, never by Python identity alone - the API mints a
+    # FRESH wrapper per access (live-measured on face.body/edge.body), so `is` can read False for two
+    # references to the same physical body and the guard would never fire. Same shape as
+    # mesh_combine's guard, which already compares tokens.
+    tgt_token = safe(lambda: tgt.entityToken)
     coll = adsk.core.ObjectCollection.create()
     for b in tool_bodies:
-        if b is tgt:
+        b_token = safe(lambda b=b: b.entityToken)
+        if b is tgt or (tgt_token and b_token and b_token == tgt_token):
             return error("A tool body is the same as the target - pick distinct bodies.")
         coll.add(b)
     if coll.count == 0:
         return error("No valid tool bodies resolved.")
+
+    # Captured BEFORE the mutation, all of it:
+    #  - the census host, resolved ONCE off the TARGET (see _common.census_host). MEASURED: a
+    #    cross-component combine is ACCEPTED, and one whose target AND tool both sit in a
+    #    sub-component moves nothing the ACTIVE component can see (root 3 -> 3 throughout), so a
+    #    census scoped to target_component(design) would be blind to it;
+    #  - BOTH signals, because either one alone is blind to a real case. MEASURED: a direct cut that
+    #    severed a bar left the body COUNT at 5 -> 5 (the consumed cutter -1 and the new lump +1
+    #    cancel) while the target's VOLUME moved 240 -> 96; and a join of two NON-TOUCHING bodies
+    #    moved neither, with add() still returning None - which is why the effect, not the None,
+    #    decides;
+    #  - the NAMES, because a combine CONSUMES its tool bodies - reading b.name afterwards asks a
+    #    proxy whose body no longer exists and publishes nulls for bodies that resolved fine.
+    host = _common.census_host(tgt, comp)
+    before_bodies = _common.body_count(host)
+    before_volume = _common.measured(lambda: tgt.volume)
+    target_name = safe(lambda: tgt.name)
+    tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
+    host_name = safe(lambda: host.name)
 
     try:
         ci = comp.features.combineFeatures.createInput(tgt, coll)
@@ -68,29 +93,66 @@ def handler(target: str = "", tools=None, operation: str = "join",
     except Exception as e:
         return error(f"Combine failed: {e}. (Bodies must overlap for cut/intersect; all bodies "
     "must be solids in the same component.)")
-    if not feature:
-        return error("Combine returned no feature.")
+    # MEASURED: combineFeatures.add returns None in a DIRECT design while the boolean LANDS (a join
+    # took 2 bodies to 1). With no feature to read, the census below is the verdict; in parametric a
+    # None feature is unmeasured as a success and stays an honest error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Combine"))
+
+    after_bodies = _common.body_count(host)
+    if direct_no_feature:
+        after_volume = _common.measured(lambda: tgt.volume)
+        counted = isinstance(before_bodies, int) and isinstance(after_bodies, int)
+        volumed = before_volume is not None and after_volume is not None
+        if not counted and not volumed:
+            return error("Combine ran in a DIRECT design, which returns no feature object, and "
+                         f"neither '{host_name}' body count nor the target's volume could be read "
+                         "back - so whether the bodies were combined is UNVERIFIED. Check with "
+                         "design_get(include=['tree']) / model_inspect.")
+        if not (counted and after_bodies != before_bodies) and not (volumed and after_volume != before_volume):
+            # Built from what the reads ACTUALLY returned: a signal that could not be read is named
+            # as unread, never reported as an observed sameness.
+            seen = [f"'{host_name}' still holds {before_bodies} bodies" if counted
+                    else f"'{host_name}' body count could not be read",
+                    f"'{target_name}' measures the same volume ({after_volume} cm3)" if volumed
+                    else f"'{target_name}' volume could not be read"]
+            return error("Combine reported no error but nothing it could measure changed - "
+                         + ", and ".join(seen) + ". For cut/intersect the bodies must overlap; "
+                         "confirm with design_get(include=['tree']) / model_inspect. "
+                         + _common.failed_effect_remedy(design, feature))
 
     # body-split: a cut/intersect that DISCONNECTS the single target leaves it in >1 piece.
     # CombineFeature.bodies returns the bodies this feature modified/created; the tool bodies were
     # consumed, so for a cut/intersect more than one result body means the target split (there is
-    # exactly one target here, unlike an unscoped extrude, so no multi-body ambiguity).
+    # exactly one target here, unlike an unscoped extrude, so no multi-body ambiguity). This read is
+    # SKIPPED in direct mode - there is no feature to read it off, and an empty list there would read
+    # as "no disconnection was found" rather than "the check could not run" (the note says which).
     result_bodies = []
-    fb = safe(lambda: feature.bodies)
-    for i in range(safe(lambda: fb.count, 0) if fb else 0):
-        result_bodies.append(safe(lambda i=i: fb.item(i).name))
+    if not direct_no_feature:
+        fb = safe(lambda: feature.bodies)
+        for i in range(safe(lambda: fb.count, 0) if fb else 0):
+            result_bodies.append(safe(lambda i=i: fb.item(i).name))
 
     payload = {
         "combined": True,
-        "feature": safe(lambda: feature.name),
         "operation": op_key,
-        "target": safe(lambda: tgt.name),
-        "tools": [safe(lambda b=b: b.name) for b in tool_bodies],
+        "target": target_name,
+        "tools": tool_names,
         "kept_tools": bool(keep_tools),
         "new_component": bool(new_component),
-        "bodies_remaining": safe(lambda: comp.bRepBodies.count, None),
+        "bodies_remaining": after_bodies,
         "note": "Bodies combined. Pair with view_screenshot to view the result.",
     }
+    # Direct mode: no feature object, so no name - and no feature.bodies, which is where the
+    # disconnection warning below comes from. Flag the omission instead of implying either exists.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += (" " + _common.DIRECT_FEATURE_NOTE + " A cut/intersect that DISCONNECTED "
+                            "the target cannot be detected here (that check reads the feature's own "
+                            "result bodies) - check with design_get(include=['tree']).")
+    else:
+        payload["feature"] = safe(lambda: feature.name)
     if op_key in ("cut", "intersect") and len(result_bodies) > 1:
         payload["body_split"] = result_bodies
         payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(result_bodies)} "

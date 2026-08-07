@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepEdge, BRepFace,
-                      FakePoint, FakeBoundingBox3D, Line3D, Plane, FakeVector3D, payload,
+                      FakePoint, FakeBoundingBox3D, Line3D, Plane, FakeVector3D, go_stale, payload,
                       error_message, assert_no_active_design, assert_unknown_units)
 
 mm = load_tool("model_move")
@@ -76,8 +76,9 @@ class FakeMoveInput:
 
 class FakeMoveFeatures:
     """component.features.moveFeatures: add() displaces the sample geometry of the targets it was
-    built for by `shift` (cm) and returns `feature`. `returns_nothing` models a creation that
-    produced none; `defined` False models a definer Fusion refuses."""
+    built for by `shift` (cm) and returns `feature`. `returns_nothing` models the return with NO
+    feature object in it - the measured direct-mode shape, where the displacement still lands;
+    `defined` False models a definer Fusion refuses."""
     def __init__(self, targets=(), shift=None, feature=None, returns_nothing=False,
                  defined=True, move_box=True):
         self.targets = list(targets)
@@ -95,11 +96,12 @@ class FakeMoveFeatures:
 
     def add(self, move_input):
         self.added += 1
-        if self.returns_nothing:
-            return None
         for target in self.targets:
             _shift(target, self.shift or self._definition_shift(), self.move_box)
-        return self.feature
+        # The moved bodies' proxies stop answering their identity reads; boundingBox/vertices stay
+        # readable, since those ARE the effect check.
+        go_stale(*self.targets)
+        return None if self.returns_nothing else self.feature
 
     def _definition_shift(self):
         """A real move carries the geometry exactly as far as the definition says; a fake that
@@ -133,10 +135,13 @@ def _edge(token="e1"):
     return BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(10, 0, 0)), entity_token=token)
 
 
-def _wire(monkeypatch, bodies=(), feats=None, tokens=None, axes=True):
+def _wire(monkeypatch, bodies=(), feats=None, tokens=None, axes=True, design_type=None):
     """Install a design whose active component carries `feats` (features.moveFeatures) and the
     origin construction axes a world axis key resolves to, with the BRep types and ValueInput
-    modelled."""
+    modelled.
+
+    `design_type` sets the modelling mode current_design_type reads (1 parametric, 0 direct); left
+    unset the design reports neither, which is the 'unknown' mode."""
     comp = MakeComp(name="Comp", bodies=list(bodies))
     feats = feats if feats is not None else FakeMoveFeatures(bodies)
     comp.features = types.SimpleNamespace(moveFeatures=feats)
@@ -144,6 +149,8 @@ def _wire(monkeypatch, bodies=(), feats=None, tokens=None, axes=True):
         comp.xConstructionAxis, comp.yConstructionAxis, comp.zConstructionAxis = (
             _X_AXIS, _Y_AXIS, _Z_AXIS)
     design = make_design(comp=comp, tokens=tokens)
+    if design_type is not None:
+        design.designType = design_type
     install(mm, design)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
     monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
@@ -373,12 +380,67 @@ class TestHonesty:
         assert res["isError"] is True and "Move failed" in res["message"]
         assert "breaks the solid" in res["message"]
 
+
+# ── DIRECT mode: moveFeatures.add returns nothing while the translate LANDS (measured) ───────
+
+class TestDirectModeNoFeature:
+    def test_direct_none_with_the_measured_displacement_is_ok(self, monkeypatch):
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True), design_type=0)
+        out = payload(mm.handler(bodies=["Block"], dx=5))
+        assert out["moved"] is True and out["displacement"] == 5.0
+
+    def test_direct_none_publishes_no_feature_name(self, monkeypatch):
+        # No feature object exists, so no name may be echoed - and the timeline claim goes with it.
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True), design_type=0)
+        out = payload(mm.handler(bodies=["Block"], dx=5))
+        assert "feature" not in out
+        assert out["no_timeline_feature"] is True
+        assert "DIRECT mode" in out["note"] and "replays on every recompute" not in out["note"]
+
+    def test_direct_none_names_the_bodies_captured_before_the_move(self, monkeypatch):
+        # The proxies stop answering .name once the move ran; the payload must still name them.
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True), design_type=0)
+        out = payload(mm.handler(bodies=["Block"], dx=5))
+        assert out["bodies"] == ["Block"]
+
+    def test_declared_outputs_hold_on_the_direct_path(self, monkeypatch):
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True), design_type=0)
+        out = payload(mm.handler(bodies=["Block"], dx=5))
+        for o in mm.RETURNS:
+            assert o.assert_present(out) == "", o.key
+
+    def test_direct_none_with_a_failed_effect_check_is_an_error(self, monkeypatch):
+        # add() handed back nothing AND no sample point moved: not a success.
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True, move_box=False),
+              design_type=0)
+        res = mm.handler(bodies=["Block"], dx=5)
+        assert res["isError"] is True and "sits exactly where it was" in res["message"]
+        # There is no timeline feature on this path - the remediation must not name one.
+        assert "design_delete_feature" not in res["message"]
+        assert "undo in Fusion" in res["message"]
+
+    def test_parametric_none_stays_an_error(self, monkeypatch):
+        # Even though the geometry did move: a None feature in a PARAMETRIC design is unmeasured as
+        # a success, so it is refused.
+        body = _body()
+        _wire(monkeypatch, [body], FakeMoveFeatures([body], returns_nothing=True), design_type=1)
+        res = mm.handler(bodies=["Block"], dx=5)
+        assert res["isError"] is True and "returned no feature" in res["message"]
+        assert "DIRECT mode" not in res["message"]
+
     def test_geometry_that_did_not_move_is_an_error(self, monkeypatch):
         body = _body()
         _wire(monkeypatch, [body], FakeMoveFeatures([body], shift=(0.0, 0.0, 0.0)))
         res = mm.handler(bodies=["Block"], dx=5)
         assert res["isError"] is True
         assert "exactly where it was" in res["message"]
+        # a parametric design DOES leave a timeline feature, so the remedy names it
+        assert "remains in the timeline" in res["message"]
         assert "design_delete_feature" in res["message"]
 
     def test_unreadable_geometry_fails_closed(self, monkeypatch):

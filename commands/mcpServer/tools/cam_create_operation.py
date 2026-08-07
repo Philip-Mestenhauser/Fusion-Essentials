@@ -12,6 +12,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam, find_setup
+from . import cam_generate
 
 app = adsk.core.Application.get()
 
@@ -70,9 +71,11 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     if not cam:
         return error(cerr)
 
-    target, available = find_setup(cam, setup)
+    # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
+    # name was ABSENT or AMBIGUOUS, and only it can say which.
+    target, _names, serr = find_setup(cam, setup)
     if not target:
-        return error(f"No setup named '{setup}'. Setups: {', '.join(str(n) for n in available)}.")
+        return error(serr)
 
     strategy = (strategy or "").strip()
     strategies = _strategy_names(target)
@@ -127,9 +130,19 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     }
 
     if generate:
-        gerr = None
+        # The Future MUST be registered, not discarded: if it is garbage-collected Fusion ABANDONS
+        # the in-progress generation (see cam_generate._GENERATIONS). register_future is the one
+        # registration path, and its handle is what cam_get_status polls.
+        gerr, handle = None, None
         try:
-            cam.generateToolpath(op)         # async future; the op updates in place
+            fut = cam.generateToolpath(op)
+            if not fut:
+                gerr = "generateToolpath returned no future, so no generation is running."
+            else:
+                op_name = safe(lambda: op.name)
+                handle, _total = cam_generate.register_future(
+                    fut, f"operation '{op_name}'", "operation", False,
+                    target_name=op_name or "")
         except Exception as e:
             gerr = str(e)
         result["generation_started"] = gerr is None
@@ -139,9 +152,10 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         else:
             # hasToolpath/isToolpathValid read this early are STALE (the generation is async) -
             # reporting them here would report a false negative, so they are deliberately omitted.
-            result["note"] = ("Operation created; toolpath generation started (async). Confirm with "
-                              "cam_get(include=['operations']) (hasToolpath / isToolpathValid) once "
-                              "generation completes.")
+            result["generation_handle"] = handle
+            result["note"] = ("Operation created; toolpath generation started (async). Poll it with "
+                              f"cam_get_status(handle='{handle}'), or confirm with "
+                              "cam_get(include=['operations']) once generation completes.")
     return ok(result)
 
 

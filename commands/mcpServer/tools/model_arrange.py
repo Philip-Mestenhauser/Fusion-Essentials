@@ -103,7 +103,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
                           f"account: {msg}. Try solver='rectangular', or enable the extension.")
         return error(f"Arrange failed: {msg}")
     if not feature:
-        return error("Arrange returned no feature.")
+        return error(_common.no_feature_error(design, "Arrange"))
 
     return ok({
         "arranged": True,

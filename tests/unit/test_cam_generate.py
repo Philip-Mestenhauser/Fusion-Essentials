@@ -65,6 +65,23 @@ class TestTargetResolution:
         assert cam.generate_calls == [("target", setup)]
         assert out["target"] == "setup 'roughing'"
 
+    def test_scoped_launch_records_the_resolved_target_name(self, monkeypatch):
+        # The handle carries the RAW resolved name (not just the display description), because the
+        # status read settles completion on that target's OWN operations - see _handle_scope_state.
+        gen._GENERATIONS.clear()
+        setup = SharedSetup("Roughing", ops=[SharedOp("Face1", operation_state=1)])
+        self._install(monkeypatch, [setup])
+        out = _payload(gen.generate_handler(target="roughing"))
+        entry = gen._GENERATIONS[out["handle"]]
+        assert entry["target_name"] == "Roughing" and entry["scope"] == "setup"
+
+    def test_document_launch_records_no_target_name(self, monkeypatch):
+        gen._GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S")])
+        out = _payload(gen.generate_handler(target=""))
+        entry = gen._GENERATIONS[out["handle"]]
+        assert entry["target_name"] == "" and entry["scope"] == "document"
+
     def test_folder_target_resolves_via_explicit_folder_walk(self, monkeypatch):
         # setup.allOperations DROPS folder containers (live-verified), so a folder target is only
         # reachable through the shared walk's explicit .folders recursion.
@@ -316,6 +333,107 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1", pump_seconds=9999))
         assert out["completed"] is True
         assert "pumped_seconds" not in out
+
+    # ── completion settles on the HANDLE'S OWN scope, not the document-wide generating count ────
+    # A handle launched against ONE setup/folder/operation must not be starved by a SECOND
+    # generation running beside it: the other job's ops keep the document tally above zero forever.
+
+    def _scoped_entry(self, name, future_done=True):
+        return {"future": SimpleNamespace(isGenerationCompleted=future_done, numberOfOperations=2,
+                                          numberOfCompleted=2),
+                "target": f"setup '{name}'", "scope": "setup", "target_name": name,
+                "started_at": 0.0, "total": 2, "doc_name": "Doc", "doc_urn": "urn:doc"}
+
+    def _install_cam(self, monkeypatch, *setups):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM(list(setups))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        return cam
+
+    def test_scoped_handle_completes_while_another_job_generates(self, monkeypatch):
+        # THE STARVATION BITE: this handle's own setup has settled (nothing generating in it), but a
+        # SECOND generation is running in another setup, so the DOCUMENT tally still reads
+        # generating=2. Completion must key on this handle's own operations, not that count.
+        gen._GENERATIONS["gen1"] = self._scoped_entry("Roughing")
+        gen._HANDLE_SEQ[0] = 1
+        self._install_cam(monkeypatch,
+                          _setup("Roughing", [_live_op("R1", state=0), _live_op("R2", state=0)]),
+                          _setup("Finishing", [_live_op("F1", state=1, generating=True),
+                                               _live_op("F2", state=1, generating=True)]))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=2, out_of_date=2, generating=2, total=4))
+        monkeypatch.setattr(gen, "_collect_op_health",
+                            lambda: {"warnings": [], "errors": [], "empty": []})
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True
+        assert out["live_states"]["generating"] == 0           # the handle's OWN scope, not 2
+        assert "Roughing" in out["completion_basis"]
+        assert "gen1" not in gen._GENERATIONS                  # done -> popped
+
+    def test_scoped_handle_waits_for_its_own_ops_even_when_the_document_looks_idle(self, monkeypatch):
+        # The mirror of the bite: the document tally reads generating=0 while THIS handle's own
+        # setup is still computing - the scoped read is what decides, so completed stays False.
+        gen._GENERATIONS["gen1"] = self._scoped_entry("Roughing")
+        gen._HANDLE_SEQ[0] = 1
+        self._install_cam(monkeypatch,
+                          _setup("Roughing", [_live_op("R1", state=1, generating=True)]))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(valid=9, generating=0, total=9, readiness="ready to post."))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False
+        assert out["live_states"]["generating"] == 1
+        assert "gen1" in gen._GENERATIONS                      # still running - entry kept
+
+    def test_unreadable_tally_reports_the_future_alone_with_the_reason(self, monkeypatch):
+        # live_readiness returns its ERROR form: no tally was read at all. An empty tally reads as
+        # "nothing is generating", so the verdict rests on the Future alone - the basis and note must
+        # say that and name the reason, and no live_states may be published under it.
+        gen._GENERATIONS["gen1"] = self._completed_entry()
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            lambda: (None, "No CAM product in the active document."))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is True                        # the Future is done
+        assert "live_states" not in out                        # no tally was read - publish none
+        assert "Future alone" in out["completion_basis"]
+        assert "No CAM product" in out["completion_basis"] and "No CAM product" in out["note"]
+        assert "gen1" not in gen._GENERATIONS                  # done -> popped
+
+    def test_unreadable_tally_while_still_generating_keeps_the_handle(self, monkeypatch):
+        entry = self._completed_entry()
+        entry["future"] = SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
+                                          numberOfCompleted=0)
+        gen._GENERATIONS["gen1"] = entry
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness", lambda: (None, "CAM unavailable."))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False
+        assert "Future alone" in out["completion_basis"] and "CAM unavailable." in out["note"]
+        assert "gen1" in gen._GENERATIONS
+
+    def test_document_scope_handle_keeps_the_document_tally(self, monkeypatch):
+        # A whole-document launch IS the document, so its basis stays the document readiness.
+        gen._GENERATIONS["gen1"] = self._completed_entry()     # no scope/target_name = document
+        gen._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(out_of_date=3, generating=3, total=3))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completion_basis"] == "document"
+        assert out["completed"] is False and out["live_states"]["generating"] == 3
+
+    def test_vanished_scope_target_falls_back_to_the_document_and_says_so(self, monkeypatch):
+        # The launch target was renamed/deleted mid-generation: the scoped walk cannot resolve it, so
+        # the read falls back to the document tally - and the basis NAMES the wider fallback.
+        gen._GENERATIONS["gen1"] = self._scoped_entry("Roughing")
+        gen._HANDLE_SEQ[0] = 1
+        self._install_cam(monkeypatch, _setup("RenamedSetup", [_live_op("R1", state=0)]))
+        monkeypatch.setattr(gen._cam_common, "live_readiness",
+                            self._readiness(out_of_date=1, generating=1, total=1))
+        out = _payload(gen.status_handler(handle="gen1"))
+        assert out["completed"] is False                        # the document tally governs the fallback
+        assert "Roughing" in out["completion_basis"]
+        assert "could not be re-resolved" in out["completion_basis"]
 
     def test_wrong_active_document_reports_future_progress_only(self, monkeypatch):
         # The per-op tallies read the ACTIVE document. When the generating document is NOT active,

@@ -41,23 +41,29 @@ _SLOW_TRI_THRESHOLD = 250_000
 
 # ── mesh-unit mapping (the import API takes a MeshUnits enum, not a scale factor) ────────────────
 
+# authored unit -> (MeshUnits enum member the import takes, cm per unit its stats are scaled by).
+# mm/cm/in take their factor from the shared _common.scale(); m and ft are exact multiples of those
+# (1 m = 1000 mm, 1 ft = 12 in), so this wider authored set holds no cm constant of its own.
+_MESH_UNIT_TABLE = {
+    "mm": ("MillimeterMeshUnit", _common.scale("mm")),
+    "cm": ("CentimeterMeshUnit", _common.scale("cm")),
+    "m": ("MeterMeshUnit", 1000.0 * _common.scale("mm")),
+    "in": ("InchMeshUnit", _common.scale("in")),
+    "inch": ("InchMeshUnit", _common.scale("inch")),
+    "ft": ("FootMeshUnit", 12.0 * _common.scale("in")),
+}
+
+
 def _mesh_units(units):
-    """Map a units string to the adsk.fusion.MeshUnits enum value the import API wants. Guarded with
-    safe so a mocked/absent enum degrades to None (the caller then errors honestly)."""
+    """(MeshUnits enum value, unit key, cm per unit) for an authored-unit string. The enum is what the
+    import API wants; the factor scales what the payload reports back. Guarded with safe so a
+    mocked/absent enum degrades to None (the caller then errors honestly)."""
     u = (units or "mm").strip().lower()
+    row = _MESH_UNIT_TABLE.get(u)
     mu = safe(lambda: adsk.fusion.MeshUnits)
-    if mu is None:
-        return None, None
-    table = {
-    "mm": safe(lambda: mu.MillimeterMeshUnit),
-    "cm": safe(lambda: mu.CentimeterMeshUnit),
-    "m": safe(lambda: mu.MeterMeshUnit),
-    "in": safe(lambda: mu.InchMeshUnit),
-    "inch": safe(lambda: mu.InchMeshUnit),
-    "ft": safe(lambda: mu.FootMeshUnit),
-    }
-    val = table.get(u)
-    return val, u
+    if row is None or mu is None:
+        return None, u, None
+    return safe(lambda: getattr(mu, row[0])), u, row[1]
 
 
 # ── mesh introspection (all READS - safe everywhere) ──────────────────────────────────────────
@@ -298,7 +304,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     "active component, or list components with design_get(include=['tree']).")
         comp = picked
 
-    mesh_units, ukey = _mesh_units(units)
+    mesh_units, ukey, unit_cm = _mesh_units(units)
     if mesh_units is None:
         return error(f"Unknown units '{units}' for mesh import. Use mm, cm, m, in, or ft.")
 
@@ -311,6 +317,10 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     if not mesh_list or count == 0:
         return error("Mesh import returned no bodies (the file may be empty or unreadable as a mesh).")
 
+    # The per-body stats are scaled into the reported 'units' through the SAME _mesh_summary path
+    # mesh_get scales its listing with - the API reads area/volume in cm^2/cm^3, so publishing them
+    # raw beside units='mm' UNDERSTATES the body by 100x in area and 1000x in volume.
+    inv_scale = 1.0 / unit_cm
     bodies = []
     rename = (name or "").strip()
     for i in range(count):
@@ -319,7 +329,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
             continue
         if rename and count == 1:
             safe(lambda: setattr(mb, "name", rename))
-        bodies.append(_mesh_summary(mb))
+        bodies.append(_mesh_summary(mb, inv_scale=inv_scale))
 
     return ok({
         "imported": True,
@@ -390,6 +400,11 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
     if feats is None:
         return error("This design has no meshReduceFeatures collection (mesh reduce unavailable here).")
 
+    # The design's OWN mode, read BEFORE any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
+
     def inner_op(base_feature):
         # createInput -> set -> add, all INSIDE the (possibly open) base-feature scope.
         try:
@@ -426,16 +441,22 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         # an add inside the BaseFeature edit scope run_in_base_feature opens). mesh_reduce modifies the
         # mesh IN PLACE, so SUCCESS is observed by re-reading the mesh's (updated) triangle count.
         try:
-            return feats.add(inp)
+            feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh reduce failed (meshReduceFeatures.add raised): {e}")
+        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
+        # HERE - it is what explains a null feature to the caller.
+        return {"feat": feat,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
-    feat, scope_err = run_in_base_feature(design, comp, inner_op)
+    result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
         return scope_err
-    if isinstance(feat, dict) and feat.get("isError") is True:
-        return feat # inner_op returned a _common.error
+    if isinstance(result, dict) and result.get("isError") is True:
+        return result # inner_op returned a _common.error
 
+    feat = result["feat"]
+    bf_name = result["base_feature_name"]
     result_mesh = _result_mesh_of(feat, mb) if feat else mb
     after_tri = _tri_count(result_mesh)
     # A reduce that leaves the count where it was reduced nothing - report that, not success.
@@ -452,12 +473,15 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
     "before": {"triangle_count": before_tri},
     "after": {"triangle_count": after_tri},
     "feature": safe(lambda: feat.name) if feat else None,
-    "non_parametric": feat is None, # add returned nothing -> non-parametric mode = success
+    "design_mode": design_mode,
+    "base_feature": bf_name,
     "target": tgt,
     }
     if before_tri and after_tri is not None and before_tri > 0:
         out["reduced_pct"] = round((1 - after_tri / before_tri) * 100, 2)
-    note = _slow_note(before_tri)
+    notes = [_common.null_feature_note(design, feat, bf_name, "reduce") if feat is None else None,
+             _slow_note(before_tri)]
+    note = " ".join(n for n in notes if n)
     if note:
         out["note"] = note
     return ok(out)
@@ -496,6 +520,11 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
     if feats is None:
         return error("This design has no meshRemeshFeatures collection (mesh remesh unavailable here).")
 
+    # The design's OWN mode, read BEFORE any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
+
     def inner_op(base_feature):
         # createInput -> set -> add, all INSIDE the (possibly open) base-feature scope.
         try:
@@ -518,16 +547,22 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
         # Mutation - direct call. A falsy return is non-parametric SUCCESS (direct design OR base-feature
         # scope), not a failure. Remesh modifies the mesh IN PLACE: SUCCESS is the mesh's updated counts.
         try:
-            return feats.add(inp)
+            feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh remesh failed (meshRemeshFeatures.add raised): {e}")
+        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
+        # HERE - it is what explains a null feature to the caller.
+        return {"feat": feat,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
-    feat, scope_err = run_in_base_feature(design, comp, inner_op)
+    result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
         return scope_err
-    if isinstance(feat, dict) and feat.get("isError") is True:
-        return feat # inner_op returned a _common.error
+    if isinstance(result, dict) and result.get("isError") is True:
+        return result # inner_op returned a _common.error
 
+    feat = result["feat"]
+    bf_name = result["base_feature_name"]
     result_mesh = _result_mesh_of(feat, mb) if feat else mb
     after_tri = _tri_count(result_mesh)
     out = {
@@ -538,13 +573,15 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
     "before": {"triangle_count": before_tri},
     "after": {"triangle_count": after_tri},
     "feature": safe(lambda: feat.name) if feat else None,
-    "non_parametric": feat is None,
+    "design_mode": design_mode,
+    "base_feature": bf_name,
     }
     if out["changed"] is False:
         out["note"] = (f"Triangle count is unchanged ({before_tri}) - an identical retriangulation "
                        "is unlikely; verify the mesh with model_inspect before trusting the remesh.")
-    note = _slow_note(before_tri)
-    if note:
+    extra = [_common.null_feature_note(design, feat, bf_name, "remesh") if feat is None else None,
+             _slow_note(before_tri)]
+    for note in (n for n in extra if n):
         out["note"] = (out.get("note", "") + " " + note).strip()
     return ok(out)
 
@@ -605,6 +642,11 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     feats = safe(lambda: comp.features.meshConvertFeatures)
     if feats is None:
         return error("This design has no meshConvertFeatures collection (mesh->BRep unavailable here).")
+
+    # The design's OWN mode, read BEFORE any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
 
     # Prismatic convert REQUIRES face groups - if they're missing the add raises
     # 'MESH_FAILED_BREP - Use Generate Face Groups'. Point the agent at the remedy (do NOT auto-run it;
@@ -683,7 +725,10 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         except Exception as e:
             return error(f"Mesh->BRep conversion failed (meshConvertFeatures.add raised): {e}. "
     "A common cause is a non-watertight or very dense mesh." + _face_groups_hint)
-        return {"feat": feat, "before_tokens": before_tokens}
+        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
+        # HERE - it is what explains a null feature to the caller.
+        return {"feat": feat, "before_tokens": before_tokens,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
@@ -693,6 +738,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
 
     feat = result["feat"]
     before_tokens = result["before_tokens"]
+    bf_name = result["base_feature_name"]
 
     brep_bodies = []
     # Parametric path: the feature object carries .bodies - use it directly.
@@ -718,6 +764,12 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         return error("Mesh->BRep conversion did not produce a BRep body. The mesh may be "
     "non-watertight or too dense to convert." + _face_groups_hint)
 
+    note = ("Converted to BRep - find_geometry / fillet / chamfer / CAM can now act on these "
+            "bodies. 'prismatic' merges flat face groups (fewest faces); 'faceted' is one face "
+            "per triangle (exact, heavy).")
+    if feat is None:
+        note += " " + _common.null_feature_note(design, feat, bf_name, "conversion")
+
     return ok({
         "converted": True,
         "source_mesh": safe(lambda: mb.name),
@@ -725,10 +777,9 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
         "method": meth,
         "operation": op,
         "feature": safe(lambda: feat.name) if feat else None,
-        "non_parametric": feat is None,
-        "note": ("Converted to BRep - find_geometry / fillet / chamfer / CAM can now act on these "
-            "bodies. 'prismatic' merges flat face groups (fewest faces); 'faceted' is one face "
-            "per triangle (exact, heavy)."),
+        "design_mode": design_mode,
+        "base_feature": bf_name,
+        "note": note,
     })
 
 
@@ -763,7 +814,7 @@ mesh_insert_tool = (
             "the result to BRep with mesh_to_brep to use it with the BRep/CAM tools."))
     .add_input_property("file_path", {"type": "string", "description": "Full path to a .stl / .obj / .3mf file (required)."})
     .add_input_property("target_component", {"type": "string", "description": "Component name to import into (default: active component)."})
-    .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm)."})
+    .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm). The reported area/volume are in it too."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the imported body (single-body imports only)."})
     .add_required_input("file_path")
     .strict_schema()

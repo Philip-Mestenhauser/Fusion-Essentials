@@ -3,8 +3,8 @@
 
 """RICH READ: design_get - the active design's structure by zoom level (see CLAUDE.md "Reads are
 RICH"). Default: a cheap orientation slice (design type, feature count, timeline health, content
-fingerprint). include=['tree'|'timeline'|'mode'|'configurations'] pulls one deeper slice at a time via
-a thin router over _slice_*() helpers. Read-only.
+fingerprint). include=['tree'|'timeline'|'mode'|'configurations'|'materials'|'appearances'] pulls one
+deeper slice at a time via a thin router over _slice_*() helpers. Read-only.
 """
 
 import json
@@ -19,11 +19,12 @@ from ._common import ok, error, safe, terse
 from . import _common
 from . import _cam_common
 from . import _inputs
+from . import _materials
 
 app = adsk.core.Application.get()
 
 # The deeper slices an agent can opt into (the default returns NONE of these in full - only summaries).
-_SLICES = ("mode", "tree", "timeline", "configurations")
+_SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances")
 
 
 # ── slice helpers - each builds one slice's payload, independently testable ─────────────────────────
@@ -319,6 +320,20 @@ def _slice_configurations(design):
     return out, None
 
 
+# ── material / appearance catalog (both slices, one walk in _materials) ────────────────────────────
+
+def _slice_materials(design, library, name_filter, max_results):
+    """The PHYSICAL-material catalog: the document's own materials plus a census of every loaded
+    library, or one named library's materials. The names model_set_material resolves."""
+    return _materials.browse(design, "materials", library, name_filter, max_results)
+
+
+def _slice_appearances(design, library, name_filter, max_results):
+    """The APPEARANCE (cosmetic) catalog, same two levels as the materials slice. A document
+    appearance name is what design_configure(action='set_appearance') resolves."""
+    return _materials.browse(design, "appearances", library, name_filter, max_results)
+
+
 def _fingerprint(design):
     """The cheap 'what IS this model' digest for the default: counts of bodies / sketches / components /
     occurrences / joints / parameters, so an agent learns the model's SHAPE without include=tree. The
@@ -373,7 +388,8 @@ def _has_cam(design):
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
 def handler(include=None, max_depth: int = 3, component: str = "",
-            include_suppressed: bool = True, group: str = "") -> dict:
+            include_suppressed: bool = True, group: str = "",
+            library: str = "", name_filter: str = "", max_results: int = 0) -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
@@ -437,14 +453,24 @@ def handler(include=None, max_depth: int = 3, component: str = "",
             "configured": False,
             "reason": (cerr.get("message") if cerr else "no configuration table"),
         }
+    if "materials" in inc:
+        out["materials"], materr = _slice_materials(design, library, name_filter, max_results)
+        if materr:
+            return materr
+    if "appearances" in inc:
+        out["appearances"], apperr = _slice_appearances(design, library, name_filter, max_results)
+        if apperr:
+            return apperr
 
     # advertise the slices NOT yet pulled (load-bearing: an un-named flag is invisible to the agent).
     remaining = [s for s in _SLICES if s not in inc]
     if remaining:
         out["note"] = ("Orientation slice. Pull deeper with include=" + str(remaining) +
                        " (e.g. include=['tree'] for the full component tree, ['timeline'] for the "
-                       "feature list, ['mode'] for the capability map, ['configurations'] for configs). "
-                       "'max_depth'/'component' scope the tree; 'group'/'include_suppressed' the timeline.")
+                       "feature list, ['mode'] for the capability map, ['configurations'] for configs, "
+                       "['materials'] or ['appearances'] for the assignable catalog). "
+                       "'max_depth'/'component' scope the tree; 'group'/'include_suppressed' the "
+                       "timeline; 'library'/'name_filter'/'max_results' the catalog.")
     return ok(out)
 
 
@@ -464,7 +490,9 @@ TOOL_DESCRIPTION = (
     "as is_out_of_date on tree nodes; the whole-document verdict is workspace_orient.is_healthy). "
     "'include' pulls deeper: 'tree' (full component/occurrence tree; "
     "'max_depth'/'component' scope it), 'timeline' (the feature list; 'group'/'include_suppressed' "
-    "scope it), 'mode' (full capability map), 'configurations' (the config table). The default is "
+    "scope it), 'mode' (full capability map), 'configurations' (the config table), 'materials' / "
+    "'appearances' (the catalog to assign FROM: the document's entries plus a count-only census of "
+    "each loaded library; 'library' lists one, 'name_filter'/'max_results' page it). The default is "
     "safe to call blind and names its deeper slices."
 )
 
@@ -472,7 +500,8 @@ tool = (
     Tool.create_simple(name="design_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices to include: any of tree | timeline | mode | configurations "
-                           "(a list or comma-string). Omit for the orientation slice."})
+                           "| materials | appearances (a list or comma-string). Omit for the "
+                           "orientation slice."})
     .add_input_property("max_depth", {"type": "integer",
             "description": "Tree depth when include=tree (default 3, max 8)."})
     .add_input_property("component", {"type": "string",
@@ -481,6 +510,13 @@ tool = (
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",
             "description": "Only this timeline group when include=timeline."})
+    .add_input_property("library", {"type": "string",
+            "description": "One material library's entries, by exact name from the census the "
+                           "catalog slices return when this is omitted."})
+    .add_input_property("name_filter", {"type": "string",
+            "description": "Catalog entries whose name contains this text."})
+    .add_input_property("max_results", {"type": "integer",
+            "description": "Catalog rows per page (default 50, cap 200); the true total comes too."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

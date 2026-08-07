@@ -341,7 +341,13 @@ def _min_distance_cm(ea, eb):
     mr, err = _common.min_distance(ea, eb)
     if err:
         return None, None, err
-    return safe(lambda: mr.value, 0.0), mr, None
+    # None, never 0.0: every caller compares this against a tolerance, and a fabricated 0 would
+    # score an unreadable gap as CONTACT - the one answer a relation check must never invent.
+    value = safe(lambda: mr.value)
+    if not isinstance(value, (int, float)):
+        return None, None, ("the minimum distance could not be read off the measurement result, so "
+                            "the relation is UNKNOWN - it is not reported as touching.")
+    return value, mr, None
 
 
 def _rel_concentric(ea, ka, eb, kb, tol_cm, tol_deg, inv, units):

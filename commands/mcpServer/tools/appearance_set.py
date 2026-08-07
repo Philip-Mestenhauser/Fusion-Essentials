@@ -113,6 +113,43 @@ def _make_colored_appearance(design, rgb, opacity, name):
     return appr, reused, None
 
 
+def _occurrence_fanout(occ, appr_name):
+    """(reached, not_reached, unverified) after an OCCURRENCE-level appearance write.
+
+    MEASURED (probe_w10.log "W10 P5"): an occurrence-level assignment fans onto the occurrence's
+    bodies, but a body that already carried its own appearance kept it - while the occurrence's
+    .appearance still read back as the newly set one. So the occurrence read-back is not proof the
+    bodies changed; each body is compared by appearance NAME (a proxy body hands out a fresh wrapper
+    per read, so identity cannot carry the comparison), and what is reported is the OBSERVATION -
+    which appearance each body reads now - not a cause this function never read.
+
+    Anything the comparison cannot be made on is 'unverified', never a classification: a body whose
+    appearance declines to answer, and - since there is nothing to compare against - every body when
+    the newly set appearance's own name could not be read.
+
+    The CAUSE of a miss (BRepBody.appearanceSourceType, which separates a body carrying its own
+    appearance from one the occurrence reached) is deliberately not read here: that enum family is
+    not in the generated live_api_facts.ENUMS yet, and referencing an unmeasured family is what
+    test_enum_families_measured refuses. Measure it, then this can name the cause.
+    """
+    reached, not_reached, unverified = [], [], []
+    bodies = safe(lambda: occ.bRepBodies)
+    n = (safe(lambda: bodies.count, 0) or 0) if bodies is not None else 0
+    for i in range(n):
+        b = safe(lambda i=i: bodies.item(i))
+        if b is None:
+            continue
+        bname = safe(lambda b=b: b.name) or f"body #{i}"
+        got = safe(lambda b=b: b.appearance.name)
+        if got is None or appr_name is None:
+            unverified.append(bname)
+        elif got == appr_name:
+            reached.append(bname)
+        else:
+            not_reached.append({"body": bname, "appearance": got})
+    return reached, not_reached, unverified
+
+
 def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "") -> dict:
     """Apply a solid-color appearance override to the resolved target. WRITES."""
     rgb, cerr = _parse_color(color)
@@ -145,6 +182,8 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
 
     applied_to = []
     failed = []
+    not_reached = []
+    unverified = []
     if kind == "component":
         # a Component has no single .appearance; apply to each of its bodies. A failure on one body
         # must not hide that other bodies already got colored - collect per-body, don't abort the loop.
@@ -180,12 +219,24 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
                          "the override did not take.")
         # a BRepFace has no .name; fall back to the target description
         applied_to.append(safe(lambda: entity.name) or desc)
+        if kind == "occurrence":
+            # The occurrence read-back above agrees with what was just set even for a body the write
+            # never reached - read the BODIES back to publish where the color actually landed.
+            reached, not_reached, unverified = _occurrence_fanout(entity, safe(lambda: appr.name))
+            applied_to.extend(reached)
 
     note = ("Appearance override applied. Set a new color anytime; to revert, the override is on "
             "the body/occurrence (.appearance). Pair with view_screenshot to see it.")
     if failed:
         note = (f"Appearance applied to {len(applied_to)} of {len(applied_to) + len(failed)} bodies; "
                 f"{len(failed)} failed - see 'failed'. " + note)
+    if not_reached:
+        note = (f"PARTIAL: {len(not_reached)} body(ies) of this occurrence do NOT carry the new "
+                f"appearance ({', '.join(o['body'] for o in not_reached[:5])}) - each still reads the "
+                "one named in 'bodies_not_reached'; color those directly (target = the body). " + note)
+    if unverified:
+        note = (f"{len(unverified)} body(ies) could not be compared, so the color is UNCONFIRMED "
+                "there - see 'unverified_bodies'. " + note)
 
     result = {
         "applied": True,
@@ -201,6 +252,10 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
     }
     if failed:
         result["failed"] = failed
+    if not_reached:
+        result["bodies_not_reached"] = not_reached
+    if unverified:
+        result["unverified_bodies"] = unverified
     return ok(result)
 
 

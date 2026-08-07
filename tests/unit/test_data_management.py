@@ -13,6 +13,8 @@ the name; a write (dm.app / dm._data) is applied to EVERY module that already ha
 patched _data lands wherever a handler captured it by value.
 """
 
+import pytest
+
 from conftest import load_tool
 
 _data_common = load_tool("_data_common")
@@ -243,6 +245,25 @@ class TestSaveDocument:
         out = _payload(dm.save_document_handler())
         assert out["saved"] is True and out["already_current"] is True
         assert doc.saved_with is None
+
+    def test_a_forking_save_reports_the_new_lineage_loudly(self):
+        # A save can move the document onto a NEW lineage URN (the first save after a
+        # configured-design conversion does; the superseded URN keeps opening the pre-conversion file).
+        # The payload must carry the change, not just swap identities silently.
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True, data_file_id="urn:old")
+        doc.save = lambda d: (setattr(doc, "dataFile", _FakeDataFile("urn:new")),
+                              setattr(doc, "isModified", False), True)[-1]
+        _install_app([doc], active=doc)
+        out = _payload(dm.save_document_handler())
+        assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
+        assert "NEW LINEAGE" in out["note"] and "lineage_changed.to" in out["note"]
+
+    def test_a_same_lineage_save_reports_no_lineage_change(self):
+        doc = FakeDocument("PartA", is_saved=True, is_modified=True, data_file_id="urn:same")
+        _install_app([doc], active=doc)
+        out = _payload(dm.save_document_handler())
+        assert "lineage_changed" not in out
+        assert "NEW LINEAGE" not in out["note"]
 
     def test_false_success_still_modified_is_an_error(self, monkeypatch):
         # Document.save() returns True but the doc stays modified (Fusion silently declined to version,
@@ -884,3 +905,154 @@ class TestListFolders:
         top = {n["name"]: n for n in out["folders"]}
         assert set(top) == {"A", "B", "C"}                # every shallow folder listed first
         assert out["truncated"] is True
+
+
+# ── resolve_file_reference: ONE file, by URN or by name-in-a-project ────────
+#
+# The reference every file-scoped data tool resolves through (data_get(file=...),
+# data_download_file, data_move_file). A file NAME is not unique across a project's folders, so the
+# behaviour that matters is the REFUSAL: several matches must return the candidates, never the first.
+
+def _file_stub(name, urn):
+    import types
+    return types.SimpleNamespace(name=name, id=urn, versionId=urn + "?version=1",
+                                 fileExtension="txt", versionNumber=1, fusionWebURL="https://x/" + urn)
+
+
+def _folder_with_files(name, files=(), subs=(), is_root=False):
+    folder = FakeProjFolder(name, is_root=is_root)
+    folder._files = list(files)
+    for s in subs:
+        folder._children.append(s)
+        s.parentFolder = folder
+    return folder
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    """Install a project tree plus the URN lookup the resolver finishes through."""
+    def _use(root, files_by_urn=None):
+        import types
+        proj = FakeProj("MCP Test Project", "proj-1", root)
+        table = dict(files_by_urn or {})
+        data = types.SimpleNamespace(dataProjects=FakeProjects([proj]),
+                                     findFileById=lambda urn: table.get(urn))
+        monkeypatch.setattr(_data_common, "app", types.SimpleNamespace(data=data))
+        return proj
+    return _use
+
+
+class TestNameExtension:
+    def test_reads_the_extension_off_the_name(self):
+        assert _data_common.name_extension("probe_note.txt") == "txt"
+        assert _data_common.name_extension("Bracket Drawing.F2D") == "f2d"
+
+    def test_a_name_without_an_extension_reports_none(self):
+        # '' is the honest answer, and a real case: a Fusion design's DataFile name carries no
+        # extension (measured), so the caller falls back to fileExtension rather than guessing here.
+        assert _data_common.name_extension("Bracket") == ""
+        assert _data_common.name_extension(None) == ""
+
+
+class TestResolveFileReference:
+    def _one_deep_tree(self):
+        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
+        parts = _folder_with_files("Parts", files=[_file_stub("Vise", "urn:lin:BBB")])
+        return _folder_with_files("Root", subs=[docs, parts], is_root=True)
+
+    def test_a_urn_resolves_without_a_project(self, cloud):
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
+        got, meta, err = _data_common.resolve_file_reference("urn:lin:AAA")
+        assert err is None and got is df
+        assert meta["matched_by"] == "urn"
+
+    def test_an_unresolvable_urn_says_what_was_tried(self, cloud):
+        cloud(self._one_deep_tree(), {})
+        got, _meta, err = _data_common.resolve_file_reference("urn:lin:MISSING")
+        assert got is None and "urn:lin:MISSING" in err
+
+    def test_a_bare_name_without_a_project_is_refused(self, cloud):
+        cloud(self._one_deep_tree(), {})
+        got, _meta, err = _data_common.resolve_file_reference("probe_note.txt")
+        assert got is None and "'project'" in err
+
+    def test_a_unique_name_resolves_and_reports_its_folder(self, cloud):
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
+        got, meta, err = _data_common.resolve_file_reference(
+            "probe_note.txt", project="MCP Test Project")
+        assert err is None and got is df
+        assert meta["matched_by"] == "name" and meta["folder_path"] == "Docs"
+
+    def test_the_match_is_case_insensitive(self, cloud):
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "PROBE_NOTE.TXT", project="MCP Test Project")
+        assert err is None and got is df
+
+    def test_a_partial_name_never_matches(self, cloud):
+        # 'note' must not grab 'probe_note.txt' - a substring resolver picks the wrong file silently.
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": _file_stub("probe_note.txt", "urn:lin:AAA")})
+        got, _meta, err = _data_common.resolve_file_reference("note", project="MCP Test Project")
+        assert got is None and "No file named 'note'" in err
+        assert "probe_note.txt" in err                    # what IS there
+
+    def test_a_name_in_two_folders_is_refused_with_both_candidates(self, cloud):
+        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
+        parts = _folder_with_files("Parts", files=[_file_stub("notes.txt", "urn:lin:BBB")])
+        root = _folder_with_files("Root", subs=[docs, parts], is_root=True)
+        cloud(root, {"urn:lin:AAA": _file_stub("notes.txt", "urn:lin:AAA")})
+        got, _meta, err = _data_common.resolve_file_reference("notes.txt", project="MCP Test Project")
+        assert got is None                                # never the first hit
+        assert "names 2 files" in err
+        assert "urn:lin:AAA" in err and "urn:lin:BBB" in err
+        assert "Docs" in err and "Parts" in err
+
+    def test_a_folder_scope_disambiguates_the_same_name(self, cloud):
+        wanted = _file_stub("notes.txt", "urn:lin:BBB")
+        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
+        parts = _folder_with_files("Parts", files=[wanted])
+        root = _folder_with_files("Root", subs=[docs, parts], is_root=True)
+        cloud(root, {"urn:lin:BBB": wanted})
+        got, meta, err = _data_common.resolve_file_reference(
+            "notes.txt", project="MCP Test Project", folder="Parts")
+        assert err is None and got is wanted
+        assert meta["folder_path"] == "Parts"
+
+    def test_a_missing_scope_folder_is_named(self, cloud):
+        cloud(self._one_deep_tree(), {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "notes.txt", project="MCP Test Project", folder="Nope")
+        assert got is None and "missing segment 'Nope'" in err
+
+    def test_an_unknown_project_lists_the_ones_there_are(self, cloud):
+        cloud(self._one_deep_tree(), {})
+        got, _meta, err = _data_common.resolve_file_reference("notes.txt", project="Ghost")
+        assert got is None and "MCP Test Project" in err
+
+    def test_a_match_inside_a_capped_listing_is_flagged_not_claimed_unique(self, cloud, monkeypatch):
+        # Uniqueness is only proven over what was actually walked - a capped listing never compared
+        # the rest, so the caller is told instead of being left to assume.
+        import mcpServer.tools._data_read as data_read
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        docs = _folder_with_files("Docs", files=[df, _file_stub("other.txt", "urn:lin:BBB")])
+        cloud(_folder_with_files("Root", subs=[docs], is_root=True), {"urn:lin:AAA": df})
+        monkeypatch.setattr(data_read, "_MAX_FILES", 1)
+        got, meta, err = _data_common.resolve_file_reference(
+            "probe_note.txt", project="MCP Test Project")
+        assert err is None and got is df
+        assert meta["scope_truncated"] is True
+
+    def test_a_complete_listing_is_not_flagged(self, cloud):
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
+        _got, meta, _err = _data_common.resolve_file_reference(
+            "probe_note.txt", project="MCP Test Project")
+        assert meta["scope_truncated"] is False
+
+    def test_an_empty_reference_is_refused(self, cloud):
+        cloud(self._one_deep_tree(), {})
+        got, _meta, err = _data_common.resolve_file_reference("")
+        assert got is None and "Provide 'file'" in err

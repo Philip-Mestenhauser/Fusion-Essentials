@@ -137,44 +137,52 @@ def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, st
     verified separately by verify_written/_assert.DeliverablesExist) - mirrors mesh_export.py's
     _apply_refinement. Returns a dict of the knobs that were requested and whether each took.
     """
-    applied = {}
+    applied, refused = {}, []
+
+    def knob(name, prop, want, report):
+        """Set `prop`, read it back, and record the VALUE that landed - not whether it stuck. A
+        did-it-stick boolean under the knob's own name reads exactly like the value it is not
+        ('stl_binary': true on an ASCII file), which is the whole point of reporting it."""
+        safe(lambda: setattr(opts, prop, want))
+        if safe(lambda: getattr(opts, prop)) == want:
+            applied[name] = report
+        else:
+            refused.append(name)
+
     if incl_bodies:
-        safe(lambda: setattr(opts, "isIncludingInvisibleBodies", True))
-        applied["invisible_bodies"] = safe(lambda: opts.isIncludingInvisibleBodies) is True
+        knob("invisible_bodies", "isIncludingInvisibleBodies", True, True)
     if incl_comps:
-        safe(lambda: setattr(opts, "isIncludingInvisibleComponents", True))
-        applied["invisible_components"] = safe(lambda: opts.isIncludingInvisibleComponents) is True
+        knob("invisible_components", "isIncludingInvisibleComponents", True, True)
     if fmt == "stl":
         if stl_binary is not None:
-            safe(lambda: setattr(opts, "isBinaryFormat", bool(stl_binary)))
-            applied["stl_binary"] = safe(lambda: opts.isBinaryFormat) == bool(stl_binary)
+            knob("stl_binary", "isBinaryFormat", bool(stl_binary), bool(stl_binary))
         if stl_unit_key:
             val = _stl_unit_enum(stl_unit_key)
-            if val is not None:
-                safe(lambda: setattr(opts, "unitType", val))
-                applied["stl_units"] = safe(lambda: opts.unitType) == val
+            if val is None:
+                refused.append("stl_units")
             else:
-                applied["stl_units"] = False
-    return applied
+                knob("stl_units", "unitType", val, stl_unit_key)
+    return applied, refused
 
 
 def _export_one(em, factory_name, geom_first, geom, path, configure=None):
     """Write one geometry to one path. 'configure', if given, receives the created options object
-    BEFORE execute() and returns an {applied} dict (see _configure_export_options) - never raises,
-    a decorative-option failure never blocks the export. Returns (ok_bool, error_or_None, applied)."""
+    BEFORE execute() and returns (applied, refused) - see _configure_export_options. It never
+    raises: a decorative-option failure never blocks the export. Returns
+    (ok_bool, error_or_None, (applied, refused))."""
     factory = getattr(em, factory_name)
-    applied = {}
+    knobs = ({}, [])
     try:
         # STL/OBJ/3MF's API signature is (geometry, filename); the others are (filename, geometry).
         opts = factory(geom, path) if geom_first else factory(path, geom)
         if configure:
-            applied = configure(opts) or {}
+            knobs = configure(opts) or ({}, [])
         did = em.execute(opts)
     except Exception as e:
-        return False, str(e), {}
+        return False, str(e), ({}, [])
     if not did:
-        return False, "export returned false - nothing was written", {}
-    return True, None, applied
+        return False, "export returned false - nothing was written", ({}, [])
+    return True, None, knobs
 
 
 def _write_dxf(design, sk, path, want_construction, want_points, want_projected):
@@ -463,8 +471,15 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     "note": ("Exported to local disk. To round-trip into the cloud, upload it with "
             "data_upload_file (STEP/IGES are translated to a Fusion design on the cloud)."),
     }
+    applied_opts, refused_opts = applied_opts
     if applied_opts:
+        # The VALUE each knob actually holds, read back off the options object - never a
+        # did-it-stick flag under the knob's own name.
         out["options_applied"] = applied_opts
+    if refused_opts:
+        out["options_refused"] = refused_opts
+        out["note"] += (" The export landed, but Fusion did not take these options: "
+                        + ", ".join(refused_opts) + ".")
     return ok(out)
 
 

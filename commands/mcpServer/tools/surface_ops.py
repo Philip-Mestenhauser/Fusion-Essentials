@@ -40,7 +40,8 @@ def _result_body_report(feature):
 
 # LOFT
 _LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True,
-    description="The profiles to loft through (>=2).")   # ordered/load-bearing comes from the kind note
+    description="The profiles to loft through (>=2) - order is load-bearing, the loft runs through "
+                "them in the order given.")
 _LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False,
     description="Optional guide curves (rails) the loft follows. Mutually exclusive with 'centerline'.")
 _LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=False,
@@ -62,7 +63,7 @@ _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=F
 # ── LOFT ─────────────────────────────────────────────────────────────────────
 
 def loft_handler(profiles=None, rails=None, centerline="", operation="new",
-                 as_surface=None) -> dict:
+                 as_surface=None, is_closed=None) -> dict:
     """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATIONS:
@@ -127,6 +128,15 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         except Exception as e:
             return error(f"Could not set loft solid/surface mode: {e}")
 
+    # isClosed has no independent effect the result bodies show, so the set-then-read-back on the
+    # input is what proves it took (a SWIG proxy accepts an unknown property name silently). Two
+    # sections are enough for a closed loft - measured, so there is no >=3 guard.
+    if is_closed is not None:
+        cerr = _common.set_verified(loft_input, "isClosed", bool(is_closed),
+                                    f"is_closed={bool(is_closed)}", "LoftFeatureInput")
+        if cerr:
+            return error(cerr)
+
     try:
         feature = root.features.loftFeatures.add(loft_input)
     except Exception as e:
@@ -134,11 +144,11 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                      f"self-intersecting path). Profiles must be the same kind and orderable into a "
                      f"single sweep. ({e})")
     if not feature:
-        return error("Loft returned no feature.")
+        return error(_common.no_feature_error(design, "Loft"))
 
     body_names, _flags = _result_body_report(feature)
     is_solid = safe(lambda: feature.isSolid)
-    return ok({
+    payload = {
         "lofted": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -150,7 +160,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         "note": ("Lofted through %d profiles in order. " % len(secs)) + (
             "Result is a SOLID." if is_solid else
             "Result is a SURFACE - pair with model_stitch/model_thicken to close it."),
-    })
+    }
+    if is_closed is not None:
+        payload["is_closed"] = bool(is_closed)
+    return ok(payload)
 
 
 # ── STITCH ────────────────────────────────────────────────────────────────────
@@ -203,7 +216,7 @@ def stitch_handler(bodies=None, tolerance=None, units="mm", operation="new") -> 
     except Exception as e:
         return error(f"Stitch failed: {e}. (Surfaces must be adjacent/overlapping within tolerance.)")
     if not feature:
-        return error("Stitch returned no feature.")
+        return error(_common.no_feature_error(design, "Stitch"))
 
     # HONEST result: read each RESULT body's isSolid back. became_solid is true ONLY if every result
     # body is a closed solid; gaps>tolerance leave an open surface and we say so - never fake success.
@@ -271,8 +284,9 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
         return error(f"Unstitch failed: {e}. (Target may already be loose surfaces, or the faces "
     "aren't unstitchable.)")
     if not feature:
-        return error("Unstitch failed: target may already be loose surfaces, or the faces aren't "
-    "unstitchable.")
+        return error(_common.no_feature_error(design, "Unstitch",
+                                              "The target may already be loose surfaces, or the "
+                                              "faces are not unstitchable."))
 
     body_names, _flags = _result_body_report(feature)
     return ok({
@@ -293,7 +307,8 @@ LOFT_DESCRIPTION = (
 "Loft a body through an ORDERED list of >=2 profiles (the loft runs through them in the order "
 "given - order is load-bearing), optionally shaped by 'rails' (guide curves) OR a single "
 "'centerline' (mutually exclusive). 'as_surface' forces "
-"a surface loft (isSolid=False). Reports 'is_solid' read back off the feature. "
+"a surface loft (isSolid=False). 'is_closed' closes the loft back on itself - the first profile is "
+"reused as the last. Reports 'is_solid' read back off the feature. "
 "Pair with model_stitch to close surfaces, or view_screenshot to view."
 )
 
@@ -305,6 +320,8 @@ loft_tool = (
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property("as_surface", {"type": "boolean",
             "description": "Force a SURFACE loft (isSolid=False). Default: the API's default (a solid is attempted)."})
+    .add_input_property("is_closed", {"type": "boolean",
+            "description": "Close the loft ring back through the first profile."})
     .add_required_input("profiles")
     .strict_schema()
 )

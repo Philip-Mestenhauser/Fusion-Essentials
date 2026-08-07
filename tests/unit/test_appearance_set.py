@@ -174,6 +174,30 @@ class FakeOcc:
         self.component = component or FakeComponent(name + "_comp")
 
 
+class FanoutOcc(FakeOcc):
+    """An occurrence whose .appearance assignment fans onto its bodies the way Fusion's does
+    (MEASURED, probe_w10.log "W10 P5"): every body without an override of its own takes the new
+    appearance, a body holding a body-level override silently KEEPS it, and the occurrence's own
+    .appearance still reads back as the newly assigned one either way. `silent` bodies model a body
+    whose appearance read declines to answer (stays None)."""
+
+    def __init__(self, name, bodies=(), keeps_override=(), silent=()):
+        self._keeps = set(keeps_override)
+        self._silent = set(silent)
+        super().__init__(name, bodies=bodies)
+        for b in bodies:
+            if b.name in self._keeps:
+                b.appearance = FakeAppearance("OwnColor_" + b.name)
+
+    def __setattr__(self, key, value):
+        object.__setattr__(self, key, value)
+        if key == "appearance" and value is not None:
+            for i in range(self.bRepBodies.count):
+                b = self.bRepBodies.item(i)
+                if b.name not in self._keeps and b.name not in self._silent:
+                    b.appearance = value
+
+
 class FakeOccs:
     def __init__(self, occs):
         self._o = {o.name: o for o in occs}
@@ -433,6 +457,76 @@ class TestGuards:
 
         res = ap.handler(target="Body1", color="#000000")
         assert res["isError"] is True and "color property" in res["message"].lower()
+
+
+# ── occurrence fan-out: where an occurrence-level write actually landed ───────
+
+class TestOccurrenceFanout:
+    """An occurrence write is NOT one assignment: it fans onto the bodies, and the occurrence's own
+    read-back agrees with what was set even for bodies it never reached. The payload publishes the
+    real reach, so a caller is never told a body changed when it did not."""
+
+    def test_applied_to_names_the_occurrence_and_every_body_reached(self):
+        b1, b2 = FakeBody("B1"), FakeBody("B2")
+        occ = FanoutOcc("Wheel:1", bodies=[b1, b2])
+        design, apps = _install(FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        assert out["applied_to"] == ["Wheel:1", "B1", "B2"]
+        assert "bodies_not_reached" not in out and "unverified_bodies" not in out
+
+    def test_body_the_write_did_not_reach_is_disclosed_as_a_partial_not_swallowed(self):
+        b1, b2 = FakeBody("Kept"), FakeBody("Reached")
+        occ = FanoutOcc("Wheel:1", bodies=[b1, b2], keeps_override=["Kept"])
+        design, apps = _install(FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        # a disclosed partial: still applied, but 'Kept' is named as NOT reached
+        assert out["applied"] is True
+        assert out["applied_to"] == ["Wheel:1", "Reached"]
+        assert out["bodies_not_reached"] == [{"body": "Kept", "appearance": "OwnColor_Kept"}]
+        assert "PARTIAL" in out["note"] and "Kept" in out["note"]
+        assert b1.appearance.name == "OwnColor_Kept"          # the body genuinely kept its own
+
+    def test_the_note_and_the_key_report_the_observation_not_an_unread_cause(self):
+        # The tool reads WHICH appearance each body carries; it never reads why
+        # (BRepBody.appearanceSourceType is not consulted). So neither the note NOR the payload key
+        # may name a body-level override as the cause - a key called 'overridden_bodies' asserts
+        # exactly what the note is careful not to.
+        occ = FanoutOcc("Wheel:1", bodies=[FakeBody("Kept")], keeps_override=["Kept"])
+        design, apps = _install(FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        partial = out["note"].split("Appearance override applied")[0]   # the fan-out clause only
+        assert "do NOT carry the new appearance" in partial
+        assert "override" not in partial.lower()                    # no cause the tool never read
+        assert "Kept" in partial
+        assert "bodies_not_reached" in out                          # the key states the observation
+        assert not [k for k in out if "overridden" in k]
+
+    def test_unreadable_appearance_name_classifies_nothing_it_could_not_compare(self):
+        # If the appearance just set cannot report its own NAME there is nothing to compare against,
+        # so every body is UNVERIFIED. Calling them not-reached would publish a comparison the tool
+        # never made - a fabricated classification.
+        b1, b2 = FakeBody("B1"), FakeBody("B2")
+        b1.appearance = FakeAppearance("Blue")
+        b2.appearance = FakeAppearance("Green")
+        occ = FakeOcc("Wheel:1", bodies=[b1, b2])
+        reached, not_reached, unverified = ap._occurrence_fanout(occ, None)
+        assert reached == [] and not_reached == []
+        assert unverified == ["B1", "B2"]
+
+    def test_body_whose_appearance_does_not_read_back_is_unverified_not_applied(self):
+        b1, b2 = FakeBody("Quiet"), FakeBody("Reached")
+        occ = FanoutOcc("Wheel:1", bodies=[b1, b2], silent=["Quiet"])
+        design, apps = _install(FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        assert out["applied_to"] == ["Wheel:1", "Reached"]     # never counted as applied
+        assert out["unverified_bodies"] == ["Quiet"]
+        assert "UNCONFIRMED" in out["note"]
+
+    def test_bodyless_occurrence_reports_just_the_occurrence(self):
+        occ = FanoutOcc("Empty:1", bodies=[])
+        design, apps = _install(FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Empty:1", color="#1E8E3E"))
+        assert out["applied_to"] == ["Empty:1"]
 
 
 # ── partial success: one body of a component fails, others still get colored ──

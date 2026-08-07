@@ -2,7 +2,8 @@
 
 The VALUE of this tool is the baked-in runtime rules, so that's what's pinned: `_joint_geometry_for`
 must pick a VALID keypoint by entity kind — a cylinder/cone face uses MiddleKeyPoint (CenterKeyPoint
-is invalid on a cylinder/cone face), a planar face uses CenterKeyPoint, a circular edge uses center,
+is invalid on a cylinder/cone face), a sphere/torus face uses CenterKeyPoint (MiddleKeyPoint is the
+one the API refuses there), a planar face uses CenterKeyPoint, a circular edge uses center,
 a vertex uses createByPoint. Plus the motion mapping and the handle-resolution guards. The geometry
 construction is captured on fakes so we assert which JointGeometry factory + keypoint were used,
 without a live design.
@@ -40,6 +41,17 @@ class _Recorder:
         self.calls.append(("point", None)); return ("geo", "point", None)
 
 
+# The verbatim message createByNonPlanarFace raises when the keypoint is wrong for the face type.
+_KEYPOINT_RAISE = "3 : Key point type should be CenterKeyPoint, if the face is sphere and torus face"
+
+
+class _RaisingRecorder(_Recorder):
+    """createByNonPlanarFace raises the way the live API does for a keypoint a face type refuses."""
+    def createByNonPlanarFace(self, face, kp):
+        self.calls.append(("nonplanar", kp))
+        raise RuntimeError(_KEYPOINT_RAISE)
+
+
 # entity-kind fakes — must pass the isinstance() checks in the handler, so we monkeypatch the
 # adsk.fusion class symbols the handler tests against to these fakes.
 class FakeBRepFace:
@@ -71,8 +83,8 @@ class _MovingOcc:
         return type("M", (), {"translation": vec})()
 
 
-def _install(monkeypatch):
-    rec = _Recorder()
+def _install(monkeypatch, rec=None):
+    rec = rec if rec is not None else _Recorder()
     # JointGeometry factory -> our recorder
     monkeypatch.setattr(adsk.fusion, "JointGeometry", rec)
     # make the handler's isinstance checks use our fakes
@@ -101,10 +113,46 @@ class TestJointGeometryRules:
         assert err is None and g[2] == _KP.MiddleKeyPoint
 
     def test_planar_face_uses_CENTER(self, monkeypatch):
-        _install(monkeypatch)
+        rec = _install(monkeypatch)
         g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.PlaneSurfaceType))
         assert err is None
         assert g[1] == "planar" and g[2] == _KP.CenterKeyPoint
+        # the planar path is the ONLY factory a planar face touches - never createByNonPlanarFace
+        assert rec.calls == [("planar", _KP.CenterKeyPoint)]
+
+    def test_sphere_face_uses_CENTER_via_nonplanar(self, monkeypatch):
+        # A sphere face accepts ONLY CenterKeyPoint; MiddleKeyPoint raises. Live: CenterKeyPoint
+        # returns a JointGeometry at the sphere centre.
+        rec = _install(monkeypatch)
+        g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.SphereSurfaceType))
+        assert err is None
+        assert g[1] == "nonplanar" and g[2] == _KP.CenterKeyPoint
+        assert label == "sphere_face@center"
+        assert rec.calls == [("nonplanar", _KP.CenterKeyPoint)]
+
+    def test_torus_face_uses_CENTER_via_nonplanar(self, monkeypatch):
+        # Measured on a live torus face (surfaceType 4): MiddleKeyPoint raises the same keypoint
+        # sentence the sphere raised, CenterKeyPoint returns a JointGeometry at the torus centre.
+        _install(monkeypatch)
+        g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.TorusSurfaceType))
+        assert err is None
+        assert g[1] == "nonplanar" and g[2] == _KP.CenterKeyPoint
+        assert label == "torus_face@center"
+
+    def test_other_nonplanar_face_still_uses_MIDDLE(self, monkeypatch):
+        # only sphere/torus move to the centre keypoint - a NURBS face keeps the middle fallback
+        _install(monkeypatch)
+        g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.NurbsSurfaceType))
+        assert err is None and g[2] == _KP.MiddleKeyPoint
+        assert label == "nonplanar_face@middle"
+
+    def test_api_raise_text_reaches_the_error(self, monkeypatch):
+        # the platform's own sentence names the keypoint the face demands - it must not be flattened
+        # to "createByNonPlanarFace failed", which tells the caller nothing actionable.
+        _install(monkeypatch, _RaisingRecorder())
+        g, label, err = jg._joint_geometry_for(FakeBRepFace(_ST.CylinderSurfaceType))
+        assert g is None
+        assert "should be CenterKeyPoint" in err and "sphere and torus" in err
 
     def test_circular_edge_uses_center(self, monkeypatch):
         _install(monkeypatch)
@@ -154,8 +202,8 @@ class _FakeJoints:
                               "occurrenceTwo": type("O", (), {"name": "Crank:1"})()})()
 
 
-def _install_design(monkeypatch, token_map, joint_health=0, joint_msg=""):
-    rec = _install(monkeypatch)
+def _install_design(monkeypatch, token_map, joint_health=0, joint_msg="", rec=None):
+    rec = _install(monkeypatch, rec)
     joints = _FakeJoints(joint_health, joint_msg)
     root = type("R", (), {"joints": joints})()
     class FakeDesign:
@@ -189,12 +237,13 @@ class TestHandler:
         assert res["isError"] is True
         assert "handle_two" in res["message"] and "did not resolve" in res["message"]
 
-    def test_revolute_forced_world_axis(self, monkeypatch):
+    def test_revolute_named_axis_is_frame_relative(self, monkeypatch):
         joints = _install_design(monkeypatch, {"rod": FakeBRepFace(_ST.CylinderSurfaceType), "pin": FakeBRepFace(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="rod", handle_two="pin", motion="revolute", axis="x"))
         assert out["jointed"] is True
         assert out["occurrence_one"] == "Rod:1" and out["occurrence_two"] == "Crank:1"
-        # axis='x' forces the world X direction (no custom-axis entity)
+        # axis='x' passes XAxisJointDirection with NO custom entity - the joint FRAME's X, which is
+        # world X only when the picked geometry's frame is world-aligned.
         assert joints.last_input.motion == ("revolute", _JD.XAxisJointDirection)
 
     def test_revolute_auto_axis_uses_geometry_axis(self, monkeypatch):
@@ -244,23 +293,23 @@ class TestHandler:
         assert joints.last_input.motion == ("ball", _JD.ZAxisJointDirection, _JD.XAxisJointDirection)
         assert out["jointed"] is True
 
-    def test_slider_forced_world_axis(self, monkeypatch):
-        # axis='z' on cylinder faces still FORCES the world Z direction (no CustomJointDirection).
+    def test_slider_named_axis_is_frame_relative(self, monkeypatch):
+        # axis='z' on cylinder faces takes the frame-relative Z direction (no CustomJointDirection).
         joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="slider", axis="z"))
         assert joints.last_input.motion == ("slider", _JD.ZAxisJointDirection)
 
-    def test_cylindrical_forced_world_axis(self, monkeypatch):
+    def test_cylindrical_named_axis_is_frame_relative(self, monkeypatch):
         joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="cylindrical", axis="y"))
         assert joints.last_input.motion == ("cyl", _JD.YAxisJointDirection)
 
-    def test_auto_axis_with_no_geometry_axis_falls_back_to_world_z(self, monkeypatch):
+    def test_auto_axis_with_no_geometry_axis_falls_back_to_frame_z(self, monkeypatch):
         # PLANAR faces give _axis_entity nothing -> 'auto' can't derive an axis; the motion uses the
-        # default world Z direction and the reported axis is plain 'auto', NOT 'auto(geometry)'.
+        # default frame-relative Z direction and the reported axis is plain 'auto', NOT 'auto(geometry)'.
         joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType), "b": FakeBRepFace(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
-        assert joints.last_input.motion == ("revolute", _JD.ZAxisJointDirection)   # world Z, not CUSTOM
+        assert joints.last_input.motion == ("revolute", _JD.ZAxisJointDirection)   # frame Z, not CUSTOM
         assert out["axis"] == "auto"
 
     def test_unknown_axis_keyword_errors(self, monkeypatch):
@@ -339,6 +388,39 @@ class TestHandler:
         res = jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="x")
         assert res["isError"] is True
         assert "Could not set revolute motion" in res["message"]
+        assert "pass axis=x/y/z" in res["message"]      # a motion WITH an axis gets the axis advice
+
+    def test_ball_motion_failure_carries_no_axis_advice(self, monkeypatch):
+        # setAsBallJointMotion never reads 'axis', so telling a failed ball caller to pass one
+        # contradicts the input's own "ball uses none" and sends them after a knob that does nothing.
+        joints = _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType), "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+        orig = joints.createInput
+        def make(g1, g2):
+            ji = orig(g1, g2)
+            ji.setAsBallJointMotion = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("rejected"))
+            return ji
+        joints.createInput = make
+        res = jg.handler(handle_one="a", handle_two="b", motion="ball")
+        assert res["isError"] is True
+        assert "Could not set ball motion" in res["message"]
+        assert "axis=" not in res["message"]
+
+    def test_sphere_face_handle_joints_instead_of_being_refused(self, monkeypatch):
+        # a sphere face IS supported joint geometry - it just needs CenterKeyPoint; the handler must
+        # build it, not refuse the handle.
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.SphereSurfaceType),
+                                      "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball"))
+        assert out["jointed"] is True and out["geometry_one"] == "sphere_face@center"
+
+    def test_keypoint_raise_reaches_the_handler_error(self, monkeypatch):
+        # the API's own actionable sentence must survive to the caller, named to the offending input
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                      "b": FakeBRepFace(_ST.CylinderSurfaceType)},
+                        rec=_RaisingRecorder())
+        res = jg.handler(handle_one="a", handle_two="b", motion="revolute")
+        assert res["isError"] is True
+        assert "handle_one" in res["message"] and "should be CenterKeyPoint" in res["message"]
 
     def test_flip_sets_isFlipped_on_the_joint_input(self, monkeypatch):
         # flip=true must reach the JointInput BEFORE add() - a dropped flag silently recreates the
@@ -355,6 +437,63 @@ class TestHandler:
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert not getattr(joints.last_input, "isFlipped", False)
         assert out["flipped"] is False
+
+
+class TestAxisNote:
+    """The note must state what the motion axis ACTUALLY is. A named x/y/z takes the frame-relative
+    path: measured on a 120-deg-rotated frame, axis='y' drove about the frame's Y, (0,-0.5,0.866) -
+    120 deg off world Y. Claiming a world axis there would be a false claim on the wire. A ball joint
+    takes NO axis at all, so it gets no axis claim in either the note or the payload."""
+
+    def _cyl_pair(self, monkeypatch):
+        return _install_design(monkeypatch, {"a": FakeBRepFace(_ST.CylinderSurfaceType),
+                                             "b": FakeBRepFace(_ST.CylinderSurfaceType)})
+
+    def test_named_axis_note_says_frame_not_world(self, monkeypatch):
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute", axis="y"))
+        assert "FRAME's y axis, NOT world y" in out["note"]
+        assert "joint_edit(world_axis=" in out["note"]
+
+    def test_auto_geometry_axis_note_credits_the_geometry(self, monkeypatch):
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert "derived the motion axis from the geometry" in out["note"]
+        assert "NOT world" not in out["note"]
+
+    def test_auto_without_a_geometry_axis_still_warns_frame_relative(self, monkeypatch):
+        # planar faces -> no derivable axis, so the frame-relative default Z is what was used
+        _install_design(monkeypatch, {"a": FakeBRepFace(_ST.PlaneSurfaceType),
+                                      "b": FakeBRepFace(_ST.PlaneSurfaceType)})
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+        assert "FRAME's z axis, NOT world z" in out["note"]
+
+    def test_rigid_note_makes_no_axis_claim(self, monkeypatch):
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert "axis" not in out["note"]
+
+    def test_ball_note_makes_no_axis_claim_even_with_a_named_axis(self, monkeypatch):
+        # setAsBallJointMotion hard-codes pitch=Z / yaw=X and reads NEITHER the axis keyword nor a
+        # custom entity - a ball landed with axis='x' is identical to one landed with 'auto'. Any
+        # axis sentence here (frame-relative OR geometry-derived) would be a measured-false claim.
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball", axis="x"))
+        assert "FRAME's" not in out["note"]
+        assert "world_axis=" not in out["note"]
+        assert "derived the motion axis" not in out["note"]
+
+    def test_ball_payload_axis_is_null(self, monkeypatch):
+        # cylinder faces make _axis_entity fire, so the un-carved payload would report
+        # 'auto(geometry)' - false: the ball motion consumed no axis entity at all.
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball"))
+        assert out["axis"] is None
+
+    def test_ball_payload_axis_is_null_with_a_named_axis(self, monkeypatch):
+        self._cyl_pair(monkeypatch)
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball", axis="x"))
+        assert out["axis"] is None
 
 
 class TestFlipHint:
@@ -389,6 +528,52 @@ class TestFlipHint:
         _install_design(monkeypatch, {"a": fa, "b": fb})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "flip_hint" not in out
+
+
+class TestAxisSchema:
+    def test_axis_reaches_the_wire_as_a_validated_enum(self):
+        # The legal values must be carried by the SCHEMA, where they are machine-validated, not
+        # asserted in prose that drifts. Read off the BUILT tool, so unwiring the kind fails too.
+        props = jg.joint_at_tool.to_dict()["inputSchema"]["properties"]
+        assert props["axis"]["enum"] == ["auto", "x", "y", "z"]
+        assert jg._AXIS.default == "auto"
+        # the one axis fact no enum can carry: a ball joint reads no axis at all
+        assert "ball uses none" in props["axis"]["description"]
+
+
+class TestAsBuiltRigidRefusal:
+    """A rigid as-built joint carries NO joint geometry ("Geometry should not be null if joint motion
+    is not rigid"), so the API cannot redefine it as a motion joint. The refusal must point at the
+    tool that CAN build one - joint_create_as_built, which takes the 'geometry' the motion anchors on
+    - rather than fail bare, and it must not attempt the setter first."""
+
+    def _as_built(self, monkeypatch, geometry):
+        class FakeAsBuilt:
+            def __init__(self):
+                self.geometry = geometry
+                self.calls = []
+            def setAsRevoluteJointMotion(self, *args):
+                self.calls.append(args); return True
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", FakeAsBuilt)
+        return FakeAsBuilt()
+
+    def test_refusal_points_at_the_tool_that_can_build_the_motion_joint(self, monkeypatch):
+        ji = self._as_built(monkeypatch, None)
+        did, err = jg.apply_motion(ji, "revolute", 2)
+        assert did is False
+        # the pointer must name the tool AND the input that makes it work, or it is not actionable
+        assert "joint_create_as_built" in err and "'geometry'" in err
+        assert "revolute" in err                      # names the motion that was refused
+        assert ji.calls == []                         # nothing attempted on the joint
+
+    def test_as_built_with_geometry_takes_the_extra_arity_setter(self, monkeypatch):
+        # the refusal is scoped to the no-geometry case: an as-built joint that HAS an anchor is
+        # redefined through the setter's as-built arity (direction, geometry).
+        geom = object()
+        ji = self._as_built(monkeypatch, geom)
+        did, err = jg.apply_motion(ji, "revolute", 1)
+        assert did is True and err is None
+        assert ji.calls == [(_JD.YAxisJointDirection, geom)]
 
 
 class TestModelParameters:

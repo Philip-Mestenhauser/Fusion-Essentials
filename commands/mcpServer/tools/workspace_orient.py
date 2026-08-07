@@ -91,8 +91,17 @@ def _data_identity(doc):
         return ident       # never-saved doc: no data-model identity yet (saved_to_cloud stays false)
     ident["saved_to_cloud"] = True
     ident["document_id"] = safe(lambda: df.id)
+    # Both numbers come off the ONE DataFile handle this open document holds. Measured (see
+    # doc_save_milestone._refetch): that handle KEEPS its pre-save values while a fresh
+    # findFileById already reports the new tip - so after a save the two can disagree with each
+    # other and with the cloud. This read does not pay the refetch, so it says which handle it read.
     ident["version_number"] = safe(lambda: df.versionNumber)
     ident["latest_version_number"] = safe(lambda: df.latestVersionNumber)
+    ident["version_lag_note"] = (
+        "version_number / latest_version_number are read off the DataFile handle this open document "
+        "HOLDS, and that handle keeps its pre-save values after a save (so the two can disagree with "
+        "each other and with the cloud) - the version_confirmed a doc_save returns, or a fresh "
+        "data_get on the URN, is the post-save read to trust.")
     ident["web_url"] = safe(lambda: df.fusionWebURL)
 
     folder = safe(lambda: df.parentFolder)

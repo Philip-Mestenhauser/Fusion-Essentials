@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 151  |  read: 27  |  write: 112  |  destructive: 11  |  script-hatch: 1
+**Tools:** 183  |  read: 28  |  write: 138  |  destructive: 16  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -21,7 +21,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (27)
+### read - safe to auto-allow (28)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
@@ -45,13 +45,14 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__sys_capability_map`
 - `mcp__fusion-essentials__sys_find_tool`
 - `mcp__fusion-essentials__sys_get_api_doc`
+- `mcp__fusion-essentials__sys_get_preferences`
 - `mcp__fusion-essentials__sys_get_selection`
 - `mcp__fusion-essentials__view_list_workspaces`
 - `mcp__fusion-essentials__view_screenshot`
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (112)
+### write - ask (138)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -61,6 +62,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__assembly_rigid_group`
 - `mcp__fusion-essentials__cam_activate_setup`
 - `mcp__fusion-essentials__cam_apply_template`
+- `mcp__fusion-essentials__cam_create_machine`
 - `mcp__fusion-essentials__cam_create_operation`
 - `mcp__fusion-essentials__cam_create_setup`
 - `mcp__fusion-essentials__cam_edit_folders`
@@ -68,6 +70,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__cam_edit_setup`
 - `mcp__fusion-essentials__cam_edit_tools`
 - `mcp__fusion-essentials__cam_generate`
+- `mcp__fusion-essentials__cam_generate_setup_sheet`
 - `mcp__fusion-essentials__cam_post`
 - `mcp__fusion-essentials__cam_reorder`
 - `mcp__fusion-essentials__cam_save_template`
@@ -76,12 +79,18 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__cam_show_toolpath`
 - `mcp__fusion-essentials__data_create_folder`
 - `mcp__fusion-essentials__data_create_project`
+- `mcp__fusion-essentials__data_download_file`
+- `mcp__fusion-essentials__data_move_file`
 - `mcp__fusion-essentials__data_switch_hub`
 - `mcp__fusion-essentials__data_upload_file`
 - `mcp__fusion-essentials__design_activate_component`
+- `mcp__fusion-essentials__design_add_instance`
 - `mcp__fusion-essentials__design_configure`
 - `mcp__fusion-essentials__design_export`
+- `mcp__fusion-essentials__design_move_occurrence`
 - `mcp__fusion-essentials__design_recompute`
+- `mcp__fusion-essentials__design_remove_feature`
+- `mcp__fusion-essentials__design_set_name`
 - `mcp__fusion-essentials__doc_activate`
 - `mcp__fusion-essentials__doc_copy`
 - `mcp__fusion-essentials__doc_insert_derive`
@@ -92,9 +101,13 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__doc_restore_version`
 - `mcp__fusion-essentials__doc_save`
 - `mcp__fusion-essentials__doc_save_as`
+- `mcp__fusion-essentials__doc_save_milestone`
 - `mcp__fusion-essentials__doc_update_xref`
+- `mcp__fusion-essentials__drawing_add_sketch`
 - `mcp__fusion-essentials__drawing_create`
+- `mcp__fusion-essentials__drawing_dimension`
 - `mcp__fusion-essentials__drawing_export`
+- `mcp__fusion-essentials__drawing_insert_image`
 - `mcp__fusion-essentials__drawing_update`
 - `mcp__fusion-essentials__joint_at_geometry`
 - `mcp__fusion-essentials__joint_create`
@@ -110,6 +123,11 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__mesh_plane_cut`
 - `mcp__fusion-essentials__mesh_reduce`
 - `mcp__fusion-essentials__mesh_remesh`
+- `mcp__fusion-essentials__mesh_repair`
+- `mcp__fusion-essentials__mesh_reverse_normal`
+- `mcp__fusion-essentials__mesh_separate`
+- `mcp__fusion-essentials__mesh_shell`
+- `mcp__fusion-essentials__mesh_smooth`
 - `mcp__fusion-essentials__mesh_to_brep`
 - `mcp__fusion-essentials__model_arrange`
 - `mcp__fusion-essentials__model_base_feature`
@@ -118,6 +136,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__model_construction`
 - `mcp__fusion-essentials__model_create_component`
 - `mcp__fusion-essentials__model_draft`
+- `mcp__fusion-essentials__model_emboss`
 - `mcp__fusion-essentials__model_extrude`
 - `mcp__fusion-essentials__model_fillet`
 - `mcp__fusion-essentials__model_hole`
@@ -126,7 +145,10 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__model_move`
 - `mcp__fusion-essentials__model_offset_face`
 - `mcp__fusion-essentials__model_pattern_circular`
+- `mcp__fusion-essentials__model_pattern_path`
 - `mcp__fusion-essentials__model_pattern_rectangular`
+- `mcp__fusion-essentials__model_pipe`
+- `mcp__fusion-essentials__model_replace_face`
 - `mcp__fusion-essentials__model_revolve`
 - `mcp__fusion-essentials__model_scale`
 - `mcp__fusion-essentials__model_set_material`
@@ -145,14 +167,19 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__sketch_add_3d_line`
 - `mcp__fusion-essentials__sketch_add_geometry`
 - `mcp__fusion-essentials__sketch_constrain`
+- `mcp__fusion-essentials__sketch_copy`
 - `mcp__fusion-essentials__sketch_create`
 - `mcp__fusion-essentials__sketch_dimension`
 - `mcp__fusion-essentials__sketch_edit_curve`
+- `mcp__fusion-essentials__sketch_insert_svg`
+- `mcp__fusion-essentials__sketch_move`
 - `mcp__fusion-essentials__sketch_project`
 - `mcp__fusion-essentials__sketch_set_text`
+- `mcp__fusion-essentials__surface_create_ruled`
 - `mcp__fusion-essentials__surface_delete_face`
 - `mcp__fusion-essentials__surface_extend`
 - `mcp__fusion-essentials__surface_extrude`
+- `mcp__fusion-essentials__surface_fill`
 - `mcp__fusion-essentials__surface_offset`
 - `mcp__fusion-essentials__surface_patch`
 - `mcp__fusion-essentials__surface_reverse_normal`
@@ -166,19 +193,24 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__view_set`
 - `mcp__fusion-essentials__view_switch_workspace`
 
-### destructive - ask / deny (11)
+### destructive - ask / deny (16)
 
+- `mcp__fusion-essentials__assembly_edit_contacts`
+- `mcp__fusion-essentials__assembly_edit_relations`
 - `mcp__fusion-essentials__cam_delete`
 - `mcp__fusion-essentials__data_delete_file`
 - `mcp__fusion-essentials__data_delete_folder`
 - `mcp__fusion-essentials__design_delete_feature`
 - `mcp__fusion-essentials__design_delete_occurrence`
+- `mcp__fusion-essentials__design_edit_timeline`
 - `mcp__fusion-essentials__design_set_mode`
 - `mcp__fusion-essentials__doc_close`
+- `mcp__fusion-essentials__drawing_edit_sheet`
 - `mcp__fusion-essentials__mesh_delete`
 - `mcp__fusion-essentials__param_delete`
 - `mcp__fusion-essentials__pmi_delete`
 - `mcp__fusion-essentials__sketch_delete_entity`
+- `mcp__fusion-essentials__sys_set_preferences`
 
 ## Ready-to-paste settings.json presets
 
@@ -214,6 +246,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__sys_capability_map",
       "mcp__fusion-essentials__sys_find_tool",
       "mcp__fusion-essentials__sys_get_api_doc",
+      "mcp__fusion-essentials__sys_get_preferences",
       "mcp__fusion-essentials__sys_get_selection",
       "mcp__fusion-essentials__view_list_workspaces",
       "mcp__fusion-essentials__view_screenshot",
@@ -229,6 +262,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__assembly_rigid_group",
       "mcp__fusion-essentials__cam_activate_setup",
       "mcp__fusion-essentials__cam_apply_template",
+      "mcp__fusion-essentials__cam_create_machine",
       "mcp__fusion-essentials__cam_create_operation",
       "mcp__fusion-essentials__cam_create_setup",
       "mcp__fusion-essentials__cam_edit_folders",
@@ -236,6 +270,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__cam_edit_setup",
       "mcp__fusion-essentials__cam_edit_tools",
       "mcp__fusion-essentials__cam_generate",
+      "mcp__fusion-essentials__cam_generate_setup_sheet",
       "mcp__fusion-essentials__cam_post",
       "mcp__fusion-essentials__cam_reorder",
       "mcp__fusion-essentials__cam_save_template",
@@ -244,12 +279,18 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__cam_show_toolpath",
       "mcp__fusion-essentials__data_create_folder",
       "mcp__fusion-essentials__data_create_project",
+      "mcp__fusion-essentials__data_download_file",
+      "mcp__fusion-essentials__data_move_file",
       "mcp__fusion-essentials__data_switch_hub",
       "mcp__fusion-essentials__data_upload_file",
       "mcp__fusion-essentials__design_activate_component",
+      "mcp__fusion-essentials__design_add_instance",
       "mcp__fusion-essentials__design_configure",
       "mcp__fusion-essentials__design_export",
+      "mcp__fusion-essentials__design_move_occurrence",
       "mcp__fusion-essentials__design_recompute",
+      "mcp__fusion-essentials__design_remove_feature",
+      "mcp__fusion-essentials__design_set_name",
       "mcp__fusion-essentials__doc_activate",
       "mcp__fusion-essentials__doc_copy",
       "mcp__fusion-essentials__doc_insert_derive",
@@ -260,9 +301,13 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__doc_restore_version",
       "mcp__fusion-essentials__doc_save",
       "mcp__fusion-essentials__doc_save_as",
+      "mcp__fusion-essentials__doc_save_milestone",
       "mcp__fusion-essentials__doc_update_xref",
+      "mcp__fusion-essentials__drawing_add_sketch",
       "mcp__fusion-essentials__drawing_create",
+      "mcp__fusion-essentials__drawing_dimension",
       "mcp__fusion-essentials__drawing_export",
+      "mcp__fusion-essentials__drawing_insert_image",
       "mcp__fusion-essentials__drawing_update",
       "mcp__fusion-essentials__joint_at_geometry",
       "mcp__fusion-essentials__joint_create",
@@ -278,6 +323,11 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__mesh_plane_cut",
       "mcp__fusion-essentials__mesh_reduce",
       "mcp__fusion-essentials__mesh_remesh",
+      "mcp__fusion-essentials__mesh_repair",
+      "mcp__fusion-essentials__mesh_reverse_normal",
+      "mcp__fusion-essentials__mesh_separate",
+      "mcp__fusion-essentials__mesh_shell",
+      "mcp__fusion-essentials__mesh_smooth",
       "mcp__fusion-essentials__mesh_to_brep",
       "mcp__fusion-essentials__model_arrange",
       "mcp__fusion-essentials__model_base_feature",
@@ -286,6 +336,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__model_construction",
       "mcp__fusion-essentials__model_create_component",
       "mcp__fusion-essentials__model_draft",
+      "mcp__fusion-essentials__model_emboss",
       "mcp__fusion-essentials__model_extrude",
       "mcp__fusion-essentials__model_fillet",
       "mcp__fusion-essentials__model_hole",
@@ -294,7 +345,10 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__model_move",
       "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
+      "mcp__fusion-essentials__model_pattern_path",
       "mcp__fusion-essentials__model_pattern_rectangular",
+      "mcp__fusion-essentials__model_pipe",
+      "mcp__fusion-essentials__model_replace_face",
       "mcp__fusion-essentials__model_revolve",
       "mcp__fusion-essentials__model_scale",
       "mcp__fusion-essentials__model_set_material",
@@ -313,14 +367,19 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__sketch_add_3d_line",
       "mcp__fusion-essentials__sketch_add_geometry",
       "mcp__fusion-essentials__sketch_constrain",
+      "mcp__fusion-essentials__sketch_copy",
       "mcp__fusion-essentials__sketch_create",
       "mcp__fusion-essentials__sketch_dimension",
       "mcp__fusion-essentials__sketch_edit_curve",
+      "mcp__fusion-essentials__sketch_insert_svg",
+      "mcp__fusion-essentials__sketch_move",
       "mcp__fusion-essentials__sketch_project",
       "mcp__fusion-essentials__sketch_set_text",
+      "mcp__fusion-essentials__surface_create_ruled",
       "mcp__fusion-essentials__surface_delete_face",
       "mcp__fusion-essentials__surface_extend",
       "mcp__fusion-essentials__surface_extrude",
+      "mcp__fusion-essentials__surface_fill",
       "mcp__fusion-essentials__surface_offset",
       "mcp__fusion-essentials__surface_patch",
       "mcp__fusion-essentials__surface_reverse_normal",
@@ -335,17 +394,22 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__view_switch_workspace"
     ],
     "deny": [
+      "mcp__fusion-essentials__assembly_edit_contacts",
+      "mcp__fusion-essentials__assembly_edit_relations",
       "mcp__fusion-essentials__cam_delete",
       "mcp__fusion-essentials__data_delete_file",
       "mcp__fusion-essentials__data_delete_folder",
       "mcp__fusion-essentials__design_delete_feature",
       "mcp__fusion-essentials__design_delete_occurrence",
+      "mcp__fusion-essentials__design_edit_timeline",
       "mcp__fusion-essentials__design_set_mode",
       "mcp__fusion-essentials__doc_close",
+      "mcp__fusion-essentials__drawing_edit_sheet",
       "mcp__fusion-essentials__mesh_delete",
       "mcp__fusion-essentials__param_delete",
       "mcp__fusion-essentials__pmi_delete",
       "mcp__fusion-essentials__sketch_delete_entity",
+      "mcp__fusion-essentials__sys_set_preferences",
       "mcp__fusion-essentials__sys_execute_script"
     ]
   }
@@ -382,6 +446,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__sys_capability_map",
       "mcp__fusion-essentials__sys_find_tool",
       "mcp__fusion-essentials__sys_get_api_doc",
+      "mcp__fusion-essentials__sys_get_preferences",
       "mcp__fusion-essentials__sys_get_selection",
       "mcp__fusion-essentials__view_list_workspaces",
       "mcp__fusion-essentials__view_screenshot",
@@ -395,6 +460,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__assembly_rigid_group",
       "mcp__fusion-essentials__cam_activate_setup",
       "mcp__fusion-essentials__cam_apply_template",
+      "mcp__fusion-essentials__cam_create_machine",
       "mcp__fusion-essentials__cam_create_operation",
       "mcp__fusion-essentials__cam_create_setup",
       "mcp__fusion-essentials__cam_edit_folders",
@@ -402,6 +468,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__cam_edit_setup",
       "mcp__fusion-essentials__cam_edit_tools",
       "mcp__fusion-essentials__cam_generate",
+      "mcp__fusion-essentials__cam_generate_setup_sheet",
       "mcp__fusion-essentials__cam_post",
       "mcp__fusion-essentials__cam_reorder",
       "mcp__fusion-essentials__cam_save_template",
@@ -409,11 +476,18 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__cam_set_nc_comment",
       "mcp__fusion-essentials__cam_show_toolpath",
       "mcp__fusion-essentials__design_activate_component",
+      "mcp__fusion-essentials__design_add_instance",
       "mcp__fusion-essentials__design_configure",
       "mcp__fusion-essentials__design_export",
+      "mcp__fusion-essentials__design_move_occurrence",
       "mcp__fusion-essentials__design_recompute",
+      "mcp__fusion-essentials__design_remove_feature",
+      "mcp__fusion-essentials__design_set_name",
+      "mcp__fusion-essentials__drawing_add_sketch",
       "mcp__fusion-essentials__drawing_create",
+      "mcp__fusion-essentials__drawing_dimension",
       "mcp__fusion-essentials__drawing_export",
+      "mcp__fusion-essentials__drawing_insert_image",
       "mcp__fusion-essentials__drawing_update",
       "mcp__fusion-essentials__joint_at_geometry",
       "mcp__fusion-essentials__joint_create",
@@ -429,6 +503,11 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__mesh_plane_cut",
       "mcp__fusion-essentials__mesh_reduce",
       "mcp__fusion-essentials__mesh_remesh",
+      "mcp__fusion-essentials__mesh_repair",
+      "mcp__fusion-essentials__mesh_reverse_normal",
+      "mcp__fusion-essentials__mesh_separate",
+      "mcp__fusion-essentials__mesh_shell",
+      "mcp__fusion-essentials__mesh_smooth",
       "mcp__fusion-essentials__mesh_to_brep",
       "mcp__fusion-essentials__model_arrange",
       "mcp__fusion-essentials__model_base_feature",
@@ -437,6 +516,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__model_construction",
       "mcp__fusion-essentials__model_create_component",
       "mcp__fusion-essentials__model_draft",
+      "mcp__fusion-essentials__model_emboss",
       "mcp__fusion-essentials__model_extrude",
       "mcp__fusion-essentials__model_fillet",
       "mcp__fusion-essentials__model_hole",
@@ -445,7 +525,10 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__model_move",
       "mcp__fusion-essentials__model_offset_face",
       "mcp__fusion-essentials__model_pattern_circular",
+      "mcp__fusion-essentials__model_pattern_path",
       "mcp__fusion-essentials__model_pattern_rectangular",
+      "mcp__fusion-essentials__model_pipe",
+      "mcp__fusion-essentials__model_replace_face",
       "mcp__fusion-essentials__model_revolve",
       "mcp__fusion-essentials__model_scale",
       "mcp__fusion-essentials__model_set_material",
@@ -464,14 +547,19 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__sketch_add_3d_line",
       "mcp__fusion-essentials__sketch_add_geometry",
       "mcp__fusion-essentials__sketch_constrain",
+      "mcp__fusion-essentials__sketch_copy",
       "mcp__fusion-essentials__sketch_create",
       "mcp__fusion-essentials__sketch_dimension",
       "mcp__fusion-essentials__sketch_edit_curve",
+      "mcp__fusion-essentials__sketch_insert_svg",
+      "mcp__fusion-essentials__sketch_move",
       "mcp__fusion-essentials__sketch_project",
       "mcp__fusion-essentials__sketch_set_text",
+      "mcp__fusion-essentials__surface_create_ruled",
       "mcp__fusion-essentials__surface_delete_face",
       "mcp__fusion-essentials__surface_extend",
       "mcp__fusion-essentials__surface_extrude",
+      "mcp__fusion-essentials__surface_fill",
       "mcp__fusion-essentials__surface_offset",
       "mcp__fusion-essentials__surface_patch",
       "mcp__fusion-essentials__surface_reverse_normal",
@@ -486,15 +574,20 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__view_switch_workspace"
     ],
     "ask": [
+      "mcp__fusion-essentials__assembly_edit_contacts",
+      "mcp__fusion-essentials__assembly_edit_relations",
       "mcp__fusion-essentials__cam_delete",
       "mcp__fusion-essentials__data_create_folder",
       "mcp__fusion-essentials__data_create_project",
       "mcp__fusion-essentials__data_delete_file",
       "mcp__fusion-essentials__data_delete_folder",
+      "mcp__fusion-essentials__data_download_file",
+      "mcp__fusion-essentials__data_move_file",
       "mcp__fusion-essentials__data_switch_hub",
       "mcp__fusion-essentials__data_upload_file",
       "mcp__fusion-essentials__design_delete_feature",
       "mcp__fusion-essentials__design_delete_occurrence",
+      "mcp__fusion-essentials__design_edit_timeline",
       "mcp__fusion-essentials__design_set_mode",
       "mcp__fusion-essentials__doc_activate",
       "mcp__fusion-essentials__doc_close",
@@ -507,11 +600,14 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__doc_restore_version",
       "mcp__fusion-essentials__doc_save",
       "mcp__fusion-essentials__doc_save_as",
+      "mcp__fusion-essentials__doc_save_milestone",
       "mcp__fusion-essentials__doc_update_xref",
+      "mcp__fusion-essentials__drawing_edit_sheet",
       "mcp__fusion-essentials__mesh_delete",
       "mcp__fusion-essentials__param_delete",
       "mcp__fusion-essentials__pmi_delete",
-      "mcp__fusion-essentials__sketch_delete_entity"
+      "mcp__fusion-essentials__sketch_delete_entity",
+      "mcp__fusion-essentials__sys_set_preferences"
     ],
     "deny": [
       "mcp__fusion-essentials__sys_execute_script"

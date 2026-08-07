@@ -147,9 +147,23 @@ class _SrcLib:
         return self._t[i]
 
 
+def _refetched(tool):
+    """One tool as a library re-read from its url hands it back: a DIFFERENT object carrying the same
+    stored values. Every persist read-back must go through one of these - a read-back satisfied by the
+    object the write just touched proves nothing. (Preset PARAMETER values are not copied; the
+    re-read only ever reports preset NAMES.)"""
+    clone = _Tool(tool.desc)
+    clone.parameters = _Params({tool.parameters.item(i).name: tool.parameters.item(i).expression
+                                for i in range(tool.parameters.count)})
+    clone.preset_params = dict(tool.preset_params)
+    clone.presets = _Presets(_preset_names(tool), owner=clone)
+    clone.holder = tool.holder
+    return clone
+
+
 # A 'target' the handler drives. Models the union of document-lib + shared-lib behaviour the tool needs:
 #   .tools (list), .add(tool), .remove(index), .update_tool(tool), .persist(), .operations_by_tool(tool),
-#   .is_document (where_used only valid here)
+#   .is_document (where_used only valid here), and the refetch read-backs off _fresh()
 class _Target:
     def __init__(self, tools=(), is_document=False, ops_by_desc=None, persisted_count_value="mirror"):
         self.tools = list(tools)
@@ -161,19 +175,35 @@ class _Target:
         # a NUMBER simulates a persist whose url re-read disagrees (the platform lie).
         self._persisted_count_value = persisted_count_value
 
+    def _fresh(self):
+        """The library re-read from its url - FRESH clones of what it stored, never the held objects.
+        A test sets `tgt._fresh = lambda: None` to simulate a library that cannot be re-read (every
+        read-back then reports None and the payload must fall back to the in-memory basis)."""
+        return [_refetched(t) for t in self.tools]
+
     def persisted_count(self):
-        if self._persisted_count_value == "mirror":
-            return len(self.tools)
-        return self._persisted_count_value
+        if self._persisted_count_value != "mirror":
+            return self._persisted_count_value
+        fresh = self._fresh()
+        return len(fresh) if fresh is not None else None
     def reread_param(self, index, name):
-        # the fake re-reads from the same in-memory tool (no separate persisted copy), so a landing
-        # edit reads back its own 'after'; a test overrides this to simulate a non-landing persist.
-        p = self.tools[index].parameters.itemByName(name)
+        # read off the FRESH clone, so a landing edit reads back its own 'after'; a test overrides
+        # this to simulate a library that stored something else.
+        fresh = self._fresh()
+        if fresh is None:
+            return None
+        p = fresh[index].parameters.itemByName(name)
         return p.expression if p is not None else None
     def reread_preset_names(self, index):
-        # same in-memory re-read for presets; a test overrides it to simulate a persist that the
+        # same fresh re-read for presets; a test overrides it to simulate a persist that the
         # library did not store.
-        return _preset_names(self.tools[index])
+        fresh = self._fresh()
+        return _preset_names(fresh[index]) if fresh is not None else None
+    def stored_tool_numbers(self):
+        # the numbers the STORED library holds; a test overrides it to simulate a persist-side
+        # renumber, which no in-memory read could catch.
+        fresh = self._fresh()
+        return None if fresh is None else [ct._read_tool_number(t) for t in fresh]
     def add(self, tool):
         self.tools.append(tool)
     def remove(self, index):
@@ -533,6 +563,69 @@ class TestAddToolNumbers:
         assert out["assigned_tool_numbers"] == [2]
         assert ct._read_tool_number(tgt.tools[-1]) == 2
 
+    def test_the_library_refetch_is_a_different_object(self):
+        # The fake's own contract: a read-back reads a FRESH clone, so no production read-back can
+        # pass by handing back the very object it just wrote.
+        tgt = _Target(tools=[_Tool("EM", tool_number="5")])
+        fresh = tgt._fresh()
+        assert fresh[0] is not tgt.tools[0]
+        assert ct._read_tool_number(fresh[0]) == 5
+
+    def test_numbers_are_confirmed_against_the_fresh_library(self, monkeypatch):
+        _install(monkeypatch)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert out["verified_in_memory_only"] is False
+        assert "persisted" in out["note"] and "library url" in out["note"]
+
+    def test_document_scope_add_never_claims_the_stored_library(self, monkeypatch):
+        # The document library has NO url to re-read, and doc_save is what stores the document. So a
+        # document add proves the numbers are present, never that they were stored - the flag stays
+        # weak and the note says so.
+        tgt = _install(monkeypatch, _Target(tools=[_Tool("EM")], is_document=True))
+        out = _payload(ct.handler(action="add", scope="document",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert out["assigned_tool_numbers"] == [1] and len(tgt.tools) == 2
+        assert out["verified_in_memory_only"] is True
+        # the add skips the document read-back, so the note must claim NO read-back - only the
+        # in-memory tools - and point at what does the storing
+        assert "in-memory" in out["note"] and "doc_save" in out["note"]
+        assert "persist" not in out["note"].lower() and "url" not in out["note"]
+
+    def test_document_scope_add_does_not_reach_for_a_stored_library(self, monkeypatch):
+        # ... and it does not even ask: the stored-number gate is shared-target-only, so a document
+        # add makes no refetch-for-storage call it would then have to explain.
+        tgt = _install(monkeypatch, _Target(tools=[_Tool("EM")], is_document=True))
+
+        def _boom():
+            raise AssertionError("a document target must not read a stored library")
+        tgt.stored_tool_numbers = _boom
+        out = _payload(ct.handler(action="add", scope="document",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert out["added"] == 1
+
+    def test_persist_side_renumber_bites(self, monkeypatch):
+        # The in-memory tools hold the assigned numbers, and the tool COUNT is right - only the
+        # library re-read from its url shows the stored number is a different one.
+        tgt = _install(monkeypatch)
+        tgt.stored_tool_numbers = lambda: [0, 0, 99]     # the new tool was stored as 99, not 1
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True
+        assert "[1]" in res["message"] and "99" in res["message"]
+        assert "did not reach the stored library" in res["message"]
+
+    def test_unreadable_refetch_names_the_weaker_basis(self, monkeypatch):
+        # The library cannot be re-read: the in-memory verdict stands, but the payload must SAY the
+        # numbers were only confirmed there - never claim the stored library agreed.
+        tgt = _install(monkeypatch)
+        tgt._fresh = lambda: None
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert out["assigned_tool_numbers"] == [1]
+        assert out["verified_in_memory_only"] is True
+        assert "in-memory" in out["note"]
+
     def test_missing_tool_number_param_errors_not_silent(self, monkeypatch):
         # a tool with no tool_number parameter can't take a free number - error, add nothing.
         tgt = _install(monkeypatch)
@@ -669,6 +762,37 @@ class TestEdit:
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_numberOfFlutes": "4"})
         assert res["isError"] is True and "did not persist" in res["message"]
+
+    def test_document_scope_edit_never_claims_storage_though_the_refetch_reads(self, monkeypatch):
+        # The document refetch READS fine and the edit is confirmed present - but the document
+        # library has no url, so nothing here proves storage. The flag must stay weak on the
+        # readable path too, and the note must name the document rung.
+        _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")],
+                                      is_document=True))
+        out = _payload(ct.handler(action="edit", scope="document", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert out["edited"] == 1                       # the effect still reports
+        assert out["verified_in_memory_only"] is True
+        assert "present, not that it was stored" in out["note"] and "doc_save" in out["note"]
+        assert "persist" not in out["note"].lower()
+
+    def test_edit_confirmed_against_the_fresh_library_says_so(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")]))
+        out = _payload(ct.handler(action="edit", scope="cloud", library="L", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert out["verified_in_memory_only"] is False
+        assert "persisted" in out["note"] and "library url" in out["note"]
+
+    def test_edit_with_an_unreadable_refetch_names_the_weaker_basis(self, monkeypatch):
+        # A library that cannot be re-read proves nothing about storage - the edit still stands on
+        # the in-memory tool, and the payload says exactly that instead of claiming persistence.
+        tgt = _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")]))
+        tgt._fresh = lambda: None
+        out = _payload(ct.handler(action="edit", scope="cloud", library="L", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert out["edited"] == 1
+        assert out["verified_in_memory_only"] is True
+        assert "persisted" not in out["note"] and "in-memory" in out["note"]
 
 
 # ── where_used (document scope) ─────────────────────────────────────────────
@@ -907,14 +1031,18 @@ class _AssetURL:
 
 
 class _SampleAssets:
-    """ToolLibraries over the bundled Fusion360 sample assets: leaf name -> the tool types it holds."""
+    """ToolLibraries over the bundled Fusion360 sample assets: leaf name -> the tool types it holds.
+    Each toolLibraryAtURL is a CLOUD FETCH live (~1.4-6.7s each, measured), so `fetched` records
+    them - a test can then pin that a lookup stopped early instead of walking all five."""
     def __init__(self, by_leaf):
         self._by_leaf = by_leaf
+        self.fetched = []
     def urlByLocation(self, loc):
         return _AssetURL("Fusion360")
     def childAssetURLs(self, url):
         return [_AssetURL(leaf) for leaf in self._by_leaf]
     def toolLibraryAtURL(self, url):
+        self.fetched.append(url.leafName)
         return _SrcLib([_Tool(ty, tool_type=ty) for ty in self._by_leaf.get(url.leafName, [])])
 
 
@@ -922,11 +1050,14 @@ def _install_samples(monkeypatch, by_leaf):
     from types import SimpleNamespace
     import adsk.cam as _c
     import adsk.core as _core
-    mgr = SimpleNamespace(libraryManager=SimpleNamespace(toolLibraries=_SampleAssets(by_leaf)))
+    assets = _SampleAssets(by_leaf)
+    mgr = SimpleNamespace(libraryManager=SimpleNamespace(toolLibraries=assets))
     monkeypatch.setattr(_c.CAMManager, "get", lambda: mgr)
     # a type-map entry stores the library's url STRING; _source_tool turns it back into a URL
     monkeypatch.setattr(_core.URL, "create", lambda s: _AssetURL(s.rsplit("/", 1)[-1]))
-    monkeypatch.setattr(ct, "_type_map_cache", None)      # the map is built once and cached
+    monkeypatch.setattr(ct, "_type_map_cache", None)      # the map is cached across calls
+    monkeypatch.setattr(ct, "_library_cache", {})         # as are the fetched libraries
+    return assets
 
 
 # A miniature stand-in for the bundled Fusion360 sample assets - a handful of leaf names and the
@@ -942,6 +1073,41 @@ _SAMPLE_ASSETS = {
     "Turning Tools (Inch)": ["turning general"],
     "Probes": ["probe"],
 }
+
+
+class TestSampleLibraryFetchCost:
+    """Each sample library is a cloud round-trip (~13s for all five, measured live) against a 30s
+    handler budget, so a lookup must read only as far as it needs."""
+
+    def test_a_type_in_the_first_library_reads_only_that_library(self, monkeypatch):
+        # ONE fetch, not one per read: the type walk and _source_tool share the cached library.
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        tool, err = ct._sample_for_type("flat end mill")
+        assert err is None and tool is not None
+        assert assets.fetched == ["Milling Tools (Metric)"]
+
+    def test_a_later_type_stops_at_the_library_holding_it(self, monkeypatch):
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        _tool, err = ct._sample_for_type("drill")
+        assert err is None
+        assert "Turning Tools (Metric)" not in assets.fetched   # never reached
+
+    def test_a_second_lookup_scans_no_further_libraries(self, monkeypatch):
+        # The type MAP is cached, so a repeat lookup must not widen the walk - it still pays
+        # _source_tool's own read of the one library it already knows about.
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        ct._sample_for_type("flat end mill")
+        before = set(assets.fetched)
+        ct._sample_for_type("flat end mill")
+        assert set(assets.fetched) == before
+
+    def test_an_unknown_type_still_lists_the_whole_vocabulary(self, monkeypatch):
+        # the early stop must not shrink the refusal's "Available types" to what happened to be read
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        tool, err = ct._sample_for_type("no such tool")
+        assert tool is None
+        for expected in ("flat end mill", "drill", "turning general", "center drill"):
+            assert expected in err
 
 
 class TestSampleTypeMap:
@@ -1105,12 +1271,34 @@ class TestAddPreset:
                                   preset={"name": "Alu"}))
         assert "persist" not in out["note"].lower() and "doc_save" in out["note"]
 
+    def test_document_scope_add_preset_never_claims_storage_though_the_refetch_reads(self, monkeypatch):
+        # Readable document refetch: the preset is confirmed PRESENT, never stored - weak flag, and
+        # the note carries the document rung rather than the persistence claim.
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=True))
+        out = _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                                  preset={"name": "Alu"}))
+        assert out["presets"] == ["Alu"]                 # the effect still reports
+        assert out["verified_in_memory_only"] is True
+        assert "present, not that it was stored" in out["note"] and "doc_save" in out["note"]
+        assert "persist" not in out["note"].lower()
+
     def test_shared_scope_note_claims_persistence(self, monkeypatch):
         # the shared branch round-trips through the library url, which does prove the write stored
         _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=False))
         out = _payload(ct.handler(action="add_preset", scope="cloud", library="L", tool=0,
                                   preset={"name": "Alu"}))
-        assert "persisted" in out["note"]
+        assert "persisted" in out["note"] and out["verified_in_memory_only"] is False
+
+    def test_unreadable_refetch_drops_the_persistence_claim(self, monkeypatch):
+        # The library could not be re-read, so nothing proves the preset reached storage - the
+        # payload keeps the in-memory verdict and names that weaker basis.
+        tgt = _install(monkeypatch, _Target(tools=[_tool_with_presets("EM")], is_document=False))
+        tgt._fresh = lambda: None
+        out = _payload(ct.handler(action="add_preset", scope="cloud", library="L", tool=0,
+                                  preset={"name": "Alu"}))
+        assert out["presets"] == ["Alu"]                 # the in-memory read still reports it
+        assert out["verified_in_memory_only"] is True
+        assert "persisted" not in out["note"] and "in-memory" in out["note"]
 
 
 # ── preset VALUES: a CAM parameter stores an expression it cannot evaluate and still reads a ────
@@ -1257,6 +1445,17 @@ class TestRemovePreset:
         assert _preset_names(tool) == ["Steel", "Brass"]
         assert out["removed_index"] == 1 and out["preset_count"] == 2
         assert out["presets"] == ["Steel", "Brass"] and tgt.updated
+
+    def test_document_scope_removal_never_claims_storage_though_the_refetch_reads(self, monkeypatch):
+        # Readable document refetch: the removal is confirmed gone from the document library, which
+        # is presence, not storage - weak flag, document-rung note, effect still reported.
+        _install(monkeypatch, _Target(tools=[_tool_with_presets("EM", ["Alu"])], is_document=True))
+        out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                                  preset={"name": "Alu"}))
+        assert out["removed_index"] == 0 and out["presets"] == []   # the effect still reports
+        assert out["verified_in_memory_only"] is True
+        assert "present, not that it was stored" in out["note"] and "doc_save" in out["note"]
+        assert "persist" not in out["note"].lower()
 
     def test_matches_case_insensitively(self, monkeypatch):
         tool = _tool_with_presets("EM", ["Alu 6061"])

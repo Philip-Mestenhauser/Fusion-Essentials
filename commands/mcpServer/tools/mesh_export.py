@@ -300,7 +300,11 @@ def _tessellate(body, quality_key):
     tmo = safe(lambda: adsk.fusion.TriangleMeshQualityOptions)
     qual = safe(lambda: getattr(tmo, _QUALITIES[quality_key])) if tmo is not None else None
     if qual is not None:
-        safe(lambda: calc.setQuality(qual))
+        # setQuality answers whether the quality took; a false leaves the DEFAULT tessellation,
+        # so the file would not be at the quality the payload reports.
+        if not safe(lambda: calc.setQuality(qual)):
+            return None, error(f"Fusion refused mesh quality '{quality_key}' (setQuality returned "
+                               "false), so nothing was exported at that quality.")
 
     # calculate is a real computation that can raise on a degenerate body - surface it, don't swallow.
     try:

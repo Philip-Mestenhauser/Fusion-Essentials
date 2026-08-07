@@ -227,10 +227,11 @@ def apply_template_to_setup_handler(setup: str = "", template_url: str = "",
         return error(err)
 
     # Find the target setup.
-    target_setup, available_setups = find_setup(cam, setup)
+    # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
+    # name was ABSENT or AMBIGUOUS, and only it can say which.
+    target_setup, _names, serr = find_setup(cam, setup)
     if not target_setup:
-        return error(f"Setup not found: '{setup}'. "
-                      f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
+        return error(serr)
 
     # Resolve the template.
     template = None
@@ -398,10 +399,11 @@ def save_operations_as_template_handler(template_name: str = "", operations: str
         return error(err)
 
     # Find the setup.
-    target_setup, available_setups = find_setup(cam, setup)
+    # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
+    # name was ABSENT or AMBIGUOUS, and only it can say which.
+    target_setup, _names, serr = find_setup(cam, setup)
     if not target_setup:
-        return error(f"Setup not found: '{setup}'. "
-                      f"Available: {', '.join(n for n in available_setups if n) or '(none)'}")
+        return error(serr)
 
     # Collect the requested operations (Operation objects only).
     by_name = {}

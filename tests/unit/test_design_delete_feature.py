@@ -3,13 +3,19 @@
 The logic pinned here, no live Fusion: name matching (exact first, then substring; ambiguity REFUSED
 with candidates), the GROUP guard (a timeline group has no deletable entity), the no-entity guard,
 the actual ``entity.deleteMe()`` call (captured so a wrong method name regresses here), the
-deleteMe-returns-false path, and the before/after timeline-health guard (a delete that breaks a
-downstream feature is reported, the deletion still standing).
+deleteMe-returns-false path, the before/after timeline-health guard (a delete that breaks a
+downstream feature is reported, the deletion still standing), and the occurrence-remove reroute (a
+Remove feature's timeline entity is the removed OCCURRENCE, so the delete goes to the RemoveFeature
+resolved by the same name).
 """
 
 import json
+import types
 
-from conftest import load_tool
+import adsk.fusion
+import pytest
+
+from conftest import MakeComp, load_tool, make_design
 
 df = load_tool("design_delete_feature")
 
@@ -209,6 +215,17 @@ class TestGuards:
         assert "timeline_warning" not in out          # no NEW error
         assert out["timeline_warnings"] == ["WarnFeature"]
 
+    def test_a_body_remove_deletes_its_timeline_entity_directly(self, monkeypatch):
+        # a body-remove timeline object's entity IS the RemoveFeature: no re-resolution, and the
+        # entity the timeline handed over is what gets deleted.
+        monkeypatch.setattr(adsk.fusion, "Occurrence", types.SimpleNamespace)
+        ent = FakeEntity("RemoveFeature")
+        design = FakeDesign(FakeTimeline([FakeTLObject("RemoveBody-Body1", 2, entity=ent)]))
+        monkeypatch.setattr(df._common, "design", lambda: design)
+        out = _payload(df.handler(feature="RemoveBody-Body1"))
+        assert out["deleted"] is True and out["entity_type"] == "RemoveFeature"
+        assert ent._deleted is True
+
     def test_downstream_error_after_delete_reported(self):
         # deleting a feature whose geometry a later feature consumed leaves a new error: the delete
         # stands, but it's surfaced.
@@ -221,3 +238,193 @@ class TestGuards:
         assert out["deleted"] is True
         assert "timeline_warning" in out
         assert "BrokenChild" in out["timeline_warning"]
+
+
+# ── the occurrence-remove reroute ────────────────────────────────────────────
+# An Occurrence .entity does not say which kind of timeline object reported it: an occurrence-remove
+# object reports the REMOVED occurrence (deleteMe raises InternalValidationError), an occurrence
+# CREATE reports the LIVE instance (deleteMe succeeds). The name lookup in removeFeatures is the
+# discriminator. The RemoveFeature class name is load-bearing - the payload's entity_type reports it.
+
+def _removed_occurrence(path="Scrap:1"):
+    """The entity an occurrence-REMOVE timeline object reports. deleteMe() raises the way Fusion's
+    does on a removed occurrence, so a handler that deletes the entity directly cannot pass. Built
+    as a SimpleNamespace - the type the fixture points adsk.fusion.Occurrence at."""
+    def deleteMe():
+        raise RuntimeError("2 : InternalValidationError : Xl::Utils::findObjectPath(this, objPath)")
+
+    return types.SimpleNamespace(name=path, fullPathName=path, deleteMe=deleteMe)
+
+
+def _live_occurrence(path="InsProbe:1"):
+    """The entity an occurrence-CREATE timeline object reports: the LIVE instance, whose deleteMe()
+    succeeds and removes it. Same type as the removed one, so only the name lookup can tell them
+    apart."""
+    ns = types.SimpleNamespace(name=path, fullPathName=path, deleted=False)
+
+    def deleteMe():
+        ns.deleted = True
+        return True
+
+    ns.deleteMe = deleteMe
+    return ns
+
+
+_TL_INDEX = 3      # the timeline index _design() places its object at
+
+
+class RemoveFeature:
+    """timelineObject.index is the feature's own place in the timeline - the reroute accepts the
+    feature only when that index is the one the caller resolved, so a same-named feature elsewhere
+    in the timeline cannot stand in for the object named."""
+
+    def __init__(self, name, delete_returns=True, restores_to=None, restored_path="Scrap:1",
+                 timeline_index=_TL_INDEX):
+        self.name = name
+        self.deleted = False
+        self.timelineObject = types.SimpleNamespace(index=timeline_index)
+        self._delete_returns = delete_returns
+        self._restores_to = restores_to      # the allOccurrences list the occurrence comes back into
+        self._restored_path = restored_path
+
+    def deleteMe(self):
+        self.deleted = True
+        if self._delete_returns and self._restores_to is not None:
+            self._restores_to.append(types.SimpleNamespace(fullPathName=self._restored_path))
+        return self._delete_returns
+
+
+def _removes(*feats):
+    """A component's features.removeFeatures - itemByName is the lookup the reroute resolves on."""
+    return types.SimpleNamespace(
+        removeFeatures=types.SimpleNamespace(
+            itemByName=lambda n: next((f for f in feats if f.name == n), None)))
+
+
+class TestOccurrenceRemoveReroute:
+    @pytest.fixture(autouse=True)
+    def occurrence_type(self, monkeypatch):
+        """The handler discriminates the removed occurrence by isinstance against
+        adsk.fusion.Occurrence, a bare Mock in this harness (isinstance against which raises, so the
+        branch would silently never fire). Point it at the type _removed_occurrence builds."""
+        monkeypatch.setattr(adsk.fusion, "Occurrence", types.SimpleNamespace)
+
+    def _design(self, monkeypatch, name, comps, entity=None):
+        design = make_design(comp=comps[0], all_components=comps)
+        entity = _removed_occurrence() if entity is None else entity
+        design.timeline = FakeTimeline([FakeTLObject(name, _TL_INDEX, entity=entity)])
+        monkeypatch.setattr(df._common, "design", lambda: design)
+        return design
+
+    def test_the_delete_is_routed_to_the_remove_feature(self, monkeypatch):
+        feat = RemoveFeature("RemoveInstance-Scrap:1")
+        comp = MakeComp("Root")
+        comp.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Scrap:1", [comp])
+        out = _payload(df.handler(feature="RemoveInstance-Scrap:1"))
+        assert out["deleted"] is True
+        assert out["entity_type"] == "RemoveFeature"   # what was deleted, not what .entity handed over
+        assert feat.deleted is True
+
+    def test_the_note_says_the_occurrence_came_back(self, monkeypatch):
+        # deleting a Remove feature RESTORES what it removed - the generic note says the opposite
+        # ("instances it created go with it") and would contradict design_remove_feature's promise.
+        feat = RemoveFeature("RemoveInstance-Scrap:1")
+        comp = MakeComp("Root")
+        comp.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Scrap:1", [comp])
+        out = _payload(df.handler(feature="RemoveInstance-Scrap:1"))
+        assert "back in the assembly" in out["note"]
+        assert "go with it" not in out["note"]
+
+    def test_the_restored_occurrence_is_read_back(self, monkeypatch):
+        comp = MakeComp("Root")
+        feat = RemoveFeature("RemoveInstance-Scrap:1", restores_to=comp.allOccurrences,
+                             restored_path="Scrap:1")
+        comp.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Scrap:1", [comp])
+        out = _payload(df.handler(feature="RemoveInstance-Scrap:1"))
+        assert out["occurrence_restored"] == "Scrap:1"
+
+    def test_an_unconfirmed_restore_is_omitted_not_denied(self, monkeypatch):
+        # the walk does not show the occurrence back: the delete still stands, and the key is simply
+        # absent - "not confirmed" is never published as "it did not come back".
+        feat = RemoveFeature("RemoveInstance-Scrap:1")      # restores_to=None: nothing comes back
+        comp = MakeComp("Root")
+        comp.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Scrap:1", [comp])
+        out = _payload(df.handler(feature="RemoveInstance-Scrap:1"))
+        assert out["deleted"] is True
+        assert "occurrence_restored" not in out
+
+    def test_the_feature_is_found_in_a_sub_component(self, monkeypatch):
+        # the RemoveFeature lives in the component that owns the instance, not necessarily the root.
+        root, sub = MakeComp("Root"), MakeComp("Sub")
+        feat = RemoveFeature("RemoveInstance-Bolt:1")
+        root.features = _removes()
+        sub.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Bolt:1", [root, sub])
+        out = _payload(df.handler(feature="RemoveInstance-Bolt:1"))
+        assert out["deleted"] is True and feat.deleted is True
+
+    def test_a_live_occurrence_with_no_remove_feature_is_deleted_not_refused(self, monkeypatch):
+        # an occurrence-CREATE timeline object also reports an Occurrence entity, and deleting it
+        # through the timeline works - so no RemoveFeature by that name means delete the entity as
+        # handed over, never refuse. The create object's name carries a leading space on this build.
+        occ = _live_occurrence(" InsProbe:1")
+        comp = MakeComp("Root")
+        comp.features = _removes()
+        self._design(monkeypatch, " InsProbe:1", [comp], entity=occ)
+        out = _payload(df.handler(feature=" InsProbe:1"))
+        assert out["deleted"] is True
+        assert occ.deleted is True
+        assert "back in the assembly" not in out["note"]   # not a Remove feature - the generic note
+
+    def test_a_removed_occurrence_with_no_feature_reports_the_platform_error(self, monkeypatch):
+        # nothing resolves by the name, so the entity is deleted as handed over and Fusion's own
+        # refusal is what the agent sees - never a diagnosis this tool never checked.
+        comp = MakeComp("Root")
+        comp.features = _removes()
+        self._design(monkeypatch, "RemoveInstance-Ghost:1", [comp])
+        res = df.handler(feature="RemoveInstance-Ghost:1")
+        assert res["isError"] is True
+        assert "InternalValidationError" in res["message"]
+        assert "is a Remove feature" not in res["message"]
+
+    def test_the_name_at_index_form_deletes_the_object_it_names(self, monkeypatch):
+        # two timeline objects share the name "Bolt:1": an occurrence CREATE at index 1 and a
+        # renamed RemoveFeature at index 0. 'Bolt:1@1' names the CREATE, and the name lookup finds
+        # the RemoveFeature - so only the index identity keeps the delete on the object named.
+        occ = _live_occurrence("Bolt:1")
+        feat = RemoveFeature("Bolt:1", timeline_index=0)
+        comp = MakeComp("Root")
+        comp.features = _removes(feat)
+        design = make_design(comp=comp, all_components=[comp])
+        design.timeline = FakeTimeline([
+            FakeTLObject("Bolt:1", 0, entity=_removed_occurrence("Bolt:1")),
+            FakeTLObject("Bolt:1", 1, entity=occ),
+        ])
+        monkeypatch.setattr(df._common, "design", lambda: design)
+        out = _payload(df.handler(feature="Bolt:1@1"))
+        assert out["deleted"] is True
+        assert occ.deleted is True                      # the object the caller named
+        assert feat.deleted is False                    # the same-named RemoveFeature is untouched
+        assert "back in the assembly" not in out["note"]
+
+    def test_the_same_name_in_two_components_is_refused_not_guessed(self, monkeypatch):
+        a, b = MakeComp("CompA"), MakeComp("CompB")
+        fa, fb = RemoveFeature("RemoveInstance-Bolt:1"), RemoveFeature("RemoveInstance-Bolt:1")
+        a.features, b.features = _removes(fa), _removes(fb)
+        self._design(monkeypatch, "RemoveInstance-Bolt:1", [a, b])
+        res = df.handler(feature="RemoveInstance-Bolt:1")
+        assert res["isError"] is True
+        assert "CompA" in res["message"] and "CompB" in res["message"]
+        assert fa.deleted is False and fb.deleted is False
+
+    def test_a_declining_remove_feature_is_reported_not_claimed(self, monkeypatch):
+        feat = RemoveFeature("RemoveInstance-Scrap:1", delete_returns=False)
+        comp = MakeComp("Root")
+        comp.features = _removes(feat)
+        self._design(monkeypatch, "RemoveInstance-Scrap:1", [comp])
+        res = df.handler(feature="RemoveInstance-Scrap:1")
+        assert res["isError"] is True and "declined" in res["message"].lower()

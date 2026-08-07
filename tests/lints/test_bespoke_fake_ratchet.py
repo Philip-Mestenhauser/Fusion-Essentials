@@ -43,16 +43,18 @@ CONFTEST_PATH = os.path.join(TESTS_DIR, "conftest.py")
 # own file's entry with a one-line reason comment.
 _PER_FILE_BASELINE = {
     "test__cam_common.py": 1,
+    "test_model_emboss.py": 1,
     "test__data_read.py": 5,
     "test__geom.py": 2,
     "test__sketch_detail.py": 12,
     "test__view_common.py": 3,
     "test_appearance_set.py": 11,
     "test_assembly_get.py": 5,
-    "test_assembly_inspect_interference.py": 10,
+    "test_assembly_inspect_interference.py": 11,
     "test_assembly_joints_advanced.py": 10,
     "test_assembly_transform.py": 8,
     "test_assert_kinds.py": 2,
+    "test_cam_generate_setup_sheet.py": 2,   # the async-landing CAM fake (bool True before the file exists) conftest cannot model
     "test_cam_activate_setup.py": 1,
     "test_cam_compare.py": 7,
     "test_cam_create_setup.py": 8,
@@ -64,6 +66,10 @@ _PER_FILE_BASELINE = {
     "test_cam_set_nc_comment.py": 5,
     "test_cam_show_toolpath.py": 6,
     "test_cam_templates.py": 2,
+    # 1: a design whose rootComponent read returns a FRESH wrapper each time - the measured platform
+    # behaviour that root_body_advisory's same-component test exists for. MakeDesign holds it as a
+    # plain attribute, so the shared fake cannot express it.
+    "test_common.py": 1,
     "test_data_management.py": 11,
     "test_data_switch_hub.py": 3,
     "test_design_configure.py": 3,
@@ -78,13 +84,14 @@ _PER_FILE_BASELINE = {
     "test_doc_open.py": 1,
     "test_doc_update_xref.py": 9,
     "test_drawing_create.py": 6,
+    "test_drawing_edit_sheet.py": 1,   # FakeSheet: the surface under test IS its properties - width/height derived read-only from size+orientation, size/orientation setters that raise the way Fusion does, and tidyUp, a property whose READ tidies; a namespace cannot express them
     "test_drawing_export.py": 3,
     "test_drawing_update.py": 4,
     "test_edit_joint.py": 9,
     "test_family_gating.py": 3,
     "test_find_geometry.py": 6,
     "test_inputs.py": 41,
-    "test_joint_at_geometry.py": 6,
+    "test_joint_at_geometry.py": 7,   # +1 AsBuiltJoint: is_as_built_joint isinstance-checks adsk.fusion.AsBuiltJoint, a class conftest does not model
     "test_joint_create_edit.py": 4,
     "test_joint_create_origin.py": 14,
     "test_joint_drive.py": 6,
@@ -101,16 +108,16 @@ _PER_FILE_BASELINE = {
     "test_model_create_component.py": 11,
     "test_model_draft.py": 4,
     "test_model_extrude.py": 12,
-    "test_model_fillet_chamfer.py": 15,
+    "test_model_fillet_chamfer.py": 16,   # + FakeRuleFilletInput - conftest models no fillet-input surface
+    "test_design_edit_timeline.py": 6,   # the Timeline/TimelineObject/TimelineGroup(s) graph plus the entity Attributes collection and the AttributeVector findAttributes returns (len()/[i], .count raises) - no conftest fake models them, and this is the only tool that reads entity.attributes
     "test_model_hole.py": 5,
-    "test_model_mirror.py": 3,
     "test_model_move.py": 3,   # MoveFeatures createInput2/define*/add graph - no conftest fake models a feature-collection input factory (bodies/faces/bounding boxes come from the shared fakes)
     "test_model_offset_face.py": 5,   # OffsetFacesFeatures createInput/add transaction graph - no conftest fake models a feature-collection input factory
     "test_model_scale.py": 3,   # ScaleFeatures createInput/setToNonUniform/add graph - no conftest fake models a feature-collection input factory (bodies/bounding boxes come from the shared fakes)
     "test_model_pattern.py": 9,
     "test_model_revolve.py": 9,
     "test_model_shell.py": 5,
-    "test_model_split.py": 7,
+    "test_model_split.py": 5,
     "test_model_sweep.py": 7,
     "test_model_thread.py": 5,   # ThreadFeatures createInput/add plus the thread-table query graph - no conftest fake models a feature-collection input factory or a thread library
     "test_param_ops.py": 5,
@@ -120,11 +127,11 @@ _PER_FILE_BASELINE = {
     "test_pmi_delete.py": 1,
     "test_pmi_edit.py": 1,
     "test_polyline.py": 6,
-    "test_sketch_constrain.py": 7,
+    "test_sketch_constrain.py": 15,   # the offset/pattern input+result object graphs conftest cannot model
     "test_sketch_core.py": 3,
     "test_sketch_delete_entity.py": 6,
     "test_sketch_detail.py": 5,   # the three spline SketchCurves collections with per-kind shape properties - not modeled by the conftest solid fakes
-    "test_sketch_dimension.py": 13,   # ellipse + fitted-spline dimension operands: sketch-entity shapes the conftest solid fakes do not model
+    "test_sketch_dimension.py": 15,   # ellipse + fitted-spline dimension operands, plus the arc and bare-SketchPoint operands the new dim types take: sketch-entity shapes the conftest solid fakes do not model
     "test_sketch_get_merge.py": 1,
     "test_sketch_project.py": 1,
     "test_sketch_set_text.py": 8,

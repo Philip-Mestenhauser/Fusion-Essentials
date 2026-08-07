@@ -14,9 +14,11 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
+from . import _contacts
 from . import _geom
 from . import _inputs
 from . import _joints
+from . import _relations
 
 app = adsk.core.Application.get()
 
@@ -113,7 +115,10 @@ def _joint_record(j):
 
 # ── joint_origins slice: each Joint Origin (a reusable WCS frame) as a referenceable, handle-bearing row ──
 
-_SLICES = ("joint_origins",)
+_SLICES = ("joint_origins", "relations", "contacts")
+
+# Per-rigid-group / per-contact-set member preview; the row's own count carries the rest.
+_MEMBER_CAP = 12
 
 
 def _jo_consumers(design):
@@ -212,6 +217,114 @@ def _joint_origin_rows(design, inv_k, cap):
     return rows, total
 
 
+# ── relations slice: the maintained assembly relationships, each editable by name ──────────────────
+#
+# Rigid groups, motion links and assembly constraints are three SEPARATE collections (they are not
+# joints, so the joint walk above never sees them). Rows carry what assembly_edit_relations needs to
+# act: the name it resolves by, and the current state a suppress/delete/re-value would change.
+
+def _rigid_group_row(rg, comp):
+    """One rigid group. The member list is PREVIEWED to _MEMBER_CAP; occurrence_count is the true
+    total and occurrences_truncated marks the row, so a capped preview is never silent."""
+    members, total = _relations.rigid_group_members(rg, _MEMBER_CAP)
+    return {"name": safe(lambda: rg.name), "component": safe(lambda: comp.name),
+            "occurrences": members, "occurrence_count": total,
+            "occurrences_truncated": total > len(members),
+            "suppressed": bool(safe(lambda: rg.isSuppressed, False))}
+
+
+def _motion_link_row(ml, comp):
+    """One motion link: the two joints it couples and the coupling itself. joint_two is null for a
+    link between two DOF of the SAME joint (the API returns null there - it is not a read failure).
+    value_one/value_two are the link's own ModelParameters in Fusion's internal units (cm / radians);
+    their RATIO is what the coupling means."""
+    healthy, msg = _health(ml)
+    row = {"name": safe(lambda: ml.name), "component": safe(lambda: comp.name),
+           "joint_one": safe(lambda: ml.jointOne.name),
+           "joint_two": safe(lambda: ml.jointTwo.name),
+           "value_one": safe(lambda: ml.valueOne.value),
+           "value_two": safe(lambda: ml.valueTwo.value),
+           "reversed": bool(safe(lambda: ml.isReversed, False)),
+           "suppressed": bool(safe(lambda: ml.isSuppressed, False)),
+           "healthy": healthy}
+    if not healthy:
+        row["error"] = msg
+    return row
+
+
+def _constraint_row(con, comp):
+    healthy, msg = _health(con)
+    row = {"name": safe(lambda: con.name), "component": safe(lambda: comp.name),
+           "relationship_count": safe(lambda: con.geometricRelationships.count, 0),
+           "suppressed": bool(safe(lambda: con.isSuppressed, False)),
+           "healthy": healthy}
+    if not healthy:
+        row["error"] = msg
+    return row
+
+
+_RELATION_ROWS = (("rigid_groups", "rigid_group", _rigid_group_row),
+                  ("motion_links", "motion_link", _motion_link_row),
+                  ("constraints", "constraint", _constraint_row))
+
+
+def _relation_rows(design, cap):
+    """The relations slice over the ONE relations walk (_relations.all_relations): ({key: rows},
+    {key: total}) for the three kinds, each list bounded by cap."""
+    rows, totals = {}, {}
+    for key, kind, build in _RELATION_ROWS:
+        pairs = _relations.all_relations(design, kind)
+        totals[key] = len(pairs)
+        rows[key] = [build(obj, comp) for obj, comp in pairs[:cap]]
+    return rows, totals
+
+
+# ── contacts slice: the design's contact sets + the two flags that decide whether they do anything ──
+#
+# Contact sets hang off the DESIGN, not a component, so the relations walk above never sees them.
+# Rows carry what assembly_edit_contacts needs to act: the name it resolves by, the membership, and
+# the suppression an edit would change. A ContactSet has no entityToken and no healthState, so a row
+# carries neither a handle nor a healthy flag.
+
+def _contact_row(cs):
+    """One contact set. Members are PREVIEWED to _MEMBER_CAP; member_count is the true total from
+    len(occurencesAndBodies) and members_truncated marks the row. members_unreadable is the COUNT of
+    members carrying no readable name (the measured case is a BODY member), or true when the member
+    list could not be read at all - then member_count is null and no membership is claimed, since a
+    zero count would report an unreadable set as an EMPTY one."""
+    names, total, unnamed = _contacts.membership(cs, _MEMBER_CAP)
+    row = {"name": safe(lambda: cs.name),
+           "suppressed": bool(safe(lambda: cs.isSuppressed, False))}
+    if total is None:
+        row["member_count"] = None
+        row["members_unreadable"] = True
+        return row
+    row["members"] = names
+    row["member_count"] = total
+    row["members_truncated"] = total > len(names) + unnamed
+    if unnamed:
+        row["members_unreadable"] = unnamed
+    return row
+
+
+def _contact_rows(design, cap):
+    """The contacts slice over the ONE design-scoped contact-set walk: (rows, total), bounded by cap."""
+    sets = _contacts.all_contact_sets(design)
+    return [_contact_row(cs) for cs in sets[:cap]], len(sets)
+
+
+def _contact_analysis(design):
+    """Both design-level flags. A contact set takes part only when analysis is ENABLED and its scope
+    is the contact sets: enabled false means NO contact analysis is performed at all, and the scope
+    reads all_bodies while it is off. Either key is null when its flag cannot be read - an unreadable
+    scope is not a scope."""
+    enabled = safe(lambda: design.isContactAnalysisEnabled)
+    use_sets = safe(lambda: design.isContactSetAnalysis)
+    return {"enabled": (None if enabled is None else bool(enabled)),
+            "scope": (None if use_sets is None else
+                      ("contact_sets" if use_sets else "all_bodies"))}
+
+
 def _normalize_include(include):
     if include in (None, "", []):
         return []
@@ -221,7 +334,8 @@ def _normalize_include(include):
 
 
 def handler(units: str = "mm", include=None, include_joints: bool = True,
-            max_occurrences: int = 50, max_joints: int = 100, max_joint_origins: int = 50) -> dict:
+            max_occurrences: int = 50, max_joints: int = 100, max_joint_origins: int = 50,
+            max_relations: int = 50, max_contacts: int = 50) -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -366,6 +480,62 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                         "qualified name + a handle to reference it by (feed joint_create / joint_at_geometry "
                         "/ cam_edit_setup wcs), world position + frame axes, and which joints consume it.")
 
+    # relations slice (opt-in): the maintained relationships that are NOT joints.
+    if "relations" in inc:
+        cap_r = max(1, int(max_relations))
+        rel_rows, rel_totals = _relation_rows(design, cap_r)
+        out["relations"] = rel_rows
+        out["relation_counts"] = rel_totals
+        # BOTH caps feed the flag: the per-kind list cap AND a rigid group's member preview, so
+        # relations_truncated never reads false over a row that dropped members.
+        list_capped = any(rel_totals[k] > len(rel_rows[k]) for k in rel_rows)
+        members_capped = any(r.get("occurrences_truncated") for r in rel_rows["rigid_groups"])
+        out["relations_truncated"] = list_capped or members_capped
+        if list_capped:
+            out["note"] += (f" relations lists were capped at {cap_r}; raise max_relations to see "
+                            "the rest (relation_counts holds the true totals).")
+        if members_capped:
+            out["note"] += (f" A rigid group's members are previewed to {_MEMBER_CAP} - the rows "
+                            "flagged occurrences_truncated carry their full count in "
+                            "occurrence_count.")
+    else:
+        out["note"] += (" include=['relations'] lists the maintained relationships that are NOT joints - "
+                        "rigid groups (members + suppressed), motion links (the two joints, their values "
+                        "and reversed flag), and assembly constraints - each editable by name with "
+                        "assembly_edit_relations.")
+
+    # contacts slice (opt-in): the design's contact sets, plus the flags that make them act.
+    if "contacts" in inc:
+        cap_c = max(1, int(max_contacts))
+        contact_rows, contact_total = _contact_rows(design, cap_c)
+        # .get: a row whose member list could not be read carries no members_truncated at all.
+        members_capped = any(r.get("members_truncated") for r in contact_rows)
+        out["contact_analysis"] = _contact_analysis(design)
+        out["contacts"] = contact_rows
+        out["contact_count"] = contact_total
+        out["contacts_truncated"] = contact_total > len(contact_rows) or members_capped
+        if contact_total > len(contact_rows):
+            out["note"] += (f" contacts was capped at {cap_c} of {contact_total}; raise max_contacts "
+                            "to see the rest.")
+        if members_capped:
+            out["note"] += (f" A contact set's members are previewed to {_MEMBER_CAP} - the rows "
+                            "flagged members_truncated carry their full count in member_count.")
+        # A list of sets reads as "these are in force"; both flag states that make them do nothing
+        # are disclosed beside it, in the same words assembly_edit_contacts uses.
+        if contact_total and out["contact_analysis"]["enabled"] is False:
+            out["note"] += (" NOTE: contact analysis is OFF for this design, so every contact set "
+                            "listed is INERT and 'scope' reads all_bodies regardless; turn it on "
+                            "with assembly_edit_contacts action='enable_analysis'.")
+        elif (contact_total and out["contact_analysis"]["enabled"] is True
+                and out["contact_analysis"]["scope"] == "all_bodies"):
+            out["note"] += (" NOTE: contact analysis is ON but scoped to ALL bodies, so the contact "
+                            "sets listed are IGNORED until assembly_edit_contacts "
+                            "action='set_analysis_scope' with scope='contact_sets'.")
+    else:
+        out["note"] += (" include=['contacts'] lists the design's contact sets - members, member "
+                        "count, suppressed - plus whether contact analysis is enabled and whether it "
+                        "uses those sets or all bodies. Edit with assembly_edit_contacts.")
+
     if rolled_back:
         out["note"] += (f" WARNING: the timeline marker is at {marker_pos}/{marker_count} - features "
                         "AFTER it (downstream joints included) are ROLLED BACK and reverted to home, so "
@@ -396,19 +566,24 @@ TOOL_DESCRIPTION = (
     "which occurrences are grounded. Use it to verify grounding, joint wiring, and part positions from "
     "numbers instead of a screenshot. include_joints=false for just positions/grounding. "
     "include=['joint_origins'] adds each Joint Origin (WCS frame): qualified name + handle (feed "
-    "joint_create / cam_edit_setup wcs), world position/axes, consuming joints. occurrences/joints are "
-    "capped (max_occurrences 50, max_joints 100); *_truncated flags a hit cap."
+    "joint_create / cam_edit_setup wcs), world position/axes, consuming joints. include=['relations'] "
+    "adds the non-joint relationships (rigid groups, motion links, constraints) by name, to edit with "
+    "assembly_edit_relations. include=['contacts'] adds the design's contact sets plus whether contact "
+    "analysis is on and what it is scoped to (assembly_edit_contacts). occurrences/joints are capped "
+    "(max_occurrences 50, max_joints 100); *_truncated flags a hit cap."
 )
 
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slice: 'joint_origins' (each Joint Origin WCS frame + handle). Omit for kinematic state only."})
+            "description": "Deeper slice: 'joint_origins' (each Joint Origin WCS frame + handle), 'relations' (rigid groups / motion links / constraints), 'contacts' (contact sets + the contact-analysis flags). Omit for kinematic state only."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
     .add_input_property("max_occurrences", {"type": "integer", "description": "Cap on the 'occurrences' array returned (default 50)."})
     .add_input_property("max_joints", {"type": "integer", "description": "Cap on the 'joints' array returned (default 100)."})
     .add_input_property("max_joint_origins", {"type": "integer", "description": "Cap on the 'joint_origins' array (default 50)."})
+    .add_input_property("max_relations", {"type": "integer", "description": "Cap on each 'relations' list (default 50)."})
+    .add_input_property("max_contacts", {"type": "integer", "description": "Cap on the 'contacts' list (default 50)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

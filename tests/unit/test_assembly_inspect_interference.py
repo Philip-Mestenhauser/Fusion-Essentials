@@ -18,15 +18,28 @@ def _payload(result):
 
 
 class FakeOcc:
-    def __init__(self, name):
+    """An occurrence in the analysis set: fullPathName names the INSTANCE, component holds the
+    native bodies analyzeInterference hands back."""
+    def __init__(self, name, full_path=None, bodies=()):
         self.name = name
+        self.fullPathName = full_path or name
+        self.component = FakeComp(name.split(":")[0], bodies)
+
+
+class FakeComp:
+    def __init__(self, name, bodies=()):
+        self.name = name
+        self.bRepBodies = list(bodies)
 
 
 class FakeBody:
-    # LIVE shape: interference bodies expose the owner via parentComponent (assemblyContext is None).
-    def __init__(self, name, comp_name=None, occ_name=None):
+    # LIVE shape: analyzeInterference returns NATIVE bodies - assemblyContext reads None on both
+    # result entities - so the interfering INSTANCE is recovered by mapping entityToken back to the
+    # occurrences that were put into the analysis set.
+    def __init__(self, name, comp_name=None, occ_name=None, token=None):
         self.name = name
-        self.parentComponent = FakeOcc(comp_name) if comp_name else None
+        self.entityToken = token or f"TOK::{name}"
+        self.parentComponent = FakeComp(comp_name) if comp_name else None
         self.assemblyContext = FakeOcc(occ_name) if occ_name else None
 
 
@@ -74,7 +87,10 @@ class FakeOccColl:
 
 class FakeRoot:
     def __init__(self, occurrences):
+        # allOccurrences is the analysis set (every depth); root-level solids join it too.
         self.occurrences = occurrences
+        self.allOccurrences = occurrences
+        self.bRepBodies = []
 
 
 class FakeDesign:
@@ -99,14 +115,25 @@ def _install(monkeypatch, occurrences, results, reject_coincident=False):
 
 
 class TestOwningOccurrence:
-    def test_prefers_parent_component_name(self):
-        # the live-validated path: parentComponent.name (assemblyContext is None on these bodies)
+    def test_names_the_INSTANCE_via_the_analysis_set(self):
+        # The point of the report: which INSTANCE interferes. analyzeInterference returns a native
+        # body, so the path comes from the occurrence map, not off the body.
         b = FakeBody("Body1", comp_name="Wheel")
-        assert ai._owning_occurrence_name(b) == "Wheel"
+        owners = {b.entityToken: ["Rig:1+Wheel:2"]}
+        assert ai._owning_occurrence_name(b, owners) == "Rig:1+Wheel:2"
 
-    def test_falls_back_to_assembly_context_then_body_name(self):
-        assert ai._owning_occurrence_name(FakeBody("B", occ_name="Crank:1")) == "Crank:1"
-        assert ai._owning_occurrence_name(FakeBody("LooseBody")) == "LooseBody"
+    def test_says_so_when_one_native_body_serves_several_instances(self):
+        # A component instanced twice maps its native body to both - a genuine ambiguity, reported
+        # rather than silently collapsed to one path.
+        b = FakeBody("Body1", comp_name="Wheel")
+        owners = {b.entityToken: ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]}
+        out = ai._owning_occurrence_name(b, owners)
+        assert "Rig:1+Wheel:1" in out and "1 more instance" in out
+
+    def test_falls_back_to_component_then_body_name_when_unmapped(self):
+        # A root-level body belongs to no occurrence: the component name is all there is.
+        assert ai._owning_occurrence_name(FakeBody("B", comp_name="Crank"), {}) == "Crank"
+        assert ai._owning_occurrence_name(FakeBody("LooseBody"), {}) == "LooseBody"
 
 
 class TestInterferenceHandler:
@@ -137,11 +164,28 @@ class TestInterferenceHandler:
         out = _payload(ai.handler())
         assert out["passed"] is True and out["measured"]["interference_count"] == 0
 
-    def test_short_circuits_under_two_occurrences(self, monkeypatch):
+    def test_under_two_entities_REFUSES_rather_than_passing(self, monkeypatch):
+        # Nothing to compare is not the same as nothing wrong. A verdict payload has no "unknown"
+        # state, so the tool refuses; reporting passed=true would let a caller gate a build on a
+        # verdict this tool never formed.
         _install(monkeypatch, [FakeOcc("Solo:1")], [FakeResult(FakeBody("x"), FakeBody("y"), 1.0)])
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "NOT a pass" in res["content"][0]["text"]
+
+    def test_nested_parts_under_ONE_top_level_occurrence_are_still_analysed(self, monkeypatch):
+        # The whole assembly wrapped in a single occurrence: the analysis set is allOccurrences, so
+        # the wrapper's children are compared instead of the design reading as one entity.
+        a, b = FakeBody("BoxA", "PartA"), FakeBody("BoxB", "PartB")
+        occs = [FakeOcc("Wrapper:1", "Wrapper:1"),
+                FakeOcc("PartA:1", "Wrapper:1+PartA:1", bodies=[a]),
+                FakeOcc("PartB:1", "Wrapper:1+PartB:1", bodies=[b])]
+        _install(monkeypatch, occs, [FakeResult(a, b, 500.0)])
         out = _payload(ai.handler())
-        assert out["passed"] is True and "Fewer than 2" in out["note"]
-        assert ai.RETURNS[0].assert_present(out) == ""       # the early-out keeps the contract too
+        assert out["passed"] is False
+        assert out["measured"]["interferences"] == [
+            {"occurrence_one": "Wrapper:1+PartA:1", "occurrence_two": "Wrapper:1+PartB:1",
+             "overlap_volume_cm3": 500.0}]
 
     def test_pairs_sorted_by_descending_volume(self, monkeypatch):
         # three distinct pairs with different overlap volumes -> reported largest-overlap first.
@@ -168,8 +212,8 @@ class TestInterferenceHandler:
     def test_owning_name_falls_back_when_parent_component_name_empty(self):
         # parentComponent present but its name is falsy -> use assemblyContext, then body name.
         b = FakeBody("BodyZ", comp_name="", occ_name="Crank:1")
-        b.parentComponent = FakeOcc("")          # present object, empty name
-        assert ai._owning_occurrence_name(b) == "Crank:1"
+        b.parentComponent = FakeComp("")         # present object, empty name
+        assert ai._owning_occurrence_name(b, {}) == "Crank:1"
 
     def test_self_pair_note_when_same_occurrence_overlaps(self, monkeypatch):
         # both bodies map to the same occurrence -> a self-pair (one entry, sorted key collapses).

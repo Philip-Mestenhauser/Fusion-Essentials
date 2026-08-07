@@ -581,6 +581,28 @@ class TestDataModel:
         assert dm["project"] == "MCP Test Project" and dm["project_id"] == "a.999"
         assert dm["folder"] == "Rovers"
 
+    def test_version_numbers_say_which_handle_they_were_read_off(self):
+        # Both numbers come off the ONE DataFile handle the open document HOLDS, and that handle
+        # keeps its pre-save values - so after a save they can disagree with each other (v3 beside
+        # latest 2 was observed). The note states that, and names the post-save read to trust
+        # instead - it must NOT promise the numbers merely lag by a few seconds.
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, data_file=FakeDataFile(version=3, latest=2)))
+        dm = _payload(wo.handler())["document"]["data_model"]
+        note = dm["version_lag_note"]
+        assert dm["version_number"] == 3 and dm["latest_version_number"] == 2
+        assert "HOLDS" in note and "pre-save" in note
+        assert "version_confirmed" in note                 # the read to trust instead
+        assert "few seconds" not in note
+
+    def test_unsaved_doc_has_no_version_note_to_warn_about(self):
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=FakeDoc(design=des, data_file=None))
+        dm = _payload(wo.handler())["document"]["data_model"]
+        assert "version_lag_note" not in dm
+
     def test_unsaved_doc_has_no_urn_and_note_warns(self):
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])

@@ -23,10 +23,11 @@ def activate_setup_handler(setup: str = "") -> dict:
     if err:
         return error(err)
 
-    target, available = find_setup(cam, want)
+    # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
+    # name was ABSENT or AMBIGUOUS, and only it can say which.
+    target, _names, serr = find_setup(cam, want)
     if not target:
-        return error(f"Setup not found: '{setup}'. "
-                      f"Available: {', '.join(n for n in available if n) or '(none)'}")
+        return error(serr)
 
     try:
         target.activate()

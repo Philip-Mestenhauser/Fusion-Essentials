@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2704.1.39"
-VERIFIED_ON = "2026-08-01"
+FUSION_VERSION = "2705.0.87"
+VERIFIED_ON = "2026-08-06"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -13,6 +13,12 @@ ENUMS = {
         "ForceGeneration": 0,
         "SkipGeneration": 1,
         "UserPreference": 2,
+    },
+    "cam.InspectionPointState": {
+        "WithinTolerance": 0,
+        "AboveTolerance": 1,
+        "BelowTolerance": 2,
+        "Unprojected": 3,
     },
     "cam.LibraryLocations": {
         "LocalLibraryLocation": 0,
@@ -22,6 +28,11 @@ ENUMS = {
         "ExternalLibraryLocation": 4,
         "Fusion360LibraryLocation": 5,
         "HubLibraryLocation": 6,
+    },
+    "cam.LoopTypes": {
+        "AllLoops": 0,
+        "OnlyOutsideLoops": 1,
+        "OnlyInsideLoops": 2,
     },
     "cam.OperationStates": {
         "IsValidOperationState": 0,
@@ -35,6 +46,10 @@ ENUMS = {
         "JetOperation": 2,
         "AdditiveOperation": 3,
     },
+    "cam.SetupSheetFormats": {
+        "HTMLFormat": 0,
+        "ExcelFormat": 1,
+    },
     "cam.SetupStockModes": {
         "FixedBoxStock": 0,
         "RelativeBoxStock": 1,
@@ -44,6 +59,12 @@ ENUMS = {
         "RelativeTubeStock": 5,
         "SolidStock": 6,
         "PreviousSetupStock": 7,
+    },
+    "cam.SideTypes": {
+        "AlwaysOutsideSideType": 0,
+        "AlwaysInsideSideType": 1,
+        "StartOutsideSideType": 2,
+        "StartInsideSideType": 3,
     },
     "core.CameraTypes": {
         "OrthographicCameraType": 0,
@@ -63,6 +84,11 @@ ENUMS = {
     "core.DocumentTypes": {
         "FusionDesignDocumentType": 0,
     },
+    "core.HorizontalAlignments": {
+        "LeftHorizontalAlignment": 0,
+        "CenterHorizontalAlignment": 1,
+        "RightHorizontalAlignment": 2,
+    },
     "core.SurfaceTypes": {
         "PlaneSurfaceType": 0,
         "CylinderSurfaceType": 1,
@@ -78,10 +104,48 @@ ENUMS = {
         "UploadFinished": 1,
         "UploadFailed": 2,
     },
+    "core.VerticalAlignments": {
+        "TopVerticalAlignment": 0,
+        "MiddleVerticalAlignment": 1,
+        "BottomVerticalAlignment": 2,
+    },
+    "drawing.DWGFormats": {
+        "SimplifiedDWGFormat": 0,
+        "AutoCADDWGFormat": 1,
+    },
+    "drawing.DatumPositionsTypes": {
+        "BottomLeftDatumPositionType": 0,
+        "BottomRightDatumPositionType": 1,
+        "TopLeftDatumPositionType": 2,
+        "TopRightDatumPositionType": 3,
+    },
+    "drawing.DimensionStrategyTypes": {
+        "OverallDimensionStrategyType": 0,
+        "AutomaticDimensionStrategyType": 1,
+        "BaselineDimensionStrategyType": 2,
+        "ChainDimensionStrategyType": 3,
+        "OrdinateDimensionStrategyType": 4,
+        "SymmetricDimensionStrategyType": 5,
+        "SymmetricWithBaselineDimensionStrategyType": 6,
+        "SymmetricWithOrdinateDimensionStrategyType": 7,
+    },
+    "drawing.DrawingCreationModes": {
+        "AutomaticDrawingCreationMode": 0,
+        "ManualDrawingCreationMode": 1,
+    },
+    "drawing.DrawingUnitTypes": {
+        "InchDrawingUnitType": 0,
+        "MillimeterDrawingUnitType": 1,
+    },
     "fusion.ArrangeSolverTypes": {
         "Arrange2DTrueShapeSolverType": 0,
         "Arrange2DRectangularSolverType": 1,
         "Arrange3DSolverType": 2,
+    },
+    "fusion.AutoConstrainResultTypes": {
+        "Option1AutoConstrainResultType": 0,
+        "Option2AutoConstrainResultType": 1,
+        "Option3AutoConstrainResultType": 2,
     },
     "fusion.BoundingBoxEntityTypes": {
         "AllEntitiesBoundingBoxEntityType": 0,
@@ -91,6 +155,16 @@ ENUMS = {
         "SketchBoundingBoxEntityType": 8,
         "ConstructionBoundingBoxEntityType": 16,
     },
+    "fusion.ChamferCornerTypes": {
+        "ChamferCornerType": 0,
+        "MiterCornerType": 1,
+        "BlendCornertype": 2,
+    },
+    "fusion.ChamferTypes": {
+        "EqualDistanceChamferType": 0,
+        "TwoDistancesChamferType": 1,
+        "DistanceAndAngleChamferType": 2,
+    },
     "fusion.DesignIntentTypes": {
         "PartDesignIntentType": 0,
         "AssemblyDesignIntentType": 1,
@@ -99,6 +173,16 @@ ENUMS = {
     "fusion.DesignTypes": {
         "DirectDesignType": 0,
         "ParametricDesignType": 1,
+    },
+    "fusion.DimensionStrategyTypes": {
+        "DefaultDimensionStrategyType": 0,
+        "ChainDimensionStrategyType": 1,
+        "BaselineDimensionStrategyType": 2,
+        "EdgeAndAlignedDimensionStrategyType": 3,
+        "SymmetricAndChainDimensionStrategyType": 4,
+        "SymmetricAndBaselineDimensionStrategyType": 5,
+        "EdgeAndAlignedHigherAngleDimPriorityDimensionStrategyType": 6,
+        "EdgeAndAlignedWithBaselineDimensionStrategyType": 7,
     },
     "fusion.ExtentDirections": {
         "PositiveExtentDirection": 0,
@@ -117,6 +201,11 @@ ENUMS = {
         "EdgeStartPointPosition": 0,
         "EdgeMidPointPosition": 1,
         "EdgeEndPointPosition": 2,
+    },
+    "fusion.InterLoopDimensionStrategyTypes": {
+        "DefaultInterLoopDimensionStrategyType": 0,
+        "ChainInterLoopDimensionStrategyType": 1,
+        "BaselineInterLoopDimensionStrategyType": 2,
     },
     "fusion.JointDirections": {
         "XAxisJointDirection": 0,
@@ -163,6 +252,11 @@ ENUMS = {
         "PrincipalXYLeaderLineNotePlaneType": 5,
         "PrincipalYZLeaderLineNotePlaneType": 6,
         "PrincipalZXLeaderLineNotePlaneType": 7,
+    },
+    "fusion.LinearDiameterDimensionPreferenceTypes": {
+        "DefaultLinearDiameterDimensionPreferenceType": 0,
+        "PreferLinearDiameterDimensionPreferenceType": 1,
+        "AvoidLinearDiameterDimensionPreferenceType": 2,
     },
     "fusion.MeshCombineAlgorithmTypes": {
         "LegacyMeshCombineAlgorithmType": 0,
@@ -216,6 +310,25 @@ ENUMS = {
         "ProportionMeshReduceTargetType": 1,
         "FaceCountMeshReduceTargetType": 2,
     },
+    "fusion.MeshRepairRebuildTypes": {
+        "FastMeshRepairRebuildType": 0,
+        "PreserveSharpEdgesMeshRepairRebuildType": 1,
+        "AccurateMeshRepairRebuildType": 2,
+        "BlockyMeshRepairRebuildType": 3,
+        "AdaptiveMeshRepairRebuildType": 4,
+        "AdaptivePreserveSharpEdgesMeshRepairRebuildType": 5,
+    },
+    "fusion.MeshRepairTypes": {
+        "CloseHolesMeshRepairType": 0,
+        "StitchAndRemoveMeshRepairType": 1,
+        "WrapMeshRepairType": 2,
+        "RebuildMeshRepairType": 3,
+        "OneTouchFixMeshRepairType": 4,
+    },
+    "fusion.MeshSeparateTypes": {
+        "ShellMeshSeparateType": 0,
+        "FaceGroupMeshSeparateType": 1,
+    },
     "fusion.PMISymbolTypes": {
         "DiameterPMISymbolType": 0,
         "TolerancePMISymbolType": 1,
@@ -256,14 +369,57 @@ ENUMS = {
         "InchesPMIUnitType": 4,
         "FeetPMIUnitType": 5,
     },
+    "fusion.PathDistanceTypes": {
+        "ProportionalPathDistanceType": 0,
+        "PhysicalPathDistanceType": 1,
+    },
+    "fusion.PipeSectionTypes": {
+        "CircularPipeSectionType": 0,
+        "SquarePipeSectionType": 1,
+        "TriangularPipeSectionType": 2,
+    },
+    "fusion.RuleFilletTopologyTypes": {
+        "RoundsAndFilletsRuleFilletTopologyType": 0,
+        "RoundsOnlyRuleFilletTopologyType": 1,
+        "FilletsOnlyRuleFilletTopologyType": 2,
+    },
+    "fusion.RuledSurfaceTypes": {
+        "TangentRuledSurfaceType": 0,
+        "NormalRuledSurfaceType": 1,
+        "DirectionRuledSurfaceType": 2,
+    },
+    "fusion.SurfaceContinuityTypes": {
+        "ConnectedSurfaceContinuityType": 0,
+        "TangentSurfaceContinuityType": 1,
+        "CurvatureSurfaceContinuityType": 2,
+    },
+    "fusion.SurfaceExtendAlignment": {
+        "FreeEdges": 0,
+        "AlignEdges": 1,
+    },
     "fusion.SurfaceExtendTypes": {
         "NaturalSurfaceExtendType": 0,
         "TangentSurfaceExtendType": 1,
         "PerpendicularSurfaceExtendType": 2,
     },
+    "fusion.SurfaceProjectTypes": {
+        "ClosestPointSurfaceProjectType": 0,
+        "AlongVectorSurfaceProjectType": 1,
+    },
     "fusion.SweepOrientationTypes": {
         "ParallelOrientationType": 0,
         "PerpendicularOrientationType": 1,
+    },
+    "fusion.SymmetricDimensionStrategyTypes": {
+        "DefaultSymmetricDimensionStrategyType": 0,
+        "EndToEndSymmetricDimensionStrategyType": 1,
+        "EndToCenterSymmetricDimensionStrategyType": 2,
+        "CenterToEndSymmetricDimensionStrategyType": 3,
+        "CenterToEndWithSymmetryConstraintSymmetricDimensionStrategyType": 4,
+    },
+    "fusion.ThickenTypes": {
+        "SharpThickenType": 0,
+        "RoundedThickenType": 1,
     },
     "fusion.ThreadLocations": {
         "HighEndThreadLocation": 0,
@@ -307,12 +463,12 @@ SHAPES = {
         "boundingBox", "cast", "classType", "concaveEdges", "convert", "convertToSheetMetal",
         "convexEdges", "copy", "copyToComponent", "createComponent", "createForAssemblyContext", "cut",
         "deleteMe", "deriveFeature", "edges", "entityToken", "faces", "findByTempId",
-        "findThicknessAtFace", "getPhysicalProperties", "isDerived", "isLightBulbOn", "isSelectable", "isSheetMetal",
-        "isSolid", "isTemporary", "isTransient", "isValid", "isVisible", "lumps",
-        "material", "meshManager", "moveToComponent", "name", "nativeObject", "objectType",
-        "opacity", "orientedMinimumBoundingBox", "parentComponent", "physicalProperties", "pointContainment", "preciseBoundingBox",
-        "revisionId", "shells", "textureMapControl", "this", "thisown", "vertices",
-        "visibleOpacity", "volume", "wires",
+        "findThicknessAtFace", "getBendFaces", "getPhysicalProperties", "isDerived", "isLightBulbOn", "isSelectable",
+        "isSheetMetal", "isSolid", "isTemporary", "isTransient", "isValid", "isVisible",
+        "lumps", "material", "meshManager", "moveToComponent", "name", "nativeObject",
+        "objectType", "opacity", "orientedMinimumBoundingBox", "parentComponent", "physicalProperties", "pointContainment",
+        "preciseBoundingBox", "revisionId", "shells", "textureMapControl", "this", "thisown",
+        "vertices", "visibleOpacity", "volume", "wires",
     ],
     "BRepEdge": [
         "assemblyContext", "attributes", "body", "boundingBox", "cast", "classType",
@@ -338,12 +494,12 @@ SHAPES = {
         "checkToolpath", "checkValidity", "classType", "clearAllToolpaths", "clearMissingReferences", "clearToolpath",
         "customGraphicsGroups", "deleteEntities", "designRootOccurrence", "documentStockMaterialLibrary", "documentToolLibrary", "export3MFForDefaultAdditiveSetup",
         "exportManager", "findAttributes", "flatPatternOccurrences", "generateAllSetupSheets", "generateAllToolpaths", "generateSetupSheet",
-        "generateTemplateXML", "generateToolpath", "genericPostFolder", "getMachiningTime", "importManager", "inspectionResults",
-        "isValid", "manufacturingModels", "namedViews", "ncPrograms", "objectType", "parentDocument",
-        "personalPostFolder", "postProcess", "postProcessAll", "productType", "selectionSets", "setupActivated",
-        "setupActivating", "setupChanged", "setupCreated", "setupDeactivated", "setupDeactivating", "setupDestroying",
-        "setupGroups", "setups", "temporaryFolder", "this", "thisown", "unitsManager",
-        "workspaces",
+        "generateTemplateXML", "generateToolpath", "genericPostFolder", "getMachiningTime", "holeManager", "importManager",
+        "inspectionResults", "isValid", "manufacturingModels", "namedViews", "ncPrograms", "objectType",
+        "parentDocument", "personalPostFolder", "postProcess", "postProcessAll", "productType", "selectionSets",
+        "setupActivated", "setupActivating", "setupChanged", "setupCreated", "setupDeactivated", "setupDeactivating",
+        "setupDestroying", "setupGroups", "setups", "temporaryFolder", "this", "thisown",
+        "unitsManager", "workspaces",
     ],
     "CAMFolder": [
         "activate", "allOperations", "attributes", "cast", "children", "classType",
@@ -430,14 +586,15 @@ SHAPES = {
         "transform", "transform2", "visibleOpacity",
     ],
     "Operation": [
-        "attributes", "cast", "classType", "clearReferenceTool", "clearTool", "copyAfter",
-        "copyBefore", "copyInto", "deleteMe", "duplicate", "error", "generatedDataCollection",
-        "generatingProgress", "hasError", "hasMissingReferences", "hasToolpath", "hasWarning", "isGenerating",
-        "isLightBulbOn", "isOptional", "isProtected", "isSelected", "isSuppressed", "isSuppressible",
-        "isToolpathValid", "isValid", "isVisible", "messageLog", "modifyUtility", "moveAfter",
-        "moveBefore", "moveInto", "name", "noteIconColor", "notes", "objectType",
-        "operationId", "operationState", "parameters", "parent", "parentSetup", "referenceTool",
-        "removeReferences", "strategy", "strategyType", "this", "thisown", "tool",
+        "attributes", "cast", "classType", "clearHoleSignature", "clearReferenceTool", "clearTool",
+        "copyAfter", "copyBefore", "copyInto", "deleteMe", "duplicate", "error",
+        "generatedDataCollection", "generatingProgress", "getHoleSignatureXML", "hasError", "hasHoleSignature", "hasMissingReferences",
+        "hasToolpath", "hasWarning", "isGenerating", "isHoleSignatureLinked", "isLightBulbOn", "isOptional",
+        "isProtected", "isSelected", "isSuppressed", "isSuppressible", "isToolpathValid", "isValid",
+        "isVisible", "linkHoleSignatureFrom", "messageLog", "modifyUtility", "moveAfter", "moveBefore",
+        "moveInto", "name", "noteIconColor", "notes", "objectType", "operationId",
+        "operationState", "parameters", "parent", "parentSetup", "referenceTool", "removeReferences",
+        "setHoleSignatureXML", "strategy", "strategyType", "this", "thisown", "tool",
         "toolJson", "toolPreset", "toolPresetId", "warning",
     ],
     "Plane": [
@@ -472,18 +629,19 @@ SHAPES = {
         "workCoordinateSystem",
     ],
     "Sketch": [
-        "addCenterPointSlot", "addCenterToCenterSlot", "addOverallSlot", "areConstraintsShown", "areDimensionsShown", "arePointsShown",
-        "areProfilesShown", "assemblyContext", "attributes", "autoConstrain", "baseOrFormFeature", "boundingBox",
-        "cast", "classType", "copy", "createAutoConstrainInput", "createForAssemblyContext", "createSpunProfile",
-        "createSpunProfileInput", "deleteMe", "deriveFeature", "entityToken", "errorOrWarningMessage", "findConnectedCurves",
-        "geometricConstraints", "healthState", "importSVG", "include", "intersectWithSketchPlane", "isComputeDeferred",
-        "isConstructionGeometryShown", "isDerived", "isFullyConstrained", "isLightBulbOn", "isModelSliced", "isParametric",
-        "isProjectedGeometryShown", "isValid", "isVisible", "modelToSketchSpace", "move", "name",
-        "nativeObject", "objectType", "offset", "origin", "originPoint", "parentComponent",
-        "profiles", "project", "project2", "projectCutEdges", "projectToSurface", "redefine",
-        "referencePlane", "revisionId", "saveAsDXF", "setCenterlineState", "setConstructionState", "sketchCurves",
-        "sketchDimensions", "sketchPoints", "sketchTexts", "sketchToModelSpace", "this", "thisown",
-        "timelineObject", "transform", "xDirection", "yDirection",
+        "addCenterPointArcSlot", "addCenterPointSlot", "addCenterToCenterSlot", "addOverallSlot", "addThreePointArcSlot", "areConstraintsShown",
+        "areDimensionsShown", "arePointsShown", "areProfilesShown", "assemblyContext", "attributes", "autoConstrain",
+        "baseOrFormFeature", "boundingBox", "cast", "classType", "copy", "createAutoConstrainInput",
+        "createForAssemblyContext", "createSpunProfile", "createSpunProfileInput", "deleteMe", "deriveFeature", "entityToken",
+        "errorOrWarningMessage", "findConnectedCurves", "geometricConstraints", "healthState", "importSVG", "include",
+        "intersectWithSketchPlane", "isComputeDeferred", "isConstructionGeometryShown", "isDerived", "isFullyConstrained", "isLightBulbOn",
+        "isModelSliced", "isParametric", "isProjectedGeometryShown", "isValid", "isVisible", "mirror",
+        "modelToSketchSpace", "move", "name", "nativeObject", "objectType", "offset",
+        "origin", "originPoint", "parentComponent", "profiles", "project", "project2",
+        "projectCutEdges", "projectToSurface", "redefine", "referencePlane", "revisionId", "saveAsDXF",
+        "scale", "setCenterlineState", "setConstructionState", "sketchCurves", "sketchDimensions", "sketchPoints",
+        "sketchTexts", "sketchToModelSpace", "this", "thisown", "timelineObject", "transform",
+        "xDirection", "yDirection",
     ],
     "Vector3D": [
         "add", "angleTo", "asArray", "asPoint", "cast", "classType",

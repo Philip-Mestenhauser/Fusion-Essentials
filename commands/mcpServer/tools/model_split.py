@@ -21,6 +21,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _assert
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -29,7 +30,8 @@ _HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
-    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
+                         absent_when="no_timeline_feature"),
     _outputs.ReturnsValue("result_count",
                           "split=body: the number of resulting bodies; split=face: the net face-count increase"),
 ]
@@ -64,30 +66,6 @@ def _resolve_cutter(split_plane, split_tool_body):
     return _TOOLBODY.resolve(split_tool_body)
 
 
-def _distinct_bodies(faces):
-    """The distinct owning bodies of a face list (by identity), best-effort (mocks may lack .body)."""
-    out, seen = [], set()
-    for f in faces:
-        b = safe(lambda f=f: f.body)
-        if b is not None and id(b) not in seen:
-            seen.add(id(b))
-            out.append(b)
-    return out
-
-
-def _total_faces(bodies):
-    """Total face count across `bodies`, or None if none could be read (so the caller falls back to
-    the feature's own created-face count instead of a bogus zero)."""
-    total, any_ok = 0, False
-    for b in bodies:
-        fs = safe(lambda b=b: b.faces)
-        n = safe(lambda: fs.count) if fs else None
-        if n is not None:
-            total += n
-            any_ok = True
-    return total if any_ok else None
-
-
 def _health_error(feature):
     """An error result if the feature computed with a health ERROR, else None."""
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:
@@ -97,44 +75,75 @@ def _health_error(feature):
     return None
 
 
-def _split_body(comp, target, cutter, extend_tool):
+def _split_body(design, comp, target, cutter, extend_tool):
     """Split a solid body with the cutter, reporting the resulting body count honestly."""
     body, berr = _TARGET.resolve(target)
     if berr:
         return error(berr)
     if body is None:
         return error("'target' is required for split=body (the body to split).")
+    # Captured BEFORE the mutation: the census host (counted twice, never re-derived - see
+    # _common.census_host) and the target's NAME, since a post-mutation proxy can stop answering it
+    # and a payload must not publish a null for a body it resolved successfully.
+    host = _common.census_host(body, comp)
+    before_count = _common.body_count(host)
+    body_name = safe(lambda: body.name)
     try:
         si = comp.features.splitBodyFeatures.createInput(body, cutter, bool(extend_tool))
         feature = comp.features.splitBodyFeatures.add(si)
     except Exception as e:
         return error(f"Split body failed: {e}. (The cutter must fully cross the body - try "
                      "extend_tool=true, or a larger cutter/plane.)")
-    if not feature:
-        return error("Split body returned no feature.")
+    # MEASURED: splitBodyFeatures.add returns None in a DIRECT design while the split LANDS (7 bodies
+    # -> 8). With no feature to read result bodies off, the component's body census is the verdict.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Split body"))
     herr = _health_error(feature)
     if herr:
         return herr
 
-    fb = safe(lambda: feature.bodies)
-    rc = safe(lambda: fb.count, 0) if fb else 0
-    names = [safe(lambda i=i: fb.item(i).name) for i in range(rc)]
+    if direct_no_feature:
+        after_count = _common.body_count(host)
+        if before_count is None or after_count is None:
+            return error("Split body ran in a DIRECT design, which returns no feature object, and "
+                         "the component's body count could not be read back - so whether the body "
+                         "was divided is UNVERIFIED. Check with design_get(include=['tree']).")
+        # One body divided into N pieces raises the count by N-1, in the TARGET's own component -
+        # MEASURED: the pieces landed in SplitHost (1 -> 2) while the active root held at 3.
+        rc = after_count - before_count + 1
+        names = None                      # the pieces were COUNTED, never named - see the payload
+    else:
+        fb = safe(lambda: feature.bodies)
+        rc = safe(lambda: fb.count, 0) if fb else 0
+        names = [safe(lambda i=i: fb.item(i).name) for i in range(rc)]
     # A split that yields a single body did not actually divide anything - report it, never a false ok.
     if rc < 2:
         return error(f"Split produced {rc} body - the cutter did not divide "
-                     f"'{safe(lambda: body.name)}'. It must fully intersect the body; try "
-                     "extend_tool=true or a cutter that crosses it.")
-    return ok({
+                     f"'{body_name}'. It must fully intersect the body; try "
+                     "extend_tool=true or a cutter that crosses it. "
+                     + _common.failed_effect_remedy(design, feature))
+    payload = {
         "split": "body",
-        "feature": safe(lambda: feature.name),
-        "target": safe(lambda: body.name),
+        "target": body_name,
         "result_count": rc,
-        "result_bodies": names,
         "note": "Body split into pieces. Pair with design_get(include=['tree']) / view_screenshot.",
-    })
+    }
+    # Direct mode: no feature object, so neither its name nor the result-body NAMES it would have
+    # listed exist. Publish the flag RETURNS declares the omission against, and omit both keys rather
+    # than ship an empty list beside a piece count that contradicts it.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += (" " + _common.DIRECT_FEATURE_NOTE + " The pieces were COUNTED from the "
+                            "component's body census, not named - list them with "
+                            "design_get(include=['tree']).")
+    else:
+        payload["feature"] = safe(lambda: feature.name)
+        payload["result_bodies"] = names
+    return ok(payload)
 
 
-def _split_face(comp, faces, cutter, extend_tool):
+def _split_face(design, comp, faces, cutter, extend_tool):
     """Split the given faces with the cutter, reporting the net face-count increase honestly."""
     face_ents, ferr = _FACES.resolve(faces)
     if ferr:
@@ -142,8 +151,13 @@ def _split_face(comp, faces, cutter, extend_tool):
     if not face_ents:
         return error("'faces' is required for split=face (the faces to split).")
 
-    bodies = _distinct_bodies(face_ents)
-    before = _total_faces(bodies)
+    # Dedupe by entityToken, NOT by identity: face.body hands back a FRESH PROXY on every read
+    # (live-measured - three faces of one box gave three distinct python ids and ONE entityToken,
+    # with `f0.body is f1.body` False), so an id()-keyed dedupe keeps one body once PER FACE and the
+    # delta below sums that body's change that many times. _geom.owning_bodies is the shared walk
+    # that keys on the token; surface_delete_face resolves its own faces through the same call.
+    bodies = _geom.owning_bodies(face_ents)
+    before = _geom.face_counts(bodies)
     coll = adsk.core.ObjectCollection.create()
     for f in face_ents:
         coll.add(f)
@@ -153,28 +167,56 @@ def _split_face(comp, faces, cutter, extend_tool):
     except Exception as e:
         return error(f"Split face failed: {e}. (The cutter must cross the faces - try "
                      "extend_tool=true or a larger cutter.)")
-    if not feature:
-        return error("Split face returned no feature.")
+    # A DIRECT design can return no feature while the split lands (measured for its splitBody
+    # sibling). The verdict here is the before/after face census on the owning BODIES, which needs no
+    # feature object - so fall through to it; in parametric a None feature stays an honest error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Split face"))
     herr = _health_error(feature)
     if herr:
         return herr
 
-    after = _total_faces(bodies)
-    ff = safe(lambda: feature.faces)
-    created = safe(lambda: ff.count, 0) if ff else 0
-    delta = (after - before) if (before is not None and after is not None) else created
+    # `bodies` was resolved BEFORE the mutation and is counted again here - the same objects, never
+    # re-derived from the faces (see _common.census_host on the body path).
+    delta, readable = _geom.face_count_delta(bodies, before)
+    if direct_no_feature:
+        # There is no feature.faces to fall back on, so an unreadable census is UNVERIFIED - saying
+        # "the cutter did not cross the faces" would be a DIAGNOSIS of something never measured.
+        if not readable:
+            return error("Split face ran in a DIRECT design, which returns no feature object, and "
+                         "the owning bodies' face count could not be read back - so whether the "
+                         "faces were split is UNVERIFIED. Check with model_inspect / find_geometry.")
+        created = None
+        no_op = delta <= 0
+    else:
+        ff = safe(lambda: feature.faces)
+        created = safe(lambda: ff.count, 0) if ff else 0
+        if not readable:
+            delta = created
+        no_op = delta <= 0 and created == 0
     # No new faces means the cutter never crossed the target faces - a no-op, not a success.
-    if delta <= 0 and created == 0:
+    if no_op:
         return error(f"Split produced no new faces - the cutter did not cross the {len(face_ents)} "
-                     "target face(s). It must intersect them; try extend_tool=true or a larger cutter.")
-    return ok({
+                     "target face(s). It must intersect them; try extend_tool=true or a larger "
+                     "cutter. " + _common.failed_effect_remedy(design, feature))
+    payload = {
         "split": "face",
-        "feature": safe(lambda: feature.name),
         "faces_targeted": len(face_ents),
-        "faces_created": created,
         "result_count": delta,
         "note": "Faces split; result_count is the net face-count increase. Pair with view_screenshot.",
-    })
+    }
+    # Direct mode: no feature object, so neither its name nor its own created-face count exists.
+    # faces_created is read straight off feature.faces, so it is omitted rather than shipped as a 0
+    # that contradicts result_count.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += (" " + _common.DIRECT_FEATURE_NOTE + " result_count is the measured "
+                            "before/after face count on the owning bodies.")
+    else:
+        payload["feature"] = safe(lambda: feature.name)
+        payload["faces_created"] = created
+    return ok(payload)
 
 
 def handler(split: str = "body", target: str = "", faces=None, split_plane: str = "",
@@ -194,8 +236,8 @@ def handler(split: str = "body", target: str = "", faces=None, split_plane: str 
         return error(cerr)
 
     if kind == "body":
-        return _split_body(comp, target, cutter, extend_tool)
-    return _split_face(comp, faces, cutter, extend_tool)
+        return _split_body(design, comp, target, cutter, extend_tool)
+    return _split_face(design, comp, faces, cutter, extend_tool)
 
 
 TOOL_DESCRIPTION = (

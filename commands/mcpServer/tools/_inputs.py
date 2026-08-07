@@ -15,13 +15,23 @@ import adsk.core
 import adsk.fusion
 
 from . import _common
+from . import _geom     # owning_bodies - the ONE entityToken-keyed owning-body walk
 from . import _joints   # the JointOrigin walk (all_joint_origins / find_joint_origins_by_name / proxy)
 from ._export import component_by_name as _component_by_name   # the one design-wide by-name component walk
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the typed reference kinds - see the kinds table above; resolve_inputs/apply_to_tool + "
              "length_value_input/looks_like_expression/expression_report (literal-or-parameter-"
-             "expression lengths) + world_construction_axis (world key -> origin ConstructionAxis)")
+             "expression lengths) + world_construction_axis (world key -> origin ConstructionAxis) + "
+             "axis_line_of (the ONE numeric axis read behind an AxisRef ('edge', entity) value - a "
+             "bounded edge/sketch line derives its direction from worldGeometry's endpoints, a "
+             "construction axis carries origin/direction and gets lifted into WORLD space, since its "
+             "own .geometry is component-LOCAL) + entity_component (the ONE owner read for an "
+             "axis/direction entity: an edge's body's parent, a sketch line's sketch's parent, or a "
+             "datum's .component - never .parent, which is a BASE FEATURE for a non-parametric datum) "
+             "+ resolve_surface/surface_ref_label (the plane-then-face two-pass every *_to_surface "
+             "operand resolves through - see the SurfaceRef kind - and the resolved-entity label its "
+             "payload publishes instead of the raw input)")
 
 app = adsk.core.Application.get()
 
@@ -205,10 +215,6 @@ class EdgeLoopRef(GeometryHandleList):
         return (f"A list of find_geometry edge 'handle's forming {shape} "
                 "(a single edge is allowed - Fusion auto-finds the connected loop).")
 
-    def _edge_body(self, edge):
-        """The owning BRepBody of an edge, or None (best-effort; mocks may not model .body)."""
-        return _common.safe(lambda: edge.body)
-
     def resolve(self, raw):
         ents, err = super().resolve(raw)        # reuse handle resolution + staleness + edge-kind check
         if err:
@@ -217,17 +223,19 @@ class EdgeLoopRef(GeometryHandleList):
             if self.required:
                 return None, f"'{self.name}' needs at least one edge handle from find_geometry."
             return (None, {"entities": [], "body_count": 0}), None
+        # Count owning bodies through the ONE shared walk, which dedupes by entityToken. Identity
+        # cannot be used: edge.body hands back a FRESH PROXY on every read (live-measured - three
+        # edges of one open surface body gave three distinct python ids and ONE entityToken, with
+        # `e0.body is e1.body` False), so an id()-keyed set counts one body once PER EDGE. That
+        # would refuse a legal single-body chain below and publish the EDGE count as body_count.
+        body_count = len(_geom.owning_bodies(ents))
         # For an OPEN chain, every edge must belong to the SAME body - a multi-body chain is invalid.
-        if not self.closed:
-            bodies = [self._edge_body(e) for e in ents]
-            known = [b for b in bodies if b is not None]
-            if len(set(id(b) for b in known)) > 1:
-                return None, (f"'{self.name}': the edges to extend must all come from ONE surface body, "
-                              "but they span more than one. Pass only the outer edges of a single body.")
+        if not self.closed and body_count > 1:
+            return None, (f"'{self.name}': the edges to extend must all come from ONE surface body, "
+                          "but they span more than one. Pass only the outer edges of a single body.")
         coll = adsk.core.ObjectCollection.create()
         for e in ents:
             coll.add(e)
-        body_count = len(set(id(b) for b in (self._edge_body(e) for e in ents) if b is not None))
         return (coll, {"entities": ents, "body_count": body_count}), None
 
 
@@ -776,6 +784,148 @@ def MeshBodyRef(name, **kw):
     return BodyRef(name, kind="mesh", **kw)
 
 
+# ── feature reference (a TIMELINE object, by its name) ───────────────────────────────────────────
+#
+# Timeline feature names are NOT unique across a design (two components can each hold a "Fillet1"),
+# so this is the non-unique name space: an EXACT case-insensitive match, and a name matching several
+# objects is REFUSED with the 'name@index' candidates rather than resolved to the first hit.
+
+def _timeline_objects(timeline):
+    """Every timeline object, in index order - live, item(i).index == i, which is what makes the
+    'name@index' disambiguation form addressable."""
+    n = int(_common.safe(lambda: timeline.count, 0) or 0)
+    return [timeline.item(i) for i in range(n)]
+
+
+def _match_timeline_objects(objs, want):
+    """Every timeline object `want` names: the exact 'name@index' pair (the object at that index,
+    confirmed by name), else an EXACT case-insensitive name match. Never a substring - two features
+    can carry the same name, so the caller refuses anything but a single hit rather than guessing
+    which one was meant."""
+    base, at, idx = want.rpartition("@")
+    if at and base.strip() and idx.strip().isdigit():
+        i = int(idx.strip())
+        if 0 <= i < len(objs) and (_common.safe(lambda o=objs[i]: o.name) or "").lower() == base.strip().lower():
+            return [objs[i]]
+        return []
+    low = want.lower()
+    return [o for o in objs if (_common.safe(lambda o=o: o.name) or "").lower() == low]
+
+
+class FeatureRef(InputKind):
+    """A reference to ONE timeline FEATURE by name, as design_get(include=['timeline']) lists it.
+
+    Resolves to (entity, label): the timeline object's `.entity` plus the name the TIMELINE object
+    carries. The label travels with the entity because the two names are not measured equal - a
+    payload naming what it acted on publishes the name that resolved, never one re-read off the
+    feature. An ambiguous name is refused with the 'name@index' candidates; a timeline GROUP is
+    refused (it has no feature entity)."""
+
+    MAP_HINT = "a timeline feature by name (refuses an ambiguous name; 'name@index' picks one)"
+
+    def contract_note(self) -> str:
+        return "A timeline feature NAME from design_get(include=['timeline'])."
+
+    def _objects(self):
+        """(timeline objects, error) for the active design."""
+        des = _common.design()
+        if not des:
+            return None, "No active design to resolve the feature name against."
+        timeline = _common.safe(lambda: des.timeline)
+        if timeline is None:
+            return None, ("This design has no timeline, so it has no features to name. Act on the "
+                          "bodies instead.")
+        return _timeline_objects(timeline), None
+
+    def _find_one(self, objs, want, label):
+        """(timeline object, error) - the ONE object `want` names, or a refusal."""
+        hits = _match_timeline_objects(objs, want)
+        if not hits:
+            sample = ", ".join(n for n in (_common.safe(lambda o=o: o.name) for o in objs[:12]) if n)
+            return None, (f"{label}: no timeline feature named '{want}'. Available (sample): "
+                          f"{sample or '(none)'}. Use design_get(include=['timeline']) for the full "
+                          "list.")
+        if len(hits) > 1:
+            cands = ", ".join(f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
+                              for o in hits[:8])
+            return None, (f"{label}: '{want}' matches {len(hits)} timeline objects ({cands}) - name "
+                          "one with the 'name@index' form.")
+        return hits[0], None
+
+    def _entity_of(self, obj, want, label):
+        """((entity, timeline name), error) for one resolved timeline object."""
+        name = _common.safe(lambda: obj.name) or want
+        if _common.safe(lambda: obj.isGroup):
+            return None, (f"{label}: '{name}' is a timeline GROUP, which has no feature entity. Name "
+                          "the features inside it instead.")
+        entity = _common.safe(lambda: obj.entity)
+        if entity is None:
+            return None, f"{label}: '{name}' has no feature entity."
+        return (entity, name), None
+
+    def resolve(self, raw):
+        s = (raw or "").strip() if isinstance(raw, str) else raw
+        if not s:
+            if self.required:
+                return None, f"'{self.name}' is required (a timeline feature name)."
+            return self.default, None
+        objs, err = self._objects()
+        if err:
+            return None, err
+        obj, ferr = self._find_one(objs, s, f"'{self.name}'")
+        if ferr:
+            return None, ferr
+        return self._entity_of(obj, s, f"'{self.name}'")
+
+
+class FeatureRefList(FeatureRef):
+    """A LIST of timeline features, resolving to (entities, labels) - the entity list plus the
+    timeline names in the same order. The SAME timeline object named twice is refused: a duplicate
+    would silently double what the caller asked for once."""
+
+    json_type = "array"
+    MAP_HINT = "several timeline features by name"
+
+    def schema(self) -> dict:
+        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
+
+    def contract_note(self) -> str:
+        return "A list of timeline feature names from design_get(include=['timeline'])."
+
+    def resolve(self, raw):
+        if raw in (None, "", []):
+            if self.required:
+                return None, f"'{self.name}' needs at least one timeline feature name."
+            return ([], []), None
+        items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+        items = [str(s).strip() for s in items if str(s).strip()]
+        if not items:
+            return None, f"'{self.name}' needs at least one timeline feature name."
+        objs, err = self._objects()
+        if err:
+            return None, err
+        ents, labels, picked = [], [], set()
+        for i, want in enumerate(items):
+            label = f"'{self.name}'[{i}]"
+            obj, ferr = self._find_one(objs, want, label)
+            if ferr:
+                return None, ferr
+            # The duplicate check reads the object's own index BEFORE the group/entity checks, so
+            # naming one object twice is refused as a duplicate rather than by whatever the second
+            # pass finds on it.
+            index = _common.safe(lambda: obj.index)
+            if index is not None and index in picked:
+                return None, (f"{label}: '{want}' names the timeline object at index {index}, which "
+                              "is already in this call. List each feature once.")
+            picked.add(index)
+            pair, eerr = self._entity_of(obj, want, label)
+            if eerr:
+                return None, eerr
+            ents.append(pair[0])
+            labels.append(pair[1])
+        return (ents, labels), None
+
+
 # ── ModeGuard: declare the design mode / base-feature scope an op needs ──────────────────────────
 #
 # NOT an InputKind - a PRECONDITION guard a tool runs BEFORE any mutation. It computes its error FROM
@@ -929,6 +1079,69 @@ class PlaneRef(InputKind):
                       "plane name, or a planar-face handle from find_geometry.")
 
 
+# ── the 'surface' operand: a plane, or - where the API takes one - any face ─────────────────────
+
+_SURFACE_PLANE = PlaneRef("surface")
+_SURFACE_ANY_FACE = GeometryHandle("surface", require="face", required=False)
+
+
+def resolve_surface(raw, allow_curved=False):
+    """(surface, error) for the FACE/PLANE a sketch entity is constrained or dimensioned to - the one
+    resolution both sketch_constrain and sketch_dimension run for their *_to_surface operands.
+
+    PlaneRef carries the whole vocabulary an agent expects (an xy/xz/yz alias, a construction plane,
+    a planar face), so it is tried first. ``allow_curved`` is the CALLING API's own contract: a call
+    whose argument is a plain ``surface`` accepts a cylindrical/spherical/conical face, one naming
+    ``planarSurface`` does not - so only the former gives a handle PlaneRef rejected a second pass
+    through the face kind, rather than a refusal the API would not have made."""
+    surf, serr = _SURFACE_PLANE.resolve(raw)
+    if serr is None or not allow_curved:
+        return surf, serr
+    wide, werr = _SURFACE_ANY_FACE.resolve(raw)
+    return (wide, None) if werr is None else (None, serr)
+
+
+def surface_ref_label(surf):
+    """What a resolved 'surface' IS - a construction plane's name, else the entity type the
+    operation attached to. Published instead of the raw input token, so the payload reports the
+    thing that was used ('xy' and a face handle both land here as what they became)."""
+    return _common.safe(lambda: surf.name) or type(surf).__name__
+
+
+class SurfaceRef(InputKind):
+    """The FACE/PLANE a sketch entity is constrained or dimensioned to. Schema and resolution come
+    from this ONE kind, so the contract the agent reads cannot say planar-only while the handler
+    accepts a curved face.
+
+    ``curved_ops`` names the operations on this input (dim_type / constraint names) whose API
+    argument is a plain ``surface: Base`` - documented as planar, cylindrical, spherical and conical
+    - so a handle PlaneRef rejects gets a second pass through the face kind. Every OTHER operation
+    sharing the input names ``planarSurface`` and takes a planar face only; ``resolve`` is handed the
+    operation being applied and picks between them."""
+
+    MAP_HINT = ("the *_to_surface operand: plane alias / construction plane / planar face, plus the "
+                "curved faces the operations named in curved_ops accept")
+
+    def __init__(self, name, curved_ops=(), **kw):
+        super().__init__(name, **kw)
+        self.curved_ops = tuple(curved_ops)
+
+    def contract_note(self) -> str:
+        note = ("A plane: an origin alias (xy/xz/yz or top/front/right), a construction-plane NAME, "
+                "or a planar-face handle from find_geometry.")
+        if self.curved_ops:
+            verb = "accepts" if len(self.curved_ops) == 1 else "accept"
+            note += (" " + " / ".join(self.curved_ops) + f" also {verb} a CURVED (cylindrical, "
+                     "spherical or conical) face handle; every other operation here takes a PLANAR "
+                     "face only.")
+        return note
+
+    def resolve(self, raw, operation=None):
+        """(surface, error) for ``operation`` - the dim_type/constraint being applied, which selects
+        the curved-face second pass exactly where that call's API accepts one."""
+        return resolve_surface(raw, operation in self.curved_ops)
+
+
 # ── axis reference (a world axis x/y/z OR an edge handle the axis runs along) ────────────────────
 
 _AXIS_VECS = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
@@ -970,14 +1183,73 @@ def _axis_from_face(name, face):
     return ("world", (d[0] / n, d[1] / n, d[2] / n)), None
 
 
+def entity_component(ent):
+    """The component an axis/direction ENTITY belongs to: an edge's body's parent, a sketch line's
+    sketch's parent, or a construction datum's own component. None when none of those read.
+
+    A datum is read through `.component` before `.parent`: per the API's own doc, `.component` always
+    returns the owning component, while `.parent` returns a BASE FEATURE for a non-parametric datum in
+    a parametric design - which a same-component test would then compare against a component."""
+    return (_common.safe(lambda: ent.body.parentComponent)
+            or _common.safe(lambda: ent.parentSketch.parentComponent)
+            or _common.safe(lambda: ent.component)
+            or _common.safe(lambda: ent.parent))
+
+
+def _datum_world_line(name, ent):
+    """(the datum axis's line in WORLD space, error) for a ConstructionAxis.
+
+    MEASURED: a ConstructionAxis has NO worldGeometry, and its `.geometry` is "defined in the
+    AssemblyContext of this ConstructionAxis" - COMPONENT-LOCAL for a native datum, so it is off by
+    the owning component's placement and a caller that treats it as world turns about the wrong line.
+    A native datum owned by a placed sub-component is therefore lifted through
+    createForAssemblyContext, and an ambiguous placement is REFUSED rather than resolved to an
+    arbitrary instance - each instance puts the same axis somewhere different."""
+    if _common.safe(lambda: ent.assemblyContext) is not None:
+        return _common.safe(lambda: ent.geometry), None    # already a proxy - it reads WORLD
+    des = _common.design()
+    root = _common.safe(lambda: des.rootComponent) if des else None
+    owner = entity_component(ent)
+    if owner is None or root is None or _common.same_component(owner, root):
+        return _common.safe(lambda: ent.geometry), None    # root-owned: local IS world
+    occs = _common.safe(lambda: root.allOccurrencesByComponent(owner))
+    count = (_common.safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+    owner_name = _common.safe(lambda: owner.name) or "another component"
+    if count == 1:
+        proxy = _common.safe(lambda: ent.createForAssemblyContext(occs.item(0)))
+        g = _common.safe(lambda: proxy.geometry) if proxy is not None else None
+        if g is None:
+            return None, (f"'{name}': that construction axis belongs to component '{owner_name}' and "
+                          "could not be read in the assembly's space, so where it sits in the model "
+                          "is unknown. Pass a world axis (x/y/z) or a handle at a straight edge.")
+        return g, None
+    if count > 1:
+        paths = ", ".join(str(_common.safe(lambda i=i: occs.item(i).fullPathName))
+                          for i in range(count))
+        return None, (f"'{name}': that construction axis belongs to component '{owner_name}', which "
+                      f"is placed {count} times ({paths}). Each instance puts the axis somewhere "
+                      "different, so the instance must not be guessed. Pass a handle at geometry in "
+                      "the instance you mean, or a world axis (x/y/z).")
+    return None, (f"'{name}': that construction axis belongs to component '{owner_name}', which is "
+                  "not placed in the assembly, so it has no position in the model to turn about.")
+
+
 def axis_line_of(name, ent):
     """The world line a straight entity runs along: ((Point3D on the line, unit Vector3D), err).
 
     For a consumer that needs a NUMERIC axis (a rotation pivot) from the ('edge', entity) value an
     AxisRef resolves to. A bounded edge / sketch line's geometry is a Line3D, which carries only
     startPoint/endPoint - the direction must be DERIVED from them; only an InfiniteLine3D (e.g. a
-    construction axis) carries .origin/.direction directly. Both shapes are accepted."""
-    line = _common.safe(lambda: ent.worldGeometry) or _common.safe(lambda: ent.geometry)
+    construction axis) carries .origin/.direction directly. Both shapes are accepted.
+
+    A BRepEdge/SketchLine reads WORLD through `.worldGeometry`; a ConstructionAxis has none, so it
+    takes the lift in _datum_world_line instead of silently handing back a component-local line."""
+    if _isinstance(ent, adsk.fusion.ConstructionAxis):
+        line, lerr = _datum_world_line(name, ent)
+        if lerr:
+            return None, lerr
+    else:
+        line = _common.safe(lambda: ent.worldGeometry) or _common.safe(lambda: ent.geometry)
     sp = _common.safe(lambda: line.startPoint) if line is not None else None
     ep = _common.safe(lambda: line.endPoint) if line is not None else None
     if sp is not None and ep is not None:
@@ -993,28 +1265,108 @@ def axis_line_of(name, ent):
     return None, f"'{name}': could not read the line geometry off that edge/sketch line."
 
 
+def _construction_axis_by_name(label, comp, want):
+    """(ConstructionAxis, error, available names) for a construction-axis NAME in `comp` - the one
+    place an axis is resolved by name, so a datum an agent created (and can only refer to by the name
+    it gave it) is reachable without a handle.
+
+    Case-insensitive EXACT, never a substring: a name several axes carry is REFUSED naming them
+    rather than resolved to the first hit. Scope is the ACTIVE component only (as PlaneRef's
+    construction-plane lookup is) - a name is unique per component, not per design."""
+    names, hits = [], []
+    for ax in _common.iter_collection(_common.safe(lambda: comp.constructionAxes)):
+        nm = _common.safe(lambda ax=ax: ax.name)
+        if not isinstance(nm, str):
+            continue
+        names.append(nm)
+        if nm.strip().lower() == want.strip().lower():
+            hits.append(ax)
+    if len(hits) > 1:
+        return None, (f"'{label}': '{want}' names {len(hits)} construction axes in "
+                      f"'{_common.safe(lambda: comp.name)}' - which one is meant cannot be told from "
+                      "the name, so it is refused rather than guessed. Rename them, or pass the "
+                      "axis 'handle' from the model_construction call that created it."), names
+    return (hits[0] if hits else None), None, names
+
+
 class AxisRef(InputKind):
-    """A direction/axis: a world axis (x / y / z), a 'handle' pointing at a straight (linear) EDGE or a
-    SKETCH LINE (the axis runs ALONG that entity), OR a FACE handle used as a direction source (a planar
-    face -> its NORMAL, a cylindrical/conical face -> its AXIS). Resolves to a tagged value:
+    """A direction/axis: a world axis (x / y / z), a 'handle' pointing at a straight (linear) EDGE, a
+    SKETCH LINE or a CONSTRUCTION AXIS (the axis runs ALONG that entity), the NAME of a construction
+    axis in the active component, OR a FACE handle used as a direction source (a planar face -> its
+    NORMAL, a cylindrical/conical face -> its AXIS). Resolves to a tagged value:
     ('world', (vx,vy,vz)) for a world axis OR a face-derived direction (a fixed direction vector), or
-    ('edge', BRepEdge | SketchLine) for a line entity. Lets construction axes / patterns / joints /
-    revolves define their axis from real geometry, not just world directions.
+    ('edge', BRepEdge | SketchLine | ConstructionAxis) for a resolved linear ENTITY. Lets construction
+    axes / patterns / joints / revolves define their axis from real geometry, not just world
+    directions.
 
     entity_only=True refuses a face handle: a face yields a direction VECTOR, and a feature input
-    that wants a linear ENTITY (a BRepEdge / SketchLine / ConstructionAxis) cannot consume one."""
+    that wants a linear ENTITY (a BRepEdge / SketchLine / ConstructionAxis) cannot consume one.
 
-    MAP_HINT = "a direction: world x/y/z, a straight-edge/sketch-line handle, OR a face normal/axis"
+    face_entity=True is the opposite input - one whose API takes the axis-DEFINING ENTITY itself
+    ("a face that defines an axis (cylinder, cone, torus, etc.)", CircularPatternFeatures.createInput's
+    own doc). There a cylindrical/conical/toroidal face resolves to ('edge', face): the entity, which
+    carries the axis POSITION that a bare direction vector throws away (an off-origin wheel axis). A
+    PLANAR face is refused - its normal is a direction with no line to rotate about."""
 
-    def __init__(self, name, entity_only=False, **kw):
+    MAP_HINT = ("a direction: world x/y/z, a construction axis (name or handle), a straight-edge/"
+                "sketch-line handle, OR a face normal/axis")
+
+    def __init__(self, name, entity_only=False, face_entity=False, **kw):
         super().__init__(name, **kw)
         self.entity_only = entity_only
+        self.face_entity = face_entity
 
     def contract_note(self) -> str:
+        # The NAME form is scoped to the ACTIVE component (measured: a sub-component's datum is not
+        # name-reachable from the root), so the contract says so rather than implying design-wide.
         if self.entity_only:
-            return "A world axis x/y/z, or a 'handle' at a straight edge or sketch line."
-        return ("A world axis x/y/z, a 'handle' at a straight edge or sketch line (axis runs along it), "
-                "or a planar-face handle (axis = its normal) / cylindrical-face handle (axis = its axis).")
+            return ("A world axis x/y/z, a construction-axis name in the active component, or a "
+                    "'handle' at a straight edge, sketch line, or construction axis.")
+        if self.face_entity:
+            return ("A world axis x/y/z, a construction-axis name in the active component, or a "
+                    "'handle' at a straight edge, sketch line, construction axis, or cylindrical/"
+                    "conical face (its own axis line, so an off-origin axis works).")
+        return ("A world axis x/y/z, a construction-axis name in the active component, or a 'handle' "
+                "at a straight edge / sketch line / construction axis (axis runs along it) or a face "
+                "(planar = its normal, cylindrical = its axis).")
+
+    def _from_entity(self, ent):
+        """(tagged value, error) for the entity a handle resolved to."""
+        if isinstance(ent, adsk.fusion.BRepEdge):
+            ct = _common.safe(lambda: ent.geometry.curveType)
+            if ct == adsk.core.Curve3DTypes.Line3DCurveType:
+                return ("edge", ent), None
+            return None, f"'{self.name}': that edge is not straight - an axis needs a LINEAR edge."
+        if isinstance(ent, adsk.fusion.SketchLine):
+            return ("edge", ent), None      # a SketchLine is always straight by construction
+        if _isinstance(ent, adsk.fusion.ConstructionAxis):
+            # .geometry is an InfiniteLine3D (origin + direction) - axis_line_of reads that shape.
+            return ("edge", ent), None
+        if _isinstance(ent, adsk.fusion.BRepFace):
+            if self.face_entity:
+                return self._axis_defining_face(ent)
+            if self.entity_only:
+                return None, (f"'{self.name}': a face gives a direction VECTOR, and this input "
+                              "needs a linear ENTITY. Pass a world axis (x/y/z), a construction-axis "
+                              "name, or a handle at a straight edge or sketch line.")
+            return _axis_from_face(self.name, ent)   # planar normal / cylinder-cone axis
+        return None, (f"'{self.name}': handle points at a {type(ent).__name__}, not an edge, "
+                      "sketch line, construction axis, or face.")
+
+    def _axis_defining_face(self, face):
+        """(tagged value, error) for a face on a face_entity input: the FACE itself when its surface
+        defines an axis (cylinder / cone / torus), refused when it does not."""
+        st = _common.safe(lambda: face.geometry.surfaceType)
+        ST = adsk.core.SurfaceTypes
+        axis_bearing = (_common.safe(lambda: ST.CylinderSurfaceType),
+                        _common.safe(lambda: ST.ConeSurfaceType),
+                        _common.safe(lambda: ST.TorusSurfaceType))
+        if st is not None and st in axis_bearing:
+            return ("edge", face), None
+        return None, (f"'{self.name}': that face has no axis to turn about - only a cylindrical, "
+                      "conical or toroidal face defines one (a planar face gives a direction, not a "
+                      "line). Pass a world axis (x/y/z), a construction-axis name, or a handle at a "
+                      "straight edge or sketch line.")
 
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
@@ -1039,23 +1391,28 @@ class AxisRef(InputKind):
         # here would pass the whole composite string and never resolve.
         ent = _resolve_token_entity(des, s)
         if ent is not None:
-            if isinstance(ent, adsk.fusion.BRepEdge):
-                ct = _common.safe(lambda: ent.geometry.curveType)
-                if ct == adsk.core.Curve3DTypes.Line3DCurveType:
-                    return ("edge", ent), None
-                return None, f"'{self.name}': that edge is not straight - an axis needs a LINEAR edge."
-            if isinstance(ent, adsk.fusion.SketchLine):
-                return ("edge", ent), None      # a SketchLine is always straight by construction
-            if _isinstance(ent, adsk.fusion.BRepFace):
-                if self.entity_only:
-                    return None, (f"'{self.name}': a face gives a direction VECTOR, and this input "
-                                  "needs a linear ENTITY. Pass a world axis (x/y/z) or a handle at "
-                                  "a straight edge or sketch line.")
-                return _axis_from_face(self.name, ent)   # planar normal / cylinder-cone axis
-            return None, (f"'{self.name}': handle points at a {type(ent).__name__}, not an edge, "
-                          "sketch line, or face.")
-        return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z) or a resolvable edge/sketch "
-                      "line / face handle.")
+            return self._from_entity(ent)
+        # Not a token: a construction axis by NAME, resolved by what resolves (as PlaneRef does), so a
+        # long axis name is never mistaken for a stale handle.
+        comp = _common.safe(lambda: _common.target_component(des))
+        axis, aerr, names = _construction_axis_by_name(self.name, comp, s)
+        if aerr:
+            return None, aerr
+        if axis is not None:
+            return ("edge", axis), None
+        # entity_only refuses a face handle above, so the miss message must not offer one either.
+        forms = "edge/sketch line handle." if self.entity_only else "edge/sketch line / face handle."
+        # The name lookup only ever walked the ACTIVE component, so the refusal says where it looked
+        # and what was there - otherwise a datum sitting in another component reads as nonexistent.
+        comp_name = _common.safe(lambda: comp.name) if comp is not None else None
+        where = f" in the active component '{comp_name}'" if comp_name else ""
+        found = ""
+        if names:
+            found = f" Construction axes in '{comp_name}': " + ", ".join(names[:10]) + "."
+        elif comp_name:
+            found = f" '{comp_name}' has no construction axes of its own."
+        return None, (f"'{self.name}': '{s}' is not a world axis (x/y/z), a construction-axis name"
+                      f"{where}, or a resolvable {forms}{found}")
 
 
 # ── distance / units (carries its own unit handling) ────────────────────────
@@ -1090,9 +1447,9 @@ class Distance(InputKind):
         except Exception:
             return None, f"'{self.name}' must be a number."
         if not self.allow_zero and v == 0:
-            return None, f"'{self.name}' must be non-zero."
+            return None, f"'{self.name}' must be non-zero, got {v}."
         if not self.allow_negative and v < 0:
-            return None, f"'{self.name}' must be positive."
+            return None, f"'{self.name}' must be positive, got {v}."
         return v * scale_factor, None
 
 
@@ -1214,41 +1571,52 @@ class Choice(InputKind):
 # resolves once, here, preferring fullPathName and refusing an AMBIGUOUS substring match (listing the
 # candidates) instead of guessing - so design_get(include=['tree'])'s fullPathName (now emitted) flows straight in.
 
-def _all_occurrences(des):
-    root = _common.safe(lambda: des.rootComponent) if des else None
-    return list(_common.safe(lambda: root.allOccurrences) or []) if root else []
-
-
-def _resolve_occurrence(name, raw):
+def _resolve_occurrence(name, raw, candidates=None):
     """Resolve `raw` to a single live Occurrence. Returns (occurrence, error).
 
     Order: (1) exact fullPathName, (2) exact name, (3) case-insensitive substring on name ONLY when it
     matches exactly one - an ambiguous substring is an ERROR (lists the candidate fullPathNames), never a
     silent first-match. The error on a miss samples available fullPathNames so the agent can re-issue the
-    unambiguous key (design_get(include=['tree']) emits it)."""
+    unambiguous key (design_get(include=['tree']) emits it).
+
+    `candidates`: an optional list the AMBIGUOUS hits are appended to, so a caller that can still act
+    on an ambiguous name (TargetRef, when every hit is an instance of ONE component) reads them from
+    the one matcher instead of re-rolling it. The refusal is unchanged."""
     want = (raw or "").strip() if isinstance(raw, str) else raw
     if not want:
         return None, f"'{name}' is required (an occurrence name or fullPathName from design_get(include=['tree']))."
     des = _common.design()
     if not des:
         return None, "No active design to resolve the occurrence against."
-    occs = _all_occurrences(des)
+    occs = _common.all_occurrences(des)
     paths = [(_common.safe(lambda o=o: o.fullPathName) or "") for o in occs]
     names = [(_common.safe(lambda o=o: o.name) or "") for o in occs]
     # 1) exact fullPathName (the unambiguous key)
     for o, fp in zip(occs, paths):
         if fp == want:
             return o, None
-    # 2) exact name
-    for o, nm in zip(occs, names):
-        if nm == want:
-            return o, None
+    # 2) exact name - collect ALL hits, never the first. Occurrence.name ("Bolt:2") is NOT unique:
+    # instancing a sub-assembly a second time replicates its children's names verbatim, so
+    # "SubA:1+Bolt:2" and "SubA:2+Bolt:2" both read "Bolt:2" (measured). fullPathName is the unique
+    # key. A first match would silently target the wrong instance - and design_delete_occurrence
+    # would delete it.
+    exact = [(o, fp) for o, fp, nm in zip(occs, paths, names) if nm == want]
+    if len(exact) == 1:
+        return exact[0][0], None
+    if len(exact) > 1:
+        if candidates is not None:
+            candidates.extend(o for o, _fp in exact)
+        cands = ", ".join(fp or "?" for _, fp in exact[:8])
+        return None, (f"'{name}': '{want}' names {len(exact)} occurrences ({cands}). Pass the exact "
+                      "fullPathName (design_get(include=['tree']) emits it).")
     # 3) substring on name - but ONLY if unique
     low = want.lower()
     hits = [(o, fp) for o, fp, nm in zip(occs, paths, names) if low in nm.lower()]
     if len(hits) == 1:
         return hits[0][0], None
     if len(hits) > 1:
+        if candidates is not None:
+            candidates.extend(o for o, _fp in hits)
         cands = ", ".join(fp or "?" for _, fp in hits[:8])
         return None, (f"'{name}': '{want}' is ambiguous - matches {len(hits)} occurrences "
                       f"({cands}). Pass the exact fullPathName (design_get(include=['tree']) emits it).")
@@ -1430,14 +1798,28 @@ class TargetRef(InputKind):
     _ALL_KINDS = ("body", "face", "mesh", "occurrence", "component", "design")
     MAP_HINT = "a thing to measure/colour: handle (body/face/mesh; edge+construction when allowed) OR occurrence/component/body name; ''=whole design"
 
-    def __init__(self, name, allow=None, **kw):
+    def __init__(self, name, allow=None, collapse_ambiguous_occurrences=False, **kw):
         super().__init__(name, **kw)
         self.allow = tuple(allow) if allow else self._ALL_KINDS
+        # OPT-IN (default off): let a name that matches several instances of ONE component resolve to
+        # that COMPONENT instead of refusing. Only for a caller whose target IS the component - it
+        # WIDENS what a call acts on, so a body/appearance/measure caller must never inherit it by
+        # default (an ambiguous 'Bolt' colouring every instance is a different act from refusing).
+        self.collapse_ambiguous_occurrences = bool(collapse_ambiguous_occurrences)
 
     def contract_note(self) -> str:
+        # Built from `allow`, so a narrowed TargetRef never advertises a shape _check refuses.
+        handles = "/".join(k for k in ("body", "face", "mesh") if k in self.allow)
         edge = ", edge" if "edge" in self.allow else ""
-        base = (f"A target: a find_geometry 'handle' (body/face/mesh{edge}), an occurrence fullPathName "
-                "or name, a component name, or a body name; '' = the whole design.")
+        parts = [f"a find_geometry 'handle' ({handles}{edge})"] if handles or edge else []
+        if "occurrence" in self.allow:
+            parts.append("an occurrence fullPathName or name")
+        if "component" in self.allow:
+            parts.append("a component name")
+        if "body" in self.allow:
+            parts.append("or a body name")
+        base = "A target: " + ", ".join(parts)
+        base += "; '' = the whole design." if "design" in self.allow else "."
         if "construction_axis" in self.allow or "construction_plane" in self.allow:
             base += " Also accepts a construction axis/plane handle."
         return base
@@ -1497,9 +1879,20 @@ class TargetRef(InputKind):
         # 2) an occurrence (fullPathName preferred, then name). An AMBIGUOUS name is a hard error here
         # (propagate it) rather than falling through to the component/body paths, which could resolve
         # to an unrelated entity and mask the ambiguity.
-        occ, occ_err = _resolve_occurrence(self.name, s)
+        ambiguous = []
+        occ, occ_err = _resolve_occurrence(self.name, s, candidates=ambiguous)
         if occ is not None:
             return self._check(occ, "occurrence")
+        # ...unless this caller OPTED IN and every ambiguous hit is an instance of ONE component:
+        # then the ambiguity is only about WHICH INSTANCE, and the component is the unambiguous
+        # answer to what was asked. Measured: a 'Bolt' with three instances refuses as ambiguous
+        # while the component 'Bolt' is unique, which dead-ends a component-level call. Off by
+        # default - it widens the blast radius, so no existing caller inherits it.
+        if ambiguous and self.collapse_ambiguous_occurrences and "component" in self.allow:
+            shared = _common.safe(lambda: ambiguous[0].component)
+            if shared is not None and all(_common.same_component(
+                    shared, _common.safe(lambda o=o: o.component)) for o in ambiguous[1:]):
+                return self._check(shared, "component")
         if occ_err and "ambiguous" in occ_err.lower():
             return None, occ_err
         # 3) a component by name
@@ -1689,8 +2082,8 @@ class ProfileRefList(ProfileRef):
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
-        return ("An ORDERED list of profiles (order is load-bearing - loft runs through them in order). "
-                "Each a stable 'handle' (entityToken) or a {sketch, profile_index} selector.")
+        return ("An ORDERED list of profiles, used in the order given (no sort, no dedupe). Each a "
+                "stable 'handle' (entityToken) or a {sketch, profile_index} selector.")
 
     def resolve(self, raw):
         if raw in (None, "", []):
@@ -1706,6 +2099,75 @@ class ProfileRefList(ProfileRef):
             out.append(p)          # append in order - NO sort/dedupe (loft order is load-bearing)
         if not out:
             return None, f"'{self.name}': no valid profiles resolved."
+        return out, None
+
+
+# ── sketch reference (a SKETCH by name, design-wide) ─────────────────────────────────────────────
+#
+# A sketch NAME can be carried by more than one sketch in a design, so this is the non-unique name
+# space: the census below counts every sketch the name matches (EXACT, case-insensitive) and a name
+# matching several is REFUSED with its owning components rather than resolved to the first hit.
+
+def _sketch_owners(d, name):
+    """Every (component name, sketch) pair whose sketch is named EXACTLY `name` (case-insensitive) -
+    the census a by-name sketch reference resolves through: exactly one hit resolves, several are
+    refused."""
+    want = (name or "").strip().lower()
+    owners = []
+    for comp in _common.all_components(d):
+        coll = _common.safe(lambda c=comp: c.sketches)
+        n = _common.safe(lambda cl=coll: cl.count, 0) if coll is not None else 0
+        for i in range(n or 0):
+            sk = _common.safe(lambda i=i, cl=coll: cl.item(i))
+            nm = _common.safe(lambda s=sk: s.name)
+            if nm and nm.strip().lower() == want:
+                owners.append((_common.safe(lambda c=comp: c.name) or "(unnamed)", sk))
+    return owners
+
+
+class SketchRefList(InputKind):
+    """A LIST of SKETCHES by name - the reference an operation taking WHOLE sketches needs (a CAM
+    SketchSelection's inputGeometry). A name carried by SEVERAL sketches is REFUSED, naming each
+    owning component; a name carried by exactly one resolves design-wide through
+    ``_common.resolve_sketch`` (active component, then root, then the rest)."""
+
+    json_type = "array"
+    MAP_HINT = "several sketches by name (refuses a name several sketches share)"
+
+    def schema(self) -> dict:
+        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
+
+    def contract_note(self) -> str:
+        return "Sketch names (sketch_get); each must name exactly one sketch."
+
+    def resolve(self, raw):
+        if raw in (None, "", []):
+            if self.required:
+                return None, f"'{self.name}' needs at least one sketch name."
+            return [], None
+        items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+        items = [str(s).strip() for s in items if str(s).strip()]
+        if not items:
+            return None, f"'{self.name}' needs at least one sketch name."
+        d = _common.design()
+        if d is None:
+            return None, "No active design to resolve the sketch names against."
+        out = []
+        for i, want in enumerate(items):
+            owners = _sketch_owners(d, want)
+            if not owners:
+                names = ", ".join(_common.all_sketch_names(d))[:300]
+                return None, (f"'{self.name}'[{i}]: no sketch named '{want}'. Available: "
+                              f"{names or '(none)'}.")
+            if len(owners) > 1:
+                where = ", ".join(f"'{c}'" for c, _ in owners[:8])
+                return None, (f"'{self.name}'[{i}]: {len(owners)} sketches are named '{want}' - in "
+                              f"{where}. Rename one so the name resolves to a single sketch, then "
+                              "retry.")
+            sk = _common.resolve_sketch(d, want)
+            if sk is None:
+                return None, f"'{self.name}'[{i}]: sketch '{want}' did not resolve to a live sketch."
+            out.append(sk)
         return out, None
 
 

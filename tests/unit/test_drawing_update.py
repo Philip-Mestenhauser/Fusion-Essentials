@@ -12,6 +12,8 @@ import json
 import sys
 import types
 
+import pytest
+
 import adsk  # the mock package conftest installed at import time
 from conftest import load_tool
 
@@ -73,15 +75,19 @@ def _make_drawing_module():
 
 
 _DRAWING = _make_drawing_module()
-adsk.drawing = _DRAWING
-sys.modules["adsk.drawing"] = _DRAWING
 
 du = load_tool("drawing_update")
 
 
+@pytest.fixture(autouse=True)
+def _fake_drawing_namespace(monkeypatch):
+    # Swapped in per-test and torn down after, so this file's fake never leaks into a sibling
+    # drawing test file in either collection order.
+    monkeypatch.setattr(adsk, "drawing", _DRAWING, raising=False)
+    monkeypatch.setitem(sys.modules, "adsk.drawing", _DRAWING)
+
+
 def _install(doc):
-    adsk.drawing = _DRAWING
-    sys.modules["adsk.drawing"] = _DRAWING
     du.app = types.SimpleNamespace(activeDocument=doc)
     return doc
 

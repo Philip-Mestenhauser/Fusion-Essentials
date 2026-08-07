@@ -53,7 +53,7 @@ TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 # NOT swept: …Options families - those are factory-OBJECT classes (…Options.create()), not int
 # enums, so they carry no members to dump. A family is only counted from a REAL reference, never a
 # comment (a stale name in a comment must not drive a live measurement).
-_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam)\.([A-Za-z]*(?:Types|States|Modes|Directions|Locations|Positions))\b")
+_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Directions|Locations|Positions|Alignments?|Sizes|Formats))\b")
 
 
 def referenced_enum_families():
@@ -116,7 +116,7 @@ def _all_enums_body():
 # Each row script is self-contained: emit() prints one verdict line per check, and make_box()
 # builds a 10 mm cube (1.0 in Fusion's internal cm) for rows that need real geometry. Rows that set
 # need_box get it bound to `body` before their own lines run.
-_TEMPLATE = '''import adsk.core, adsk.fusion, adsk.cam
+_TEMPLATE = '''import adsk.core, adsk.fusion, adsk.cam, adsk.drawing
 
 def emit(ok, detail):
     print(("PASS " if ok else "FAIL ") + detail)

@@ -421,9 +421,12 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         n_expected = len(sketch_pts)
     elif placement == "center":
         try:
-            hin.setPositionAtCenter(face_ent, edge_ent)
+            placed = hin.setPositionAtCenter(face_ent, edge_ent)
         except Exception as e:
             return error(f"Could not position the hole at the edge's center: {e}")
+        if placed is False:
+            return error("Fusion refused to centre the hole on that edge, so nothing was placed. "
+                         "Check that 'edge' is a circular/elliptical edge ON 'face'.")
         n_expected = 1
     elif placement == "on_edge":
         pos_attr = _EDGE_POSITION_ATTRS[edge_position]
@@ -431,9 +434,12 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         if pos_enum is None:
             return error(f"HoleEdgePositions.{pos_attr} is not available on this Fusion version.")
         try:
-            hin.setPositionOnEdge(face_ent, edge_ent, pos_enum)
+            placed = hin.setPositionOnEdge(face_ent, edge_ent, pos_enum)
         except Exception as e:
             return error(f"Could not position the hole on the edge: {e}")
+        if placed is False:
+            return error(f"Fusion refused to place the hole at the '{edge_position}' of that edge, "
+                         "so nothing was placed. Check that 'edge' borders 'face'.")
         n_expected = 1
     else:   # plane_offsets
         try:
@@ -445,9 +451,13 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         if offset_edge_two_ent is not None:
             args += [offset_edge_two_ent, _value(offset_two)]
         try:
-            hin.setPositionByPlaneAndOffsets(*args)
+            placed = hin.setPositionByPlaneAndOffsets(*args)
         except Exception as e:
             return error(f"Could not position the hole by plane and offsets: {e}")
+        if placed is False:
+            return error("Fusion refused the plane-and-offsets placement, so nothing was placed. "
+                         "Check that both offset edges border 'face' and the offsets reach a point "
+                         "on it.")
         n_expected = 1
 
     # Extent (THROUGH must be Positive - verified live).
@@ -479,7 +489,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
     feature = holes.add(hin)             # MUTATION - raises (and aborts) if anything is inconsistent
     if not feature:
-        return error("holeFeatures.add returned no feature.")
+        return error(_common.no_feature_error(design, "Hole"))
 
     # READ THE EFFECT BACK: a point that misses the body cuts nothing while add() still 'succeeds'
     # (only a warning on the feature). Count the DISTINCT drill axes the feature created - one per

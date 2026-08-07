@@ -98,7 +98,8 @@ def untrim_handler(faces=None, loop_type="all", extension=None, units="mm") -> d
         return error(f"Untrim failed: {e}. (Only loops with no connected face, on an OPEN surface, "
                      "can be untrimmed.)")
     if not feature:
-        return error("Untrim returned no feature - the selected loops could not be removed.")
+        return error(_common.no_feature_error(design, "Untrim",
+                                              "The selected loops could not be removed."))
 
     # Read the RESULT faces back. The untrimmed face is a NEW, larger face, so total created-face area
     # vs the input area is the honest signal the extent actually grew (removing an internal hole fills

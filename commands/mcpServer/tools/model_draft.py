@@ -81,13 +81,15 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         di.isDirectionFlipped = bool(flip)
         # A single angle for every drafted face; isSymmetric splits at the pull plane and tapers both
         # sides by that angle. This is the setSingleAngle path (not setTwoAngles, which is per-side).
-        di.setSingleAngle(bool(symmetric), angle_val)
+        if not di.setSingleAngle(bool(symmetric), angle_val):
+            return error(f"Fusion refused a {'symmetric ' if symmetric else ''}draft angle of "
+                         f"{angle_deg} deg (setSingleAngle returned false), so nothing was drafted.")
         feature = comp.features.draftFeatures.add(di)
     except Exception as e:
         return error(f"Draft failed: {e}. (The pull direction may not suit these faces, or the angle "
                      "undercuts the geometry - try a smaller angle or 'flip'.)")
     if not feature:
-        return error("Draft returned no feature.")
+        return error(_common.no_feature_error(design, "Draft"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:

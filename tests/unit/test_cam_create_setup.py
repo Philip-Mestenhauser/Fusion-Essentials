@@ -15,8 +15,9 @@ cs = load_tool("cam_create_setup")
 # ── fakes ────────────────────────────────────────────────────────────────────
 
 class FakeBody:
-    def __init__(self, name):
+    def __init__(self, name, is_solid=True):
         self.name = name
+        self.isSolid = is_solid
 
 
 class FakeBodies:
@@ -146,6 +147,13 @@ class TestModelSelection:
         _payload(cs.handler())
         models = cam.setups.added[-1].models
         assert {m.name for m in models} == {"A", "B"}
+
+    def test_default_set_is_every_root_body_including_a_surface_one(self, monkeypatch):
+        # The default machining set is every root BRep body, solid AND surface - what the walk does
+        # and what the tool now claims. An isSolid filter here would silently drop 'Skin'.
+        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("Plate"), FakeBody("Skin", is_solid=False)])
+        _payload(cs.handler())
+        assert {m.name for m in cam.setups.added[-1].models} == {"Plate", "Skin"}
 
     def test_named_body(self, monkeypatch):
         _, cam, _ = _install(monkeypatch, bodies=[FakeBody("Widget"), FakeBody("Other")])

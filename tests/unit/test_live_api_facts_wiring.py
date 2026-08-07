@@ -10,6 +10,7 @@ import pytest
 
 import adsk.cam
 import adsk.core
+import adsk.drawing
 import adsk.fusion
 
 import live_api_facts
@@ -18,7 +19,8 @@ from conftest import FakeVector3D, _NamedCollection
 
 class TestEnumSeeding:
     def test_every_measured_enum_family_is_seeded_on_the_mock_modules(self):
-        ns = {"core": adsk.core, "fusion": adsk.fusion, "cam": adsk.cam}
+        ns = {"core": adsk.core, "fusion": adsk.fusion, "cam": adsk.cam,
+              "drawing": adsk.drawing}
         assert live_api_facts.ENUMS, "generated facts carry no enum families"
         for family, members in live_api_facts.ENUMS.items():
             prefix, cls_name = family.split(".", 1)

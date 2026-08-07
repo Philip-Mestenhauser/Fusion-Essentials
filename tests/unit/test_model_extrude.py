@@ -75,16 +75,21 @@ class FakeExtrudeInput:
         self.two_sides_distance = None  # (distanceOne, distanceTwo) captured (extent=two_side)
         self.participantBodies = None
         self.isSolid = True             # default solid; surface path sets this False
-        self.next_result = True         # setAllExtent/setTwoSidesDistanceExtent return this
+        # EVERY extent setter is documented "Returns true if successful" - the fake returns the
+        # bool as live does, so a handler that ignores it has something to be caught ignoring.
+        self.next_result = True
 
     def setDistanceExtent(self, isSymmetric, distance):
         self.distance_extent = (isSymmetric, distance)
+        return self.next_result
 
     def setOneSideExtent(self, extent, direction, taper=None):
         self.one_side = (extent, direction, taper)
+        return self.next_result
 
     def setSymmetricExtent(self, distance, isFullLength, taper=None):
         self.symmetric_extent = (distance, isFullLength, taper)
+        return self.next_result
 
     def setAllExtent(self, direction):
         self.all_extent = direction
@@ -110,7 +115,7 @@ class FakeExtrudeFeatures:
     def __init__(self):
         self.last_input = None
         self.added = False
-        self.next_result = True   # propagated onto each new input's setAllExtent/setTwoSidesDistanceExtent
+        self.next_result = True   # propagated onto every extent setter of each new input
         self.on_add = None        # optional callable(inp) - simulates a live body mutation from add()
 
     def createInput(self, profile, operation):
@@ -249,6 +254,48 @@ class TestProfileHandle:
         assert ex._looks_like_handle("0,2,3") is False
         assert ex._looks_like_handle("all") is False
         assert ex._looks_like_handle([0, 1]) is False
+
+
+class TestAllIncludesEnclosedRegions:
+    """'all' takes every closed region with no containment analysis, so a region ENCLOSED by another
+    selected one is extruded too - measured: a frame sketch's 5 bays between the members filled in and
+    the frame came out a solid plate, reported as plain success. The result cannot show that, so the
+    note discloses it and points at the per-region selection."""
+
+    def test_all_over_several_profiles_discloses_the_enclosed_regions(self):
+        _install([FakeSketch("S", profile_count=6)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        note = out["note"]
+        assert "'all' selected every closed region in this sketch (6)" in note
+        assert "INCLUDING any region enclosed by another selected one" in note
+        assert "this new acted on them as well" in note
+        assert "sketch_get" in note and "handle" in note and "index list" in note
+
+    def test_the_disclosure_never_claims_what_a_cut_did_to_those_regions(self):
+        # a bay that FILLS on a 'new' extrude is material REMOVED on a cut - the sentence names the
+        # operation that ran instead of asserting the new-body outcome for all four
+        _install([FakeSketch("S", profile_count=6)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all", operation="cut"))
+        disclosure = out["note"].split("'all' selected")[1]
+        assert "this cut acted on them as well" in disclosure
+        assert "solid" not in disclosure and "fill" not in disclosure
+
+    def test_a_single_profile_sketch_is_not_lectured(self):
+        # one region cannot enclose another - the sentence would be noise on every simple extrude
+        _install([FakeSketch("S", profile_count=1)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="all"))
+        assert "enclosed" not in out["note"]
+
+    def test_an_explicit_index_list_is_not_lectured(self):
+        # the caller named the regions one by one - it is 'all' that selects sight-unseen
+        _install([FakeSketch("S", profile_count=6)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index=[0, 2, 4]))
+        assert "enclosed" not in out["note"]
+
+    def test_the_star_spelling_the_resolver_accepts_is_disclosed_too(self):
+        _install([FakeSketch("S", profile_count=3)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, profile_index="*"))
+        assert "enclosed" in out["note"] and out["profiles_extruded"] == 3
 
 
 class TestMultiProfileExtrude:
@@ -503,6 +550,32 @@ class TestTargetBodies:
 # 'extent' picks the depth style; these pin the cross-extent validation that must fire BEFORE any
 # ExtrudeFeatureInput setter runs - an unknown value, 'to_object' paired with an extent that doesn't
 # use it, and 'to_face' missing its required 'to_object'.
+
+class TestExtentSetterRefusals:
+    """Each extent setter answers "did it take". A false answer left on the floor means add() builds
+    the feature on its DEFAULT extent while the payload reports the requested one."""
+
+    def test_a_refused_distance_extent_is_an_error_and_nothing_is_added(self):
+        ef = _install([FakeSketch("S")])
+        ef.next_result = False
+        res = ex.handler(sketch_name="S", profile_index=0, distance=10)
+        assert res["isError"] is True and "distance extent" in res["message"]
+        assert ef.added is False
+
+    def test_a_refused_symmetric_tapered_extent_is_an_error(self):
+        ef = _install([FakeSketch("S")])
+        ef.next_result = False
+        res = ex.handler(sketch_name="S", profile_index=0, distance=10, symmetric=True, taper_deg=3)
+        assert res["isError"] is True and "symmetric tapered extent" in res["message"]
+        assert ef.added is False
+
+    def test_a_refused_one_sided_tapered_extent_is_an_error(self):
+        ef = _install([FakeSketch("S")])
+        ef.next_result = False
+        res = ex.handler(sketch_name="S", profile_index=0, distance=10, taper_deg=3)
+        assert res["isError"] is True and "one-sided tapered extent" in res["message"]
+        assert ef.added is False
+
 
 class TestExtentGuards:
     def test_unknown_extent_value(self):

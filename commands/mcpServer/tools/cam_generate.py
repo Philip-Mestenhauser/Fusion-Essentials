@@ -34,11 +34,15 @@ _GENERATIONS = {}
 _HANDLE_SEQ = [0]
 
 
-def register_future(future, target, scope, skip_valid):
+def register_future(future, target, scope, skip_valid, target_name=""):
     """Mint a handle and register a live generation Future - the ONE registration path (also used by
     cam_select_geometry's inline launch). Keeps the Future referenced and records which DOCUMENT the
     generation belongs to, so a later status read taken while another document is active reports the
-    Future's own progress instead of the wrong document's tallies. Returns (handle, total)."""
+    Future's own progress instead of the wrong document's tallies. Returns (handle, total).
+
+    target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
+    whole-document launch): a status read settles this handle's completion on THAT target's own
+    operations, so a second generation running beside it cannot keep this handle incomplete."""
     _HANDLE_SEQ[0] += 1
     handle = f"gen{_HANDLE_SEQ[0]}"
     total = safe(lambda: future.numberOfOperations, None)
@@ -47,6 +51,7 @@ def register_future(future, target, scope, skip_valid):
         "future": future,
         "target": target,
         "scope": scope,
+        "target_name": (target_name or "").strip(),
         "skip_valid": bool(skip_valid),
         "started_at": time.time(),
         "total": total,
@@ -103,6 +108,7 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
 
     want = (target or "").strip()
     scope = "document"
+    resolved_name = ""          # the scoped launch's own target name (empty for a document launch)
     try:
         if not want or want.lower() in ("all", "document", "*"):
             future = cam.generateAllToolpaths(bool(skip_valid))
@@ -122,6 +128,7 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
         "hint": "Pass skip_valid=false to force-regenerate it."})
             future = cam.generateToolpath(tgt)
             scope = kind or "target"
+            resolved_name = node.name or want
             target_desc = f"{scope} '{want}'"
     except Exception as e:
         return error(f"Failed to launch generation for {scope}: {e}")
@@ -129,7 +136,8 @@ def generate_handler(target: str = "", skip_valid: bool = True) -> dict:
     if not future:
         return error("Generation launch returned no future (nothing to generate?).")
 
-    handle, total = register_future(future, target_desc, scope, skip_valid)
+    handle, total = register_future(future, target_desc, scope, skip_valid,
+                                    target_name=resolved_name)
 
     # NOTE: future.numberOfOperations raises "Generation not started" if read on this same launch
     # tick - the count only populates once generation has spun up. safe() above already turned that
@@ -229,15 +237,46 @@ def status_handler(handle: str = "", target: str = "", include_operations: bool 
     return _status_live("document", include_operations)
 
 
+def _handle_scope_state(entry: dict):
+    """(live_dict, basis_label, err) for THIS handle's OWN operations - the tally its completion
+    settles on, the name of whose operations that is, and why no tally could be read.
+
+    A handle launched against ONE setup/folder/operation settles on THAT target's ops (the scoped walk
+    _scope_state already does for the no-handle path). Gating it on the DOCUMENT-wide generating count
+    starves it under concurrent generation: a second job's ops keep the count above zero, so the first
+    handle reports incomplete long after its own work finished. A document-scope launch IS the whole
+    document, so it keeps the document tally. If the scoped target no longer resolves (renamed or
+    deleted mid-generation) the read falls back to the document tally and the basis label says so.
+
+    When even that read fails, err carries the reason and the basis names the Future alone - a
+    verdict must never be published under a tally that was never read."""
+    name = (entry.get("target_name") or "").strip()
+    scoped = bool(name) and (entry.get("scope") or "document") in ("setup", "folder", "operation")
+    if scoped:
+        cam, cerr = _cam_common.get_cam()
+        if not cerr:
+            live, label, serr = _scope_state(cam, name)
+            if not serr and live is not None:
+                return live, label, None
+    live, lerr = _cam_common.live_readiness()
+    if lerr or live is None:
+        reason = lerr or "the read returned no tally"
+        return {}, f"this generation's Future alone (no per-op tally could be read: {reason})", reason
+    if scoped:
+        return live, (f"document (the launch target '{name}' could not be re-resolved - "
+                      "renamed, deleted, or now ambiguous)"), None
+    return live, "document", None
+
+
 def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     """The handle path: scope to a cam_generate-launched Future and report its progress.
 
     CRITICAL: holding the GenerateToolpathFuture (in _GENERATIONS) keeps the background work alive.
 
-    The per-op tallies (live_readiness) read the ACTIVE document - so they are only attached when
-    the generating document IS the active one. When another document is active, the Future's own
-    counters still report progress, the payload says whose generation this is, and completion falls
-    back to the Future alone (a wrong-document tally must never gate it)."""
+    The per-op tallies read the ACTIVE document - so they are only attached when the generating
+    document IS the active one. When another document is active, the Future's own counters still
+    report progress, the payload says whose generation this is, and completion falls back to the
+    Future alone (a wrong-document tally must never gate it)."""
     future = entry["future"]
 
     total = safe(lambda: future.numberOfOperations, entry.get("total"))
@@ -261,6 +300,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     if not same_doc:
         # Per-op tallies would describe the WRONG document - report Future progress only.
         payload["completed"] = future_done
+        payload["completion_basis"] = "this generation's Future alone (its document is not active)"
         payload["note"] = (
             (f"Generation complete ({done_count} of {total} operations)." if future_done else
              "Still generating in the background - check again later.")
@@ -272,18 +312,34 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
         return ok(payload)
 
     # Health/readiness is NOT re-derived here - it is the _cam_common domain (the single CAM-health
-    # source cam_get exposes). live_readiness() walks ops + setup/NC-program errors and returns the
-    # tally + a ready-made readiness verdict. This path owns only the progress delta layered on top.
-    live, _live_err = _cam_common.live_readiness()
-    live = live or {}
+    # source cam_get exposes). The scope read walks ops + (document scope) setup/NC-program errors and
+    # returns the tally + a ready-made readiness verdict. This path owns the progress delta on top.
+    live, basis, tally_err = _handle_scope_state(entry)
+
+    if tally_err:
+        # No tally was read at all, so nothing can corroborate the Future - report the Future-alone
+        # verdict WITH the reason (the wrong-document branch above words this the same way), and
+        # attach no live_states: an empty tally read as "nothing is generating" is the false done.
+        payload["completed"] = future_done
+        payload["completion_basis"] = basis
+        payload["note"] = (
+            (f"Generation complete ({done_count} of {total} operations)." if future_done else
+             "Still generating in the background - check again later.")
+            + f" The per-op tallies could not be read ({tally_err}), so this rests on the "
+            "generation Future alone - cam_get for the job's health.")
+        if future_done:
+            _GENERATIONS.pop(key, None)
+        return ok(payload)
 
     # The Future flips isGenerationCompleted a beat BEFORE live op state settles (observed:
     # completed while live_states still showed generating=3). Gate completed on BOTH agreeing - the
-    # Future is done AND nothing is still generating - so the caller never reads a premature done.
+    # Future is done AND nothing in THIS HANDLE'S OWN scope is still generating - so the caller never
+    # reads a premature done, and a second concurrent generation's ops never keep this handle waiting.
     # An errored op is its own bucket (never counted as generating), so this can't hang on a fault.
     completed = future_done and (live.get("generating", 0) == 0)
     payload["completed"] = completed
-    payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed + setup/program errors
+    payload["completion_basis"] = basis   # whose operations settled this verdict
+    payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed (+ setup/program for document)
 
     if not completed:
         payload["note"] = _incomplete_note(live)

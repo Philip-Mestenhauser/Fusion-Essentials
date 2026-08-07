@@ -503,6 +503,31 @@ class TestOrientAxisFromFace:
         assert (end.x - start.x, end.y - start.y, end.z - start.z) == (0.0, 1.0, 0.0)
         assert (start.x, start.y, start.z) == (5.0, 10.0, 15.0)
 
+    def test_construction_axis_handle_aligns_z_to_the_datum_direction(self, monkeypatch):
+        # A ConstructionAxis's geometry is an InfiniteLine3D - origin/direction, NO start/end points.
+        # Reading start/end directly refuses an axis the schema advertises; the shared axis_line_of
+        # reads both shapes (and lifts a datum into world space).
+        import adsk.fusion
+        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        datum = SimpleNamespace(name="Spin", component=None, assemblyContext=None,
+                                geometry=SimpleNamespace(origin=SimpleNamespace(x=0, y=0, z=0),
+                                                         direction=SimpleNamespace(x=0, y=0, z=2)))
+        _install_face_orient(monkeypatch, body, _FakeOrientFace((0, 1, 0)))
+        monkeypatch.setattr(adsk.fusion, "ConstructionAxis", type(datum), raising=False)
+        # ONE design resolving both tokens: the body for bbox_target, the datum for orient_axis.
+        handles = {"BODYH": body, "AXISH": datum}
+        design = SimpleNamespace(rootComponent=None,
+                                 findEntityByToken=lambda t: [handles[t]] if t in handles else [])
+        monkeypatch.setattr(jo._common, "design", lambda: design)
+        monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+        store = []
+        g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
+                             bbox_target="BODYH", orient_axis="AXISH", meta={})
+        assert err is None and g is not None
+        start, end = store[0]
+        # the datum's direction, normalized - not a refusal
+        assert (end.x - start.x, end.y - start.y, end.z - start.z) == (0.0, 0.0, 1.0)
+
 
 # ── anchor='face_center': planar face guard + normal orientation ────────────────────────────────
 

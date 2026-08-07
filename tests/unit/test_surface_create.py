@@ -46,6 +46,7 @@ class FakeExtrudeInput:
         self.distance_extent = None
     def setDistanceExtent(self, sym, dist):
         self.distance_extent = (sym, dist)
+        return True
 
 
 class FakeRevolveInput:
@@ -57,13 +58,36 @@ class FakeRevolveInput:
         self.angle_extent = None
     def setAngleExtent(self, sym, ang):
         self.angle_extent = (sym, ang)
+        return True
+
+
+class _RailsColl:
+    """What interiorRailsAndPoints reads back: a FRESH ObjectCollection on every read (never the
+    object assigned), whose count reads None when it is EMPTY. Both measured live."""
+    def __init__(self, items):
+        self.items = list(items)
+
+    @property
+    def count(self):
+        return len(self.items) or None
 
 
 class FakePatchInput:
-    def __init__(self, boundary, op):
+    def __init__(self, boundary, op, rails_dropped=0):
         self.boundary = boundary
         self.operation = op
         self.continuity = None
+        self._rails = []
+        self._rails_dropped = rails_dropped
+
+    @property
+    def interiorRailsAndPoints(self):
+        kept = self._rails[:len(self._rails) - self._rails_dropped]
+        return _RailsColl(kept)
+
+    @interiorRailsAndPoints.setter
+    def interiorRailsAndPoints(self, coll):
+        self._rails = list(getattr(coll, "items", []))
 
 
 class _ContinuityRejectingPatchInput:
@@ -104,15 +128,18 @@ class FakeRevolveFeatures:
 
 
 class FakePatchFeatures:
-    def __init__(self, result_bodies=None, feature=True, raises=None):
+    def __init__(self, result_bodies=None, feature=True, raises=None, rails_dropped=0):
         # raises: add() raises this message - models the kernel refusing the patch
         # (e.g. a tangent saddle opening the single-seed auto-complete cannot chain).
+        # rails_dropped: how many assigned rails the input fails to keep, so the count read-back
+        # disagrees with what was assigned.
         self.last_input = None
         self._result = result_bodies
         self._feature = feature
         self._raises = raises
+        self._rails_dropped = rails_dropped
     def createInput(self, boundary, op):
-        self.last_input = FakePatchInput(boundary, op)
+        self.last_input = FakePatchInput(boundary, op, rails_dropped=self._rails_dropped)
         return self.last_input
     def add(self, inp):
         if self._raises:
@@ -236,10 +263,9 @@ def _wire_adsk(handle_map=None):
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     adsk.core.ObjectCollection.create = staticmethod(_OC)
     adsk.fusion.BRepEdge = FakeEdge
-    sct = adsk.fusion.SurfaceContinuityType
-    for n in ("ConnectedSurfaceContinuityType", "TangentSurfaceContinuityType",
-              "CurvatureSurfaceContinuityType"):
-        setattr(sct, n, n)
+    # SurfaceContinuityTypes members are NOT installed here: a test asserts against
+    # adsk.fusion.SurfaceContinuityTypes.<member> itself, so the value comes from the mock/seeded
+    # enum rather than a local sentinel.
     # handle resolution is attached to the real design in _install now (see below) — this only wires
     # the adsk enum stand-ins.
 
@@ -585,14 +611,122 @@ class TestSurfacePatch:
         assert "continuity rejected" in res["message"]
 
     def test_continuity_tangent_set_on_input(self):
-        # continuity=tangent resolves to the TangentSurfaceContinuityType enum on the patch input
+        # continuity resolves through SurfaceContinuityTypes - the PLURAL class is the one that
+        # exists; a singular SurfaceContinuityType resolves to nothing, so the value the input
+        # carries must come from the plural class or the patch runs on its default.
+        import adsk.fusion
         e1 = FakeEdge()
         pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)])
         comp = FakeComp(FakeFeatures(pf=pf))
         _install(comp, handle_map={"E1": e1})
         out = _payload(sc.patch_handler(boundary="E1", continuity="tangent"))
         assert out["continuity"] == "tangent"
-        assert pf.last_input.continuity == "TangentSurfaceContinuityType"
+        assert (pf.last_input.continuity
+                is adsk.fusion.SurfaceContinuityTypes.TangentSurfaceContinuityType)
+
+    def test_continuity_unavailable_member_is_refused_not_run_on_the_default(self, monkeypatch):
+        # an unresolvable continuity member must REFUSE. Reporting continuity=curvature while the
+        # patch ran connected is the defect this path closes.
+        import adsk.fusion
+        e1 = FakeEdge()
+        monkeypatch.setattr(adsk.fusion, "SurfaceContinuityTypes", object())
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1", continuity="curvature")
+        assert res["isError"] is True
+        assert "continuity=curvature" in res["message"]
+        assert "not available on this Fusion version" in res["message"]
+
+    def test_continuity_that_does_not_take_is_refused(self):
+        # the input accepts the write and keeps its default: nothing raises, so only the read-back
+        # catches it
+        import adsk.fusion
+
+        class _SwallowingPatchInput(FakePatchInput):
+            def __setattr__(self, name, value):
+                if name == "continuity":
+                    object.__setattr__(self, "continuity", "connected-default")
+                    return
+                object.__setattr__(self, name, value)
+
+        class _Feats(FakePatchFeatures):
+            def createInput(self, boundary, op):
+                self.last_input = _SwallowingPatchInput(boundary, op)
+                return self.last_input
+
+        e1 = FakeEdge()
+        pf = _Feats(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        res = sc.patch_handler(boundary="E1", continuity="tangent")
+        assert res["isError"] is True
+        assert "continuity=tangent" in res["message"] and "reads back unchanged" in res["message"]
+
+    def test_interior_rails_assigned_and_verified_by_count(self):
+        e1, r1, r2 = FakeEdge(), FakeEdge(), FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1, "R1": r1, "R2": r2})
+        out = _payload(sc.patch_handler(boundary="E1", interior_rails=["R1", "R2"]))
+        # the published count is the one the INPUT reads back, not the number of handles asked for
+        assert out["interior_rail_count"] == pf.last_input.interiorRailsAndPoints.count == 2
+        # the read-back is a FRESH collection each time - identity can never be the check, so the
+        # verification is the COUNT
+        first, second = pf.last_input.interiorRailsAndPoints, pf.last_input.interiorRailsAndPoints
+        assert first is not second
+        assert first.items == [r1, r2]
+
+    def test_interior_rails_count_mismatch_is_refused(self):
+        # the input keeps only some of the assigned rails -> the patch would run without them
+        e1, r1, r2 = FakeEdge(), FakeEdge(), FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)], rails_dropped=1)
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1, "R1": r1, "R2": r2})
+        res = sc.patch_handler(boundary="E1", interior_rails=["R1", "R2"])
+        assert res["isError"] is True
+        assert "reads back 1 entity(ies) after assigning 2" in res["message"]
+
+    def test_interior_rails_empty_readback_counts_as_zero_not_as_success(self):
+        # an EMPTY ObjectCollection reads count None (measured) - a None treated as "unreadable, so
+        # assume it took" would pass a patch that dropped every rail
+        e1, r1 = FakeEdge(), FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)], rails_dropped=1)
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1, "R1": r1})
+        res = sc.patch_handler(boundary="E1", interior_rails=["R1"])
+        assert res["isError"] is True
+        assert "reads back 0 entity(ies) after assigning 1" in res["message"]
+
+    def test_interior_rails_rejected_with_the_multi_loop_form(self):
+        r1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("P", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"R0": FakeEdge(), "R1": r1})
+        res = sc.patch_handler(boundaries=["R0"], interior_rails=["R1"])
+        assert res["isError"] is True
+        assert "interior_rails" in res["message"] and "boundary" in res["message"]
+        assert pf.last_input is None      # refused BEFORE any patch was attempted
+
+    def test_interior_rails_omitted_writes_nothing(self):
+        e1 = FakeEdge()
+        pf = FakePatchFeatures(result_bodies=[FakeBody("Patch1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1})
+        out = _payload(sc.patch_handler(boundary="E1"))
+        assert pf.last_input._rails == []
+        assert "interior_rail_count" not in out
+
+    def test_interior_rails_failure_names_both_causes_without_asserting_one(self):
+        e1, r1 = FakeEdge(), FakeEdge()
+        pf = FakePatchFeatures(raises="ASM_BL_BAD_INPUT")
+        comp = FakeComp(FakeFeatures(pf=pf))
+        _install(comp, handle_map={"E1": e1, "R1": r1})
+        res = sc.patch_handler(boundary="E1", interior_rails=["R1"])
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "two candidate causes" in msg and "asserts neither" in msg
+        assert "Retry WITHOUT interior_rails" in msg
 
     def test_boundaries_all_fail_reports_zero_patched(self):
         # every loop is a stale handle -> 0 patched, all failed, still a non-error multi report

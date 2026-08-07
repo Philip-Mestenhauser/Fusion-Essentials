@@ -17,18 +17,27 @@ class OutputKind:
     """One declared tool output. ``key`` = the payload field a consumer reads; ``label`` = the human
     "what it is"; ``consumers`` = the tool names that read it (for the generated prose); ``stable`` =
     deterministic / round-trippable id (vs a transient value); ``in_list`` = the key lands inside each
-    item of a list (e.g. find_geometry's ``matches``) rather than at the payload top level."""
+    item of a list (e.g. find_geometry's ``matches``) rather than at the payload top level.
 
-    def __init__(self, key, label, consumers=(), stable=True, in_list=False):
+    ``absent_when`` names ANOTHER payload key (a boolean flag) whose truth licenses this output to be
+    OMITTED - the shape for a value that genuinely does not exist in some run (a feature name in a
+    direct-mode design, where the add() creates no timeline feature object). It is a CONDITION, not
+    an excuse: the flag must be published in the payload for the omission to pass, so a run that
+    quietly drops the key still fails, and the produces_note tells the calling agent when to expect
+    the gap instead of leaving it to discover a missing field."""
+
+    def __init__(self, key, label, consumers=(), stable=True, in_list=False, absent_when=""):
         self.key = key
         self.label = label
         self.consumers = list(consumers)
         self.stable = stable
         self.in_list = in_list
+        self.absent_when = absent_when
 
     def produces_note(self) -> str:
         who = (" -> " + ", ".join(self.consumers)) if self.consumers else ""
-        return f"{self.key}: {self.label}{who}".rstrip()
+        when = f" (omitted when {self.absent_when}=true)" if self.absent_when else ""
+        return f"{self.key}: {self.label}{who}{when}".rstrip()
 
     # ── the test hook ────────────────────────────────────────────────────────
     def _present_in(self, obj) -> bool:
@@ -48,8 +57,12 @@ class OutputKind:
         ``payload`` is the dict a handler json.dumps into its ok() text content."""
         if self._present_in(payload):
             return ""
+        if self.absent_when and isinstance(payload, dict) and payload.get(self.absent_when) is True:
+            return ""            # declared-conditional, and the payload states the condition itself
         where = "in any list item" if self.in_list else "at the payload top level"
-        return f"declared output '{self.key}' is missing {where}"
+        because = (f" - and '{self.absent_when}' is not true in this payload, so the declared "
+                   "omission does not apply") if self.absent_when else ""
+        return f"declared output '{self.key}' is missing {where}{because}"
 
 
 class ReturnsHandle(OutputKind):

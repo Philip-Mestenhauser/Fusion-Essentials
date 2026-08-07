@@ -7,7 +7,9 @@ The nuances pinned, no live Fusion:
   snapshot back to the joint-defined state; 'status' reports pending + count.
 
   joint_create_as_built — a joint where parts ALREADY are; createInput(occ1, occ2, None)
-  for a rigid as-built; occurrences resolved by name.
+  for a rigid as-built, and createInput with a real JointGeometry for every other motion
+  type (Fusion refuses a non-rigid as-built joint whose geometry is null). The input's
+  motion setters take the JointInput arity; the created joint's motion is read back.
 
   assembly_constrain — the new Constrain Components: build geometric relationships
   between two occurrences' entities (type inferred: flush/coincident/concentric/
@@ -16,6 +18,8 @@ The nuances pinned, no live Fusion:
 """
 
 import json
+
+import pytest
 
 from conftest import load_tool
 
@@ -43,12 +47,28 @@ class FakeSnapshot:
 
 
 class FakeSnapshots:
-    def __init__(self, pending=False, items=()):
-        self.hasPendingSnapshot = pending
+    def __init__(self, pending=False, items=(), revert_pending_ok=True, revert_pending_lies=False,
+                 blind_after_revert=False):
+        self._pending = pending
         self._items = list(items)
         for it in self._items:
             it._parent = self
         self.added = False
+        self.reverted_pending = False
+        self._revert_pending_ok = revert_pending_ok
+        self._revert_pending_lies = revert_pending_lies   # returns True, flag stays set
+        self._blind_after_revert = blind_after_revert     # the flag read RAISES after the revert
+        self._blind = False
+
+    @property
+    def hasPendingSnapshot(self):
+        if self._blind:
+            raise RuntimeError("pending flag unreadable")
+        return self._pending
+
+    @hasPendingSnapshot.setter
+    def hasPendingSnapshot(self, value):
+        self._pending = value
 
     @property
     def count(self):
@@ -65,6 +85,20 @@ class FakeSnapshots:
         self.hasPendingSnapshot = False
         return snap
 
+    def revertPendingSnapshot(self):
+        """Clears hasPendingSnapshot and returns whether that took; the captured snapshots stay put.
+        revert_pending_lies models a True return with the flag still set, blind_after_revert a flag
+        that cannot be read afterwards. Live, the discarded pose falls back to the last captured
+        position, or to the joint rest pose when nothing was ever captured."""
+        self.reverted_pending = True
+        if not self._revert_pending_ok:
+            return False
+        if not self._revert_pending_lies:
+            self._pending = False
+        if self._blind_after_revert:
+            self._blind = True
+        return True
+
     def _remove(self, snap):
         if snap in self._items:
             self._items.remove(snap)
@@ -77,19 +111,74 @@ class FakeOcc:
 
 
 class FakeAsBuiltInput:
-    pass
+    """An AsBuiltJointInput: its motion setters take the JointInput arity - the axis enum alone, with
+    NO JointGeometry argument (an AsBuiltJointInput is not an AsBuiltJoint). A call carrying the extra
+    geometry argument raises here, the way the overload does live."""
+
+    def __init__(self):
+        self.motion_calls = []
+        self.jointMotion = None
+        # a geometry IS readable off the input, so a wrong-arity call would have one to pass and
+        # would fail for the arity, not for a missing attribute
+        self.geometry = "GEOM_ON_INPUT"
+
+    def _set(self, motion_class, args, arity):
+        if len(args) != arity:
+            raise TypeError(f"wrong number or type of arguments for {motion_class}")
+        self.motion_calls.append((motion_class, args))
+        self.jointMotion = type(motion_class, (), {})()
+        return True
+
+    def setAsRigidJointMotion(self, *a):
+        return self._set("RigidJointMotion", a, 0)
+
+    def setAsRevoluteJointMotion(self, *a):
+        return self._set("RevoluteJointMotion", a, 1)
+
+    def setAsSliderJointMotion(self, *a):
+        return self._set("SliderJointMotion", a, 1)
+
+    def setAsCylindricalJointMotion(self, *a):
+        return self._set("CylindricalJointMotion", a, 1)
+
+    def setAsPlanarJointMotion(self, *a):
+        return self._set("PlanarJointMotion", a, 1)
+
+    def setAsBallJointMotion(self, *a):
+        return self._set("BallJointMotion", a, 2)
+
+    def setAsPinSlotJointMotion(self, *a):
+        return self._set("PinSlotJointMotion", a, 2)
 
 
 class FakeAsBuiltJoints:
-    def __init__(self):
+    """asBuiltJoints: createInput(occ1, occ2, geometry) + add(input). The created joint reports the
+    motion the input carries, unless motion_class forces another (the platform-lies case: '' models a
+    joint whose motion cannot be read at all)."""
+
+    def __init__(self, motion_class=None, geometry_readback="ANCHOR", add_returns=True):
         self.last = None
+        self.last_input = None
+        self.added = 0
+        self._motion_class = motion_class
+        self._geometry_readback = geometry_readback
+        self._add_returns = add_returns
 
     def createInput(self, o1, o2, geometry):
         self.last = (o1, o2, geometry)
-        return FakeAsBuiltInput()
+        self.last_input = FakeAsBuiltInput()
+        return self.last_input
 
     def add(self, inp):
-        return type("J", (), {"name": "AsBuilt1"})()
+        self.added += 1
+        if not self._add_returns:
+            return None
+        cls = self._motion_class
+        if cls is None:
+            cls = type(inp.jointMotion).__name__ if inp.jointMotion is not None else "RigidJointMotion"
+        motion = type(cls, (), {})() if cls else None
+        return type("J", (), {"name": "AsBuilt1", "jointMotion": motion,
+                              "geometry": self._geometry_readback})()
 
 
 class FakeGeoRels:
@@ -138,8 +227,8 @@ class FakeDesign:
         self.snapshots = snapshots
 
 
-def _install(occ_names, pending=False, snapshot_items=()):
-    snaps = FakeSnapshots(pending=pending, items=snapshot_items)
+def _install(occ_names, pending=False, snapshot_items=(), **snapshot_kwargs):
+    snaps = FakeSnapshots(pending=pending, items=snapshot_items, **snapshot_kwargs)
     abj, ac = FakeAsBuiltJoints(), FakeAssemblyConstraints()
     occs = [FakeOcc(n) for n in occ_names]
     design = FakeDesign(occs, snaps, abj, ac)
@@ -251,6 +340,44 @@ class TestCapturePosition:
         res = ja.capture_position_handler(action="revert")
         assert res["isError"] is True and "no captured" in res["message"].lower()
 
+    def test_discard_pending_throws_the_uncaptured_move_away(self):
+        snap = FakeSnapshot("Position1")
+        _, snaps, _, _ = _install([], pending=True, snapshot_items=[snap])
+        out = _payload(ja.capture_position_handler(action="discard_pending"))
+        assert out["discarded"] is True
+        assert out["has_pending"] is False
+        assert snaps.hasPendingSnapshot is False
+        # discarding the PENDING move is not reverting a CAPTURED one - the marker survives
+        assert snap.deleted is False
+        assert out["snapshot_count"] == 1
+
+    def test_discard_pending_with_nothing_pending_errors_without_calling_the_api(self):
+        _, snaps, _, _ = _install([], pending=False)
+        res = ja.capture_position_handler(action="discard_pending")
+        assert res["isError"] is True and "nothing to discard" in res["message"].lower()
+        assert snaps.reverted_pending is False
+
+    def test_discard_pending_declining_bool_errors(self):
+        # revertPendingSnapshot() returns false -> the move still stands; never a false success.
+        _install([], pending=True, revert_pending_ok=False)
+        res = ja.capture_position_handler(action="discard_pending")
+        assert res["isError"] is True and "declined" in res["message"].lower()
+
+    def test_discard_pending_that_leaves_the_flag_set_is_an_error(self):
+        # the platform returns True while the pending change survives - the re-read must catch it.
+        _install([], pending=True, revert_pending_lies=True)
+        res = ja.capture_position_handler(action="discard_pending")
+        assert res["isError"] is True and "still" in res["message"].lower()
+
+    def test_discard_pending_with_an_unreadable_flag_afterwards_is_an_error(self):
+        # the confirming re-read RAISES: publishing has_pending False here would report a
+        # measurement the tool never took, so the unreadable flag is an error, not a success.
+        _install([], pending=True, blind_after_revert=True)
+        res = ja.capture_position_handler(action="discard_pending")
+        assert res["isError"] is True
+        assert "could not be re-read" in res["message"]
+        assert "status" in res["message"]
+
     def test_unknown_action(self):
         _install([])
         res = ja.capture_position_handler(action="frobnicate")
@@ -259,43 +386,253 @@ class TestCapturePosition:
 
 # ── joint_create_as_built ───────────────────────────────────────────────────────────
 
+@pytest.fixture
+def as_built(monkeypatch):
+    """Factory: install a design with two occurrences plus a configurable asBuiltJoints collection,
+    and stub the shared '<occ>:<snap>'/handle resolver so 'geometry' yields an opaque JointGeometry
+    (a real one needs a live session). Returns the asBuiltJoints fake."""
+    def _make(occ_specs=(("A:1", "A:1"), ("B:1", "B:1")), **abj_kwargs):
+        import adsk.fusion
+        abj = FakeAsBuiltJoints(**abj_kwargs)
+        design = FakeDesign([FakeOcc(n, full_path=fp) for n, fp in occ_specs],
+                            FakeSnapshots(), abj, FakeAssemblyConstraints())
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ja, "app", fake_app)
+        monkeypatch.setattr(ja._common, "app", fake_app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        # real classes, so is_as_built_joint / is_joint_origin are genuine isinstance checks rather
+        # than the degrade-to-False path a Mock type takes
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", type("JointOrigin", (), {}))
+        monkeypatch.setattr(ja, "_resolve_input",
+                            lambda d, spec: (f"JG[{spec}]", f"snap:{spec}", None))
+        return abj
+    return _make
+
+
 class TestAsBuiltJoint:
-    def test_rigid_as_built_passes_null_geometry(self):
-        _, _, abj, _ = _install(["A:1", "B:1"])
+    def test_rigid_as_built_passes_null_geometry(self, as_built):
+        abj = as_built()
         out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
         o1, o2, geom = abj.last
         assert o1.name == "A:1" and o2.name == "B:1"
         assert geom is None                      # rigid as-built = null geometry
-        assert out["created"] is True
+        assert out["created"] is True and out["joint_type"] == "rigid"
+        # rigid sets no motion at all: null geometry IS the rigid contract
+        assert abj.last_input.motion_calls == []
 
-    def test_missing_occurrence_errors(self):
-        _install(["A:1"])
+    def test_missing_occurrence_errors(self, as_built):
+        as_built(occ_specs=(("A:1", "A:1"),))
         res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
-    def test_requires_two_distinct(self):
-        _install(["A:1"])
+    def test_requires_two_distinct(self, as_built):
+        as_built(occ_specs=(("A:1", "A:1"),))
         res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="A:1")
         assert res["isError"] is True and "two distinct" in res["message"].lower()
 
-    def test_same_local_name_different_path_is_allowed(self):
+    def test_same_local_name_different_path_is_allowed(self, as_built):
         # Two DISTINCT instances of the same component share a local .name ("Bolt:1") but
         # differ by fullPathName. The distinctness check must compare fullPathName, not .name - else it
         # false-positives and rejects a legitimate pair. Address each by its unambiguous fullPathName.
-        snaps = FakeSnapshots(pending=False, items=())
-        abj, ac = FakeAsBuiltJoints(), FakeAssemblyConstraints()
-        occs = [FakeOcc("Bolt:1", full_path="SubA/Bolt:1"),
-                FakeOcc("Bolt:1", full_path="SubB/Bolt:1")]
-        design = FakeDesign(occs, snaps, abj, ac)
-        ja.app = type("A", (), {"activeProduct": design})()
-        ja._common.app = ja.app
-        import adsk.fusion
-        adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+        abj = as_built(occ_specs=(("Bolt:1", "SubA/Bolt:1"), ("Bolt:1", "SubB/Bolt:1")))
         out = _payload(ja.as_built_joint_handler(
             occurrence_one="SubA/Bolt:1", occurrence_two="SubB/Bolt:1"))
         assert out["created"] is True
         o1, o2, _ = abj.last
         assert o1.fullPathName == "SubA/Bolt:1" and o2.fullPathName == "SubB/Bolt:1"
+
+    def test_payload_names_each_occurrence_by_full_path(self, as_built):
+        # A NESTED child's .name is only the leaf ("Inner:1") - the caller addressed it as
+        # "Outer:1+Inner:1", and only the full path names it unambiguously, so that is what the
+        # payload publishes.
+        as_built(occ_specs=(("Base:1", "Base:1"), ("Inner:1", "Outer:1+Inner:1")))
+        out = _payload(ja.as_built_joint_handler(
+            occurrence_one="Base:1", occurrence_two="Outer:1+Inner:1"))
+        assert out["occurrence_one"] == "Base:1"
+        assert out["occurrence_two"] == "Outer:1+Inner:1"
+
+
+class TestAsBuiltMotion:
+    """A non-rigid as-built joint: Fusion REFUSES one whose createInput got a null geometry
+    ("Geometry should not be null if joint motion is not rigid"), so the anchor is a precondition
+    here, and the motion the joint comes back with is read off the created joint."""
+
+    def _revolute(self, **kw):
+        args = {"occurrence_one": "A:1", "occurrence_two": "B:1", "geometry": "A:1:top",
+                "joint_type": "revolute"}
+        args.update(kw)
+        return ja.as_built_joint_handler(**args)
+
+    def test_revolute_uses_the_one_arg_joint_input_setter(self, as_built):
+        # The bite for the reuse claim: an AsBuiltJointInput takes the JointInput arity (the axis enum
+        # ALONE). Routing it through the existing-as-built branch would call the two-arg
+        # setter(axis, geometry), which raises in the fake - so this pins the dispatch, not just the type.
+        abj = as_built()
+        out = _payload(self._revolute(axis="x"))
+        assert abj.last_input.motion_calls == [("RevoluteJointMotion", (0,))]
+        assert out["joint_type"] == "revolute" and out["axis"] == "x"
+
+    def test_resolved_geometry_reaches_create_input(self, as_built):
+        abj = as_built()
+        _payload(self._revolute())
+        assert abj.last[2] == "JG[A:1:top]"      # createInput's third argument, not None
+        assert _payload(self._revolute())["geometry"] == "snap:A:1:top"
+
+    def test_non_rigid_without_geometry_is_refused_before_any_call(self, as_built):
+        abj = as_built()
+        res = self._revolute(geometry="")
+        assert res["isError"] is True
+        assert "geometry" in res["message"] and "revolute" in res["message"]
+        assert abj.last is None and abj.added == 0
+
+    def test_rigid_with_geometry_is_refused(self, as_built):
+        # A rigid as-built joint anchors nowhere, so a supplied geometry would be silently dropped.
+        abj = as_built()
+        res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1",
+                                        geometry="A:1:top")
+        assert res["isError"] is True
+        assert "rigid" in res["message"] and "A:1:top" in res["message"]
+        assert abj.added == 0
+
+    def test_joint_origin_geometry_is_refused_naming_joint_create(self, as_built, monkeypatch):
+        import adsk.fusion
+        abj = as_built()
+        monkeypatch.setattr(ja, "_resolve_input",
+                            lambda d, spec: (adsk.fusion.JointOrigin(), "handle:joint_origin", None))
+        res = self._revolute(geometry="H_JO")
+        assert res["isError"] is True
+        assert "Joint Origin" in res["message"] and "joint_create" in res["message"]
+        assert abj.added == 0
+
+    def test_unresolvable_geometry_error_is_surfaced(self, as_built, monkeypatch):
+        abj = as_built()
+        monkeypatch.setattr(ja, "_resolve_input",
+                            lambda d, spec: (None, spec, "handle did not resolve - stale token"))
+        res = self._revolute(geometry="H_DEAD")
+        assert res["isError"] is True
+        assert "geometry" in res["message"] and "stale token" in res["message"]
+        assert abj.added == 0
+
+    def test_motion_readback_mismatch_is_an_error(self, as_built):
+        # the joint comes back RIGID when revolute was asked - a wrong result with a healthy feature
+        as_built(motion_class="RigidJointMotion")
+        res = self._revolute()
+        assert res["isError"] is True
+        assert "'rigid'" in res["message"] and "'revolute'" in res["message"]
+
+    def test_unreadable_motion_is_an_error_for_a_motion_type(self, as_built):
+        as_built(motion_class="")
+        res = self._revolute()
+        assert res["isError"] is True and "could not be read back" in res["message"]
+
+    def test_rigid_survives_an_unreadable_motion_readback(self, as_built):
+        # add() with a null geometry RAISES for any non-rigid motion, so reaching a created joint on
+        # the rigid path is itself the proof - an unreadable motion class is not a failure there.
+        as_built(motion_class="")
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert out["created"] is True and out["joint_type"] == "rigid"
+
+    def test_a_rejected_motion_setter_stops_before_add(self, as_built, monkeypatch):
+        abj = as_built()
+        monkeypatch.setattr(ja, "_apply_motion",
+                            lambda *a, **k: (False, "Invalid parameter pitchDirection"))
+        res = self._revolute()
+        assert res["isError"] is True and "pitchDirection" in res["message"]
+        assert abj.added == 0
+
+    def test_null_anchor_geometry_on_a_motion_joint_is_reported(self, as_built):
+        # AsBuiltJoint.geometry reads null only for a rigid joint, so a revolute one with no
+        # geometry to read is a signal - reported, not swallowed.
+        as_built(geometry_readback=None)
+        out = _payload(self._revolute())
+        assert "anchor_warning" in out and "joint_drive" in out["anchor_warning"]
+
+    def test_pin_slot_passes_two_distinct_directions(self, as_built):
+        abj = as_built()
+        out = _payload(self._revolute(joint_type="pin_slot", axis="z", slide_axis="x"))
+        assert abj.last_input.motion_calls == [("PinSlotJointMotion", (2, 0))]
+        assert out["slide_axis"] == "x"
+
+    def test_pin_slot_slide_axis_must_differ_from_the_rotation_axis(self, as_built):
+        abj = as_built()
+        res = self._revolute(joint_type="pin_slot", axis="z", slide_axis="z")
+        assert res["isError"] is True and "must differ" in res["message"]
+        assert abj.added == 0
+
+    def test_unknown_joint_type_is_refused(self, as_built):
+        as_built()
+        res = self._revolute(joint_type="hinge")
+        assert res["isError"] is True and "hinge" in res["message"]
+
+    def test_unknown_axis_is_refused(self, as_built):
+        as_built()
+        res = self._revolute(axis="w")
+        assert res["isError"] is True and "Unknown axis 'w'" in res["message"]
+
+    def test_add_returning_nothing_is_an_error(self, as_built):
+        as_built(add_returns=False)
+        res = self._revolute()
+        assert res["isError"] is True and "returned nothing" in res["message"]
+
+
+class TestAsBuiltResultNote:
+    """What the note TELLS the agent after a successful create must match what was actually set -
+    the axis the setter used, and a next step that will not refuse the joint."""
+
+    def _make(self, **kw):
+        args = {"occurrence_one": "A:1", "occurrence_two": "B:1", "geometry": "A:1:top"}
+        args.update(kw)
+        return _payload(ja.as_built_joint_handler(**args))
+
+    def test_ball_note_claims_no_frame_axis(self, as_built):
+        # setAsBallJointMotion ignores 'axis' (pitch Z / yaw X is the only pair the API accepts), and
+        # the payload publishes axis=None - so the note must not name the requested axis.
+        abj = as_built()
+        out = self._make(joint_type="ball", axis="y")
+        assert abj.last_input.motion_calls == [("BallJointMotion", (2, 0))]   # Z pitch, X yaw
+        assert out["axis"] is None
+        assert "y axis" not in out["note"]
+        assert "pitch Z / yaw X" in out["note"]
+
+    def test_axis_using_types_state_the_dof_the_setter_gave_that_axis(self, as_built):
+        as_built()
+        assert "rotating about the frame z axis" in self._make(joint_type="revolute")["note"]
+        as_built()
+        assert "sliding along the frame x axis" in self._make(joint_type="slider", axis="x")["note"]
+        as_built()
+        # planar's axis is the plane NORMAL - the motion is in the plane, not along the axis
+        note = self._make(joint_type="planar", axis="z")["note"]
+        assert "sliding in the plane normal to the frame z axis" in note
+
+    def test_pin_slot_note_names_both_directions(self, as_built):
+        as_built()
+        note = self._make(joint_type="pin_slot", axis="z", slide_axis="x")["note"]
+        assert "rotating about the frame z axis" in note
+        assert "sliding along the frame x axis" in note
+
+    def test_joint_drive_is_offered_only_for_the_types_it_drives(self, as_built):
+        # joint_drive REFUSES ball/planar/pin_slot ("only revolute, slider, and cylindrical joints
+        # can be driven by value"), so pointing those at it would hand the agent a dead end.
+        for jt in ("revolute", "slider", "cylindrical"):
+            as_built()
+            assert "Pose it with joint_drive." in self._make(joint_type=jt)["note"]
+        for jt in ("planar", "ball", "pin_slot"):
+            as_built()
+            note = self._make(joint_type=jt)["note"]
+            assert "assembly_move" in note, jt
+            assert "Pose it with joint_drive." not in note, jt
+
+    def test_anchor_warning_points_at_the_right_tool_for_a_ball_joint(self, as_built):
+        as_built(geometry_readback=None)
+        warn = self._make(joint_type="ball")["anchor_warning"]
+        assert "assembly_move" in warn and "Pose it with joint_drive." not in warn
+
+    def test_rigid_note_is_unchanged(self, as_built):
+        as_built()
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert out["note"] == "Occurrences rigidly joined where they already are."
 
 
 # ── assembly_constrain ──────────────────────────────────────────────────────

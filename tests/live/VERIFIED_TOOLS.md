@@ -15,15 +15,17 @@ exercised: `--check` recomputes the hash and fails on any difference, so a green
 cannot ride on a live run that never saw the current code. Only a run with zero
 FAIL/blocked steps rewrites this file.
 
-Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 | Fusion 2704.1.39 | verified 2026-08-01
+Stamp: source 49be44864b6afc835c9f926a08e95243a2b477b64794aad1c9f457ccd2f89bbc | Fusion 2705.0.87 | verified 2026-08-06
 
-126 covered / 25 skipped(reason) / 0 pending
+152 covered / 31 skipped(reason) / 0 pending
 
 | tool | status | step (the demo's shot list) |
 |---|---|---|
 | appearance_set | covered | give each gyroscope part its own color |
-| assembly_capture_position | covered | capture the posed snapshot |
+| assembly_capture_position | covered | status, discard the pending pose, re-arm and capture |
 | assembly_constrain | covered | flush-constrain a scratch cameo pair |
+| assembly_edit_contacts | covered | build a contact set from two story parts, meet the single-member refusal, re-member it, rename it reading the landed name back, suppress round-trip, switch contact analysis on and back off, then delete it |
+| assembly_edit_relations | covered | suppress/unsuppress the frame lock, re-value the crank link with was_reversed disclosed, and meet the measured set_occurrences refusal |
 | assembly_get | covered | read the joint wiring, driven angles, and the StockCenter anchor back |
 | assembly_ground | covered | ground the frame so the mechanism has a base |
 | assembly_inspect_interference | covered | check interference at rest and driven |
@@ -32,6 +34,7 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | cam_activate_setup | covered | activate the setup |
 | cam_apply_template | covered | apply the template to a second setup |
 | cam_compare_operations | covered | compare the two operations |
+| cam_create_machine | covered | build a run-stamped 3-axis machine into the Local library, find it in the catalog, assign it to the setup, and refuse the duplicate name |
 | cam_create_operation | covered | create the face, adaptive, silhouette, and drill operations |
 | cam_create_setup | covered | create the milling setup on the Carrier in the vise |
 | cam_delete | covered | delete a scratch operation; count diff |
@@ -40,31 +43,39 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | cam_edit_setup | covered | real stock + vise fixture bodies; WCS bound to the stock-center JO (bound read back); Haas VF-2 assigned |
 | cam_edit_tools | covered | add mill/drill/turning/center-drill tools; preset add/remove round-trip with unit, refusal, and rollback gates |
 | cam_generate | covered | generate the toolpaths against the real part in the real fixture |
-| cam_get | covered | read the CAM job structure |
+| cam_generate_setup_sheet | covered | write the machinist setup sheet with the file-landed gate |
+| cam_get | covered | read the CAM job structure, and the recorded-probing slice on a job nothing has probed: the empty state with its reason named, a scope that invents no measure, and the units refusal |
 | cam_get_status | covered | poll the generation to completion (empty toolpaths fail) |
 | cam_inspect_toolpaths | covered | verdict false with named ops before generation, scoped check, bogus-scope refusal, verdict true after generation |
 | cam_post | covered | post the NC program to disk |
 | cam_reorder | covered | reorder the adaptive before the face op |
 | cam_save_template | covered | save the setup as a local CAM template |
-| cam_select_geometry | covered | select stock-top face, zero-handle silhouette, and the bolt-circle holes |
+| cam_select_geometry | covered | select the stock-top face, both silhouette branches (setup models and named bodies), a whole scratch sketch, the bolt-circle holes, and recognized pockets whose filter is read back in CM; refusals for a knob on the wrong kind, geometry through the wrong input, and an edge where a face belongs |
 | cam_set_nc_comment | covered | stamp the NC program comment |
 | cam_show_toolpath | covered | leave the toolpath visible on camera |
 | data_create_folder | skipped: cloud write (opt-in tier) |  |
 | data_create_project | skipped: cloud write to the operator's real hub (opt-in tier) |  |
 | data_delete_file | skipped: cloud destructive (opt-in tier) |  |
 | data_delete_folder | skipped: cloud destructive (opt-in tier) |  |
+| data_download_file | skipped: cloud read to the local disk (opt-in tier) |  |
 | data_get | skipped: cloud read, hub-dependent (opt-in tier) |  |
 | data_get_upload_status | skipped: cloud read (opt-in tier) |  |
+| data_move_file | skipped: cloud write - relocates a real file in the operator's hub (opt-in tier) |  |
 | data_switch_hub | skipped: changes the active hub, closes docs (opt-in tier) |  |
 | data_upload_file | skipped: cloud write (opt-in tier) |  |
 | design_activate_component | covered | step into each part to build its sketch |
-| design_configure | skipped: configuration table needs a SAVED document (a DataFile to carry it); opt-in tier |  |
+| design_add_instance | covered | place two more crank instances and read the landed paths back, the second naming the component while two of it already stand; the self-nesting target refused |
+| design_configure | skipped: configuration table needs a SAVED document (a DataFile to carry it); opt-in tier - the appearance/material columns need that document too, and a body's material reads back only after the geometry catches up with the activation |  |
 | design_delete_feature | covered | add a wart feature then delete it; health diff |
 | design_delete_occurrence | covered | delete a scratch occurrence |
+| design_edit_timeline | covered | roll the marker back a step and to the end, refuse a discard without the confirmation, refuse an unknown feature and a bad group range, and tag a feature with an attribute then delete it - the value and the design-wide count are read back both ways, and a second delete is refused |
 | design_export | covered | export the machined part to STEP |
-| design_get | covered | final design read: the whole cast |
+| design_get | covered | final design read: the whole cast, plus the material/appearance catalog at both zoom levels - the library census and one paged library; an unloaded library name refused |
+| design_move_occurrence | covered | re-parent one of those instances under the frame, the new path and the held world position both read back; the root target and the self-nesting target refused |
 | design_recompute | covered | recompute the assembly after motion |
+| design_remove_feature | covered | remove a scratch body and its occurrence; deleting each Remove brings them back |
 | design_set_mode | skipped: irreversible parametric->direct conversion; not run unattended |  |
+| design_set_name | covered | rename the machined part and re-find it by the name that landed, rename a cameo occurrence with its instance name following, and give a twin body the name its sibling holds so the deduped '(1)' is what gets published; the empty target and the root component refused |
 | doc_activate | skipped: needs a second open document (opt-in tier) |  |
 | doc_close | covered | discard the document on camera - clean teardown |
 | doc_copy | skipped: cloud write (opt-in tier) |  |
@@ -77,19 +88,24 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | doc_restore_version | skipped: needs cloud version history (opt-in tier) |  |
 | doc_save | skipped: versions to the cloud; needs a saved doc (opt-in tier) |  |
 | doc_save_as | skipped: cloud write (opt-in tier) |  |
+| doc_save_milestone | skipped: cloud write; needs a saved MODIFIED doc (opt-in tier) |  |
 | doc_update_xref | skipped: needs cloud external references (opt-in tier) |  |
-| drawing_create | skipped: first-open modal needs a human review (user-present tier) |  |
+| drawing_add_sketch | skipped: user-present tier (drawing docs) |  |
+| drawing_create | covered | meet every guard the drawing generator sits behind, each settled before the tool reaches for a cloud source: the shaded style with no member to set, the two centre annotations with no enum family on this build, a tangent-edge value outside the Choice, manual creation with no template, and a sheet size from the other standard - none of them creating anything, and the session healthy afterwards. The creation path is cloud tier (it needs a saved source design) and stays out of the default sweep |
+| drawing_dimension | skipped: user-present tier (drawing docs) |  |
+| drawing_edit_sheet | skipped: user-present tier (drawing docs) |  |
 | drawing_export | skipped: user-present tier (drawing docs) |  |
+| drawing_insert_image | skipped: user-present tier (drawing docs) |  |
 | drawing_update | skipped: user-present tier (drawing docs) |  |
 | find_geometry | covered | acquire the face/edge/body handles the build consumes |
-| joint_at_geometry | covered | joint a pin in its bore via cylinder faces |
+| joint_at_geometry | covered | joint a pin in its bore via cylinder faces; then the motion vocabulary on its own cameo tree - a BALL on a real sphere face (the centre key point named in the payload, no axis and no axis sentence), a revolute on an explicit axis whose note says frame, NOT world, and points at the tool that sets a true world axis, and a rigid pair with the same axis-free report; an axis outside the Choice refused |
 | joint_create | covered | revolute the yaw, ring pivots, spin, and crank |
-| joint_create_as_built | covered | seat the rotor shaft in the inner ring as-built |
+| joint_create_as_built | covered | seat the rotor shaft in the inner ring as-built; then a REVOLUTE as-built pair anchored on their shared face, read back through assembly_get and driven to prove the DOF, with the missing-anchor and rigid-plus-anchor refusals |
 | joint_create_origin | covered | place the crank mount and the stock-center WCS |
 | joint_drive | covered | drive every axis, the crank -> rotor 2:1, then ONE vise jaw (the link closes the other) |
 | joint_edit | covered | set rotation limits on the yaw |
 | joint_motion_link | covered | couple the crank to the rotor spin at 2:1; the vise jaws at -1 (self-centering) |
-| mesh_combine | covered | combine two mesh copies |
+| mesh_combine | covered | combine two mesh copies, the parametric mode and the base feature the write ran in both named; then merge two disjoint meshes into one body |
 | mesh_delete | covered | delete a scratch mesh body with the design-wide survivor re-scan |
 | mesh_export | covered | export a mesh to STL |
 | mesh_generate_face_groups | covered | group the mesh faces |
@@ -98,15 +114,21 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | mesh_plane_cut | covered | plane-cut a mesh copy |
 | mesh_reduce | covered | reduce a dense mesh |
 | mesh_remesh | covered | remesh a copy |
+| mesh_repair | covered | one-touch-fix a healthy mesh (an honest no-op, not a failure), rebuild it with the density read back off the feature, and refuse density on a non-rebuild |
+| mesh_reverse_normal | covered | flip an inside-out mesh - confirmed by the signed volume changing sign, not by is_closed |
+| mesh_separate | covered | split a two-shell mesh into its lumps - the pieces are the auto-named bodies read back from the component |
+| mesh_shell | covered | hollow a scratch mesh - the volume DROPS and the thickness is read back off the feature, never echoed |
+| mesh_smooth | covered | smooth a scan-quality mesh: the triangle count HOLDS STILL and the node coordinates move, which is why a count census cannot judge it |
 | mesh_to_brep | covered | convert a mesh to a base-feature BRep |
 | model_arrange | covered | nest two scratch parts in a boundary |
 | model_base_feature | covered | open and close a base-feature scope |
-| model_chamfer | covered | chamfer the frame edge |
+| model_chamfer | covered | chamfer the frame edge, then a second one by distance-and-angle with a miter corner, both read back off the created feature |
 | model_combine | covered | join two overlapping cameo pads |
 | model_compute_holder | covered | compute a CAM tool holder (read) |
-| model_construction | covered | offset the carrier hub plane below the rotor sweep |
+| model_construction | covered | offset the carrier hub plane below the rotor sweep; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about the shaft's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused |
 | model_create_component | covered | cast the eight parts, Pedestal nested in Frame |
 | model_draft | covered | draft a cameo face |
+| model_emboss | covered | raise then engrave a circular profile on a scratch block's top face, each checked against the volume direction; a zero depth refused |
 | model_extrude | covered | extrude the ring bands symmetric about the ring plane |
 | model_fillet | covered | fillet the outer ring edge |
 | model_hole | covered | drill a cameo mounting hole, then the three additive placements - centred on its rim, on an edge at middle and at start, and by plane offsets; a circular offset edge refused |
@@ -114,11 +136,14 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | model_loft | covered | loft the pedestal base-to-post transition |
 | model_measure_between | covered | measure the outer-ring-to-inner-ring gap |
 | model_measure_relation | covered | read rotor/shaft coaxiality |
-| model_mirror | covered | mirror a cameo body |
+| model_mirror | covered | mirror a cameo body, then the emboss block's own timeline FEATURE with the body/volume census read back, then a join whose isCombine is read off the created feature, and meet the join-is-bodies-only refusal |
 | model_move | covered | translate, along-axis, rotate and point-to-point move features on a scratch block, each checked against the distance it was asked for; a face as the axis and any faces selection refused |
 | model_offset_face | covered | push a scratch block's top face outward |
-| model_pattern_circular | covered | circular-pattern a cameo body |
+| model_pattern_circular | covered | circular-pattern a cameo body about a world axis, then about a construction axis by handle and by name with the resolved label read back, then about the bore FACE itself; the datum name reached from the root refused |
+| model_pattern_path | covered | pattern the feature cameo along its own edge with the count read back |
 | model_pattern_rectangular | covered | rectangular-pattern a cameo body |
+| model_pipe | covered | run a hollow pipe along its path with the wall read back off the feature, then a half-path pipe whose bounding box proves the extent is a FRACTION; the reverse extent refused on an open path |
+| model_replace_face | covered | replace a scratch block's top face with an open sheet above it, the measured volume move pinning the effect; a solid face as the target refused |
 | model_revolve | covered | revolve the rotor disc about the spin axis |
 | model_scale | covered | uniform x8 and per-axis x*y*z scales with ratio read-backs; unresolvable, length, and angle expressions refused; a bare unitless parameter accepted; a vertex-anchored scale |
 | model_set_material | covered | assign the rotor a physical steel material |
@@ -133,38 +158,45 @@ Stamp: source 49ac87f31c8647655a50bb1dbd8977b16565f33fef8b5e0a973697600bda9174 |
 | param_get | covered | read the parameter table; a fresh GimbalDia read sizes the CAM stock |
 | param_set | covered | bump GimbalDia +33%, then restore it |
 | param_set_favorite | covered | mark GimbalDia the favorite driving dimension |
-| pmi_create | covered | author a flatness note on the frame plate and a hole note on a carrier bore |
-| pmi_delete | covered | delete the flatness note; the count read-back confirms it |
-| pmi_edit | covered | restate the flatness note's markup, then hide and show it |
+| pmi_create | covered | aim a flatness note at the frame plate and a hole note at a carrier bore, and meet the extension gate PMI authoring sits behind on this build |
+| pmi_delete | covered | meet the same lookup refusal for the delete |
+| pmi_edit | covered | meet the name lookup on a design holding no PMI - it lists what exists instead of editing something else - and the blank-name guard |
 | pmi_get | covered | read the PMI back with segments and detail |
 | save_as_mesh | covered | mesh a scratch solid (one per destructive op) |
 | sketch_add_3d_line | covered | draw the yaw axis as the skeleton's 3D line |
-| sketch_add_geometry | covered | draw the concentric rings and part footprints |
-| sketch_constrain | covered | constrain the skeleton's X axis horizontal |
+| sketch_add_geometry | covered | draw the concentric rings and part footprints; then the SLOT family, one scratch sketch per shape - a three-point arc slot with its five arcs and its profile, the centre-point arc slot in both its short and its full ladder with each dimension flag gated independently, an overall slot whose cap centres prove the tip-to-tip measure, the length/angle tail that adds the fourth line and its own dimensions, the centre-point slot's HALF length landing a cap on its second point, and the legacy centre-to-centre form; the angle with no length, the angle FLAG on a straight slot, each cross-kind input pointed at the kind that carries it, and a tail on the legacy form all refused |
+| sketch_constrain | covered | constrain the skeleton's X axis horizontal; then autoConstrain a loose rectangle to fully constrained and re-run it as a no-op, lay a rectangular pattern by total EXTENT with the landed centre measured, suppress two instances of a 3x2 pattern with the landed flags and the curve count both read back; the N-1 flag length, a knob on the wrong constraint, and the dimensioning strategies this build does not carry all refused |
+| sketch_copy | covered | copy a two-line chain to an offset position, its new refs and the endpoints in the returned collection both accounted for, then across into a second sketch, and again inside a COMPONENT sketch where the refs cross the occurrence-proxy seam |
 | sketch_create | covered | draw each part's sketch on its plane |
-| sketch_delete_entity | covered | delete a helper constraint; count drops |
+| sketch_delete_entity | covered | delete a helper constraint; count drops - then a sketch text by its index, the deleted string reported back, and the empty index refused |
 | sketch_dimension | covered | drive ring/rotor radii by parameter expression |
 | sketch_edit_curve | covered | trim, extend, split, fillet, chamfer and offset on one scratch sketch per action, with length read-backs; split's two halves must carry distinct ids; a chamfer across an offset pair refused |
 | sketch_get | covered | read the skeleton and ring profiles back |
-| sketch_project | covered | project the machining boundary |
-| sketch_set_text | covered | engrave the FUSION ESSENTIALS nameplate |
+| sketch_insert_svg | covered | import the logo art into a fresh sketch, its landed width measured against the 1/96-inch-per-user-unit convention; the missing file refused |
+| sketch_move | covered | shift a line by a known offset and read the new coordinates back, then spin it 180 deg about its own midpoint - the swap only the endpoints show; the negative-scale mirror and the empty transform refused |
+| sketch_project | covered | project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals |
+| sketch_set_text | covered | engrave the FUSION ESSENTIALS nameplate; then the path layouts - text along a line and wrapped around a closed circle, and fitted to a line - each checked against the created text's own definition objectType; a model edge as the path, the three cross-mode inputs, and a layout input on an edit all refused; then the FONT - named on a create and on an along-path create, read back off the landed text both times, then changed on an edit beside the string; an unknown name and its case variant refused on create with the text count proving nothing landed, the same name refused on an edit with the following read showing the string untouched, and a call with no font_name publishing no font key at all |
+| surface_create_ruled | covered | rule off a sheet's top rim - tangent, normal, along a direction entity and at an angle read off the feature - then off a SOLID box edge, where only the new sheet is the result; both misuse refusals |
 | surface_delete_face | covered | open a bore by deleting a face |
-| surface_extend | covered | extend a sheet edge |
+| surface_extend | covered | extend a sheet edge with no alignment given (the payload carries no key, so nothing was written), then a second sheet extended with 'align_edges' read back |
 | surface_extrude | covered | extrude prep sheets |
+| surface_fill | covered | seal a closed revolved sphere surface into a solid, the volume measured off the result and every tool accounted for; and seal the joint cameo's sphere the same way, so the ball beat has a real sphere face to joint at |
 | surface_offset | covered | offset a ring face zero and nonzero |
-| surface_patch | covered | close the opened bore with a patch |
+| surface_patch | covered | close the opened bore with a patch, then the same rim at 'tangent' continuity and again through one interior RAIL whose landed count is read off the input; rails paired with the multi-loop form refused |
 | surface_reverse_normal | covered | flip a sheet normal |
-| surface_revolve | covered | revolve a prep sheet |
-| surface_thicken | covered | thicken the prep sheet |
+| surface_revolve | covered | revolve a prep sheet; and the half-disc that closes into the ball joint's sphere |
+| surface_thicken | covered | thicken the prep sheet, then a four-walled sheet with 'rounded' corners read back off the input |
 | surface_trim | covered | trim a sheet with a cylinder cutter |
 | surface_untrim | covered | untrim the internal hole loop |
 | sys_capability_map | covered | survey the server's tool families at cold start |
 | sys_execute_script | skipped: gated off by design; the sweep proves the typed surface suffices |  |
 | sys_find_tool | covered | search the surface for the revolve verb |
 | sys_get_api_doc | covered | read the RevolveFeatures API doc |
+| sys_get_preferences | covered | read the application's own configuration - the default projection, two decoded enum families, the compatibility group and the members that raise on read |
 | sys_get_selection | covered | expected refusal: nothing is selected yet |
 | sys_reload_addin | skipped: restarts the server mid-sweep |  |
 | sys_request_selection | skipped: waits on a human pick (user-present tier) |  |
+| sys_set_preferences | covered | round-trip one invisible preference and restore it in the same act; the below-minimum value and a tier-R member refused |
 | view_list_workspaces | covered | list the workspaces available |
 | view_screenshot | covered | capture the sectioned mechanism |
 | view_screenshot_multi | covered | capture the front and top beauty shots |

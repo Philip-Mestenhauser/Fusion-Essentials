@@ -5,8 +5,9 @@ unit convention. If these drift, every tool drifts, so pin the contract explicit
 """
 
 import json
+from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import MakeComp, entity_proxy, load_tool
 
 common = load_tool("_common")
 
@@ -252,6 +253,33 @@ class TestResolveEntityRef:
         assert common.resolve_entity_ref(self._sketch(), "line") is None
 
 
+class TestResolveEntityRefs(TestResolveEntityRef):
+    """The comma-separated list parser over resolve_entity_ref - the ONE 'entities' selector
+    sketch_constrain's list kinds and sketch_move/sketch_copy share."""
+
+    def test_an_empty_selector_yields_no_refs_and_no_error(self):
+        ents, refs, err = common.resolve_entity_refs(self._sketch(), "  ")
+        assert (ents, refs, err) == ([], [], None)
+
+    def test_one_ref_resolves(self):
+        ents, refs, err = common.resolve_entity_refs(self._sketch(), "line:0")
+        assert [e.name for e in ents] == ["L0"] and refs == ["line:0"] and err is None
+
+    def test_several_refs_keep_the_order_given_and_tolerate_spacing(self):
+        ents, refs, err = common.resolve_entity_refs(self._sketch(), " point:0 , line:0 ")
+        assert [e.name for e in ents] == ["P0", "L0"] and refs == ["point:0", "line:0"]
+        assert err is None
+
+    def test_the_first_ref_that_misses_is_named_with_the_legal_kinds(self):
+        ents, refs, err = common.resolve_entity_refs(self._sketch(), "line:0,arc:7,line:0")
+        assert ents is None and "'arc:7'" in err and "line/arc/circle" in err
+        assert refs == ["line:0", "arc:7", "line:0"]     # kept, so a caller can echo what it got
+
+    def test_the_field_name_in_the_error_is_the_caller_s(self):
+        _e, _r, err = common.resolve_entity_refs(self._sketch(), "arc:7", field="targets")
+        assert "in 'targets'" in err
+
+
 class TestOperations:
     def test_maps_every_verb_to_a_feature_operation_attribute_name(self):
         for key in ("new", "new_body", "join", "cut", "intersect"):
@@ -285,3 +313,154 @@ class TestMinDistance:
         self._install_mgr(monkeypatch, result=None)
         mr, err = common.min_distance(object(), object())
         assert mr is None and err["isError"] is True
+
+
+# ── same_component / root_body_advisory: identity NEVER carries the comparison ───────────────
+
+class _FakeDesignWithRoot:
+    def __init__(self, root, occurrence_count=0):
+        self._root = root
+        self._occ = occurrence_count
+
+    @property
+    def rootComponent(self):
+        # a FRESH wrapper on every read, as the platform hands back (measured: two reads of
+        # design.rootComponent are different Python objects sharing one entityToken)
+        self._root.occurrences = type("C", (), {"count": self._occ})()
+        return entity_proxy(self._root)
+
+
+def _root(name="Root", token="TOKEN:Root", bodies=0):
+    comp = MakeComp(name=name, bodies=["B%d" % i for i in range(bodies)])
+    comp.entityToken = token
+    return comp
+
+
+class TestSameComponent:
+    def test_distinct_wrappers_of_one_component_are_the_same(self):
+        c = _root()
+        assert common.same_component(entity_proxy(c), entity_proxy(c)) is True
+
+    def test_identity_still_short_circuits(self):
+        c = _root()
+        assert common.same_component(c, c) is True
+
+    def test_different_tokens_are_different_components(self):
+        assert common.same_component(_root(token="TOKEN:A"), _root(token="TOKEN:B")) is False
+
+    def test_falls_back_to_name_when_a_token_cannot_be_read(self):
+        a, b = _root(name="Sub", token=None), _root(name="Sub", token=None)
+        assert common.same_component(a, b) is True
+
+    def test_name_fallback_still_separates_different_names(self):
+        a, b = _root(name="Sub", token=None), _root(name="Other", token=None)
+        assert common.same_component(a, b) is False
+
+    def test_none_is_never_the_same_component(self):
+        assert common.same_component(None, _root()) is False
+        assert common.same_component(_root(), None) is False
+
+
+# ── the assembly-context walk + the cycle test the structural edits run on ──────────────────────
+
+
+def _occ(path, component=None):
+    """One occurrence record: the two attributes these helpers read."""
+    return SimpleNamespace(fullPathName=path, component=component)
+
+
+def _design_with_occurrences(*occs, root=None):
+    root = root if root is not None else _root()
+    root.allOccurrences = list(occs)
+    return type("D", (), {"rootComponent": root})()
+
+
+class TestAllOccurrences:
+    def test_reads_the_root_components_assembly_walk(self):
+        a, b = _occ("Frame:1"), _occ("Frame:1+Bolt:1")
+        assert common.all_occurrences(_design_with_occurrences(a, b)) == [a, b]
+
+    def test_no_design_is_empty(self):
+        assert common.all_occurrences(None) == []
+
+    def test_an_unreadable_root_is_empty_not_a_crash(self):
+        class D:
+            @property
+            def rootComponent(self):
+                raise RuntimeError("no design")
+        assert common.all_occurrences(D()) == []
+
+
+class TestOccurrencePaths:
+    def test_returns_the_set_of_assembly_paths(self):
+        d = _design_with_occurrences(_occ("Frame:1"), _occ("Frame:1+Bolt:1"))
+        assert common.occurrence_paths(d) == {"Frame:1", "Frame:1+Bolt:1"}
+
+    def test_an_unreadable_path_reads_as_empty_string_not_a_dropped_row(self):
+        # a caller filters '' out; silently dropping the row would make a before/after diff report a
+        # phantom new path instead.
+        bad = SimpleNamespace()
+        assert common.occurrence_paths(_design_with_occurrences(_occ("Frame:1"), bad)) == {
+            "Frame:1", ""}
+
+    def test_no_occurrences_is_an_empty_set(self):
+        assert common.occurrence_paths(_design_with_occurrences()) == set()
+
+
+class TestComponentContains:
+    def test_a_component_contains_ITSELF_through_a_distinct_wrapper(self):
+        # the identity trap: two wrappers of one component are different Python objects, so `outer is
+        # inner` reads False and a self-nesting call would sail past the guard.
+        comp = _root(name="Sub", token="TOKEN:Sub")
+        assert common.component_contains(entity_proxy(comp), entity_proxy(comp)) is True
+
+    def test_a_component_INSIDE_it_is_found_through_a_distinct_wrapper(self):
+        inner = _root(name="Bolt", token="TOKEN:Bolt")
+        outer = _root(name="Sub", token="TOKEN:Sub")
+        outer.allOccurrences = [_occ("Sub:1+Bolt:1", component=entity_proxy(inner))]
+        assert common.component_contains(outer, entity_proxy(inner)) is True
+
+    def test_an_unrelated_component_is_not_contained(self):
+        outer = _root(name="Sub", token="TOKEN:Sub")
+        outer.allOccurrences = [_occ("Sub:1+Bolt:1", component=_root(name="Bolt",
+                                                                    token="TOKEN:Bolt"))]
+        assert common.component_contains(outer, _root(name="Frame", token="TOKEN:Frame")) is False
+
+    def test_an_empty_or_unreadable_subtree_contains_nothing(self):
+        outer = _root(name="Sub", token="TOKEN:Sub")
+        outer.allOccurrences = []
+        assert common.component_contains(outer, _root(name="X", token="TOKEN:X")) is False
+        del outer.allOccurrences
+        assert common.component_contains(outer, _root(name="X", token="TOKEN:X")) is False
+
+    def test_none_contains_nothing(self):
+        assert common.component_contains(None, _root()) is False
+
+
+class TestRootBodyAdvisory:
+    def test_fires_when_the_active_component_is_a_DIFFERENT_WRAPPER_of_the_root(self):
+        # THE case an identity test gets wrong: comp and design.rootComponent denote the same
+        # component but are different objects, so `comp is not d.rootComponent` reads True and the
+        # advisory silently never fires at all.
+        root = _root(bodies=1)
+        design = _FakeDesignWithRoot(root)
+        comp = design.rootComponent            # a wrapper, not the object design holds
+        assert comp is not root
+        assert "ROOT component" in common.root_body_advisory(design, comp)
+
+    def test_silent_when_a_real_sub_component_is_active(self):
+        design = _FakeDesignWithRoot(_root())
+        assert common.root_body_advisory(design, _root(name="Sub", token="TOKEN:Sub")) == ""
+
+    def test_silent_once_the_root_holds_several_bodies(self):
+        root = _root(bodies=2)
+        design = _FakeDesignWithRoot(root)
+        assert common.root_body_advisory(design, design.rootComponent) == ""
+
+    def test_silent_once_the_design_has_sub_components(self):
+        root = _root(bodies=1)
+        design = _FakeDesignWithRoot(root, occurrence_count=1)
+        assert common.root_body_advisory(design, design.rootComponent) == ""
+
+    def test_silent_without_a_component(self):
+        assert common.root_body_advisory(_FakeDesignWithRoot(_root()), None) == ""

@@ -227,6 +227,41 @@ class TestPlaneCut:
         assert out["auto_viewed"] is False
 
 
+# ── the assembly-context refusal teaches its remedy ─────────────────────────
+
+class TestSubComponentContextRefusal:
+    """With a sub-component active, an origin alias resolves to THAT component's plane and the
+    section is refused '... object is not in the assembly context of this component'. The platform
+    text says what is wrong, not what to do - the error must carry the activate-root remedy."""
+
+    def _install_failing(self, monkeypatch, message):
+        sections = _install()
+        # the ACTIVE component is a sub-component: it carries its own origin planes, so the alias
+        # resolves fine - the section is what refuses the resulting plane
+        sub = type("Comp", (), {"name": "Inner", "xYConstructionPlane": "SUB_XY",
+                                "xZConstructionPlane": "SUB_XZ", "yZConstructionPlane": "SUB_YZ"})()
+        monkeypatch.setattr(sv._common, "target_component", lambda d: sub)
+
+        def boom(entity, distance_cm):
+            raise RuntimeError(message)
+        monkeypatch.setattr(sections, "createInput", boom)
+        return sections
+
+    def test_assembly_context_failure_names_the_remedy_and_the_active_component(self, monkeypatch):
+        self._install_failing(monkeypatch, "3 : object is not in the assembly context of this component")
+        res = sv.handler(action="cut", plane="yz")
+        assert res["isError"] is True
+        assert "design_activate_component" in res["message"]
+        assert "Inner" in res["message"]                     # which component is active
+        assert "assembly context" in res["message"]          # the platform's own text is kept
+
+    def test_an_unrelated_failure_is_not_given_the_remedy(self, monkeypatch):
+        self._install_failing(monkeypatch, "3 : a totally different problem")
+        res = sv.handler(action="cut", plane="yz")
+        assert res["isError"] is True
+        assert "design_activate_component" not in res["message"]
+
+
 # ── through-occurrence center math ──────────────────────────────────────────
 
 class TestThroughCenter:

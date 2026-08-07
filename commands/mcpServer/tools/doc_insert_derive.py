@@ -318,7 +318,10 @@ def handler(document_id: str = "", into_component: str = "",
     before_bodies, _ = _common.design_wide_counts(design)
     before_occ_tokens = _occurrence_tokens(comp)
     root = safe(lambda: design.rootComponent)
-    before_root_tokens = _occurrence_tokens(root) if comp is not root else before_occ_tokens
+    # same_component, not `is`: component wrappers are never identity-stable, so `comp is not root`
+    # reads True even at the root and this would re-walk the same collection.
+    before_root_tokens = (before_occ_tokens if _common.same_component(comp, root)
+                          else _occurrence_tokens(root))
 
     # The platform routes a derive into the ACTIVE component (the UI Insert>Derive behavior),
     # IGNORING which component's deriveFeatures collection built the input - without activation
@@ -339,7 +342,8 @@ def handler(document_id: str = "", into_component: str = "",
             if safe(lambda: design.activateRootComponent(), None) is None:
                 safe(lambda: into_occ.deactivate())
     if not feature:
-        return error("deriveFeatures.add returned nothing (the derive did not produce a feature).")
+        return error(_common.no_feature_error(design, "Derive",
+                                              "(deriveFeatures.add returned nothing.)"))
 
     # Force a full recompute so world-space reads (bounding box, joint-origin frames) taken right
     # after this call are FRESH - without it a bbox/center can read stale until an unrelated edit
@@ -366,7 +370,7 @@ def handler(document_id: str = "", into_component: str = "",
                       "is_derived": bool(safe(lambda b=b: b.isDerived, False))}
                      for b in _common.result_bodies(feature)]
     derived_components = _new_derived_occurrences(comp, before_occ_tokens)
-    if not derived_components and comp is not root:
+    if not derived_components and not _common.same_component(comp, root):
         # Landing net: nothing new in the TARGET component - if the derive surfaced at ROOT
         # instead, the nesting failed and saying so beats a silent root sibling.
         strays = _new_derived_occurrences(root, before_root_tokens)

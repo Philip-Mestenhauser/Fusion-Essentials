@@ -46,6 +46,27 @@ TOOLS_DIR = os.path.join(COMMANDS_DIR, "mcpServer", "tools")
 
 # ── adsk mock installation ─────────────────────────────────────────────────
 
+class _StrictEnum:
+    """One measured adsk enum family. Accessing a member that was NOT measured against live Fusion
+    raises AttributeError, exactly as the live enum does. Tools legitimately probe with
+    getattr(Enum, name, None) for version-dependent members, and that still returns the default."""
+
+    def __init__(self, family, members):
+        self._family = family
+        for member, value in members.items():
+            setattr(self, member, value)
+
+    def __getattr__(self, name):
+        known = ", ".join(sorted(k for k in vars(self) if not k.startswith("_")))
+        raise AttributeError(
+            f"adsk.{self._family} has no member '{name}' - it does not exist in Fusion "
+            f"{_api_facts.FUSION_VERSION}. Measured members: {known}. If '{name}' is real, add a "
+            "measurement row to tests/live/measure_api.py and regenerate live_api_facts.py.")
+
+    def __repr__(self):
+        return f"<measured adsk.{self._family}>"
+
+
 def install_mock_adsk():
     """Inject mock ``adsk`` / ``adsk.core`` / ``adsk.fusion`` into sys.modules.
 
@@ -101,17 +122,17 @@ def install_mock_adsk():
     drawing = Mock()
 
     # Seed every measured enum family onto the mock namespaces, so comparison/branch code sees
-    # the live integers without per-test hand-wiring.
-    ns = {"core": core, "fusion": fusion, "cam": cam}
+    # the live integers without per-test hand-wiring. The drawing namespace gets the same strict
+    # seeding - its measured families (SheetSizes, DimensionStrategyTypes, ...) would otherwise be
+    # fabricatable child Mocks, the exact silent-drop class the strict enums exist to refuse.
+    ns = {"core": core, "fusion": fusion, "cam": cam, "drawing": drawing}
     for family, members in _api_facts.ENUMS.items():
         prefix, cls_name = family.split(".", 1)
-        owner = getattr(ns[prefix], cls_name)
-        # Explicit setattr promotes the auto-created child mock into vars(), where the pristine
-        # snapshot/restore sees it - a getattr-born child lives only in _mock_children and a
-        # test's sentinel assignment onto it would leak past the autouse restore.
-        setattr(ns[prefix], cls_name, owner)
-        for member, value in members.items():
-            setattr(owner, member, value)
+        # A plain object, NOT the auto-created child Mock: a Mock invents any attribute asked of it,
+        # so a member name that does not exist in live Fusion would return a fresh Mock, the tool
+        # would set it on its input, and a test asserting `input.x == Enum.FabricatedName` would
+        # compare that Mock to itself and PASS. _StrictEnum raises instead, like the live enum does.
+        setattr(ns[prefix], cls_name, _StrictEnum(family, members))
 
     adsk = types.ModuleType("adsk")
     adsk.core = core
@@ -406,10 +427,13 @@ class BRepBody:
     (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter. `vertices`
     takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry."""
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
-                 light_bulb=True, hidden_by_ancestor=False, vertices=()):
+                 light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
+                 face_count=0):
         self.name = name
+        self.parentComponent = parent_component
         self.boundingBox = bbox
         self.vertices = _NamedCollection([_Vertex(p) for p in vertices])
+        self.faces = _NamedCollection([None] * face_count)
         self.volume = volume
         self.isSolid = is_solid
         self.entityToken = entity_token or name
@@ -419,6 +443,42 @@ class BRepBody:
     @property
     def isVisible(self):
         return bool(self.isLightBulbOn) and not self._hidden_by_ancestor
+
+
+class _EntityProxy:
+    """See ``entity_proxy``. Deliberately holds no state of its own - reads and writes both go to the
+    one underlying entity, so only object IDENTITY differs."""
+
+    def __init__(self, obj):
+        object.__setattr__(self, "_obj", obj)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_obj"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_obj"), name, value)
+
+    def __delattr__(self, name):
+        delattr(object.__getattribute__(self, "_obj"), name)
+
+
+def entity_proxy(obj):
+    """A DISTINCT Python object standing for the same entity - what Fusion hands back on every read.
+
+    LIVE-MEASURED, and it is not confined to bodies:
+      * three faces of one box, and three edges of one open surface body, each gave N distinct python
+        ids and ONE entityToken (``f0.body is f1.body`` False);
+      * two reads of ``design.rootComponent`` return DIFFERENT objects, as do rootComponent vs
+        ``body.parentComponent`` vs ``edge.body.parentComponent`` - all four sharing one entityToken.
+
+    So identity NEVER carries an is-it-the-same test, for bodies or components alike. Every read
+    delegates to `obj`, so a mutation a fake applies is visible through each proxy. Hand one out per
+    reference whenever a test covers code that compares or dedupes entities: reusing the SAME object
+    makes an identity-keyed comparison indistinguishable from a token-keyed one, which is exactly how
+    that class of defect survives a green suite. A harness affordance, deliberately NOT a method on
+    the fakes - they expose only attributes the live types have.
+    """
+    return _EntityProxy(obj)
 
 
 class _NamedCollection:
@@ -465,7 +525,8 @@ def bbox():
 # below are NAMED to match those runtime type names exactly.
 
 class FakeVector3D:
-    """Vector matching Fusion's real Vector3D interface: plain .x/.y/.z plus .copy()/.normalize().
+    """Vector matching Fusion's real Vector3D interface: plain .x/.y/.z plus .length/.copy()/
+    .normalize().
 
     Zero-vector behavior is the measured BEHAVIOR flag: live normalize() reports success and
     leaves the components untouched, so callers zero-check by magnitude, never by the return
@@ -473,6 +534,10 @@ class FakeVector3D:
     """
     def __init__(self, x=0.0, y=0.0, z=0.0):
         self.x, self.y, self.z = x, y, z
+
+    @property
+    def length(self):
+        return (self.x ** 2 + self.y ** 2 + self.z ** 2) ** 0.5
 
     def copy(self):
         return FakeVector3D(self.x, self.y, self.z)
@@ -585,6 +650,68 @@ def make_cam(*setups):
     """A minimal CAM product carrying `setups` (count/item protocol) - pair with
     `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`."""
     return types.SimpleNamespace(setups=_NamedCollection(list(setups)))
+
+
+# ── inspection results (CAM.inspectionResults) - the recorded probing measurements ────────────────
+#
+# The member sets are exactly the live ones. _InspMeasure has NO .name on purpose: a measure folder
+# exposes none (the browser name is not readable, and no call enumerates the legal names), so a fake
+# that carried one would teach a round-trip that cannot exist. Named without a Fake prefix because
+# these types have no live SHAPES dump to sweep against (test_fake_shapes_exist).
+
+class _InspPoint:
+    """InspectionPointResult: nominalPosition/projectedPoint/contact (Point3D), delta (Vector3D),
+    offset/deviation/error (CM) and state. readable=False models a property that raises."""
+
+    def __init__(self, state, deviation=0.0, error=0.0, offset=0.0, nominal=(0.0, 0.0, 0.0),
+                 contact=(0.0, 0.0, 0.0), projected=(0.0, 0.0, 0.0), delta=(0.0, 0.0, 0.0),
+                 readable=True):
+        self.state = state
+        self._deviation = deviation
+        self.error = error
+        self.offset = offset
+        self.nominalPosition = FakePoint(*nominal)
+        self.contact = FakePoint(*contact)
+        self.projectedPoint = FakePoint(*projected)
+        self.delta = FakeVector3D(*delta)
+        self._readable = readable
+
+    @property
+    def deviation(self):
+        if not self._readable:
+            raise RuntimeError("deviation cannot be read on this point")
+        return self._deviation
+
+
+class _InspPath:
+    """InspectionPathResult: pointResults is its only member (a counted collection; the shared
+    _NamedCollection's itemByName goes unused - the live one carries only count/item)."""
+
+    def __init__(self, points):
+        self.pointResults = _NamedCollection(list(points))
+
+
+class _InspMeasure:
+    """CAMMeasure: inspectionPathResults is its only member. paths=None models the documented
+    'null if none found'."""
+
+    def __init__(self, paths):
+        self.inspectionPathResults = None if paths is None else _NamedCollection(list(paths))
+
+
+def make_inspection_cam(measures):
+    """A CAM product whose inspectionResults is a collection of `measures`. measures=None models the
+    MEASURED empty state: the property reads None on a document that has never been probed."""
+    return types.SimpleNamespace(
+        inspectionResults=None if measures is None else _NamedCollection(list(measures)))
+
+
+def make_gated_cam(member="inspectionResults", text="preview feature is not enabled"):
+    """A CAM product whose `member` RAISES on read - the gated-member shape (measured on
+    stockMaterialLibrary), which is a different answer from the property reading None."""
+    def _raise(self):
+        raise RuntimeError(text)
+    return type("_GatedCam", (), {member: property(_raise)})()
 
 
 class FakeUnitsManager:
@@ -783,6 +910,24 @@ def sketch_curves_edit(sketch, collection, add=(), remove=()):
         collection._items.append(curve)
 
 
+def go_stale(*entities, attrs=("name", "parentComponent")):
+    """Make `entities` stop answering their IDENTITY reads. MEASUREMENT reads (volume, faces,
+    boundingBox, vertices) are left alone - those are what a post-mutation effect check counts on.
+
+    This is a deliberate WORST CASE, not measured platform behaviour: a held target body was
+    measured STILL answering parentComponent after a direct splitBodyFeatures.add. What it pins is
+    that a handler must not DEPEND on a post-mutation identity read - a body the feature consumed
+    outright has no such guarantee, and the dependency is invisible while every proxy stays alive.
+
+    Call it from a feature fake's add(), after the canned effect lands: a payload key or an error
+    clause that reads .name/.parentComponent AFTERWARDS then reads as unavailable, which is what
+    forces the handler to capture it BEFORE."""
+    for e in entities:
+        for attr in attrs:
+            if hasattr(e, attr):
+                delattr(e, attr)
+
+
 def install(mod, design, *, cast_design=True, object_collection=True):
     """Wire `design` into a tool module under both seams (see the dual-seam note above).
 
@@ -823,10 +968,18 @@ def install(mod, design, *, cast_design=True, object_collection=True):
 
 
 class _FakeObjectCollection:
-    def __init__(self):
+    """ObjectCollection: add() ANSWERS whether the collection took the object (live returns a bool),
+    so a tool that reads that answer sees a real one. `refuse` holds the objects it rejects - the
+    silent-False case a collection-building tool has to report rather than run on an empty
+    collection."""
+    def __init__(self, refuse=()):
         self._items = []
+        self._refuse = list(refuse)
     def add(self, x):
+        if any(x is r for r in self._refuse):
+            return False
         self._items.append(x)
+        return True
     @property
     def count(self):
         return len(self._items)
@@ -836,8 +989,8 @@ class _FakeObjectCollection:
         return self._items[i]
 
 
-def _make_object_collection():
-    return _FakeObjectCollection()
+def _make_object_collection(refuse=()):
+    return _FakeObjectCollection(refuse)
 
 
 def payload(result):

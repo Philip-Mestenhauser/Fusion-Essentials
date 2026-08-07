@@ -136,9 +136,9 @@ def _bbox(design, entity, desc, frame, units):
             "frame": f"joint origin '{jo_name}' (part space)",
             "oriented": True,
             "units": units,
-            "x": round(safe(lambda: obb.length, 0.0) * f, 6),    # length=X, width=Y, height=Z (right-hand)
-            "y": round(safe(lambda: obb.width, 0.0) * f, 6),
-            "z": round(safe(lambda: obb.height, 0.0) * f, 6),
+            "x": _common.measured(lambda: obb.length, f),    # length=X, width=Y, height=Z (right-hand)
+            "y": _common.measured(lambda: obb.width, f),
+            "z": _common.measured(lambda: obb.height, f),
             "center": _common.ptxyz(safe(lambda: obb.centerPoint), f),
             "frame_axes": {"x_axis": _vecxyz(x_vec), "y_axis": _vecxyz(y_vec), "z_axis": _vecxyz(z_vec)},
             "note": "Measured in the joint-origin frame; x/y/z are the part-space extents. Feed "
@@ -175,10 +175,10 @@ def _full_props(pp, k):
     inv = 1.0 / k
     i_f = inv * inv
     out = {
-        "mass_kg": round(safe(lambda: pp.mass, 0.0), 6),
-        "volume": round(safe(lambda: pp.volume, 0.0) * (inv ** 3), 6),
-        "area": round(safe(lambda: pp.area, 0.0) * (inv ** 2), 6),
-        "density_kg_per_cm3": round(safe(lambda: pp.density, 0.0), 9),
+        "mass_kg": _common.measured(lambda: pp.mass),
+        "volume": _common.measured(lambda: pp.volume, inv ** 3),
+        "area": _common.measured(lambda: pp.area, inv ** 2),
+        "density_kg_per_cm3": _common.measured(lambda: pp.density, places=9),
         "center_of_mass": _vec(safe(lambda: pp.centerOfMass), inv),
     }
     xyz = safe(lambda: pp.getXYZMomentsOfInertia())     # world-origin inertia tensor, kg*unit^2
@@ -244,7 +244,7 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
                 continue
             breakdown.append({
                 "occurrence": safe(lambda o=o: o.name),
-                "mass_kg": round(safe(lambda: opp.mass, 0.0), 6),
+                "mass_kg": _common.measured(lambda: opp.mass),
                 "center_of_mass": _vec(safe(lambda: opp.centerOfMass), 1.0 / k),
             })
         result["per_occurrence"] = breakdown

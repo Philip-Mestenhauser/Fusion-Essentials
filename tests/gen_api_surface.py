@@ -1,0 +1,231 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Generate tests/api_surface.py - every adsk class's real property names, plus what each
+`createInput` factory returns.
+
+A SWIG proxy ACCEPTS an assignment to a name it does not define: the value lands on a dead Python
+attribute, the object keeps its API default, and nothing raises. So a misspelled input property
+runs the DEFAULT operation while the tool reports the requested one, and no runtime check can catch
+it. Comparing the assigned name against the target class's real member list is the only defence,
+and that needs the member list as data - which is what this writes.
+
+Regenerate: py -3 tests/gen_api_surface.py   (reads the installed Fusion Python bindings)
+"""
+
+import ast
+import glob
+import os
+import re
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_PATH = os.path.join(REPO_ROOT, "tests", "api_surface.py")
+
+_BINDING_GLOBS = (
+    os.path.expanduser("~/AppData/Local/Autodesk/webdeploy/production/*/Api/Python/packages/adsk"),
+    os.path.expanduser("~/AppData/Local/Autodesk/webdeploy/pre-production/*/Api/Python/packages/adsk"),
+    os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk "
+                       "Fusion 360.app/Contents/Api/Python/packages/adsk"),
+)
+
+_MODULES = ("core", "fusion", "cam")
+
+
+def find_bindings():
+    """The installed adsk package directory (newest by mtime), or None."""
+    hits = []
+    for pattern in _BINDING_GLOBS:
+        hits.extend(glob.glob(pattern))
+    hits = [h for h in hits if os.path.isdir(h)]
+    if not hits:
+        return None
+    return max(hits, key=os.path.getmtime)
+
+
+def _returns_bool(node):
+    """True when a def's return annotation is exactly "bool"."""
+    ann = node.returns
+    if not isinstance(ann, ast.Constant) or not isinstance(ann.value, str):
+        return False
+    return ann.value.replace("*", "").strip() == "bool"
+
+
+def _return_class(node):
+    """The 'adsk.<mod>.<Class>' a def's return annotation names, or None. The bindings annotate as a
+    string literal ("adsk.fusion.MeshCombineFeatureInput"), sometimes with a trailing ' *'."""
+    ann = node.returns
+    if not isinstance(ann, ast.Constant) or not isinstance(ann.value, str):
+        return None
+    text = ann.value.replace("*", "").strip()
+    m = re.match(r"^adsk\.(core|fusion|cam)\.(\w+)$", text)
+    return f"{m.group(1)}.{m.group(2)}" if m else None
+
+
+def scan_module(path, module_name):
+    """(properties, factories, bool_methods, other_methods) for one bindings module.
+
+    properties: 'fusion.MeshCombineFeatureInput' -> sorted real member names. A SWIG property is
+    declared as `def _get_x` / `def _set_x`; plain methods are included too, since assigning over a
+    method name is just as dead as assigning a typo.
+    factories:  'fusion.MeshCombineFeatures.createInput' -> 'fusion.MeshCombineFeatureInput'.
+    """
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        tree = ast.parse(fh.read(), filename=path)
+    properties, factories, bools, other = {}, {}, set(), set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        key = f"{module_name}.{node.name}"
+        names = set()
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                m = re.match(r"^_(?:get|set)_(\w+)$", item.name)
+                if m:
+                    names.add(m.group(1))
+                elif not item.name.startswith("__"):
+                    names.add(item.name)
+                    rc = _return_class(item)
+                    if rc is not None:
+                        factories[f"{key}.{item.name}"] = rc
+                        other.add(item.name)
+                    elif _returns_bool(item):
+                        bools.add(item.name)
+                    elif item.returns is not None:
+                        other.add(item.name)
+            elif isinstance(item, ast.Assign):
+                # an enum member: `MemberName = _fusion.Class_MemberName`
+                for tgt in item.targets:
+                    if isinstance(tgt, ast.Name) and not tgt.id.startswith("_"):
+                        names.add(tgt.id)
+        if names:
+            properties[key] = sorted(names)
+    return properties, factories, bools, other
+
+
+def build():
+    root = find_bindings()
+    if root is None:
+        return None, None, None, None
+    properties, factories, bools, other = {}, {}, set(), set()
+    for mod in _MODULES:
+        path = os.path.join(root, f"{mod}.py")
+        if not os.path.isfile(path):
+            continue
+        p, f, b, o = scan_module(path, mod)
+        properties.update(p)
+        factories.update(f)
+        bools |= b
+        other |= o
+    # Only what a create* factory HANDS BACK is kept: those are the objects a tool builds and then
+    # assigns properties onto, and the
+    # lint ERRORS on an input class missing from the table rather than skipping it, so narrowing
+    # here cannot open a silent hole. Keeping all 1,670 classes would be a half-megabyte of churn
+    # on every Fusion update for no extra coverage.
+    factories = {k: v for k, v in factories.items() if k.rsplit(".", 1)[1].startswith("create")}
+    keep = set(factories.values())
+    properties = {k: v for k, v in properties.items() if k in keep}
+    # A name that returns something OTHER than bool anywhere in the API is ambiguous at a call site
+    # (Features.add returns a feature; ObjectCollection.add returns bool), and this lint only ever
+    # sees the name. Keep only names that are bool EVERYWHERE, so a hit cannot be a false positive.
+    bools -= other
+    return root, properties, factories, bools
+
+
+def _build_id(root):
+    """The webdeploy build hash the bindings came from - '<hash>/Api/Python/packages/adsk'."""
+    parts = os.path.normpath(root).split(os.sep)
+    return parts[-5] if len(parts) >= 5 else os.path.basename(root)
+
+
+def _render(root, properties, factories, bools):
+    lines = [
+        "# GENERATED by tests/gen_api_surface.py from the installed Fusion Python bindings"
+        " - DO NOT EDIT.",
+        "# Regenerate: py -3 tests/gen_api_surface.py",
+        '"""Every adsk class\'s real member names, and what each factory method returns.',
+        "",
+        "A SWIG proxy accepts an assignment to a name it does not define - the value lands on a",
+        "dead Python attribute while the object keeps its API default - so a misspelled input",
+        "property cannot raise. test_input_property_names.py checks each assignment against these",
+        'lists, which is the only place that mistake is catchable."""',
+        "",
+        "# The Fusion build the surface was read from. NOT an absolute path - that would differ"
+        " per user",
+        "# and make the staleness check fail on every machine but the one that generated it.",
+        f'BINDINGS_BUILD = "{_build_id(root)}"',
+        "",
+        "# 'module.Class' -> every real member name (properties and methods).",
+        "PROPERTIES = {",
+    ]
+    for key in sorted(properties):
+        names = properties[key]
+        lines.append(f'    "{key}": (')
+        row = "        "
+        for n in names:
+            piece = f'"{n}", '
+            if len(row) + len(piece) > 96:
+                lines.append(row.rstrip())
+                row = "        "
+            row += piece
+        if row.strip():
+            lines.append(row.rstrip())
+        lines.append("    ),")
+    lines.append("}")
+    lines.append("")
+    lines.append("# 'module.Class.method' -> the 'module.Class' it returns.")
+    lines.append("FACTORIES = {")
+    for key in sorted(factories):
+        lines.append(f'    "{key}": "{factories[key]}",')
+    lines.append("}")
+    lines.append("")
+    lines.append('# Method names the bindings declare as returning bool - each documents "Returns')
+    lines.append('# true if successful", so discarding the answer discards the failure.')
+    lines.append("BOOL_METHODS = frozenset({")
+    row = "    "
+    for n in sorted(bools):
+        piece = f'"{n}", '
+        if len(row) + len(piece) > 96:
+            lines.append(row.rstrip())
+            row = "    "
+        row += piece
+    if row.strip():
+        lines.append(row.rstrip())
+    lines.append("})")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    check = "--check" in argv
+    root, properties, factories, bools = build()
+    if root is None:
+        msg = ("Fusion Python bindings not found - cannot generate the API surface. Looked under "
+               "the Autodesk webdeploy production/pre-production trees.")
+        if check and os.path.isfile(OUT_PATH):
+            print(f"{msg} Keeping the existing tests/api_surface.py.")
+            return 0
+        print(msg, file=sys.stderr)
+        return 1
+    text = _render(root, properties, factories, bools)
+    if check:
+        current = ""
+        if os.path.isfile(OUT_PATH):
+            with open(OUT_PATH, encoding="utf-8") as fh:
+                current = fh.read()
+        if current.replace("\r\n", "\n") != text:
+            print("tests/api_surface.py is STALE - regenerate: py -3 tests/gen_api_surface.py",
+                  file=sys.stderr)
+            return 1
+        print(f"api surface current: {len(properties)} classes, {len(factories)} factories")
+        return 0
+    with open(OUT_PATH, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    print(f"Wrote {OUT_PATH} ({len(properties)} classes, {len(factories)} factory returns) "
+          f"from {root}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

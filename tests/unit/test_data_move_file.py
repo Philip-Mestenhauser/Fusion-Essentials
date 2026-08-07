@@ -1,0 +1,208 @@
+"""Unit tests for ``data_move_file`` - move one cloud file into another folder of its project.
+
+DataFile.move answers with a bool, and a bool is a claim: the behaviour worth pinning is the
+read-back that turns "true but the file is still where it was" into an error, alongside the
+destination guard (this tool creates nothing), the already-there no-op, and the ambiguity refusal
+arriving from the shared resolver.
+"""
+
+import json
+import types
+
+import pytest
+
+from conftest import error_message, load_tool
+
+dmv = load_tool("data_move_file")
+
+
+def _payload(result):
+    assert result["isError"] is False, result
+    return json.loads(result["content"][0]["text"])
+
+
+def _ns(**kw):
+    return types.SimpleNamespace(**kw)
+
+
+def _folder(name, subs=(), is_root=False, parent=None):
+    """A DataFolder stand-in: name/id/isRoot, a parent chain, and the dataFolders.asArray() walk
+    _resolve_folder_path uses."""
+    f = _ns(name=name, id="fid:" + name, isRoot=is_root, parentFolder=parent)
+    f.dataFolders = _ns(asArray=lambda subs=subs: list(subs))
+    for s in subs:
+        s.parentFolder = f
+    return f
+
+
+def _project(root):
+    return _ns(name="MCP Test Project", id="proj-1", rootFolder=root)
+
+
+def _cloud_file(parent, project, returns=True, lands_in="target"):
+    """A DataFile stand-in whose move() answers `returns` and repoints its parent per `lands_in`:
+    'target' (the move took), 'nowhere' (the platform lie: true, unchanged), or 'elsewhere'."""
+    df = _ns(name="probe_note.txt", id="urn:lin:AAA", parentFolder=parent, parentProject=project)
+    moves = []
+
+    def move(target):
+        moves.append(target)
+        if lands_in == "target":
+            df.parentFolder = target
+        elif lands_in == "elsewhere":
+            df.parentFolder = _folder("Somewhere Else")
+        return returns
+
+    df.move = move
+    df.moves = moves
+    return df
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """Resolve `file` to a stand-in, and make the post-move re-resolution return the same object
+    (the handler re-fetches by lineage URN, which in Fusion is what shows the new parent)."""
+    def _use(df=None, err=None):
+        monkeypatch.setattr(dmv, "resolve_file_reference",
+                            lambda *a, **kw: (df, {"matched_by": "urn", "urn": "urn:lin:AAA"}, err))
+        monkeypatch.setattr(dmv, "_resolve_data_file", lambda raw: (df, raw, [raw]))
+    return _use
+
+
+def _tree():
+    """root/{Docs, Parts/Fixtures} - returns (root, docs, parts, fixtures)."""
+    fixtures = _folder("Fixtures")
+    parts = _folder("Parts", subs=[fixtures])
+    docs = _folder("Docs")
+    root = _folder("MCP Test Project", subs=[docs, parts], is_root=True)
+    return root, docs, parts, fixtures
+
+
+class TestDestinationGuard:
+    def test_missing_target_folder_is_named(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root)))
+        assert "target_folder" in error_message(dmv.handler(file="urn:lin:AAA"))
+
+    def test_a_nonexistent_destination_is_refused_with_what_is_there(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root)))
+        msg = error_message(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Nope"))
+        assert "missing segment 'Nope'" in msg
+        assert "Fixtures" in msg                     # what DOES exist at the failure point
+        assert "data_create_folder" in msg           # this tool creates nothing
+
+    def test_nested_path_resolves(self, wired):
+        root, docs, _p, fixtures = _tree()
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert df.moves == [fixtures]
+        assert out["to_folder"] == "Parts/Fixtures"
+
+    def test_slash_targets_the_project_root(self, wired):
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="/"))
+        assert df.moves == [root]
+        assert out["to_folder"] == "(project root)"
+
+
+class TestMoveVerification:
+    def test_a_successful_move_reports_both_ends(self, wired):
+        root, docs, _p, fixtures = _tree()
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert out["moved"] is True
+        assert out["from_folder"] == "Docs" and out["to_folder"] == "Parts/Fixtures"
+        assert out["parent_folder_after"] == "Fixtures"
+
+    def test_true_with_an_unchanged_parent_is_an_error(self, wired):
+        # The platform lie this read-back exists for: move() answers true, the file never moved.
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _project(root), lands_in="nowhere")
+        wired(df)
+        msg = error_message(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert "did NOT take" in msg and "Docs" in msg
+
+    def test_landing_in_the_wrong_folder_is_an_error(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root), lands_in="elsewhere"))
+        assert "Somewhere Else" in error_message(
+            dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+
+    def test_a_false_return_is_an_error_and_nothing_is_claimed(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root), returns=False, lands_in="nowhere"))
+        msg = error_message(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert "returned false" in msg and "Nothing changed" in msg
+
+    def test_an_unreadable_parent_after_the_move_is_unconfirmed_not_ok(self, wired):
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        original_move = df.move
+
+        def move(target):
+            original_move(target)
+            df.parentFolder = None            # the re-read cannot see where it landed
+            return True
+
+        df.move = move
+        assert "UNCONFIRMED" in error_message(
+            dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+
+    def test_an_unverifiable_target_refuses_before_moving(self, wired):
+        # Neither id nor name readable on the DESTINATION (here the project root): the post-move
+        # read-back would have nothing to compare against, so the mutation must not happen at all.
+        blind_root = _ns(isRoot=True, parentFolder=None,
+                         dataFolders=_ns(asArray=lambda: []))     # no id, no name to read
+        docs = _folder("Docs")
+        df = _cloud_file(docs, _project(blind_root))
+        wired(df)
+        msg = error_message(dmv.handler(file="urn:lin:AAA", target_folder="/"))
+        assert "could not be verified" in msg
+        assert df.moves == []
+
+    def test_no_comparable_identity_after_the_move_is_unconfirmed_not_landed(self, wired):
+        # Target readable by NAME only, new parent readable by ID only: nothing lines up, so two
+        # missing values must not pass as a match.
+        target = _folder("Fixtures")
+        target.id = None
+        root = _folder("MCP Test Project", subs=[target], is_root=True)
+        docs = _folder("Docs")
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        original_move = df.move
+
+        def move(dest):
+            original_move(dest)
+            df.parentFolder = _ns(id="fid:Fixtures", name=None, isRoot=False, parentFolder=None)
+            return True
+
+        df.move = move
+        assert "UNCONFIRMED" in error_message(
+            dmv.handler(file="urn:lin:AAA", target_folder="Fixtures"))
+
+    def test_already_in_the_target_moves_nothing_and_is_not_an_error(self, wired):
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Docs"))
+        assert out["moved"] is False and out["already_in_target"] is True
+        assert df.moves == []
+
+    def test_an_ambiguous_name_refusal_is_passed_through(self, wired):
+        wired(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")
+        assert "names 2 files" in error_message(
+            dmv.handler(file="notes.txt", project="P1", target_folder="Docs"))
+
+    def test_an_unreadable_project_root_refuses_before_moving(self, wired):
+        root, docs, _p, _f = _tree()
+        df = _cloud_file(docs, _ns(name="P", id="p", rootFolder=None))
+        wired(df)
+        assert "project root folder" in error_message(
+            dmv.handler(file="urn:lin:AAA", target_folder="Docs"))
+        assert df.moves == []

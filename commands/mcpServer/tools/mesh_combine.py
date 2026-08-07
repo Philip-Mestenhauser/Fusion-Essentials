@@ -39,15 +39,15 @@ _ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanc
 
 _SPEC = [_TARGET, _TOOLS, _OPERATION, _ALGORITHM]
 
-# operation key -> the MeshCombineOperationTypes enum member name (confirmed live).
+# operation key -> the MeshCombineOperationTypes enum member name.
 _OPERATIONS = {
-                            "join": "JoinMeshCombineOperationType",
-                            "cut": "CutMeshCombineOperationType",
-                            "intersect": "IntersectMeshCombineOperationType",
-                            "merge": "MergeMeshCombineOperationType",
+                            "join": "JoinMeshCombineType",
+                            "cut": "CutMeshCombineType",
+                            "intersect": "IntersectMeshCombineType",
+                            "merge": "MergeMeshCombineType",
 }
 
-# algorithm key -> the MeshCombineAlgorithmTypes enum member name (confirmed live).
+# algorithm key -> the MeshCombineAlgorithmTypes enum member name.
 _ALGORITHMS = {
 "legacy": "LegacyMeshCombineAlgorithmType",
 "enhanced": "EnhancedMeshCombineAlgorithmType",
@@ -78,11 +78,26 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if aerr:
         return error(aerr)
 
-    # same-body guard (mirrors model_combine): the target must NOT also be a tool body.
+    # same-body guard: the target must NOT also be a tool body. Compared by entityToken, never by
+    # Python identity - the API mints a FRESH wrapper per access, so `is` reads False even when both
+    # references name the same physical body and the guard would never fire.
+    tgt_token = safe(lambda: tgt.entityToken)
     for b in tool_bodies:
-        if b is tgt:
+        b_token = safe(lambda b=b: b.entityToken)
+        if b is tgt or (tgt_token and b_token and b_token == tgt_token):
             return error("A tool body is the same as the target - pick distinct mesh bodies "
     "(the target is combined INTO, the tools are combined FROM).")
+
+    # Identity reads captured BEFORE the mutation: the combine CONSUMES the tool bodies, and a
+    # consumed body's wrapper is not guaranteed to still answer .name - read after the add, the
+    # tools list published nulls for the very bodies that were combined.
+    tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
+    tgt_name = safe(lambda: tgt.name)
+
+    # The design's OWN mode, read before any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
 
     # The MeshCombine feature lives on the component that owns the target mesh.
     comp = safe(lambda: tgt.parentComponent) or _target_component(design)
@@ -95,7 +110,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # CREATES/edits mesh bodies, so it runs INSIDE run_in_base_feature: direct mode calls inner_op(None)
     # directly; parametric mode wraps it in an atomic base-feature scope that always finishEdits in a
     # finally. The add mutation is NOT wrapped in safe - a real failure must surface.
-    def inner_op(_base_feature):
+    def inner_op(base_feature):
         try:
             inp = feats.createInput(tgt, list(tool_bodies))
         except Exception as e:
@@ -103,14 +118,27 @@ def handler(target: str = "", tools=None, operation: str = "join",
         if inp is None:
             return error("meshCombineFeatures.createInput returned nothing.")
 
+        # set_verified reads every assignment back: a SWIG proxy accepts an unknown property name
+        # silently, so without the read-back a requested 'cut' would run as the default JOIN and be
+        # reported as ok.
+        _IN = "MeshCombineFeatureInput"
         ot = safe(lambda: adsk.fusion.MeshCombineOperationTypes)
+        oerr2 = _common.set_verified(
+            inp, "meshCombineOperationType",
+            safe(lambda: getattr(ot, _OPERATIONS[op_key])) if ot is not None else None,
+            f"operation='{op_key}'", _IN)
+        if oerr2:
+            return error(oerr2)
+
+        # algorithmType "is only effective in non-parametric mode - in parametric mode the algorithm
+        # type is always LegacyMeshCombineAlgorithmType" (API doc), so a read-back mismatch here is
+        # the platform's documented coercion, not a failure: report what landed instead of erroring.
         at = safe(lambda: adsk.fusion.MeshCombineAlgorithmTypes)
-        try:
-            inp.operation = safe(lambda: getattr(ot, _OPERATIONS[op_key]))
-            if at is not None:
-                inp.algorithm = safe(lambda: getattr(at, _ALGORITHMS[alg_key]))
-        except Exception as e:
-            return error(f"Could not configure the mesh-combine input: {e}")
+        aerr2 = _common.set_verified(
+            inp, "algorithmType",
+            safe(lambda: getattr(at, _ALGORITHMS[alg_key])) if at is not None else None,
+            f"algorithm='{alg_key}'", _IN)
+        algorithm_applied = alg_key if not aerr2 else "legacy"
 
         # Snapshot the target's mesh body set BEFORE the add (inside inner_op so it is valid in both
         # direct and base-feature modes) so a non-parametric None return can still be reported.
@@ -126,7 +154,8 @@ def handler(target: str = "", tools=None, operation: str = "join",
             return error(f"Mesh combine failed (meshCombineFeatures.add raised): {e}. (For cut / "
     "intersect the meshes must overlap; all must be MESH bodies.)")
         return {"feature": feature, "before_mesh_count": before_mesh_count,
-    "before_tri": before_tri,
+    "before_tri": before_tri, "algorithm_applied": algorithm_applied,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None,
     "after_mesh_count": safe(lambda: comp.meshBodies.count)}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
@@ -149,27 +178,37 @@ def handler(target: str = "", tools=None, operation: str = "join",
                      f"triangles, {after_mesh_count} mesh bodies before and after) - the tool "
                      "meshes may not overlap the target.")
 
-    # Parametric: the feature carries the result .bodies (result_bodies() handles a None feature).
+    # The feature carries the result .bodies when one came back (result_bodies() handles a None
+    # feature); with no feature the combine landed in the TARGET mesh in place - report it from the
+    # pre-mutation capture.
     result_bodies = [{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
                      for b in _common.result_bodies(feature)]
-    # Non-parametric (feature None): the combine landed in the TARGET mesh in place - report it.
     if not result_bodies:
-        result_bodies.append({"name": safe(lambda: tgt.name),
-        "handle": safe(lambda: tgt.entityToken)})
+        result_bodies.append({"name": tgt_name, "handle": tgt_token})
+
+    note = ("Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect "
+            "the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with "
+            "view_screenshot to view it.")
+    # A null feature is explained by the shared sentence: the fleet's ONE direct-mode vocabulary
+    # when that is what this design is, otherwise the base-feature scope THIS call opened. The
+    # direct-mode return of meshCombineFeatures.add is not in the measured per-class register, so
+    # nothing here asserts one.
+    bf_name = result["base_feature_name"]
+    if feature is None:
+        note += " " + _common.null_feature_note(design, feature, bf_name, "combine")
 
     return ok({
         "combined": True,
         "feature": safe(lambda: feature.name) if feature else None,
-        "non_parametric": feature is None,
+        "design_mode": design_mode,
+        "base_feature": bf_name,
         "operation": op_key,
-        "algorithm": alg_key,
-        "target": safe(lambda: tgt.name),
-        "tools": [safe(lambda b=b: b.name) for b in tool_bodies],
+        "algorithm": result["algorithm_applied"],
+        "target": tgt_name,
+        "tools": tool_names,
         "result_bodies": result_bodies,
         "mesh_body_count": after_mesh_count,
-        "note": ("Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect "
-            "the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with "
-            "view_screenshot to view it."),
+        "note": note,
     })
 
 

@@ -200,10 +200,97 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
 
 # ------------------------------------------------------------ sketch_add_geometry
 
-_KINDS = ("line", "rectangle", "center_rectangle", "circle", "ellipse", "arc", "polygon",
-    "slot", "point", "spline", "polyline", "closed_path")
+_KINDS = ("line", "rectangle", "center_rectangle", "circle", "ellipse", "elliptical_arc", "arc",
+    "conic", "polygon", "slot", "overall_slot", "center_point_slot", "center_point_arc_slot",
+    "three_point_arc_slot", "point", "spline", "cv_spline", "polyline", "closed_path")
+
+# The slot kinds that follow an ARC instead of a straight centre line. Both constructors build the
+# whole slot out of SketchArcs (two end caps plus the inner/centre/outer arcs), so 'arc' is the
+# collection whose before/after count verifies the draw.
+_ARC_SLOT_KINDS = ("center_point_arc_slot", "three_point_arc_slot")
+
+# The STRAIGHT slot kinds carrying an optional length/angle tail. Each lands three SketchLines (two
+# sides + centreline), four with the length/angle tail, plus two SketchArc end caps - so 'line' is
+# the collection counted.
+_LINEAR_SLOT_KINDS = ("overall_slot", "center_point_slot")
+
+# Every slot kind, tailed or not. All of them route through the one pre-call guard: the tailed ones
+# because their arity must be built exactly, plain 'slot' because it is called in its three-argument
+# form and so has nowhere to put a length, angle or dimension flag.
+_SLOT_KINDS = ("slot",) + _ARC_SLOT_KINDS + _LINEAR_SLOT_KINDS
 
 _KIND = _inputs.Choice("kind", list(_KINDS), required=True, description="Which entity to draw.")
+
+# Control-point spline degree -> the SplineDegrees member. SketchControlPointSplines.add takes the
+# degree as an enum member, and its binding states only degree 3 and degree 5 can be specified at
+# creation - so this map IS the legal set the handler guards on.
+_SPLINE_DEGREES = {3: "SplineDegreeThree", 5: "SplineDegreeFive"}
+
+# Kinds with NO '<type>:<index>' ref token, so _common.entity_collection cannot name their
+# collection: conic and elliptical arcs have no ref kind. Every other counted kind is addressed by
+# its ref token and routes through _common instead of a second copy of that mapping.
+_NO_REF_CURVE_ATTR = {
+    "conic": "sketchConicCurves",
+    "elliptical_arc": "sketchEllipticalArcs",
+}
+
+
+# The wire note for each ref-less kind: what the caller loses (no ref token, so no dimension/
+# constraint/delete by ref and no entry in sketch_get's entity list) and what still works - both
+# curves close a region that forms a profile and extrudes to a solid, measured live.
+_REF_LESS_NOTES = {
+    "conic": ("Conic drawn. This curve has NO '<type>:<index>' ref, so it cannot be dimensioned, "
+              "constrained or deleted by ref and sketch_get's entity list omits it. Modelling with "
+              "it works: closed by a chord between its endpoints it forms a profile that extrudes "
+              "to a solid."),
+    "elliptical_arc": ("Elliptical arc drawn. This curve has NO '<type>:<index>' ref, so it cannot "
+                       "be dimensioned, constrained or deleted by ref and sketch_get's entity list "
+                       "omits it. Modelling with it works: a 180 deg arc closed by a line across "
+                       "its diameter forms a profile that extrudes to a solid."),
+}
+
+
+# kind -> the '<type>:<index>' REF TOKEN whose collection its curves land in, where the kind's own
+# name is not that token. _common owns the token -> sub-collection mapping, so these resolve there.
+_KIND_REF_TOKEN = {"cv_spline": "cv_spline",
+                   "center_point_arc_slot": "arc",
+                   "three_point_arc_slot": "arc",
+                   "overall_slot": "line",
+                   "center_point_slot": "line"}
+
+
+def _kind_curve_collection(sketch, kind):
+    """The sketch sub-collection this kind's factory adds to - the one the before/after count that
+    VERIFIES the draw is read from. None when the kind has no dedicated collection to count."""
+    token = _KIND_REF_TOKEN.get(kind)
+    if token is not None:
+        return _common.entity_collection(sketch, token)
+    attr = _NO_REF_CURVE_ATTR.get(kind)
+    if attr is None:
+        return None
+    curves = safe(lambda: sketch.sketchCurves)
+    return safe(lambda: getattr(curves, attr)) if curves is not None else None
+
+
+def _kind_curve_count(sketch, kind):
+    """How many curves the kind's OWN sub-collection holds - None when the kind has no dedicated
+    collection to count, or when the collection cannot be read."""
+    coll = _kind_curve_collection(sketch, kind)
+    return safe(lambda: coll.count) if coll is not None else None
+
+
+def _effective_spline_degree(sketch):
+    """The degree the newest control-point spline was actually BUILT at. add() accepts a degree it
+    cannot honor and SILENTLY CLAMPS it to controlPointCount - 1 (3 control points asked for degree
+    5 build a degree-2 curve). The spline carries TWO degree surfaces, measured: the `.degree`
+    PROPERTY answers the REQUESTED degree (5 in that case - reading it only echoes the request back),
+    while `.geometry.degree` - the NurbsCurve the sketch holds - answers the built degree (2). So the
+    geometry is what is read. None when it cannot be read."""
+    coll = _kind_curve_collection(sketch, "cv_spline")
+    n = safe(lambda: coll.count, 0) if coll is not None else 0
+    if not n:
+        return None
+    return safe(lambda: coll.item(n - 1).geometry.degree)
 
 
 def _draw_polyline(sketch, points, k):
@@ -242,6 +329,165 @@ def _mark_recent_construction(sketch, before_count):
     n = safe(lambda: curves.count, 0) if curves else 0
     for i in range(before_count, n):
         setattr(curves.item(i), "isConstruction", True)
+
+
+def _minor_radius(p):
+    """The minor radius an ellipse/elliptical arc is DRAWN with, in the call's units: the given
+    'minor', else half the major. The one place the default is applied, so the drawn label reports
+    the radius that was built instead of the raw (possibly omitted) input."""
+    return float(p["minor"] if p.get("minor") is not None else p["radius"] / 2.0)
+
+
+def _slot_error(kind, p):
+    """The refusal a slot call needs BEFORE it reaches the API, or None.
+
+    Every tailed slot constructor's tail is POSITIONAL, and the ladders differ:
+    addCenterPointArcSlot takes radius (ValueInput), then angle (ValueInput), then three dimension
+    flags, and no overload accepts a bool in the radius or angle slot. addOverallSlot and
+    addCenterPointSlot take createWidthDimension FIRST, then their length and angle ValueInputs -
+    and passing those values IMPLIES the linear and angular dimensions, so neither has a flag of its
+    own. addThreePointArcSlot ends at createWidthDimension, and kind='slot' is called in its
+    three-argument form. A value or flag with nowhere to sit is named here rather than dropped
+    silently or left to raise a bare overload TypeError.
+    """
+    if float(p["radius"]) <= 0:
+        return (f"'{kind}' radius is the slot's HALF-width (full width = radius*2) and must be > 0. "
+                f"Got radius={p['radius']}.")
+    flags = (("create_width_dimension", p.get("create_width_dimension")),
+             ("create_radius_dimension", p.get("create_radius_dimension")),
+             ("create_angle_dimension", p.get("create_angle_dimension")))
+    extra = [n for n, on in flags if on and n != "create_width_dimension"]
+    if kind == "slot":
+        stray = [n for n in ("slot_length", "arc_radius", "angle_deg") if p.get(n) is not None]
+        stray += [n for n, on in flags if on]
+        if stray:
+            return (f"kind='slot' draws from two centres and radius alone, so {', '.join(stray)} "
+                    "would be dropped. Pass a length or angle with kind='overall_slot' or "
+                    "'center_point_slot'; size an arc with kind='center_point_arc_slot'.")
+        return None
+    if kind in _LINEAR_SLOT_KINDS:
+        if p.get("arc_radius") is not None:
+            return (f"'{kind}' has no arc to size - 'arc_radius' belongs to center_point_arc_slot. "
+                    "Override this slot's second point with 'slot_length' instead.")
+        if extra:
+            return (f"'{kind}' takes only create_width_dimension - its linear and angular dimensions "
+                    f"are created by passing slot_length / angle_deg, with no flag of their own. "
+                    f"Drop {', '.join(extra)}.")
+        if p.get("slot_length") is not None and float(p["slot_length"]) <= 0:
+            return f"'{kind}' slot_length must be > 0. Got slot_length={p['slot_length']}."
+        if p.get("angle_deg") is not None and p.get("slot_length") is None:
+            return (f"'{kind}' angle_deg ({p['angle_deg']}) needs 'slot_length' too - the angle sits "
+                    "AFTER the length in the API's argument list, so there is no form that takes an "
+                    "angle on its own.")
+        return None
+    if p.get("slot_length") is not None:
+        # the remedy is per-kind: only center_point_arc_slot has a radius argument to redirect to
+        remedy = ("Size this slot's arc with 'arc_radius'." if kind == "center_point_arc_slot"
+                  else "Its arc is fixed by its three points - draw one you can size with "
+                       "kind='center_point_arc_slot'.")
+        return (f"'{kind}' takes no 'slot_length' - that belongs to overall_slot / "
+                f"center_point_slot. {remedy}")
+    if kind == "three_point_arc_slot":
+        stray = [n for n in ("arc_radius", "angle_deg") if p.get(n) is not None]
+        if stray:
+            return (f"three_point_arc_slot's arc is fixed by its three points, so it takes no "
+                    f"{', '.join(stray)}. Drop them, or draw the slot with "
+                    "kind='center_point_arc_slot'.")
+        if extra:
+            return (f"three_point_arc_slot takes only create_width_dimension - it has no radius or "
+                    f"angle argument to dimension. Drop {', '.join(extra)}, or draw the slot with "
+                    "kind='center_point_arc_slot'.")
+        return None
+    if p.get("arc_radius") is not None and float(p["arc_radius"]) <= 0:
+        return (f"center_point_arc_slot 'arc_radius' must be > 0. Got arc_radius={p['arc_radius']}; "
+                "omit it to take the arc radius from the start point's distance to the centre.")
+    if p.get("angle_deg") is not None and p.get("arc_radius") is None:
+        return (f"center_point_arc_slot 'angle_deg' ({p['angle_deg']}) needs 'arc_radius' too - the "
+                "angle sits AFTER the radius in the API's argument list, so there is no form that "
+                "takes an angle on its own.")
+    wanted = [n for n, on in flags if on]
+    missing = [n for n in ("arc_radius", "angle_deg") if p.get(n) is None]
+    if wanted and missing:
+        return (f"center_point_arc_slot {', '.join(wanted)} needs both 'arc_radius' and 'angle_deg' "
+                f"- the dimension flags sit after them in the API's argument list. "
+                f"Missing: {', '.join(missing)}.")
+    return None
+
+
+def _draw_arc_slot(sketch, kind, p, k):
+    """Draw an arc slot. Both constructors are methods on the SKETCH and take 'width' as a
+    ValueInput holding the slot's FULL width (radius*2 - radius is the half-width, as for 'slot').
+
+    three_point_arc_slot is addThreePointArcSlot(startPoint, endPoint, pointOnArc, width,
+    createWidthDimension); the trailing flag is a plain bool.
+
+    center_point_arc_slot is addCenterPointArcSlot(centerPoint, startPoint, endPoint, width) with an
+    optional positional tail: radius (ValueInput), angle (ValueInput), then createWidthDimension,
+    createRadiusDimension, createAngleDimension - each flag gating its own dimension independently.
+    A supplied radius OVERRIDES the centre-to-start distance, leaving the start point to set
+    direction only. The angle argument takes a unit-bearing expression, not radians.
+    """
+    width = adsk.core.ValueInput.createByReal(p["radius"] * 2 * k)
+    if kind == "three_point_arc_slot":
+        slot = sketch.addThreePointArcSlot(_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k),
+                                           _pt(p["cx"], p["cy"], k), width,
+                                           bool(p.get("create_width_dimension")))
+        if slot is None:
+            return None
+        return (f"three_point_arc_slot ({p['x1']},{p['y1']})->({p['x2']},{p['y2']}) through "
+                f"({p['cx']},{p['cy']}) w={p['radius'] * 2}")
+    args = [_pt(p["cx"], p["cy"], k), _pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k), width]
+    if p.get("arc_radius") is not None:
+        args.append(adsk.core.ValueInput.createByReal(float(p["arc_radius"]) * k))
+    if p.get("angle_deg") is not None:
+        args.append(adsk.core.ValueInput.createByString(f"{float(p['angle_deg'])} deg"))
+    flags = [bool(p.get("create_width_dimension")), bool(p.get("create_radius_dimension")),
+             bool(p.get("create_angle_dimension"))]
+    if any(flags):
+        args.extend(flags)
+    slot = sketch.addCenterPointArcSlot(*args)
+    if slot is None:
+        return None
+    label = (f"center_point_arc_slot c=({p['cx']},{p['cy']}) start=({p['x1']},{p['y1']}) "
+             f"end=({p['x2']},{p['y2']}) w={p['radius'] * 2}")
+    if p.get("arc_radius") is not None:
+        label += f" arc_r={p['arc_radius']}"
+    if p.get("angle_deg") is not None:
+        label += f" angle={p['angle_deg']}deg"
+    return label
+
+
+def _draw_linear_slot(sketch, kind, p, k):
+    """Draw a straight slot through addOverallSlot / addCenterPointSlot: (pointA, pointB, width) plus
+    an optional positional tail - createWidthDimension, then the length ValueInput, then the angle
+    ValueInput. The flag sits BEFORE the two values, so a length or angle can only be sent with the
+    flag in front of it. 'width' is the FULL width (radius*2). Passing the length overrides the
+    second point's distance, leaving it to set direction only, and it CREATES the linear dimension
+    on its own - only the width dimension is gated on the flag. addCenterPointSlot's argument is the
+    HALF length (centre to cap centre), and its linear dimension carries that half value as passed,
+    so the length is forwarded unhalved. createByReal is centimetres for the length, as for the
+    width. Both return a BaseVector, which is never walked here - the sketch's own collection count
+    is what verifies the draw.
+    """
+    factory = sketch.addOverallSlot if kind == "overall_slot" else sketch.addCenterPointSlot
+    args = [_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k),
+            adsk.core.ValueInput.createByReal(p["radius"] * 2 * k)]
+    length, angle = p.get("slot_length"), p.get("angle_deg")
+    if length is not None or angle is not None or p.get("create_width_dimension"):
+        args.append(bool(p.get("create_width_dimension")))
+    if length is not None:
+        args.append(adsk.core.ValueInput.createByReal(float(length) * k))
+    if angle is not None:
+        args.append(adsk.core.ValueInput.createByString(f"{float(angle)} deg"))
+    slot = factory(*args)
+    if slot is None:
+        return None
+    label = f"{kind} ({p['x1']},{p['y1']})->({p['x2']},{p['y2']}) w={p['radius'] * 2}"
+    if length is not None:
+        label += f" {'half_len' if kind == 'center_point_slot' else 'len'}={length}"
+    if angle is not None:
+        label += f" angle={angle}deg"
+    return label
 
 
 def _draw(sketch, kind, p, k):
@@ -286,9 +532,10 @@ def _draw(sketch, kind, p, k):
     if kind == "ellipse":
         center = _pt(p["cx"], p["cy"], k)
         major = adsk.core.Point3D.create(center.x + p["radius"] * k, center.y, 0)   # major endpoint
-        minor_r = (p.get("minor") if p.get("minor") is not None else p["radius"] / 2.0) * k
-        e = curves.sketchEllipses.add(center, major, adsk.core.Point3D.create(center.x, center.y + minor_r, 0))
-        return f"ellipse c=({p['cx']},{p['cy']}) major={p['radius']} minor={p.get('minor')}" if e else None
+        minor_u = _minor_radius(p)
+        e = curves.sketchEllipses.add(center, major,
+                                      adsk.core.Point3D.create(center.x, center.y + minor_u * k, 0))
+        return f"ellipse c=({p['cx']},{p['cy']}) major={p['radius']} minor={minor_u:g}" if e else None
     if kind == "slot":
         # a slot between two centers (x1,y1)-(x2,y2) with overall width = radius*2.
         # addCenterToCenterSlot is a method on the SKETCH (not sketchLines - confirmed live), and
@@ -300,6 +547,10 @@ def _draw(sketch, kind, p, k):
         if slot is None:
             return None
         return f"slot ({p['x1']},{p['y1']})-({p['x2']},{p['y2']}) w={p['radius']*2}"
+    if kind in _ARC_SLOT_KINDS:
+        return _draw_arc_slot(sketch, kind, p, k)
+    if kind in _LINEAR_SLOT_KINDS:
+        return _draw_linear_slot(sketch, kind, p, k)
     if kind == "point":
         pt = sketch.sketchPoints.add(_pt(p["cx"], p["cy"], k))
         return f"point ({p['cx']},{p['cy']})" if pt else None
@@ -309,6 +560,35 @@ def _draw(sketch, kind, p, k):
             pts.add(_pt(px, py, k))
         sp = curves.sketchFittedSplines.add(pts)
         return f"spline through {pts.count} pts" if sp else None
+    if kind == "cv_spline":
+        # SketchControlPointSplines.add takes controlPoints as a list[Base] - a plain Python list,
+        # NOT the ObjectCollection the FITTED spline's add() declares. The degree it was built with
+        # is read back into the payload (the API clamps it silently), so the label states the shape
+        # only.
+        pts = [_pt(px, py, k) for (px, py) in (p.get("_points") or [])]
+        deg = int(p["degree"])
+        sp = curves.sketchControlPointSplines.add(
+            pts, getattr(adsk.fusion.SplineDegrees, _SPLINE_DEGREES[deg]))
+        return f"cv_spline over {len(pts)} control points" if sp else None
+    if kind == "conic":
+        # add(startPoint, endPoint, apexPoint, rhoValue) - the apex rides on cx,cy.
+        c = curves.sketchConicCurves.add(_pt(p["x1"], p["y1"], k), _pt(p["x2"], p["y2"], k),
+                                         _pt(p["cx"], p["cy"], k), float(p["rho"]))
+        return (f"conic ({p['x1']},{p['y1']})->({p['x2']},{p['y2']}) "
+                f"apex=({p['cx']},{p['cy']}) rho={p['rho']}") if c else None
+    if kind == "elliptical_arc":
+        # addByAngle(centerPoint, majorAxis, minorAxis, startAngle, sweepAngle): each axis vector's
+        # MAGNITUDE is that radius, and the minor axis must be perpendicular to the major. Angles
+        # are radians from the major axis, positive counterclockwise.
+        center = _pt(p["cx"], p["cy"], k)
+        minor_u = _minor_radius(p)
+        start = float(p.get("start_deg") or 0.0)
+        a = curves.sketchEllipticalArcs.addByAngle(
+            center, adsk.core.Vector3D.create(p["radius"] * k, 0, 0),
+            adsk.core.Vector3D.create(0, minor_u * k, 0),
+            math.radians(start), math.radians(p["sweep_deg"]))
+        return (f"elliptical_arc c=({p['cx']},{p['cy']}) major={p['radius']} "
+                f"minor={minor_u:g} start={start}deg sweep={p['sweep_deg']}deg") if a else None
     return None
 
 
@@ -319,15 +599,31 @@ _REQUIRED = {
     "center_rectangle": ["cx", "cy", "x2", "y2"],   # center + corner half-extents (x2,y2)
     "circle": ["cx", "cy", "radius"],
     "ellipse": ["cx", "cy", "radius"],              # radius = major; 'minor' optional
+    "elliptical_arc": ["cx", "cy", "radius", "sweep_deg"],   # + optional 'minor' / 'start_deg'
     "arc": ["cx", "cy", "x1", "y1", "sweep_deg"],
+    "conic": ["x1", "y1", "x2", "y2", "cx", "cy", "rho"],    # start, end, apex (cx,cy), rho
     "polygon": ["cx", "cy", "radius", "sides"],
     "slot": ["x1", "y1", "x2", "y2", "radius"],     # two centers + radius (half-width)
+    # arc slots: (cx,cy) is the arc CENTRE for center_point_arc_slot and a point ON the arc for
+    # three_point_arc_slot; (x1,y1)/(x2,y2) are the two slot-end centres; radius is the half-width.
+    "center_point_arc_slot": ["cx", "cy", "x1", "y1", "x2", "y2", "radius"],
+    "three_point_arc_slot": ["x1", "y1", "x2", "y2", "cx", "cy", "radius"],
+    # straight slots, and the two point roles are NOT symmetric: overall_slot's (x1,y1)/(x2,y2) are
+    # the overall TIPS (the cap centres land inset by width/2, so the extent equals the distance
+    # between them), while center_point_slot's (x1,y1) is the slot centre and (x2,y2) is a CAP
+    # CENTRE - a cap lands exactly on it, and tip-to-tip is 2*half-length + width.
+    "overall_slot": ["x1", "y1", "x2", "y2", "radius"],
+    "center_point_slot": ["x1", "y1", "x2", "y2", "radius"],
     "point": ["cx", "cy"],
-    # spline / polyline / closed_path take a 'points' list instead of flat scalars (handled specially).
+    # spline / cv_spline / polyline / closed_path take a 'points' list instead of flat scalars
+    # (handled specially).
     "spline": [],
+    "cv_spline": [],
     "polyline": [],
     "closed_path": [],
 }
+
+_POINT_LIST_KINDS = ("polyline", "closed_path", "spline", "cv_spline")
 
 
 def _parse_points(points):
@@ -353,7 +649,13 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                                 x1: float = None, y1: float = None, x2: float = None, y2: float = None,
                                 cx: float = None, cy: float = None, radius: float = None,
                                 sweep_deg: float = None, sides: int = None, points=None,
-                                minor: float = None, is_construction: bool = False) -> dict:
+                                minor: float = None, is_construction: bool = False,
+                                rho: float = None, degree: int = None,
+                                start_deg: float = None, arc_radius: float = None,
+                                slot_length: float = None,
+                                angle_deg: float = None, create_width_dimension: bool = False,
+                                create_radius_dimension: bool = False,
+                                create_angle_dimension: bool = False) -> dict:
     """Draw one geometry entity on a sketch; required params per 'kind' are in _REQUIRED."""
     kind = (kind or "").strip().lower()
     if kind not in _KINDS:
@@ -374,18 +676,25 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     "or sketch_create first.")
         return error("No sketch to draw on. Create one first with sketch_create.")
 
-    # polyline / closed_path / spline: a chain/curve from a 'points' list.
-    if kind in ("polyline", "closed_path", "spline"):
+    # polyline / closed_path / spline / cv_spline: a chain/curve from a 'points' list.
+    if kind in _POINT_LIST_KINDS:
         pts, perr = _parse_points(points)
         if perr:
             return error(perr)
         p = {"points": pts, "_points": pts}
+        if kind == "cv_spline":
+            d = 3 if degree is None else int(degree)
+            if d not in _SPLINE_DEGREES:
+                return error(f"cv_spline 'degree' must be "
+                             f"{' or '.join(str(n) for n in sorted(_SPLINE_DEGREES))} - the only "
+                             f"degrees the API accepts when creating a spline. Got {degree}.")
+            p["degree"] = d
         # fall through to the shared draw + result below
 
     else:
         # Gather + validate the scalar params this kind needs.
         supplied = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": cx, "cy": cy,
-    "radius": radius, "sweep_deg": sweep_deg, "sides": sides, "minor": minor}
+    "radius": radius, "sweep_deg": sweep_deg, "sides": sides, "minor": minor, "rho": rho}
         p = {}
         missing = []
         for key in _REQUIRED[kind]:
@@ -395,13 +704,30 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
                 p[key] = supplied[key]
         if missing:
             return error(f"'{kind}' needs: {', '.join(_REQUIRED[kind])}. Missing: {', '.join(missing)}.")
-        p["minor"] = minor   # optional, passed through for ellipse
-        if kind in ("circle", "ellipse") and p["radius"] <= 0:
+        p["minor"] = minor   # optional, passed through for ellipse / elliptical_arc
+        p["start_deg"] = start_deg   # optional, elliptical_arc only (default 0 = the major axis)
+        p["arc_radius"] = arc_radius            # optional, center_point_arc_slot only
+        p["slot_length"] = slot_length          # optional, overall_slot / center_point_slot only
+        p["angle_deg"] = angle_deg              # optional, the tailed slot kinds
+        p["create_width_dimension"] = bool(create_width_dimension)
+        p["create_radius_dimension"] = bool(create_radius_dimension)
+        p["create_angle_dimension"] = bool(create_angle_dimension)
+        if kind in _SLOT_KINDS:
+            slot_err = _slot_error(kind, p)
+            if slot_err:
+                return error(slot_err)
+        if kind in ("circle", "ellipse", "elliptical_arc") and p["radius"] <= 0:
             return error("radius must be > 0.")
+        if kind == "elliptical_arc" and p["minor"] is not None and p["minor"] <= 0:
+            return error(f"minor must be > 0 (got {p['minor']}); omit it for major/2.")
+        # the conic binding states rhoValue must be greater than zero and less than one.
+        if kind == "conic" and not 0.0 < float(p["rho"]) < 1.0:
+            return error(f"conic 'rho' must be greater than 0 and less than 1. Got {p['rho']}.")
         if kind == "polygon" and int(p["sides"]) < 3:
             return error("polygon needs sides >= 3.")
 
     # Draw (defer compute so the single add is efficient and consistent).
+    before_kind = _kind_curve_count(sketch, kind)
     deferred_set = False
     try:
         sketch.isComputeDeferred = True
@@ -422,14 +748,52 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if not label:
         return error(f"Drawing {kind} returned no entity (check the parameters).")
 
-    return ok({
+    # VERIFY the draw against the sketch's own collection for this kind: a factory can hand back an
+    # object without the curve landing in the sketch, and that is a failure, not a success.
+    after_kind = _kind_curve_count(sketch, kind)
+    delta = None
+    if before_kind is not None and after_kind is not None:
+        delta = after_kind - before_kind
+        if delta < 1:
+            return error(f"Drawing {kind} returned an entity but the sketch's own {kind} collection "
+                         f"count did not change ({before_kind} -> {after_kind}) - nothing was "
+                         "added. Re-read sketch_get.")
+
+    out = {
     "drawn": label,
     "kind": kind,
     "sketch_name": safe(lambda: sketch.name),
     "units": units,
     "sketch": _sketch_summary(sketch),
     "note": "Draw more with sketch_add_geometry, or view_screenshot to view the sketch.",
-    })
+    }
+    if delta is not None:
+        out["curves_added"] = delta
+    if kind == "cv_spline":
+        out["note"] = ("Control-point spline drawn - constrain or dimension it as "
+                       "'cv_spline:<index>' (sketch_get lists the index).")
+        # The degree is READ BACK off the created spline: the API accepts a degree it cannot honor
+        # and clamps it to (control points - 1) without saying so, so what it BUILT is published.
+        effective = _effective_spline_degree(sketch)
+        if effective is not None:
+            out["degree"] = effective
+            if effective != p["degree"]:
+                out["note"] += (f" Degree {p['degree']} was requested but the spline was built at "
+                                f"degree {effective}: the API silently clamps the degree to the "
+                                "control-point count minus one. Pass more 'points' to get the "
+                                "degree asked for.")
+    if kind in _ARC_SLOT_KINDS:
+        out["note"] = ("Arc slot drawn out of SketchArcs - 'curves_added' counts them and each is "
+                       "addressable as 'arc:<index>' for sketch_dimension / sketch_constrain "
+                       "(sketch_get(include_entities=true) lists the indexes).")
+    if kind in _LINEAR_SLOT_KINDS:
+        out["note"] = ("Slot drawn - 'curves_added' counts its SketchLines: three, four when a "
+                       "length or angle is passed. Its two end caps are SketchArcs. Address either "
+                       "as 'line:<index>' / 'arc:<index>' for sketch_dimension / sketch_constrain "
+                       "(sketch_get(include_entities=true) lists the indexes).")
+    if kind in _REF_LESS_NOTES:
+        out["note"] = _REF_LESS_NOTES[kind]
+    return ok(out)
 
 
 # --------------------------------------------------------------- sketch_add_3d_line
@@ -574,20 +938,21 @@ create_sketch_item = Item.create_tool_item(tool=create_sketch_tool, write="write
                                            run_on_main_thread=True)
 
 _ADD_DESC = (
-                                           "Draw one geometry entity on a sketch. Params per 'kind' (coords/sizes in 'units' = mm "
-                                           "[default]/cm/in; angles in degrees): line/rectangle need x1,y1,x2,y2; circle needs "
-                                           "cx,cy,radius; arc needs cx,cy,x1,y1,sweep_deg (start point + CCW sweep); polygon needs "
-                                           "cx,cy,radius,sides; polyline/closed_path/spline take 'points' (see its own description; "
-                                           "closed_path scales to large outlines). center_rectangle "
-                                           "adds NO center/symmetry constraints (unlike native) - constrain/dimension it after. Targets "
-                                           "'sketch_name' (else the most recent sketch). Pair with view_screenshot to view it."
+                                           "Draw one geometry entity on a sketch (coords/sizes in 'units' = mm [default]/cm/in; "
+                                           "angles in degrees). Non-obvious roles: conic takes cx,cy as the APEX, closed_path "
+                                           "scales to large outlines, and center_rectangle adds NO center/symmetry constraints "
+                                           "- constrain/dimension it after. Every slot kind takes x1,y1 / x2,y2 + radius, but "
+                                           "the point roles DIFFER: overall_slot's two are the overall TIPS, center_point_slot's "
+                                           "are the centre and a CAP CENTRE, and the arc slots add cx,cy = the arc centre "
+                                           "(center_point_arc_slot) or a point ON the arc (three_point_arc_slot). "
+                                           "Pair with view_screenshot to view what was drawn."
 )
 add_geometry_tool = (
     Tool.create_simple(name="sketch_add_geometry", description=_ADD_DESC)
     .add_input_property(*_KIND.as_property())
     .add_required_input("kind")
     .add_input_property("points", {"type": "array",
-            "description": "For polyline/closed_path/spline: list of [x,y] points (in 'units'). polyline/closed_path share endpoints (coincident) for a parametric loop; spline fits a smooth curve through them.",
+            "description": "For polyline/closed_path/spline/cv_spline: list of [x,y] points (in 'units'). polyline/closed_path share endpoints (coincident) for a parametric loop; spline fits a smooth curve THROUGH them; cv_spline treats them as the control polygon.",
             "items": {"type": "array"}})
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
     .add_input_property(*_inputs.UNITS.as_property())
@@ -595,12 +960,21 @@ add_geometry_tool = (
     .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
     .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle); center_rectangle: HALF-width from center."})
     .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle); center_rectangle: HALF-height from center."})
-    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle); point X for kind='point'."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle); point Y for kind='point'."})
-    .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot half-width."})
+    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle, arc slots); point X for kind='point'."})
+    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle, arc slots); point Y for kind='point'."})
+    .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot HALF-width (full width = radius*2)."})
     .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
     .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})
+    .add_input_property("start_deg", {"type": "number", "description": "elliptical_arc start angle in degrees, measured from the major axis (default 0)."})
+    .add_input_property("rho", {"type": "number", "description": "Conic rho: greater than 0 and less than 1 (how far the curve pulls toward the apex)."})
+    .add_input_property("degree", {"type": "integer", "description": "cv_spline degree - 3 or 5 (default 3); the API accepts no other degree at creation, and CLAMPS the degree to the control-point count minus one (the built degree is reported back)."})
     .add_input_property("sides", {"type": "integer", "description": "Polygon side count (>=3)."})
+    .add_input_property("arc_radius", {"type": "number", "description": "center_point_arc_slot: the arc radius. Overrides the x1,y1 distance to cx,cy, which then sets direction only."})
+    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length (tip-to-tip = 2*slot_length + width). Overrides the x2,y2 distance, which then sets direction only, and dimensions itself."})
+    .add_input_property("angle_deg", {"type": "number", "description": "Slot angle in degrees. Needs arc_radius (center_point_arc_slot) or slot_length."})
+    .add_input_property("create_width_dimension", {"type": "boolean", "description": "Slot kinds: dimension the full width."})
+    .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius (needs both values)."})
+    .add_input_property("create_angle_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension angle_deg (needs both values)."})
     .add_input_property("is_construction", {"type": "boolean", "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
 )
 add_geometry_item = Item.create_tool_item(tool=add_geometry_tool, write="write", handler=add_sketch_geometry_handler,

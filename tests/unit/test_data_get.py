@@ -37,6 +37,9 @@ def stub(monkeypatch):
                                                                "projects": [{"name": "P1"}, {"name": "P2"}]})),
             "list_project_files_handler": staticmethod(lambda **kw: _ok({"project": {"name": kw.get("project")},
                                                                         "file_count": 3, "files": ["a", "b", "c"]})),
+            "file_facts_handler": staticmethod(lambda **kw: _ok({"matched_by": "urn",
+                                                                 "file": {"name": "notes.txt"},
+                                                                 "seen": dict(kw)})),
         }))
     monkeypatch.setitem(sys.modules, "mcpServer.tools.data_ops",
         type("DO", (), {"list_folders_handler": staticmethod(
@@ -144,6 +147,49 @@ class TestScopeDispatch:
         out = _payload(dge.handler(project="P1", folder="Parts/Fixtures", recursive=False))
         assert seen["folder"] == "Parts/Fixtures" and seen["recursive"] is False
         assert "pointers" not in out            # no files -> no doc_open pointer (present-only)
+
+
+class TestFileScope:
+    def test_file_wins_over_the_project_file_listing(self, stub):
+        # 'file' is a NARROWER scope than the project listing - a caller passing both must get the
+        # one file's record, not the folder's contents.
+        out = _payload(dge.handler(project="P1", file="notes.txt"))
+        assert out["scope"] == "file"
+        assert out["file"]["name"] == "notes.txt"
+
+    def test_file_scope_passes_its_resolution_scope_through(self, stub):
+        out = _payload(dge.handler(project="P1", folder="Docs", file="notes.txt"))
+        assert out["seen"] == {"file": "notes.txt", "project": "P1", "project_id": "",
+                               "folder": "Docs"}
+
+    def test_file_note_advertises_the_extension_trap_and_the_read_only_link_state(self, stub):
+        note = _payload(dge.handler(file="urn:adsk.wipprod:fs.file:vf.abc"))["note"]
+        assert "NAME carries the true extension" in note
+        assert "data_download_file" in note and "data_move_file" in note
+
+    def test_a_name_matched_in_a_capped_listing_gets_the_uniqueness_caveat(self, stub, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+            type("DR", (), {"file_facts_handler": staticmethod(
+                lambda **kw: _ok({"matched_by": "name", "name_scope_truncated": True,
+                                  "file": {"name": "notes.txt"}}))}))
+        note = _payload(dge.handler(file="notes.txt", project="P1"))["note"]
+        assert "CAPPED listing" in note and "lineage URN" in note
+
+    def test_an_untruncated_match_carries_no_caveat(self, stub):
+        assert "CAPPED listing" not in _payload(dge.handler(file="notes.txt", project="P1"))["note"]
+
+    def test_file_with_include_is_refused_rather_than_silently_ignored(self, stub):
+        res = dge.handler(file="notes.txt", project="P1", include=["folders"])
+        assert "does not apply to the 'file' scope" in error_message(res)
+
+    def test_file_scope_propagates_a_resolution_error(self, stub, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "mcpServer.tools._data_read",
+            type("DR", (), {"file_facts_handler": staticmethod(
+                lambda **kw: _err("'notes.txt' names 2 files in project 'P1'"))}))
+        res = dge.handler(file="notes.txt", project="P1")
+        assert "names 2 files" in error_message(res)
 
 
 class TestGuards:

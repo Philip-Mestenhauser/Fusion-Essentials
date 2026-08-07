@@ -3,9 +3,10 @@
 
 """MCP building blocks: assembly_capture_position, joint_create_as_built, assembly_constrain.
 
-Capture/revert/delete a jointed occurrence's transient pose in the timeline; joint two occurrences
-rigidly where they already are; or mate two occurrences' geometry via Constrain Components
-(flush/coincident/concentric/angle, inferred from the geometry). All three WRITE.
+Capture/discard/revert/delete a jointed occurrence's transient pose in the timeline; joint two
+occurrences where they already are (rigidly, or with a motion anchored on a JointGeometry); or mate
+two occurrences' geometry via Constrain Components (flush/coincident/concentric/angle, inferred from
+the geometry). All three WRITE.
 """
 
 import adsk.core
@@ -20,16 +21,27 @@ from . import _inputs
 from . import _assert
 # Reuse the joint tool's autonomous geometry resolver so assembly_constrain can snap to geometry
 # (face/top/bottom/left/right/front/back/cylinder/origin) without a human selection - same '<occurrence>:<snap>' grammar.
-from .joint_create_edit import _resolve_snap_entity, _parse_snap
+# joint_create_as_built resolves its anchor through the SAME grammar one level up (_resolve_input:
+# handle -> JointGeometry, or '<occ>:<snap>'), and shares that tool's motion vocabulary and pin_slot
+# slide-axis rules rather than keeping a second copy of the seven motion names.
+from .joint_create_edit import (_JOINT_TYPES, _MOTIONS, _parse_snap, _resolve_input,
+                                _resolve_snap_entity, _slide_index, _slide_name)
+from ._joints import (AXES as _AXES, apply_motion as _apply_motion,
+                      current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin)
 
 app = adsk.core.Application.get()
 
-_CAPTURE_ACTIONS = ("capture", "revert", "status", "delete")
+# The read declined to answer - distinct from a read that answered False. Publishing bool() of a
+# failed read would fabricate a measurement the tool never took.
+_UNREADABLE = object()
+
+_CAPTURE_ACTIONS = ("capture", "revert", "status", "delete", "discard_pending")
 _CAPTURE_ACTION = _inputs.Choice(
     "action", options=list(_CAPTURE_ACTIONS), default="status",
-    description="capture records the current pending position as a new marker; revert discards the "
-                "latest captured marker; delete removes one captured marker by 'marker' name; status "
-                "reports the pending flag and lists the captured markers.")
+    description="capture records the current pending position as a new marker; discard_pending "
+                "throws the uncaptured move away (back to the last captured position); revert "
+                "discards the latest captured marker; delete removes one captured marker by "
+                "'marker' name; status reports the pending flag and lists the captured markers.")
 
 
 def _find_one(design, name):
@@ -68,13 +80,7 @@ def _find_captured(snaps, count, want):
 
 
 def capture_position_handler(action: str = "status", marker: str = "") -> dict:
-    """Capture / revert / delete / report the assembly's flexible position in the timeline.
-
-    action: 'capture' (write the current pose into the timeline as a new marker - only valid when
-    a move is pending), 'revert' (discard the latest captured marker), 'delete' (remove one
-    captured marker by 'marker' name), or 'status' (report whether a move is pending and list the
-    captured markers).
-    """
+    """See _CAPTURE_DESC."""
     act, aerr = _CAPTURE_ACTION.resolve(action)
     if aerr:
         return error(aerr)
@@ -96,6 +102,8 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         "drop the latest capture, or delete a specific marker by name."})
 
     if act == "capture":
+        # Live-verified: with no pending position change snapshots.add() RAISES
+        # "3 : Has no pending snapshot" - the pending flag is the precondition, not a hint.
         if not pending:
             return error("Nothing to capture - there is no pending position change. Move a jointed "
     "component first (its pose is transient until captured).")
@@ -112,6 +120,36 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         return ok({"captured": True, "snapshot": safe(lambda: snap.name),
         "snapshot_count": count_after if count_after is not None else count + 1,
         "note": "Current position captured into the timeline."})
+
+    if act == "discard_pending":
+        # Live-verified: with nothing pending revertPendingSnapshot() RAISES "3 : Has no pending
+        # snapshot" (it does not return False), so the flag is the precondition and this guard
+        # refuses first. The bool it returns on the valid path is read back below.
+        if not pending:
+            return error("Nothing to discard - there is no pending position change.")
+        try:
+            did = snaps.revertPendingSnapshot()
+        except Exception as e:
+            return error(f"Discard failed: {e}")
+        if not did:
+            return error("Fusion declined to discard the pending position change "
+                         "(revertPendingSnapshot returned false) - the move still stands.")
+        still_pending = safe(lambda: snaps.hasPendingSnapshot, _UNREADABLE)
+        if still_pending is _UNREADABLE or still_pending is None:
+            return error("Discard ran, but the pending-position flag could not be re-read - the "
+                         "confirming read could not be taken, so the move may or may not have been "
+                         "thrown away. Call action='status' before acting on this result.")
+        if still_pending:
+            return error("Discard reported success but a pending position change is still "
+                         "reported - the move was not thrown away.")
+        # Live-verified restore target: with a captured marker the assembly goes back to the last
+        # captured position; with nothing ever captured it goes back to the joint rest pose. The
+        # captured markers and their names survive the discard untouched.
+        return ok({"discarded": True, "has_pending": bool(still_pending),
+        "snapshot_count": safe(lambda: snaps.count, count),
+        "note": "Uncaptured move thrown away - the assembly is back at its last captured position "
+        "(or the joint-defined state when nothing was ever captured). Captured markers are "
+        "untouched; use revert to drop the latest of those."})
 
     if act == "delete":
         want = (marker or "").strip()
@@ -160,12 +198,45 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
 
 # ---------------------------------------------------------------- joint_create_as_built
 
-def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "") -> dict:
-    """Create a rigid as-built joint between two occurrences where they already are.
+# What 'axis' actually does per motion type - the role the setter gives that argument, so the result
+# note states the DOF that was set rather than a generic "motion axis". Keyed by the types
+# _JOINT_TYPES marks as needing an axis; ball is deliberately absent (see _BALL_AXIS_NOTE).
+_AXIS_ROLE = {
+"revolute": "rotating about",
+"slider": "sliding along",
+"cylindrical": "rotating about and sliding along",
+"planar": "sliding in the plane normal to",
+"pin_slot": "rotating about",
+}
 
-    occurrence_one / occurrence_two: the two occurrences to join in place (no joint origins
-    needed). Creates a RIGID as-built joint. WRITES.
-    """
+# setAsBallJointMotion takes no selectable axis: pitch MUST be Z and yaw MUST be X (live-verified on
+# an as-built input - the API rejects any other pair), so 'axis' is ignored for ball and the note must
+# not claim one.
+_BALL_AXIS_NOTE = "ball motion (pitch Z / yaw X - the API accepts no other pair)"
+
+# joint_drive drives a single-value DOF and REFUSES every other motion ("only revolute, slider, and
+# cylindrical joints can be driven by value" - joint_drive.py), so the next-step pointer has to split.
+_DRIVABLE = ("revolute", "slider", "cylindrical")
+_POSE_HINT_OTHER = ("joint_drive does not drive this motion type (only revolute/slider/cylindrical "
+                    "take a value) - pose the part with assembly_move.")
+
+
+def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = "",
+                           joint_type: str = "rigid", axis: str = "z",
+                           slide_axis: str = "") -> dict:
+    """See _ASBUILT_DESC."""
+    jtype = (joint_type or "rigid").strip().lower()
+    if jtype not in _JOINT_TYPES:
+        return error(f"Unknown joint_type '{joint_type}'. Valid: {', '.join(_JOINT_TYPES)}.")
+    ax_name = (axis or "z").strip().lower()
+    if ax_name not in _AXES:
+        return error(f"Unknown axis '{axis}'. Valid: x, y, z.")
+    slide_idx = None
+    if jtype == "pin_slot":
+        slide_idx, slide_err = _slide_index(slide_axis, ax_name)
+        if slide_err:
+            return error(slide_err)
+
     design = _common.design()
     if not design:
         return error("No active design with components.")
@@ -184,18 +255,97 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "") -
     if (id1 is not None and id1 == id2) or o1 is o2:
         return error("As-built joint needs two distinct occurrences.")
 
+    spec = (geometry or "").strip()
+    # Live-verified: asBuiltJoints.add() RAISES "Geometry should not be null if joint motion is not
+    # rigid" when createInput was handed None - a null geometry is rigid-ONLY, so every other motion
+    # type must be given an anchor here rather than discovering the raise at add().
+    if jtype != "rigid" and not spec:
+        return error(f"joint_type '{jtype}' needs 'geometry' - the anchor its motion runs on (a "
+                     "find_geometry handle, or '<occurrence>:<snap>' with snap = origin/center/top/"
+                     "bottom/left/right/front/back/cylinder). Fusion refuses a non-rigid as-built "
+                     "joint with no geometry; only 'rigid' is creatable without one.")
+    if jtype == "rigid" and spec:
+        return error("joint_type 'rigid' takes no 'geometry' - a rigid as-built joint locks the two "
+                     f"occurrences with no anchor to move along, so '{spec}' would be ignored. Drop "
+                     "'geometry', or set joint_type to the motion you want at that geometry.")
+
+    geom, geom_label = None, None
+    if spec:
+        anchor, geom_label, gerr = _resolve_input(design, spec)
+        if anchor is None:
+            return error(f"'geometry': {gerr or f'could not resolve {spec}.'}")
+        if _is_joint_origin(anchor):
+            return error(f"'geometry' resolved to the Joint Origin '{spec}'. An as-built joint "
+                         "anchors on a JointGeometry - real geometry (a face/edge/vertex handle, or "
+                         "an '<occurrence>:<snap>'). To joint AT a Joint Origin use joint_create.")
+        geom = anchor
+
     try:
-        # null geometry -> a rigid as-built joint
-        abj_input = design.rootComponent.asBuiltJoints.createInput(o1, o2, None)
+        abj_input = design.rootComponent.asBuiltJoints.createInput(o1, o2, geom)
+    except Exception as e:
+        return error(f"As-built joint input failed: {e}")
+    if not abj_input:
+        return error("asBuiltJoints.createInput returned nothing for these two occurrences.")
+
+    if jtype != "rigid":
+        # An AsBuiltJointInput takes the JointInput setter arity - the axis enum alone, with no
+        # geometry argument - and is NOT an AsBuiltJoint (both live-verified), so apply_motion's
+        # existing-as-built branch and its extra geometry argument do not claim it.
+        did, merr = _apply_motion(abj_input, jtype, _AXES[ax_name], slide_axis_idx=slide_idx)
+        if not did:
+            return error(f"Could not set {jtype} motion on the as-built joint input: "
+                         f"{merr or 'setter returned false'}.")
+
+    try:
         joint = design.rootComponent.asBuiltJoints.add(abj_input)
     except Exception as e:
         return error(f"As-built joint failed: {e}")
     if not joint:
         return error("As-built joint creation returned nothing.")
-    return ok({"created": True, "joint": safe(lambda: joint.name),
-        "occurrence_one": safe(lambda: o1.name), "occurrence_two": safe(lambda: o2.name),
-        "type": "rigid (as-built)",
-        "note": "Occurrences rigidly joined where they already are."})
+
+    # A motion that silently comes back rigid is a wrong result with a healthy feature, so read the
+    # motion class back off the created joint. On the rigid path the null geometry IS the proof (any
+    # other motion raises at add() with a null geometry), so a read that declines to answer there is
+    # not a failure; a requested MOTION must confirm itself.
+    got = _current_joint_type(joint)
+    if got and got != jtype:
+        return error(f"The as-built joint was created as '{got}', not the requested '{jtype}'. It "
+                     "remains in the design - remove it with design_delete_feature and retry.")
+    if jtype != "rigid" and not got:
+        return error(f"The as-built joint was created but its motion could not be read back, so "
+                     f"'{jtype}' is unconfirmed. Check it with assembly_get before relying on the "
+                     "degree of freedom.")
+
+    # Publish the fullPathName (id1/id2 above), not the leaf .name: a nested child reads 'Inner:1'
+    # while the caller addressed it as 'Outer:1+Inner:1', and only the full path names it uniquely.
+    out = {"created": True, "joint": safe(lambda: joint.name),
+           "occurrence_one": id1, "occurrence_two": id2,
+           "joint_type": got or jtype,
+           "type": f"{got or jtype} (as-built)",
+           "axis": ax_name if _JOINT_TYPES[jtype][1] else None,
+           "slide_axis": _slide_name(slide_idx, ax_name) if jtype == "pin_slot" else None,
+           "geometry": geom_label}
+    if jtype == "rigid":
+        out["note"] = "Occurrences rigidly joined where they already are."
+        return ok(out)
+
+    if _JOINT_TYPES[jtype][1]:
+        moved = f"{jtype} motion {_AXIS_ROLE.get(jtype, 'on')} the frame {ax_name} axis"
+        if jtype == "pin_slot":
+            moved += f" and sliding along the frame {out['slide_axis']} axis"
+    else:
+        moved = _BALL_AXIS_NOTE if jtype == "ball" else f"{jtype} motion"
+    pose_hint = "Pose it with joint_drive." if jtype in _DRIVABLE else _POSE_HINT_OTHER
+    out["note"] = (f"Occurrences joined where they already are with {moved} - an as-built joint "
+                   f"moves neither part. {pose_hint}")
+    # AsBuiltJoint.geometry reads null when (and only when) the motion is rigid (live-verified across
+    # rigid plus the five motion types), so a non-rigid joint with no geometry to read is a signal worth reporting
+    # rather than swallowing.
+    if safe(lambda: joint.geometry) is None:
+        out["anchor_warning"] = (f"The joint reports '{got}' motion but no anchor geometry reads back "
+                                 f"off it - check the pose before relying on the degree of freedom. "
+                                 f"{pose_hint}")
+    return ok(out)
 
 
 # ------------------------------------------------------------ assembly_constrain
@@ -322,9 +472,10 @@ _CAPTURE_DESC = (
 "geometry history (timeline features) separate from assembly positions - a pose only enters the "
 "timeline as an explicit captured Position marker. When you move a jointed component - by hand or "
 "via joint_drive, both set the same pending-position flag - its pose is transient; 'capture' "
-"records it as a new marker (valid only when a move is pending), 'delete' removes one captured "
-"marker by 'marker' name, 'revert' discards the latest captured marker, 'status' reports whether a "
-"move is pending and lists the captured markers."
+"records it as a new marker (valid only when a move is pending), 'discard_pending' throws that "
+"uncaptured move away instead, 'delete' removes one captured marker by 'marker' name, 'revert' "
+"discards the latest captured marker, 'status' reports whether a move is pending and lists the "
+"captured markers."
 )
 capture_tool = (
     Tool.create_simple(name="assembly_capture_position", description=_CAPTURE_DESC)
@@ -337,14 +488,25 @@ capture_item = Item.create_tool_item(tool=capture_tool, write="write", handler=c
                                      run_on_main_thread=True)
 
 _ASBUILT_DESC = (
-                                     "Create a rigid AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint "
-                                     "origins needed (unlike the joint tool). 'occurrence_one'/'occurrence_two' are the occurrence "
-                                     "names to lock together in place."
+                                     "Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins "
+                                     "needed and neither part moves (unlike joint_create). 'occurrence_one'/'occurrence_two' are "
+                                     "the occurrence names. joint_type defaults to rigid; EVERY other motion ALSO needs "
+                                     "'geometry' - the anchor it runs on - because Fusion refuses a non-rigid as-built joint "
+                                     "without one. 'axis' is the frame axis the motion runs on, for the types that use one "
+                                     "(ball uses none). Pose a revolute/slider/cylindrical result with joint_drive, any other "
+                                     "with assembly_move."
 )
 asbuilt_tool = (
     Tool.create_simple(name="joint_create_as_built", description=_ASBUILT_DESC)
     .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name."})
     .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name."})
+    .add_input_property("geometry", {"type": "string", "description": "Where a non-rigid motion anchors: a find_geometry handle, or '<occurrence>:<snap>' (snap = origin/center/top/bottom/left/right/front/back/cylinder). Omit for rigid."})
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
+            description="Motion type; anything but rigid requires 'geometry'.").as_property())
+    .add_input_property(*_inputs.world_axis("axis", default="z",
+            description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())
+    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+            description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
     .strict_schema()
 )
 asbuilt_item = Item.create_tool_item(tool=asbuilt_tool, write="write", handler=as_built_joint_handler,

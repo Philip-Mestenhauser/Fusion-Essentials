@@ -1,0 +1,168 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Generate a machinist SETUP SHEET (HTML or Excel) for a setup/folder/operation or the whole
+document. generateSetupSheet returns True BEFORE the sheet exists - a temp PNG lands first, then
+the sheet arrives asynchronously and consumes it (live-measured) - so success here is gated on the
+sheet file actually landing, advanced by a bounded adsk.doEvents pump.
+"""
+
+import os
+import time
+
+import adsk.cam
+import adsk.core
+
+from ..mcp_primitives.tool import Tool
+from ..mcp_primitives.item import Item
+from ..mcp_primitives.registry import register
+from . import _assert
+from . import _inputs
+from . import _outputs
+from ._cam_common import get_cam, resolve_cam_node
+from ._common import error, ok, safe
+
+app = adsk.core.Application.get()
+
+# The async landing is sub-second live (~0.3s of pumping); the cap only bounds a wedged generation.
+_PUMP_SECONDS = 10.0
+_SHEET_SUFFIXES = {"html": (".html", ".htm"), "excel": (".xlsx", ".xls")}
+
+_FORMAT = _inputs.Choice(
+    "format", ["html", "excel"], default="html",
+    description="Sheet format. excel needs Windows (the API's own limitation).")
+
+RETURNS = [
+    _outputs.ReturnsValue("file_path", "the setup-sheet document written to disk"),
+]
+
+
+def _sheet_files(folder, suffixes):
+    """{path: (mtime, size)} for the sheet-format files in folder (empty if it does not exist)."""
+    snap = {}
+    if safe(lambda: os.path.isdir(folder), False):
+        for n in safe(lambda: os.listdir(folder), []) or []:
+            if not n.lower().endswith(suffixes):
+                continue
+            p = os.path.join(folder, n)
+            if safe(lambda p=p: os.path.isfile(p), False):
+                snap[p] = (safe(lambda p=p: os.path.getmtime(p), 0.0),
+                           safe(lambda p=p: os.path.getsize(p), 0))
+    return snap
+
+
+def handler(scope: str = "", format: str = "html", output_folder: str = "") -> dict:
+    """See TOOL_DESCRIPTION."""
+    values, verr = _inputs.resolve_inputs([_FORMAT], {"format": format})
+    if verr:
+        return verr
+    fmt_key = values["format"]
+
+    cam, cerr = get_cam()
+    if cerr:
+        return cerr
+    if not (output_folder or "").strip():
+        return error("Provide 'output_folder' - the directory the setup sheet will be written to.")
+    out_dir = os.path.abspath(output_folder.strip())
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception as e:
+        return error(f"Could not create output folder '{out_dir}': {e}")
+
+    # Resolve the scope up front so a bad name fails before anything is generated.
+    target, kind = (None, "document")
+    want = (scope or "").strip()
+    if want and want.lower() not in ("all", "document", "*"):
+        node, serr = resolve_cam_node(cam, want, kinds=("setup", "folder", "operation"),
+                                      label="setup/folder/operation")
+        if serr:
+            return error(serr + " Omit 'scope' to sheet the whole document.")
+        target, kind = node.obj, node.kind
+
+    fmt_enum = safe(lambda: (adsk.cam.SetupSheetFormats.ExcelFormat if fmt_key == "excel"
+                             else adsk.cam.SetupSheetFormats.HTMLFormat))
+    if fmt_enum is None:
+        return error("adsk.cam.SetupSheetFormats is unavailable on this Fusion version.")
+
+    suffixes = _SHEET_SUFFIXES[fmt_key]
+    before = _sheet_files(out_dir, suffixes)
+    started = time.time()
+
+    # openDocument=False ALWAYS: the API's default True opens the generated sheet in the UI, an
+    # unsolicited window the calling agent cannot see or close.
+    try:
+        if target is None:
+            did = cam.generateAllSetupSheets(fmt_enum, out_dir, False)
+        else:
+            did = cam.generateSetupSheet(target, fmt_enum, out_dir, False)
+    except Exception as e:
+        return error(f"Setup-sheet generation failed: {e}")
+    if not did:
+        return error(f"Fusion declined to generate the setup sheet (returned false) for "
+                     f"{kind} scope '{want or 'document'}' - nothing was written.")
+
+    # True is NOT the deliverable: the sheet lands asynchronously and only advances while the main
+    # thread pumps. Judged by a NEW or MODIFIED sheet file - never by the bool - and the file must
+    # be NON-EMPTY and STABLE across two pumps: it appears at 0 bytes first and is written after
+    # (live-measured), so breaking on appearance reports a 0-byte deliverable.
+    landed, prev_sizes = {}, None
+    while time.time() - started < _PUMP_SECONDS:
+        safe(lambda: adsk.doEvents())
+        time.sleep(0.05)
+        now = _sheet_files(out_dir, suffixes)
+        fresh = {p: v for p, v in now.items() if p not in before or v != before[p]}
+        sizes = {p: v[1] for p, v in fresh.items()}
+        if fresh and all(sz > 0 for sz in sizes.values()) and sizes == prev_sizes:
+            landed = fresh
+            break
+        prev_sizes = sizes
+    if not landed:
+        return error(f"generateSetupSheet returned true but no {fmt_key} sheet landed in "
+                     f"'{out_dir}' within {int(_PUMP_SECONDS)}s - the generation did not complete, "
+                     "so there is no deliverable to report.")
+
+    path = sorted(landed)[0]
+    overwrote = path in before
+    payload = {
+        "generated": True,
+        "format": fmt_key,
+        "scope": (want or "document"),
+        "scope_kind": kind,
+        "file_path": path,
+        "size_bytes": landed[path][1],
+        "overwrote_existing": overwrote,
+        "note": "Setup sheet written. The file is named after the DOCUMENT, not the scope, so "
+                "another call into this folder OVERWRITES it - use a distinct output_folder per "
+                "sheet you want to keep.",
+    }
+    if overwrote:
+        payload["note"] = ("Setup sheet written OVER an existing sheet of the same name (the file "
+                           "is named after the document, not the scope). " + payload["note"])
+    return ok(payload)
+
+
+TOOL_DESCRIPTION = (
+    "Generate a machinist SETUP SHEET document (format='html' default, or 'excel' on Windows) for "
+    "'scope' (a setup/folder/operation NAME; omit for every setup) into 'output_folder'. The file "
+    "is named after the DOCUMENT, so one call per folder - a second call overwrites it. Success is "
+    "gated on the sheet file landing on disk. Toolpaths should be generated first (cam_generate); "
+    "pair with cam_post for the NC program itself."
+    + _outputs.produces_block(RETURNS)
+)
+
+tool = (
+    Tool.create_simple(name="cam_generate_setup_sheet", description=TOOL_DESCRIPTION)
+    .add_input_property("scope", {"type": "string",
+        "description": "Setup/folder/operation NAME to sheet; omit (or 'document') for all setups."})
+    .add_input_property(_FORMAT.name, _FORMAT.schema())
+    .add_input_property("output_folder", {"type": "string",
+        "description": "Directory the sheet is written to (created if absent). One sheet per "
+                       "folder - the file name comes from the document."})
+    .strict_schema()
+)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
+                             postconditions=[_assert.DeliverablesExist()])
+
+
+def register_tool():
+    register(item)

@@ -1,11 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Create a 2D drawing document from the active design's saved cloud DataFile via the automatic
-generator (CreateDrawingInput + its automationPreferences tree; only automatic creation exists).
-The new drawing is a CLOUD file, returned as file_id (lineage URN) and NOT opened: a never-reviewed
-auto-drawing surfaces an interactive view pane that blocks a headless open - review it once in the
-Fusion UI first. WRITES a drawing.
+"""Create a 2D drawing document from the active design's saved cloud DataFile (CreateDrawingInput +
+its automationPreferences tree). The automatic generator lays the views out; manual creation needs a
+template carrying view-placeholder information. The new drawing is a CLOUD file, returned as file_id
+(lineage URN) and NOT opened: a never-reviewed auto-drawing surfaces an interactive view pane that
+blocks a headless open - review it once in the Fusion UI first. WRITES a drawing.
 """
 
 import adsk.core
@@ -39,11 +39,13 @@ _SHEET_SIZE_MAP = {
 # Portrait is rejected by Fusion for the largest sheet of each standard (A0 ISO / E ASME).
 _NO_PORTRAIT = {("iso", "a0"), ("asme", "e")}
 
+# DrawingViewStyleTypes carries exactly these four members: the two shaded ones pair shading with
+# HIDDEN edges or with VISIBLE edges - there is no plain shaded member.
 _VIEW_STYLE_MAP = {
     "visible": "VisibleEdgesDrawingViewStyleType",
     "hidden": "VisibleAndHiddenEdgesDrawingViewStyleType",
-    "shaded": "ShadedDrawingViewStyleType",
-    "shaded_edges": "ShadedWithVisibleEdgesDrawingViewStyleType",
+    "shaded_hidden": "ShadedAndHiddenEdgesDrawingViewStyleType",
+    "shaded_edges": "ShadedVisibleEdgesDrawingViewStyleType",
 }
 _DIM_STRATEGY_MAP = {
     "overall": "OverallDimensionStrategyType",
@@ -76,19 +78,33 @@ _HOLE_PREF_MAP = {
     "thread": "ThreadNoteOnlyHolePreferencesType",
     "none": "NoHoleAnnotationsHolePreferencesType",
 }
-_CENTER_LINE_MAP = {
-    "off": "OffCenterLineDisplayType", "cylindrical": "AllCylindricalCenterLineDisplayType",
-    "holes": "AllHolesCenterLineDisplayType",
-}
-_CENTER_MARK_MAP = {
-    "off": "OffCenterMarkDisplayType", "holes": "AllHolesCenterMarkDisplayType",
-    "fillets": "AllFilletsCenterMarkDisplayType", "edges": "AllCircularEdgesCenterMarkDisplayType",
-    "punches": "AllPunchesCenterMarkDisplayType",
-}
 _TANGENT_EDGE_MAP = {
-    "off": "OffTangentEdgeDisplayType", "on": "OnTangentEdgeDisplayType",
-    "partial": "ForeshortenedTangentEdgeDisplayType",
+    "off": "OffTangentEdgeDisplayType", "full_length": "FullLengthTangentEdgeDisplayType",
+    "shortened": "ShortenedTangentEdgeDisplayType",
 }
+_STANDARD_MAP = {"iso": "ISODrawingStandardType", "asme": "ASMEDrawingStandardType"}
+_UNITS_MAP = {"mm": "MillimeterDrawingUnitType", "inch": "InchDrawingUnitType"}
+_ORIENTATION_MAP = {"landscape": "LandscapeSheetOrientationType",
+                    "portrait": "PortraitSheetOrientationType"}
+
+# Every adsk.drawing enum member this tool sets: input name -> (family, resolved value -> member name).
+# A value the map does not carry ('default', or auto_dimension 'off') is not a request.
+_ENUM_INPUTS = (
+    ("standard", "DrawingStandardTypes", _STANDARD_MAP),
+    ("units", "DrawingUnitTypes", _UNITS_MAP),
+    ("orientation", "SheetOrientationTypes", _ORIENTATION_MAP),
+    ("view_style", "DrawingViewStyleTypes", _VIEW_STYLE_MAP),
+    ("auto_dimension", "DimensionStrategyTypes", _DIM_STRATEGY_MAP),
+    ("hole_annotations", "HolePreferencesTypes", _HOLE_PREF_MAP),
+    ("parts_list_location", "TableLocationTypes", _TABLE_LOCATION_MAP),
+    ("tangent_edges", "TangentEdgeDisplayTypes", _TANGENT_EDGE_MAP),
+)
+
+# center_line / center_mark have no enum to reach: adsk.drawing carries no CenterLineDisplayTypes or
+# CenterMarkDisplayTypes family (the namespace holds CenterLineOptions / CenterMarkOptions classes
+# instead), so a non-default request is refused rather than dropped by a best-effort setter.
+_UNREACHABLE_INPUTS = {"center_line": ("CenterLineDisplayTypes", "CenterLineOptions"),
+                       "center_mark": ("CenterMarkDisplayTypes", "CenterMarkOptions")}
 _STANDARD = _inputs.Choice("standard", ["iso", "asme"], default="iso",
                            description="ISO (first-angle) or ASME (third-angle).")
 _UNITS = _inputs.Choice("units", ["mm", "inch"], default="mm",
@@ -107,9 +123,12 @@ _SHEET_SCOPE = _inputs.Choice("sheet_scope", ["all_levels", "first_level"], defa
 _AUTO_DIMENSION = _inputs.Choice("auto_dimension", ["default", "off", "overall", "automatic", "baseline", "chain"],
                                  default="default",
                                  description="'off' disables it; else sets placement. Default: on, overall.")
-_VIEW_STYLE = _inputs.Choice("view_style", ["default", "visible", "hidden", "shaded", "shaded_edges"],
+_VIEW_STYLE = _inputs.Choice("view_style",
+                             ["default", "visible", "hidden", "shaded_hidden", "shaded_edges"],
                              default="default",
                              description="View rendering style.")
+_CREATION_MODE = _inputs.Choice("creation_mode", ["automatic", "manual"], default="automatic",
+                             description="'manual' needs a template_file.")
 _PARTS_LIST_LOCATION = _inputs.Choice("parts_list_location",
                              ["default", "top_left", "top_right", "bottom_left", "bottom_right"],
                              default="default",
@@ -124,7 +143,8 @@ _CENTER_MARK = _inputs.Choice("center_mark",
                              ["default", "off", "holes", "fillets", "edges", "punches"],
                              default="default",
                              description="Center marks.")
-_TANGENT_EDGES = _inputs.Choice("tangent_edges", ["default", "off", "on", "partial"], default="default",
+_TANGENT_EDGES = _inputs.Choice("tangent_edges", ["default", "off", "full_length", "shortened"],
+                             default="default",
                              description="Tangent-edge display.")
 
 
@@ -140,18 +160,42 @@ def _source_datafile(design):
     return df, None
 
 
-def _apply_input_settings(di, cfg, template_data_file=None):
+# The gate Fusion enforces on manual creation, in its own words. The failure was measured escaping
+# an enclosing try/except inside sys_execute_script, so the tool refuses the mode up front rather
+# than calling into it.
+_MANUAL_GATE = "Manual drawing creation requires a template with view placeholder information."
+
+
+def _resolve_members(cfg):
+    """Every enum member this tool sets, as {input name: member}, or (None, error). Resolved BEFORE
+    the create transaction: a family or member this Fusion version does not carry is reported as a
+    failure naming the input, never a setting dropped inside safe() while the call reports success."""
+    members = {}
+    for input_name, family, member_map in _ENUM_INPUTS:
+        value = cfg[input_name]
+        name = member_map.get(value)
+        if not name:
+            continue
+        fam = safe(lambda f=family: getattr(adsk.drawing, f))
+        member = None if fam is None else safe(lambda f=fam, n=name: getattr(f, n))
+        if member is None:
+            missing = f"adsk.drawing.{family}" if fam is None else f"{family}.{name}"
+            return None, (f"{input_name} '{value}' needs {missing}, which is not available on this "
+                          f"Fusion version - the setting could not be applied, so no drawing was "
+                          f"created. Retry with a different {input_name}.")
+        members[input_name] = member
+    return members, None
+
+
+def _apply_input_settings(di, cfg, members, template_data_file=None):
     """Best-effort configuration of the CreateDrawingInput + its automationPreferences tree. Each setter
     is wrapped in safe() (a property missing on this Fusion version must not sink the create); the
-    requested values are echoed to the caller as 'settings_requested' rather than read back.
-    'template_data_file' is a resolved DataFile (not JSON-safe, so it stays out of cfg)."""
+    requested values are echoed to the caller as 'settings_requested' rather than read back. 'members'
+    is _resolve_members' {input name: enum member} and 'template_data_file' a resolved DataFile -
+    neither is JSON-safe, so both stay out of cfg."""
     d = adsk.drawing
-    safe(lambda: setattr(di, "standard",
-         d.DrawingStandardTypes.ASMEDrawingStandardType if cfg["standard"] == "asme"
-         else d.DrawingStandardTypes.ISODrawingStandardType))
-    safe(lambda: setattr(di, "units",
-         d.DrawingUnitTypes.InchDrawingUnitType if cfg["units"] == "inch"
-         else d.DrawingUnitTypes.MillimeterDrawingUnitType))
+    safe(lambda: setattr(di, "standard", members["standard"]))
+    safe(lambda: setattr(di, "units", members["units"]))
     safe(lambda: setattr(di, "content",
          d.DrawingContentTypes.VisibleOnlyDrawingContentType if cfg["content"] == "visible"
          else d.DrawingContentTypes.FullAssemblyDrawingContentType))
@@ -164,9 +208,7 @@ def _apply_input_settings(di, cfg, template_data_file=None):
     elif cfg["sheet_size"] != "default":
         member = _SHEET_SIZE_MAP[cfg["sheet_size"]][1]
         safe(lambda m=member: setattr(di, "sheetSize", getattr(d.SheetSizes, m)))
-    safe(lambda: setattr(di, "orientationType",
-         d.SheetOrientationTypes.PortraitSheetOrientationType if cfg["orientation"] == "portrait"
-         else d.SheetOrientationTypes.LandscapeSheetOrientationType))
+    safe(lambda: setattr(di, "orientationType", members["orientation"]))
     safe(lambda: setattr(di, "sheetCreationType",
          d.SheetCreationTypes.FirstLevelOnlySheetCreationType if cfg["sheet_scope"] == "first_level"
          else d.SheetCreationTypes.AllLevelsSheetCreationType))
@@ -192,24 +234,22 @@ def _apply_input_settings(di, cfg, template_data_file=None):
 
     # Apply the requested strategy/hole-annotation to every sheet type's autoDimensionPreferences, not
     # just componentPreferences.
-    strat_member = _DIM_STRATEGY_MAP.get(cfg["auto_dimension"])
-    hole_member = _HOLE_PREF_MAP.get(cfg["hole_annotations"])
-    if strat_member or hole_member:
+    strat_member = members.get("auto_dimension")
+    hole_member = members.get("hole_annotations")
+    if strat_member is not None or hole_member is not None:
         for path in _AUTODIM_PATHS:
             prefs = safe(lambda p=path: getattr(di.automationPreferences, p))
             node = safe(lambda pr=prefs: pr.autoDimensionPreferences) if prefs is not None else None
             if node is None:
                 continue
-            if strat_member:
-                safe(lambda n=node, m=strat_member: setattr(
-                    n, "dimensionStrategyType", getattr(d.DimensionStrategyTypes, m)))
-            if hole_member:
-                safe(lambda n=node, m=hole_member: setattr(
-                    n, "holePreferencesType", getattr(d.HolePreferencesTypes, m)))
+            if strat_member is not None:
+                safe(lambda n=node, m=strat_member: setattr(n, "dimensionStrategyType", m))
+            if hole_member is not None:
+                safe(lambda n=node, m=hole_member: setattr(n, "holePreferencesType", m))
 
     # Parts-list (BOM) inclusion/placement on both main- and sub-assembly sheet prefs (iso + orthogonal).
-    loc_member = _TABLE_LOCATION_MAP.get(cfg["parts_list_location"])
-    if cfg["parts_list"] is not None or loc_member:
+    loc_member = members.get("parts_list_location")
+    if cfg["parts_list"] is not None or loc_member is not None:
         for path in ("mainAssemblyPreferences", "subAssemblyPreferences"):
             prefs = safe(lambda p=path: getattr(di.automationPreferences, p))
             if prefs is None:
@@ -220,32 +260,23 @@ def _apply_input_settings(di, cfg, template_data_file=None):
                     continue
                 if cfg["parts_list"] is not None:
                     safe(lambda n=node: setattr(n, "isPartsListIncluded", cfg["parts_list"]))
-                if loc_member:
-                    safe(lambda n=node, m=loc_member: setattr(
-                        n, "partsListLocationType", getattr(d.TableLocationTypes, m)))
+                if loc_member is not None:
+                    safe(lambda n=node, m=loc_member: setattr(n, "partsListLocationType", m))
 
-    # Per-view drafting display, on the same objects already reached for .style.
-    style_member = _VIEW_STYLE_MAP.get(cfg["view_style"])
-    cl_member = _CENTER_LINE_MAP.get(cfg["center_line"])
-    cmk_member = _CENTER_MARK_MAP.get(cfg["center_mark"])
-    te_member = _TANGENT_EDGE_MAP.get(cfg["tangent_edges"])
-    if (style_member or cl_member or cmk_member or te_member
+    # Per-view drafting display, on the same objects already reached for .style. A resolved enum value
+    # can be falsy, so every member is tested against None.
+    style_member = members.get("view_style")
+    te_member = members.get("tangent_edges")
+    if (style_member is not None or te_member is not None
             or cfg["show_interference_edges"] is not None or cfg["show_thread_edges"] is not None):
         for path in _VIEWSTYLE_PATHS:
             node = safe(lambda p=path: getattr(di.automationPreferences, p).drawingViewPreferences)
             if node is None:
                 continue
-            if style_member:
-                safe(lambda n=node, m=style_member: setattr(n, "style", getattr(d.DrawingViewStyleTypes, m)))
-            if cl_member:
-                safe(lambda n=node, m=cl_member: setattr(
-                    n, "centerLineType", getattr(d.CenterLineDisplayTypes, m)))
-            if cmk_member:
-                safe(lambda n=node, m=cmk_member: setattr(
-                    n, "centerMarkType", getattr(d.CenterMarkDisplayTypes, m)))
-            if te_member:
-                safe(lambda n=node, m=te_member: setattr(
-                    n, "tangentEdgesType", getattr(d.TangentEdgeDisplayTypes, m)))
+            if style_member is not None:
+                safe(lambda n=node, m=style_member: setattr(n, "style", m))
+            if te_member is not None:
+                safe(lambda n=node, m=te_member: setattr(n, "tangentEdgesType", m))
             if cfg["show_interference_edges"] is not None:
                 safe(lambda n=node: setattr(n, "isShowInterferenceEdges", cfg["show_interference_edges"]))
             if cfg["show_thread_edges"] is not None:
@@ -265,7 +296,8 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
             custom_width_mm: float = None, custom_height_mm: float = None,
             hole_annotations: str = "default", center_line: str = "default",
             center_mark: str = "default", tangent_edges: str = "default",
-            show_interference_edges: bool = None, show_thread_edges: bool = None) -> dict:
+            show_interference_edges: bool = None, show_thread_edges: bool = None,
+            creation_mode: str = "automatic") -> dict:
     """See TOOL_DESCRIPTION."""
     std, e = _STANDARD.resolve(standard)
     if e:
@@ -306,6 +338,9 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
     te_v, e = _TANGENT_EDGES.resolve(tangent_edges)
     if e:
         return error(e)
+    mode_v, e = _CREATION_MODE.resolve(creation_mode)
+    if e:
+        return error(e)
 
     # Guard the two real constraints the API silently ignores rather than reports.
     if size_v not in ("default", "custom"):
@@ -344,6 +379,11 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
                          "Pass a DataFile id/versionId or a fusionWebURL from data_get / "
                          "design_get(include=['tree']).")
 
+    if mode_v == "manual" and template_df is None:
+        return error(f"creation_mode 'manual' requires template_file, which was empty. {_MANUAL_GATE} "
+                     "This call stops here without creating anything. Pass the template's DataFile "
+                     "id/URL as template_file, or use creation_mode 'automatic'.")
+
     types_v = None
     if sheet_types is not None:
         if not isinstance(sheet_types, (list, tuple)):
@@ -355,26 +395,16 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
                          f"{', '.join(_SHEET_TYPE_ATTR)}.")
         types_v = list(sheet_types)
 
-    design = _common.design()
-    if not design:
-        return error("No active design to draw. Open or create a design first (see doc_new), then retry.")
-
-    src, serr = _source_datafile(design)
-    if serr:
-        return error(serr)
-
-    dm = safe(lambda: adsk.drawing.DrawingManager.get())
-    if not dm:
-        return error("DrawingManager is unavailable in this Fusion session - cannot create a drawing.")
-
-    try:
-        di = dm.createDrawingInput(src, adsk.drawing.DrawingCreationModes.AutomaticDrawingCreationMode)
-    except Exception as ex:
-        return error(f"createDrawingInput failed: {ex}")
-    if not di:
-        return error("createDrawingInput returned null - Fusion could not start a drawing from this design.")
+    for input_name, value in (("center_line", cl_v), ("center_mark", cmk_v)):
+        if value != "default":
+            family, present = _UNREACHABLE_INPUTS[input_name]
+            return error(f"{input_name} '{value}' cannot be applied: adsk.drawing has no {family} enum "
+                         f"on this Fusion version (the namespace carries {present} classes instead), so "
+                         f"the setting has no API to reach and no drawing was created. Leave "
+                         f"{input_name} at 'default'.")
 
     cfg = {
+        "creation_mode": mode_v,
         "standard": std, "units": units_v, "content": content_v, "isometric": bool(isometric),
         "sheet_size": size_v, "orientation": orient_v, "sheet_scope": scope_v,
         "sheet_types": types_v, "auto_dimension": dim_v, "omit_fasteners": bool(omit_fasteners),
@@ -389,7 +419,34 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
                                      else None),
         "show_thread_edges": (bool(show_thread_edges) if show_thread_edges is not None else None),
     }
-    _apply_input_settings(di, cfg, template_data_file=template_df)
+
+    design = _common.design()
+    if not design:
+        return error("No active design to draw. Open or create a design first (see doc_new), then retry.")
+
+    src, serr = _source_datafile(design)
+    if serr:
+        return error(serr)
+
+    dm = safe(lambda: adsk.drawing.DrawingManager.get())
+    if not dm:
+        return error("DrawingManager is unavailable in this Fusion session - cannot create a drawing.")
+
+    members, e = _resolve_members(cfg)
+    if e:
+        return error(e)
+
+    modes = adsk.drawing.DrawingCreationModes
+    mode_member = (modes.ManualDrawingCreationMode if mode_v == "manual"
+                   else modes.AutomaticDrawingCreationMode)
+    try:
+        di = dm.createDrawingInput(src, mode_member)
+    except Exception as ex:
+        return error(f"createDrawingInput failed: {ex}")
+    if not di:
+        return error("createDrawingInput returned null - Fusion could not start a drawing from this design.")
+
+    _apply_input_settings(di, cfg, members, template_data_file=template_df)
 
     try:
         df = dm.createDrawing(di)
@@ -403,6 +460,16 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         return error("createDrawing returned a drawing DataFile but no file_id could be read from it, "
                      "so the created drawing cannot be located for export. Treating this as a failure.")
 
+    note = ("Drawing created as a CLOUD file (NOT opened). Opening a never-reviewed drawing surfaces "
+            "an interactive view pane that blocks a headless open - open it ONCE in the Fusion UI to "
+            "review the layout and save; after that doc_open and drawing_export (PDF) work "
+            "headlessly. settings_requested were applied best-effort to the input (they configure "
+            "creation and are not read back).")
+    if mode_v == "automatic":
+        note += (" Manual dimensions/annotations and custom title blocks beyond the automatic "
+                 "layout are not placed by this tool.")
+    else:
+        note += f" creation_mode was 'manual', which Fusion gates on the template: {_MANUAL_GATE}"
     return ok({
         "created": True,
         "drawing_name": safe(lambda: df.name),
@@ -410,21 +477,15 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         "version_id": safe(lambda: df.versionId),
         "file_extension": safe(lambda: df.fileExtension),
         "settings_requested": cfg,
-        "note": ("Drawing created as a CLOUD file (NOT opened). Opening a never-reviewed auto-drawing "
-                 "surfaces an interactive view pane that blocks a headless open - open it ONCE in the "
-                 "Fusion UI to review the auto-layout and save; after that doc_open and drawing_export "
-                 "(PDF) work headlessly. settings_requested were applied best-effort to the generator "
-                 "(they configure generation and are not read back). Manual dimensions/annotations and "
-                 "custom title blocks beyond the automatic layout are not placed by this tool."),
+        "note": note,
     })
 
 
 TOOL_DESCRIPTION = (
-    "Create a 2D drawing from the active design via Fusion's automatic generator (the only "
-    "creation mode the API supports). Configures standard/units/content, sheet size/orientation/"
-    "scope/types, auto-dimensioning + hole/thread annotation style (all sheet types), fastener "
-    "omission, per-view drafting display, an isometric view, an assembly parts list (BOM), and an "
-    "optional create-from-template mode. Source design must be cloud-saved. Result is a CLOUD "
+    "Create a 2D drawing from the active design via Fusion's automatic generator. Configures the "
+    "generator's sheet, annotation and view-display preferences. Manual creation_mode is refused "
+    "without a template_file carrying view placeholders. Source design must be cloud-saved. "
+    "Result is a CLOUD "
     "file, NOT opened - file_id (lineage URN) returned. Open it ONCE in the Fusion UI before "
     "doc_open/drawing_export can run headlessly (an unreviewed auto-drawing blocks headless open). "
     "Per-view placement/scale is not API-controllable. This call can run long; it waits rather "
@@ -455,6 +516,7 @@ tool = (
     .add_input_property("parts_list", {"type": "boolean",
             "description": "Include a parts list (BOM) on assembly sheets."})
     .add_input_property(*_PARTS_LIST_LOCATION.as_property())
+    .add_input_property(*_CREATION_MODE.as_property())
     .add_input_property("template_file", {"type": "string",
             "description": "DataFile id/URL for a drawing template (doc_open idiom); empty = scratch."})
     .add_input_property("custom_width_mm", {"type": "number",

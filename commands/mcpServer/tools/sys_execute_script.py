@@ -6,8 +6,9 @@
 """High-risk MCP tool: execute arbitrary Fusion API Python in the live session.
 
 The general "go do X" escape hatch. NOT registered unless the user explicitly enables it
-(mcpServer settings -> allow_execute_api_script, default False). A script error is NOT auto-rolled-back
-- partial changes can commit as one undo step; verify state afterward.
+(mcpServer settings -> allow_execute_api_script, default False). MEASURED: an UNCAUGHT raise of
+either kind rolls the whole script back, printed output with it. Catching an error is no guarantee
+the earlier work survived either - some Fusion API errors take the command down even when caught.
 """
 
 import os
@@ -48,10 +49,11 @@ def handler(script: str) -> dict:
         # passed inside double quotes, so spaces in the path are preserved.
         run_path = temp_file.replace('\\', '/')
 
-        # Group the script's changes into ONE timeline/undo step via a transaction. NOTE: this does
-        # NOT make it atomic - an in-script exception is swallowed by Python.Run and committed as one
-        # undo step, it does NOT auto-roll-back (see the module docstring's CAVEAT). "Grouped+undoable",
-        # not "rolls back on error".
+        # Group the script's changes into ONE timeline/undo step via a transaction. Grouping is all
+        # it buys - the script cannot control what survives: measured, an UNCAUGHT raise takes the
+        # whole command down and its earlier mutations with it, and CATCHING an API error is no
+        # guarantee either (a caught "Bad index parameter" left its mutation standing, while a caught
+        # pmiSettings raise rolled three fresh annotations back).
         try:
             transacted_doc = app.activeDocument
         except Exception:
@@ -74,7 +76,12 @@ def handler(script: str) -> dict:
 
         result = {"isError": False, "message": "Script executed successfully"}
         if res:
-            result["content"] = [{"type": "text", "text": res}]
+            # Python.Run's return text embeds the accumulated TextCommands console log (the same
+            # noise _extract_script_error strips on the failure path) - strip it here too, or every
+            # success payload carries one "MCP calling tool: ..." line per call since the last run.
+            cleaned = re.sub(r"\n{3,}", "\n\n", _CONSOLE_NOISE.sub("", res)).strip()
+            if cleaned:
+                result["content"] = [{"type": "text", "text": cleaned}]
         return result
 
     except Exception as e:
@@ -142,13 +149,14 @@ TOOL_DESCRIPTION = (
     "- The script MUST define a function `def run(context):` which is the entry point.\n"
     "- DO NOT show any modal UI (no messageBox / no input dialogs) - modal windows "
     "pause script execution and the agent cannot dismiss them.\n"
-    "- Let exceptions raise rather than swallowing them, so the error text is returned. "
-    "NOTE: the script's changes are grouped as ONE undo step but are NOT guaranteed to "
-    "auto-roll-back on error - a partial change can commit, so verify state afterward and "
-    "undo manually if needed.\n"
+    "- Let exceptions raise rather than swallowing them, so the error text is returned.\n"
+    "- ONE mutation per call is the safe shape: a script gets no per-item failure isolation, so a "
+    "bulk edit that half-fails cannot report WHICH item failed. An UNCAUGHT raise (Fusion API error "
+    "or plain Python) always rolls the WHOLE script back, earlier mutations and printed output with "
+    "it - and catching an error is NO GUARANTEE the earlier work survived: some Fusion API errors "
+    "take the whole command down even when caught. Batch work belongs in separate calls.\n"
     "- Use print() to return values/information; printed output is included in the result.\n\n"
-    "Before editing a model, consider reading its state first (e.g. workspace_orient). "
-    "After changes, verify the result."
+    "Read the state first (e.g. workspace_orient), and verify it again after."
 )
 
 tool = Tool.create_with_string_input(

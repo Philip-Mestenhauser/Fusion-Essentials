@@ -1,26 +1,31 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Set the machining geometry (and optional heights) on a CAM operation via find_geometry handles.
-Two selection mechanisms exist: curve chains (contours/pockets/boundaries) and direct
-object-lists (drill hole faces); heights are a mode+offset parameter group."""
+"""Set the machining geometry (and optional heights) on a CAM operation.
+Two selection mechanisms exist: curve selections (contours / pockets / silhouettes / sketches /
+recognized pockets) and direct object-lists (drill hole faces); heights are a mode+offset
+parameter group."""
+
+import adsk.cam
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, scale
+from ._common import ok, error, safe, scale, set_verified
 from ._cam_common import get_cam, resolve_cam_node
 from . import _inputs
 from . import cam_generate  # its _GENERATIONS registry keeps a launched Future alive (see below)
 
-# selection kind -> (CurveSelections builder method, geometry requirement) for the CURVE (A) family.
+# The selection kinds. All but 'holes' are the CURVE (A) family - one CurveSelections builder each;
 # 'holes' is the DIRECT (B) family and handled separately.
 _CHAIN = "chain"
 _POCKET = "pocket"
 _FACE = "face"
 _SILHOUETTE = "silhouette"
+_SKETCH = "sketch"
+_POCKET_RECOGNITION = "pocket_recognition"
 _HOLES = "holes"
-_SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _HOLES)
+_SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION, _HOLES)
 
 # Which operation parameter carries the selection, by strategy family. The curve param is whichever of
 # these the op actually has; we probe in order. (machiningBoundarySel = 3D adaptive/parallel boundary.)
@@ -34,7 +39,51 @@ _CURVE_BUILDER = {
     _POCKET: "createNewPocketSelection",
     _FACE: "createNewFaceContourSelection",
     _SILHOUETTE: "createNewSilhouetteSelection",
+    _SKETCH: "createNewSketchSelection",
+    _POCKET_RECOGNITION: "createNewPocketRecognitionSelection",
 }
+
+# Each selection class states the ONE object type its inputGeometry takes, so the input that carries
+# the geometry differs by kind: ChainSelection takes B-Rep edges, FaceContour/Pocket take BRepFace,
+# Silhouette and PocketRecognition take BRepBody, SketchSelection takes ENTIRE sketches (not curves,
+# not profiles). A kind fed through the wrong input is refused rather than resolved to the wrong type.
+_GEOMETRY_INPUT = {_CHAIN: "handles", _POCKET: "handles", _FACE: "handles", _HOLES: "handles",
+                   _SILHOUETTE: "bodies", _POCKET_RECOGNITION: "bodies", _SKETCH: "sketches"}
+_HANDLE_REQUIRE = {_CHAIN: "edge", _POCKET: "face", _FACE: "face", _HOLES: "face"}
+_BODY_SELECTIONS = (_SILHOUETTE, _POCKET_RECOGNITION)
+# loopType/sideType exist on FaceContourSelection, SilhouetteSelection and SketchSelection only.
+_LOOP_SIDE_SELECTIONS = (_FACE, _SILHOUETTE, _SKETCH)
+
+_LOOP_TYPE = {"all": "AllLoops", "outside": "OnlyOutsideLoops", "inside": "OnlyInsideLoops"}
+_SIDE_TYPE = {"always_outside": "AlwaysOutsideSideType", "always_inside": "AlwaysInsideSideType",
+              "start_outside": "StartOutsideSideType", "start_inside": "StartInsideSideType"}
+
+LOOP_TYPE = _inputs.Choice("loop_type", list(_LOOP_TYPE),
+                           description="face/silhouette/sketch: which loops to cut.")
+SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE),
+                           description="face/silhouette/sketch: loop cut order.")
+
+# pocket_recognition search criteria -> the PocketRecognitionSelection property each sets.
+_POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
+                          ("min_corner_radius", "minimumCornerRadius"),
+                          ("max_corner_radius", "maximumCornerRadius"),
+                          ("min_depth", "minimumPocketDepth"),
+                          ("max_depth", "maximumPocketDepth"))
+_POCKET_FILTER_KEYS = ("holes",) + tuple(k for k, _ in _POCKET_FILTER_LENGTHS)
+
+# Which selection kind each optional knob belongs to - the property simply does not exist on the
+# other classes, so passing one is a caller error, not something to drop silently.
+_KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
+                    "loop_type": _LOOP_SIDE_SELECTIONS, "side_type": _LOOP_SIDE_SELECTIONS,
+                    "pocket_filter": (_POCKET_RECOGNITION,),
+                    "min_diameter": (_HOLES,), "max_diameter": (_HOLES,)}
+
+
+# The geometry inputs the body/sketch kinds resolve through - one instance each, shared by the
+# schema and the resolver so the wire contract and the resolution cannot describe different things.
+BODIES = _inputs.BodyRefList("bodies", description="silhouette/pocket_recognition: what to machine.")
+SKETCHES = _inputs.SketchRefList("sketches", description="sketch: what to machine.", required=True)
+
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
 
@@ -59,15 +108,173 @@ def _launch_generation(cam, op, op_name):
         return None, str(e)
     if not fut:
         return None, "generateToolpath returned no future."
-    handle, _total = cam_generate.register_future(fut, f"operation '{op_name}'", "operation", False)
+    handle, _total = cam_generate.register_future(fut, f"operation '{op_name}'", "operation", False,
+                                                  target_name=op_name)
     return handle, None
+
+
+# ── input guards ─────────────────────────────────────────────────────────────
+
+def _knob_guard(selection, knobs):
+    """The error for a knob passed to a selection kind whose class does not carry that property, or
+    None. Silently dropping it would leave the caller believing an option applied that never did."""
+    for key in sorted(knobs):
+        if knobs[key] is None:
+            continue
+        kinds = _KNOB_SELECTIONS[key]
+        if selection not in kinds:
+            return (f"'{key}' does not apply to the '{selection}' selection - it is a "
+                    f"{'/'.join(kinds)} option. Drop it, or change 'selection'.")
+    return None
+
+
+def _resolve_geometry(selection, handles, bodies, sketches):
+    """(entities, error) - the live objects this selection kind's inputGeometry takes, resolved
+    through the input the kind uses. A body kind with no bodies resolves to an empty list: that is
+    the setup-models form, switched on by isSetupModelSelected."""
+    want = _GEOMETRY_INPUT[selection]
+    for name, raw in (("handles", handles), ("bodies", bodies), ("sketches", sketches)):
+        if name != want and raw not in (None, "", []):
+            return None, (f"the '{selection}' selection takes its geometry from '{want}', not "
+                          f"'{name}'. Move the values to '{want}', or change 'selection'.")
+    if want == "bodies":
+        return BODIES.resolve(bodies)
+    if want == "sketches":
+        return SKETCHES.resolve(sketches)
+    return _inputs.GeometryHandleList("handles", require=_HANDLE_REQUIRE[selection],
+                                      required=True).resolve(handles)
 
 
 # ── selection appliers ───────────────────────────────────────────────────────
 
-def _apply_curve(op, selection, entities, is_open, reverted):
-    """Mechanism (A): build a CurveSelection of the given kind from `entities` and apply it. Returns
-    (selection_count, None) or (None, error)."""
+def _set_knob(sel, prop, value, label):
+    """Set ONE property on a curve selection and CONFIRM it took, returning WHAT IT READS BACK - the
+    only number a payload may publish, since the value written and the value kept are not the same
+    claim. A number is compared within 1e-9 (a stored double need not echo the assigned literal bit
+    for bit); everything else goes through set_verified, which catches the SWIG proxy accepting an
+    assignment to a name it does not define. Returns (read_back, '') or (None, error)."""
+    if isinstance(value, float):
+        try:
+            setattr(sel, prop, value)          # MUTATION
+        except Exception as e:
+            return None, f"Could not set {label}: {e}"
+        back = safe(lambda: getattr(sel, prop))
+        if back is None or abs(float(back) - value) > 1e-9:
+            return None, (f"Setting {label} did not take - the selection reads back {back}, so the "
+                          "operation would run on its default criteria.")
+        return back, ""
+    err = set_verified(sel, prop, value, label, "the selection")
+    if err:
+        return None, err
+    return safe(lambda: getattr(sel, prop)), ""
+
+
+def _apply_pocket_filter(sel, flt, factor, extra):
+    """Set the pocket-recognition search criteria, publishing what each one READS BACK. Returns an
+    error string, or None."""
+    if not flt:
+        return None
+    if not isinstance(flt, dict):
+        return f"'pocket_filter' must be an object with the keys {', '.join(_POCKET_FILTER_KEYS)}."
+    unknown = sorted(k for k in flt if k not in _POCKET_FILTER_KEYS)
+    if unknown:
+        return (f"'pocket_filter' has no key(s) {', '.join(unknown)} - it takes "
+                f"{', '.join(_POCKET_FILTER_KEYS)}.")
+    holes = flt.get("holes")
+    if flt.get("min_hole_diameter") is not None and not holes:
+        return ("'pocket_filter.min_hole_diameter' needs holes=true - the API accepts the hole "
+                "diameter bound only while holes are being interpreted as pockets.")
+    applied = {}
+    # areHolesIncluded GATES minimumHoleDiameter, so it is set first.
+    if holes is not None:
+        back, err = _set_knob(sel, "areHolesIncluded", bool(holes), "pocket_filter.holes")
+        if err:
+            return err
+        applied["holes"] = bool(back)
+    for key, prop in _POCKET_FILTER_LENGTHS:
+        v = flt.get(key)
+        if v is None:
+            continue
+        try:
+            scaled = float(v) * factor
+        except (TypeError, ValueError):
+            return f"'pocket_filter.{key}' must be a number; got '{v}'."
+        back, err = _set_knob(sel, prop, scaled, f"pocket_filter.{key}")
+        if err:
+            return err
+        applied[key] = round(float(back), 6)
+    if applied:
+        extra["pocket_filter_applied"] = applied
+    return None
+
+
+def _apply_knobs(sel, selection, entities, knobs, factor, extra):
+    """Set the per-selection properties this kind carries, each confirmed by a read-back. Returns an
+    error string, or None."""
+    if selection == _CHAIN:
+        for key, prop in (("is_open", "isOpen"), ("reverted", "isReverted")):
+            if knobs.get(key) is not None:
+                _back, err = _set_knob(sel, prop, bool(knobs[key]), key)
+                if err:
+                    return err
+    if selection in _BODY_SELECTIONS:
+        # With no bodies of its own the selection runs against the bodies set as the setup's models -
+        # a named flag, set explicitly rather than left to a default.
+        back, err = _set_knob(sel, "isSetupModelSelected", not entities, "isSetupModelSelected")
+        if err:
+            return err
+        extra["setup_models_selected"] = bool(back)
+    if selection in _LOOP_SIDE_SELECTIONS:
+        for key, prop, table, enum in (("loop_type", "loopType", _LOOP_TYPE, adsk.cam.LoopTypes),
+                                       ("side_type", "sideType", _SIDE_TYPE, adsk.cam.SideTypes)):
+            v = knobs.get(key)
+            if v is not None:
+                _back, err = _set_knob(sel, prop, getattr(enum, table[v], None), key)
+                if err:
+                    return err
+                extra[key] = v
+    if selection == _POCKET_RECOGNITION:
+        return _apply_pocket_filter(sel, knobs.get("pocket_filter"), factor, extra)
+    return None
+
+
+def _read_back(cs, selection):
+    """What the operation holds AFTER applyCurveSelections: the collection count, what Fusion
+    RESOLVED off the selection (outputGeometry's Curve3DPaths and their segments, plus the entity set
+    `value` reports - which a same-plane/setup-model expansion can grow beyond the input), and the
+    selection's own error/warning channel. Returns (record, fusion_error_or_None)."""
+    count = (safe(lambda: cs.count, 0) or 0) if cs is not None else 0
+    record = {"selections": count}
+    sel = safe(lambda: cs.item(0)) if count else None
+    if sel is None:
+        return record, None
+    resolved = {}
+    paths = safe(lambda: list(sel.outputGeometry))
+    if paths is not None:
+        resolved["curve_paths"] = len(paths)
+        resolved["curve_segments"] = sum((safe(lambda p=p: p.count, 0) or 0) for p in paths)
+    value = safe(lambda: list(sel.value))
+    if value is not None:
+        resolved["entities"] = len(value)
+    if resolved:
+        record["resolved"] = resolved
+    warning = (safe(lambda: sel.warning) or "").strip()
+    if safe(lambda: sel.hasWarning, False) and warning:
+        record["selection_warning"] = warning
+    if safe(lambda: sel.hasError, False):
+        reason = (safe(lambda: sel.error) or "").strip()
+        # The collection was CLEARED before this selection was built, so the operation is not back on
+        # what it held before the call - the caller has to re-select, not just retry differently.
+        return record, (f"Fusion rejected the {selection} selection: "
+                        f"{reason or 'the selection reports an error with no message'}. The "
+                        "operation's previous selection was cleared before this one was applied, so "
+                        "it now holds only the rejected selection - select its geometry again.")
+    return record, None
+
+
+def _apply_curve(op, selection, entities, knobs, factor, extra):
+    """Mechanism (A): build a CurveSelection of the given kind from `entities`, apply it, and read the
+    applied selection back. Returns (record, None) or (None, error)."""
     p = _curve_param(op)
     if p is None:
         return None, (f"Operation '{safe(lambda: op.name)}' has no curve-selection parameter "
@@ -86,17 +293,14 @@ def _apply_curve(op, selection, entities, is_open, reverted):
         sel.inputGeometry = entities          # MUTATION
     except Exception as e:
         return None, f"Could not set inputGeometry for the {selection} selection: {e}"
-    # chain-only knobs
-    if selection == _CHAIN:
-        if is_open is not None:
-            safe(lambda: setattr(sel, "isOpen", bool(is_open)))
-        if reverted is not None:
-            safe(lambda: setattr(sel, "isReverted", bool(reverted)))
+    kerr = _apply_knobs(sel, selection, entities, knobs, factor, extra)
+    if kerr:
+        return None, kerr
     try:
         pv.applyCurveSelections(cs)           # MUTATION
     except Exception as e:
         return None, f"applyCurveSelections failed: {e}"
-    return safe(lambda: pv.getCurveSelections().count, 0) or 0, None
+    return _read_back(safe(lambda: pv.getCurveSelections()), selection)
 
 
 def _hole_param(op):
@@ -165,8 +369,9 @@ def _set_height(op, which, mode, offset):
     return None
 
 
-def handler(operation: str = "", selection: str = "", handles=None,
+def handler(operation: str = "", selection: str = "", handles=None, bodies=None, sketches=None,
             is_open: bool = None, reverted: bool = None,
+            loop_type: str = None, side_type: str = None, pocket_filter=None,
             min_diameter: float = None, max_diameter: float = None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
@@ -176,6 +381,25 @@ def handler(operation: str = "", selection: str = "", handles=None,
     if selection not in _SELECTIONS:
         return error(f"selection must be one of {', '.join(_SELECTIONS)}; got '{selection}'.")
 
+    knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
+             "min_diameter": min_diameter, "max_diameter": max_diameter}
+    for kind in (LOOP_TYPE, SIDE_TYPE):
+        raw = loop_type if kind is LOOP_TYPE else side_type
+        if raw is None:
+            knobs[kind.name] = None
+            continue
+        value, kerr = kind.resolve(raw)
+        if kerr:
+            return error(kerr)
+        knobs[kind.name] = value
+    kerr = _knob_guard(selection, knobs)
+    if kerr:
+        return error(kerr)
+
+    factor = scale(units)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Use mm, cm, or in.")
+
     cam, cerr = get_cam()
     if cerr:
         return error(cerr)
@@ -184,10 +408,7 @@ def handler(operation: str = "", selection: str = "", handles=None,
         return error(oerr)
     op = node.obj
 
-    # resolve geometry handles to live BRep entities (require edge for chain, face otherwise)
-    require = "edge" if selection == _CHAIN else "face"
-    kind = _inputs.GeometryHandleList("handles", require=require)
-    entities, herr = kind.resolve(handles)
+    entities, herr = _resolve_geometry(selection, handles, bodies, sketches)
     if herr:
         return error(herr)
 
@@ -213,28 +434,29 @@ def handler(operation: str = "", selection: str = "", handles=None,
         result["heights_set"] = applied
 
     # ── apply the selection ──
+    extra = {}
     diam_note = None
     if selection == _HOLES:
         faces = entities
         if min_diameter is not None or max_diameter is not None:
-            factor = scale(units)
-            if factor is None:
-                return error(f"Unknown units '{units}'. Use mm, cm, or in.")
             faces, non_cyl, out_range = _filter_by_diameter(entities, min_diameter, max_diameter, factor)
             diam_note = (f"diameter filter [{min_diameter},{max_diameter}]{units} kept {len(faces)} "
                          f"(dropped {out_range} out-of-range, {non_cyl} non-cylinder).")
             if not faces:
                 return error("No cylinder faces left after the diameter filter. " + diam_note)
         count, aerr = _apply_holes(op, faces)
+        record = None if aerr else {"selections": count}
     else:
-        count, aerr = _apply_curve(op, selection, entities, is_open, reverted)
+        record, aerr = _apply_curve(op, selection, entities, knobs, factor, extra)
     if aerr:
         return error(aerr)
-    if not count:
+    if not record.get("selections"):
         return error("Selection applied but the operation reports 0 selections - the geometry was "
-                     "rejected. Check the handles match the strategy (edges for chain, the pocket "
-                     "floor face for pocket, cylinder faces for holes).")
-    result["selections"] = count
+                     "rejected. Check the geometry matches the strategy (edges for chain, the pocket "
+                     "floor face for pocket, bodies for silhouette/pocket_recognition, whole sketches "
+                     "for sketch, cylinder faces for holes).")
+    result.update(record)
+    result.update(extra)
     if diam_note:
         result["diameter_filter"] = diam_note
 
@@ -261,26 +483,37 @@ def handler(operation: str = "", selection: str = "", handles=None,
 
 
 TOOL_DESCRIPTION = (
-    "SELECT the machining geometry on a CAM operation using find_geometry handles, then (optionally) "
-    "regenerate. 'selection': chain (seed edges -> Fusion walks a contour chain; is_open/reverted) / "
-    "pocket (the pocket-floor face) / face / silhouette / holes (drill/bore/circular: cylinder faces, optionally "
-    "filtered by min_diameter/max_diameter in 'units'); see 'handles' for its accepted forms. "
-    "Optional top_mode/top_offset + bottom_mode/bottom_offset set heights (mode = "
-    "e.g. 'from stock top'/'from contour'/'from hole bottom'; never set the resolved _value). "
-    "'generate' (default true) LAUNCHES regeneration and returns immediately - poll "
-    "cam_get_status(target=<operation>) until completed=true; the note teaches the empty-toolpath "
-    "checks. Pair: cam_create_operation -> this; find_geometry supplies handles."
+    "SELECT the machining geometry on a CAM operation. 'selection' picks the strategy family AND the "
+    "input carrying the geometry: chain (edge 'handles'; Fusion walks the contour chain, "
+    "is_open/reverted) / pocket / face (face 'handles') / silhouette / pocket_recognition ('bodies'; "
+    "omit them to machine the setup's own models) / sketch ('sketches' by name - a whole sketch, not "
+    "one curve) / holes (drill/bore/circular: cylinder-face 'handles', filtered by min/max_diameter "
+    "in 'units'). loop_type/side_type suit face, silhouette and sketch; pocket_filter suits "
+    "pocket_recognition; a knob passed to another kind is REFUSED. top_mode/top_offset + "
+    "bottom_mode/bottom_offset set the heights (never the resolved _value). The result reports what "
+    "Fusion resolved, and its reason when it rejects the selection. 'generate' (default true) "
+    "LAUNCHES regeneration and returns "
+    "immediately - poll cam_get_status(target=<operation>) until completed=true. Pair: "
+    "cam_create_operation -> this; find_geometry supplies handles."
 )
 
 tool = (
     Tool.create_simple(name="cam_select_geometry", description=TOOL_DESCRIPTION)
     .add_input_property("operation", {"type": "string", "description": "Operation name (cam_get(include=['operations']))."})
     .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
-            "description": "chain / pocket / face / silhouette / holes."})
+            "description": "The geometry family."})
     .add_input_property("handles", {"type": "array", "items": {"type": "string"},
             "description": "find_geometry handles: edges for chain, faces for pocket/face/holes."})
+    .add_input_property(*BODIES.as_property())
+    .add_input_property(*SKETCHES.as_property())
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
+    .add_input_property(*LOOP_TYPE.as_property())
+    .add_input_property(*SIDE_TYPE.as_property())
+    .add_input_property("pocket_filter", {"type": "object",
+            "description": "pocket_recognition criteria: holes (bool - count holes as pockets), "
+                           "min_hole_diameter (needs holes=true), min/max_corner_radius, "
+                           "min/max_depth; lengths in 'units'."})
     .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units'); filters the PASSED handles only, never discovers - pass every candidate face."})
     .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (in 'units')."})
     .add_input_property(*_inputs.UNITS.as_property())

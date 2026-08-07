@@ -18,10 +18,72 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", "diameter", "angle")
+_DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", "diameter", "angle",
+              "offset", "linear_diameter", "concentric_circle", "tangent_distance",
+              "ellipse_major_radius", "ellipse_minor_radius", "point_to_surface", "line_to_surface")
 _DISTANCE_TYPES = ("distance", "horizontal_distance", "vertical_distance")  # sign is a signed placement
 _DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance",
-                          description="What kind of dimension to add.")
+                          description="What kind of dimension to add. 'angle' dimensions the wedge "
+                                      "FACING THE SKETCH ORIGIN, not its supplement; 'offset' "
+                                      "ROTATES a non-parallel second line parallel (it MOVES "
+                                      "geometry).")
+
+# dim_type -> ('<type>:<index>' ref kinds legal as entity_one, same for entity_two or None), read off
+# the ARGUMENT TYPES the installed SketchDimensions bindings declare: addOffsetDimension /
+# addLinearDiameterDimension take (SketchLine, SketchEntity = a parallel line or a point);
+# addConcentricCircleDimension takes two SketchCurves documented as circle-or-arc;
+# addTangentDistanceDimension takes (SketchPoint/SketchLine/SketchCircle/SketchArc, SketchCurve =
+# circle or arc); the two ellipse-radius dims take a SketchEllipse. Surfaced in the refusal, so the
+# wire description carries no per-type operand table.
+_OPERANDS = {
+    "offset": (("line",), ("line", "point")),
+    "linear_diameter": (("line",), ("line", "point")),
+    "concentric_circle": (("circle", "arc"), ("circle", "arc")),
+    "tangent_distance": (("point", "line", "circle", "arc"), ("circle", "arc")),
+    "ellipse_major_radius": (("ellipse",), None),
+    "ellipse_minor_radius": (("ellipse",), None),
+    "point_to_surface": (("point",), None),
+    "line_to_surface": (("line",), None),
+}
+
+# Types taking a second sketch entity (the lone-LINE shortcut stays a _DISTANCE_TYPES-only rule).
+_TWO_ENTITY_TYPES = _DISTANCE_TYPES + ("angle", "offset", "linear_diameter", "concentric_circle",
+                                       "tangent_distance")
+
+# Types anchoring to ONE point of an entity ('line:0:end'): the distance family, plus
+# point_to_surface - its binding argument is a SketchPoint, which is exactly what an anchor yields.
+_ANCHOR_TYPES = _DISTANCE_TYPES + ("point_to_surface",)
+
+# The two dims whose second operand is a model face / construction plane, not a sketch entity.
+_SURFACE_TYPES = ("point_to_surface", "line_to_surface")
+# addDistanceBetweenPointAndSurfaceDimension's argument is `surface: Base`, documented as accepting
+# planar, cylindrical, spherical and conical faces; the line dim's argument is named planarSurface
+# and documented planar-only. So only the point dim is a curved_op - the kind carries that split
+# into BOTH the schema the agent reads and the resolution the handler runs.
+_CURVED_SURFACE_OK = ("point_to_surface",)
+_SURFACE = _inputs.SurfaceRef("surface", curved_ops=_CURVED_SURFACE_OK,
+                              description="Face/plane the point_to_surface and line_to_surface "
+                                          "dimensions measure to.")
+
+# Dims whose API failure message NAMES its own cause ("Both sketch lines should be parallel", "line
+# is not parallel to the planar surface" - both measured live). Their operand KINDS are already
+# gated by _OPERANDS before the call, so a raise here is about the geometry, never the kind: the
+# API's own sentence is surfaced alone rather than dressed with an operand-kind hint that misleads.
+_SELF_NAMING_FAILURE = ("linear_diameter", "line_to_surface")
+
+
+def _kinds_text(kinds):
+    return " or ".join(f"'{k}'" for k in kinds)
+
+
+def _operand_error(dt, label, ref, base_ref, kinds):
+    """None when the ref names one of the kinds this dim_type's binding accepts, else the refusal -
+    which names the kind actually given, since a '<type>:<index>' ref declares its own kind."""
+    kind = (base_ref or "").rpartition(":")[0].strip().lower()
+    if kind in kinds:
+        return None
+    return (f"'{dt}' takes {_kinds_text(kinds)} as {label}; '{ref}' names "
+            + (f"a '{kind}'." if kind else "no entity kind."))
 
 
 def _point_of(entity):
@@ -37,6 +99,19 @@ def _point_of(entity):
         return cp
     return entity   # a sketch point itself
 
+
+# Per-type note text, appended to the payload's note: the two dims whose MEASURED behavior the
+# result alone does not show - which wedge an angular dim picked, and that the offset dim MOVES
+# geometry to satisfy itself.
+_TYPE_NOTES = {
+    "angle": (" The wedge dimensioned is the one FACING THE SKETCH ORIGIN (the dimension's text "
+              "point sits at the origin, and the dimensioned wedge is the one containing it) - a "
+              "value near 180 minus the angle wanted means the supplement was measured; re-read "
+              "'value' before driving it."),
+    "offset": (" A second line that is NOT parallel to the first is ROTATED parallel by this "
+               "dimension: the constraint MOVES geometry rather than refusing, so re-read "
+               "sketch_get to confirm the shape is still what was drawn."),
+}
 
 # Entity-anchored POSITION references: pinning a distance to an ENTITY's own point (a line end, a
 # circle center) instead of a bare 'point:N' avoids the silent mis-attach when two entities share
@@ -120,11 +195,18 @@ def _radial_text_point(curve):
 
 
 def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str = "",
-            entity_two: str = "", value: str = "") -> dict:
+            entity_two: str = "", value: str = "", surface: str = "", is_driving: bool = True,
+            tangent_side_one: bool = True, tangent_side_two: bool = True) -> dict:
     """See TOOL_DESCRIPTION."""
     dt = (dim_type or "distance").strip().lower()
     if dt not in _DIM_TYPES:
         return error(f"Unknown dim_type '{dim_type}'. Valid: {', '.join(_DIM_TYPES)}.")
+    # isDriving=False is the API's DRIVEN (reference) dimension: the geometry controls the
+    # dimension, so an expression cannot drive it. Refuse the contradiction naming both inputs.
+    if not is_driving and (value or "").strip():
+        return error(f"is_driving=false creates a DRIVEN (reference) dimension - the geometry "
+                     f"controls it, so value '{value}' cannot drive it. Drop 'value', or leave "
+                     "is_driving true.")
 
     design = _common.design()
     if not design:
@@ -142,8 +224,9 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         return error(f"entity_one '{entity_one}' did not resolve. Use '<type>:<index>' "
     f"({'/'.join(_common.ENTITY_REF_KINDS)}), optionally with an anchor "
     "':start'/':end'/':mid'/':center', e.g. 'line:0:end'.")
-    need_two = dt in ("distance", "horizontal_distance", "vertical_distance", "angle")
+    need_two = dt in _TWO_ENTITY_TYPES
     e2 = None
+    base2 = None
     anchor2 = None
     lone_line = False
     if need_two and dt in _DISTANCE_TYPES and not (entity_two or "").strip():
@@ -169,17 +252,47 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 
     dims = sketch.sketchDimensions
     P = adsk.core.Point3D.create
-    # Text position for LINEAR/ANGLE dims is cosmetic - (0,0,0) is fine. For RADIAL/DIAMETER dims it is
+    # Text position for a LINEAR dim is cosmetic - (0,0,0) is fine. For RADIAL/DIAMETER dims it is
     # NOT cosmetic: the API derives the radial direction from (textPoint - center), so it must be
     # OFFSET from the curve's center (see _radial_text_point) - (0,0,0) is degenerate at an
-    # origin-centered curve and the add raises "Some input argument is invalid".
+    # origin-centered curve and the add raises "Some input argument is invalid". For an ANGULAR dim
+    # the text position selects WHICH wedge is dimensioned: measured across all four quadrants, the
+    # dimensioned wedge is the one CONTAINING the text point, so this origin point always dimensions
+    # the wedge facing the sketch origin (10deg/80deg lines crossing in each quadrant: 70/110/70/110
+    # deg). The payload's note states that rule for the caller.
     tp = P(0, 0, 0)
-    # Anchors pin one point of an entity for a DISTANCE dim; radius/diameter/angle take the whole entity.
-    if anchor1 and dt not in ("distance", "horizontal_distance", "vertical_distance"):
+    # Anchors pin one point of an entity for a DISTANCE dim (and for point_to_surface, whose binding
+    # argument IS a SketchPoint); every other type takes whole entities.
+    if anchor1 and dt not in _ANCHOR_TYPES:
         return error(f"'{dt}' takes a whole entity, not a point anchor - drop the ':{anchor1}' from entity_one.")
-    if anchor2 and dt == "angle":
-        return error("angle takes two whole lines, not point anchors - drop the anchor from entity_two.")
-    if dt in ("distance", "horizontal_distance", "vertical_distance"):
+    if anchor2 and dt not in _DISTANCE_TYPES:
+        return error(f"'{dt}' takes a whole entity as entity_two, not a point anchor - drop the "
+                     f"':{anchor2}'.")
+
+    kinds1, kinds2 = _OPERANDS.get(dt, (None, None))
+    # an anchored ref for point_to_surface resolves to a SketchPoint whatever entity it names, so the
+    # entity_one kind gate applies only to a bare ref.
+    if kinds1 and not anchor1:
+        oerr = _operand_error(dt, "entity_one", entity_one, base1, kinds1)
+        if oerr:
+            return error(oerr)
+    if kinds2:
+        oerr = _operand_error(dt, "entity_two", entity_two, base2, kinds2)
+        if oerr:
+            return error(oerr)
+
+    surf = None
+    if dt in _SURFACE_TYPES:
+        surf, serr = _SURFACE.resolve(surface, dt)
+        if serr:
+            return error(serr)
+        if surf is None:
+            return error(f"'{dt}' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane "
+                         "name, or a face handle from find_geometry"
+                         + (" (curved faces allowed)." if dt in _CURVED_SURFACE_OK
+                            else " (this dimension takes a PLANAR face only)."))
+
+    if dt in _DISTANCE_TYPES:
         if lone_line:
             p1 = safe(lambda: e1.startSketchPoint)
             p2 = safe(lambda: e1.endSketchPoint)
@@ -190,23 +303,59 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             p2, perr2 = _dim_point(sketch, e2, anchor2)
             if perr2:
                 return error(f"entity_two: {perr2}")
+    elif dt == "point_to_surface":
+        p1, perr1 = _dim_point(sketch, e1, anchor1)
+        if perr1:
+            return error(f"entity_one: {perr1}")
     try:
-        if dt in ("distance", "horizontal_distance", "vertical_distance"):
+        if dt in _DISTANCE_TYPES:
             orient = {
             "distance": adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
             "horizontal_distance": adsk.fusion.DimensionOrientations.HorizontalDimensionOrientation,
             "vertical_distance": adsk.fusion.DimensionOrientations.VerticalDimensionOrientation,
             }[dt]
-            dim = dims.addDistanceDimension(p1, p2, orient, tp)
+            dim = dims.addDistanceDimension(p1, p2, orient, tp, is_driving)
         elif dt == "radius":
-            dim = dims.addRadialDimension(e1, _radial_text_point(e1))
+            dim = dims.addRadialDimension(e1, _radial_text_point(e1), is_driving)
         elif dt == "diameter":
-            dim = dims.addDiameterDimension(e1, _radial_text_point(e1))
-        else:  # angle
-            dim = dims.addAngularDimension(e1, e2, tp)
+            dim = dims.addDiameterDimension(e1, _radial_text_point(e1), is_driving)
+        elif dt == "angle":
+            dim = dims.addAngularDimension(e1, e2, tp, is_driving)
+        elif dt == "offset":
+            dim = dims.addOffsetDimension(e1, e2, tp, is_driving)
+        elif dt == "linear_diameter":
+            dim = dims.addLinearDiameterDimension(e1, e2, tp, is_driving)
+        elif dt == "concentric_circle":
+            dim = dims.addConcentricCircleDimension(e1, e2, tp, is_driving)
+        elif dt == "tangent_distance":
+            # The binding interleaves the two tangent-side selectors between the entities:
+            # (entityOne, isCloseToEnityTwo, entityTwo, isCloseToEnityOne, textPoint, isDriving) -
+            # 'Enity' is the API's own spelling, so these are passed POSITIONALLY.
+            dim = dims.addTangentDistanceDimension(e1, bool(tangent_side_one), e2,
+                                                   bool(tangent_side_two), tp, is_driving)
+        elif dt in ("ellipse_major_radius", "ellipse_minor_radius"):
+            # an offset-from-center text point, never AT the center (degenerate for a radial-family
+            # dimension on an origin-centered curve).
+            etp = _radial_text_point(e1)
+            dim = (dims.addEllipseMajorRadiusDimension(e1, etp, is_driving)
+                   if dt == "ellipse_major_radius"
+                   else dims.addEllipseMinorRadiusDimension(e1, etp, is_driving))
+        elif dt == "point_to_surface":
+            # no textPoint argument - this dim places its own text (per the binding).
+            dim = dims.addDistanceBetweenPointAndSurfaceDimension(p1, surf, is_driving)
+        else:  # line_to_surface
+            dim = dims.addDistanceBetweenLineAndPlanarSurfaceDimension(e1, surf, is_driving)
     except Exception as e:
-        return error(f"Could not add the {dt} dimension: {e}. (Check the entity types match the "
-    "dimension - radius/diameter need an arc/circle, angle needs two lines.)")
+        if dt in _SELF_NAMING_FAILURE:
+            return error(f"Could not add the {dt} dimension: {e}")
+        if kinds1:
+            hint = (f"'{dt}' takes {_kinds_text(kinds1)} as entity_one"
+                    + (f" and {_kinds_text(kinds2)} as entity_two" if kinds2 else "")
+                    + (" plus a 'surface'" if dt in _SURFACE_TYPES else "") + ".")
+        else:
+            hint = ("Check the entity types match the dimension - radius/diameter need an "
+                    "arc/circle, angle needs two lines.")
+        return error(f"Could not add the {dt} dimension: {e}. ({hint})")
     if not dim:
         return error(f"Adding the {dt} dimension returned nothing.")
 
@@ -225,9 +374,15 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     "parameter": safe(lambda: dim.parameter.name),
     # the value is READ BACK off the parameter - what Fusion holds, not an echo of the request
     "value": safe(lambda: dim.parameter.expression),
-    "driven": set_value is not None,
-    "note": "Dimensional constraint added. Drive it later by name via param_set.",
+    "value_driven": set_value is not None,
+    # READ BACK off the dimension: a driving dimension controls the geometry, a driven one only
+    # reports it - which of the two the API actually made is not assumed from the request.
+    "is_driving": safe(lambda: dim.isDriving),
+    "note": ("Dimensional constraint added. Drive it later by name via param_set."
+             + _TYPE_NOTES.get(dt, "")),
     }
+    if dt in _SURFACE_TYPES:
+        out["surface"] = _inputs.surface_ref_label(surf)
     # A negative DISTANCE does not mirror: the solver places the point at the SIGNED offset, flipping it
     # to the other side of its reference (and, when that flipped spot lands on another point, silently
     # merging geometry). Detect it from the read-back EVALUATED value's sign - reliable and cheap, where
@@ -252,7 +407,11 @@ TOOL_DESCRIPTION = (
 "scheme; point:0 is ALWAYS the sketch ORIGIN, point:1..N are geometry points in creation order. To "
 "pin a POSITION, anchor on an entity's OWN point instead of a bare 'point:N' (which "
 "mis-attaches when points share coordinates): append ':start'/':end'/':mid' (line) or ':center' "
-"(circle/arc), e.g. 'line:0:end'. 'value' drives it by expression; omit to keep the measured value. "
+"(circle/arc), e.g. 'line:0:end'. The rest of the dim_type enum - offset, linear_diameter, "
+"concentric_circle, tangent_distance, ellipse_major_radius/ellipse_minor_radius, and "
+"point_to_surface/line_to_surface (which measure to a model face or plane given as 'surface') - "
+"name their operands in the error they return when the refs are wrong. "
+"'value' drives it by expression; omit to keep the measured value. "
 "The dimension becomes a param drivable with param_set."
 )
 
@@ -264,6 +423,10 @@ tool = (
     .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional position anchor ':start/:end/:mid/:center' (e.g. 'line:0:end')."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref (angle needs two; distance on a lone LINE may omit it = the line's length); same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', '90 deg', 'StockX/2'); omit to keep measured."})
+    .add_input_property(*_SURFACE.as_property())
+    .add_input_property("is_driving", {"type": "boolean", "description": "false makes a DRIVEN (reference) dimension the geometry controls - it cannot take a 'value'. Default true."})
+    .add_input_property("tangent_side_one", {"type": "boolean", "description": "tangent_distance: true = the tangent side of entity_one nearer entity_two; ignored when entity_one is a line or point. Default true."})
+    .add_input_property("tangent_side_two", {"type": "boolean", "description": "tangent_distance: true = the tangent side of entity_two nearer entity_one. Default true."})
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

@@ -34,6 +34,19 @@ RETURNS = [
 
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
 
+# The motions that consume NO axis input. Rigid has no motion to aim; a ball joint's
+# setAsBallJointMotion hard-codes pitch=Z / yaw=X and reads neither the axis keyword nor a custom
+# entity, so the landed motion is identical whatever 'axis' says (measured: ball with axis='x' is
+# byte-identical to ball with axis='auto'). Reporting an axis for either would be a false claim.
+_NO_AXIS_MOTIONS = {"rigid", "ball"}
+
+_AXIS = _inputs.Choice(
+    "axis", ["auto", "x", "y", "z"], default="auto",
+    description="The frame axis the motion runs on, for the types that use one (ball uses none). "
+                "'auto' takes it from the geometry; x/y/z are FRAME axes, NOT world - "
+                "joint_edit(world_axis=) sets a true world axis, and forcing one rotates the free "
+                "part to align.")
+
 
 # The two handle inputs are typed GeometryHandle kinds (require='any' - a joint can land on a face,
 # edge, vertex, or construction/sketch point; _joint_geometry_for does the per-kind validation). Using
@@ -112,14 +125,31 @@ def _axis_entity(entity):
     return None
 
 
+def _axis_note(mot, ax_name, use_custom):
+    """The note sentence for what the motion axis ACTUALLY is: '' for the motions that take no axis
+    (rigid, ball), the geometry's own axis when the custom-direction path ran, else the joint geometry
+    FRAME's axis - which is the world axis of the same name only when that frame is world-aligned.
+    joint_edit(world_axis=) is the only true world axis available from here."""
+    if mot in _NO_AXIS_MOTIONS:
+        return ""
+    if use_custom:
+        return " axis='auto' derived the motion axis from the geometry itself."
+    frame_ax = ax_name if ax_name in _AXES else "z"
+    return (f" The motion axis is the joint geometry FRAME's {frame_ax} axis, NOT world {frame_ax} "
+            "(they coincide only when that frame is world-aligned) - for a true world axis follow "
+            "with joint_edit(world_axis=x/y/z).")
+
+
 def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute",
             axis: str = "auto", name: str = "", flip: bool = False) -> dict:
     """Joint two parts at two geometry handles (from find_geometry).
 
     handle_one / handle_two: the entity-token handles to joint AT (e.g. a rod bore face and a crank
-    pin face). motion: rigid | revolute | slider | cylindrical | ball. axis: 'auto' (default -
-    derive the rotation/slide axis FROM the geometry's own axis, e.g. a cylinder face's axis; this
-    is what you want for a pin so it moves about the PIN, not a world axis) or x | y | z to force a
+    pin face). motion: rigid | revolute | slider | cylindrical | ball. axis: the axis the motion runs
+    on, for the types that use one (ball uses none) - 'auto' (default) derives it FROM the geometry's
+    own axis, e.g. a cylinder face's axis, which is what you want for a pin so it moves about the PIN;
+    x | y | z are FRAME-relative, the joint geometry's own frame axes rather than world axes whenever
+    the picked geometry is not world-aligned, and joint_edit(world_axis=) re-points a joint to a true
     world axis. name: optional joint name. The joint lands at the real geometry; keypoint/proxy/axis
     rules are handled internally. WRITES.
     """
@@ -127,9 +157,9 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     if mot not in _MOTIONS:
         return error(f"Unknown motion '{motion}'. Use: {', '.join(sorted(_MOTIONS))}.")
 
-    ax_name = (axis or "auto").strip().lower()
-    if ax_name not in ("auto",) and ax_name not in _AXES:
-        return error(f"Unknown axis '{axis}'. Valid: auto, x, y, z.")
+    ax_name, ax_err = _AXIS.resolve(axis)
+    if ax_err:
+        return error(ax_err)
 
     design = _common.design()
     if not design:
@@ -176,9 +206,13 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     use_custom = (ax_name == "auto") and (axis_ent is not None)
     did, merr = apply_motion(ji, mot, _AXES.get(ax_name, 2), axis_ent if use_custom else None)
     if merr or not did:
-        return error(f"Could not set {mot} motion: {merr or 'rejected'}. "
-    "(For a world axis pass axis=x/y/z; 'auto' needs a cylinder face / round edge "
-    "to derive the axis from.)")
+        # The axis advice only applies to a motion that HAS an axis - offering it on a ball/rigid
+        # failure would contradict the input's own "ball uses none" and send the caller chasing a
+        # knob this motion never read.
+        hint = ("" if mot in _NO_AXIS_MOTIONS else
+                " (For a frame-relative axis pass axis=x/y/z; 'auto' needs a cylinder face / round "
+                "edge to derive the axis from.)")
+        return error(f"Could not set {mot} motion: {merr or 'rejected'}.{hint}")
 
     # capture BOTH occurrences' origins BEFORE add() - the joint repositions parts to align the picked
     # keypoints, and that move must be reported, not silent (see _move_delta). Either side can be the
@@ -210,15 +244,15 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "jointed": True,
     "joint_name": safe(lambda: joint.name),
     "motion": mot,
-    "axis": ("auto(geometry)" if use_custom else ax_name) if mot != "rigid" else None,
+    "axis": None if mot in _NO_AXIS_MOTIONS else ("auto(geometry)" if use_custom else ax_name),
     "healthy": healthy,
     "flipped": bool(flip),
     "geometry_one": l1,
     "geometry_two": l2,
     "occurrence_one": o1,
     "occurrence_two": o2,
-    "note": "Joint created AT the geometry. axis='auto' derived the motion axis from the "
-    "geometry itself. Verify with assembly_get (is_healthy + positions).",
+    "note": "Joint created AT the geometry." + _axis_note(mot, ax_name, use_custom)
+    + " Verify with assembly_get (is_healthy + positions).",
     }
     mp = motion_param_names(joint)
     if mp:
@@ -262,8 +296,8 @@ TOOL_DESCRIPTION = (
                                  "keypoints (face CENTROID, edge MIDPOINT) and MOVES whichever occurrence is FREE "
                                  "(grounding wins; 'moved_by' names the actual mover). A placed part gets REPOSITIONED "
                                  "(restore offsets with joint_edit). motion: "
-                                 "revolute/slider/cylindrical/ball/rigid. axis: "
-                                 "'auto' (from the geometry) unless forcing a world x/y/z. 'flip' seats two planar faces "
+                                 "revolute/slider/cylindrical/ball/rigid. 'axis' is the frame axis the motion runs "
+                                 "on, for the types that use one (ball uses none). 'flip' seats two planar faces "
                                  "whose normals OPPOSE flush (else the free part rotates 180 deg; flip_hint flags it). "
                                  "If it can't solve in the current pose "
                                  "the joint is still added with healthy=false - the returned 'healthy' flag is authoritative.\n"
@@ -277,7 +311,7 @@ joint_at_tool = (
     .add_input_property(*_inputs.joint_motion(
         "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
         default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
-    .add_input_property("axis", {"type": "string", "description": "auto (default - derive axis from the geometry, e.g. a cylinder face's axis) | x | y | z (force a world axis). WARNING: forcing an axis ROTATES the free occurrence to align - it can swing a positioned part out of place. Prefer auto."})
+    .add_input_property(*_AXIS.as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Reverse the alignment (default false): true seats two planar faces with OPPOSING normals flush."})
     .add_input_property("name", {"type": "string", "description": "Optional joint name."})
     .strict_schema()

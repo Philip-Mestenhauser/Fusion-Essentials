@@ -116,13 +116,13 @@ def _face_record(face, inv_k):
     handle = _inputs.make_handle(face, kind, (c.x, c.y, c.z)) if c else safe(lambda: face.entityToken)
     rec = {"handle": handle, "kind": kind,
             "position": [round(c.x * inv_k, 3), round(c.y * inv_k, 3), round(c.z * inv_k, 3)] if c else None,
-            "area": round(safe(lambda: face.area, 0) * inv_k * inv_k, 3)}
+            "area": _common.measured(lambda: face.area, inv_k * inv_k, 3)}
     # Outward normal at the reported position (constant for planar, sampled at that point for curved).
     nrm = _geom.evaluator_normal_at(face, c, decimals=4)
     if nrm is not None:
         rec["normal"] = nrm
     if kind == "cylinder_face":
-        rec["radius"] = round(safe(lambda: g.radius, 0) * inv_k, 3)
+        rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
         ax = safe(lambda: g.axis)
         if ax:
             rec["axis"] = [round(ax.x, 3), round(ax.y, 3), round(ax.z, 3)]
@@ -141,9 +141,9 @@ def _edge_record(edge, inv_k):
     handle = _inputs.make_handle(edge, kind, (pt.x, pt.y, pt.z)) if pt else safe(lambda: edge.entityToken)
     rec = {"handle": handle, "kind": kind,
             "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
-            "length": round(safe(lambda: edge.length, 0) * inv_k, 3)}
+            "length": _common.measured(lambda: edge.length, inv_k, 3)}
     if kind in ("circular_edge", "arc_edge"):
-        rec["radius"] = round(safe(lambda: g.radius, 0) * inv_k, 3)
+        rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
         ctr = safe(lambda: g.center)
         if ctr:
             rec["position"] = [round(ctr.x * inv_k, 3), round(ctr.y * inv_k, 3), round(ctr.z * inv_k, 3)]

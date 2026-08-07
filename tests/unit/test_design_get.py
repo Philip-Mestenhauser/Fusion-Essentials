@@ -49,6 +49,11 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(dg, "_slice_timeline", lambda d, include_suppressed, group: (
         {"count": 4, "timeline": []}, None))
     monkeypatch.setattr(dg, "_slice_configurations", lambda d: ({"table_name": "Configs"}, None))
+    monkeypatch.setattr(dg, "_slice_materials", lambda d, library, name_filter, max_results: (
+        {"kind": "materials", "library": library, "name_filter": name_filter,
+         "max_results": max_results, "document": {"count": 1}, "libraries": []}, None))
+    monkeypatch.setattr(dg, "_slice_appearances", lambda d, library, name_filter, max_results: (
+        {"kind": "appearances", "library": library, "document": {"count": 1}, "libraries": []}, None))
 
 
 # ── default orientation slice is DENSE + bounded (the core rich-read contract) ──────────────────────
@@ -65,6 +70,7 @@ class TestDefaultSlice:
         # the HEAVY slices must be absent by default (the anti-flood contract)
         assert "tree" not in out and "timeline" not in out and "configurations" not in out
         assert "mode_detail" not in out                # the full can{} map is opt-in only
+        assert "materials" not in out and "appearances" not in out   # the catalog is opt-in too
 
     def test_default_omits_noise_when_healthy(self, stub_slices):
         # a healthy design carries no health DETAIL block + no in_base_feature_edit:false
@@ -111,6 +117,8 @@ class TestIncludeSlices:
         ("timeline", "timeline"),
         ("mode", "mode_detail"),
         ("configurations", "configurations"),
+        ("materials", "materials"),
+        ("appearances", "appearances"),
     ])
     def test_include_adds_the_slice(self, stub_slices, slice_name, key):
         out = _payload(dg.handler(include=[slice_name]))
@@ -123,6 +131,46 @@ class TestIncludeSlices:
     def test_multiple_includes(self, stub_slices):
         out = _payload(dg.handler(include=["tree", "timeline"]))
         assert "tree" in out and "timeline" in out
+
+    def test_catalog_slices_are_independent(self, stub_slices):
+        # materials and appearances are two projections of one walk but two separate slices:
+        # asking for one must not pull the other.
+        out = _payload(dg.handler(include=["materials"]))
+        assert out["materials"]["kind"] == "materials" and "appearances" not in out
+
+
+class TestCatalogSlices:
+    """The materials/appearances slices - the catalog an agent picks a name FROM before assigning it.
+    Both delegate to the one bounded walk in _materials; the router's job is passing the scope flags
+    through, keeping the two kinds apart, and advertising the flags."""
+
+    def test_scope_flags_reach_the_slice(self, stub_slices):
+        out = _payload(dg.handler(include=["materials"], library="Fusion Material Library",
+                                  name_filter="steel", max_results=10))
+        assert out["materials"]["library"] == "Fusion Material Library"
+        assert out["materials"]["name_filter"] == "steel" and out["materials"]["max_results"] == 10
+
+    def test_default_note_advertises_the_catalog_slices_and_flags(self, stub_slices):
+        note = _payload(dg.handler())["note"]
+        assert "materials" in note and "appearances" in note
+        assert "library" in note and "name_filter" in note   # un-named flags are invisible
+
+    def test_slice_error_fails_the_read(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(dg, "_slice_materials",
+                            lambda d, library, name_filter, max_results: (None, dg.error("no such library")))
+        res = dg.handler(include=["materials"])
+        assert res["isError"] and "no such library" in error_message(res)
+
+    def test_each_slice_browses_its_own_kind(self, monkeypatch):
+        # the delegation itself: two slices, one walk, DIFFERENT kind - passing 'materials' for both
+        # would return the wrong catalog under the right label.
+        seen = []
+        monkeypatch.setattr(dg._materials, "browse",
+                            lambda design, kind, library, name_filter, max_results: (
+                                seen.append(kind) or ({"kind": kind}, None)))
+        dg._slice_materials(object(), "", "", 0)
+        dg._slice_appearances(object(), "", "", 0)
+        assert seen == ["materials", "appearances"]
 
 
 class TestFingerprint:

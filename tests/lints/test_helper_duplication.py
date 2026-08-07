@@ -40,6 +40,12 @@ _DENYLIST = {
     "operations_under": ("_cam_common", "def"),
     "_b64url_decode": ("_data_common", "def"),
     "_urn_candidates": ("_data_common", "def"),
+    # The ONE DataFile reference resolver (lineage URN / web URL, or a name scoped to a project,
+    # refusing a name that matches several) plus the name-carries-the-true-extension fact every
+    # file-scoped data tool gates on - a per-tool copy is how one of them starts guessing.
+    "resolve_file_reference": ("_data_common", "def"),
+    "name_extension": ("_data_common", "def"),
+    "FUSION_NATIVE_EXTENSIONS": ("_data_common", "assign"),
     "sanitize": ("_export", "def"),
     "component_by_name": ("_export", "def"),
     "verify_written": ("_export", "def"),
@@ -48,9 +54,42 @@ _DENYLIST = {
     "resolve_or_recent_sketch": ("_common", "def"),
     "timeline_health": ("_common", "def"),
     "result_bodies": ("_common", "def"),
+    "body_facts": ("_common", "def"),
+    # The ONE abort for a partial-computing createInput transaction (trim, boundary fill): a
+    # per-tool copy is how a refused cancel silently stops being reported in one of them.
+    "cancel_input": ("_common", "def"),
+    # The ONE mode gate for a Features.*.add() that returns nothing, plus the refusal text a site
+    # with no feature-independent effect check returns: a per-tool copy is how one tool keeps
+    # calling a landed direct-mode edit a failure after the shared rule is fixed.
+    "direct_feature_absence": ("_common", "def"),
+    "no_feature_error": ("_common", "def"),
+    "failed_effect_remedy": ("_common", "def"),
+    # The body census a feature-free effect check counts on: one home so the resolve-ONCE rule and
+    # the measured "the pieces land in the TARGET's parentComponent" scoping cannot be right in one
+    # tool and stale in the next.
+    "census_host": ("_common", "def"),
+    "body_count": ("_common", "def"),
+    # The ONE same-component test. Component wrappers are measured never identity-stable, so this
+    # cannot be re-rolled as `a is b` anywhere: one home keeps the token-then-name hedge in step.
+    "same_component": ("_common", "def"),
+    # The ONE feature-path resolver (sweep / pipe / path pattern / on-path datum): one home so the
+    # 'sketch:<name>' chain rule and the single-handle-auto-chains rule cannot be right in one tool
+    # and stale in the next.
+    "build_path": ("_common", "def"),
+    # The timeline walk and the EXACT-match/'name@index' matcher behind FeatureRef: one home, so a
+    # tool cannot re-roll the matcher with a substring fallback.
+    "_timeline_objects": ("_inputs", "def"),
+    "_match_timeline_objects": ("_inputs", "def"),
     "open_profile_from_sketch": ("_common", "def"),
     "most_recent_body": ("_common", "def"),
     "resolve_entity_ref": ("_common", "def"),
+    "resolve_entity_refs": ("_common", "def"),
+    "entity_component": ("_inputs", "def"),
+    "axis_line_of": ("_inputs", "def"),
+    "all_occurrences": ("_common", "def"),
+    "occurrence_paths": ("_common", "def"),
+    "component_contains": ("_common", "def"),
+    "null_feature_note": ("_common", "def"),
     "design_wide_counts": ("_common", "def"),
     "CM_TO_UNIT": ("_common", "assign"),
     "OPERATIONS": ("_common", "assign"),
@@ -62,6 +101,12 @@ _DENYLIST = {
     "world_construction_axis": ("_inputs", "def"),
     "length_value_input": ("_inputs", "def"),
     "expression_report": ("_inputs", "def"),
+    # The plane-then-face two-pass every '*_to_surface' operand resolves through, and the label its
+    # payload publishes: one home beside the SurfaceRef kind that declares them, so the curved-face
+    # contract and the resolved-entity read-back can never be right in one sketch tool and stale in
+    # the other.
+    "resolve_surface": ("_inputs", "def"),
+    "surface_ref_label": ("_inputs", "def"),
     "unit_vector": ("_geom", "def"),
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),
@@ -69,6 +114,11 @@ _DENYLIST = {
     "owning_bodies": ("_geom", "def"),
     "volumes": ("_geom", "def"),
     "volume_delta": ("_geom", "def"),
+    # The face-count counterpart of the volume pair - the signal a topology-changing feature
+    # (delete-face, split-face) verifies with; one home so both read the same "unreadable is not
+    # zero" contract.
+    "face_counts": ("_geom", "def"),
+    "face_count_delta": ("_geom", "def"),
     # The thread-table walk that turns a designation into a ThreadInfo, shared by the tapped hole
     # and the thread-an-existing-cylinder tools.
     "resolve_thread_info": ("_threads", "def"),

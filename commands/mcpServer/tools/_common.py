@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), most_recent_body, open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard) - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), most_recent_body, result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle auto-chains from that seed, a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -43,6 +43,19 @@ def safe(getter, default=None):
         return default
 
 
+def measured(getter, scale=1.0, places=6):
+    """A measured number, scaled and rounded - or None when it cannot be read.
+
+    The counterpart to safe() for anything a caller will treat as a MEASUREMENT. safe(read, 0.0)
+    turns an unreadable property into a confident zero, and zero is an answer: "no gap", "no mass",
+    "parallel". None says the value is unknown, which is the only honest thing an unreadable
+    property can say. Use safe(read, 0) for a TALLY - an absent collection really does hold none."""
+    v = safe(getter)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    return round(v * scale, places)
+
+
 # ── design / component resolution ───────────────────────────────────────────
 
 def design():
@@ -64,6 +77,29 @@ def target_component(d):
     return comp if comp is not None else d.rootComponent
 
 
+def same_component(a, b) -> bool:
+    """True when `a` and `b` denote the SAME component.
+
+    MEASURED: component identity is NEVER stable. Two reads of design.rootComponent return DIFFERENT
+    Python objects (`c1 is c2` is False), and so do rootComponent vs body.parentComponent vs
+    edge.body.parentComponent - all four sharing ONE entityToken. So `component_a is component_b` is
+    effectively ALWAYS FALSE and cannot carry a same-component test: written that way it silently
+    takes the "different component" branch every time.
+
+    Compares by entityToken (exact - every wrapper of one component reports the same one), falling
+    back to name (the hedge _joints.jo_assembly_proxy and assembly_get already use) when a token
+    cannot be read, and keeping the identity check only as a free short-circuit."""
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    ta, tb = safe(lambda: a.entityToken), safe(lambda: b.entityToken)
+    if ta and tb:
+        return ta == tb
+    na = safe(lambda: a.name)
+    return bool(na) and na == safe(lambda: b.name)
+
+
 def root_body_advisory(d, comp):
     """A note (or '') for a build tool to append when it just built into ROOT with no component active.
 
@@ -72,7 +108,9 @@ def root_body_advisory(d, comp):
     re-minted, invalidating handles you hold) and clutters the root timeline. Modelling the FIRST body
     straight into a component avoids that. This fires only when it is still cheap to switch (root has <=1
     solid body and no sub-components), so it advises at the point of the decision, not as nagging."""
-    if comp is None or comp is not safe(lambda: d.rootComponent):
+    # same_component, not `is`: component wrappers are never identity-stable, so `comp is not
+    # d.rootComponent` reads True even AT the root and this advisory would never fire at all.
+    if comp is None or not same_component(comp, safe(lambda: d.rootComponent)):
         return ""                                  # a component IS active - the good path, say nothing
     body_n = safe(lambda: comp.bRepBodies.count, 0) or 0
     occ_n = safe(lambda: d.rootComponent.occurrences.count, 0) or 0
@@ -99,6 +137,35 @@ def all_components(d):
     out = [safe(lambda i=i: comps.item(i)) for i in range(n)]
     out = [c for c in out if c is not None]
     return out or [root]
+
+
+def all_occurrences(d, cap=None):
+    """Every occurrence in the design, in ASSEMBLY context, as a flat list. ``allOccurrences`` is a
+    property of the ROOT COMPONENT and is the only walk that reports true assembly fullPathNames: an
+    occurrence handle taken from ``<component>.occurrences`` reads a COMPONENT-LOCAL path (measured).
+    The occurrence counterpart of ``all_components`` - the basis of the by-name resolver
+    (``_inputs._resolve_occurrence``) and of every before/after assembly census. ``cap`` bounds the
+    list for a caller that only renders/labels (a view tool never needs an unbounded walk)."""
+    root = safe(lambda: d.rootComponent) if d else None
+    occs = list(safe(lambda: root.allOccurrences) or []) if root is not None else []
+    return occs[:cap] if cap is not None else occs
+
+
+def occurrence_paths(d):
+    """Every occurrence fullPathName in the design, as a set - the before/after census a structural
+    edit (instance, re-parent) diffs to read back WHICH paths it actually added."""
+    return {(safe(lambda o=o: o.fullPathName) or "") for o in all_occurrences(d)}
+
+
+def component_contains(outer, inner):
+    """True when component `inner` IS `outer` or sits anywhere inside it - the cycle test a structural
+    edit refuses on (a component cannot hold an instance of itself). Walks ``Component.allOccurrences``
+    (the component's own subtree) and compares through ``same_component``, since component wrappers are
+    never identity-stable."""
+    if same_component(outer, inner):
+        return True
+    inside = safe(lambda: outer.allOccurrences) if outer is not None else None
+    return any(same_component(safe(lambda o=o: o.component), inner) for o in list(inside or []))
 
 
 def all_meshes(d):
@@ -150,6 +217,16 @@ def result_bodies(feature):
         if b is not None:
             out.append(b)
     return out
+
+
+def body_facts(bodies):
+    """[{name, is_solid}] read LIVE per body - the per-body projection a feature result reports its
+    bodies with. Kept beside result_bodies because the two are always used together: the walk gets
+    the fresh references, this reads what a caller publishes about each one. A caller that needs a
+    single verdict takes all()/any() over is_solid rather than collapsing the list here, so a MIXED
+    result can still name the body that is not solid."""
+    return [{"name": safe(lambda b=b: b.name), "is_solid": bool(safe(lambda b=b: b.isSolid))}
+            for b in bodies]
 
 
 def most_recent_body(comp):
@@ -264,6 +341,149 @@ def timeline_marker(design):
     if tl is None:
         return None, None
     return safe(lambda: tl.markerPosition), (safe(lambda: tl.count, 0) or 0)
+
+
+def set_verified(obj, prop, value, label, owner_name):
+    """Set `prop` on a FeatureInput and CONFIRM it took. Returns an error string, or '' on success.
+
+    LIVE-VERIFIED: a SWIG proxy ACCEPTS an assignment to a name it does not define - the value lands
+    on a dead Python attribute while the object silently keeps its API default - so a misspelled
+    property or a fabricated enum member CANNOT raise, and neither a bare assignment nor a
+    try/except catches it. Reading the value back is the only thing that does.
+
+    `value` None means the enum member/value was unavailable, which is reported rather than set."""
+    if value is None:
+        return f"'{label}' is not available on this Fusion version."
+    try:
+        setattr(obj, prop, value)
+    except Exception as e:
+        return f"Could not set {label}: {e}"
+    if safe(lambda: getattr(obj, prop)) != value:
+        return (f"Setting {label} did not take - {owner_name}.{prop} reads back unchanged, so the "
+                "operation would run on its default settings.")
+    return ""
+
+
+def cancel_input(inp, what):
+    """Abort an OPEN feature-input transaction, reporting a refusal to cancel.
+
+    A createInput that partial-computes (trimFeatures, boundaryFillFeatures) STARTS a feature
+    transaction that only add() or cancel() ends; the API's own doc says leaving it open "leaves
+    Fusion in a bad state and there will be undo problems and possibly a crash". cancel() answers
+    whether the abort took: a false leaves Fusion holding the open compute, which the tool cannot
+    fix, so it is surfaced instead of swallowed.
+
+    Returns "" (nothing to cancel, or the cancel took) or a sentence to APPEND to the error the
+    caller is already returning. `what` names the transaction in it ("trim", "boundary-fill")."""
+    if inp is None:
+        return ""
+    if safe(lambda: inp.cancel()):
+        return ""
+    return (f" The open {what} transaction could NOT be cancelled - Fusion may be left mid-compute; "
+            "undo in Fusion before continuing.")
+
+
+# ── the DIRECT-mode no-feature shape (a Features.*.add() that returns nothing) ──────────────
+
+# MEASURED (Fusion 2704.1.39, direct-mode scratch document). SIX classes returned None WHILE the
+# edit landed: combineFeatures.add (a join took 2 bodies to 1), moveFeatures.add (the translate
+# applied), splitBodyFeatures.add (7 bodies to 8), scaleFeatures.add (a x2 factor multiplied volume
+# by 8), offsetFacesFeatures.add (a loft frustum read 117.248 after a +0.2 side-face offset) and
+# deleteFaceFeatures.add (a healed fillet face took a box from 7 faces to 6). ELEVEN returned real
+# feature objects in that same direct design: extrudeFeatures.addSimple, filletFeatures.add,
+# shellFeatures.add, chamferFeatures.add, rectangularPatternFeatures.add, mirrorFeatures.add,
+# holeFeatures.add, revolveFeatures.add, thickenFeatures.add, loftFeatures.add and
+# patchFeatures.add. So the None is PER-CLASS, not family-wide - which is why this is a MODE gate
+# and not a per-class table: a class that does return a feature never reaches it, and a class nobody
+# has measured is covered either way.
+#
+# A None is never itself proof of an effect: a direct combine of two NON-TOUCHING bodies returned
+# None with the body count AND the target volume both unmoved. The caller's own effect read decides.
+
+DIRECT_FEATURE_NOTE = ("This design is in DIRECT mode, where this operation creates no timeline "
+                       "feature object to name - what is reported here is read back off the model.")
+
+
+def direct_feature_absence(design, feature) -> bool:
+    """True when a falsy Features.*.add() return is the DIRECT-mode shape rather than a failure.
+
+    It says only that the RETURN carries no information about success in this design. The caller
+    must still confirm its own effect (a census / volume / count read-back of the model, never the
+    feature) before reporting ok, and must not publish a feature name it does not have - see
+    DIRECT_FEATURE_NOTE. In a PARAMETRIC design this is always False: a None feature there is
+    unmeasured as a success and stays an honest error."""
+    # _inputs imports _common, so the ONE mode reader (current_design_type, shared with ModeGuard
+    # and design_get's mode slice) is bound at call time rather than at import.
+    from . import _inputs
+    return not feature and _inputs.current_design_type(design) == _inputs.MODE_DIRECT
+
+
+def null_feature_note(design, feature, base_feature_name, what) -> str:
+    """The sentence a payload appends when a write's add() came back without a feature object.
+
+    A DIRECT design gets DIRECT_FEATURE_NOTE. A design that is NOT direct ran the add inside a
+    base-feature edit scope, and THAT scope - not the design's mode - is why there is no feature to
+    name, so the scope is what the note names. `what` names the operation ("plane cut"). It never
+    claims the write succeeded: the caller's own effect read-back decides that, exactly as with
+    direct_feature_absence."""
+    if direct_feature_absence(design, feature):
+        return DIRECT_FEATURE_NOTE
+    if base_feature_name:
+        return (f"'feature' is null: this {what} ran inside the base-feature edit scope "
+                f"'{base_feature_name}' that a parametric mesh write requires, and the add returned "
+                "no feature there - the result is read back off the model.")
+    return (f"'feature' is null and no base-feature scope was opened - the {what} result is read "
+            "back off the model.")
+
+
+def census_host(entity, fallback):
+    """The component whose body collection a before/after census must be counted on: the target
+    entity's OWN parentComponent, falling back to `fallback` when it cannot be read.
+
+    MEASURED: a direct splitBodyFeatures.add put the new piece in the TARGET's parentComponent
+    (SplitHost 1 -> 2) while the ACTIVE component held still (root 3 -> 3), and a direct combine
+    whose target AND tool both live in a sub-component moves nothing the active component can see
+    (root 3 -> 3 throughout). So a census scoped to target_component(design) is BLIND to either.
+
+    Resolve this ONCE, BEFORE the mutation, and count the SAME object twice: re-deriving it
+    afterwards lets a proxy that stops answering parentComponent swing the count onto a different
+    collection, and the difference of two unrelated counts is a fabricated number, not a verdict."""
+    return safe(lambda: entity.parentComponent) or fallback
+
+
+def body_count(host):
+    """How many BRep bodies `host` holds, or None if the collection cannot be read."""
+    return safe(lambda: host.bRepBodies.count)
+
+
+def failed_effect_remedy(design, feature) -> str:
+    """The remediation sentence a "the call ran but its effect is wrong" error ends with.
+
+    A PARAMETRIC design leaves a timeline entry to delete. On the direct-mode no-feature path there
+    is neither a feature nor a timeline, so naming design_delete_feature would send the caller after
+    something that does not exist - the honest remedy there is Fusion's own undo."""
+    if direct_feature_absence(design, feature):
+        return ("This design is in DIRECT mode: there is no timeline feature to remove, so whatever "
+                "did change is already in the model - undo in Fusion, or re-run with corrected "
+                "inputs.")
+    return "The feature remains in the timeline; remove it with design_delete_feature."
+
+
+def no_feature_error(design, what, hint="") -> str:
+    """The refusal text for a falsy add() at a site whose ONLY evidence was the feature object.
+
+    In a parametric design that is a plain failure. In a direct design this call cannot tell a
+    no-op from a landed-but-unnamed edit, so it says so and points at the read that settles it,
+    instead of asserting a failure it cannot prove. `what` names the operation ("Extrude")."""
+    text = f"{what} returned no feature."
+    if hint:
+        text = f"{text} {hint}"
+    if direct_feature_absence(design, None):
+        text += (" This design is in DIRECT mode, where some feature classes return no feature "
+                 "object even though the edit LANDED, so this result cannot tell a no-op from a "
+                 "silent success. Read the model back with design_get before retrying - a retry "
+                 "would repeat an edit that may already be in the model.")
+    return text
 
 
 def timeline_health(design):
@@ -400,6 +620,24 @@ def resolve_entity_ref(sketch, ref):
     return safe(lambda: coll.item(i))
 
 
+def resolve_entity_refs(sketch, raw, field="entities"):
+    """Every entity named by a COMMA-SEPARATED '<type>:<index>' list, in the order given - the ONE
+    parser for the multi-entity sketch selector (``entities``) that sketch_constrain's list kinds and
+    sketch_move/sketch_copy both take. Returns (entities, refs, error): ``refs`` is the cleaned token
+    list (kept even on failure, so a caller can name what it was given) and the error names the FIRST
+    ref that did not resolve, with the legal kinds."""
+    refs = [r.strip() for r in (raw or "").split(",") if r.strip()]
+    ents = []
+    for ref in refs:
+        ent = resolve_entity_ref(sketch, ref)
+        if ent is None:
+            return None, refs, (f"Could not resolve '{ref}' in '{field}' (use '<type>:<index>', "
+                                f"type = {'/'.join(ENTITY_REF_KINDS)}) - ids come from "
+                                "sketch_get(include_entities=true).")
+        ents.append(ent)
+    return ents, refs, None
+
+
 # Operation name -> adsk.fusion.FeatureOperations attribute (extrude/revolve/sweep/loft-style features).
 OPERATIONS = {
     "new": "NewBodyFeatureOperation",
@@ -410,3 +648,69 @@ OPERATIONS = {
     "new_component": "NewComponentFeatureOperation",
 }
 
+
+# ── the ONE path resolver (sweep / pipe / path pattern / on-path datum) ──────
+
+def build_path(comp, path_raw):
+    """Resolve a feature path input to an adsk.fusion.Path. Returns (path, label, error).
+
+    'sketch:<name>' -> chain the connected curves of that path sketch (Features.createPath, isChain).
+    Otherwise a find_geometry EDGE handle (single, auto-chained) or a JSON list of edge handles (used
+    exactly, no chaining) -> a model-edge path (Path.create). A path built from several edges requires
+    them to geometrically connect into one path."""
+    # _inputs imports _common, so the edge-handle kind is bound at call time rather than at import.
+    from . import _inputs
+    if isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:"):
+        nm = path_raw.split(":", 1)[1].strip()
+        sk, _ = target_sketch(comp, nm)
+        if not sk:
+            return None, None, f"No sketch named '{nm}' for the path. Use sketch_get or sketch_create."
+        curves = safe(lambda: sk.sketchCurves)
+        cn = safe(lambda: curves.count, 0) if curves else 0
+        if not cn:
+            return None, None, f"Path sketch '{nm}' has no curves to build a path from."
+        seed = safe(lambda: curves.item(0))
+        try:
+            p = comp.features.createPath(seed, True) # isChain=True: chain the connected curves
+        except Exception as e:
+            return None, None, f"Could not build a path from sketch '{nm}': {e}"
+        if not p:
+            return None, None, f"createPath returned nothing for sketch '{nm}'."
+        return p, f"sketch:{nm}", None
+
+    # Model-edge path. A single handle is kept whole (a composite handle carries commas in its
+    # locator, so it must NOT be comma-split); several must arrive as a JSON list.
+    if path_raw in (None, "", []):
+        return None, None, ("'path' is required: a find_geometry edge 'handle' (or a JSON list of "
+                            "them), or 'sketch:<name>' for a path sketch.")
+    handles = [path_raw] if isinstance(path_raw, str) else list(path_raw)
+    edges, err = _inputs.GeometryHandleList("path", require="edge").resolve(handles)
+    if err:
+        return None, None, err
+    if len(edges) == 1:
+        try:
+            p = comp.features.createPath(edges[0], True) # chain tangent-connected edges from the seed
+        except Exception as e:
+            return None, None, f"Could not build a path from the edge: {e}"
+    else:
+        coll = adsk.core.ObjectCollection.create()
+        for e in edges:
+            coll.add(e)
+        try:
+            # Multiple edges: use them exactly (noChainedCurves); they must connect into one path.
+            p = adsk.fusion.Path.create(coll, adsk.fusion.ChainedCurveOptions.noChainedCurves)
+        except Exception as e:
+            return None, None, f"Could not build a path from the {len(edges)} edges: {e}"
+    if not p:
+        return None, None, "Path build returned nothing (the edges may not connect into one path)."
+    return p, f"{len(edges)} edge(s)", None
+
+
+def iter_collection(coll):
+    """Yield each item of a Fusion count/item(i) collection - the measured live protocol
+    (brepbodies-protocol, VERIFIED_API_FACTS.md); the fakes carry the same shape. Yields nothing
+    when the collection is absent."""
+    for i in range(safe(lambda: coll.count, 0) or 0):
+        it = safe(lambda i=i: coll.item(i))
+        if it is not None:
+            yield it

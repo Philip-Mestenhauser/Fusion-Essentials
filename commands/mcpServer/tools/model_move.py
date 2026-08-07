@@ -45,7 +45,8 @@ _ROTATE = "rotate"
 _POINT_TO_POINT = "point_to_point"
 
 RETURNS = [
-    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
+                         absent_when="no_timeline_feature"),
     _outputs.ReturnsValue("displacement", "the measured geometry displacement proving the move took"),
 ]
 
@@ -132,25 +133,25 @@ def _expected_cm(mode_key, offsets_cm, dist_cm, start_pt, end_pt):
     return None
 
 
-def _verify(before, after, expected_cm=None):
+def _verify(before, after, remedy, expected_cm=None):
     """(error_text, largest_displacement_cm) proving the move displaced the geometry - and, when the
     mode fixes the distance up front, that it moved by exactly that much. Every sample point of a
     rigid translation travels the same vector, so the largest displacement IS the expected magnitude;
-    a rotation has no single expected scalar and passes expected_cm=None."""
+    a rotation has no single expected scalar and passes expected_cm=None.
+
+    `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct path
+    has no timeline feature to send the caller after."""
     dists = [d for d in (_displacement(b, a) for b, a in zip(before, after)) if d is not None]
     if not dists:
         return ("Move reported success but no moved geometry could be read back, so the result "
-                "could not be verified. Re-read it with model_inspect; the feature remains in the "
-                "timeline and design_delete_feature removes it."), None
+                f"could not be verified. Re-read it with model_inspect. {remedy}"), None
     biggest = max(dists)
     if biggest <= _MOVE_EPS_CM:
         return ("Move reported success but the geometry sits exactly where it was - nothing was "
-                "displaced. The feature remains in the timeline; remove it with "
-                "design_delete_feature."), None
+                f"displaced. {remedy}"), None
     if expected_cm is not None and abs(biggest - expected_cm) > _MOVE_TOL_CM:
         return (f"Move displaced the geometry by {round(biggest, 6)} cm, not the {round(expected_cm, 6)} "
-                "cm requested - the move did not land where it was asked to. The feature remains in "
-                "the timeline; remove it with design_delete_feature."), None
+                f"cm requested - the move did not land where it was asked to. {remedy}"), None
     return "", biggest
 
 
@@ -181,7 +182,10 @@ def _host_for(design, body):
     owning component raises "3 : Invalid entity" at defineAs. Together they succeed."""
     root = safe(lambda: design.rootComponent)
     owner = safe(lambda: body.parentComponent) or root
-    if owner is None or owner is root:
+    # same_component, not `is`: component wrappers are never identity-stable, so `owner is root` reads
+    # False even for a ROOT body, which then takes the sub-component path (a pointless
+    # allOccurrencesByComponent lookup that finds nothing).
+    if owner is None or _common.same_component(owner, root):
         return root, None
     ctx = safe(lambda: body.assemblyContext)
     if ctx is None:
@@ -281,6 +285,9 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
     for e in ents:
         coll.add(e)
     before = [_body_points(e) for e in ents]
+    # Also captured BEFORE: the NAMES - a post-mutation proxy can stop answering .name, and a payload
+    # must not publish a null for a body that resolved.
+    body_names = [safe(lambda e=e: e.name) for e in ents]
     # Measured BEFORE the mutation: a point_to_point from_point normally rides the body being
     # moved, so after add() the two vertices have closed on each other and their separation no
     # longer describes the travel that was asked for.
@@ -312,8 +319,12 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
         feature = comp.features.moveFeatures.add(move_input)
     except Exception as e:
         return error(f"Move failed: {e} {_HINTS[mode_key]}")
-    if not feature:
-        return error("Move returned no feature.")
+    # MEASURED: moveFeatures.add returns None in a DIRECT design while the translate LANDS. The
+    # verdict below is the measured before/after body-point read-back, which needs no feature object
+    # - so in direct mode fall through to it. In parametric a None feature stays an honest error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Move"))
 
     # A feature can be ADDED yet fail to compute.
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:
@@ -322,20 +333,30 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
                      "or a different axis/point selection.")
 
     after = [_body_points(e) for e in ents]
-    verr, moved_cm = _verify(before, after, expected_cm)
+    verr, moved_cm = _verify(before, after, _common.failed_effect_remedy(design, feature),
+                             expected_cm)
     if verr:
         return error(verr)
 
     payload = {
         "moved": True,
-        "feature": safe(lambda: feature.name),
         "mode": mode_key,
         "displacement": round(moved_cm / scale_factor, 6),
         "units": units,
-        "note": "Geometry repositioned by a move feature in the timeline, so it replays on every "
-                "recompute. To reposition a component instance instead, use assembly_move.",
+        "note": ("Geometry repositioned. To reposition a component instance instead, use "
+                 "assembly_move."),
     }
-    payload["bodies"] = [safe(lambda b=b: b.name) for b in ents]
+    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
+    # against, and drop the timeline claim that only holds for the parametric feature. Every other
+    # key here is measured off the BODIES, so it survives the missing feature untouched.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
+    else:
+        payload["feature"] = safe(lambda: feature.name)
+        payload["note"] += (" The move is a feature in the timeline, so it replays on every "
+                            "recompute.")
+    payload["bodies"] = body_names
     return ok(payload)
 
 

@@ -22,23 +22,44 @@ app = adsk.core.Application.get()
 _MAX_PARAMS = 2000
 
 
-def _param_summary(p) -> dict:
+def _param_summary(p, units_manager=None) -> dict:
+    if units_manager is None:
+        d = _common.design()
+        units_manager = safe(lambda: d.unitsManager) if d else None
+    unit = safe(lambda: p.unit)
     out = {
     "name": safe(lambda: p.name),
     "expression": safe(lambda: p.expression),
-    "unit": safe(lambda: p.unit),
+    "unit": unit,
     "comment": safe(lambda: p.comment),
     # round-trippable with param_set_favorite / param_add(favorite=) - None when the parameter
     # kind carries no favorite flag (model parameters).
     "favorite": safe(lambda: p.isFavorite),
     "value": None,
     }
-    # value is numeric in db units; text params raise - fall back to textValue.
+    # Parameter.value is in DATABASE units (cm / radians), which is NOT the parameter's own 'unit':
+    # a "50 mm" length reads 5.0 and a "90 deg" angle reads 1.5708. Reporting that raw number beside
+    # unit='mm' is a 10x (or 57x) error for any caller that does arithmetic on it, so it is converted
+    # into the parameter's own unit and the raw value kept under its own key.
     v = safe(lambda: p.value)
-    if v is not None:
+    if v is None:
+        out["value"] = safe(lambda: p.textValue)     # text parameters have no numeric value
+        return out
+    out["value_internal"] = v
+    if not unit:
+        # A unitless parameter (a count, a ratio) has no conversion to make - the number IS the value.
         out["value"] = v
-    else:
-        out["value"] = safe(lambda: p.textValue)
+        out["value_units"] = ""
+        return out
+    converted = None
+    if units_manager is not None:
+        converted = safe(lambda: units_manager.convert(v, units_manager.internalUnits, unit))
+        # Only a real number may be published under the parameter's unit; anything else is reported
+        # as the internal value rather than mislabelled.
+        if not isinstance(converted, (int, float)) or isinstance(converted, bool):
+            converted = None
+    out["value"] = converted if converted is not None else v
+    out["value_units"] = unit if converted is not None else "internal (cm/radians)"
     return out
 
 
@@ -300,9 +321,11 @@ def favorite_handler(name: str = "", favorite: bool = True) -> dict:
 
 TOOL_DESCRIPTION = (
 "Read the active design's parameters: each parameter's name, expression, value, "
-"unit, and comment. Returns user parameters by default; pass "
-"include_model_parameters=true to also include feature/model parameters, or 'name' "
-"to fetch a single parameter. (Use param_set to change one.)"
+"unit, and comment. 'value' is in the parameter's own 'unit' (mm, deg, ...) - "
+"'value_units' names it, and 'value_internal' is the raw cm/radians figure. Returns "
+"user parameters by default; pass include_model_parameters=true to also include "
+"feature/model parameters, or 'name' to fetch a single parameter. (Use param_set to "
+"change one.)"
 )
 
 tool = (

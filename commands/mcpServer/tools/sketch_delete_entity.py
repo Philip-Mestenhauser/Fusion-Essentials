@@ -6,10 +6,11 @@ bad constraint can be surgically removed WITHOUT deleting and rebuilding the who
 
   sketch_delete_entity -> remove one 'target' from a named sketch. 'target' is '<type>:<index>':
       line / arc / circle / ellipse / point / spline / cv_spline / fixed_spline (a curve or point,
-      via the shared resolve_entity_ref/entity_collection - see _common.ENTITY_REF_KINDS) OR
-      constraint (a geometric constraint, indexed in sketch.geometricConstraints creation order).
-      The delete is verified by reading the collection count back - a delete that removed nothing
-      is reported as a failure, never a false ok. WRITES.
+      via the shared resolve_entity_ref/entity_collection - see _common.ENTITY_REF_KINDS),
+      constraint (a geometric constraint, indexed in sketch.geometricConstraints creation order),
+      OR text (a sketch text, indexed in sketch.sketchTexts creation order - the same index
+      sketch_set_text edits by). The delete is verified by reading the collection count back - a
+      delete that removed nothing is reported as a failure, never a false ok. WRITES.
 
 The recovery tool for the coincident-vs-point-on-curve trap sketch_constrain documents: apply a wrong
 constraint, delete just THAT constraint here, re-constrain - instead of design_delete_feature on the
@@ -24,6 +25,9 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names, resolve_entity_ref
 from . import _common
+# The readable handle on a SketchText's string is textParameter.expression, which holds it QUOTED -
+# _unquote is sketch_set_text's own reader for it, imported rather than re-rolled here.
+from .sketch_set_text import _unquote
 
 app = adsk.core.Application.get()
 
@@ -40,6 +44,22 @@ def _resolve_constraint(sketch, idx):
         return None, "This sketch exposes no geometric constraints collection."
     if idx < 0 or idx >= n:
         return None, f"constraint index {idx} out of range - the sketch has {n} constraint(s)."
+    return safe(lambda: coll.item(idx)), None
+
+
+def _text_collection(sketch):
+    return safe(lambda: sketch.sketchTexts)
+
+
+def _resolve_text(sketch, idx):
+    """A sketch text by creation-order index - the SAME index sketch_set_text edits by - or
+    (None, error_string)."""
+    coll = _text_collection(sketch)
+    n = safe(lambda: coll.count, 0) if coll is not None else 0
+    if coll is None:
+        return None, "This sketch exposes no sketch texts collection."
+    if idx < 0 or idx >= n:
+        return None, f"text index {idx} out of range - the sketch has {n} sketch text(s)."
     return safe(lambda: coll.item(idx)), None
 
 
@@ -62,7 +82,9 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
     if ":" not in ref:
         return error("Provide 'target' as '<type>:<index>' - type = "
                      + " | ".join(_common.ENTITY_REF_KINDS)
-                     + " | constraint (e.g. 'circle:0', 'constraint:2'). List them with sketch_get.")
+                     + " | constraint | text (e.g. 'circle:0', 'constraint:2', 'text:0'). "
+                     "sketch_get lists the curve/constraint indexes; a text index is the one "
+                     "sketch_set_text edits by.")
     kind, _, idx_s = ref.rpartition(":")
     try:
         idx = int(idx_s)
@@ -96,10 +118,40 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
             "note": "Constraint removed. Re-constrain if needed (see sketch_constrain).",
         })
 
+    # --- sketch-text path (sketchTexts is neither a SketchCurves sub-collection nor a constraint,
+    # so it has its own resolve; sketch_set_text creates and edits these by the same index) ---
+    if kind == "text":
+        coll = _text_collection(sketch)
+        before = safe(lambda: coll.count, 0) if coll is not None else 0
+        ent, terr = _resolve_text(sketch, idx)
+        if terr:
+            return error(terr)
+        # The string is captured BEFORE the mutation - a deleted text's wrapper is not guaranteed to
+        # still answer, and this is what tells the caller WHICH text went.
+        content = _unquote(safe(lambda: ent.textParameter.expression))
+        try:
+            # The MUTATION - not safe-wrapped, so a genuine failure raises and is reported.
+            did = ent.deleteMe()
+        except Exception as e:
+            return error(f"Could not delete {ref}: {e}")
+        after = safe(lambda: coll.count, 0) if coll is not None else before
+        if not did or after >= before:
+            return error(f"Delete of {ref} did not take (sketch text count {before} -> {after}). "
+                         "The text is still in the sketch.")
+        return ok({
+            "deleted": True,
+            "target": ref,
+            "text": content,
+            "sketch": safe(lambda: sketch.name),
+            "texts_before": before,
+            "texts_after": after,
+            "note": "Sketch text removed. Create a replacement with sketch_set_text(create=true).",
+        })
+
     # --- curve/point path (shared resolver + count read-back on the matching collection) ---
     if kind not in _common.ENTITY_REF_KINDS:
         return error(f"Unknown target type '{kind}'. Use "
-                     + " | ".join(_common.ENTITY_REF_KINDS) + " | constraint.")
+                     + " | ".join(_common.ENTITY_REF_KINDS) + " | constraint | text.")
 
     # Count the SAME collection resolve_entity_ref indexes, so the read-back proves this delete.
     coll = _common.entity_collection(sketch, kind)
@@ -129,10 +181,10 @@ def handler(sketch_name: str = "", target: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete ONE sketch entity or constraint from a named sketch - the surgical alternative to deleting "
-    "and rebuilding the whole sketch. 'target' is '<type>:<index>': line | arc | circle | ellipse | "
-    "point | spline | cv_spline | fixed_spline (a curve or point) or constraint (a geometric "
-    "constraint, indexed in creation order). Get indexes from sketch_get. Use it to undo a WRONG "
+    "Delete ONE sketch entity, constraint or text from a named sketch - the surgical alternative to "
+    "deleting and rebuilding the whole sketch. 'target' is '<type>:<index>': line | arc | circle | "
+    "ellipse | point | spline | cv_spline | fixed_spline (a curve or point) or constraint - indexes "
+    "from sketch_get - or text, at the index sketch_set_text edits by. Use it to undo a WRONG "
     "constraint (e.g. a coincident that pinned a circle to a curve instead of centering it - see "
     "sketch_constrain) without losing the rest of the sketch. The delete is verified by reading the "
     "collection count back: a delete that removed nothing is returned as an error, never a false ok."
@@ -147,8 +199,8 @@ tool = (
     )
     .add_input_property("target", {"type": "string",
             "description": "The entity to delete as '<type>:<index>' - line | arc | circle | ellipse | "
-                           "point | spline | cv_spline | fixed_spline | constraint (e.g. 'circle:0', "
-                           "'constraint:2'). Indexes from sketch_get, 0-based."})
+                           "point | spline | cv_spline | fixed_spline | constraint | text (e.g. "
+                           "'circle:0', 'constraint:2', 'text:0'). 0-based, in creation order."})
     .add_required_input("target")
     .strict_schema()
 )

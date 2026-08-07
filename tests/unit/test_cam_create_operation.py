@@ -92,11 +92,15 @@ class _CAM:
         self.setups = _Setups([_Setup(n, strategies) for n in setups])
         self.documentToolLibrary = _ToolLib(list(doc_tools))   # this doc's tools (real adsk shape)
         self.generated = []
+        self.futures = []
     def generateToolpath(self, op):
         op.hasToolpath = True
         op.isToolpathValid = True
         self.generated.append(op)
-        return object()   # GenerateToolpathFuture stand-in
+        # GenerateToolpathFuture stand-in, kept so a test can assert THIS object was registered.
+        fut = type("Fut", (), {"numberOfOperations": 1})()
+        self.futures.append(fut)
+        return fut
 
 
 def _install(monkeypatch, setups=("Setup1",), tools=2, doc_tools=()):
@@ -174,6 +178,31 @@ class TestCreate:
         # carry it (a false negative would send the agent chasing a phantom failure)
         assert "has_toolpath" not in out and "toolpath_valid" not in out
         assert len(cam.generated) == 1
+
+    def test_generation_future_is_REGISTERED_not_dropped(self, monkeypatch):
+        # Fusion ABANDONS an in-progress generation whose Future is garbage-collected, so the launch
+        # must hand it to cam_generate.register_future - the one thing keeping it alive - and return
+        # the handle cam_get_status polls. Discarding it reports generation_started with nothing
+        # actually generating.
+        cco.cam_generate._GENERATIONS.clear()
+        cam = _install(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="adaptive",
+                                   tool_library_url="u", tool_index=1, generate=True))
+        assert out["generation_started"] is True
+        handle = out["generation_handle"]
+        entry = cco.cam_generate._GENERATIONS[handle]
+        assert entry["future"] is cam.futures[-1]      # THE launched future, still referenced
+        cco.cam_generate._GENERATIONS.clear()
+
+    def test_a_null_future_is_reported_not_claimed_as_started(self, monkeypatch):
+        # generateToolpath returning nothing means no generation is running; saying otherwise sends
+        # the agent to post a job whose toolpath was never computed.
+        cam = _install(monkeypatch)
+        monkeypatch.setattr(cam, "generateToolpath", lambda op: None)
+        out = _payload(cco.handler(setup="Setup1", strategy="adaptive",
+                                   tool_library_url="u", tool_index=1, generate=True))
+        assert out["generation_started"] is False
+        assert "no future" in out["generate_error"]
 
     def test_default_generates(self, monkeypatch):
         # generate defaults to True (the useful default — an operation with no toolpath is incomplete)

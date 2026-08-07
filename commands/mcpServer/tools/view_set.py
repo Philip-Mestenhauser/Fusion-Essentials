@@ -119,18 +119,6 @@ def _doc_key():
     return safe(lambda: doc.name) or "<active>"
 
 
-def _all_occurrences(design):
-    occs = []
-    try:
-        for o in design.rootComponent.allOccurrences:
-            occs.append(o)
-            if len(occs) >= _MAX_OCC:
-                break
-    except Exception:
-        pass
-    return occs
-
-
 def _show_with_ancestors(occ):
     """Turn on this occurrence's light bulb AND every ancestor occurrence's bulb.
 
@@ -155,7 +143,7 @@ def _show_with_ancestors(occ):
 def _do_snapshot(design):
     vp = app.activeViewport
     occ_state = {}
-    for o in _all_occurrences(design):
+    for o in _common.all_occurrences(design, cap=_MAX_OCC):
         fp = safe(lambda o=o: o.fullPathName)
         if fp is None:
             continue
@@ -311,7 +299,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
 def _do_visibility(design, action, target):
     if action == "clear_isolation":
         cleared = 0
-        for o in _all_occurrences(design):
+        for o in _common.all_occurrences(design, cap=_MAX_OCC):
             if safe(lambda o=o: o.isIsolated):
                 try:
                     o.isIsolated = False
@@ -414,7 +402,7 @@ def _do_restore(design):
     missing = 0
     # restore visibility per occurrence (clear isolation first so bulbs apply cleanly)
     by_path = {}
-    for o in _all_occurrences(design):
+    for o in _common.all_occurrences(design, cap=_MAX_OCC):
         fp = safe(lambda o=o: o.fullPathName)
         if fp is not None:
             by_path[fp] = o

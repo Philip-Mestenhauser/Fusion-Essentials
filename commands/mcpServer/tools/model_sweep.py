@@ -17,7 +17,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, target_component, root_body_advisory
+from ._common import error, ok, safe, target_component, root_body_advisory, build_path
 from . import _common
 from . import _inputs
 from . import _outputs
@@ -26,9 +26,6 @@ app = adsk.core.Application.get()
 
 # profile may be a stable profile HANDLE (entityToken) or a {sketch, profile_index} selector.
 _PROFILE = _inputs.ProfileRef("profile", required=True)
-# path model-edge handles from find_geometry (an open BRep edge chain). A path SKETCH is selected by
-# the 'sketch:<name>' form instead (sketch curves are not find_geometry handles).
-_PATH_EDGES = _inputs.GeometryHandleList("path", require="edge")
 # target_bodies: scope a cut/intersect to these bodies so the sweep can't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
     description="Bodies a cut/intersect may affect (prevents cut bleed-through into other bodies).")
@@ -92,59 +89,6 @@ def _resolve_profile(comp, profile_raw, as_surface):
     return None, None, None, None, err
 
 
-def _build_path(comp, path_raw):
-    """Resolve the sweep path to an adsk.fusion.Path. Returns (path, label, error).
-
-    'sketch:<name>' -> chain the connected curves of that path sketch (Features.createPath, isChain).
-    Otherwise a find_geometry EDGE handle (single, auto-chained) or a JSON list of edge handles (used
-    exactly, no chaining) -> a model-edge path (Path.create). A path built from several edges requires
-    them to geometrically connect into one path."""
-    if isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:"):
-        nm = path_raw.split(":", 1)[1].strip()
-        sk, _ = _common.target_sketch(comp, nm)
-        if not sk:
-            return None, None, f"No sketch named '{nm}' for the path. Use sketch_get or sketch_create."
-        curves = safe(lambda: sk.sketchCurves)
-        cn = safe(lambda: curves.count, 0) if curves else 0
-        if not cn:
-            return None, None, f"Path sketch '{nm}' has no curves to sweep along."
-        seed = safe(lambda: curves.item(0))
-        try:
-            p = comp.features.createPath(seed, True) # isChain=True: chain the connected curves
-        except Exception as e:
-            return None, None, f"Could not build a path from sketch '{nm}': {e}"
-        if not p:
-            return None, None, f"createPath returned nothing for sketch '{nm}'."
-        return p, f"sketch:{nm}", None
-
-    # Model-edge path. A single handle is kept whole (a composite handle carries commas in its
-    # locator, so it must NOT be comma-split); several must arrive as a JSON list.
-    if path_raw in (None, "", []):
-        return None, None, ("'path' is required: a find_geometry edge 'handle' (or a JSON list of "
-                            "them), or 'sketch:<name>' for a path sketch.")
-    handles = [path_raw] if isinstance(path_raw, str) else list(path_raw)
-    edges, err = _PATH_EDGES.resolve(handles)
-    if err:
-        return None, None, err
-    if len(edges) == 1:
-        try:
-            p = comp.features.createPath(edges[0], True) # chain tangent-connected edges from the seed
-        except Exception as e:
-            return None, None, f"Could not build a path from the edge: {e}"
-    else:
-        coll = adsk.core.ObjectCollection.create()
-        for e in edges:
-            coll.add(e)
-        try:
-            # Multiple edges: use them exactly (noChainedCurves); they must connect into one path.
-            p = adsk.fusion.Path.create(coll, adsk.fusion.ChainedCurveOptions.noChainedCurves)
-        except Exception as e:
-            return None, None, f"Could not build a path from the {len(edges)} edges: {e}"
-    if not p:
-        return None, None, "Path build returned nothing (the edges may not connect into one path)."
-    return p, f"{len(edges)} edge(s)", None
-
-
 def handler(profile=None, path=None, operation: str = "new", orientation: str = "perpendicular",
             as_surface: bool = False, target_bodies=None) -> dict:
     """See TOOL_DESCRIPTION."""
@@ -166,7 +110,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
 
     # Build the path AND the feature on the profile's OWNING component (host) - a profile-consuming
     # feature created on the active component raises bSet when the profile is owned elsewhere.
-    sweep_path, path_label, patherr = _build_path(host, path)
+    sweep_path, path_label, patherr = build_path(host, path)
     if patherr:
         return error(patherr)
 
@@ -204,7 +148,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         return error(f"Sweep failed: {e}. (A 'cut'/'intersect' needs existing geometry to act on; "
                      "the profile and path must form a valid sweep.)")
     if not feature:
-        return error("Sweep returned no feature.")
+        return error(_common.no_feature_error(design, "Sweep"))
 
     body_names = []
     bodies = safe(lambda: feature.bodies)

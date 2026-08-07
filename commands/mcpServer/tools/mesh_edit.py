@@ -46,6 +46,11 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
         return error("This design has no meshGenerateFaceGroupsFeatures collection (generate face "
     "groups unavailable here).")
 
+    # The design's OWN mode, read BEFORE any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
+
     def inner_op(base_feature):
         # createInput -> set method -> add, all INSIDE the (possibly open) base-feature scope.
         try:
@@ -55,10 +60,15 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
         if inp is None:
             return error("meshGenerateFaceGroupsFeatures.createInput returned nothing.")
         mt = safe(lambda: adsk.fusion.MeshGenerateFaceGroupsMethodTypes)
-        if mt is not None:
-            method_enum = safe(lambda: (mt.FastMeshGenerateFaceGroupsMethodType if meth == "fast"
-                                        else mt.AccurateMeshGenerateFaceGroupsMethodType))
-            safe(lambda: setattr(inp, "method", method_enum))
+        if mt is None:
+            return error("adsk.fusion.MeshGenerateFaceGroupsMethodTypes is unavailable on this "
+                         "Fusion version.")
+        merr = _common.set_verified(inp, "meshGenerateFaceGroupsMethodType",
+                             safe(lambda: (mt.FastGenerateFaceGroupsType if meth == "fast"
+                                           else mt.AccurateGenerateFaceGroupsType)),
+                             f"method='{meth}'", "MeshGenerateFaceGroupsFeatureInput")
+        if merr:
+            return error(merr)
         # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
         # method "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR
         # an add inside the BaseFeature scope run_in_base_feature opens). SUCCESS is observed on the
@@ -68,7 +78,10 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
         except Exception as e:
             return error(f"Generate face groups failed "
                          f"(meshGenerateFaceGroupsFeatures.add raised): {e}")
-        return feat
+        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
+        # HERE - it is what explains a null feature to the caller.
+        return {"feat": feat,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
@@ -76,7 +89,8 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
     if isinstance(result, dict) and result.get("isError") is True:
         return result   # inner_op returned a _common.error() (createInput failure)
 
-    feat = result   # a MeshGenerateFaceGroupsFeature (parametric) or None (non-parametric)
+    feat = result["feat"]   # a MeshGenerateFaceGroupsFeature, or None inside a base-feature scope
+    bf_name = result["base_feature_name"]
     group_count = safe(lambda: mb.faceGroups.count)
     # A returned feature IS proof the add() succeeded. A None feature (non-parametric) is only proof
     # of success if the mesh actually carries face groups afterward - a None with zero groups is a
@@ -85,16 +99,21 @@ def mesh_generate_face_groups_handler(mesh: str = "", method: str = "accurate") 
         return error("mesh_generate_face_groups reported no error, but the mesh has no face groups "
                      "afterward (add() returned nothing and face_group_count is 0). Treating this as "
                      "a failure - no face groups were generated.")
+    note = ("Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - "
+            "prismatic convert REQUIRES face groups (it merges each flat group into one BRep "
+            "face).")
+    if feat is None:
+        note += " " + _common.null_feature_note(design, feat, bf_name, "face-group generation")
+
     return ok({
         "generated": True,
         "mesh": safe(lambda: mb.name),
         "method": meth,
         "feature": safe(lambda: feat.name) if feat else None,
-        "non_parametric": feat is None,        # add() returned nothing -> non-parametric = success
+        "design_mode": design_mode,
+        "base_feature": bf_name,
         "face_group_count": group_count,       # the observable side effect proving it applied
-        "note": ("Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - "
-            "prismatic convert REQUIRES face groups (it merges each flat group into one BRep "
-            "face)."),
+        "note": note,
     })
 
 
@@ -137,6 +156,11 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         if cut_plane is None:
             return error("'plane': could not read the plane geometry off that face handle.")
 
+    # The design's OWN mode, read BEFORE any scope opens: designType reads DIRECT while a
+    # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
+    # parametric design - so the returned feature is no evidence of the design's mode.
+    design_mode = _inputs.current_design_type(design)
+
     def inner_op(base_feature):
         try:
             inp = feats.createInput(mb, cut_plane)
@@ -145,26 +169,38 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         if inp is None:
             return error("meshPlaneCutFeatures.createInput returned nothing.")
 
+        _IN = "MeshPlaneCutFeatureInput"
         cts = safe(lambda: adsk.fusion.MeshPlaneCutTypes)
-        if cts is not None:
-            cut_enum = safe(lambda: {
+        if cts is None:
+            return error("adsk.fusion.MeshPlaneCutTypes is unavailable on this Fusion version.")
+        cerr = _common.set_verified(inp, "meshPlaneCutType", safe(lambda: {
             "trim": cts.TrimMeshPlaneCutType,
             "split_body": cts.SplitBodyMeshPlaneCutType,
             "split_faces": cts.SplitFacesMeshPlaneCutType,
-            }.get(ct))
-            safe(lambda: setattr(inp, "cutType", cut_enum))
+        }.get(ct)), f"cut_type='{ct}'", _IN)
+        if cerr:
+            return error(cerr)
 
-        fts = safe(lambda: adsk.fusion.MeshPlaneCutFillTypes)
-        if fts is not None:
-            fill_enum = safe(lambda: {
-            "none": fts.NoFillMeshPlaneCutFillType,
-            "minimal": fts.MinimalMeshPlaneCutFillType,
-            "uniform": fts.UniformMeshPlaneCutFillType,
-            }.get(fl))
-            safe(lambda: setattr(inp, "fillType", fill_enum))
+        # meshPlaneCutFillType is "Only valid if meshPlaneCutType is not SplitFacesMeshPlaneCutType"
+        # (API doc), so split_faces skips it rather than asserting a fill it cannot honour.
+        fill_applied = None
+        if ct != "split_faces":
+            fts = safe(lambda: adsk.fusion.MeshPlaneCutFillTypes)
+            if fts is None:
+                return error("adsk.fusion.MeshPlaneCutFillTypes is unavailable on this Fusion version.")
+            ferr = _common.set_verified(inp, "meshPlaneCutFillType", safe(lambda: {
+                "none": fts.NoFillMeshPlaneCutFillType,
+                "minimal": fts.MinimalMeshPlaneCutFillType,
+                "uniform": fts.UniformMeshPlaneCutFillType,
+            }.get(fl)), f"fill='{fl}'", _IN)
+            if ferr:
+                return error(ferr)
+            fill_applied = fl
 
         if flip:
-            safe(lambda: setattr(inp, "isFlipped", True))
+            xerr = _common.set_verified(inp, "isFlip", True, "flip=true", _IN)
+            if xerr:
+                return error(xerr)
 
         # Snapshot the component's mesh bodies BEFORE the add so we can detect the cut by side effect
         # in non-parametric mode (where add() returns None). Captured INSIDE inner_op so the count is
@@ -180,8 +216,11 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
             feat = feats.add(inp)
         except Exception as e:
             return error(f"Mesh plane cut failed (meshPlaneCutFeatures.add raised): {e}")
+        # The open BaseFeature can never be re-found once the scope closes, so its name is captured
+        # HERE - it is what explains a null feature to the caller.
         return {"feat": feat, "before_mesh_count": before_mesh_count,
-    "after_mesh_count": _mesh_count()}
+    "after_mesh_count": _mesh_count(), "fill_applied": fill_applied,
+    "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
     if scope_err:
@@ -190,6 +229,7 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         return result
 
     feat = result["feat"]
+    bf_name = result["base_feature_name"]
     before_mesh_count = result["before_mesh_count"]
     after_mesh_count = result["after_mesh_count"]
     # Parametric: the feature carries .bodies. Non-parametric (feat None): the cut applied (no
@@ -201,15 +241,18 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     note = ("Mesh cut by the plane. 'trim' keeps one side, 'split_body' makes two mesh bodies, "
     "'split_faces' cuts the triangulation in place. fill controls the new opening "
     "(none / minimal / uniform). Use flip=true to keep/cut the other side.")
+    if feat is None:
+        note += " " + _common.null_feature_note(design, feat, bf_name, "plane cut")
 
     payload = {
     "cut": True,
     "mesh": safe(lambda: mb.name),
     "cut_type": ct,
-    "fill": fl,
+    "fill": result["fill_applied"],
     "flipped": bool(flip),
     "feature": safe(lambda: feat.name) if feat else None,
-    "non_parametric": feat is None,
+    "design_mode": design_mode,
+    "base_feature": bf_name,
     "result_bodies": bodies,
     "result_body_count": len(bodies),
     "mesh_body_count": after_mesh_count,
@@ -226,9 +269,19 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         became_split = after > before
         payload["became_split"] = became_split
         if not became_split:
-            note += (" NOTE: split_body did not separate the mesh into two bodies (the mesh is likely "
-    "not watertight - split_body needs a closed mesh; run mesh_remesh or check "
-    "is_closed via model_inspect).")
+            # Report the cause only when it was READ; split_body needs a closed mesh, but an open
+            # mesh is not the only way to get one body back, so an unreadable flag stays unnamed.
+            closed = safe(lambda: mb.isClosed)
+            payload["mesh_is_closed"] = closed
+            note += " NOTE: split_body did not separate the mesh into two bodies."
+            if closed is False:
+                note += (" This mesh reads is_closed=false, and split_body needs a closed mesh - "
+                         "close it with mesh_repair, then retry.")
+            elif closed is True:
+                note += (" This mesh reads is_closed=true, so the open-mesh explanation does not "
+                         "apply - check that the plane actually passes through the body.")
+            else:
+                note += " Its is_closed flag could not be read, so the reason is unconfirmed."
 
     payload["note"] = note
     return ok(payload)

@@ -97,13 +97,21 @@ class _FakeLoftInput:
         self.isSolid = True
 
 
+class _SwallowingLoftInput(_FakeLoftInput):
+    """A LoftFeatureInput that ACCEPTS the isClosed write and keeps its default anyway - the SWIG
+    shape set_verified exists to catch (nothing raises, the loft would just run open)."""
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, False if name == "isClosed" else value)
+
+
 class _FakeLoftFeatures:
-    def __init__(self, result_is_solid=True, result_bodies=None):
+    def __init__(self, result_is_solid=True, result_bodies=None, input_cls=_FakeLoftInput):
         self.last_input = None
         self._result_is_solid = result_is_solid
+        self._input_cls = input_cls
         self._result_bodies = result_bodies if result_bodies is not None else [_FakeBRepBody("Body1", True)]
     def createInput(self, op):
-        self.last_input = _FakeLoftInput(op)
+        self.last_input = self._input_cls(op)
         return self.last_input
     def add(self, inp):
         return _FakeFeature("Loft1", self._result_bodies, is_solid=self._result_is_solid)
@@ -243,6 +251,40 @@ class TestLoft:
         res = so.loft_handler(profiles=["H0"])
         assert res["isError"] is True
         assert "at least 2 profiles" in res["message"]
+
+    def test_is_closed_set_on_input_and_reported(self):
+        lf, _ = self._profiles_design()
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"], is_closed=True))
+        assert lf.last_input.isClosed is True
+        assert out["is_closed"] is True
+
+    def test_is_closed_omitted_writes_nothing_and_reports_nothing(self):
+        # an unwritten isClosed keeps the API default; the payload must not claim a value for it
+        lf, _ = self._profiles_design()
+        out = _payload(so.loft_handler(profiles=["H0", "H1"]))
+        assert not hasattr(lf.last_input, "isClosed")
+        assert "is_closed" not in out
+
+    def test_is_closed_false_is_written_not_skipped(self):
+        # False is a REQUEST, not an omission - `if is_closed:` would silently drop it
+        lf, _ = self._profiles_design()
+        out = _payload(so.loft_handler(profiles=["H0", "H1"], is_closed=False))
+        assert lf.last_input.isClosed is False
+        assert out["is_closed"] is False
+
+    def test_is_closed_accepts_two_sections(self):
+        # measured: a TWO-section closed loft builds a real feature - there is no >=3 guard
+        self._profiles_design()
+        out = _payload(so.loft_handler(profiles=["H0", "H1"], is_closed=True))
+        assert out["lofted"] is True and out["profiles_count"] == 2
+
+    def test_is_closed_that_does_not_take_is_refused(self):
+        lf = _FakeLoftFeatures(input_cls=_SwallowingLoftInput)
+        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1")}
+        _install(_FakeFeatures(loft=lf), handle_map=handles)
+        res = so.loft_handler(profiles=["H0", "H1"], is_closed=True)
+        assert res["isError"] is True
+        assert "is_closed=True" in res["message"] and "reads back unchanged" in res["message"]
 
     def test_rails_and_centerline_both_rejected(self):
         lf = _FakeLoftFeatures()

@@ -11,7 +11,8 @@ import math
 import adsk.core
 import pytest
 
-from conftest import (FakePoint, assert_no_active_design, assert_unknown_units, error_message,
+from conftest import (FakeBoundingBox3D, FakePoint, assert_no_active_design,
+                      assert_unknown_units, error_message,
                       install, load_tool, make_design, make_sketch, make_sketch_curve, payload,
                       sketch_curves_edit)
 
@@ -201,7 +202,7 @@ class TestSingleCurveEdits:
     def test_trim_that_changes_nothing_is_an_error(self, mod, sketch):
         _lines(sketch).item(0).trim = lambda point, create_constraints=True: _result()
         msg = error_message(mod.handler(action="trim", entity_one="line:0", x1=1, y1=1))
-        assert "trim changed nothing" in msg and "matched no segment to remove" in msg
+        assert "trim returned no curves" in msg and "a pick point on a segment" in msg
         assert "still holds 2 curve(s)" in msg
 
     def test_trim_that_consumed_the_whole_curve_is_reported(self, mod, sketch):
@@ -218,12 +219,12 @@ class TestSingleCurveEdits:
     def test_break_with_no_crossings_names_the_cause(self, mod, sketch):
         _lines(sketch).item(0).breakCurve = lambda point, create_constraints=True: _result()
         msg = error_message(mod.handler(action="break", entity_one="line:0", x1=1, y1=1))
-        assert "crosses no other curve" in msg
+        assert "returned no curves" in msg and "crosses another curve" in msg
 
     def test_split_of_a_closed_curve_names_the_cause(self, mod, sketch):
         _lines(sketch).item(0).split = lambda point, create_constraints=True: _result()
         msg = error_message(mod.handler(action="split", entity_one="line:0", x1=1, y1=1))
-        assert "the curve is CLOSED" in msg
+        assert "returned no curves" in msg and "an OPEN curve" in msg
 
     def test_extend_reports_the_lengthened_original(self, mod, sketch):
         line0 = _lines(sketch).item(0)
@@ -253,6 +254,27 @@ class TestSingleCurveEdits:
         assert "Could not trim 'line:0' in sketch 'Plate'" in msg
         assert "invalid argument segmentPoint" in msg
 
+    def test_a_break_that_raises_still_states_what_break_needs(self, mod, sketch):
+        # breakCurve RAISES "Break is not available for this segment point" on a curve nothing
+        # crosses - it does not return an empty collection - so the requirement has to ride the
+        # raised-error path or the caller never learns what break wants.
+        def _boom(point, create_constraints=True):
+            raise RuntimeError("3 : Break is not available for this segment point")
+
+        _lines(sketch).item(0).breakCurve = _boom
+        msg = error_message(mod.handler(action="break", entity_one="line:0", x1=1, y1=1))
+        assert "Break is not available for this segment point" in msg
+        assert "'break' needs a curve that crosses another curve in the sketch." in msg
+
+    def test_an_action_with_no_requirement_entry_adds_no_tail(self, mod, sketch):
+        def _boom(*a, **k):
+            raise RuntimeError("3 : invalid argument")
+
+        sketch.sketchCurves.sketchArcs.addFillet = _boom
+        msg = error_message(mod.handler(action="fillet", entity_one="line:0", entity_two="line:1",
+                                        x1=1, y1=1, x2=2, y2=2, radius=1))
+        assert "needs" not in msg
+
 
 class TestFilletChamferOffset:
     def test_fillet_passes_both_pick_points_and_a_centimetre_radius(self, mod, sketch):
@@ -271,7 +293,7 @@ class TestFilletChamferOffset:
         sketch.sketchCurves.sketchArcs.addFillet = _recorder([], None)
         msg = error_message(mod.handler(action="fillet", entity_one="line:0", entity_two="line:1",
                                         x1=1, y1=0, x2=0, y2=1, radius=3))
-        assert "fillet changed nothing" in msg
+        assert "fillet returned no curves" in msg and "nothing changed" in msg
 
     def test_chamfer_defaults_the_second_setback_to_the_first(self, mod, sketch):
         calls = []
@@ -346,7 +368,7 @@ class TestSketchCurvesChangedPostcondition:
         kind = load_tool("_assert").SketchCurvesChanged()
         before = kind.capture({"sketch_name": "Plate"})
         reason, evidence = kind.verify({"sketch_name": "Plate"}, {}, before)
-        assert "the sketch's curves are unchanged" in reason and evidence == {}
+        assert "the sketch's entities are unchanged" in reason and evidence == {}
 
     def test_an_in_place_length_change_is_detected(self, mod, sketch):
         kind = load_tool("_assert").SketchCurvesChanged()
@@ -361,6 +383,18 @@ class TestSketchCurvesChangedPostcondition:
         line0 = _lines(sketch).item(0)
         sketch_curves_edit(sketch, _lines(sketch), remove=[line0],
                            add=[make_sketch_curve("L9", length=10.0)])
+        reason, evidence = kind.verify({"sketch_name": "Plate"}, {}, before)
+        assert reason == "" and evidence == {"curve_count_after": 2}
+
+    def test_a_pure_translation_registers_even_though_every_length_matches(self, mod, sketch):
+        # a translated curve keeps its entityToken AND its length - only its position moves - so a
+        # fingerprint of tokens and lengths alone reads a successful move as a no-op.
+        line0 = _lines(sketch).item(0)
+        line0.boundingBox = FakeBoundingBox3D(FakePoint(0.0, 0.0, 0.0), FakePoint(10.0, 0.0, 0.0))
+        kind = load_tool("_assert").SketchCurvesChanged()
+        before = kind.capture({"sketch_name": "Plate"})
+        line0.boundingBox.minPoint.x += 2.0
+        line0.boundingBox.maxPoint.x += 2.0
         reason, evidence = kind.verify({"sketch_name": "Plate"}, {}, before)
         assert reason == "" and evidence == {"curve_count_after": 2}
 

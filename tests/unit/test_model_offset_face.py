@@ -9,7 +9,7 @@ volume-diff honesty gate - an offset the API reports as success but that leaves 
 volume unchanged must surface as an error, not a false ok.
 """
 
-from conftest import (load_tool, make_design, install, MakeComp, payload,
+from conftest import (load_tool, make_design, install, MakeComp, go_stale, payload,
                       error_message, assert_no_active_design, assert_unknown_units)
 
 of = load_tool("model_offset_face")
@@ -53,12 +53,18 @@ class FakeOffsetFeature:
 class FakeOffsetFacesFeatures:
     """createInput/add that simulate a push/pull: add() shifts each affected body's volume by
     `volume_delta` (split evenly across the distinct bodies given), unless volume_delta is 0 - which
-    models a silent no-op the API still reports as success."""
-    def __init__(self, bodies, volume_delta=10.0, return_feature=True, health=0):
+    models a silent no-op the API still reports as success.
+
+    `return_feature` False models the MEASURED direct-mode shape: no feature object comes back while
+    the offset LANDS. `volume_unreadable` additionally drops the volume read, leaving the call with
+    no evidence at all."""
+    def __init__(self, bodies, volume_delta=10.0, return_feature=True, health=0,
+                 volume_unreadable=False):
         self.bodies = list(bodies)
         self.volume_delta = volume_delta
         self.return_feature = return_feature
         self.health = health
+        self.volume_unreadable = volume_unreadable
         self.last_input = None
 
     def createInput(self, face_list, distance):
@@ -69,22 +75,32 @@ class FakeOffsetFacesFeatures:
         return self.last_input
 
     def add(self, inp):
-        if not self.return_feature:
-            return None
         per_body = self.volume_delta / len(self.bodies) if self.bodies else 0.0
         for b in self.bodies:
             b.volume += per_body
+        if self.volume_unreadable:
+            go_stale(*self.bodies, attrs=("volume",))
+        # the offset edits the SAME bodies in place, so only the identity reads go stale
+        go_stale(*self.bodies)
+        if not self.return_feature:
+            return None
         return FakeOffsetFeature(health=self.health)
 
 
-def _wire(monkeypatch, feats, faces):
+def _wire(monkeypatch, feats, faces, design_type=None):
     """Install a component carrying `feats` (features.offsetFacesFeatures), stub _FACES.resolve to
     hand back canned face entities (the kind's own resolution is covered by test_inputs), and model
-    the adsk ValueInput factory the handler calls."""
+    the adsk ValueInput factory the handler calls.
+
+    `design_type` sets the modelling mode current_design_type reads (1 parametric, 0 direct); left
+    unset the design reports neither, which is the 'unknown' mode."""
     import adsk.core
     comp = MakeComp(name="Comp")
     comp.features = type("F", (), {"offsetFacesFeatures": feats})()
-    install(of, make_design(comp=comp))
+    design = make_design(comp=comp)
+    if design_type is not None:
+        design.designType = design_type
+    install(of, design)
     monkeypatch.setattr(of._FACES, "resolve", lambda raw: (faces, None))
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: _VI(v))
 
@@ -187,6 +203,9 @@ class TestHonesty:
         _wire(monkeypatch, feats, [face])
         res = of.handler(faces=["h"], distance=2, units="mm")
         assert res["isError"] is True and "unchanged" in res["message"]
+        # a parametric design DOES leave a timeline feature, so the remedy names it
+        assert "remains in the timeline" in res["message"]
+        assert "design_delete_feature" in res["message"]
 
     def test_health_error_reported_not_false_ok(self, monkeypatch):
         body = FakeBody(volume=100.0)
@@ -220,6 +239,74 @@ class TestHonesty:
         _wire(monkeypatch, feats, [face])
         res = of.handler(faces=["h"], distance=1, units="mm")
         assert res["isError"] is True and "owning body" in res["message"]
+
+
+# ── DIRECT mode: offsetFacesFeatures.add returns nothing while the offset LANDS (measured) ───
+
+class TestDirectModeNoFeature:
+    def test_direct_none_with_a_moved_volume_is_ok(self, monkeypatch):
+        # the measured shape: a loft frustum ~99 cm3 read 117.248 after a +0.2 side-face offset,
+        # with add() handing back nothing.
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        out = payload(of.handler(faces=["h"], distance=2, units="mm"))
+        assert out["offset"] is True and out["volume_delta_cm3"] == 18.248
+
+    def test_direct_none_publishes_no_feature_name(self, monkeypatch):
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        out = payload(of.handler(faces=["h"], distance=2, units="mm"))
+        assert "feature" not in out
+        assert out["no_timeline_feature"] is True
+        assert "DIRECT mode" in out["note"]
+
+    def test_direct_none_names_the_bodies_captured_before_the_offset(self, monkeypatch):
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        out = payload(of.handler(faces=["h"], distance=2, units="mm"))
+        assert out["bodies"] == ["Cone"]
+
+    def test_declared_outputs_hold_on_the_direct_path(self, monkeypatch):
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        out = payload(of.handler(faces=["h"], distance=2, units="mm"))
+        for o in of.RETURNS:
+            assert o.assert_present(out) == "", o.key
+
+    def test_direct_none_with_an_unmoved_volume_is_an_error(self, monkeypatch):
+        # add() handed back nothing AND no volume moved: not a success.
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=0.0, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        res = of.handler(faces=["h"], distance=2, units="mm")
+        assert res["isError"] is True and "unchanged" in res["message"]
+        # no timeline feature exists on this path - the remedy must not name one
+        assert "design_delete_feature" not in res["message"]
+        assert "undo in Fusion" in res["message"]
+
+    def test_direct_none_with_an_unreadable_volume_is_unverified(self, monkeypatch):
+        # No feature AND no volume: the offset is UNVERIFIED, which is not a success (in parametric
+        # the feature object itself is evidence, so an unreadable volume passes there).
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False,
+                                        volume_unreadable=True)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=0)
+        res = of.handler(faces=["h"], distance=2, units="mm")
+        assert res["isError"] is True and "UNVERIFIED" in res["message"]
+
+    def test_parametric_none_stays_an_error(self, monkeypatch):
+        # Even with the volume moved: a None feature in a PARAMETRIC design is unmeasured as a
+        # success, so it is refused.
+        body = FakeBody(name="Cone", volume=99.0)
+        feats = FakeOffsetFacesFeatures([body], volume_delta=18.248, return_feature=False)
+        _wire(monkeypatch, feats, [FakeFace(body)], design_type=1)
+        res = of.handler(faces=["h"], distance=2, units="mm")
+        assert res["isError"] is True and "returned no feature" in res["message"]
+        assert "DIRECT mode" not in res["message"]
 
 
 # ── declared output contract ─────────────────────────────────────────────────

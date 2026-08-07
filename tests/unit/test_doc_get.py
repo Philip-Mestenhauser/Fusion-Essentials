@@ -221,11 +221,12 @@ class TestCaps:
 # ── (A) versions slice ────────────────────────────────────────────────────────
 
 class _Ver:
-    def __init__(self, num, vid=None, date=1_700_000_000, desc=""):
+    def __init__(self, num, vid=None, date=1_700_000_000, desc="", is_milestone=False):
         self.versionNumber = num
         self.versionId = vid or f"urn:v:{num}"
         self.dateCreated = date
         self.description = desc
+        self.isMilestone = is_milestone
 
 
 class _VerColl:
@@ -235,13 +236,36 @@ class _VerColl:
     def item(self, i): return self._v[i]
 
 
+class _MStone:
+    """One Milestone: a NAME plus the DataFile version it points at (the whole object)."""
+    def __init__(self, name, version): self.name = name; self.version = version
+
+
+class _MStones:
+    """The DataFile's Milestones collection; unreadable=True models the measured count of None.
+    Counts item() reads so the walk's bound can be asserted."""
+    def __init__(self, items=(), unreadable=False):
+        self._i = list(items)
+        self._unreadable = unreadable
+        self.reads = 0
+
+    @property
+    def count(self): return None if self._unreadable else len(self._i)
+
+    def item(self, i):
+        self.reads += 1
+        return self._i[i]
+
+
 class _DFileVers(_Ver):
     """A DataFile that is itself the tip version and carries df.versions for the older ones."""
-    def __init__(self, open_num, latest, others, desc="open"):
-        super().__init__(open_num, desc=desc)
+    def __init__(self, open_num, latest, others, desc="open", is_milestone=False, milestones=None):
+        super().__init__(open_num, desc=desc, is_milestone=is_milestone)
         self.latestVersionNumber = latest
         self.id = "urn:lineage"
         self.versions = _VerColl(others)
+        if milestones is not None:
+            self.milestones = milestones
 
 
 class TestVersions:
@@ -268,6 +292,84 @@ class TestVersions:
         out = dg._slice_versions()
         assert out["available"] is False
         assert "never saved" in out["note"].lower()
+
+
+class TestVersionMilestones:
+    def test_milestone_row_carries_flag_and_name(self):
+        # the NAME lives only in the Milestones collection - the row is matched to it by version.
+        v4 = _Ver(4, is_milestone=True)
+        df = _DFileVers(open_num=3, latest=4, others=[v4, _Ver(2)],
+                        milestones=_MStones([_MStone("v1 release", v4)]))
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        rows = {r["version_number"]: r for r in out["versions"]}
+        assert rows[4]["is_milestone"] is True
+        assert rows[4]["milestone_name"] == "v1 release"
+        assert rows[2]["is_milestone"] is False
+        assert rows[2]["milestone_name"] is None
+        assert out["milestone_count"] == 1
+        assert out["milestone_names_readable"] is True
+
+    def test_flag_that_cannot_be_read_at_all_is_null_not_false(self):
+        # a version whose isMilestone cannot be read, with the collection unreadable too: nothing is
+        # known about this row, so it is null and counted as unreadable - never as 'not a milestone'.
+        class _NoFlagVer:
+            def __init__(self, num):
+                self.versionNumber = num
+                self.versionId = f"urn:v:{num}"
+                self.dateCreated = 1_700_000_000
+                self.description = ""
+        df = _DFileVers(open_num=1, latest=2, others=[_NoFlagVer(2)],
+                        milestones=_MStones(unreadable=True))
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        rows = {r["version_number"]: r for r in out["versions"]}
+        assert rows[2]["is_milestone"] is None
+        assert rows[2].get("flag_lagging") is None
+        assert out["milestone_count"] == 0
+        assert out["milestone_unreadable_count"] == 1
+        assert out["milestone_names_readable"] is False
+
+    def test_flag_false_while_the_collection_names_it_resolves_to_milestone(self):
+        # The defensive precedence, not a measured window: in both measured runs the collection and
+        # the flag arrived on the same poll (roughly 15-20s after doc_save_milestone), so neither
+        # source is known to lead. Where the collection DOES list a version whose own flag still
+        # reads false, the collection wins and the row publishes flag_lagging.
+        v2 = _Ver(2, is_milestone=False)
+        df = _DFileVers(open_num=1, latest=2, others=[v2],
+                        milestones=_MStones([_MStone("v2 release", v2)]))
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        row = {r["version_number"]: r for r in out["versions"]}[2]
+        assert row["is_milestone"] is True
+        assert row["milestone_name"] == "v2 release"
+        assert row["flag_lagging"] is True
+        assert out["milestone_count"] == 1
+        assert "flag_lagging" in out["note"]
+
+    def test_milestone_walk_is_bounded_by_the_row_cap(self):
+        # each entry's .version hop is a cloud read - the walk may not outrun the cap that bounds
+        # the published rows, and a walk that stopped short says so.
+        vers = [_Ver(i, is_milestone=True) for i in range(1, 6)]
+        stones = _MStones([_MStone(f"m{v.versionNumber}", v) for v in vers])
+        df = _DFileVers(open_num=5, latest=5, others=vers, milestones=stones)
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions(versions_max=2)
+        assert stones.reads == 2                       # not all 5 milestones were hopped
+        assert out["milestone_walk_truncated"] is True
+
+    def test_milestone_count_covers_every_known_row_not_just_the_capped_ones(self):
+        # the cap limits the published list, not the rollup - version_count and milestone_count
+        # must describe the SAME set of known versions.
+        v1, v2 = _Ver(1, is_milestone=True), _Ver(2, is_milestone=True)
+        df = _DFileVers(open_num=3, latest=3, others=[v1, v2],
+                        milestones=_MStones([_MStone("a", v1), _MStone("b", v2)]))
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions(versions_max=1)
+        assert out["truncated"] is True
+        assert len(out["versions"]) == 1
+        assert out["version_count"] == 3
+        assert out["milestone_count"] == 2      # both milestones fell outside the capped list
 
 
 # ── (B) xref_tree slice ───────────────────────────────────────────────────────

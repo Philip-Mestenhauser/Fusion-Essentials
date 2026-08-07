@@ -38,6 +38,12 @@ _CURVES = _inputs.EdgeLoopRef("curves", closed=False, required=False,
 # boundary: the CLOSED loop a patch fills.
 _BOUNDARY = _inputs.EdgeLoopRef("boundary", closed=True, required=True,
     description="The closed loop of edges to fill with a surface.")
+# interior_rails: B-Rep EDGES the patch surface must pass through. The API property also accepts
+# sketch curves/points and construction points, but find_geometry mints handles for BRep faces and
+# edges only, so an edge is the one kind this server can reference.
+_INTERIOR_RAILS = _inputs.GeometryHandleList("interior_rails", require="edge", required=False,
+    description="Interior edges the patch surface is fitted through - B-Rep edges only, so a "
+                "sketch curve or point cannot be a rail.")
 
 
 def _curve_host_component(ents, fallback):
@@ -126,12 +132,14 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         ext_input = host.features.extrudeFeatures.createInput(profile, op)
         ext_input.isSolid = False        # THE surface switch: no end caps, an open sheet body
         dist_val = adsk.core.ValueInput.createByReal(float(distance) * k)
-        ext_input.setDistanceExtent(bool(symmetric), dist_val)
+        if not ext_input.setDistanceExtent(bool(symmetric), dist_val):
+            return error(f"Fusion refused a {'symmetric ' if symmetric else ''}distance extent of "
+                         f"{distance} {units}, so no surface was extruded.")
         feature = host.features.extrudeFeatures.add(ext_input)
     except Exception as e:
         return error(f"Surface extrude failed: {e}.")
     if not feature:
-        return error("Surface extrude returned no feature.")
+        return error(_common.no_feature_error(design, "Surface extrude"))
 
     names, any_solid = _body_names_and_solid(feature)
 
@@ -211,12 +219,14 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
         rev_input = host.features.revolveFeatures.createInput(profile, axis_entity, op)
         rev_input.isSolid = False
         angle_val = adsk.core.ValueInput.createByReal(math.radians(ang))
-        rev_input.setAngleExtent(bool(symmetric), angle_val)
+        if not rev_input.setAngleExtent(bool(symmetric), angle_val):
+            return error(f"Fusion refused a {'symmetric ' if symmetric else ''}revolve extent of "
+                         f"{angle_deg} deg, so no surface was revolved.")
         feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
         return error(f"Surface revolve failed: {e}. (The profile must be coplanar with the axis.)")
     if not feature:
-        return error("Surface revolve returned no feature.")
+        return error(_common.no_feature_error(design, "Surface revolve"))
 
     names, any_solid = _body_names_and_solid(feature)
 
@@ -237,7 +247,24 @@ def revolve_handler(sketch_name: str = "", curves=None, axis: str = "z",
 
 # ── surface_patch ───────────────────────────────────────────────────────────
 
-def _patch_one_loop(comp, boundary, op, cont):
+def _rails_readback(patch_input, expected):
+    """Read interiorRailsAndPoints back and return (count, error) - the count is what the input
+    holds, so it is the number the payload publishes.
+
+    Measured: the read-back is a FRESH ObjectCollection - never the object assigned - so identity
+    (and _common.set_verified's != comparison) can never carry this verification; and an EMPTY
+    collection's count reads None, which is 0 entities."""
+    got = safe(lambda: patch_input.interiorRailsAndPoints)
+    n = safe(lambda: got.count)
+    n = 0 if n is None else int(n)
+    if n != expected:
+        return n, (f"interior_rails did not take - PatchFeatureInput.interiorRailsAndPoints reads "
+                   f"back {n} entity(ies) after assigning {expected}, so the patch would run "
+                   "without them.")
+    return n, ""
+
+
+def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
     """Patch ONE closed loop. boundary = a single edge handle or a list of edge handles forming one
     loop. Returns (result_dict, error_str). On success result_dict has the feature/body info; the
     error_str is None. Resolves the loop's edges via _BOUNDARY, then createInput->add."""
@@ -252,8 +279,22 @@ def _patch_one_loop(comp, boundary, op, cont):
     boundary_arg = ents[0] if len(ents) == 1 else coll
     try:
         patch_input = comp.features.patchFeatures.createInput(boundary_arg, op)
-        if cont is not None:
-            patch_input.continuity = cont
+        # The enum class is SurfaceContinuityTypes (PLURAL) - measured live, the singular does not
+        # exist. set_verified reads the value back off the input, so an unavailable member is
+        # refused instead of running the patch on the API default.
+        cerr = _common.set_verified(patch_input, "continuity", cont,
+                                    f"continuity={cont_key}", "PatchFeatureInput")
+        if cerr:
+            return None, cerr
+        rail_count = None
+        if rails:
+            rail_coll = adsk.core.ObjectCollection.create()
+            for r in rails:
+                rail_coll.add(r)
+            patch_input.interiorRailsAndPoints = rail_coll
+            rail_count, rerr = _rails_readback(patch_input, len(rails))
+            if rerr:
+                return None, rerr
         feature = comp.features.patchFeatures.add(patch_input)
     except Exception as e:
         msg = str(e).lower()
@@ -274,21 +315,29 @@ def _patch_one_loop(comp, boundary, op, cont):
                 "or patch this opening before adding the feature that splits it. Count the opening's "
                 "edges with find_geometry to tell them apart: exactly 2 means case (1), more means "
                 "case (2).")
+        if rails:
+            return None, (f"Patch failed: {e}. With interior_rails there are two candidate causes and "
+                "this message asserts neither: the boundary does not form a CLOSED loop, or a rail "
+                "edge does not lie on the surface the boundary spans (a rail must be interior to the "
+                "patch). Retry WITHOUT interior_rails to tell them apart: if it succeeds, the rails "
+                "are the cause.")
         return None, (f"Patch failed: {e}. (The boundary must form a CLOSED loop - pass the loop's "
     "edges, or a single edge Fusion can auto-complete.)")
     if not feature:
-        return None, "Patch returned no feature (the boundary may not form a closed loop)."
+        return None, _common.no_feature_error(_common.design(), "Patch",
+                                             "(The boundary may not form a closed loop.)")
     names, _ = _body_names_and_solid(feature)
     return {
     "feature": safe(lambda: feature.name),
     "result_body": names[0] if names else None,
     "result_bodies": names,
     "boundary_edge_count": len(ents),
+    "interior_rail_count": rail_count,
     }, None
 
 
 def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
-                  operation: str = "new") -> dict:
+                  operation: str = "new", interior_rails=None) -> dict:
     """Fill closed loop(s) of edges with surface face(s) - "cap the hole(s)"."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _PATCH_OPS:
@@ -302,7 +351,17 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         return error("No active design. Create or open a document first (see doc_new).")
     comp = target_component(design)
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
-    cont = safe(lambda: getattr(adsk.fusion.SurfaceContinuityType, _CONTINUITY[cont_key]))
+    cont = safe(lambda: getattr(adsk.fusion.SurfaceContinuityTypes, _CONTINUITY[cont_key]))
+
+    has_rails = interior_rails not in (None, "", [])
+    if has_rails and boundaries not in (None, "", []):
+        return error("'interior_rails' fits ONE patch surface, so it goes with 'boundary' (a single "
+                     "loop). With 'boundaries' every loop would be handed the same rails.")
+    rail_ents = []
+    if has_rails:
+        rail_ents, rerr = _INTERIOR_RAILS.resolve(interior_rails)
+        if rerr:
+            return error(rerr)
 
     # Normalise to a list of loops. 'boundaries' (multi) wins; else the single 'boundary'.
     if boundaries not in (None, "", []):
@@ -317,7 +376,7 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
 
     results, errors = [], []
     for i, loop in enumerate(loops):
-        res, lerr = _patch_one_loop(comp, loop, op, cont)
+        res, lerr = _patch_one_loop(comp, loop, op, cont, cont_key, rail_ents)
         if lerr:
             errors.append({"index": i, "error": lerr})
         else:
@@ -328,7 +387,7 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         if errors:
             return error(errors[0]["error"])
         r = results[0]
-        return ok({
+        payload = {
         "patched": True,
         "feature": r["feature"],
         "operation": op_key,
@@ -338,7 +397,11 @@ def patch_handler(boundary=None, boundaries=None, continuity: str = "connected",
         "is_solid": False,
         "boundary_edge_count": r["boundary_edge_count"],
         "note": "Closed boundary filled with a surface (isSolid=false).",
-        })
+        }
+        if r["interior_rail_count"] is not None:
+            # the count PatchFeatureInput.interiorRailsAndPoints reads back, not the number asked for
+            payload["interior_rail_count"] = r["interior_rail_count"]
+        return ok(payload)
 
     # Multi-loop: report how many patched + per-loop bodies + any per-loop failures.
     all_bodies = [n for r in results for n in r["result_bodies"]]
@@ -415,7 +478,8 @@ _PATCH_DESC = (
                                              "call - each element is one edge handle Fusion auto-completes, or a list of handles forming one "
                                              "loop). Use 'boundaries' to patch every hole of a part at once (pass each hole's rim edge). "
                                              "In the multi "
-                                             "form a loop that fails is reported per-loop without aborting the rest. Returns the patch "
+                                             "form a loop that fails is reported per-loop without aborting the rest. 'interior_rails' "
+                                             "(single 'boundary' form only) fits the patch through interior edges. Returns the patch "
                                              "body/bodies (isSolid=false)."
 )
 
@@ -429,6 +493,7 @@ surface_patch_tool = (
             "every hole at once."})
     .add_input_property(*_inputs.Choice("continuity", ["connected", "tangent", "curvature"],
         default="connected", description="Edge continuity of the patch.").as_property())
+    .add_input_property("interior_rails", _INTERIOR_RAILS.schema())
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())
     .strict_schema()
 )

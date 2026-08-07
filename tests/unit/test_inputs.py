@@ -8,7 +8,12 @@ Pinned: handle resolution + the require-predicate enforcement, the units/Distanc
 schema/contract auto-generation, and resolve_inputs end-to-end.
 """
 
-from conftest import load_tool, _make_object_collection
+import types
+
+import pytest
+
+from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
+                      FakePoint, FakeVector3D, MakeComp, entity_proxy)
 
 inp = load_tool("_inputs")
 
@@ -260,6 +265,19 @@ class TestGeometryHandleList:
 # ── EdgeLoopRef: edge handles as a BOUNDARY, with the closed/open loop contract ─────────────
 
 
+def _edges_on_one_body(count, token="Surface1"):
+    """`count` FakeEdges of ONE body, each holding its OWN proxy - the measured shape of edge.body
+    (see conftest entity_proxy). Sharing one object between edges cannot tell an entityToken dedupe
+    from an id() one, which is how a per-edge body over-count hides."""
+    body = BRepBody(name=token, entity_token=token)
+    edges = []
+    for _ in range(count):
+        e = FakeEdge()
+        e.body = entity_proxy(body)
+        edges.append(e)
+    return edges
+
+
 def _install_loop(token_map):
     """Edge handles plus a real ObjectCollection.create, so EdgeLoopRef can assemble the boundary
     collection it hands to Patch/Extend."""
@@ -287,26 +305,33 @@ class TestEdgeLoopRef:
     def test_open_chain_across_two_bodies_is_refused(self):
         # closed=False (extend / open-extrude): every edge must come from ONE surface body -
         # a multi-body chain is rejected before any mutation runs.
-        e1, e2 = FakeEdge(), FakeEdge()
-        e1.body, e2.body = object(), object()
+        e1, = _edges_on_one_body(1, token="BodyA")
+        e2, = _edges_on_one_body(1, token="BodyB")
         _install_loop({"E1": e1, "E2": e2})
         val, err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2"])
         assert val is None and "ONE surface body" in err
 
     def test_open_chain_one_body_resolves_with_body_count(self):
-        b = object()
-        e1, e2 = FakeEdge(), FakeEdge()
-        e1.body = b
-        e2.body = b
+        # Each edge holds its OWN proxy of the one body - the measured shape of edge.body (three
+        # edges of one open surface body: three python ids, ONE entityToken). Counting by identity
+        # would read two bodies here and REFUSE a legal single-body chain.
+        e1, e2 = _edges_on_one_body(2)
         _install_loop({"E1": e1, "E2": e2})
         (coll, meta), err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2"])
         assert err is None and meta["body_count"] == 1 and coll.count == 2
 
+    def test_open_chain_of_many_edges_on_one_body_reports_one_body(self):
+        # body_count is a BODY count, not an edge count: three edges of one body report 1.
+        e1, e2, e3 = _edges_on_one_body(3)
+        _install_loop({"E1": e1, "E2": e2, "E3": e3})
+        (coll, meta), err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2", "E3"])
+        assert err is None and meta["body_count"] == 1 and coll.count == 3
+
     def test_closed_loop_may_span_bodies_and_reports_body_count(self):
         # the single-body rule gates OPEN chains only; a closed boundary resolves, and meta
         # reports how many bodies the edges touch.
-        e1, e2 = FakeEdge(), FakeEdge()
-        e1.body, e2.body = object(), object()
+        e1, = _edges_on_one_body(1, token="BodyA")
+        e2, = _edges_on_one_body(1, token="BodyB")
         _install_loop({"E1": e1, "E2": e2})
         (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E1", "E2"])
         assert err is None and meta["body_count"] == 2
@@ -690,6 +715,242 @@ class TestAxisRefFace:
         _install_axis_face({})
         val, err = inp.AxisRef("axis").resolve("y")
         assert err is None and val == ("world", (0, 1, 0))
+
+
+# ── AxisRef: a CONSTRUCTION AXIS, by handle or by name ───────────────────────────────────────────
+#
+# A construction axis is a linear ENTITY (its .geometry is an InfiniteLine3D), so it comes back
+# tagged ('edge', axis) - the same shape a straight edge uses, which is what every consumer that
+# feeds a linear entity to a feature input already handles. The NAME path resolves within the ACTIVE
+# component only, case-insensitive EXACT, and refuses a name two axes share.
+
+class _FakeConstructionAxis:
+    """A construction axis: a NAME plus .geometry, an InfiniteLine3D (origin + direction) - the
+    shape that tells a datum axis from a bounded edge's Line3D. Its geometry reads component-LOCAL
+    while native and WORLD through the createForAssemblyContext proxy, which is the split a world
+    lift exists for. Also stands in for the ConstructionAxis type the TargetRef extension tests bind
+    (one fake per live type per file)."""
+    def __init__(self, name="Axis1", origin=None, direction=None, component=None, proxy=None,
+                 assembly_context=None):
+        self.name = name
+        self.geometry = types.SimpleNamespace(origin=origin, direction=direction)
+        self.component = component
+        self.assemblyContext = assembly_context
+        self.proxied_into = []
+        if proxy is not None:
+            def _for_context(occ, p=proxy):
+                self.proxied_into.append(occ)
+                return p
+            self.createForAssemblyContext = _for_context
+
+
+@pytest.fixture
+def axis_env(monkeypatch):
+    """A design whose ACTIVE component is NOT the root - so a lookup scoped to the active component
+    is told apart from one that walks the root - plus token resolution and occurrence placement.
+
+    Returns a callable: env(axes=[...], tokens={...}, root_axes=[...]) -> a namespace with .active,
+    .root, .design and .place(component, *fullPathNames). The adsk types AxisRef isinstance-checks
+    must be REAL classes (a bare Mock attribute is not a type)."""
+    import adsk.fusion
+
+    def build(axes=(), tokens=None, root_axes=()):
+        monkeypatch.setattr(adsk.fusion, "ConstructionAxis", _FakeConstructionAxis, raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepEdge", (_FakeLinearEdge, _FakeArcEdge), raising=False)
+        monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepFace", (_FakePlanarAxisFace, _FakeCylAxisFace),
+                            raising=False)
+        active = MakeComp(name="Active")
+        active.constructionAxes = _NamedCollection(list(axes))
+        root = MakeComp(name="Root")
+        root.constructionAxes = _NamedCollection(list(root_axes))
+        design = make_design(comp=root, tokens=dict(tokens or {}))
+        placed = {}
+        root.allOccurrencesByComponent = lambda c: _NamedCollection(placed.get(id(c), []))
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        monkeypatch.setattr(inp._common, "target_component", lambda _d=None: active)
+
+        def place(comp, *full_paths):
+            placed[id(comp)] = [types.SimpleNamespace(fullPathName=p) for p in full_paths]
+
+        return types.SimpleNamespace(active=active, root=root, design=design, place=place)
+
+    return build
+
+
+class TestAxisRefConstructionAxis:
+    def test_handle_resolves_to_the_axis_entity(self, axis_env):
+        ax = _FakeConstructionAxis("WheelAxis")
+        axis_env(axes=[ax], tokens={"CA": ax})
+        val, err = inp.AxisRef("axis").resolve("CA")
+        assert err is None and val == ("edge", ax)
+
+    def test_name_resolves_in_the_active_component(self, axis_env):
+        ax = _FakeConstructionAxis("WheelAxis")
+        axis_env(axes=[ax])
+        val, err = inp.AxisRef("axis").resolve("WheelAxis")
+        assert err is None and val == ("edge", ax)
+
+    def test_name_match_is_case_insensitive_but_exact(self, axis_env):
+        ax = _FakeConstructionAxis("WheelAxis")
+        axis_env(axes=[ax])
+        assert inp.AxisRef("axis").resolve("wheelaxis")[0] == ("edge", ax)
+        # EXACT: a prefix is not a match (a substring hit would silently target the wrong axis)
+        val, err = inp.AxisRef("axis").resolve("Wheel")
+        assert val is None and "WheelAxis" in err        # the miss lists what IS available
+
+    def test_ambiguous_name_is_refused_naming_the_count(self, axis_env):
+        axis_env(axes=[_FakeConstructionAxis("Hinge"), _FakeConstructionAxis("Hinge")])
+        val, err = inp.AxisRef("axis").resolve("Hinge")
+        assert val is None
+        assert "2" in err and "Hinge" in err              # refuses, never grabs the first
+        assert "handle" in err                            # and names the unambiguous way in
+
+    def test_entity_only_input_still_takes_a_construction_axis(self, axis_env):
+        # entity_only refuses a FACE (a direction vector); a construction axis IS a linear entity.
+        ax = _FakeConstructionAxis("Spin")
+        axis_env(axes=[ax], tokens={"CA": ax})
+        assert inp.AxisRef("d", entity_only=True).resolve("CA")[0] == ("edge", ax)
+        assert inp.AxisRef("d", entity_only=True).resolve("Spin")[0] == ("edge", ax)
+
+    def test_a_world_key_still_wins_over_the_name_lookup(self, axis_env):
+        # regression: the world keys resolve BEFORE any component walk, so an axis named 'x'
+        # cannot shadow the world x direction.
+        axis_env(axes=[_FakeConstructionAxis("x")])
+        assert inp.AxisRef("axis").resolve("x")[0] == ("world", (1, 0, 0))
+
+    def test_component_without_construction_axes_still_reports_the_miss(self, axis_env):
+        env = axis_env(axes=[])
+        val, err = inp.AxisRef("axis").resolve("Nope")
+        assert val is None and "not a world axis" in err
+        assert env.active.name in err          # the miss says WHERE it looked
+
+    def test_the_name_lookup_is_scoped_to_the_ACTIVE_component(self, axis_env):
+        # An axis owned by the ROOT while another component is active is NOT name-reachable: the
+        # lookup walks the active component, so a root-scoped walk would resolve it and be wrong.
+        env = axis_env(axes=[], root_axes=[_FakeConstructionAxis("RootSpin")])
+        val, err = inp.AxisRef("axis").resolve("RootSpin")
+        assert val is None
+        assert "active component 'Active'" in err       # the refusal names the component searched
+        # the root's axis was never a candidate - the active component is reported as empty
+        assert f"'{env.active.name}' has no construction axes" in err
+
+
+# ── AxisRef(face_entity=True): the face ENTITY, for an input whose API takes the axis-defining face ──
+
+class TestAxisRefFaceEntity:
+    def test_cylindrical_face_resolves_to_the_face_itself(self, axis_env):
+        f = _FakeCylAxisFace((0, 0, 1))
+        axis_env(tokens={"F": f})
+        # NOT ('world', vector): the vector throws the axis POSITION away, which is exactly what an
+        # off-origin rotation axis needs.
+        assert inp.AxisRef("axis", face_entity=True).resolve("F")[0] == ("edge", f)
+
+    def test_planar_face_is_refused(self, axis_env):
+        f = _FakePlanarAxisFace((0, 0, 1))
+        axis_env(tokens={"F": f})
+        val, err = inp.AxisRef("axis", face_entity=True).resolve("F")
+        assert val is None and "cylindrical" in err
+
+    def test_world_key_and_construction_axis_unchanged(self, axis_env):
+        ax = _FakeConstructionAxis("Spin")
+        axis_env(axes=[ax])
+        k = inp.AxisRef("axis", face_entity=True)
+        assert k.resolve("z")[0] == ("world", (0, 0, 1))
+        assert k.resolve("Spin")[0] == ("edge", ax)
+
+
+# ── axis_line_of: the NUMERIC axis a rotation pivots about must be in WORLD space ────────────────
+#
+# A ConstructionAxis has no worldGeometry and its .geometry reads component-LOCAL, so a datum in a
+# placed component describes a line that is off by the placement - a rotation built from it turns
+# about the wrong pivot and reports success. A BRepEdge/SketchLine carries worldGeometry and keeps
+# its existing path.
+
+def _datum_in(component, local_origin, world_origin=None, name="Spin"):
+    """(axis, its assembly-context proxy) - a datum whose LOCAL geometry differs from what the
+    proxy reads, i.e. a component placed away from the origin."""
+    proxy = (_FakeConstructionAxis(name, origin=FakePoint(*world_origin),
+                                   direction=FakeVector3D(0, 0, 1), assembly_context="OCC")
+             if world_origin is not None else None)
+    axis = _FakeConstructionAxis(name, origin=FakePoint(*local_origin),
+                                 direction=FakeVector3D(0, 0, 1), component=component, proxy=proxy)
+    return axis, proxy
+
+
+class TestAxisLineOfWorldSpace:
+    def test_a_datum_in_a_placed_component_is_lifted_through_its_occurrence(self, axis_env):
+        env = axis_env()
+        wheel = MakeComp(name="Wheel")
+        axis, proxy = _datum_in(wheel, (0, 0, 0), world_origin=(5, 0, 0))
+        env.place(wheel, "Wheel:1")
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert err is None
+        point, _direction = pair
+        # the PROXY's world origin - the component-local (0,0,0) would pivot about the world origin
+        assert (point.x, point.y, point.z) == (5, 0, 0)
+        assert axis.proxied_into == ["Wheel:1"] or len(axis.proxied_into) == 1
+
+    def test_a_root_owned_datum_is_used_as_is(self, axis_env):
+        # The datum's owner and the design's root are DISTINCT wrappers sharing one entityToken -
+        # the measured shape, since component references are never identity-stable. An identity test
+        # reads False here and sends a perfectly legal ROOT datum down the placed-component lookup,
+        # which finds no occurrences and refuses it.
+        env = axis_env()
+        env.root.entityToken = "TOKEN:Root"
+        axis, _ = _datum_in(entity_proxy(env.root), (2, 2, 0))
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert err is None and (pair[0].x, pair[0].y) == (2, 2)
+        assert axis.proxied_into == []            # local IS world on the root - no lift attempted
+
+    def test_a_proxied_datum_is_read_directly_even_where_its_component_is_placed_twice(self, axis_env):
+        # A proxy already reads WORLD (and createForAssemblyContext on one RAISES), so the early
+        # return is the ONLY route for a datum handed in from a multiply-placed component: without
+        # it the ambiguity refusal fires on a reference that names its instance already.
+        env = axis_env()
+        wheel = MakeComp(name="Wheel")
+        axis = _FakeConstructionAxis("Spin", origin=FakePoint(9, 0, 0),
+                                     direction=FakeVector3D(0, 0, 1), component=wheel,
+                                     assembly_context="Assy:1+Wheel:2")
+        env.place(wheel, "Assy:1+Wheel:1", "Assy:1+Wheel:2")
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert err is None and pair[0].x == 9
+
+    def test_a_datum_already_in_context_is_not_re_proxied(self, axis_env):
+        axis_env()
+        axis = _FakeConstructionAxis("Spin", origin=FakePoint(7, 0, 0),
+                                     direction=FakeVector3D(0, 0, 1), assembly_context="OCC")
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert err is None and pair[0].x == 7
+        assert axis.proxied_into == []
+
+    def test_a_component_placed_twice_is_refused_naming_each_path(self, axis_env):
+        env = axis_env()
+        wheel = MakeComp(name="Wheel")
+        axis, _ = _datum_in(wheel, (0, 0, 0), world_origin=(5, 0, 0))
+        env.place(wheel, "Assy:1+Wheel:1", "Assy:1+Wheel:2")
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert pair is None
+        assert "Assy:1+Wheel:1" in err and "Assy:1+Wheel:2" in err
+
+    def test_an_unplaced_component_datum_is_refused(self, axis_env):
+        axis_env()
+        axis, _ = _datum_in(MakeComp(name="Wheel"), (0, 0, 0), world_origin=(5, 0, 0))
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert pair is None and "not placed in the assembly" in err
+
+    def test_an_edge_keeps_its_worldgeometry_path(self, axis_env):
+        # regression: only a ConstructionAxis takes the lift; an edge's world line is read directly,
+        # and its direction is DERIVED from the two endpoints.
+        axis_env()
+        edge = _FakeLinearEdge()
+        edge.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(1, 0, 0),
+                                                   endPoint=FakePoint(4, 0, 0))
+        pair, err = inp.axis_line_of("rotate_axis", edge)
+        assert err is None
+        point, direction = pair
+        assert (point.x, point.y, point.z) == (1, 0, 0)
+        assert (direction.x, direction.y, direction.z) == (1.0, 0.0, 0.0)   # normalized
 
 
 # ── Distance + UnitField scaling chain ──────────────────────────────────────
@@ -1496,6 +1757,26 @@ class TestOccurrenceRef:
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
 
+    def test_duplicated_EXACT_name_is_REFUSED_not_guessed(self):
+        # A duplicated EXACT name must refuse with the candidate paths, not resolve to one of them -
+        # returning a hit here targets an instance the caller did not choose, which for
+        # design_delete_occurrence means deleting the wrong one. The substring branch below refuses
+        # the looser input already; the precise-looking one needs the same guarantee.
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        _install_occurrences(a, b)
+        val, err = inp.OccurrenceRef("occ").resolve("Bolt:1")   # EXACT name, matches both
+        assert val is None, "a duplicated exact name must not resolve to one of the instances"
+        assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
+
+    def test_duplicated_exact_name_still_resolves_by_its_fullPathName(self):
+        # The refusal above must not block the unambiguous key the error tells the caller to use.
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        _install_occurrences(a, b)
+        val, err = inp.OccurrenceRef("occ").resolve("Sub-A:1+Bolt:1")
+        assert err is None and val is a
+
     def test_unique_substring_resolves(self):
         a = _FakeOcc("LeftBracket:1", "LeftBracket:1")
         _install_occurrences(a, _FakeOcc("Plate:1", "Plate:1"))
@@ -1673,15 +1954,58 @@ class TestTargetRef:
         assert res is None and "Ghost" in err
 
     def test_ambiguous_occurrence_name_errors_with_candidates(self):
-        # An ambiguous occurrence match must propagate _resolve_occurrence's ambiguity error
-        # (with the candidate fullPathNames), not fall through to a generic "did not resolve" miss.
+        # An ambiguous occurrence match across DIFFERENT components must propagate
+        # _resolve_occurrence's ambiguity error (with the candidate fullPathNames), not fall through
+        # to a generic "did not resolve" miss - there is no single answer to give.
         a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
         b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        a.component = type("C", (), {"name": "BoltA", "entityToken": "tA"})()
+        b.component = type("C", (), {"name": "BoltB", "entityToken": "tB"})()
         _install_target(occurrences=[a, b])
         res, err = inp.TargetRef("target").resolve("Bolt")
         assert res is None
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
+
+    def _instances_of_one_component(self):
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        shared = type("C", (), {"name": "Bolt", "entityToken": "tBolt"})()
+        a.component = b.component = shared
+        _install_target(occurrences=[a, b])
+        return shared
+
+    def test_a_default_target_still_REFUSES_instances_of_one_component(self):
+        # The blast radius of a default TargetRef must not widen: for appearance_set / model_inspect /
+        # model_set_material, an ambiguous 'Bolt' is still a refusal, not "act on the component"
+        # (which would colour or re-material every instance).
+        self._instances_of_one_component()
+        res, err = inp.TargetRef("target").resolve("Bolt")
+        assert res is None and "ambiguous" in err.lower()
+
+    def test_an_OPTED_IN_target_resolves_instances_of_one_component_to_it(self):
+        # The instance-only ambiguity, for a caller whose target IS the component: every hit is an
+        # instance of the SAME one, so the component is the unambiguous answer. Opt-in only.
+        shared = self._instances_of_one_component()
+        (ent, kind), err = inp.TargetRef(
+            "target", collapse_ambiguous_occurrences=True).resolve("Bolt")
+        assert err is None and kind == "component" and ent is shared
+
+    def test_the_opt_in_still_refuses_when_the_caller_takes_no_component(self):
+        self._instances_of_one_component()
+        res, err = inp.TargetRef("target", allow=("occurrence",),
+                                 collapse_ambiguous_occurrences=True).resolve("Bolt")
+        assert res is None and "ambiguous" in err.lower()
+
+    def test_the_opt_in_still_refuses_instances_of_DIFFERENT_components(self):
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
+        a.component = type("C", (), {"name": "BoltA", "entityToken": "tA"})()
+        b.component = type("C", (), {"name": "BoltB", "entityToken": "tB"})()
+        _install_target(occurrences=[a, b])
+        res, err = inp.TargetRef(
+            "target", collapse_ambiguous_occurrences=True).resolve("Bolt")
+        assert res is None and "ambiguous" in err.lower()
 
     def test_ambiguous_body_name_errors_with_candidates(self):
         # The same propagation rule for the BODY step: two same-named bodies must surface
@@ -1769,10 +2093,6 @@ class TestTargetRefList:
 # them exactly as it refuses any out-of-allow kind, so model_inspect / appearance_set / model_set_material
 # are UNAFFECTED. model_measure_relation's concentric relation opts in with allow=(...,'edge').
 
-class _FakeConsAxis:
-    pass
-
-
 class _FakeConsPlane:
     pass
 
@@ -1785,7 +2105,7 @@ def _install_target_ext(handle_map):
     adsk.fusion.MeshBody = FakeMesh
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
     adsk.fusion.BRepEdge = FakeEdge
-    adsk.fusion.ConstructionAxis = _FakeConsAxis
+    adsk.fusion.ConstructionAxis = _FakeConstructionAxis
     adsk.fusion.ConstructionPlane = _FakeConsPlane
 
     class _Root:
@@ -1820,7 +2140,7 @@ class TestTargetRefEdgeAndConstruction:
         assert res is None and "edge" in err.lower()
 
     def test_construction_axis_resolves_when_allowed(self):
-        ax = _FakeConsAxis()
+        ax = _FakeConstructionAxis()
         _install_target_ext({"H": ax})
         (ent, kind), err = inp.TargetRef("t", allow=("construction_axis",)).resolve("H")
         assert err is None and kind == "construction_axis" and ent is ax

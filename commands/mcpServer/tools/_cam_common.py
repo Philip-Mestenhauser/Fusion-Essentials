@@ -12,15 +12,16 @@ import adsk.core
 import adsk.cam
 import adsk.fusion
 
-from ._common import ok, error, safe
+from ._common import CM_TO_UNIT, measured, ok, error, iter_collection, safe
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / "
              "resolve_cam_node (the ONE CAM tree traversal + by-name resolver every CAM tool targets "
              "through: case-insensitive EXACT, a miss lists the available names, a DUPLICATED name is "
              "REFUSED naming each hit's setup path; kinds=/setup= scope it) + operations_under (the "
-             "ops nested under one setup/folder/pattern) + find_setup / find_operation (the "
-             "(obj, available_names) wrappers over the same resolver) + expression_error (the post-set "
+             "ops nested under one setup/folder/pattern) + find_setup (a (setup, available_names, "
+             "error) wrapper handing back the resolver's refusal verbatim) + find_operation (the "
+             "(obj, available_names) wrapper over the same resolver) + expression_error (the post-set "
              "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
              "(the one CAM job-health signal) + op_state_facts / op_primary_state / validity_basis "
              "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
@@ -94,20 +95,9 @@ def tool_holder(t):
     return out or None
 
 
-def _iter_collection(coll):
-    """Yield items from a Fusion count/item collection - the measured live protocol
-    (brepbodies-protocol in tests/live/VERIFIED_API_FACTS.md); the fakes carry the same shape."""
-    if coll is None:
-        return
-    for i in range(safe(lambda: coll.count, 0) or 0):
-        it = safe(lambda i=i: coll.item(i))
-        if it is not None:
-            yield it
-
-
 def setups(cam):
     """Every Setup in the document, as a list - the basis for the tree walk below."""
-    return list(_iter_collection(safe(lambda: cam.setups)))
+    return list(iter_collection(safe(lambda: cam.setups)))
 
 
 def setup_names(cam):
@@ -129,18 +119,18 @@ def _walk_children(parent, setup_name, path, out):
     collection degrades to its allOperations flatten (operations only)."""
     ops = safe(lambda: parent.operations)
     if ops is not None:
-        for o in _iter_collection(ops):
+        for o in iter_collection(ops):
             nm = safe(lambda o=o: o.name)
             out.append(CamNode(o, "operation", nm, setup_name, f"{path} / {nm}"))
         for kind, getter in (("folder", lambda: parent.folders),
                              ("pattern", lambda: parent.patterns)):
-            for c in _iter_collection(safe(getter)):
+            for c in iter_collection(safe(getter)):
                 nm = safe(lambda c=c: c.name)
                 child_path = f"{path} / {nm}"
                 out.append(CamNode(c, kind, nm, setup_name, child_path))
                 _walk_children(c, setup_name, child_path, out)
         return
-    for o in _iter_collection(safe(lambda: parent.allOperations)):
+    for o in iter_collection(safe(lambda: parent.allOperations)):
         op = adsk.cam.Operation.cast(o)
         if op is not None:
             nm = safe(lambda op=op: op.name)
@@ -209,11 +199,16 @@ def operations_under(parent):
 
 
 def find_setup(cam, name):
-    """The unique Setup named `name` (case-INSENSITIVE exact), or (None, available_names). A
-    DUPLICATED setup name is REFUSED (None + the available names) - never resolved to the first
-    hit; resolve_cam_node(kinds=('setup',)) is the same resolver with the full refusal message."""
-    node, _err = resolve_cam_node(cam, name, kinds=("setup",), label="setup")
-    return (node.obj if node else None), setup_names(cam)
+    """The unique Setup named `name` (case-INSENSITIVE exact) as (setup, available_names, error).
+
+    On a miss `setup` is None and `error` is resolve_cam_node's ready-to-return refusal - a plain
+    absence lists the available names, a DUPLICATED name is REFUSED as ambiguous (never resolved to
+    the first hit). Callers return that text verbatim: the resolver is the one place that knows
+    WHICH of the two happened, so a caller wrapping it in its own 'not found' prefix would assert
+    absence about a name that was found twice. `available_names` stays the plain name list it has
+    always been, for callers that offer the choices elsewhere in their payload."""
+    node, err = resolve_cam_node(cam, name, kinds=("setup",), label="setup")
+    return (node.obj if node else None), setup_names(cam), err
 
 
 def walk_operations(cam):
@@ -1015,3 +1010,254 @@ def get_nc_programs_handler() -> dict:
         return error(f"Could not read NC programs: {e}")
 
     return ok({"nc_program_count": len(programs), "nc_programs": programs})
+
+# ---------------------------------------------------------------------------
+# Inspection results - the recorded surface-inspection (probing) measurements read by
+# cam_get(include=['inspection']).
+# ---------------------------------------------------------------------------
+
+# Nothing in the API bounds the point count on a path, so the per-point read is capped.
+_INSPECTION_ROW_DEFAULT = 50
+_INSPECTION_ROW_CAP = 200
+
+# safe() cannot tell "read None" from "the read raised", and those are different answers here.
+_MISSING = object()
+
+# The actionable states: everything that is not within tolerance. adsk.cam words the two tolerance
+# states as POSSIBLY indicating that not enough (above) / too much (below) material was removed, so a
+# row reports its state and this code never converts that into a verdict of its own.
+_OUT_OF_TOLERANCE = ("above_tolerance", "below_tolerance", "unprojected")
+
+# Measured on a CAM document that carries a setup and no probing operations: CAM.inspectionResults
+# reads None - NOT an empty collection - so the absence is published as a state, never raised.
+_INSPECTION_ABSENT_NOTE = (
+    "No inspection results on this document: CAM.inspectionResults reads None, so there is no "
+    "results folder to read. Results are recorded by a probing cycle on the machine; nothing in "
+    "this server creates them.")
+
+# CAMMeasure exposes inspectionPathResults and nothing else - no name, no operation, no id. The
+# collection's itemByName() takes a browser name, but no API call enumerates the legal names, so a
+# measure is addressable only by index and no name can be echoed back.
+_INSPECTION_UNREADABLE_NOTE = (
+    "CAM.inspectionResults could not be read on this document - the property RAISED, and "
+    "'read_error' carries the platform text. That is an UNREADABLE state, not an absence of "
+    "results: a gated CAM member raises rather than reading empty.")
+
+_INSPECTION_INDEX_NOTE = (
+    "Measures are addressed by INDEX: a measure folder exposes no name through the API (its browser "
+    "name is not readable, and no call lists the legal names), so no name is echoed back.")
+
+
+def _read_inspection_results(cam) -> tuple:
+    """(collection_or_None, raise_text_or_None). Two DIFFERENT answers have to stay apart: the
+    property reads None on a document that has never been probed (measured), and a gated CAM member
+    can RAISE instead of reading empty (measured on stockMaterialLibrary). safe()'s single default
+    cannot carry both, so the _MISSING sentinel separates them and the platform text is kept."""
+    reason = {}
+
+    def read():
+        try:
+            return cam.inspectionResults
+        except Exception as exc:
+            reason["text"] = str(exc).strip() or repr(exc)
+            raise
+
+    results = safe(read, _MISSING)
+    if results is _MISSING:
+        return None, reason.get("text") or "the property read raised."
+    return results, None
+
+
+def _point_state_map() -> dict:
+    """InspectionPointState value -> wire name. The enum's int values are not documented, so the map
+    is keyed off the live members and a value it does not carry degrades to str() (the same
+    defensive shape as _operation_type_name) rather than guessing."""
+    return {getattr(adsk.cam.InspectionPointState, member, object()): name for member, name in (
+        ("WithinTolerance", "within_tolerance"), ("AboveTolerance", "above_tolerance"),
+        ("BelowTolerance", "below_tolerance"), ("Unprojected", "unprojected"))}
+
+
+def _point_state_name(value, state_names) -> str:
+    """The wire name for one point's state: 'unknown' when the state cannot be read, str(value) for a
+    member this build does not name. Only a NAMED out-of-tolerance state is counted as one."""
+    if value is None:
+        return "unknown"
+    return state_names.get(value, str(value))
+
+
+def _xyz(pt, f):
+    """[x, y, z] for a Point3D/Vector3D, scaled out of Fusion's internal CM (InspectionPointResult:
+    "All values are in the Fusion's internal units which for positional and length values is CM").
+    None when the point/vector itself is absent."""
+    if pt is None:
+        return None
+    return [measured(lambda: pt.x, f), measured(lambda: pt.y, f), measured(lambda: pt.z, f)]
+
+
+def _point_row(p, path_index, point_index, state, f) -> dict:
+    """One measured point. Lengths go through measured(), not safe(read, 0.0): a deviation of 0.0 is
+    an ANSWER ("dead on nominal"), so an unreadable field must read null instead of masquerading
+    as one."""
+    return {"path": path_index, "index": point_index, "state": state,
+            "deviation": measured(lambda: p.deviation, f),
+            "error": measured(lambda: p.error, f),
+            "offset": measured(lambda: p.offset, f),
+            "nominal": _xyz(safe(lambda: p.nominalPosition), f),
+            "contact": _xyz(safe(lambda: p.contact), f),
+            "projected": _xyz(safe(lambda: p.projectedPoint), f),
+            "delta": _xyz(safe(lambda: p.delta), f)}
+
+
+def _measure_paths(m) -> list:
+    """One measure's InspectionPathResults as a list. CAMMeasure.inspectionPathResults is documented
+    to return null when the measure holds none, so an absent collection reads as zero paths."""
+    return list(iter_collection(safe(lambda: m.inspectionPathResults)))
+
+
+def _measure_rollup(m, index, f, state_names) -> dict:
+    """ONE measure's rollup: the per-state tally (terse - zero buckets dropped, so a clean measure
+    reads {'within_tolerance': N}), the actionable out_of_tolerance count, and the worst (highest
+    error) out-of-tolerance point. Exception-first: a clean measure carries no 'worst'."""
+    tally = {}
+    total = 0
+    oot = 0
+    worst = None
+    worst_rank = None
+    paths = _measure_paths(m)
+    for pi, path in enumerate(paths):
+        for qi, p in enumerate(iter_collection(safe(lambda path=path: path.pointResults))):
+            total += 1
+            state = _point_state_name(safe(lambda p=p: p.state), state_names)
+            tally[state] = tally.get(state, 0) + 1
+            if state not in _OUT_OF_TOLERANCE:
+                continue
+            oot += 1
+            err = measured(lambda p=p: p.error, f)
+            # Rank by MAGNITUDE: the identity ranking if error is unsigned, and the right one if it
+            # is signed (a below-tolerance point would otherwise sort under every above-tolerance
+            # one). The row still publishes the raw value, sign included.
+            rank = None if err is None else abs(err)
+            if worst is None or (rank is not None and (worst_rank is None or rank > worst_rank)):
+                worst = {"path": pi, "point": qi, "state": state,
+                         "deviation": measured(lambda p=p: p.deviation, f), "error": err}
+                worst_rank = rank
+    row = {"index": index, "path_count": len(paths), "point_count": total,
+           "out_of_tolerance": oot}
+    if tally:
+        row["states"] = tally
+    if worst:
+        row["worst"] = worst
+    return row
+
+
+def _measure_points(paths, path_filter, f, state_names, cap) -> tuple:
+    """(rows, points_in_scope, out_of_tolerance_in_scope, truncated) for one measure's paths, or one
+    of them (path_filter). Only out-of-tolerance points become rows - the narrowing that keeps the
+    deep read bounded however many points the path carries."""
+    rows = []
+    total = 0
+    oot = 0
+    truncated = False
+    for pi, path in enumerate(paths):
+        if path_filter is not None and pi != path_filter:
+            continue
+        for qi, p in enumerate(iter_collection(safe(lambda path=path: path.pointResults))):
+            total += 1
+            state = _point_state_name(safe(lambda p=p: p.state), state_names)
+            if state not in _OUT_OF_TOLERANCE:
+                continue
+            oot += 1
+            if len(rows) >= cap:
+                truncated = True
+                continue
+            rows.append(_point_row(p, pi, qi, state, f))
+    return rows, total, oot, truncated
+
+
+def _parse_measure_scope(raw) -> tuple:
+    """'<measure>' or '<measure>/<path>' -> (measure_index, path_index_or_None, None); a value that
+    is neither -> (None, None, reason naming it)."""
+    parts = [s.strip() for s in str(raw).split("/")]
+    if len(parts) > 2:
+        return None, None, (f"'measure' takes '<measure index>' or '<measure index>/<path index>' - "
+                            f"'{raw}' has {len(parts)} parts.")
+    idx = []
+    for part in parts:
+        if not part.isdigit():
+            return None, None, (f"'measure': '{part}' is not a non-negative index. A measure folder "
+                                "has no API-readable name, so the scope is '<measure index>' or "
+                                "'<measure index>/<path index>'.")
+        idx.append(int(part))
+    return idx[0], (idx[1] if len(idx) == 2 else None), None
+
+
+def _row_cap(max_results) -> int:
+    try:
+        n = int(max_results or _INSPECTION_ROW_DEFAULT)
+    except (TypeError, ValueError):
+        n = _INSPECTION_ROW_DEFAULT
+    return max(1, min(n, _INSPECTION_ROW_CAP))
+
+
+def get_inspection_results_handler(measure: str = "", max_results: int = 0,
+                                   units: str = "mm") -> dict:
+    """The recorded probing results: a per-measure state rollup by default, or one measure's (or one
+    path's) out-of-tolerance points when 'measure' scopes it. Lengths are scaled out of CM."""
+    cam, err = get_cam()
+    if err:
+        return error(err)
+    unit = (units or "mm").strip().lower()
+    f = CM_TO_UNIT.get(unit)
+    if f is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
+
+    results, read_error = _read_inspection_results(cam)
+    if read_error is not None:
+        return ok({"available": False, "readable": False, "measure_count": 0, "measures": [],
+                   "units": unit, "read_error": read_error, "note": _INSPECTION_UNREADABLE_NOTE})
+    if results is None:
+        return ok({"available": False, "readable": True, "measure_count": 0, "measures": [],
+                   "units": unit, "note": _INSPECTION_ABSENT_NOTE})
+    count = safe(lambda: results.count, 0) or 0
+    state_names = _point_state_map()
+    scope = (measure or "").strip()
+
+    if not scope:
+        rows = []
+        truncated = False
+        for i, m in enumerate(iter_collection(results)):
+            if i >= _MAX_ITEMS:
+                truncated = True
+                break
+            rows.append(_measure_rollup(m, i, f, state_names))
+        note = _INSPECTION_INDEX_NOTE + (
+            " Pass measure='<index>' (or '<index>/<path>') for that measure's out-of-tolerance "
+            "points." if count else
+            " The results collection is present but holds no measures.")
+        return ok({"available": True, "measure_count": count, "measures": rows,
+                   "measures_truncated": truncated, "units": unit, "note": note})
+
+    mi, pi, perr = _parse_measure_scope(scope)
+    if perr:
+        return error(perr)
+    if mi >= count:
+        return error(f"measure index {mi} is out of range - this document holds {count} measure(s)"
+                     + (f" (index 0 to {count - 1})." if count else ".") + " " +
+                     _INSPECTION_INDEX_NOTE)
+    m = safe(lambda: results.item(mi))
+    if m is None:
+        return error(f"measure index {mi} did not resolve to a measure folder.")
+    paths = _measure_paths(m)
+    if pi is not None and pi >= len(paths):
+        return error(f"path index {pi} is out of range - measure {mi} holds {len(paths)} path(s)"
+                     + (f" (index 0 to {len(paths) - 1})." if paths else "."))
+
+    rows, total, oot, truncated = _measure_points(paths, pi, f, state_names, _row_cap(max_results))
+    out = {"available": True, "measure": mi, "path_count": len(paths), "point_count": total,
+           "out_of_tolerance": oot, "filter": "out_of_tolerance", "returned": len(rows),
+           "truncated": truncated, "points": rows, "units": unit,
+           "note": ("Out-of-tolerance points only (above/below tolerance and unprojected); "
+                    "within-tolerance points are counted, not listed. " + _INSPECTION_INDEX_NOTE)}
+    if pi is not None:
+        out["path"] = pi
+    return ok(out)

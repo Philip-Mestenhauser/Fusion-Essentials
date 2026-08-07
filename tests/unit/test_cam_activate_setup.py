@@ -27,12 +27,14 @@ class FakeSetup:
 @pytest.fixture
 def wire(monkeypatch):
     """Point the module's CAM seams at fakes: get_cam yields a product (or the given error),
-    find_setup resolves to the given setup with the given available names."""
-    def _wire(setup=None, available=(), cam_error=None):
+    find_setup resolves to (setup, available_names, refusal) - the refusal is the resolver's own
+    ready-to-return text on a miss, which the handler passes through verbatim."""
+    def _wire(setup=None, available=(), cam_error=None, refusal=None):
         monkeypatch.setattr(
             mod, "get_cam",
             lambda: (None, cam_error) if cam_error else (object(), None))
-        monkeypatch.setattr(mod, "find_setup", lambda cam, want: (setup, list(available)))
+        monkeypatch.setattr(mod, "find_setup",
+                            lambda cam, want: (setup, list(available), refusal))
         return setup
     return _wire
 
@@ -47,11 +49,22 @@ def test_cam_gate_error_is_surfaced(wire):
     assert "No Manufacture product" in error_message(mod.activate_setup_handler(setup="Op10"))
 
 
-def test_unknown_setup_lists_available_names(wire):
-    wire(setup=None, available=["Top", "Bottom"])
-    msg = error_message(mod.activate_setup_handler(setup="Nope"))
-    assert "Setup not found: 'Nope'" in msg
-    assert "Top, Bottom" in msg
+def test_a_miss_returns_the_resolvers_own_refusal(wire):
+    # the handler must not re-word it: only the resolver knows whether the name was absent or
+    # AMBIGUOUS, so a local "not found" prefix would assert absence about a duplicated name.
+    wire(setup=None, available=["Top", "Bottom"],
+         refusal="No setup named 'Nope'. Available: Top, Bottom.")
+    assert error_message(mod.activate_setup_handler(setup="Nope")) == (
+        "No setup named 'Nope'. Available: Top, Bottom.")
+
+
+def test_an_ambiguous_name_is_not_reported_as_missing(wire):
+    wire(setup=None, available=["Dup", "Dup"],
+         refusal="'Dup' is ambiguous - 2 CAM items share that name: Dup, Dup. Rename the target "
+                 "so its name is unique, then retry.")
+    msg = error_message(mod.activate_setup_handler(setup="Dup"))
+    assert "is ambiguous" in msg
+    assert "not found" not in msg.lower()
 
 
 def test_activates_and_reports_the_setup_name(wire):

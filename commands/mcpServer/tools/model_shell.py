@@ -106,7 +106,8 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
         return error(f"Shell failed: {e}. (The thickness may be too large for the geometry, or the "
                      "removed faces span more than one body - try a smaller thickness.)")
     if not feature:
-        return error("Shell returned no feature (the body could not be hollowed at this thickness).")
+        return error(_common.no_feature_error(
+            design, "Shell", "(The body could not be hollowed at this thickness.)"))
 
     # Post-mutation read-back: prove the body was actually hollowed rather than trust the API's success.
     vol_after = safe(lambda: body.volume, None) if body else None

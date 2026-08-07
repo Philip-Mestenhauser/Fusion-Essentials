@@ -51,3 +51,35 @@ class TestHandlerGuard:
         res = ses.handler("print('hi')")
         assert res["isError"] is True
         assert "run" in res["content"][0]["text"]
+
+
+class TestBulkMutationConstraint:
+    """The description is the ONLY place a caller learns that a script has no per-item failure
+    isolation - the tool cannot detect a bulk mutation, so the constraint has to be stated with the
+    reason a half-failed batch reports nothing about WHICH item failed."""
+
+    def test_description_states_one_mutation_per_call_with_its_reason(self):
+        desc = ses.TOOL_DESCRIPTION
+        assert "ONE mutation per call" in desc
+        assert "isolation" in desc                       # the reason, not a bare rule
+        assert "WHICH item failed" in desc
+
+    def test_description_states_the_uncaught_rule_and_refuses_to_promise_more(self):
+        # Two measured facts, and the reason one-mutation-per-call is safe: an UNCAUGHT raise of
+        # either kind always takes the whole script (and its printed output) down, and catching an
+        # error guarantees NOTHING - one caught API error left its mutation standing while another
+        # rolled three back. Both "a plain Python error can leave earlier mutations committed" and
+        # "a caught exception lets the earlier mutations commit" are wrong; neither may reappear.
+        desc = ses.TOOL_DESCRIPTION
+        assert "UNCAUGHT" in desc and "always rolls the WHOLE script back" in desc
+        assert "NO GUARANTEE" in desc and "even when caught" in desc
+        assert "plain Python error can leave earlier mutations committed" not in desc
+        assert "lets execution continue" not in desc
+
+    def test_module_docstring_carries_the_same_non_guarantee(self):
+        # The docstring is where the next reader of this file forms their model, so the caught-error
+        # non-guarantee has to hold THERE too - a correct description over a docstring still
+        # promising rollback (or survival) teaches the wrong thing at the point of use.
+        doc = ses.__doc__
+        assert "no guarantee" in doc.lower()
+        assert "even when caught" in doc

@@ -14,11 +14,13 @@ Pinned (the DoD):
     (startEdit/finishEdit) around the add(); a direct design opens NONE.
   • a bad operation is rejected by the Choice input.
   • algorithm default is enhanced; the add() mutation is NOT swallowed by safe().
+  • the target/tool NAMES are captured before the combine consumes the tool bodies, and the reported
+    mode is the DESIGN's own mode - not an inference from a feature object the scope suppresses.
 """
 
 import json
 
-from conftest import load_tool
+from conftest import go_stale, load_tool
 
 mc = load_tool("mesh_combine")
 
@@ -71,8 +73,8 @@ class _CombineInput:
     def __init__(self, target, tools):
         self.target = target
         self.tools = tools
-        self.operation = None
-        self.algorithm = None
+        self.meshCombineOperationType = None
+        self.algorithmType = None
 
 
 class _FeatureResult:
@@ -217,7 +219,7 @@ class TestOperations:
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
         assert out["combined"] is True and out["operation"] == "join"
-        assert feats.last_input.operation == _OT.JoinMeshCombineOperationType
+        assert feats.last_input.meshCombineOperationType == _OT.JoinMeshCombineType
         # createInput got (target, list[MeshBody])
         tgt, tools = feats.create_args
         assert tgt.name == "Target"
@@ -226,17 +228,17 @@ class TestOperations:
     def test_cut(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="cut"))
-        assert feats.last_input.operation == _OT.CutMeshCombineOperationType
+        assert feats.last_input.meshCombineOperationType == _OT.CutMeshCombineType
 
     def test_intersect(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="intersect"))
-        assert feats.last_input.operation == _OT.IntersectMeshCombineOperationType
+        assert feats.last_input.meshCombineOperationType == _OT.IntersectMeshCombineType
 
     def test_merge(self):
         des, feats, *_ = _build()
         _payload(mc.handler(target="T", tools=["A"], operation="merge"))
-        assert feats.last_input.operation == _OT.MergeMeshCombineOperationType
+        assert feats.last_input.meshCombineOperationType == _OT.MergeMeshCombineType
 
     def test_multiple_tool_bodies(self):
         des, feats, *_ = _build()
@@ -259,13 +261,13 @@ class TestAlgorithm:
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"]))
         assert out["algorithm"] == "enhanced"
-        assert feats.last_input.algorithm == _AT.EnhancedMeshCombineAlgorithmType
+        assert feats.last_input.algorithmType == _AT.EnhancedMeshCombineAlgorithmType
 
     def test_legacy(self):
         des, feats, *_ = _build()
         out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
         assert out["algorithm"] == "legacy"
-        assert feats.last_input.algorithm == _AT.LegacyMeshCombineAlgorithmType
+        assert feats.last_input.algorithmType == _AT.LegacyMeshCombineAlgorithmType
 
 
 # ── the no-op gate: unchanged body count + unchanged target triangles = error ────────────────────
@@ -325,6 +327,20 @@ class TestSameBodyGuard:
         res = mc.handler(target="T", tools=["T"])
         assert res["isError"] is True and "same as the target" in res["message"]
         assert feats.create_args is None      # rejected before any mutation
+
+    def test_rejected_when_the_two_references_are_distinct_wrappers(self):
+        # target and tools resolve through separate reads, so they are different Python objects
+        # sharing one entityToken (measured). Identity alone reads False and lets a mesh be combined
+        # into itself; the token clause is what actually fires here.
+        des, feats, target, *_ = _build()
+        # two handles onto the SAME mesh: DISTINCT objects carrying one entityToken, which is what
+        # two reads of one body give live
+        twin = MeshBody("Target", token=target.entityToken, parent=target.parentComponent)
+        assert twin is not target and twin.entityToken == target.entityToken
+        _install(des, handle_map={"T": target, "T2": twin})
+        res = mc.handler(target="T", tools=["T2"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert feats.create_args is None
 
 
 # ── base-feature routing: parametric opens a scope, direct opens none ───────────────────────────
@@ -402,29 +418,111 @@ class TestNoCollection:
         assert "no meshCombineFeatures collection" in res["message"]
 
 
-# ── REGRESSION: a None add() return is non-parametric SUCCESS, not a failure ─────────────────────
+# ── REGRESSION: a None add() return is SUCCESS, not a failure ───────────────────────────────────
 # add() "Return nothing in the case where the feature is non-parametric" (a DIRECT design OR an add
-# inside the BaseFeature scope). A None return must report SUCCESS via the target mesh, not error.
+# inside the BaseFeature scope). A None return must report SUCCESS via the target mesh, not error -
+# and it says nothing about the DESIGN's mode: a parametric design gets the scope, so its combine
+# also comes back featureless.
 
-class TestNonParametricSuccess:
+class TestNoneFeatureSuccess:
     def test_none_feature_is_success_via_target_body(self):
-        # add() returns None (non-parametric) -> SUCCESS, reported against the target mesh body.
+        # add() returns None -> SUCCESS, reported against the target mesh body.
         des, feats, target, *_ = _build(none_feature=True)
         out = _payload(mc.handler(target="T", tools=["A"]))
         assert out["combined"] is True
-        assert out["non_parametric"] is True
         assert out["feature"] is None
         # the result is observed on the TARGET (combine lands in place), not via the None feature
         assert out["result_bodies"][0]["name"] == "Target"
         assert out["result_bodies"][0]["handle"] == "MTOK::Target"
 
     def test_none_feature_in_parametric_scope_is_success(self):
-        # PARAMETRIC: the scoped add still returns None (the scope makes it non-parametric) -> SUCCESS,
-        # and the base-feature scope was opened/closed around it.
+        # PARAMETRIC: the scoped add still returns None -> SUCCESS, and the base-feature scope was
+        # opened/closed around it.
         des, feats, *_ = _build(design_type=1, none_feature=True)
         out = _payload(mc.handler(target="T", tools=["A"]))
-        assert out["combined"] is True and out["non_parametric"] is True
+        assert out["combined"] is True and out["feature"] is None
         assert des._bf.started is True and des._bf.finished is True
+
+
+# ── the reported mode is the DESIGN's, read before the scope opens ──────────────────────────────
+#
+# The BaseFeature scope a PARAMETRIC design requires suppresses the feature object, so a featureless
+# add() supports no claim about the design's mode - only a read of the design itself does.
+
+class TestDesignModeReported:
+    def test_parametric_design_reports_parametric_with_a_null_feature(self):
+        des, feats, *_ = _build(design_type=1, none_feature=True)
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert out["design_mode"] == "parametric"      # the design's own mode, not the add() result
+        assert out["feature"] is None
+        assert out["base_feature"] == "BaseFeature1"   # where the combine actually landed
+        # the note explains the null feature by naming the scope THIS call opened - it claims
+        # nothing about what the same add returns in a direct design (unmeasured for this class)
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
+
+    def test_direct_design_reports_direct_and_the_shared_direct_note(self):
+        des, feats, *_ = _build(design_type=0, none_feature=True)
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None             # direct opens no scope
+        # the fleet's ONE direct-mode sentence, not a locally worded claim, and it does not point
+        # the caller at the null base_feature key
+        assert mc._common.DIRECT_FEATURE_NOTE in out["note"]
+        assert "base_feature" not in out["note"]
+
+    def test_the_null_feature_sentence_is_the_shared_one(self):
+        # the exemplar must not re-roll the sentence its siblings import: an inline copy goes stale
+        # the next time the shared one is corrected.
+        des, feats, *_ = _build(design_type=1, none_feature=True)
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert out["note"].endswith(
+            mc._common.null_feature_note(des, None, "BaseFeature1", "combine"))
+
+    def test_a_returned_feature_is_still_named(self):
+        des, feats, *_ = _build(design_type=1)
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert out["feature"] == "MeshCombine1" and out["design_mode"] == "parametric"
+
+    def test_mode_is_read_before_the_scope_opens(self):
+        # designType reads DIRECT while a base-feature edit scope is open; a mode read taken after
+        # the combine would report 'direct' for a parametric design.
+        des, feats, *_ = _build(design_type=1, none_feature=True)
+        bf = des._bf
+        real_start = bf.startEdit
+
+        def start_and_flip():
+            des.designType = 0        # what the platform reports while the scope is open
+            return real_start()
+
+        bf.startEdit = start_and_flip
+        out = _payload(mc.handler(target="T", tools=["A"]))
+        assert out["design_mode"] == "parametric"
+
+
+# ── the names are captured BEFORE the combine consumes the tool bodies ──────────────────────────
+
+class TestNamesCapturedBeforeMutation:
+    def test_consumed_tool_names_survive_in_the_payload(self):
+        # the combine consumes the tool bodies; a consumed body's wrapper is not guaranteed to still
+        # answer .name, so a payload projected AFTER the add published nulls for the very bodies it
+        # combined. go_stale drops exactly those identity reads.
+        des, feats, target, *_ = _build(none_feature=True)
+        target.displayMesh = type("TM", (), {"triangleCount": 1000})()
+        real_add = feats.add
+
+        def consume(inp):
+            target.displayMesh.triangleCount = 1600      # the combine landed
+            go_stale(inp.target, *inp.tools)
+            return real_add(inp)
+
+        feats.add = consume
+        out = _payload(mc.handler(target="T", tools=["A", "B"]))
+        assert out["tools"] == ["ToolA", "ToolB"]
+        assert out["target"] == "Target"
+        # the in-place result body is reported from the same pre-mutation capture
+        assert out["result_bodies"][0]["name"] == "Target"
+        assert out["result_bodies"][0]["handle"] == "MTOK::Target"
 
 
 # ── result bodies are reported ──────────────────────────────────────────────────────────────────

@@ -70,12 +70,25 @@ OFFSET_PARAM_NOTE = (
 AXES = {"x": 0, "y": 1, "z": 2}
 
 
+def _non_planar_face_geometry(entity, keypoint):
+    """createByNonPlanarFace(entity, keypoint) as (geometry, error_or_None). The API's OWN raise text
+    is carried into the error rather than swallowed: it names the keypoint a face type demands
+    ("Key point type should be CenterKeyPoint, if the face is sphere and torus face"), which a flat
+    "createByNonPlanarFace failed" would hide from the caller."""
+    try:
+        g = adsk.fusion.JointGeometry.createByNonPlanarFace(entity, keypoint)
+    except Exception as e:
+        return None, f"createByNonPlanarFace failed: {e}"
+    return g, None if g else "createByNonPlanarFace failed"
+
+
 def build_joint_geometry(entity, edge_keypoint=None):
     """Build a JointGeometry for a face/edge/vertex/point entity, picking the keypoint the API accepts
     for that entity's kind. CenterKeyPoint is INVALID on a cylinder/cone face - MiddleKeyPoint is used
-    there instead; a circular edge centers, a straight edge uses its midpoint. edge_keypoint overrides
-    the automatic edge pick with an explicit JointKeyPointTypes value (a start/middle/end/center choice
-    an anchor tool offers its caller). Returns (geometry, label, error_or_None)."""
+    there instead - while a SPHERE or TORUS face accepts ONLY CenterKeyPoint; a circular edge centers,
+    a straight edge uses its midpoint. edge_keypoint overrides the automatic edge pick with an explicit
+    JointKeyPointTypes value (a start/middle/end/center choice an anchor tool offers its caller).
+    Returns (geometry, label, error_or_None)."""
     JG = adsk.fusion.JointGeometry
     KP = adsk.fusion.JointKeyPointTypes
     if isinstance(entity, adsk.fusion.BRepFace):
@@ -84,10 +97,18 @@ def build_joint_geometry(entity, edge_keypoint=None):
             g = safe(lambda: JG.createByPlanarFace(entity, None, KP.CenterKeyPoint))
             return g, "planar_face@center", None if g else "createByPlanarFace failed"
         if st in (adsk.core.SurfaceTypes.CylinderSurfaceType, adsk.core.SurfaceTypes.ConeSurfaceType):
-            g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-            return g, "cylinder_face@middle", None if g else "createByNonPlanarFace failed"
-        g = safe(lambda: JG.createByNonPlanarFace(entity, KP.MiddleKeyPoint))
-        return g, "nonplanar_face@middle", None if g else "createByNonPlanarFace failed"
+            g, err = _non_planar_face_geometry(entity, KP.MiddleKeyPoint)
+            return g, "cylinder_face@middle", err
+        # A sphere or torus face takes ONLY CenterKeyPoint, both measured on live faces:
+        # MiddleKeyPoint raises "Key point type should be CenterKeyPoint, if the face is sphere and
+        # torus face", CenterKeyPoint returns a JointGeometry at the face's centre.
+        centre_only = {adsk.core.SurfaceTypes.SphereSurfaceType: "sphere_face@center",
+                       adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face@center"}
+        if st in centre_only:
+            g, err = _non_planar_face_geometry(entity, KP.CenterKeyPoint)
+            return g, centre_only[st], err
+        g, err = _non_planar_face_geometry(entity, KP.MiddleKeyPoint)
+        return g, "nonplanar_face@middle", err
     if isinstance(entity, adsk.fusion.BRepEdge):
         if edge_keypoint is not None:
             kp = edge_keypoint
@@ -134,8 +155,9 @@ def apply_motion(ji, jtype, axis_idx, custom_entity=None, slide_axis_idx=None):
         if geom is None:
             return False, (f"this is a rigid AS-BUILT joint with no joint geometry, so the API "
                            f"cannot redefine it as a '{jtype}' joint (it has no anchor to move "
-                           "along). Delete it and build the motion joint with joint_create (a "
-                           "':origin' snap) or joint_at_geometry (a real face/edge).")
+                           "along). Delete it and build the motion joint with joint_create_as_built "
+                           "(same two occurrences, plus the 'geometry' the motion anchors on), "
+                           "joint_create (a ':origin' snap) or joint_at_geometry (a real face/edge).")
         setter = {"revolute": "setAsRevoluteJointMotion", "slider": "setAsSliderJointMotion",
                   "cylindrical": "setAsCylindricalJointMotion",
                   "planar": "setAsPlanarJointMotion"}.get(jtype)

@@ -18,7 +18,7 @@ import json
 
 import adsk.core
 
-from ._common import safe
+from ._common import measured, safe
 
 app = adsk.core.Application.get()
 
@@ -34,6 +34,10 @@ class Postcondition:
 
     name = "postcondition"
     severity = "hard"
+    # Handler PARAMETER names this kind reads out of kwargs. wrap() checks them against the
+    # handler's own signature, so a kind pointed at a parameter the handler does not take fails at
+    # registration instead of silently reading None and verifying the wrong thing.
+    input_keys = ()
     # The MCP read tool that re-reads THIS postcondition's ground truth, if one exists. Named in the
     # honest error when verification itself could not run (capture/verify raised) so the caller knows
     # where to re-check the state. None = no single read tool reveals it (e.g. a file on disk).
@@ -227,34 +231,95 @@ class FeatureHealthy(Postcondition):
         return "", evidence
 
 
+def _xyz(point):
+    """(x, y, z) in cm, rounded - or None when any component is unreadable (never a zero corner)."""
+    out = []
+    for axis in ("x", "y", "z"):
+        v = safe(lambda axis=axis: getattr(point, axis))
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return None
+        out.append(round(float(v), 7))
+    return tuple(out)
+
+
+def entity_position(entity):
+    """A position fingerprint for ONE sketch entity: its bounding-box corners in cm PLUS its
+    start/end sketch-point coordinates when it has them. Measured: a sketch point carries a
+    (degenerate) boundingBox too, so the box alone covers every sketch entity - but a box is
+    INVARIANT under any symmetry of the thing it bounds, so a line rotated 180 degrees about its own
+    midpoint reads identical while Fusion really did move it. The endpoints break exactly that tie
+    (they swap), which is why both go into the fingerprint. This is the one sampler a sketch-move's
+    own coordinate read-back and SketchCurvesChanged's fingerprint share, so the handler's verdict
+    and the declared postcondition read the same ground truth. None when nothing can be read.
+    A READ - it never mutates."""
+    marks = []
+    bb = safe(lambda: entity.boundingBox)
+    for get_pt in (lambda: bb.minPoint, lambda: bb.maxPoint):
+        p = safe(get_pt) if bb is not None else None
+        marks.append(_xyz(p) if p is not None else None)
+    for get_pt in (lambda: entity.startSketchPoint.geometry,
+                   lambda: entity.endSketchPoint.geometry,
+                   lambda: entity.geometry):
+        # a curve carries start/end; a SketchPoint carries only .geometry; a circle/ellipse neither
+        p = safe(get_pt)
+        marks.append(_xyz(p) if p is not None else None)
+    return tuple(marks) if any(m is not None for m in marks) else None
+
+
 class SketchCurvesChanged(Postcondition):
-    """After a sketch-curve edit: the target sketch's curve set differs. Keyed entityToken ->
-    length (cm), so an in-place extend (same curve, longer) registers as readily as an add or a
-    delete - and a spline split, which deletes the original and returns two new curves, registers
-    even though the count is unchanged. Resolves the sketch through the same name-or-most-recent
-    contract the handler uses. NEVER mutates - capture/verify are safe() reads."""
+    """After a sketch edit: the target sketch's entity set differs. Keyed entityToken ->
+    (length in cm, position), over the sketch's CURVES and its POINTS - a point-only edit (moving
+    'point:0') touches no curve at all, so a curves-only walk would call it a no-op. An in-place
+    extend (same curve, longer) registers as readily as an add or a delete, a spline split registers
+    even though the count is unchanged, and so does a pure TRANSLATION, which changes neither the
+    token nor the length. ``keys`` names the handler kwargs holding the sketch to read, in priority
+    order: a copy into another sketch must verify its TARGET, since the source it copied FROM is left
+    untouched. Resolves through the same name-or-most-recent contract the handler uses. NEVER
+    mutates - capture/verify are safe() reads."""
 
     name = "sketch_curves_changed"
     read_tool = "sketch_get"
+
+    def __init__(self, keys=("sketch_name",)):
+        self.keys = tuple(keys)
+        # the handler parameters this kind reads; wrap() refuses a name the handler does not take,
+        # so a typo'd key cannot silently fall through to the most-recent sketch.
+        self.input_keys = self.keys
 
     def _fingerprint(self, kwargs):
         from ._common import design, resolve_or_recent_sketch
         d = design()
         if d is None:
             return None
-        sketch, _requested = resolve_or_recent_sketch(d, kwargs.get("sketch_name") or "")
+        wanted = ""
+        for key in self.keys:
+            wanted = (kwargs.get(key) or "").strip()
+            if wanted:
+                break
+        sketch, _requested = resolve_or_recent_sketch(d, wanted)
         if sketch is None:
             return None
+        marks = {}
         curves = safe(lambda: sketch.sketchCurves)
         n = (safe(lambda: curves.count, 0) or 0) if curves is not None else 0
-        marks = {}
         for i in range(n):
             c = safe(lambda i=i: curves.item(i))
             if c is None:
                 continue
-            marks[safe(lambda c=c: c.entityToken) or f"#{i}"] = round(
-                safe(lambda c=c: c.length, 0.0) or 0.0, 7)
-        return marks
+            marks[("curve", safe(lambda c=c: c.entityToken) or f"#{i}")] = (
+                measured(lambda c=c: c.length, 1.0, 7), entity_position(c))
+        points = safe(lambda: sketch.sketchPoints)
+        m = (safe(lambda: points.count, 0) or 0) if points is not None else 0
+        for i in range(m):
+            p = safe(lambda i=i: points.item(i))
+            if p is None:
+                continue
+            # a SketchPoint carries no .length (measured), so position is its whole fingerprint
+            marks[("point", safe(lambda p=p: p.entityToken) or f"#{i}")] = (None, entity_position(p))
+        return {"marks": marks, "curves": n}
+
+    def describe(self) -> str:
+        return f"{self.name}({'|'.join(self.keys)})"
 
     def capture(self, kwargs):
         return self._fingerprint(kwargs)
@@ -263,10 +328,10 @@ class SketchCurvesChanged(Postcondition):
         after = self._fingerprint(kwargs)
         if before is None or after is None:
             return "", {}                    # no sketch to read - nothing to gate
-        if after == before:
-            return ("the edit reported success but the sketch's curves are unchanged - nothing was "
-                    "added, removed, shortened or lengthened."), {}
-        return "", {"curve_count_after": len(after)}
+        if after["marks"] == before["marks"]:
+            return ("the edit reported success but the sketch's entities are unchanged - nothing was "
+                    "added, removed, shortened, lengthened or moved."), {}
+        return "", {"curve_count_after": after["curves"]}
 
 
 class ChildGeometryMoved(Postcondition):
@@ -390,6 +455,25 @@ def _verification_failed(post, ex):
             "message": f"{post.name}: verification could not run - {detail}"}
 
 
+def _check_input_keys(handler, posts):
+    """Refuse a postcondition pointed at a handler parameter that does not exist. Such a key reads
+    None out of kwargs and the kind falls back to its own default target - here, the most recently
+    created sketch - so the call would verify the WRONG state and still report success. Raised at
+    registration (import time), where it is a loud wiring bug rather than a silent wrong verdict."""
+    import inspect
+    try:
+        params = set(inspect.signature(handler).parameters)
+    except (TypeError, ValueError):
+        return                       # an unintrospectable callable - nothing to check against
+    for post in posts:
+        unknown = [k for k in getattr(post, "input_keys", ()) or () if k not in params]
+        if unknown:
+            raise ValueError(
+                f"postcondition {post.name} reads handler argument(s) {', '.join(unknown)}, which "
+                f"{getattr(handler, '__name__', 'the handler')} does not take "
+                f"({', '.join(sorted(params)) or 'no parameters'}). It would verify the wrong state.")
+
+
 def wrap(handler, postconditions):
     """Wrap an Edit handler with capture -> handler -> verify. Runs verify only on a JSON ok() result;
     error results and non-JSON payloads pass through untouched. Applied INSIDE _write_guard.wrap (the
@@ -403,6 +487,7 @@ def wrap(handler, postconditions):
     posts = list(postconditions or [])
     if not posts:
         return handler
+    _check_input_keys(handler, posts)
 
     def _capture(p, kwargs):
         try:

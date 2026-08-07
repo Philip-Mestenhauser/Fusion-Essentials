@@ -8,7 +8,9 @@
   model_pattern_circular    -> duplicate occurrences/bodies evenly around an axis: a count over a
                          total angle (360 = full ring). WRITES.
 
-Direction/axis defaults to a world construction axis (x/y/z); pass 'axis'/'direction' to choose.
+Both the circular 'axis' and the rectangular 'direction' resolve through the shared AxisRef kind: a
+world axis x/y/z, a construction axis (name or handle), or a find_geometry handle - plus, for the
+circular axis only, a cylindrical/conical face, whose own axis line places an off-origin rotation.
 """
 
 import adsk.core
@@ -61,9 +63,101 @@ def _resolve_input_entities(design, occurrences, bodies):
     return coll, [safe(lambda o=o: o.name) for o in occs], None
 
 
-def _axis_entity(comp, axis_key):
-    """The x/y/z construction axis of the given component (must own the pattern's input entities)."""
-    return _inputs.world_construction_axis(comp, axis_key or "z")
+# A grid direction: a world axis x/y/z, a construction axis (its name in the active component, or a
+# handle), OR a find_geometry handle at a straight edge / sketch line.
+# entity_only refuses a FACE handle - RectangularPatternFeatureInput's direction takes a linear
+# ENTITY (the binding's own list: a linear edge, construction axis, sketch line, or a rectangular
+# pattern feature), and a face resolves to a direction VECTOR that input cannot consume.
+_DIR_ONE = _inputs.AxisRef("direction_one", entity_only=True, default="x")
+_DIR_TWO = _inputs.AxisRef("direction_two", entity_only=True, default="y")
+
+# The circular pattern's rotation axis. CircularPatternFeatures.createInput's axis takes the entity
+# that DEFINES the axis - "a sketch line, linear edge, construction axis, an edge/sketch curve that
+# defines an axis (circle, etc.) or a face that defines an axis (cylinder, cone, torus, etc.)" (the
+# installed API's own doc) - so face_entity hands the FACE itself through. A face resolved to a
+# direction VECTOR would drop the axis POSITION, which is the whole point off-origin (a wheel axis).
+_CIRC_AXIS = _inputs.AxisRef("axis", face_entity=True, default="z",
+                             description="What to turn about.")
+
+
+def _direction_key(kind, raw):
+    """The direction as the caller gave it, falling back to the kind's default for a blank."""
+    return raw if isinstance(raw, str) and raw.strip() else kind.default
+
+
+def _in_context(kind, ent, comp, design):
+    """(entity, error) - the direction entity in a form the pattern's component can consume.
+
+    LIVE-VERIFIED: a NATIVE entity (assemblyContext None) owned by ANOTHER component is accepted by
+    the input and then raises InternalValidationError at add(); proxied into the occurrence that
+    carries it, the same entity is accepted. An entity that already has an assembly context, or one
+    owned by `comp` itself, passes untouched.
+
+    A component placed SEVERAL times is refused rather than proxied into an arbitrary instance: each
+    instance points its own way, and patternElements.count - the only read-back a pattern has - is
+    identical for a right and a wrong direction, so a bad pick would never surface."""
+    if safe(lambda: ent.assemblyContext) is not None:
+        return ent, None
+    owner = _inputs.entity_component(ent)
+    # _common.same_component, never `owner is comp`: component wrappers are measured NEVER
+    # identity-stable (two reads of design.rootComponent are different Python objects sharing one
+    # entityToken), so `is` reads False even for the pattern's OWN component - and control then falls
+    # to allOccurrencesByComponent, which returns 0 for the root and REFUSES a perfectly legal
+    # direction, telling the caller to pass exactly what they just passed.
+    if owner is None or _common.same_component(owner, comp):
+        return ent, None
+    root = safe(lambda: design.rootComponent)
+    occs = safe(lambda: root.allOccurrencesByComponent(owner)) if root is not None else None
+    count = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+    owner_name = safe(lambda: owner.name) or "another component"
+    if count == 1:
+        proxy = safe(lambda: ent.createForAssemblyContext(occs.item(0)))
+        if proxy is None:
+            return None, (f"'{kind.name}': that direction belongs to component '{owner_name}' and "
+                          "could not be brought into the pattern's assembly context. Pass a handle "
+                          "at geometry in the pattern's own component, or a world axis (x/y/z).")
+        return proxy, None
+    if count > 1:
+        paths = ", ".join(str(safe(lambda i=i: occs.item(i).fullPathName)) for i in range(count))
+        return None, (f"'{kind.name}': that direction belongs to component '{owner_name}', which is "
+                      f"placed {count} times ({paths}). Each instance points a different way and a "
+                      "pattern's instance count cannot tell a right direction from a wrong one, so "
+                      "the instance must not be guessed. Pass a handle at geometry in the pattern's "
+                      "own component, or a world axis (x/y/z).")
+    return None, (f"'{kind.name}': that direction belongs to component '{owner_name}', which is not "
+                  "placed in the assembly, so it cannot be brought into the pattern's context. Pass "
+                  "a handle at geometry in the pattern's own component, or a world axis (x/y/z).")
+
+
+def _direction_entity(kind, raw, comp, design):
+    """(entity, error) for one direction/axis input - the ONE resolution both the grid directions and
+    the circular axis run. A world-axis key becomes `comp`'s own origin ConstructionAxis (the feature
+    and its axis must share a component); anything else becomes the resolved entity itself (a straight
+    edge, sketch line, construction axis, or - on a face_entity input - the axis-defining face),
+    brought into `comp`'s assembly context when it is native to another component."""
+    key = _direction_key(kind, raw)
+    tagged, err = kind.resolve(key)
+    if err:
+        return None, err
+    if tagged and tagged[0] == "edge":
+        return _in_context(kind, tagged[1], comp, design)
+    ent = _inputs.world_construction_axis(comp, key)
+    if ent is None:
+        return None, (f"'{kind.name}': component '{safe(lambda: comp.name)}' has no {key} origin "
+                      "construction axis. Pass a find_geometry handle at a straight edge or sketch "
+                      "line instead.")
+    return ent, None
+
+
+def _direction_label(kind, raw, ent):
+    """What the direction/axis RESOLVED to, for the payload: the world-axis key, else the entity's own
+    NAME (a construction axis has one) falling back to its type - never the handle string itself.
+    Measured: neither a BRepEdge nor a SketchLine carries a name, so those label by type."""
+    key = _direction_key(kind, raw)
+    if key.lower() in _inputs.WORLD_AXIS_ATTRS:
+        return key.lower()
+    name = safe(lambda: ent.name)
+    return name if isinstance(name, str) and name else type(ent).__name__
 
 
 def _owning_component(design, coll, bodies):
@@ -100,9 +194,14 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
     # Build the axis AND the feature in the component that OWNS the inputs (the bodies' parent for a
     # body pattern, else root) - they must share a component or Fusion raises getObjectPath.
     owner = _owning_component(design, coll, bodies)
-    d1 = _axis_entity(owner, direction_one)
-    if not d1:
-        return error(f"Unknown direction_one '{direction_one}'. Use x, y, or z.")
+    d1, d1err = _direction_entity(_DIR_ONE, direction_one, owner, design)
+    if d1err:
+        return error(d1err)
+    # Direction two is resolved even for a single row: it is ALWAYS set below, so a bad value must
+    # be refused before any feature transaction opens.
+    d2, d2err = _direction_entity(_DIR_TWO, direction_two, owner, design)
+    if d2err:
+        return error(d2err)
 
     try:
         dist_type = adsk.fusion.PatternDistanceType.SpacingPatternDistanceType
@@ -114,18 +213,17 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         # (quantityTwo=3, verified live: a quantity_one=2 single-row request silently produced 6
         # coincident instances while only direction one was set) - leaving the default unset is how
         # a single-row pattern triples itself.
-        d2 = _axis_entity(owner, direction_two)
-        if not d2:
-            return error(f"Unknown direction_two '{direction_two}'. Use x, y, or z.")
         q2 = adsk.core.ValueInput.createByReal(max(1, int(quantity_two)))
         s2 = adsk.core.ValueInput.createByReal(float(spacing_two) * k)
-        pin.setDirectionTwo(d2, q2, s2)
+        if not pin.setDirectionTwo(d2, q2, s2):
+            return error("Fusion refused the second pattern direction (setDirectionTwo returned "
+                         "false), so no pattern was created.")
 
         feature = owner.features.rectangularPatternFeatures.add(pin)
     except Exception as e:
         return error(f"Rectangular pattern failed: {e}")
     if not feature:
-        return error("Rectangular pattern returned no feature.")
+        return error(_common.no_feature_error(design, "Rectangular pattern"))
 
     # Verify the effect: the REAL instance count read off the created feature, never the request.
     requested_total = int(quantity_one) * max(1, int(quantity_two))
@@ -141,9 +239,11 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         "feature": safe(lambda: feature.name),
         "entities": resolved,
         "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
-        "direction_one": direction_one.lower(), "quantity_one": int(quantity_one),
+        "direction_one": _direction_label(_DIR_ONE, direction_one, d1),
+        "quantity_one": int(quantity_one),
         "spacing_one": round(float(spacing_one), 6),
-        "direction_two": direction_two.lower() if int(quantity_two) > 1 else None,
+        "direction_two": (_direction_label(_DIR_TWO, direction_two, d2)
+                          if int(quantity_two) > 1 else None),
         "quantity_two": int(quantity_two), "spacing_two": round(float(spacing_two), 6),
         "units": units,
         # the read-back count when available (the verified value); the computed request otherwise
@@ -171,9 +271,9 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
     # root) - sharing a component is what lets Fusion build the object path (the sub-component body
     # pattern failed with getObjectPath when the axis came from root).
     owner = _owning_component(design, coll, bodies)
-    ax = _axis_entity(owner, axis)
-    if not ax:
-        return error(f"Unknown axis '{axis}'. Use x, y, or z.")
+    ax, axerr = _direction_entity(_CIRC_AXIS, axis, owner, design)
+    if axerr:
+        return error(axerr)
 
     try:
         pin = owner.features.circularPatternFeatures.createInput(coll, ax)
@@ -184,7 +284,7 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
     except Exception as e:
         return error(f"Circular pattern failed: {e}")
     if not feature:
-        return error("Circular pattern returned no feature.")
+        return error(_common.no_feature_error(design, "Circular pattern"))
 
     # Verify the effect: the REAL instance count read off the created feature, never the request.
     real_total = safe(lambda: feature.patternElements.count)
@@ -199,7 +299,7 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
         "feature": safe(lambda: feature.name),
         "entities": resolved,
         "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
-        "axis": axis.lower(),
+        "axis": _direction_label(_CIRC_AXIS, axis, ax),
         "quantity": int(real_total) if real_total is not None else int(quantity),
         "total_angle_deg": float(total_angle_deg),
         "symmetric": bool(symmetric),
@@ -212,9 +312,10 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
 _RECT_DESC = (
 "Pattern component OCCURRENCES in a rectangular grid. 'occurrences' = the occurrence name(s) to "
 "copy (comma-separated, or one). 'quantity_one'/'spacing_one'/'direction_one' set the count, "
-"spacing (in 'units', the distance BETWEEN instances), and world axis (x/y/z) of the first "
-"direction; 'quantity_two'/'spacing_two'/'direction_two' add an optional second direction "
-"(leave quantity_two=1 for a single row). Pair with view_screenshot to view."
+"spacing (in 'units', the distance BETWEEN instances), and direction of the first row; "
+"'quantity_two'/'spacing_two'/'direction_two' add an optional second direction "
+"(leave quantity_two=1 for a single row). To pattern along a curve instead, use "
+"model_pattern_path. Pair with view_screenshot to view."
 )
 rectangular_tool = (
     Tool.create_simple(name="model_pattern_rectangular", description=_RECT_DESC)
@@ -222,10 +323,10 @@ rectangular_tool = (
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity_one", {"type": "integer", "description": "Instance count in direction one (>=1)."})
     .add_input_property("spacing_one", {"type": "number", "description": "Spacing between instances in direction one (in 'units')."})
-    .add_input_property(*_inputs.world_axis("direction_one", default="x", description="World axis for direction one.").as_property())
+    .add_input_property(*_DIR_ONE.as_property())
     .add_input_property("quantity_two", {"type": "integer", "description": "Instance count in direction two (default 1 = single row)."})
     .add_input_property("spacing_two", {"type": "number", "description": "Spacing between instances in direction two (in 'units')."})
-    .add_input_property(*_inputs.world_axis("direction_two", default="y", description="World axis for direction two.").as_property())
+    .add_input_property(*_DIR_TWO.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
@@ -236,8 +337,8 @@ rectangular_item = Item.create_tool_item(tool=rectangular_tool, write="write", h
 _CIRC_DESC = (
                                          "Pattern component OCCURRENCES evenly around an axis. 'occurrences' = the occurrence name(s) to "
                                          "copy (comma-separated, or one). 'quantity' = number of instances (including the original); "
-                                         "'total_angle_deg' = the angle to spread them over (360 = full ring); 'axis' = world axis x/y/z "
-                                         "to rotate about (default z); 'symmetric' spreads symmetrically about the original. "
+                                         "'total_angle_deg' = the angle to spread them over (360 = full ring); "
+                                         "'symmetric' spreads symmetrically about the original. "
                                          "Pair with view_screenshot to view."
 )
 circular_tool = (
@@ -246,7 +347,7 @@ circular_tool = (
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("quantity", {"type": "integer", "description": "Number of instances including the original (>=2)."})
     .add_input_property("total_angle_deg", {"type": "number", "description": "Total angle to spread over in degrees (360 = full ring)."})
-    .add_input_property(*_inputs.world_axis("axis", default="z", description="World axis to rotate about.").as_property())
+    .add_input_property(*_CIRC_AXIS.as_property())
     .add_input_property("symmetric", {"type": "boolean", "description": "Spread symmetrically about the original (default false)."})
     .strict_schema()
 )

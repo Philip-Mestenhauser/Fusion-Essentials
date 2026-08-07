@@ -115,12 +115,20 @@ class FakeExtendInput:
         self.chaining = chaining
 
 
+class _SwallowingExtendInput(FakeExtendInput):
+    """An ExtendFeatureInput that ACCEPTS the extendAlignment write and keeps its default anyway -
+    nothing raises and the extend would just run free-edged. The shape set_verified catches."""
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, "FreeEdges" if name == "extendAlignment" else value)
+
+
 class FakeExtendFeatures:
-    def __init__(self, result_bodies=None):
+    def __init__(self, result_bodies=None, input_cls=FakeExtendInput):
         self.last_input = None
         self._result = result_bodies
+        self._input_cls = input_cls
     def createInput(self, edges, dist, et, chaining):
-        self.last_input = FakeExtendInput(edges, dist, et, chaining)
+        self.last_input = self._input_cls(edges, dist, et, chaining)
         return self.last_input
     def add(self, inp):
         return FakeFeature(name="Extend1", bodies=self._result)
@@ -155,13 +163,20 @@ class FakeThickenInput:
         self.chain = chain
 
 
+class _SwallowingThickenInput(FakeThickenInput):
+    """A ThickenFeatureInput that ACCEPTS the thickenType write and keeps its default anyway."""
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, "SharpThickenType" if name == "thickenType" else value)
+
+
 class FakeThickenFeatures:
-    def __init__(self, result_bodies=None, created_faces=None):
+    def __init__(self, result_bodies=None, created_faces=None, input_cls=FakeThickenInput):
         self.last_input = None
         self._result = result_bodies
         self._faces = created_faces
+        self._input_cls = input_cls
     def createInput(self, faces, thick, sym, op, chain):
-        self.last_input = FakeThickenInput(faces, thick, sym, op, chain)
+        self.last_input = self._input_cls(faces, thick, sym, op, chain)
         return self.last_input
     def add(self, inp):
         return FakeFeature(name="Thicken1", bodies=self._result, faces=self._faces)
@@ -491,6 +506,64 @@ class TestSurfaceExtend:
         assert out["extend_type"] == "tangent"
         assert xf.last_input.et == "TangentSurfaceExtendType"
 
+    def test_extend_alignment_set_on_input_and_reported(self):
+        import adsk.fusion
+        body = object()
+        e1 = FakeEdge(body=body)
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": e1})
+        out = _payload(se.extend_handler(edges=["E1"], distance=4, extend_alignment="align_edges"))
+        # the member name is BARE (AlignEdges), not suffixed like the neighbouring extend
+        # types - bindings-sourced until the enum sweep measures the family
+        assert xf.last_input.extendAlignment is adsk.fusion.SurfaceExtendAlignment.AlignEdges
+        assert out["extend_alignment"] == "align_edges"
+
+    def test_extend_alignment_omitted_writes_nothing_and_reports_nothing(self):
+        # a fresh input's extendAlignment reads 0 (measured), so an unwritten one keeps that;
+        # the payload must not claim a value nobody set
+        body = object()
+        e1 = FakeEdge(body=body)
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": e1})
+        out = _payload(se.extend_handler(edges=["E1"], distance=4))
+        assert not hasattr(xf.last_input, "extendAlignment")
+        assert "extend_alignment" not in out
+
+    def test_unknown_extend_alignment_rejected(self):
+        comp = FakeComp(FakeFeatures(extend=FakeExtendFeatures()))
+        _wire(comp, handle_map={"E1": FakeEdge()})
+        res = se.extend_handler(edges=["E1"], distance=4, extend_alignment="snap_to_grid")
+        assert res["isError"] is True
+        assert "free_edges, align_edges" in res["message"]
+
+    def test_extend_alignment_that_does_not_take_is_refused(self):
+        body = object()
+        e1 = FakeEdge(body=body)
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
+                                input_cls=_SwallowingExtendInput)
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": e1})
+        res = se.extend_handler(edges=["E1"], distance=4, extend_alignment="align_edges")
+        assert res["isError"] is True
+        assert "extend_alignment=align_edges" in res["message"]
+        assert "reads back unchanged" in res["message"]
+
+    def test_extend_alignment_unavailable_member_is_refused_not_silently_defaulted(self, monkeypatch):
+        # a missing enum class/member must REFUSE - running the extend on its default while the
+        # payload echoes the request is the failure mode this path exists to prevent
+        import adsk.fusion
+        body = object()
+        e1 = FakeEdge(body=body)
+        monkeypatch.setattr(adsk.fusion, "SurfaceExtendAlignment", object())
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": e1})
+        res = se.extend_handler(edges=["E1"], distance=4, extend_alignment="align_edges")
+        assert res["isError"] is True
+        assert "not available on this Fusion version" in res["message"]
+
 
 # ── surface_offset vs surface_thicken: output body kind ─────────────────────
 
@@ -594,6 +667,44 @@ class TestOffsetThickenKind:
         out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
         assert out["result_bodies"] == ["Wall1"]
         assert out["is_solid"] is True
+
+    def test_thicken_type_set_on_input_and_reported(self):
+        import adsk.fusion
+        f1 = FakeFace()
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, thicken_type="rounded"))
+        assert tf.last_input.thickenType is adsk.fusion.ThickenTypes.RoundedThickenType
+        assert out["thicken_type"] == "rounded"
+
+    def test_thicken_type_omitted_writes_nothing_and_reports_nothing(self):
+        # a fresh input's thickenType reads 0 (measured), so an unwritten one keeps that; the
+        # payload must not claim a value nobody set
+        f1 = FakeFace()
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
+        assert not hasattr(tf.last_input, "thickenType")
+        assert "thicken_type" not in out
+
+    def test_unknown_thicken_type_rejected(self):
+        comp = FakeComp(FakeFeatures(thicken=FakeThickenFeatures()))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        res = se.thicken_handler(faces=["F1"], thickness=3, thicken_type="chamfered")
+        assert res["isError"] is True and "sharp, rounded" in res["message"]
+
+    def test_thicken_type_that_does_not_take_is_refused(self):
+        f1 = FakeFace()
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)],
+                                 input_cls=_SwallowingThickenInput)
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        res = se.thicken_handler(faces=["F1"], thickness=3, thicken_type="rounded")
+        assert res["isError"] is True
+        assert "thicken_type=rounded" in res["message"]
+        assert "reads back unchanged" in res["message"]
 
     def test_thicken_symmetric_passed(self):
         f1 = FakeFace()

@@ -30,34 +30,67 @@ _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLoca
 
 class _Target:
     """Uniform interface the handler drives, hiding document-vs-shared differences.
-    persist() commits a shared library; document edits commit per-tool via update_tool()."""
+    persist() commits a shared library; document edits commit per-tool via update_tool().
+
+    Every persist read-back goes through ONE seam, refetch(), whose STRENGTH differs by target and is
+    what the payload's verified_in_memory_only / note must report:
+      - a SHARED library re-reads from its url, which returns stored state (measured: an unpersisted
+        in-memory edit on one fetch is invisible to the next) - that read proves the write PERSISTED;
+      - the DOCUMENT library has no url; its refetch is the document's own live library, so a
+        read-back there proves the change is PRESENT, never that anything was stored (doc_save does
+        the storing).
+    A refetch that comes back empty makes each reread_* return None, which proves neither."""
     def __init__(self, lib, is_document, persist_fn=None, update_tool_fn=None, ops_fn=None,
-                 refetch_count_fn=None, reread_param_fn=None, reread_presets_fn=None):
+                 refetch_fn=None):
         self._lib = lib
         self.is_document = is_document
         self._persist_fn = persist_fn
         self._update_tool_fn = update_tool_fn
         self._ops_fn = ops_fn
-        self._refetch_count_fn = refetch_count_fn
-        self._reread_param_fn = reread_param_fn
-        self._reread_presets_fn = reread_presets_fn
+        self._refetch_fn = refetch_fn
+
+    def refetch(self):
+        """The library read again: for a shared target the stored library re-read from its url, for
+        the document target its own live library (None when neither can be read). See the class note
+        for what each of those two reads is evidence OF."""
+        return self._refetch_fn() if self._refetch_fn else None
+
+    def _refetch_tool(self, index):
+        lib = self.refetch()
+        return safe(lambda: lib.item(index)) if lib is not None else None
 
     def persisted_count(self):
-        """The tool count re-read FRESH from the persisted url (None when unavailable) - the proof
-        a persist() actually landed; updateToolLibrary returning true is not."""
-        return self._refetch_count_fn() if self._refetch_count_fn else None
+        """The tool count off the re-read library (None when it cannot be re-read) - for a shared
+        target the proof a persist() actually landed, since updateToolLibrary returning true is not."""
+        lib = self.refetch()
+        return safe(lambda: lib.count) if lib is not None else None
 
     def reread_param(self, index, name):
-        """The expression of one parameter re-read FRESH from the persisted library (None when
-        unavailable) - the proof an edit() actually stored; updateTool/updateToolLibrary returning
-        true is not."""
-        return self._reread_param_fn(index, name) if self._reread_param_fn else None
+        """The expression of one parameter off the re-read library (None when it cannot be re-read) -
+        for a shared target the proof an edit() stored, for the document target the proof it is
+        present; updateTool/updateToolLibrary returning true is neither."""
+        t = self._refetch_tool(index)
+        return safe(lambda: t.parameters.itemByName(name).expression) if t is not None else None
 
     def reread_preset_names(self, index):
-        """The preset names of one tool re-read FRESH from the persisted library (None when
-        unavailable) - the proof a preset add/remove actually stored; updateTool/updateToolLibrary
-        returning true is not, and neither changes the library's tool COUNT."""
-        return self._reread_presets_fn(index) if self._reread_presets_fn else None
+        """The preset names of one tool off the re-read library (None when it cannot be re-read) -
+        the same two rungs as reread_param, and the only read that covers a preset change at all:
+        updateTool/updateToolLibrary returning true proves nothing and no preset change moves the
+        library's tool COUNT."""
+        return _persisted_preset_names(self._refetch_tool(index))
+
+    def stored_tool_numbers(self):
+        """Every tool_number the STORED library holds, re-read from its url (None when it cannot be
+        re-read) - the proof an auto-assigned number reached storage, which re-reading the in-memory
+        Tool object cannot show. Shared targets only: the document library has no url to re-read.
+        The numbers come back as the library's whole SET and the caller matches against that set, so
+        the check holds however a persist orders the tools; the add path already walks every tool's
+        number to pick free ones, so this is the same cost profile."""
+        lib = self.refetch()
+        if lib is None:
+            return None
+        return [_read_tool_number(safe(lambda i=i: lib.item(i)))
+                for i in range(safe(lambda: lib.count, 0) or 0)]
 
     @property
     def tools(self):
@@ -141,10 +174,9 @@ def _resolve_target(scope, library):
         return _Target(dtl, is_document=True,
                        update_tool_fn=lambda t: dtl.updateTool(t),
                        ops_fn=lambda t: safe(lambda: dtl.operationsByTool(t)),
-                       reread_param_fn=lambda idx, nm: safe(
-                           lambda: dtl.item(idx).parameters.itemByName(nm).expression),
-                       reread_presets_fn=lambda idx: _persisted_preset_names(
-                           safe(lambda: dtl.item(idx)))), None
+                       # the document library re-read off the CAM product - the document's own state
+                       # (doc_save is what stores it), so a read-back here proves presence, not storage
+                       refetch_fn=lambda: safe(lambda: cam.documentToolLibrary)), None
     # shared library - no open document needed
     libs = _tool_libraries()
     if not libs:
@@ -167,11 +199,13 @@ def _resolve_target(scope, library):
         return None, f"Could not load {scope} library '{target}'."
     return _Target(lib, is_document=False,
                    persist_fn=lambda: libs.updateToolLibrary(lib_url, lib),
-                   refetch_count_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url).count),
-                   reread_param_fn=lambda idx, nm: safe(
-                       lambda: libs.toolLibraryAtURL(lib_url).item(idx).parameters.itemByName(nm).expression),
-                   reread_presets_fn=lambda idx: _persisted_preset_names(
-                       safe(lambda: libs.toolLibraryAtURL(lib_url).item(idx)))), None
+                   refetch_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url))), None
+
+
+# library url string -> the ToolLibrary already fetched for it. Loading one is a cloud round-trip
+# costing seconds (measured: 1.4s for 66 tools, 6.7s for 266), and a type lookup reads the same
+# library twice - once to map its types, once to take the tool - inside a 30s handler budget.
+_library_cache = {}
 
 
 def _source_tool(library_url, index):
@@ -179,8 +213,12 @@ def _source_tool(library_url, index):
     libs = safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
     if not libs:
         return None, "Tool libraries unavailable."
-    url = safe(lambda: adsk.core.URL.create(library_url))
-    lib = safe(lambda: libs.toolLibraryAtURL(url)) if url else None
+    lib = _library_cache.get(library_url)
+    if lib is None:
+        url = safe(lambda: adsk.core.URL.create(library_url))
+        lib = safe(lambda: libs.toolLibraryAtURL(url)) if url else None
+        if lib is not None:
+            _library_cache[library_url] = lib
     if not lib:
         return None, f"Could not load source library '{library_url}'."
     n = safe(lambda: lib.count, 0) or 0
@@ -204,7 +242,9 @@ _json_dumps = _json.dumps
 _SAMPLE_LIBS = ("Milling Tools (Metric)", "Hole Making Tools (Metric)", "Cutting Tools (Metric)",
                 "Turning Tools (Metric)", "Hole Making Tools (Inch)")
 _HOLDERS_LIB = "Holders (Metric)"
-_type_map_cache = None   # {tool_type: (library_url, index)} built once from the sample libs
+# ({tool_type: (library_url, index)}, {sample libraries already fetched}) - built INCREMENTALLY,
+# because each library is a cloud round-trip (see _build_type_map).
+_type_map_cache = None
 
 
 def _tool_from_json(json_str):
@@ -231,33 +271,57 @@ def _fusion360_child(leaf_substr):
     return libs, None
 
 
-def _build_type_map():
-    """{tool_type -> (library_url, index)} from the sample libraries (built once, cached)."""
+def _build_type_map(want=None):
+    """{tool_type -> (library_url, index)} from the sample libraries.
+
+    Each library is a CLOUD fetch: measured, the five together cost ~13s warm (604 tools), which is
+    most of the server's 30s handler budget - and the cache is per-process, so the first call after
+    a restart pays it. `want` stops as soon as that type is found, so adding a flat end mill reads
+    ONE library (~1.4s) instead of five. Libraries already read stay cached, and _scanned records
+    which, so a later call never re-fetches one.
+    """
     global _type_map_cache
-    if _type_map_cache is not None:
-        return _type_map_cache
-    out = {}
+    if _type_map_cache is None:
+        _type_map_cache = ({}, set())
+    out, scanned = _type_map_cache
+    if want and want in out:
+        return out
+    if len(scanned) == len(_SAMPLE_LIBS):
+        return out
     libs = safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
     if libs:
         root = safe(lambda: libs.urlByLocation(adsk.cam.LibraryLocations.Fusion360LibraryLocation))
         children = safe(lambda: list(libs.childAssetURLs(root)), []) or []
         for ln in _SAMPLE_LIBS:
+            if ln in scanned:
+                continue
             u = next((a for a in children if ln in (safe(lambda a=a: a.leafName) or "")), None)
             if not u:
+                scanned.add(ln)
                 continue
-            lib = safe(lambda: libs.toolLibraryAtURL(u))
+            key = safe(lambda u=u: u.toString())
+            lib = _library_cache.get(key) or safe(lambda: libs.toolLibraryAtURL(u))
+            if lib is not None and key:
+                _library_cache[key] = lib     # _source_tool reads the SAME library moments later
             for i in range(safe(lambda: lib.count, 0) or 0):
                 ty = safe(lambda lib=lib, i=i: lib.item(i).parameters.itemByName("tool_type").value.value)
                 if ty and ty not in out:
-                    out[ty] = (safe(lambda u=u: u.toString()), i)
-    _type_map_cache = out
+                    out[ty] = (key, i)
+            scanned.add(ln)
+            if want and want in out:
+                break
     return out
 
 
 def _sample_for_type(tool_type):
     """A sample Tool of the given geometry type (e.g. 'drill', 'ball end mill'), or (None, error)."""
-    tmap = _build_type_map()
-    ref = tmap.get((tool_type or "").strip())
+    want = (tool_type or "").strip()
+    tmap = _build_type_map(want)
+    ref = tmap.get(want)
+    if not ref:
+        # A miss must list the FULL vocabulary, so fall back to the complete walk before refusing.
+        tmap = _build_type_map()
+        ref = tmap.get(want)
     if not ref:
         return None, (f"No sample tool of type '{tool_type}'. Available types: "
                       f"{', '.join(sorted(tmap.keys()))}.")
@@ -687,19 +751,33 @@ def _do_add(target, add_tools):
         if got is not None and got != len(target.tools):
             return error(f"updateToolLibrary reported success but the library re-read from its url "
                          f"holds {got} tool(s), not {len(target.tools)} - the persist did not land.")
-    # Honesty read-back, scoped: this re-reads each IN-MEMORY tool object's number after the
-    # add/persist - it catches an assignment that did not stick on the object, and the persisted
-    # COUNT is verified from the url above, but a persist-side renumber of an individual tool
-    # (never observed live) would pass; only cam_post's duplicate-number refusal would catch it.
+    # Honesty read-back, first rung: each IN-MEMORY tool object's number after the add/persist -
+    # this catches an assignment that did not stick on the object.
     landed = [_read_tool_number(t) for t in built]
     if landed != assigned:
         return error(f"Auto-assigned tool numbers {assigned} but after the add they read back "
                      f"{landed} - the tool-number assignment did not persist.")
+    # Second rung, SHARED targets only: the numbers the STORED library holds, re-read from its url -
+    # the only read that can show a persist-side renumber (the count gate above cannot: the count is
+    # right either way). The document library has no url to re-read and doc_save is what stores it,
+    # so there the first rung is all the evidence there is.
+    in_memory_only = True
+    if not target.is_document:
+        stored_numbers = target.stored_tool_numbers()
+        in_memory_only = stored_numbers is None
+        if not in_memory_only:
+            missing = [n for n in assigned if n not in stored_numbers]
+            if missing:
+                return error(f"Auto-assigned tool number(s) {missing} but the library re-read from "
+                             f"its url holds numbers {stored_numbers} - the assignment did not "
+                             "reach the stored library.")
     return ok({"added": len(built), "tool_count": len(target.tools),
                "assigned_tool_numbers": assigned,
-               "note": (("Tools added and persisted. " if not target.is_document
-                         else "Tools added to the document library. ")
-                        + f"Auto-assigned free tool number(s) {assigned} (next free per tool, so "
+               # the honest basis of the numbers above: the stored library agreed, or nothing but the
+               # in-memory tools was checked (always the case for a document target)
+               "verified_in_memory_only": in_memory_only,
+               "note": (_persist_note(target, "Tools added", in_memory_only)
+                        + f" Auto-assigned free tool number(s) {assigned} (next free per tool, so "
                         "multiple adds do not collide - cam_post refuses duplicate tool numbers).")})
 
 
@@ -781,8 +859,13 @@ def _do_edit(target, tool_index, parameters):
     if stored is not None and str(stored) != str(check["after"]):
         return error(f"Edited '{check['name']}' to '{check['after']}' but the tool re-read from the "
                      f"library holds '{stored}' - the edit did not persist.")
+    # verified_in_memory_only = nothing proved the edit reached STORAGE: either the library could not
+    # be re-read, or this is the document library, whose read-back can only show presence (doc_save
+    # stores it). Never let a read that proves presence publish itself as a storage check.
+    in_memory_only = target.is_document or stored is None
     out = {"edited": len(changed), "tool": tool_index, "changed": changed,
-           "note": "Tool edited and persisted."}
+           "verified_in_memory_only": in_memory_only,
+           "note": _persist_note(target, "Tool edited", stored is None)}
     if warnings:
         out["warnings"] = warnings
     return ok(out)
@@ -827,16 +910,27 @@ def _persist_preset_change(target, tool, tool_index, name, expect_present):
     return stored, None
 
 
-def _preset_note(target, done):
-    """The payload note for a completed preset change ('added to' / 'removed from'). A SHARED library
-    round-trips through updateToolLibrary and reloads from its url, which proves the write persisted;
-    a re-read of the DOCUMENT library returns the document's own unsaved state, so there it proves
-    the preset is present, not that anything was stored."""
+def _persist_note(target, act, in_memory_only):
+    """The note for a completed write - what the read-back actually PROVED, and the ONE place any of
+    the three rungs is worded. NO library read (none happened, or it came back empty) proves only
+    what the in-memory tool shows, so that rung is tested FIRST - a note may never describe a
+    read-back that did not happen. Otherwise: a SHARED library round-trips through updateToolLibrary
+    and reloads from its url, so the fresh read proves the write PERSISTED; the DOCUMENT library has
+    no url and its re-read returns the document's own live state, so there the read proves the change
+    is PRESENT and never that it was stored (doc_save does the storing)."""
+    if in_memory_only:
+        return (f"{act}, but the library was not read back - confirmed on the in-memory tool only."
+                + (" doc_save stores the document." if target.is_document else ""))
     if target.is_document:
-        return (f"Preset {done} the document tool library and read back there - the document itself "
-                "is stored by doc_save. 'presets' lists this tool's preset names.")
-    return (f"Preset {done} the library and persisted (re-read from the library url). 'presets' "
-            "lists this tool's preset names.")
+        return (f"{act}, and read back from the document tool library - a document read-back shows "
+                "the change is present, not that it was stored; doc_save stores the document.")
+    return f"{act} and persisted (re-read from the library url)."
+
+
+def _preset_note(target, done, in_memory_only=False):
+    """The payload note for a completed preset change ('added to' / 'removed from')."""
+    return (_persist_note(target, f"Preset {done} the tool", in_memory_only)
+            + " 'presets' lists this tool's preset names.")
 
 
 def _do_add_preset(target, tool_index, spec):
@@ -871,7 +965,8 @@ def _do_add_preset(target, tool_index, spec):
     return ok({"tool": tool_index, "preset": name, "preset_index": matches[0][0],
                "preset_count": safe(lambda: presets.count, 0),
                "presets": stored if stored is not None else _preset_names(presets),
-               "note": _preset_note(target, "added to")})
+               "verified_in_memory_only": target.is_document or stored is None,
+               "note": _preset_note(target, "added to", stored is None)})
 
 
 def _do_remove_preset(target, tool_index, spec):
@@ -902,7 +997,8 @@ def _do_remove_preset(target, tool_index, spec):
     return ok({"tool": tool_index, "preset": name, "removed_index": index,
                "preset_count": safe(lambda: presets.count, 0),
                "presets": stored if stored is not None else _preset_names(presets),
-               "note": _preset_note(target, "removed from")})
+               "verified_in_memory_only": target.is_document or stored is None,
+               "note": _preset_note(target, "removed from", stored is None)})
 
 
 def _do_where_used(target, tool_index):

@@ -6,14 +6,18 @@ project — data_get(project=..., folder=...) delegates here). The branches that
 caller to the wrong place: folder navigation by case-insensitive name, a nested
 path, ``recursive`` immediate-files-only vs. descend, the folder-not-found error
 (with its "available subfolders" hint), project resolution by name/id, and the
-whole-project fallback when no folder is given. No live Fusion — small fakes
-mimic the DataProject / DataFolder / DataFile tree, and the module-level ``app``
-is swapped for a fake exposing ``app.data.dataProjects``.
+whole-project fallback when no folder is given. Plus ``file_facts_handler`` — the
+single-file record behind data_get(file=...), whose projection, date conversion
+and two link reads are pinned at the bottom of this file. No live Fusion — small
+fakes mimic the DataProject / DataFolder / DataFile tree, and the module-level
+``app`` is swapped for a fake exposing ``app.data.dataProjects``.
 """
 
 import json
 
-from conftest import load_tool
+import pytest
+
+from conftest import error_message, load_tool
 
 dm = load_tool("_data_read")
 
@@ -420,3 +424,147 @@ class TestProjectsListingTimeBudget:
         out = _payload(dm.list_projects_handler())
         assert out["time_truncated"] is False
         assert out["project_count"] == 3
+
+
+# ── file_facts_handler: ONE file's record (data_get(file=...)) ──────────────
+#
+# Resolution is stubbed out here (it is _data_common's job, covered in test_data_management.py);
+# what is pinned is the PROJECTION: which fields land, users flattened, dates converted, and the two
+# link reads - one that is safe while unshared, one that RAISES while unshared.
+
+class _CloudFile:
+    """A DataFile stand-in. A class rather than a namespace because publicLink must be able to
+    RAISE (its measured behaviour on an unshared file), which only a property can do."""
+
+    def __init__(self, public_link=None, **fields):
+        self.__dict__.update(fields)
+        self.__dict__["_public"] = public_link          # a str, or an Exception to raise
+
+    @property
+    def publicLink(self):
+        if isinstance(self._public, Exception):
+            raise self._public
+        return self._public
+
+
+def _ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+def _unshared_link():
+    return _ns(isShared=False, linkURL="", isDownloadAllowed=True, isPasswordRequired=False)
+
+
+def _full_file(**overrides):
+    fields = dict(
+        name="probe_note.txt", id="urn:lin:AAA", versionId="urn:lin:AAA?version=2",
+        fileExtension="sql", description="a note", fusionWebURL="https://example/AAA",
+        versionNumber=2, latestVersionNumber=3, versions=_ns(count=3), isMilestone=False,
+        dateCreated=1783893584, dateModified=1783893999,
+        createdBy=_ns(displayName="Ada L", userName="ada", email="ada@example.com"),
+        lastUpdatedBy=_ns(displayName="Bob K", userName="bob", email="bob@example.com"),
+        parentFolder=_ns(name="Docs", isRoot=False, parentFolder=None),
+        parentProject=_ns(name="MCP Test Project", id="proj-1"),
+        isReadOnly=False, isInUse=False, isComplete=True,
+        sharedLink=_unshared_link(),
+    )
+    public = overrides.pop("public_link", RuntimeError("3 : No public link available. Use "
+                                                      "sharedLink.isShared to create a public link."))
+    fields.update(overrides)
+    return _CloudFile(public_link=public, **fields)
+
+
+@pytest.fixture
+def resolves(monkeypatch):
+    """Point the facts read at a given DataFile stand-in (or a resolution error)."""
+    def _use(df=None, err=None, meta=None):
+        monkeypatch.setattr(dm, "resolve_file_reference",
+                            lambda *a, **kw: (df, meta or {"matched_by": "urn"}, err))
+    return _use
+
+
+class TestFileFacts:
+    def test_projects_the_record_a_caller_acts_on(self, resolves):
+        resolves(_full_file())
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["file"]["name"] == "probe_note.txt"
+        assert out["file"]["id"] == "urn:lin:AAA"
+        assert out["version"]["number"] == 2 and out["version"]["latest_number"] == 3
+        assert out["version"]["is_latest"] is False        # v2 of 3 - not the tip
+        assert out["version"]["version_count"] == 3
+        assert out["location"]["project"]["name"] == "MCP Test Project"
+        assert out["location"]["parent_folder"]["path"] == "Docs"
+        assert out["state"] == {"is_read_only": False, "is_in_use": False, "is_complete": True}
+
+    def test_latest_version_reads_as_latest(self, resolves):
+        resolves(_full_file(versionNumber=3))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["version"]["is_latest"] is True
+
+    def test_users_are_flattened_to_their_three_fields(self, resolves):
+        resolves(_full_file())
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["created_by"] == {"display_name": "Ada L", "user_name": "ada",
+                                     "email": "ada@example.com"}
+        assert out["last_updated_by"]["user_name"] == "bob"
+
+    def test_dates_carry_both_the_raw_epoch_and_the_utc_iso_string(self, resolves):
+        import datetime
+        resolves(_full_file())
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["dates"]["created_unix"] == 1783893584
+        assert out["dates"]["modified_unix"] == 1783893999
+        # The ISO string must be the SAME instant in UTC - a local-time conversion round-trips to a
+        # different epoch, which is exactly what publishing the raw value beside it exposes.
+        iso = out["dates"]["created_iso"]
+        assert iso.endswith("Z")
+        back = datetime.datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc)
+        assert int(back.timestamp()) == 1783893584
+
+    def test_an_unreadable_date_is_null_not_a_fabricated_epoch(self, resolves):
+        resolves(_full_file(dateCreated=None))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["dates"]["created_unix"] is None and out["dates"]["created_iso"] is None
+
+    def test_unshared_file_reports_link_state_without_leaking_an_empty_url(self, resolves):
+        resolves(_full_file())
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["shared_link"]["is_shared"] is False
+        assert "link_url" not in out["shared_link"]        # the binding returns '' when unshared
+        assert out["shared_link"]["is_download_allowed"] is True
+        assert out["shared_link"]["is_password_required"] is False
+
+    def test_shared_file_publishes_the_link_url(self, resolves):
+        resolves(_full_file(sharedLink=_ns(isShared=True, linkURL="https://a360/x",
+                                           isDownloadAllowed=False, isPasswordRequired=True)))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["shared_link"]["link_url"] == "https://a360/x"
+        assert out["shared_link"]["is_password_required"] is True
+
+    def test_the_raising_public_link_is_caught_and_reported_not_sunk(self, resolves):
+        # publicLink RAISES on an unshared file - the whole read must still succeed, carrying the
+        # reason rather than a bare false.
+        resolves(_full_file())
+        result = dm.file_facts_handler(file="urn:lin:AAA")
+        out = _payload(result)
+        assert out["public_link"]["available"] is False
+        assert "No public link available" in out["public_link"]["reason"]
+
+    def test_a_present_public_link_is_published(self, resolves):
+        resolves(_full_file(public_link="https://a360.co/abc"))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["public_link"] == {"available": True, "url": "https://a360.co/abc"}
+
+    def test_an_unreadable_shared_link_does_not_sink_the_read(self, resolves):
+        resolves(_CloudFile(name="x.txt", public_link="https://a360.co/abc"))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["shared_link"] == {"readable": False}
+        assert out["file"]["name"] == "x.txt"
+        assert out["version"]["is_latest"] is None         # unknown, not a guessed True
+
+    def test_a_resolution_error_is_returned_verbatim(self, resolves):
+        resolves(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")
+        res = dm.file_facts_handler(file="notes.txt", project="P1")
+        assert "names 2 files" in error_message(res)

@@ -26,7 +26,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, design as _active_design, design_wide_counts
+from ._common import ok, error, safe, measured, design as _active_design, design_wide_counts
 from . import _geom
 from . import _inputs
 from . import _outputs
@@ -137,7 +137,7 @@ def _classify(entity) -> dict:
         out.update({
         "kind": "face",
         "surface_type": safe(lambda: type(entity.geometry).__name__),
-        "area_cm2": round(safe(lambda: entity.area, 0.0), 6),
+        "area_cm2": measured(lambda: entity.area),
         "centroid": _xyz(safe(lambda: entity.centroid)),
         "direction": direction,        # planar -> normal; cyl/cone/torus -> axis (unit vec)
         "direction_kind": dir_kind,    # face_normal | axis | None
@@ -151,7 +151,7 @@ def _classify(entity) -> dict:
         out.update({
         "kind": "edge",
         "curve_type": safe(lambda: type(entity.geometry).__name__),
-        "length_cm": round(safe(lambda: entity.length, 0.0), 6),
+        "length_cm": measured(lambda: entity.length),
         "start": _xyz(safe(lambda: entity.startVertex.geometry)),
         "end": _xyz(safe(lambda: entity.endVertex.geometry)),
         "direction": direction,        # linear -> end-start; circular -> plane normal (unit vec)
@@ -172,8 +172,8 @@ def _classify(entity) -> dict:
         "kind": "body",
         "name": safe(lambda: entity.name),
         "is_solid": safe(lambda: entity.isSolid),
-        "volume_cm3": round(safe(lambda: entity.volume, 0.0), 6),
-        "area_cm2": round(safe(lambda: entity.area, 0.0), 6),
+        "volume_cm3": measured(lambda: entity.volume),
+        "area_cm2": measured(lambda: entity.area),
         "component": safe(lambda: entity.parentComponent.name),
         "component_path": safe(lambda: entity.assemblyContext.fullPathName),
         })

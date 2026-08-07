@@ -76,7 +76,7 @@ def reverse_normal_handler(bodies=None) -> dict:
         return error(f"Reverse normal failed: {e}. (Pass OPEN surface bodies - a solid has no free "
                      "normal to flip.)")
     if not feature:
-        return error("Reverse normal returned no feature - nothing was changed.")
+        return error(_common.no_feature_error(design, "Reverse normal"))
 
     # AFTER: read the flip back off the feature's OWN result bodies (fresh references; the input
     # references can go invalid once the parametric feature rebuilds the bodies).

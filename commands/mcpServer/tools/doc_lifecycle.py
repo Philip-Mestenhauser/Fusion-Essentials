@@ -42,6 +42,25 @@ _URN_POLL_TRIES = 12
 _URN_POLL_SLEEP = 0.25
 
 
+def _report_lineage_change(payload, doc, lineage_before):
+    """A save can move the document onto a NEW lineage URN - measured live when the first save
+    after a configured-design conversion forked the file (version history restarts at v1, and the
+    old URN still opens the pre-conversion file; the new URN was readable immediately). A caller
+    holding the superseded URN must learn the new one from THIS payload, so the change is reported
+    loudly, never just swapped into acted_on."""
+    if not (isinstance(lineage_before, str) and lineage_before.startswith("urn:")):
+        return
+    lineage_after = safe(lambda: doc.dataFile.id)
+    if (isinstance(lineage_after, str) and lineage_after.startswith("urn:")
+            and lineage_before != lineage_after):
+        payload["lineage_changed"] = {"from": lineage_before, "to": lineage_after}
+        payload["note"] = (payload.get("note", "") +
+                           " THIS SAVE MOVED THE DOCUMENT TO A NEW LINEAGE URN (measured: the "
+                           "first save after a configured-design conversion does this). Address "
+                           "the file by lineage_changed.to from now on - lineage_changed.from opens the "
+                           "pre-conversion file, and its version history does not continue.").strip()
+
+
 def _settled_lineage_urn(doc):
     """Pump briefly and return doc.dataFile.id once it is a lineage 'urn:', else None. The URN is the
     stable identity a caller needs to address the saved file unambiguously (two files may share a name)."""
@@ -691,6 +710,7 @@ def save_document_handler(description: str = "") -> dict:
             "note": "Document had no unsaved changes - nothing to version.",
         })
 
+    lineage_before = safe(lambda: doc.dataFile.id)
     try:
         did = doc.save(_agent_description(description))  # adsk.core: Document.save(description)
     except Exception as e:
@@ -701,12 +721,14 @@ def save_document_handler(description: str = "") -> dict:
     # Document.save() returning True is NOT proof a version was created (observed live: a document
     # open as another document's reference saves nothing). The VersionAdvanced postcondition on this
     # tool's Item re-reads isModified and fails the call if the save didn't persist.
-    return ok({
-    "saved": True,
-    "document_name": safe(lambda: doc.name),
-    "description": _agent_description(description),
-    "note": "Active document saved as a new cloud version (verified: no longer modified).",
-    })
+    payload = {
+        "saved": True,
+        "document_name": safe(lambda: doc.name),
+        "description": _agent_description(description),
+        "note": "Active document saved as a new cloud version (verified: no longer modified).",
+    }
+    _report_lineage_change(payload, doc, lineage_before)
+    return ok(payload)
 
 
 def close_document_handler(name: str = "", save_changes: bool = False,

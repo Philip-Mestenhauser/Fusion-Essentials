@@ -37,6 +37,9 @@ def stub_slices(monkeypatch):
                         lambda cam, vendor, machine_type: ({"count": 0, "machines": []}, None))
     monkeypatch.setattr(cg, "_slice_templates",
                         lambda cam, loc, url, depth: ({"node_count": 0, "tree": {}}, None))
+    monkeypatch.setattr(cg, "_slice_inspection",
+                        lambda cam, measure, max_results, units: (
+                            {"available": False, "measure_count": 0, "measures": []}, None))
 
 
 class TestDefaultSlice:
@@ -44,7 +47,8 @@ class TestDefaultSlice:
         out = _payload(cg.handler())
         assert "setups" in out and "setup_count" in out
         # the heavy slices must be absent by default (anti-flood)
-        for k in ("operations", "references", "nc_programs", "time", "tools", "library_types"):
+        for k in ("operations", "references", "nc_programs", "time", "tools", "library_types",
+                  "inspection"):
             assert k not in out
 
     def test_default_note_advertises_remaining(self, stub_slices):
@@ -359,6 +363,40 @@ class TestDuplicateOperationName:
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
         assert "ambiguous" not in msg.lower()
         assert "Face1" in msg and "Adaptive1" in msg
+
+
+class TestInspectionSlice:
+    """include=['inspection'] = the recorded probing results, delegated to _cam_common's
+    get_inspection_results_handler; 'measure'/'max_results'/'units' scope and bound it."""
+
+    def test_router_includes_inspection_and_passes_the_scope(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_inspection",
+                            lambda cam, measure, max_results, units: (
+                                seen.update(measure=measure, max_results=max_results, units=units)
+                                or ({"available": True, "measure_count": 1}, None)))
+        out = _payload(cg.handler(include=["inspection"], measure="0/1", max_results=25,
+                                  units="in"))
+        assert out["inspection"]["measure_count"] == 1
+        assert seen == {"measure": "0/1", "max_results": 25, "units": "in"}
+
+    def test_slice_delegates_to_the_cam_common_handler(self, monkeypatch):
+        ccom = load_tool("_cam_common")
+        seen = {}
+        monkeypatch.setattr(ccom, "get_inspection_results_handler",
+                            lambda measure, max_results, units: (
+                                seen.update(measure=measure, max_results=max_results, units=units)
+                                or {"isError": False, "content": [{"type": "text", "text": json.dumps(
+                                    {"available": False, "measure_count": 0})}]}))
+        out, err = cg._slice_inspection(object(), "", 0, "mm")
+        assert err is None and out["available"] is False
+        assert seen == {"measure": "", "max_results": 0, "units": "mm"}
+
+    def test_slice_error_surfaces_from_the_router(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(cg, "_slice_inspection",
+                            lambda cam, measure, max_results, units: (
+                                None, cg.error("measure index 5 is out of range")))
+        assert "out of range" in error_message(cg.handler(include=["inspection"], measure="5"))
 
 
 class TestNormalizeInclude:

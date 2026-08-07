@@ -15,11 +15,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse
 from ._cam_common import get_cam, find_operation
+from . import _inputs
 
 app = adsk.core.Application.get()
 
 _SLICES = ("operations", "parameters", "tool", "references", "nc_programs", "time", "tools", "library",
-           "library_types", "machines", "templates")
+           "library_types", "machines", "templates", "inspection")
 
 # Keep operation rows readable (via _common.terse): a healthy op collapses to {name, tool, strategy, state}; an
 # abnormal op keeps the flag(s) that aren't default (is_suppressed=true, has_error=true, ...) and pops.
@@ -166,6 +167,15 @@ def _slice_machines(cam, vendor, machine_type):
     return _unwrap(cam_edit_setup.read_machines(vendor or "", machine_type or ""))
 
 
+def _slice_inspection(cam, measure, max_results, units):
+    """The recorded surface-inspection (probing) results: a per-measure state rollup + its worst
+    out-of-tolerance point by default; 'measure'=<index> (or '<index>/<path>') drills that scope's
+    out-of-tolerance points, capped by 'max_results'."""
+    from . import _cam_common as _cc
+    return _unwrap(_cc.get_inspection_results_handler(
+        measure=measure, max_results=max_results, units=units))
+
+
 def _slice_templates(cam, template_location, template_url, template_depth):
     """The CAM toolpath TEMPLATE library tree (folders + templates by URL) for a location
     (cloud/local/fusion/...) or a specific folder 'template_url'. Apply/save stay on cam_apply_template
@@ -282,7 +292,8 @@ def _slice_tool(cam, operation, preset):
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
             scope: str = "", library: str = "", tool_type: str = "", vendor: str = "",
             machine_type: str = "",
-            template_location: str = "", template_url: str = "", template_depth: int = 0) -> dict:
+            template_location: str = "", template_url: str = "", template_depth: int = 0,
+            measure: str = "", max_results: int = 0, units: str = "mm") -> dict:
     """See TOOL_DESCRIPTION."""
     cam, cerr = get_cam()
     if not cam:
@@ -341,6 +352,10 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         out["templates"], e = _slice_templates(cam, template_location, template_url, template_depth)
         if e:
             return e
+    if "inspection" in inc:                     # recorded probing results ('measure' drills one)
+        out["inspection"], e = _slice_inspection(cam, measure, max_results, units)
+        if e:
+            return e
 
     _dedupe_orientation(out, inc)
 
@@ -376,19 +391,20 @@ TOOL_DESCRIPTION = (
     "(grouped by section) or its tool + presets -> 'preset'=<name> for that preset's feeds/speeds "
     "expressions. Document-level slices: 'references' (X-ref source docs), 'nc_programs', 'time' "
     "(cycle estimate), 'tools' (the tool sheet ops use), 'library' (a tool library's catalog to add "
-    "from; 'scope'=document/local/cloud/hub, 'library'=shared-lib name/url, 'tool_type' filters - "
-    "add/remove/edit stay on cam_edit_tools), 'library_types' (the add_tools[].from_type "
-    "vocabulary), 'machines' (the machine catalog cam_edit_setup assigns; 'vendor'/'machine_type' "
-    "filter), 'templates' (the toolpath template library; apply/save stay on cam_apply_template / "
-    "cam_save_template). Works without switching to Manufacture, but operation validity is only "
-    "trustworthy once Manufacture has been entered."
+    "from - 'scope'/'library'/'tool_type' filter it; add/remove/edit stay on cam_edit_tools), "
+    "'library_types' (the add_tools[].from_type "
+    "vocabulary), 'machines' (the machine catalog cam_edit_setup assigns), "
+    "'templates' (the toolpath template library; apply/save stay on cam_apply_template / "
+    "cam_save_template), 'inspection' (recorded probing results per measure, tolerance tally + worst "
+    "point; 'measure'=<index> lists its out-of-tolerance points). Works without switching to "
+    "Manufacture, but operation validity is only trustworthy once Manufacture has been entered."
 )
 
 tool = (
     Tool.create_simple(name="cam_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices: operations | parameters | tool | references | nc_programs | "
-                           "time | tools | library | library_types | machines | templates (list or "
+                           "time | tools | library | library_types | machines | templates | inspection (list or "
                            "comma-string). parameters/tool need 'operation'. Omit for the setups orientation slice."})
     .add_input_property("setup", {"type": "string",
             "description": "Scope operations/references/time to this setup name (omit = all setups)."})
@@ -413,6 +429,11 @@ tool = (
             "description": "With include=['templates']: a specific folder URL to start at (overrides location)."})
     .add_input_property("template_depth", {"type": "integer",
             "description": "With include=['templates']: folder depth to walk (default 4)."})
+    .add_input_property("measure", {"type": "string",
+            "description": "With include=['inspection']: drill one measure's out-of-tolerance points by INDEX ('0'), or one of its paths ('0/1'). A measure folder has no API-readable name."})
+    .add_input_property("max_results", {"type": "integer",
+            "description": "With include=['inspection'] + 'measure': cap on point rows (default 50, max 200)."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

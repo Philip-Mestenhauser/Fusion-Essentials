@@ -1,11 +1,13 @@
 """Unit tests for ``_geom.py`` - the direction-vector math find_geometry and sys_get_selection
 share: normalizing a Vector3D (``unit_vector``), the unit direction between two points
-(``unit_vector_between``), and a face's evaluator-sampled normal (``evaluator_normal_at``).
+(``unit_vector_between``), and a face's evaluator-sampled normal (``evaluator_normal_at``); plus the
+owning-body walk and the before/after volume and face-count samples every effect check reads through
+(``owning_bodies`` / ``volumes`` / ``volume_delta`` / ``face_counts`` / ``face_count_delta``).
 """
 
 import math
 
-from conftest import FakePoint, FakeVector3D, load_tool
+from conftest import (BRepBody, BRepFace, FakePoint, FakeVector3D, entity_proxy, load_tool)
 
 geom = load_tool("_geom")
 
@@ -155,3 +157,83 @@ class TestBodyAabb:
             def boundingBox2(self, types):
                 return None                    # no measurable bodies
         assert geom.body_aabb(_Empty()) is None
+
+
+# ── owning_bodies: deduped by entityToken, NEVER by identity ────────────────
+
+def _entities_on_one_body(count, token="Body1", face_count=6, kind="face"):
+    """`count` faces (or edge-shaped stubs) of ONE body, each holding its OWN proxy - the measured
+    shape of face.body / edge.body (see conftest entity_proxy)."""
+    body = BRepBody(name=token, entity_token=token, face_count=face_count)
+    if kind == "face":
+        return body, [BRepFace(None, body=entity_proxy(body)) for _ in range(count)]
+    edges = []
+    for _ in range(count):
+        e = type("E", (), {})()
+        e.body = entity_proxy(body)
+        edges.append(e)
+    return body, edges
+
+
+class TestOwningBodies:
+    def test_many_faces_of_one_body_yield_exactly_one_body(self):
+        # THE load-bearing pin for model_split and surface_delete_face: face.body hands back a fresh
+        # proxy per read, so three faces of one body are three distinct Python objects sharing one
+        # entityToken. Keying on identity yields 3 and inflates every per-body sum built on it.
+        _body, faces = _entities_on_one_body(3)
+        assert len(geom.owning_bodies(faces)) == 1
+
+    def test_many_edges_of_one_body_yield_exactly_one_body(self):
+        # edge.body behaves the same way - this is what EdgeLoopRef's body_count counts through.
+        _body, edges = _entities_on_one_body(3, kind="edge")
+        assert len(geom.owning_bodies(edges)) == 1
+
+    def test_distinct_bodies_are_kept_apart(self):
+        _b1, f1 = _entities_on_one_body(2, token="BodyA")
+        _b2, f2 = _entities_on_one_body(2, token="BodyB")
+        assert len(geom.owning_bodies(f1 + f2)) == 2
+
+    def test_first_seen_order_is_preserved(self):
+        _b1, f1 = _entities_on_one_body(1, token="BodyA")
+        _b2, f2 = _entities_on_one_body(1, token="BodyB")
+        tokens = [b.entityToken for b in geom.owning_bodies(f2 + f1)]
+        assert tokens == ["BodyB", "BodyA"]
+
+    def test_entity_with_no_readable_body_is_skipped(self):
+        assert geom.owning_bodies([type("F", (), {})()]) == []
+
+    def test_untokened_bodies_fall_back_to_identity(self):
+        # The `or id(b)` last resort: without a token there is nothing else to key on, so two
+        # separate proxies of one body read as two. Pinned so the fallback's LIMIT is visible - a
+        # live entityToken read is measured non-empty, so this is not the normal path.
+        body = BRepBody(name="NoToken", face_count=4)
+        body.entityToken = None
+        faces = [BRepFace(None, body=entity_proxy(body)) for _ in range(2)]
+        assert len(geom.owning_bodies(faces)) == 2
+
+
+class TestVolumeAndFaceSamples:
+    def test_face_count_delta_sums_each_body_once(self):
+        body, faces = _entities_on_one_body(3, face_count=6)
+        bodies = geom.owning_bodies(faces)
+        before = geom.face_counts(bodies)
+        body.faces._items.extend([None] * 3)          # the split adds 3 faces to the ONE body
+        delta, readable = geom.face_count_delta(bodies, before)
+        assert readable is True and delta == 3        # not 9
+
+    def test_face_count_delta_reports_unreadable_rather_than_zero(self):
+        body, faces = _entities_on_one_body(1)
+        bodies = geom.owning_bodies(faces)
+        before = geom.face_counts(bodies)
+        del body.faces
+        delta, readable = geom.face_count_delta(bodies, before)
+        assert readable is False and delta == 0       # a real zero is distinguishable from this
+
+    def test_volume_delta_sums_each_body_once(self):
+        body, faces = _entities_on_one_body(2)
+        body.volume = 100.0
+        bodies = geom.owning_bodies(faces)
+        before = geom.volumes(bodies)
+        body.volume = 118.0
+        delta, readable = geom.volume_delta(bodies, before)
+        assert readable is True and delta == 18.0     # not 36.0

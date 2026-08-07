@@ -41,6 +41,12 @@ _PROFILE = _inputs.ProfileRef("profile_index")
 _looks_like_handle = _inputs.is_handle
 
 
+def _is_all_selector(profile_index) -> bool:
+    """True for the 'all' (or '*') profile selector - one spelling shared by the resolver below and
+    the result note, so the two can never disagree about what 'all' was."""
+    return isinstance(profile_index, str) and profile_index.strip().lower() in ("all", "*")
+
+
 def _resolve_profile_indices(profile_index, pcount, profiles=None):
     """Normalise the profile_index selector to a sorted list of in-range indices, or (None, error).
 
@@ -52,7 +58,7 @@ def _resolve_profile_indices(profile_index, pcount, profiles=None):
     sel = profile_index
     if isinstance(sel, str):
         s = sel.strip().lower()
-        if s in ("all", "*"):
+        if _is_all_selector(sel):
             return list(range(pcount)), None
         try:
             sel = [int(x) for x in s.split(",") if x.strip() != ""]
@@ -257,6 +263,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     want_surface = bool(as_surface) or pcount == 0
     open_surface = False
     indices = [0]
+    took_all = False
     if want_surface:
         profile_arg, perr = _common.open_profile_from_sketch(
             safe(lambda: sketch.parentComponent) or root, sketch, "for a surface extrude",
@@ -290,6 +297,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             indices, ierr = _resolve_profile_indices(profile_index, pcount, profiles)
             if ierr:
                 return error(ierr)
+            took_all = _is_all_selector(profile_index)
             # One profile -> pass it directly; several -> an ObjectCollection (extrudeFeatures.createInput
             # accepts either, so N profiles of one sketch extrude in ONE feature/call).
             if len(indices) == 1:
@@ -321,7 +329,13 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             if ferr:
                 return error(ferr)
             to_extent = adsk.fusion.ToEntityExtentDefinition.create(face, False)  # chained=False
-            ext_input.setOneSideExtent(to_extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
+            # Every setter here documents "Returns true if successful". A false answer leaves the
+            # input on its DEFAULT extent, and add() then builds a feature nobody asked for.
+            if not ext_input.setOneSideExtent(to_extent,
+                                              adsk.fusion.ExtentDirections.PositiveExtentDirection):
+                return error("Fusion refused the to_object extent (setOneSideExtent returned false), "
+                             "so nothing was extruded. Check the target face is reachable from the "
+                             "profile in the extrude direction.")
         elif ext_key == "through_all":
             if taper:
                 return error("taper_deg is not supported with extent=through_all (setAllExtent takes "
@@ -359,15 +373,21 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                 # isFullLength=False -> 'distance' is the per-side half-length, matching setDistanceExtent
                 # (isSymmetric=True, distance), which live-measures as 'distance' on EACH side (2x total).
                 taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
-                ext_input.setSymmetricExtent(dist_val, False, taper_val)
+                if not ext_input.setSymmetricExtent(dist_val, False, taper_val):
+                    return error(f"Fusion refused a symmetric tapered extent ({distance} {units} per "
+                                 f"side, {taper} deg), so nothing was extruded.")
             elif taper:
                 # one-sided with taper: build a DistanceExtentDefinition + taper ValueInput
                 extent_def = adsk.fusion.DistanceExtentDefinition.create(dist_val)
                 taper_val = adsk.core.ValueInput.createByString(f"{taper} deg")
-                ext_input.setOneSideExtent(extent_def, adsk.fusion.ExtentDirections.PositiveExtentDirection,
-                                           taper_val)
+                if not ext_input.setOneSideExtent(
+                        extent_def, adsk.fusion.ExtentDirections.PositiveExtentDirection, taper_val):
+                    return error(f"Fusion refused a one-sided tapered extent ({distance} {units}, "
+                                 f"{taper} deg), so nothing was extruded.")
             else:
-                ext_input.setDistanceExtent(bool(symmetric), dist_val)
+                if not ext_input.setDistanceExtent(bool(symmetric), dist_val):
+                    return error(f"Fusion refused a {'symmetric ' if symmetric else ''}distance "
+                                 f"extent of {distance} {units}, so nothing was extruded.")
     except Exception as e:
         return error(f"Could not set extrude extent: {e}")
 
@@ -419,7 +439,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             hint = " (A 'cut'/'intersect' needs existing geometry to act on.)"
         return error(f"Extrude failed: {e}.{hint}")
     if not feature:
-        return error("Extrude returned no feature.")
+        return error(_common.no_feature_error(design, "Extrude"))
 
     through_all_removed = None
     if check_bodies:
@@ -487,6 +507,16 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         adv = root_body_advisory(design, host)          # advise on where the body actually landed
         if adv:
             note += " " + adv
+    # 'all' takes every closed region with no containment analysis, so a region ENCLOSED by another
+    # selected one is extruded too - measured on a 'new' extrude: a frame sketch's 5 bays between the
+    # members came out filled, turning the frame into a plate, and the call reported plain success.
+    # The sentence stays operation-neutral because what a bay does under cut/intersect differs.
+    if took_all and len(indices) > 1:
+        note += (f" 'all' selected every closed region in this sketch ({len(indices)}), INCLUDING "
+                 "any region enclosed by another selected one - the openings inside a frame outline "
+                 f"are closed regions too, so this {op_key} acted on them as well. To act on only "
+                 "the regions you mean, read them with sketch_get (area/centroid per region) and "
+                 "pass a profile 'handle' or an index list.")
 
     if use_to_object:
         extent_report, distance_report = "to_object", None

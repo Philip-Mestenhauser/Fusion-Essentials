@@ -11,7 +11,8 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import load_tool, make_design, install, payload, error_message, MakeComp
+from conftest import (load_tool, make_design, install, entity_proxy, go_stale, payload,
+                      error_message, MakeComp)
 
 sdf = load_tool("surface_delete_face")
 
@@ -32,16 +33,21 @@ class _Face:
 
 
 class _Body:
-    def __init__(self, name="Srf1", is_solid=False, face_count=0, faces=None):
+    """Carries an entityToken, because _geom.owning_bodies dedupes on it and only falls back to
+    identity when there is none. Each face gets its OWN proxy of this body - the measured shape of
+    face.body - so the token path is what these tests actually exercise; sharing one object would
+    make them pass under either keying."""
+    def __init__(self, name="Srf1", is_solid=False, face_count=0, faces=None, entity_token=None):
         self.name = name
         self.isSolid = is_solid
+        self.entityToken = entity_token or name
         if faces is not None:
             self._faces = list(faces)
         else:
             self._faces = [_Face() for _ in range(face_count)]
         for f in self._faces:
             if f.body is None:
-                f.body = self
+                f.body = entity_proxy(self)
     @property
     def faces(self):
         return _Coll(self._faces)
@@ -74,17 +80,44 @@ class _Raises:
         raise RuntimeError("body cannot be healed")
 
 
+class _DirectDelFeatures:
+    """The MEASURED direct-mode shape: add() returns NO feature object while the delete LANDS - a
+    healed fillet face took a box from 7 faces to 6. `faces_removed` drops that many faces off each
+    input body; `count_unreadable` additionally kills the face read, leaving no evidence at all."""
+    def __init__(self, bodies, faces_removed=1, count_unreadable=False):
+        self.bodies = list(bodies)
+        self.faces_removed = faces_removed
+        self.count_unreadable = count_unreadable
+        self.calls = 0
+
+    def add(self, coll):
+        self.calls += 1
+        for b in self.bodies:
+            if self.faces_removed < 0:
+                b._faces.extend([_Face(b) for _ in range(-self.faces_removed)])
+            else:
+                del b._faces[:self.faces_removed]
+        if self.count_unreadable:
+            go_stale(*self.bodies, attrs=("_faces",))
+        go_stale(*self.bodies)      # identity reads go stale; the face count is the effect check
+        return None
+
+
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
     monkeypatch.setattr(adsk.fusion, "BRepFace", _Face, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", _Body, raising=False)
 
 
-def _wire(tokens, delete=None, surface_delete=None):
+def _wire(tokens, delete=None, surface_delete=None, design_type=None):
+    """`design_type` sets the modelling mode current_design_type reads (1 parametric, 0 direct);
+    left unset the design reports neither, which is the 'unknown' mode."""
     comp = MakeComp()
     comp.features = types.SimpleNamespace(
         deleteFaceFeatures=delete, surfaceDeleteFaceFeatures=surface_delete)
     design = make_design(comp=comp, tokens=tokens)
+    if design_type is not None:
+        design.designType = design_type
     install(sdf, design)
     return comp.features
 
@@ -160,3 +193,126 @@ def test_missing_faces_rejected():
     res = sdf.delete_face_handler(faces=None)
     assert res["isError"] is True
     assert "needs a list of geometry handles" in res["message"]
+
+
+def test_parametric_no_op_remedy_names_the_timeline_feature():
+    # the parametric counterpart of the direct-path remedy below
+    body = _Body("Solid1", is_solid=True, face_count=7)
+    target = body._faces[0]
+    _wire({"F1": target}, delete=_DelFeatures(lambda coll: None))
+    msg = error_message(sdf.delete_face_handler(faces=["F1"], heal=True))
+    assert "returned no feature" in msg and "DIRECT mode" not in msg
+
+
+# ── DIRECT mode: deleteFaceFeatures.add returns nothing while the delete LANDS (measured) ────
+
+class TestDirectModeNoFeature:
+    def _wire_direct(self, faces_removed=1, count_unreadable=False, design_type=0, face_count=7):
+        body = _Body("Box1", is_solid=True, face_count=face_count)
+        target = body._faces[-1]        # keep index 0 deletable by the fake
+        feats = _DirectDelFeatures([body], faces_removed=faces_removed,
+                                   count_unreadable=count_unreadable)
+        _wire({"F1": target}, delete=feats, surface_delete=feats, design_type=design_type)
+        return body
+
+    def test_direct_none_with_a_moved_face_count_is_ok(self):
+        # the measured shape: a healed fillet face took the box from 7 faces to 6, add() -> None
+        self._wire_direct()
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
+        assert out["deleted"] is True
+        assert out["faces_before"] == 7 and out["faces_after"] == 6
+        assert out["faces_delta"] == -1
+
+    def test_direct_none_publishes_no_feature_and_no_feature_derived_keys(self):
+        self._wire_direct()
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
+        assert "feature" not in out
+        # BOTH of these are read off the feature's result bodies - neither may be fabricated
+        assert "result_bodies" not in out
+        assert "bodies_consumed" not in out
+        assert out["no_timeline_feature"] is True
+        assert "DIRECT mode" in out["note"]
+
+    def test_direct_none_names_the_bodies_captured_before_the_delete(self):
+        # a delete can consume the body outright, so the names belong to the pre-mutation capture
+        self._wire_direct()
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
+        assert out["input_bodies"] == ["Box1"]
+
+    def test_declared_outputs_hold_on_the_direct_path(self):
+        self._wire_direct()
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
+        for o in sdf.RETURNS:
+            assert o.assert_present(out) == "", o.key
+
+    def test_direct_none_with_an_unchanged_face_count_is_an_error(self):
+        # add() handed back nothing AND no face went: not a success.
+        self._wire_direct(faces_removed=0)
+        res = sdf.delete_face_handler(faces=["F1"], heal=True)
+        assert res["isError"] is True and "nothing was deleted" in res["message"]
+        # no timeline feature exists on this path - the remedy must not name one
+        assert "design_delete_feature" not in res["message"]
+        assert "undo in Fusion" in res["message"]
+
+    def test_direct_none_with_an_unreadable_face_count_is_unverified(self):
+        # No feature AND no face count: UNVERIFIED, not success. In parametric the feature object is
+        # itself evidence, so an unreadable count may pass there - here it is the only evidence.
+        self._wire_direct(count_unreadable=True)
+        res = sdf.delete_face_handler(faces=["F1"], heal=True)
+        assert res["isError"] is True and "UNVERIFIED" in res["message"]
+        # a fully-consumed body reads the same way - the message must name that, not guess
+        assert "fully consumed" in res["message"]
+
+    def test_faces_delta_is_the_true_delta_however_many_faces_share_a_body(self):
+        # faces_delta is the body's OWN change, however many of its faces were targeted: the owning
+        # body is deduped by entityToken, so it is sampled once. Keyed by identity it would be
+        # counted once per face and its delta summed that many times (3 faces, delta -3 -> -9).
+        body = _Body("Box1", is_solid=True, face_count=9)
+        targets = {"F%d" % i: body._faces[i] for i in range(3)}
+        feats = _DirectDelFeatures([body], faces_removed=3)
+        _wire(targets, delete=feats, surface_delete=feats, design_type=0)
+        out = payload(sdf.delete_face_handler(faces=list(targets), heal=True))
+        assert out["faces_before"] == 9
+        assert out["faces_delta"] == -3        # NOT -9 - one body, sampled once
+        assert out["faces_after"] == 6
+
+    def test_the_note_reports_the_measured_delta_not_the_requested_count(self):
+        # 3 faces requested, a heal that nets -1: the note must not read "Deleted 3 face(s) ... 9 ->
+        # 8" beside faces_delta -1. Only the measured movement is claimed; the request is labelled
+        # as a request.
+        body = _Body("Box1", is_solid=True, face_count=9)
+        targets = {"F%d" % i: body._faces[i] for i in range(3)}
+        feats = _DirectDelFeatures([body], faces_removed=1)      # heal re-merged the rest
+        _wire(targets, delete=feats, surface_delete=feats, design_type=0)
+        out = payload(sdf.delete_face_handler(faces=list(targets), heal=True))
+        assert out["faces_delta"] == -1 and out["faces_after"] == 8
+        assert "9 -> 8" in out["note"]
+        assert "3 face(s) requested" in out["note"]
+        assert "Deleted 3 face" not in out["note"]
+        # `heal` is an input flag, never read back - the note may only say it was requested
+        assert "heal requested" in out["note"]
+        assert "and healed the opening" not in out["note"]
+
+    def test_a_rising_face_count_is_flagged_not_narrated_flatly(self):
+        # A delete that RAISES the count is unmeasured territory: the count moved, so the edit did
+        # land - but "7 -> 9" must not read as a normal delete. Not refused either: refusing would
+        # assert a delete can only ever lower the count, which nobody has measured.
+        body = _Body("Box1", is_solid=True, face_count=7)
+        target = body._faces[-1]
+        feats = _DirectDelFeatures([body], faces_removed=-2)   # negative removal = faces ADDED
+        _wire({"F1": target}, delete=feats, surface_delete=feats, design_type=0)
+        out = payload(sdf.delete_face_handler(faces=["F1"], heal=True))
+        assert out["faces_delta"] == 2
+        assert "ROSE" in out["warning"] and "unexpected" in out["warning"]
+        # the note must not also call this a delete - a moving count proves an edit landed, not
+        # that the requested face was the one removed
+        assert "The edit landed" in out["note"]
+        assert "The delete landed" not in out["note"]
+
+    def test_parametric_none_stays_an_error(self):
+        # Even with the face count moved: a None feature in a PARAMETRIC design is unmeasured as a
+        # success, so it is refused.
+        self._wire_direct(design_type=1)
+        res = sdf.delete_face_handler(faces=["F1"], heal=True)
+        assert res["isError"] is True and "returned no feature" in res["message"]
+        assert "DIRECT mode" not in res["message"]

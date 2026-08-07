@@ -31,7 +31,10 @@ class _ExtentDir:
 
 
 class FakeHoleInput:
-    def __init__(self, kind, args):
+    # refuse_placement models the live setters' documented bool return: they answer False when the
+    # entities cannot carry the placement, and a False that is not read lets add() run anyway.
+    def __init__(self, kind, args, refuse_placement=False):
+        self.refuse_placement = refuse_placement
         self.kind = kind            # 'simple' | 'counterbore' | 'countersink'
         self.args = args            # the ValueInput strings passed to the builder
         self.placed = None          # ('point', pt) / ('points', [pts]) / ('center', edge) /
@@ -50,14 +53,20 @@ class FakeHoleInput:
     def setPositionAtCenter(self, planar_entity, center_edge):
         assert planar_entity == "FACE"
         assert isinstance(center_edge, BRepEdge)
+        if self.refuse_placement:
+            return False
         self.placed = ("center", (planar_entity, center_edge)); return True
     def setPositionOnEdge(self, planar_entity, edge, position):
         assert planar_entity == "FACE"
         assert isinstance(edge, BRepEdge)
+        if self.refuse_placement:
+            return False
         self.placed = ("on_edge", (planar_entity, edge, position)); return True
     def setPositionByPlaneAndOffsets(self, *args):
         assert len(args) in (4, 6)
         assert args[0] == "FACE"
+        if self.refuse_placement:
+            return False
         self.placed = ("plane_offsets", args); return True
     def setDistanceExtent(self, v):
         self.extent = ("distance", v); return True
@@ -143,6 +152,7 @@ class FakeHoleFeatures:
     def __init__(self):
         self.added = []
         self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
+        self.refuse_placement = False   # the setPosition* setters answer False
         # True echoes the input; a bool models a flag that read back different; None models one
         # that could not be read at all
         self.modeled_readback = True
@@ -153,7 +163,7 @@ class FakeHoleFeatures:
     def __len__(self):
         return len(self.added)
     def createSimpleInput(self, dia):
-        return FakeHoleInput("simple", {"dia": dia})
+        return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement)
     def createCounterboreInput(self, dia, cbd, cbdepth):
         return FakeHoleInput("counterbore", {"dia": dia, "cb_dia": cbd, "cb_depth": cbdepth})
     def createCountersinkInput(self, dia, csd, csa):
@@ -858,3 +868,38 @@ class TestTapReadBackIsHonest:
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
                                   points=[[1, 2, 0]], extent="through", tap="M5x0.8"))
         assert "thread_type_alternatives" not in out
+
+
+class TestPlacementRefusalIsRead:
+    """A setPosition* setter that answers False placed nothing; letting add() run past it would
+    report a hole at a position Fusion never accepted."""
+
+    def _refusing(self):
+        d = _install()
+        d.rootComponent.features.holeFeatures.refuse_placement = True
+        mh._resolve_edge = lambda d_, h: (BRepEdge(Circle3D(None)), None)
+        mh._resolve_offset_edge_one = lambda d_, h: (BRepEdge(Line3D()), None)
+        return d
+
+    def test_center_refusal_is_an_error(self):
+        d = self._refusing()
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="center", edge="e1")
+        assert res["isError"] is True and "refused to centre" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+    def test_on_edge_refusal_is_an_error(self):
+        d = self._refusing()
+        mh._resolve_edge = lambda d_, h: (BRepEdge(Line3D()), None)
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="on_edge", edge="e1", edge_position="middle")
+        assert res["isError"] is True and "middle" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+    def test_plane_offsets_refusal_is_an_error(self):
+        d = self._refusing()
+        res = mh.handler(hole_type="simple", diameter="5 mm", extent="through",
+                         placement="plane_offsets", point=[1, 2, 0],
+                         offset_edge_one="e1", offset_one="4 mm")
+        assert res["isError"] is True and "refused the plane-and-offsets" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []

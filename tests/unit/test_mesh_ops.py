@@ -633,6 +633,74 @@ class TestMeshInsert:
         assert res["isError"] is True and "import failed" in res["message"]
 
 
+# ── mesh_insert: the imported bodies' stats are scaled into the units the payload reports ───────
+#
+# MeshBody.area/volume read in cm^2/cm^3 (Fusion internal). Publishing them raw beside units='mm'
+# understates the same body by 100x in area and 1000x in volume - and mesh_get, reading the very
+# same body, reports the scaled figures, so the two tools disagree about one body.
+
+class TestMeshInsertStats:
+    def _insert(self, units="mm", area=6.0, volume=1.0, existing=()):
+        return self._insert_with_collection(units, area, volume, existing)[0]
+
+    def _insert_with_collection(self, units="mm", area=6.0, volume=1.0, existing=()):
+        _wire_adsk()
+        imported = MeshBody("Imported", area=area, volume=volume)
+        mb_coll = _MeshBodies(existing=existing or [imported], import_result=_Coll([imported]))
+        comp = FakeComp("Comp",
+                        features=_Features(base_features=_BaseFeatures(made=_BaseFeature())),
+                        mesh_bodies=mb_coll)
+        _install(FakeDesign(comp, design_type=0))
+        mo.os.path.isfile = lambda p: True
+        out = _payload(mo.mesh_insert_handler(file_path="C:/scan.stl", units=units))
+        return out, mb_coll
+
+    def test_each_unit_key_pairs_its_import_enum_with_its_own_factor(self):
+        # ONE table drives both halves: the MeshUnits enum handed to meshBodies.add AND the factor
+        # the reported stats are scaled by. A row whose enum and factor belong to different units
+        # imports at one scale and reports at another - so both are asserted per key, against
+        # cm-per-unit restated here rather than read from the tool.
+        rows = [("mm", "MM", 0.1), ("cm", "CM", 1.0), ("m", "M", 100.0),
+                ("in", "IN", 2.54), ("ft", "FT", 30.48)]
+        for key, enum_sentinel, cm_per_unit in rows:
+            out, coll = self._insert_with_collection(units=key, area=6.0, volume=1.0)
+            assert coll.add_args[1] == enum_sentinel, f"{key} imported as {coll.add_args[1]}"
+            assert out["units"] == key
+            assert abs(out["bodies"][0]["area"] - round(6.0 / cm_per_unit ** 2, 6)) < 1e-6, key
+            assert abs(out["bodies"][0]["volume"] - round(1.0 / cm_per_unit ** 3, 6)) < 1e-6, key
+
+    def test_area_and_volume_are_scaled_into_the_reported_units(self):
+        out = self._insert(units="mm", area=6.0, volume=1.0)      # cm^2, cm^3
+        assert out["units"] == "mm"
+        assert abs(out["bodies"][0]["area"] - 600.0) < 1e-6       # 6 cm^2 -> 600 mm^2
+        assert abs(out["bodies"][0]["volume"] - 1000.0) < 1e-6    # 1 cm^3 -> 1000 mm^3
+
+    def test_the_same_body_reads_the_same_from_mesh_get(self):
+        # the two tools' figures for ONE body must agree; a raw-cm insert payload disagrees with
+        # mesh_get by a factor of 100 (area) / 1000 (volume) on the identical mesh.
+        out = self._insert(units="mm", area=6.0, volume=1.0)
+        listed = _payload(mo.mesh_get_handler(target="", units="mm"))["meshes"][0]
+        assert out["bodies"][0]["area"] == listed["area"]
+        assert out["bodies"][0]["volume"] == listed["volume"]
+
+    def test_inch_authored_units_scale_by_the_shared_factor(self):
+        out = self._insert(units="in", area=2.54 ** 2, volume=2.54 ** 3)
+        assert abs(out["bodies"][0]["area"] - 1.0) < 1e-6         # 1 in^2
+        assert abs(out["bodies"][0]["volume"] - 1.0) < 1e-6       # 1 in^3
+
+    def test_metre_authored_units_scale_too(self):
+        # m/ft are outside the shared mm/cm/in length kind, so a scaling path that only knew that
+        # kind would leave a metre-authored file's stats in raw cm.
+        out = self._insert(units="m", area=20000.0, volume=1_000_000.0)
+        assert abs(out["bodies"][0]["area"] - 2.0) < 1e-6         # 2 m^2
+        assert abs(out["bodies"][0]["volume"] - 1.0) < 1e-6       # 1 m^3
+
+    def test_foot_authored_units_scale_too(self):
+        out = self._insert(units="ft", area=30.48 ** 2, volume=30.48 ** 3)
+        assert abs(out["bodies"][0]["area"] - 1.0) < 1e-6         # 1 ft^2
+        assert abs(out["bodies"][0]["volume"] - 1.0) < 1e-6       # 1 ft^3
+
+
 # ── mesh_reduce ─────────────────────────────────────────────────────────────────────────────
 
 class TestMeshReduce:
@@ -743,17 +811,51 @@ class TestMeshReduce:
         assert "note" not in out
 
     def test_none_feature_is_success_in_place(self):
-        # add() returns None (non-parametric); mesh_reduce edits the mesh in place, so success is the
-        # mesh's updated triangle count, not the None feature return.
+        # add() returns None in a DIRECT design; mesh_reduce edits the mesh in place, so success is
+        # the mesh's updated triangle count, not the None feature return.
         src, feats = self._setup(before_tri=1000, none_feature=True)
         # the in-place reduction lands DURING add(): before_tri (read first) stays 1000, after = 250
         feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 250)
         out = _payload(mo.mesh_reduce_handler(mesh="H", target="proportion", value=25))
         assert out["reduced"] is True
-        assert out["non_parametric"] is True
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None            # direct opens no scope
         assert out["feature"] is None
         assert out["before"]["triangle_count"] == 1000
         assert out["after"]["triangle_count"] == 250
+        assert mo._common.DIRECT_FEATURE_NOTE in out["note"]
+
+    def test_null_feature_in_a_parametric_scope_reports_parametric(self):
+        # the scope - not the design's mode - is why the feature is null, so the payload reports the
+        # design as PARAMETRIC and names the base feature the reduce actually landed in.
+        bf = _BaseFeature()
+        src, feats = self._setup(before_tri=1000, parametric=True, base_feature=bf,
+                                 none_feature=True)
+        feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 400)
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="proportion", value=40))
+        assert out["feature"] is None
+        assert out["design_mode"] == "parametric"
+        assert out["base_feature"] == "BaseFeature1"
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
+
+    def test_mode_is_read_before_the_scope_opens(self):
+        # designType reads DIRECT while a base-feature edit scope is open, so a mode read taken after
+        # the reduce would report 'direct' for a parametric design.
+        bf = _BaseFeature()
+        src, feats = self._setup(before_tri=1000, parametric=True, base_feature=bf,
+                                 none_feature=True)
+        feats._on_add = lambda: setattr(src.displayMesh, "triangleCount", 400)
+        des = mo.app.activeProduct
+        real_start = bf.startEdit
+
+        def start_and_flip():
+            des.designType = 0        # what the platform reports while the scope is open
+            return real_start()
+
+        bf.startEdit = start_and_flip
+        out = _payload(mo.mesh_reduce_handler(mesh="H", target="proportion", value=40))
+        assert out["design_mode"] == "parametric"
 
     def test_unreduced_count_is_an_error_not_success(self):
         # the honesty gate: add() succeeded but the triangle count did not decrease -> error, not ok
@@ -824,8 +926,8 @@ class TestMeshRemesh:
         assert "meshRemeshFeatures collection" in res["message"]
 
     def test_none_feature_is_success_in_place(self):
-        # add() returns None (non-parametric); remesh edits in place, so success is the mesh's updated
-        # counts, not the None feature return.
+        # add() returns None in a DIRECT design; remesh edits in place, so success is the mesh's
+        # updated counts, not the None feature return.
         _wire_adsk()
         src = MeshBody("Scan", tri=2000)
         feats = _MeshFeatures([], none_feature=True,
@@ -835,10 +937,30 @@ class TestMeshRemesh:
         _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
         out = _payload(mo.mesh_remesh_handler(mesh="H"))
         assert out["remeshed"] is True
-        assert out["non_parametric"] is True
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None            # direct opens no scope
         assert out["feature"] is None
         assert out["before"]["triangle_count"] == 2000
         assert out["after"]["triangle_count"] == 1800
+        assert mo._common.DIRECT_FEATURE_NOTE in out["note"]
+
+    def test_null_feature_in_a_parametric_scope_reports_parametric(self):
+        # the scope suppresses the feature; the payload still reports the DESIGN's own mode and names
+        # the base feature the remesh landed in.
+        _wire_adsk()
+        bf = _BaseFeature()
+        src = MeshBody("Scan", tri=2000)
+        feats = _MeshFeatures([], none_feature=True,
+                              on_add=lambda: setattr(src.displayMesh, "triangleCount", 1800))
+        comp = FakeComp("Comp", features=_Features(remesh=feats, base_features=_BaseFeatures(made=bf)))
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=1, edit_object=bf), handle_map={"H": src})
+        out = _payload(mo.mesh_remesh_handler(mesh="H"))
+        assert out["feature"] is None
+        assert out["design_mode"] == "parametric"
+        assert out["base_feature"] == "BaseFeature1"
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
 
     def test_parametric_routes_through_base_feature_scope(self):
         # REGRESSION: in PARAMETRIC the remesh createInput->add runs INSIDE the helper's base-feature
@@ -926,9 +1048,24 @@ class TestMeshToBrep:
         self._setup(is_closed=True, none_feature=True, none_appends_body=True)
         out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
         assert out["converted"] is True
-        assert out["non_parametric"] is True
+        assert out["design_mode"] == "direct"
+        assert out["base_feature"] is None            # direct opens no scope
         assert out["feature"] is None
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
+        assert mo._common.DIRECT_FEATURE_NOTE in out["note"]
+
+    def test_null_feature_in_a_parametric_scope_reports_parametric(self):
+        # the scope suppresses the feature; the payload reports the DESIGN's own mode and names the
+        # base feature the conversion landed in, instead of labelling the design non-parametric.
+        bf = _BaseFeature()
+        self._setup(is_closed=True, parametric=True, base_feature=bf, none_feature=True,
+                    none_appends_body=True)
+        out = _payload(mo.mesh_to_brep_handler(mesh="H", method="prismatic"))
+        assert out["feature"] is None
+        assert out["design_mode"] == "parametric"
+        assert out["base_feature"] == "BaseFeature1"
+        assert "BaseFeature1" in out["note"]
+        assert "direct" not in out["note"].lower()
 
     def test_none_feature_with_no_new_body_is_real_failure_with_hint(self):
         # add() returned None AND no new BRep body appeared -> a REAL failure. Keep the prismatic

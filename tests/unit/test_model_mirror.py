@@ -1,150 +1,404 @@
-"""Unit tests for ``mirror.py`` — mirror solid bodies across an origin plane.
+"""Unit tests for ``model_mirror`` - mirror solid bodies OR timeline features across a plane.
 
-Pinned: the plane guard, body resolution + missing-body reporting, the list-vs-comma parsing, the
-mirror-plane selection (xy/xz/yz), and the join (isCombine) flag.
+Pinned: the one-target-or-the-other guards, the exact-match/refuse-ambiguity feature resolver, the
+collection's add() refusal, the join read-back, and the body/volume census - counted over BOTH the
+source's component and the build component - that decides whether the mirror did anything.
 """
 
-from conftest import load_tool, make_design, install, payload as _payload
+import re
+import types
+
+import pytest
+
+import adsk.core
+
+from conftest import (BRepBody, MakeComp, error_message, install, load_tool, make_design,
+                      payload as _payload, _make_object_collection, _NamedCollection)
 
 mr = load_tool("model_mirror")
 
-
-class FakeMirrorInput:
-    def __init__(self, bodies, plane):
-        self.bodies = bodies
-        self.plane = plane
-        self.isCombine = False
+SOURCE_VOLUME = 10.0          # every source body in these scenes
 
 
-class FakeMirrorFeature:
-    name = "Mirror1"
-    class bodies:
-        count = 1
-        @staticmethod
-        def item(i):
-            return type("B", (), {"name": "Body2"})()
+def mirror_input(entities, plane):
+    """MirrorFeatureInput: the entities, the plane, and the isCombine flag a body mirror sets."""
+    return types.SimpleNamespace(entities=entities, plane=plane, isCombine=False)
 
 
-class FakeMirrorFeatures:
-    def __init__(self):
+def mirror_feature(name="Mirror1", bodies=(), is_combine=False):
+    """MirrorFeature. `bodies` is the result walk the after-volume is read from; `resultFeatures`
+    exposes a count that reads None even for a mirror that minted geometry, which is why the census
+    is the effect gate."""
+    return types.SimpleNamespace(name=name, bodies=_NamedCollection(list(bodies)),
+                                 resultFeatures=types.SimpleNamespace(count=None),
+                                 isCombine=is_combine, healthState=0)
+
+
+def feature_entity(name="Extrude1", bodies=()):
+    """A timeline feature's `.entity` - the object the mirror collection is handed."""
+    return types.SimpleNamespace(name=name, parentComponent=None,
+                                 bodies=_NamedCollection(list(bodies)))
+
+
+def timeline_object(name, index, entity=None, is_group=False):
+    return types.SimpleNamespace(name=name, index=index, entity=entity, isGroup=is_group)
+
+
+def timeline(*objs):
+    """The timeline, in index order. Live, ``timeline.item(i).index == i`` - the invariant the
+    'name@index' disambiguation form is addressed through - so a fake that reports a different index
+    than it sits at is rejected here rather than silently pinning an unreachable candidate."""
+    for i, obj in enumerate(objs):
+        assert obj.index == i, f"timeline fake: object {obj.name} reports index {obj.index} at {i}"
+    return _NamedCollection(objs)
+
+
+class _MirrorFeatures:
+    """comp.features.mirrorFeatures. add() spawns `scene.spawn` bodies into the component's census -
+    the two signals a real mirror moves are that census and the volume read off the feature."""
+
+    def __init__(self, scene):
+        self.scene = scene
         self.last = None
-    def createInput(self, bodies, plane):
-        self.last = FakeMirrorInput(bodies, plane)
+
+    def createInput(self, entities, plane):
+        self.last = self.scene.input_factory(entities, plane)
         return self.last
+
     def add(self, inp):
-        return FakeMirrorFeature()
+        for i in range(self.scene.spawn):
+            self.scene.comp.bRepBodies._items.append(BRepBody(f"Mirror{i + 1}", volume=SOURCE_VOLUME))
+        return self.scene.feature
 
 
-def _install(names):
-    """Mirror-specific component (features.mirrorFeatures + the origin construction planes) wired into
-    a standard design via conftest's make_design/install (which patch both seams + Design.cast +
-    ObjectCollection.create uniformly, so nothing leaks)."""
-    from conftest import MakeComp
-    mf = FakeMirrorFeatures()
-    comp = MakeComp(name="Comp", bodies=names)
-    comp.features = type("F", (), {"mirrorFeatures": mf})()
-    comp.xYConstructionPlane = ("plane", "xy")
-    comp.xZConstructionPlane = ("plane", "xz")
-    comp.yZConstructionPlane = ("plane", "yz")
-    install(mr, make_design(comp=comp))
-    return mf
+class Scene:
+    """The wired-up design plus the knobs a test turns: how many bodies the mirror spawns, what the
+    collection refuses, and what add() hands back."""
+
+    def __init__(self, comp, design):
+        self.comp = comp
+        self.design = design
+        self.spawn = 1
+        self.refuse = []
+        # the mirrored copy: a body of its own, the same volume as the source it reflects
+        self.feature = mirror_feature(bodies=[BRepBody("Body2", volume=SOURCE_VOLUME)])
+        self.input_factory = mirror_input
+        self.mf = _MirrorFeatures(self)
+
+    def body(self, name):
+        return self.comp.bRepBodies.itemByName(name)
 
 
-class TestGuards:
-    def test_bad_plane(self):
-        _install(["A"])
-        res = mr.handler(bodies=["A"], plane="qq")
-        # PlaneRef now owns the error: 'qq' is not an origin alias / construction name / handle
-        assert res["isError"] is True and "not an origin alias" in res["message"]
+class _Unreadable:
+    """A body collection that cannot be counted - the census-blind case."""
 
-    def test_no_bodies(self):
-        # BodyRefList ('bodies', required) owns the empty error
-        _install(["A"])
-        res = mr.handler(bodies=[], plane="yz")
-        assert res["isError"] is True and "bodies" in res["message"] and "at least one body" in res["message"]
+    @property
+    def count(self):
+        raise RuntimeError("3 : collection is gone")
 
-    def test_body_not_found(self):
-        _install(["A"])
-        res = mr.handler(bodies=["A", "X"], plane="yz")
-        assert res["isError"] is True and "no body or component named 'X'" in res["message"]
+    def item(self, i):
+        raise RuntimeError("3 : collection is gone")
+
+    def itemByName(self, name):
+        return None
 
 
-class TestMirror:
-    def test_mirror_across_yz(self):
-        mf = _install(["BankL"])
-        out = _payload(mr.handler(bodies=["BankL"], plane="yz"))
-        assert out["mirrored"] is True and out["plane"] == "yz"
-        assert mf.last.plane == ("plane", "yz")
-        assert out["result_bodies"] == ["Body2"]
+@pytest.fixture
+def scene(monkeypatch):
+    """Build a mirror scene: a component with `bodies`, an optional timeline, and the shared
+    ObjectCollection fake carrying this scene's refusals."""
+    def build(bodies=("A",), tl=None, body_owner=None, extra_components=()):
+        comp = MakeComp(name="Comp", bodies=[BRepBody(n, volume=SOURCE_VOLUME,
+                                                      parent_component=body_owner) for n in bodies])
+        comp.xYConstructionPlane = ("plane", "xy")
+        comp.xZConstructionPlane = ("plane", "xz")
+        comp.yZConstructionPlane = ("plane", "yz")
+        design = make_design(comp=comp, all_components=[comp, *extra_components])
+        if tl is not None:
+            design.timeline = tl
+        sc = Scene(comp, design)
+        comp.features = type("F", (), {"mirrorFeatures": sc.mf})()
+        install(mr, design)
+        monkeypatch.setattr(adsk.core.ObjectCollection, "create",
+                            staticmethod(lambda: _make_object_collection(sc.refuse)))
+        return sc
+    return build
 
-    def test_comma_string_bodies(self):
-        mf = _install(["a", "b"])
-        out = _payload(mr.handler(bodies="a, b", plane="xy"))
-        assert out["source_bodies"] == ["a", "b"]
-        assert mf.last.bodies.count == 2
 
-    def test_join_sets_iscombine(self):
-        mf = _install(["A"])
-        _payload(mr.handler(bodies=["A"], plane="yz", join=True))
-        assert mf.last.isCombine is True
+class TestTargetGuards:
+    def test_both_bodies_and_features_is_refused_naming_both(self, scene):
+        sc = scene(bodies=("A",), tl=timeline(timeline_object("Extrude1", 0, feature_entity())))
+        msg = error_message(mr.handler(bodies=["A"], features=["Extrude1"], plane="yz"))
+        # precedence would silently mirror one of them - the refusal must name what it saw
+        assert "not both" in msg and "A" in msg and "Extrude1" in msg
+        assert sc.mf.last is None
 
-    def test_join_defaults_false(self):
-        mf = _install(["A"])
+    def test_neither_bodies_nor_features_is_refused(self, scene):
+        scene()
+        msg = error_message(mr.handler(plane="yz"))
+        assert "Nothing to mirror" in msg and "features" in msg
+
+    def test_empty_lists_count_as_neither(self, scene):
+        scene()
+        msg = error_message(mr.handler(bodies=[], features=[], plane="yz"))
+        assert "Nothing to mirror" in msg
+
+    def test_bad_plane(self, scene):
+        scene()
+        msg = error_message(mr.handler(bodies=["A"], plane="qq"))
+        # PlaneRef owns the error: 'qq' is not an origin alias / construction name / handle
+        assert "not an origin alias" in msg
+
+    def test_body_not_found(self, scene):
+        scene(bodies=("A",))
+        msg = error_message(mr.handler(bodies=["A", "X"], plane="yz"))
+        assert "no body or component named 'X'" in msg
+
+
+class TestFeatureResolution:
+    def test_mirrors_a_feature_by_exact_name(self, scene):
+        ent = feature_entity("Extrude1")
+        sc = scene(bodies=("A",), tl=timeline(timeline_object("Extrude1", 0, ent)))
+        out = _payload(mr.handler(features=["Extrude1"], plane="yz"))
+        assert out["mode"] == "features" and out["source_features"] == ["Extrude1"]
+        assert sc.mf.last.entities.item(0) is ent
+        assert sc.mf.last.plane == ("plane", "yz")
+
+    def test_the_label_is_the_timeline_name_not_the_entity_name(self, scene):
+        # the timeline object's name is what resolved; a name re-read off the feature is a
+        # different, unverified value and must never be what the payload publishes
+        ent = feature_entity("SomeOtherName")
+        scene(tl=timeline(timeline_object("Extrude1", 0, ent)))
+        out = _payload(mr.handler(features=["extrude1"], plane="yz"))
+        assert out["source_features"] == ["Extrude1"]
+
+    def test_partial_name_does_not_match(self, scene):
+        # the substring fallback a delete tool affords is NOT available here: 'Extrude' must not
+        # silently resolve to 'Extrude1'
+        scene(tl=timeline(timeline_object("Extrude1", 0, feature_entity("Extrude1"))))
+        msg = error_message(mr.handler(features=["Extrude"], plane="yz"))
+        assert "no timeline feature named 'Extrude'" in msg and "Extrude1" in msg
+
+    def test_duplicate_name_is_refused_with_the_candidates(self, scene):
+        scene(tl=timeline(timeline_object("Sketch1", 0, feature_entity("Sketch1")),
+                          timeline_object("Extrude1", 1, feature_entity("Extrude1")),
+                          timeline_object("Fillet1", 2, feature_entity("Fillet1")),
+                          timeline_object("Fillet1", 3, feature_entity("Fillet1"))))
+        msg = error_message(mr.handler(features=["Fillet1"], plane="yz"))
+        assert "matches 2 timeline objects" in msg and "Fillet1@2" in msg and "Fillet1@3" in msg
+
+    def test_a_printed_candidate_resolves_to_its_own_object(self, scene):
+        third, fourth = feature_entity("Fillet1"), feature_entity("Fillet1")
+        sc = scene(tl=timeline(timeline_object("Sketch1", 0, feature_entity("Sketch1")),
+                               timeline_object("Extrude1", 1, feature_entity("Extrude1")),
+                               timeline_object("Fillet1", 2, third),
+                               timeline_object("Fillet1", 3, fourth)))
+        msg = error_message(mr.handler(features=["Fillet1"], plane="yz"))
+        # the candidates the refusal prints must be usable verbatim - the LAST one proves the form
+        # addresses a specific object rather than falling back to the first hit
+        candidates = re.findall(r"Fillet1@\d+", msg)
+        assert candidates == ["Fillet1@2", "Fillet1@3"]
+        _payload(mr.handler(features=[candidates[-1]], plane="yz"))
+        assert sc.mf.last.entities.item(0) is fourth
+
+    def test_name_at_index_with_a_wrong_name_is_refused(self, scene):
+        scene(tl=timeline(timeline_object("Fillet1", 0, feature_entity("Fillet1"))))
+        msg = error_message(mr.handler(features=["Extrude1@0"], plane="yz"))
+        assert "no timeline feature named 'Extrude1@0'" in msg
+
+    def test_timeline_group_is_refused(self, scene):
+        scene(tl=timeline(timeline_object("Group1", 0, None, is_group=True)))
+        msg = error_message(mr.handler(features=["Group1"], plane="yz"))
+        assert "timeline GROUP" in msg
+
+    def test_the_same_feature_twice_is_refused_as_a_duplicate(self, scene):
+        # the duplicate check runs BEFORE the group/entity checks, so naming one object twice is
+        # refused as the duplicate it is
+        scene(tl=timeline(timeline_object("Extrude1", 0, feature_entity("Extrude1")),
+                          timeline_object("Fillet1", 1, feature_entity("Fillet1"))))
+        msg = error_message(mr.handler(features=["Extrude1", "Extrude1@0"], plane="yz"))
+        assert "already in this call" in msg
+
+    def test_no_timeline_refuses_feature_mode(self, scene):
+        sc = scene(bodies=("A",))
+        assert not hasattr(sc.design, "timeline")
+        msg = error_message(mr.handler(features=["Extrude1"], plane="yz"))
+        assert "no timeline" in msg
+
+    def test_comma_separated_feature_names_are_split(self, scene):
+        a, b = feature_entity("Extrude1"), feature_entity("Fillet1")
+        sc = scene(tl=timeline(timeline_object("Extrude1", 0, a), timeline_object("Fillet1", 1, b)))
+        out = _payload(mr.handler(features="Extrude1, Fillet1", plane="yz"))
+        assert out["source_features"] == ["Extrude1", "Fillet1"]
+        assert sc.mf.last.entities.count == 2
+
+
+class TestCollectionRefusal:
+    def test_a_refused_object_is_reported_naming_it(self, scene):
+        ent = feature_entity("Emboss1")
+        sc = scene(tl=timeline(timeline_object("Emboss1", 0, ent)))
+        sc.refuse.append(ent)
+        msg = error_message(mr.handler(features=["Emboss1"], plane="yz"))
+        # a swallowed False would leave an EMPTY collection for createInput to run on
+        assert "Emboss1" in msg and type(ent).__name__ in msg
+        assert sc.mf.last is None
+
+
+class TestJoin:
+    def test_join_is_refused_in_feature_mode(self, scene):
+        sc = scene(tl=timeline(timeline_object("Extrude1", 0, feature_entity("Extrude1"))))
+        msg = error_message(mr.handler(features=["Extrude1"], plane="yz", join=True))
+        # isCombine is documented as ignored for a non-body input, so reporting joined=true is a lie
+        assert "join" in msg and "bodies" in msg.lower()
+        assert sc.mf.last is None
+
+    def test_join_sets_iscombine_and_reports_the_feature_read_back(self, scene):
+        sc = scene(bodies=("A",))
+        sc.spawn = 0                       # a join merges into the source: no new body
+        sc.feature = mirror_feature(bodies=[BRepBody("A", volume=SOURCE_VOLUME * 2)],
+                                    is_combine=True)
+        out = _payload(mr.handler(bodies=["A"], plane="yz", join=True))
+        assert sc.mf.last.isCombine is True
+        assert out["joined"] is True and out["bodies_added"] == 0
+        assert out["volume_change_cm3"] == SOURCE_VOLUME
+
+    def test_joined_comes_from_the_feature_not_the_request(self, scene):
+        sc = scene(bodies=("A",))
+        sc.feature = mirror_feature(bodies=[BRepBody("Body2", volume=SOURCE_VOLUME)],
+                                    is_combine=False)        # the request did not take
+        out = _payload(mr.handler(bodies=["A"], plane="yz", join=True))
+        assert out["joined"] is False and "did not take" in out["note"]
+
+    def test_join_defaults_false(self, scene):
+        sc = scene(bodies=("A",))
         out = _payload(mr.handler(bodies=["A"], plane="yz"))
-        assert mf.last.isCombine is False
-        assert out["joined"] is False
+        assert sc.mf.last.isCombine is False and out["joined"] is False
 
-    def test_mirror_across_xz(self):
-        mf = _install(["A"])
-        out = _payload(mr.handler(bodies=["A"], plane="xz"))
-        assert out["plane"] == "xz"
-        assert mf.last.plane == ("plane", "xz")
+    def test_feature_mode_publishes_no_joined_key(self, scene):
+        scene(tl=timeline(timeline_object("Extrude1", 0, feature_entity("Extrude1"))))
+        out = _payload(mr.handler(features=["Extrude1"], plane="yz"))
+        assert "joined" not in out and "source_bodies" not in out
 
-    def test_multiple_result_bodies_collected(self):
-        mf = _install(["A"])
+    def test_iscombine_that_does_not_take_is_an_error(self, scene):
+        class _Stuck:
+            """An input that keeps its default: the assignment lands, the property does not move."""
 
-        # feature.bodies returns several names -> result_bodies lists them all
-        class _Bodies:
-            count = 3
-            @staticmethod
-            def item(i):
-                return type("B", (), {"name": f"R{i}"})()
+            def __init__(self, entities, plane):
+                self.entities, self.plane, self.isCombine = entities, plane, False
 
-        class _Feat:
-            name = "Mirror1"
-            bodies = _Bodies
+            def __setattr__(self, key, value):
+                object.__setattr__(self, key, False if key == "isCombine" else value)
 
-        mf.add = lambda inp: _Feat()
-        out = _payload(mr.handler(bodies=["A"], plane="yz"))
-        assert out["result_bodies"] == ["R0", "R1", "R2"]
+        sc = scene(bodies=("A",))
+        sc.input_factory = _Stuck
+        msg = error_message(mr.handler(bodies=["A"], plane="yz", join=True))
+        assert "did not take" in msg
 
-    def test_zero_result_bodies_is_empty_list(self):
-        mf = _install(["A"])
+    def test_iscombine_raise_surfaces_as_an_error(self, scene):
+        class _ReadOnly:
+            """An input whose isCombine setter raises."""
 
-        class _Bodies:
-            count = 0
-            @staticmethod
-            def item(i):
-                raise AssertionError("should not be called when count==0")
+            def __init__(self, entities, plane):
+                object.__setattr__(self, "entities", entities)
+                object.__setattr__(self, "plane", plane)
+                object.__setattr__(self, "isCombine", False)
 
-        class _Feat:
-            name = "Mirror1"
-            bodies = _Bodies
-
-        mf.add = lambda inp: _Feat()
-        out = _payload(mr.handler(bodies=["A"], plane="yz"))
-        assert out["result_bodies"] == []
-
-    def test_iscombine_raise_surfaces_as_error(self):
-        # An isCombine setter failure must propagate through the outer try and surface as isError -
-        # swallowing it would still report "joined: True".
-        class _ReadOnlyInput(FakeMirrorInput):
             def __setattr__(self, key, value):
                 if key == "isCombine":
                     raise AttributeError("isCombine is read-only")
-                super().__setattr__(key, value)
+                object.__setattr__(self, key, value)
 
-        mf = _install(["A"])
-        mf.createInput = lambda bodies, plane: _ReadOnlyInput(bodies, plane)
-        res = mr.handler(bodies=["A"], plane="yz", join=True)
-        assert res["isError"] is True and "Mirror failed" in res["message"]
+        sc = scene(bodies=("A",))
+        sc.input_factory = _ReadOnly
+        msg = error_message(mr.handler(bodies=["A"], plane="yz", join=True))
+        assert "Could not set join" in msg
+
+
+class TestEffectCensus:
+    def test_body_mirror_reports_the_census_growth(self, scene):
+        sc = scene(bodies=("BankL",))
+        out = _payload(mr.handler(bodies=["BankL"], plane="yz"))
+        assert out["mirrored"] is True and out["mode"] == "bodies" and out["plane"] == "yz"
+        assert out["bodies_added"] == 1
+        assert out["source_bodies"] == ["BankL"] and out["result_bodies"] == ["Body2"]
+        assert sc.mf.last.plane == ("plane", "yz")
+
+    def test_the_census_counts_the_build_component_too(self, scene):
+        # the source body is OWNED by another component (an occurrence proxy reports its source
+        # component), while the mirror lands in the component the feature is built in - a census
+        # scoped to the source's component alone is blind to it
+        owner = MakeComp(name="Owner")
+        sc = scene(bodies=("A",), body_owner=owner, extra_components=(owner,))
+        sc.feature = mirror_feature(bodies=[BRepBody("Mirror1", volume=SOURCE_VOLUME)])
+        out = _payload(mr.handler(bodies=["A"], plane="yz"))
+        assert out["bodies_added"] == 1 and out["volume_change_cm3"] == 0.0
+
+    def test_feature_mirror_is_verified_by_the_census(self, scene):
+        ent = feature_entity("Emboss1", bodies=[BRepBody("Body1", volume=12.0)])
+        sc = scene(bodies=("Body1",), tl=timeline(timeline_object("Emboss1", 0, ent)))
+        out = _payload(mr.handler(features=["Emboss1"], plane="yz"))
+        assert out["mirrored"] is True and out["bodies_added"] == 1
+
+    def test_a_mirror_that_changes_nothing_is_an_error(self, scene):
+        sc = scene(bodies=("A",))
+        sc.spawn = 0                        # no new body, and the volume did not move either
+        msg = error_message(mr.handler(bodies=["A"], plane="yz"))
+        assert "added no body" in msg and "nothing was mirrored" in msg
+
+    def test_a_flat_count_with_no_volume_read_is_unverified_not_a_no_op(self, scene):
+        sc = scene(bodies=("A",))
+        sc.spawn = 0
+        sc.feature = mirror_feature(bodies=[])           # nothing to read a volume off
+        msg = error_message(mr.handler(bodies=["A"], plane="yz"))
+        assert "added no body" in msg and "UNVERIFIED" in msg and "moved material" in msg
+
+    def test_a_flat_volume_with_no_count_read_is_unverified_not_a_no_op(self, scene):
+        ent = feature_entity("Extrude1", bodies=[BRepBody("Body1", volume=12.0)])
+        sc = scene(tl=timeline(timeline_object("Extrude1", 0, ent)))
+        sc.spawn = 0
+        sc.feature = mirror_feature(bodies=[BRepBody("Body1", volume=12.0)])
+        sc.comp.bRepBodies = _Unreadable()
+        msg = error_message(mr.handler(features=["Extrude1"], plane="yz"))
+        assert "moved no volume" in msg and "UNVERIFIED" in msg and "added a body" in msg
+
+    def test_neither_signal_readable_is_unverified(self, scene):
+        ent = feature_entity("Extrude1")                 # no bodies -> no volume sample either
+        sc = scene(tl=timeline(timeline_object("Extrude1", 0, ent)))
+        sc.spawn = 0
+        sc.feature = mirror_feature(bodies=[])
+        sc.comp.bRepBodies = _Unreadable()
+        msg = error_message(mr.handler(features=["Extrude1"], plane="yz"))
+        assert "neither the body count" in msg and "UNVERIFIED" in msg
+
+    def test_no_feature_returned_is_an_error(self, scene):
+        sc = scene(bodies=("A",))
+        sc.feature = None
+        msg = error_message(mr.handler(bodies=["A"], plane="yz"))
+        assert "Mirror returned no feature" in msg
+
+    def test_add_that_raises_surfaces_the_platform_message(self, scene):
+        sc = scene(bodies=("A",))
+        sc.mf.add = lambda inp: (_ for _ in ()).throw(RuntimeError("3 : invalid input entities"))
+        msg = error_message(mr.handler(bodies=["A"], plane="yz"))
+        assert "Mirror failed" in msg and "invalid input entities" in msg
+
+    def test_several_result_bodies_are_all_listed(self, scene):
+        sc = scene(bodies=("A",))
+        sc.feature = mirror_feature(bodies=[BRepBody(f"R{i}", volume=SOURCE_VOLUME) for i in range(3)])
+        out = _payload(mr.handler(bodies=["A"], plane="yz"))
+        assert out["result_bodies"] == ["R0", "R1", "R2"]
+
+    def test_two_bodies_mirror_together(self, scene):
+        sc = scene(bodies=("a", "b"))
+        sc.spawn = 2
+        sc.feature = mirror_feature(bodies=[BRepBody("Ma", volume=SOURCE_VOLUME),
+                                            BRepBody("Mb", volume=SOURCE_VOLUME)])
+        out = _payload(mr.handler(bodies="a, b", plane="xy"))
+        assert out["source_bodies"] == ["a", "b"] and out["bodies_added"] == 2
+        assert sc.mf.last.entities.count == 2
+        assert sc.mf.last.plane == ("plane", "xy")
+
+    def test_mirror_across_xz(self, scene):
+        sc = scene(bodies=("A",))
+        out = _payload(mr.handler(bodies=["A"], plane="xz"))
+        assert out["plane"] == "xz" and sc.mf.last.plane == ("plane", "xz")

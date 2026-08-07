@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from conftest import (load_tool, make_design, install, MakeComp, BRepBody, FakePoint,
-                      FakeBoundingBox3D, FakeUnitsManager, payload, error_message,
+                      FakeBoundingBox3D, FakeUnitsManager, go_stale, payload, error_message,
                       assert_no_active_design)
 
 ms = load_tool("model_scale")
@@ -62,7 +62,8 @@ class FakeScaleFeatures:
     """component.features.scaleFeatures: add() applies the canned effect a real scale would have
     (volume by `volume_ratio` - one number, or a per-body-name map for a partial result - and each
     bounding-box extent by `extent_ratios`) to the bodies it was built for, then returns `feature`.
-    `returns_nothing` models a creation that produced none."""
+    `returns_nothing` models the return with NO feature object in it - the measured direct-mode
+    shape, where the canned effect still lands."""
     def __init__(self, bodies, volume_ratio=8.0, extent_ratios=(2.0, 2.0, 2.0),
                  feature=None, returns_nothing=False, non_uniform_result=True):
         self.bodies = list(bodies)
@@ -83,8 +84,6 @@ class FakeScaleFeatures:
         return self.volume_ratio
 
     def add(self, scale_input):
-        if self.returns_nothing:
-            return None
         for body in self.bodies:
             body.volume *= self._ratio_for(body)
             bb = body.boundingBox
@@ -94,7 +93,10 @@ class FakeScaleFeatures:
                 low = getattr(bb.minPoint, axis)
                 high = getattr(bb.maxPoint, axis)
                 setattr(bb.maxPoint, axis, low + (high - low) * ratio)
-        return self.feature
+        # The resized bodies' proxies stop answering their identity reads; volume/boundingBox stay
+        # readable, since those ARE the effect check.
+        go_stale(*self.bodies)
+        return None if self.returns_nothing else self.feature
 
 
 def _body(name="Block", volume=8.0, span=2.0):
@@ -103,16 +105,22 @@ def _body(name="Block", volume=8.0, span=2.0):
                     bbox=FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(span, span, span)))
 
 
-def _wire(monkeypatch, bodies, feats=None, origin=_ORIGIN, tokens=None, units=None):
+def _wire(monkeypatch, bodies, feats=None, origin=_ORIGIN, tokens=None, units=None,
+          design_type=None):
     """Install a design whose active component carries `feats` (features.scaleFeatures) and an origin
     construction point, plus the units engine an expression factor is gated against, with ValueInput
-    modelled and BRepBody wired for the solid-body kind."""
+    modelled and BRepBody wired for the solid-body kind.
+
+    `design_type` sets the modelling mode current_design_type reads (1 parametric, 0 direct); left
+    unset the design reports neither, which is the 'unknown' mode."""
     comp = MakeComp(name="Comp", bodies=list(bodies))
     feats = feats if feats is not None else FakeScaleFeatures(bodies)
     comp.features = types.SimpleNamespace(scaleFeatures=feats)
     if origin is not None:
         comp.originConstructionPoint = origin
     design = make_design(comp=comp, tokens=tokens)
+    if design_type is not None:
+        design.designType = design_type
     design.fusionUnitsManager = units if units is not None else FakeUnitsManager(
         valid=("ShrinkAllowance", "XFactor", "YFactor", "ZFactor", "ShrinkAllowance * 2", "5 mm",
                "TiltAngle"),
@@ -444,6 +452,9 @@ class TestHonesty:
         assert "x2.0" in res["message"] and "x8.0" in res["message"] and "Block" in res["message"]
         # a single-body call has no other body to have resized - no PARTIAL claim
         assert "PARTIAL" not in res["message"]
+        # a parametric design DOES leave a timeline feature, so the remedy names it
+        assert "remains in the timeline" in res["message"]
+        assert "design_delete_feature" in res["message"]
 
     def test_unreadable_geometry_fails_closed(self, monkeypatch):
         body = _body(volume=8.0)
@@ -475,6 +486,76 @@ class TestHonesty:
         res = ms.handler(bodies=["Block"], factor=200)
         assert res["isError"] is True and "Scale failed" in res["message"]
         assert "collapses the geometry" in res["message"]
+
+
+# ── DIRECT mode: scaleFeatures.add returns nothing while the resize LANDS (measured) ─────────
+
+class TestDirectModeNoFeature:
+    def test_direct_none_with_the_measured_ratio_is_ok(self, monkeypatch):
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=8.0,
+                                                     returns_nothing=True), design_type=0)
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        assert out["scaled"] is True and out["volume_ratio"] == 8.0
+
+    def test_direct_none_publishes_no_feature_name(self, monkeypatch):
+        # No feature object exists, so no name may be echoed - the note says so instead.
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=8.0,
+                                                     returns_nothing=True), design_type=0)
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        assert "feature" not in out
+        assert out["no_timeline_feature"] is True
+        assert "DIRECT mode" in out["note"]
+
+    def test_direct_none_names_the_bodies_captured_before_the_scale(self, monkeypatch):
+        # The proxies stop answering .name once the scale ran; the payload must still name them.
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=8.0,
+                                                     returns_nothing=True), design_type=0)
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        assert out["bodies"] == ["Block"]
+
+    def test_declared_outputs_hold_on_the_direct_path(self, monkeypatch):
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=8.0,
+                                                     returns_nothing=True), design_type=0)
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        for o in ms.RETURNS:
+            assert o.assert_present(out) == "", o.key
+
+    def test_direct_none_with_a_failed_effect_check_is_an_error(self, monkeypatch):
+        # add() returned nothing AND the volume did not move: the fall-through must not turn that
+        # into a success.
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=1.0, extent_ratios=(1.0,)*3,
+                                                     returns_nothing=True), design_type=0)
+        res = ms.handler(bodies=["Block"], factor=2)
+        assert res["isError"] is True and "unchanged" in res["message"]
+        # There is no timeline feature on this path - the remediation must not name one.
+        assert "design_delete_feature" not in res["message"]
+        assert "undo in Fusion" in res["message"]
+
+    def test_direct_none_wrong_ratio_names_the_body_and_points_at_undo(self, monkeypatch):
+        # the body moved, but by x2 - not the x8 a factor of 2 implies; the message must still name
+        # the body (captured pre-mutation) and offer a remedy that exists in direct mode.
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=2.0,
+                                                     returns_nothing=True), design_type=0)
+        res = ms.handler(bodies=["Block"], factor=2)
+        assert res["isError"] is True and "'Block'" in res["message"]
+        assert "design_delete_feature" not in res["message"]
+        assert "undo in Fusion" in res["message"]
+
+    def test_parametric_none_stays_an_error(self, monkeypatch):
+        # Even with the volume ratio the factors imply: a None feature in a PARAMETRIC design is
+        # unmeasured as a success, so it is refused.
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body], volume_ratio=8.0,
+                                                     returns_nothing=True), design_type=1)
+        res = ms.handler(bodies=["Block"], factor=2)
+        assert res["isError"] is True and "returned no feature" in res["message"]
+        assert "DIRECT mode" not in res["message"]
 
 
 # ── declared output contract ─────────────────────────────────────────────────

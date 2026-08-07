@@ -9,6 +9,8 @@ occurrence<->joint cross-index.
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import load_tool
 
 ap = load_tool("assembly_get")
@@ -617,3 +619,366 @@ class TestJointOriginsSlice:
         out = _payload(ap.handler(include=["joint_origins"], max_joint_origins=3))
         assert len(out["joint_origins"]) == 3
         assert out["joint_origin_count"] == 5 and out["joint_origins_truncated"] is True
+
+
+# ── include=['relations']: the maintained relationships that are NOT joints ──────────────────────
+#
+# Rigid groups, motion links and assembly constraints live in three collections the joint walk never
+# sees, so without this slice they are invisible to a reader and un-addressable by
+# assembly_edit_relations. The default omits it (and advertises it); include= adds a row per
+# relation carrying the name the editor resolves by and the state an edit would change.
+
+class _RelRigid:
+    def __init__(self, name, members=(), suppressed=False, token=None):
+        self.name = name
+        self.entityToken = token or f"RG:{name}"
+        self.isSuppressed = suppressed
+        self.occurrences = _Coll([SimpleNamespace(fullPathName=m, name=m.split("+")[-1])
+                                  for m in members])
+
+
+class _RelLink:
+    def __init__(self, name, one="CrankAxis", two="Spin", values=(1.0, 2.0), reversed_=False,
+                 suppressed=False, health=0, message="", token=None):
+        self.name = name
+        self.entityToken = token or f"ML:{name}"
+        self.jointOne = SimpleNamespace(name=one) if one else None
+        self.jointTwo = SimpleNamespace(name=two) if two else None
+        self.valueOne = SimpleNamespace(value=values[0])
+        self.valueTwo = SimpleNamespace(value=values[1])
+        self.isReversed = reversed_
+        self.isSuppressed = suppressed
+        self.healthState = health
+        self.errorOrWarningMessage = message
+
+
+class _RelConstraint:
+    def __init__(self, name, relationships=2, suppressed=False, health=0, message="", token=None):
+        self.name = name
+        self.entityToken = token or f"AC:{name}"
+        self.geometricRelationships = _Coll([object()] * relationships)
+        self.isSuppressed = suppressed
+        self.healthState = health
+        self.errorOrWarningMessage = message
+
+
+class _RelComp:
+    def __init__(self, name, rigid=(), links=(), constraints=()):
+        self.name = name
+        self.rigidGroups = _Coll(list(rigid))
+        self.motionLinks = _Coll(list(links))
+        self.assemblyConstraints = _Coll(list(constraints))
+        self.jointOrigins = _Coll([])
+        self.joints = _Coll([])
+        self.asBuiltJoints = _Coll([])
+
+
+@pytest.fixture
+def relations_design(monkeypatch):
+    """A design whose root carries the given relations (plus optional sub-components), wired into
+    assembly_get through a fixture so the patches undo themselves."""
+    def _build(rigid=(), links=(), constraints=(), subs=()):
+        root = _RelComp("Root", rigid, links, constraints)
+        design = _SliceDesign(root, subs=subs)
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ap, "app", fake_app)
+        monkeypatch.setattr(ap._common, "app", fake_app)
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, _SliceDesign) else None)
+        return design
+    return _build
+
+
+class TestRelationsSlice:
+    def test_default_omits_the_slice_and_advertises_it(self, relations_design):
+        relations_design(rigid=[_RelRigid("RigidGroup1", members=["Frame:1", "Carrier:1"])])
+        out = _payload(ap.handler())
+        assert "relations" not in out and "relation_counts" not in out
+        assert "include=['relations']" in out["note"]
+
+    def test_empty_design_reports_three_empty_lists(self, relations_design):
+        relations_design()
+        out = _payload(ap.handler(include=["relations"]))
+        assert out["relations"] == {"rigid_groups": [], "motion_links": [], "constraints": []}
+        assert out["relation_counts"] == {"rigid_groups": 0, "motion_links": 0, "constraints": 0}
+        assert out["relations_truncated"] is False
+
+    def test_rigid_group_row_carries_members_and_suppression(self, relations_design):
+        relations_design(rigid=[_RelRigid("RigidGroup1", members=["Frame:1", "Carrier:1"],
+                                          suppressed=True)])
+        row = _payload(ap.handler(include=["relations"]))["relations"]["rigid_groups"][0]
+        assert row["name"] == "RigidGroup1" and row["component"] == "Root"
+        assert row["occurrences"] == ["Frame:1", "Carrier:1"] and row["occurrence_count"] == 2
+        assert row["suppressed"] is True
+
+    def test_rigid_group_members_are_bounded_but_the_count_is_honest(self, relations_design):
+        relations_design(rigid=[_RelRigid("Big", members=[f"P{i}:1" for i in range(30)])])
+        out = _payload(ap.handler(include=["relations"]))
+        row = out["relations"]["rigid_groups"][0]
+        assert len(row["occurrences"]) == 12          # the member preview cap
+        assert row["occurrence_count"] == 30          # the truth, uncapped
+        # a capped member list must never be SILENT: the row is flagged and the top-level
+        # truncation flag counts it, even though the relation LISTS themselves fit the cap.
+        assert row["occurrences_truncated"] is True
+        assert out["relations_truncated"] is True
+        assert "occurrences_truncated" in out["note"]
+
+    def test_an_uncapped_member_list_is_not_flagged(self, relations_design):
+        relations_design(rigid=[_RelRigid("Small", members=["P0:1", "P1:1"])])
+        out = _payload(ap.handler(include=["relations"]))
+        assert out["relations"]["rigid_groups"][0]["occurrences_truncated"] is False
+        assert out["relations_truncated"] is False
+
+    def test_motion_link_row_names_both_joints_and_its_values(self, relations_design):
+        relations_design(links=[_RelLink("MotionLink1", one="CrankAxis", two="Spin",
+                                         values=(1.0, 2.0), reversed_=True)])
+        row = _payload(ap.handler(include=["relations"]))["relations"]["motion_links"][0]
+        assert row["joint_one"] == "CrankAxis" and row["joint_two"] == "Spin"
+        assert row["value_one"] == 1.0 and row["value_two"] == 2.0
+        assert row["reversed"] is True and row["healthy"] is True
+
+    def test_same_joint_link_reports_a_null_second_joint(self, relations_design):
+        # jointTwo is null when a link couples two DOF of ONE joint - the row must report null
+        # rather than drop the link.
+        relations_design(links=[_RelLink("SelfLink", two=None)])
+        row = _payload(ap.handler(include=["relations"]))["relations"]["motion_links"][0]
+        assert row["joint_one"] == "CrankAxis" and row["joint_two"] is None
+
+    def test_a_broken_relation_reports_unhealthy_with_its_message(self, relations_design):
+        relations_design(links=[_RelLink("Bad", health=2, message="Compute Failed")],
+                         constraints=[_RelConstraint("AC1", health=1, message="over-constrained")])
+        rels = _payload(ap.handler(include=["relations"]))["relations"]
+        assert rels["motion_links"][0]["healthy"] is False
+        assert rels["constraints"][0]["healthy"] is False
+        assert "over-constrained" in rels["constraints"][0]["error"]
+
+    def test_constraint_row_counts_its_relationships(self, relations_design):
+        relations_design(constraints=[_RelConstraint("AC1", relationships=3, suppressed=True)])
+        row = _payload(ap.handler(include=["relations"]))["relations"]["constraints"][0]
+        assert row["relationship_count"] == 3 and row["suppressed"] is True
+
+    def test_one_two_and_many_relations_are_all_listed(self, relations_design):
+        for n in (1, 2, 6):
+            relations_design(rigid=[_RelRigid(f"RG{i}") for i in range(n)])
+            out = _payload(ap.handler(include=["relations"]))
+            assert out["relation_counts"]["rigid_groups"] == n
+            assert len(out["relations"]["rigid_groups"]) == n
+
+    def test_subcomponent_relations_are_listed_with_their_component(self, relations_design):
+        # a relation created inside a sub-assembly lives on THAT component; a root-only read would
+        # report the design as having none.
+        relations_design(subs=[_RelComp("Tower", rigid=[_RelRigid("SubGroup")])])
+        rows = _payload(ap.handler(include=["relations"]))["relations"]["rigid_groups"]
+        assert [r["name"] for r in rows] == ["SubGroup"] and rows[0]["component"] == "Tower"
+
+    def test_cap_truncates_each_list_and_flags_it(self, relations_design):
+        relations_design(rigid=[_RelRigid(f"RG{i}") for i in range(5)],
+                         links=[_RelLink(f"ML{i}") for i in range(4)])
+        out = _payload(ap.handler(include=["relations"], max_relations=2))
+        assert len(out["relations"]["rigid_groups"]) == 2
+        assert len(out["relations"]["motion_links"]) == 2
+        assert out["relation_counts"] == {"rigid_groups": 5, "motion_links": 4, "constraints": 0}
+        assert out["relations_truncated"] is True and "max_relations" in out["note"]
+
+    def test_relations_and_joint_origins_compose(self, relations_design):
+        # each include= adds exactly its own slice; asking for both must not drop either.
+        relations_design(rigid=[_RelRigid("RG1")])
+        out = _payload(ap.handler(include=["relations", "joint_origins"]))
+        assert out["relation_counts"]["rigid_groups"] == 1
+        assert out["joint_origins"] == [] and out["joint_origin_count"] == 0
+
+
+# ── include=['contacts']: the design's contact sets + the two contact-analysis flags ─────────────
+#
+# Contact sets hang off the DESIGN, not a component, so neither the joint walk nor the relations
+# walk sees them. The default omits the slice (and advertises it); include= adds a row per set -
+# members (previewed), the true member count, suppression - beside the two flags that decide whether
+# any of them takes part at all. A ContactSet carries no entityToken and no healthState, so a row
+# carries neither a handle nor a healthy key.
+
+class _RawMember:
+    """What a BODY member reads back as: an object neither cast accepts, so it counts but has no name."""
+
+
+class _MemberOcc:
+    def __init__(self, path):
+        self.fullPathName = path
+        self.name = path.split("+")[-1]
+
+
+class _ContactSetRow:
+    def __init__(self, name, members=(), suppressed=False):
+        self.name = name
+        self.occurencesAndBodies = list(members)      # ONE 'r' - the real property name
+        self.isSuppressed = suppressed
+
+
+class _UnreadableMembers(_ContactSetRow):
+    """A set whose member list cannot be read at all - distinct from a set that holds nothing."""
+
+    @property
+    def occurencesAndBodies(self):
+        raise RuntimeError("3 : the member list cannot be read")
+
+    @occurencesAndBodies.setter
+    def occurencesAndBodies(self, value):
+        pass
+
+
+class _UnreadableScopeDesign(_SliceDesign):
+    """A design whose isContactSetAnalysis raises - the scope has no answer, which is not all_bodies."""
+
+    @property
+    def isContactSetAnalysis(self):
+        raise RuntimeError("3 : the flag cannot be read")
+
+    @isContactSetAnalysis.setter
+    def isContactSetAnalysis(self, value):
+        pass
+
+
+class _ContactSetsColl:
+    def __init__(self, items=()):
+        self._items = list(items)
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+
+@pytest.fixture
+def contacts_design(monkeypatch):
+    """A design carrying contact sets and both analysis flags, wired into assembly_get through a
+    fixture so the patches undo themselves. Occurrence/BRepBody casts decide which members can be
+    NAMED - a member that casts to neither is the measured body case."""
+    def _build(sets=(), enabled=False, use_sets=False, design_cls=_SliceDesign):
+        design = design_cls(_RelComp("Root"))
+        design.contactSets = _ContactSetsColl(sets)
+        design.isContactAnalysisEnabled = enabled
+        design.isContactSetAnalysis = use_sets
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ap, "app", fake_app)
+        monkeypatch.setattr(ap._common, "app", fake_app)
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, _SliceDesign) else None)
+        monkeypatch.setattr(adsk.fusion, "Occurrence",
+                            type("Occurrence", (), {"cast": staticmethod(
+                                lambda x: x if isinstance(x, _MemberOcc) else None)}), raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepBody",
+                            type("BRepBody", (), {"cast": staticmethod(lambda x: None)}),
+                            raising=False)
+        return design
+    return _build
+
+
+class TestContactsSlice:
+    def test_default_omits_the_slice_and_advertises_it(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow("ContactSet1")])
+        out = _payload(ap.handler())
+        assert "contacts" not in out and "contact_analysis" not in out
+        assert "include=['contacts']" in out["note"]
+
+    def test_empty_design_reports_an_empty_list_and_both_flags(self, contacts_design):
+        contacts_design()
+        out = _payload(ap.handler(include=["contacts"]))
+        assert out["contacts"] == [] and out["contact_count"] == 0
+        assert out["contacts_truncated"] is False
+        assert out["contact_analysis"] == {"enabled": False, "scope": "all_bodies"}
+
+    def test_a_row_carries_members_count_and_suppression(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow("Frame_Panel",
+                                             members=[_MemberOcc("Frame:1"), _MemberOcc("Panel:1")],
+                                             suppressed=True)])
+        row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
+        assert row["name"] == "Frame_Panel"
+        assert row["members"] == ["Frame:1", "Panel:1"] and row["member_count"] == 2
+        assert row["members_truncated"] is False and row["suppressed"] is True
+
+    def test_a_row_carries_no_handle_and_no_health(self, contacts_design):
+        # a ContactSet has neither entityToken nor healthState - inventing either key would promise
+        # a round-trip and a health verdict that do not exist.
+        contacts_design(sets=[_ContactSetRow("ContactSet1", members=[_MemberOcc("A:1")])])
+        row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
+        assert "handle" not in row and "healthy" not in row
+
+    def test_a_body_member_is_counted_but_not_named(self, contacts_design):
+        # measured: a body member reads back as a raw object both casts reject. Counting it keeps
+        # member_count honest; a names-only row would silently under-report the membership.
+        contacts_design(sets=[_ContactSetRow("Mixed", members=[_RawMember(), _MemberOcc("A:1")])])
+        row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
+        assert row["member_count"] == 2
+        assert row["members"] == ["A:1"] and row["members_unreadable"] == 1
+
+    def test_members_are_previewed_but_the_count_is_honest(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow("Big", members=[_MemberOcc(f"P{i}:1") for i in range(30)])])
+        out = _payload(ap.handler(include=["contacts"]))
+        row = out["contacts"][0]
+        assert len(row["members"]) == 12              # the member preview cap
+        assert row["member_count"] == 30              # the truth, uncapped
+        assert row["members_truncated"] is True
+        assert out["contacts_truncated"] is True and "members_truncated" in out["note"]
+
+    def test_one_two_and_many_sets_are_all_listed(self, contacts_design):
+        for n in (1, 2, 6):
+            contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(n)])
+            out = _payload(ap.handler(include=["contacts"]))
+            assert out["contact_count"] == n and len(out["contacts"]) == n
+
+    def test_the_list_cap_truncates_and_flags_it(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(5)])
+        out = _payload(ap.handler(include=["contacts"], max_contacts=2))
+        assert len(out["contacts"]) == 2 and out["contact_count"] == 5
+        assert out["contacts_truncated"] is True and "max_contacts" in out["note"]
+
+    def test_analysis_on_with_the_sets_is_reported_without_an_inert_warning(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True, use_sets=True)
+        out = _payload(ap.handler(include=["contacts"]))
+        assert out["contact_analysis"] == {"enabled": True, "scope": "contact_sets"}
+        assert "INERT" not in out["note"]
+
+    def test_analysis_on_but_scoped_to_all_bodies_says_the_sets_are_ignored(self, contacts_design):
+        # analysis being ON is not enough: scoped to all bodies, every set listed takes no part, and
+        # a list with no disclosure reads as "these are in force".
+        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True, use_sets=False)
+        out = _payload(ap.handler(include=["contacts"]))
+        assert out["contact_analysis"]["scope"] == "all_bodies"
+        assert "IGNORED" in out["note"] and "set_analysis_scope" in out["note"]
+        assert "INERT" not in out["note"]            # that word is the analysis-OFF case
+
+    def test_an_unreadable_scope_is_null_not_all_bodies(self, contacts_design):
+        # all_bodies would be a fabricated answer for a flag that never answered - and it would also
+        # trigger the ignored-sets disclosure over a scope nobody read.
+        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True,
+                        design_cls=_UnreadableScopeDesign)
+        out = _payload(ap.handler(include=["contacts"]))
+        assert out["contact_analysis"] == {"enabled": True, "scope": None}
+        assert "IGNORED" not in out["note"]
+
+    def test_an_unreadable_member_list_is_not_reported_as_an_empty_set(self, contacts_design):
+        # member_count 0 would claim the set holds nothing; null plus the flag leaves it unclaimed.
+        contacts_design(sets=[_UnreadableMembers("Opaque")])
+        row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
+        assert row["member_count"] is None and row["members_unreadable"] is True
+        assert "members" not in row and "members_truncated" not in row
+        assert _payload(ap.handler(include=["contacts"]))["contacts_truncated"] is False
+
+    def test_sets_listed_while_analysis_is_off_are_flagged_inert(self, contacts_design):
+        # the list alone would read as "these are in force"; with analysis off none of them acts.
+        contacts_design(sets=[_ContactSetRow("CS1")], enabled=False)
+        out = _payload(ap.handler(include=["contacts"]))
+        assert "INERT" in out["note"] and "enable_analysis" in out["note"]
+
+    def test_no_inert_warning_when_there_are_no_sets(self, contacts_design):
+        contacts_design(enabled=False)
+        assert "INERT" not in _payload(ap.handler(include=["contacts"]))["note"]
+
+    def test_contacts_composes_with_the_other_slices(self, contacts_design):
+        contacts_design(sets=[_ContactSetRow("CS1")])
+        out = _payload(ap.handler(include=["contacts", "relations"]))
+        assert out["contact_count"] == 1
+        assert out["relation_counts"] == {"rigid_groups": 0, "motion_links": 0, "constraints": 0}

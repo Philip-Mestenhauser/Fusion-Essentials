@@ -460,3 +460,17 @@ class TestAmbiguousDesignation:
         msg = error_message(mt.handler(faces=["h"], designation="M30x3.5",
                                        thread_type="ISO Metric profile"))
         assert "does not carry" in msg and "ANSI Metric M Profile" in msg
+
+    def test_thread_class_picks_the_fit(self, monkeypatch):
+        # 4g6g and 6g are different external FITS of the same thread - not interchangeable the way
+        # the standards sharing a designation are, so the caller can name one
+        feats = FakeThreadFeatures()
+        _wire(monkeypatch, feats, [_shaft()])
+        out = payload(mt.handler(faces=["h"], designation="M10x1.5", thread_class="6g"))
+        assert out["thread_class"] == "6g"
+        assert feats.created_info[0].threadClass == "6g"
+
+    def test_an_unoffered_thread_class_is_refused(self, monkeypatch):
+        _wire(monkeypatch, FakeThreadFeatures(), [_shaft()])
+        msg = error_message(mt.handler(faces=["h"], designation="M10x1.5", thread_class="9z"))
+        assert "not offered" in msg and "4g6g" in msg

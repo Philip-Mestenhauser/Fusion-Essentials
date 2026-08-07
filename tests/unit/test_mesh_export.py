@@ -59,6 +59,7 @@ class FakeMeshCalculator:
 
     def setQuality(self, q):
         self.quality = q
+        return True
 
     def calculate(self):
         if self.raise_on_calc:

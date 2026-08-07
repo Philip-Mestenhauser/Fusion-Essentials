@@ -17,14 +17,52 @@ params = load_tool("param_ops")
 
 # ── _param_summary: numeric vs text value ──────────────────────────────────
 
+class _UM:
+    """A units manager: internal units are cm/radians, convert() scales into the target unit."""
+    internalUnits = "cm"
+    _FACTOR = {"mm": 10.0, "cm": 1.0, "in": 1 / 2.54, "deg": 180.0 / 3.141592653589793}
+
+    def convert(self, value, from_unit, to_unit):
+        return value * self._FACTOR[to_unit]
+
+
 class TestParamSummary:
-    def test_numeric_value_used_directly(self):
+    def test_value_is_reported_in_the_parameters_OWN_unit(self):
+        # Parameter.value is in DATABASE units: a "50 mm" length reads 5.0. Reporting 5.0 beside
+        # unit='mm' is a 10x error for any caller doing arithmetic on it.
         p = SimpleNamespace(name="StockX", expression="50 mm", unit="mm",
                             comment="", value=5.0, textValue="ignored")
-        out = params._param_summary(p)
-        assert out["value"] == 5.0
+        out = params._param_summary(p, units_manager=_UM())
+        assert out["value"] == 50.0                  # mm, matching out["unit"]
+        assert out["value_units"] == "mm"
+        assert out["value_internal"] == 5.0          # the raw db-unit number, clearly named
         assert out["name"] == "StockX"
         assert out["expression"] == "50 mm"
+
+    def test_an_angle_is_converted_out_of_radians(self):
+        # The same trap with a bigger factor: "90 deg" reads 1.5708 in db units (~57x off).
+        p = SimpleNamespace(name="Draft", expression="90 deg", unit="deg",
+                            comment="", value=3.141592653589793 / 2, textValue="")
+        out = params._param_summary(p, units_manager=_UM())
+        assert round(out["value"], 6) == 90.0
+        assert out["value_units"] == "deg"
+
+    def test_unitless_parameter_needs_no_conversion(self):
+        # A count/ratio has no display unit, so its db number IS its value - labelling it as an
+        # internal cm/radian figure would be a different kind of wrong.
+        p = SimpleNamespace(name="Ratio", expression="3", unit="",
+                            comment="", value=3.0, textValue="")
+        out = params._param_summary(p, units_manager=_UM())
+        assert out["value"] == 3.0 and out["value_units"] == ""
+
+    def test_unconvertible_value_is_labelled_internal_not_mislabelled(self):
+        # No units manager to convert with -> report the raw number AND say which frame it is in,
+        # rather than presenting a db-unit number under the parameter's display unit.
+        p = SimpleNamespace(name="StockX", expression="50 mm", unit="mm",
+                            comment="", value=5.0, textValue="")
+        out = params._param_summary(p, units_manager=None)
+        assert out["value"] == 5.0
+        assert out["value_units"] == "internal (cm/radians)"
 
     def test_text_param_falls_back_to_textValue(self):
         # A text parameter: .value raises, so summary must use .textValue.

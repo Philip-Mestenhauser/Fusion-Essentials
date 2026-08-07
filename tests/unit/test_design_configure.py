@@ -16,6 +16,8 @@ Fakes are NAMED to match the real adsk classes where the handler reads type(x)._
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import load_tool
 
 dc = load_tool("design_configure")
@@ -77,19 +79,24 @@ class _Col:
 
 
 class _Row:
-    def __init__(self, name, idx):
+    def __init__(self, name, idx, owner=None):
         self.name = name
         self.id = "row-" + name
         self.index = idx
         self.activated = False
+        self._owner = owner
     def activate(self):
         self.activated = True
+        if self._owner is not None:
+            self._owner._active = self      # a real activate() moves the table's active row
         return True
 
 
 class _Rows:
-    def __init__(self):
+    def __init__(self, owner=None, on_add=None):
         self._r = []
+        self._owner = owner
+        self._on_add = on_add
     @property
     def count(self):
         return len(self._r)
@@ -98,14 +105,36 @@ class _Rows:
     def __iter__(self):
         return iter(self._r)        # real ConfigurationRows is iterable (read tool's _find_row needs it)
     def add(self, name):
-        r = _Row(name, len(self._r))
+        prev = self._r[-1] if self._r else None
+        r = _Row(name, len(self._r), self._owner)
         self._r.append(r)
+        if self._owner is not None:
+            self._owner._active = r         # adding a configuration row activates it
+        if self._on_add is not None:
+            self._on_add(r, prev)           # a new row copies the cell values of the row above it
         return r
 
 
 class _ThemeCell:
-    def __init__(self):
-        self.referencedTableRow = None
+    """The config->theme link cell. Its owner's 'cell_mode', read at assignment time, models the
+    assignment landing ('honest'), being silently dropped ('silent'), or reading back a DIFFERENT row
+    than the one assigned ('lies')."""
+    def __init__(self, owner=None):
+        self._owner = owner
+        self._row = None
+
+    @property
+    def referencedTableRow(self):
+        return self._row
+
+    @referencedTableRow.setter
+    def referencedTableRow(self, value):
+        mode = getattr(self._owner, "cell_mode", "honest")
+        if mode == "honest":
+            self._row = value
+        elif mode == "lies":
+            self._row = getattr(self._owner, "substitute", None)
+        # 'silent': the link is dropped and the cell keeps reading no row
 
 
 class _ThemeColumn:
@@ -116,13 +145,15 @@ class _ThemeColumn:
         self._rows = rows
         self.by_name = {}
         self._scratch = {}
+        self.cell_mode = "honest"
+        self.substitute = None
     def getCell(self, i):
         # NOT the addressing the tool should use — hand back a scratch cell unrelated to by_name.
-        self._scratch.setdefault(i, _ThemeCell())
+        self._scratch.setdefault(i, _ThemeCell(self))
         return self._scratch[i]
     def getCellByRowName(self, name):
         if name not in self.by_name:
-            self.by_name[name] = _ThemeCell()
+            self.by_name[name] = _ThemeCell(self)
         return self.by_name[name]
 
 
@@ -142,6 +173,139 @@ class _AppearanceTable:
         col = _Col(ConfigurationAppearanceCell, kind="appearance")
         self._columns_added.append(col)
         return col
+
+
+class ConfigurationMaterialCell:
+    """A material cell. Its table's 'cell_mode', read at assignment time, models the three outcomes
+    an assignment can have: it lands ('honest'), it silently does not land ('silent' - the cell still
+    reads no material), or the cell reports a DIFFERENT material than the one assigned ('lies')."""
+    def __init__(self, owner=None):
+        self._owner = owner
+        self._material = None
+
+    @property
+    def material(self):
+        return self._material
+
+    @material.setter
+    def material(self, value):
+        mode = getattr(self._owner, "cell_mode", "honest")
+        if mode == "honest":
+            self._material = value
+        elif mode == "lies":
+            self._material = getattr(self._owner, "substitute", None)
+        # 'silent': the assignment is dropped and the cell keeps reading no material
+
+
+class _MaterialColumn:
+    """A material column: cells are addressed positionally (getCell(theme_row_index)) and the column
+    exposes .title/.id/.entity - a real ConfigurationMaterialColumn has NO .name."""
+    def __init__(self, entity, title, table=None):
+        self.entity = entity
+        self.id = "matcol-" + title
+        self.title = title
+        self._table = table
+        self._cells = {}
+
+    @property
+    def cell_mode(self):
+        """This column's assignment behaviour: a column named in the table's silent_columns drops
+        what it is handed, so one column can refuse while the others assign honestly."""
+        if self.title in getattr(self._table, "silent_columns", ()):
+            return "silent"
+        return getattr(self._table, "cell_mode", "honest")
+
+    @property
+    def substitute(self):
+        return getattr(self._table, "substitute", None)
+
+    def getCell(self, idx):
+        if idx not in self._cells:
+            self._cells[idx] = ConfigurationMaterialCell(self)
+        return self._cells[idx]
+
+    def material_at(self, idx):
+        """The material name this column holds on a theme row, or None - what a caller sees for the
+        configurations linked to that row."""
+        m = self._cells.get(idx)
+        return getattr(m.material, "name", None) if m is not None else None
+
+
+class _MaterialColumns:
+    """materialTable.columns: the first non-root add ALSO mints a root-component column ahead of it,
+    so the count jumps 0 -> 2 on a single add. A tool asserting count == 1 would be wrong."""
+    def __init__(self, table):
+        self._table = table
+        self._cols = []
+        self.added = []                           # the non-root columns, in add order
+
+    @property
+    def count(self):
+        return len(self._cols)
+
+    def item(self, i):
+        return self._cols[i]
+
+    def add(self, entity):
+        if self._table.add_returns_null:
+            return None
+        existing = next((c for c in self._cols if c.entity is entity), None)
+        if existing is not None:
+            return existing                       # an entity that already has a column keeps it
+        if not self._cols:                        # the auto-created root-component column
+            self._cols.append(_MaterialColumn("RootComponent", "(Unsaved)", self._table))
+        col = _MaterialColumn(entity, getattr(entity, "name", "Body"), self._table)
+        self._cols.append(col)
+        self.added.append(col)
+        if self._table.rows.count == 0:
+            # the column add mints the first theme row, and EVERY configuration starts out
+            # referencing it (the platform seeds the links, so it bypasses the cell's mode)
+            row = self._table.rows.add("Theme 1")
+            for name in self._table.config_names():
+                self._table.parentTableColumn.getCellByRowName(name)._row = row
+        return col
+
+
+class _MaterialRows(_Rows):
+    """materialTable.rows: adding a name an existing row carries returns THAT row and adds nothing,
+    and a genuinely new row starts as a COPY of the row above it - which is not the row the
+    configuration being moved was referencing."""
+    def __init__(self, table):
+        super().__init__()
+        self._table = table
+
+    def add(self, name):
+        taken = next((self.item(i) for i in range(self.count) if self.item(i).name == name), None)
+        if taken is not None:
+            return taken
+        prev = self.count - 1
+        row = super().add(name)
+        if prev >= 0:
+            for i in range(self._table.columns.count):
+                col = self._table.columns.item(i)
+                src = col.getCell(prev).material
+                if src is not None:
+                    col.getCell(self.count - 1)._material = src   # the platform copies, not the tool
+        return row
+
+
+class _MaterialTable:
+    def __init__(self, top=None):
+        self._top = top
+        self.rows = _MaterialRows(self)
+        self.columns = _MaterialColumns(self)
+        self.parentTableColumn = _ThemeColumn(self.rows)
+        self.add_returns_null = False
+        self.cell_mode = "honest"
+        self.substitute = None
+        self.silent_columns = set()        # titles of columns that drop what they are assigned
+
+    def config_names(self):
+        top = self._top
+        return [top.rows.item(i).name for i in range(top.rows.count)] if top is not None else []
+
+    def row_index(self, name):
+        return next(i for i in range(self.rows.count) if self.rows.item(i).name == name)
 
 
 class ConfigurationInsertCell:
@@ -171,12 +335,40 @@ class _Columns:
 
 class ConfigurationTopTable:
     def __init__(self):
-        self.rows = _Rows()
+        self._active = None
+        # rows.add(...) and row.activate() both move _active; a new row also copies the row above
+        self.rows = _Rows(owner=self, on_add=self._row_added)
         self.rows.add("Default")           # createConfiguredDesign yields one row
         self.columns = _Columns()
         self.appearanceTable = _AppearanceTable()
+        self.materialTable = _MaterialTable(self)
         self.name = "Configurations"
         self.id = "1"
+
+    @property
+    def activeRow(self):
+        return self._active
+
+    def _row_added(self, row, prev):
+        # a new configuration row copies the cell values of the row above it - including WHICH theme
+        # row it references, so a configuration added later starts out sharing its neighbour's theme
+        if prev is None:
+            return
+        tc = self.materialTable.parentTableColumn
+        tc.getCellByRowName(row.name)._row = tc.getCellByRowName(prev.name).referencedTableRow
+
+
+class _MaterialCollection:
+    """design.materials - a count/item(i) collection of named materials (what iter_collection walks)."""
+    def __init__(self, names):
+        self._m = [SimpleNamespace(name=n, id="mat-%d" % i) for i, n in enumerate(names)]
+    @property
+    def count(self):
+        return len(self._m)
+    def item(self, i):
+        return self._m[i]
+    def named(self, name):
+        return next(m for m in self._m if m.name == name)
 
 
 class _PartRow:
@@ -230,7 +422,7 @@ class _Root:
 
 class _Design:
     def __init__(self, configured=False, params=None, bodies=None, features=None,
-                 appearances=None, datafiles=None):
+                 appearances=None, datafiles=None, materials=()):
         self._top = ConfigurationTopTable() if configured else None
         self.allParameters = _Params(params or [])
         self.created = None
@@ -238,6 +430,7 @@ class _Design:
         self._features = features or {}
         self._appearances = appearances or {}
         self._datafiles = datafiles or {}
+        self.materials = _MaterialCollection(materials)
         self.rootComponent = _Root()
 
     @property
@@ -321,6 +514,14 @@ class TestAddConfiguration:
         names = [d.configurationTopTable.rows.item(i).name
                  for i in range(d.configurationTopTable.rows.count)]
         assert "Large" in names and out["configuration"] == "Large"
+
+    def test_add_row_discloses_that_it_activated_the_new_configuration(self, monkeypatch):
+        # adding a row switches the design to it - a payload that stayed silent would leave the
+        # caller believing the configuration active before the call is still what the model shows
+        _install(monkeypatch, _Design(configured=True))
+        out = _payload(dc.handler(action="add_configuration", name="Large"))
+        assert out["active_configuration"] == "Large"
+        assert "activated it" in out["note"].lower()
 
     def test_add_row_requires_name(self, monkeypatch):
         _install(monkeypatch, _Design(configured=True))
@@ -452,6 +653,226 @@ class TestAppearanceTheme:
             return None
         assert appearance_for(ref_default) is d._appearances["Red"]
         assert appearance_for(ref_small) is d._appearances["Blue"]
+
+
+# ── add_material: per-configuration physical material (the material theme table) ─────────────
+
+@pytest.fixture
+def mat_design(monkeypatch):
+    """A configured design with three document materials, two bodies, and the body resolver stubbed."""
+    d = _Design(configured=True,
+                bodies={"Body1": _FakeFeature("Body1"), "Body2": _FakeFeature("Body2")},
+                materials=("Steel", "ABS Plastic", "Aluminum"))
+    _install(monkeypatch, d)
+    monkeypatch.setattr(dc._BODY, "resolve",
+                        lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
+                        else (None, f"No body named '{raw}'."))
+    return d
+
+
+def _mat_table(design):
+    return design.configurationTopTable.materialTable
+
+
+def _material_for(design, config, column_title):
+    """What one column holds for one CONFIGURATION: follow the config's theme link to a row, then
+    read that column's cell on it - the way a caller experiences the table."""
+    mtbl = _mat_table(design)
+    row = mtbl.parentTableColumn.getCellByRowName(config).referencedTableRow
+    if row is None:
+        return None
+    col = next(c for c in mtbl.columns.added if c.title == column_title)
+    return col.material_at(mtbl.row_index(row.name))
+
+
+class TestAddMaterial:
+    def test_a_materials_map_arriving_as_json_text_is_parsed_not_char_iterated(self, mat_design):
+        # An object-typed input can cross the wire as its JSON TEXT (a stale client schema does
+        # this); iterating that string as a map sprays per-character unknown-configuration refusals.
+        out = _payload(dc.handler(action="add_material", body="Body1",
+                                  materials='{"Default": "Steel"}'))
+        assert _material_for(mat_design, "Default", "Body1") == "Steel"
+        assert out["materials"] == {"Default": "Steel"}
+
+    def test_unparseable_map_text_is_refused_naming_the_field(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials="not json {")
+        assert res["isError"] is True
+        assert "'materials'" in res["message"] and "JSON object" in res["message"]
+
+    def test_links_each_config_to_its_own_theme_row_by_row_name(self, mat_design):
+        dc.handler(action="add_configuration", name="Small")
+        out = _payload(dc.handler(action="add_material", body="Body1",
+                                  materials={"Default": "Steel", "Small": "ABS Plastic"}))
+        mtbl = _mat_table(mat_design)
+        # one theme row per configuration, no over-provisioning
+        assert mtbl.rows.count == 2
+        # each CONFIG links a theme row addressed BY NAME - a positional getCell() on the theme
+        # column hands back an unrelated scratch cell, so an index-linked tool leaves these unset
+        theme_col = mtbl.parentTableColumn
+        ref_default = theme_col.getCellByRowName("Default").referencedTableRow
+        ref_small = theme_col.getCellByRowName("Small").referencedTableRow
+        assert ref_default is not None and ref_small is not None
+        assert ref_default is not ref_small
+        # and the theme row each config points at carries ITS material
+        assert _material_for(mat_design, "Default", "Body1") == "Steel"
+        assert _material_for(mat_design, "Small", "Body1") == "ABS Plastic"
+        # the payload publishes what the CELLS read back, per configuration
+        assert out["materials"] == {"Default": "Steel", "Small": "ABS Plastic"}
+        assert out["themes"] == 2 and out["column_title"] == "Body1"
+        assert "configurations_unset" not in out
+
+    def test_a_second_body_does_not_re_point_the_first_bodys_configurations(self, mat_design):
+        # theme rows and the config->theme link are TABLE-global: allocating rows positionally on the
+        # second call silently moves configurations off the rows the first call gave them, changing
+        # the first body's materials while every read-back of the second call still passes
+        dc.handler(action="add_configuration", name="Small")
+        _payload(dc.handler(action="add_material", body="Body1",
+                            materials={"Default": "Steel", "Small": "ABS Plastic"}))
+        out = _payload(dc.handler(action="add_material", body="Body2",
+                                  materials={"Small": "Aluminum"}))
+        # the first body keeps exactly what it was configured with
+        assert _material_for(mat_design, "Default", "Body1") == "Steel"
+        assert _material_for(mat_design, "Small", "Body1") == "ABS Plastic"
+        # and the second body is Aluminum in Small ONLY - not in Default too
+        assert _material_for(mat_design, "Small", "Body2") == "Aluminum"
+        assert _material_for(mat_design, "Default", "Body2") != "Aluminum"
+        assert out["materials"] == {"Small": "Aluminum"}
+        assert out["configurations_unset"] == ["Default"]
+
+    def test_a_configuration_moved_to_its_own_theme_row_keeps_the_other_bodys_material(self, mat_design):
+        # 'Large' is added after the first column and starts out sharing 'Small's theme row, so it
+        # shows Body1 as ABS Plastic. Setting Body2 for it has to mint a row and carry that across -
+        # a minted row otherwise copies the row ABOVE it and Body1 silently becomes Steel.
+        dc.handler(action="add_configuration", name="Small")
+        _payload(dc.handler(action="add_material", body="Body1",
+                            materials={"Default": "Steel", "Small": "ABS Plastic"}))
+        dc.handler(action="add_configuration", name="Large")
+        assert _material_for(mat_design, "Large", "Body1") == "ABS Plastic"
+        _payload(dc.handler(action="add_material", body="Body2", materials={"Large": "Aluminum"}))
+        assert _material_for(mat_design, "Large", "Body1") == "ABS Plastic"
+        assert _material_for(mat_design, "Small", "Body1") == "ABS Plastic"
+        assert _material_for(mat_design, "Default", "Body1") == "Steel"
+        assert _material_for(mat_design, "Large", "Body2") == "Aluminum"
+
+    def test_a_minted_theme_row_never_takes_a_name_the_table_already_carries(self, mat_design):
+        # rows.add(<a name an existing row carries>) returns THAT row and adds nothing, so a
+        # count-based name that collides would put two configurations on one row
+        mtbl = _mat_table(mat_design)
+        mtbl.rows.add("Material 2")          # the name the count-based scheme reaches for first
+        dc.handler(action="add_configuration", name="Small")
+        _payload(dc.handler(action="add_material", body="Body1",
+                            materials={"Default": "Steel", "Small": "ABS Plastic"}))
+        theme_col = mtbl.parentTableColumn
+        ref_default = theme_col.getCellByRowName("Default").referencedTableRow
+        ref_small = theme_col.getCellByRowName("Small").referencedTableRow
+        assert ref_default is not None and ref_default is not ref_small
+        assert _material_for(mat_design, "Default", "Body1") == "Steel"
+        assert _material_for(mat_design, "Small", "Body1") == "ABS Plastic"
+
+    def test_a_repeat_call_for_the_same_body_updates_its_existing_column(self, mat_design):
+        # columns.add(<a body that already has a column>) returns the EXISTING column, so a second
+        # call re-materials that body rather than building a duplicate column
+        _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"}))
+        _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "ABS Plastic"}))
+        mtbl = _mat_table(mat_design)
+        assert mtbl.columns.count == 2 and len(mtbl.columns.added) == 1
+        assert _material_for(mat_design, "Default", "Body1") == "ABS Plastic"
+
+    def test_a_carry_that_does_not_take_is_an_error(self, mat_design):
+        # moving a configuration to its own theme row must bring every OTHER column's material with
+        # it; a column that drops the copy leaves that configuration mis-materialled, so the call
+        # fails naming the column instead of reporting success
+        dc.handler(action="add_configuration", name="Small")
+        _payload(dc.handler(action="add_material", body="Body1",
+                            materials={"Default": "Steel", "Small": "ABS Plastic"}))
+        dc.handler(action="add_configuration", name="Large")     # inherits Small's theme row
+        mtbl = _mat_table(mat_design)
+        root = mtbl.columns.item(0)                              # the root-component column
+        root.getCell(mtbl.row_index("Theme 1"))._material = mat_design.materials.named("Steel")
+        mtbl.silent_columns.add(root.title)
+        res = dc.handler(action="add_material", body="Body2", materials={"Large": "Aluminum"})
+        assert res["isError"] is True and root.title in res["message"]
+
+    def test_configurations_left_out_of_the_map_are_published(self, mat_design):
+        # every configuration starts on the one auto-created theme row, so an unnamed configuration
+        # keeps another configuration's material - say so instead of implying it was set
+        dc.handler(action="add_configuration", name="Small")
+        dc.handler(action="add_configuration", name="Large")
+        out = _payload(dc.handler(action="add_material", body="Body1", materials={"Small": "Steel"}))
+        assert out["configurations_unset"] == ["Default", "Large"]
+        assert "Default" in out["note"] and "Large" in out["note"]
+
+    def test_dropped_theme_link_is_an_error(self, mat_design):
+        # two configurations, so 'Default' has to MOVE to a theme row of its own: the link assignment
+        # is silently ignored, leaving it on the shared row while the payload claims it was linked
+        dc.handler(action="add_configuration", name="Small")
+        _mat_table(mat_design).parentTableColumn.cell_mode = "silent"
+        res = dc.handler(action="add_material", body="Body1",
+                         materials={"Default": "Steel", "Small": "ABS Plastic"})
+        assert res["isError"] is True and "theme link did not take" in res["message"]
+
+    def test_theme_link_pointing_at_another_row_is_an_error(self, mat_design):
+        theme_col = _mat_table(mat_design).parentTableColumn
+        theme_col.cell_mode = "lies"
+        theme_col.substitute = SimpleNamespace(name="Theme 9")
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True
+        # the error names BOTH the row it landed on and the row it should have linked
+        assert "Theme 9" in res["message"] and "Theme 1" in res["message"]
+
+    def test_auto_root_column_does_not_fail_the_call(self, mat_design):
+        # adding the first non-root column also mints a root-component column: the count lands on 2
+        # after ONE add, and the call must not gate on it
+        out = _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"}))
+        assert _mat_table(mat_design).columns.count == 2
+        assert out["themes"] == 1
+
+    def test_unconfirmed_readback_is_an_error(self, mat_design):
+        # the cell silently keeps no material: reporting ok here would publish a configuration
+        # carrying the wrong material
+        _mat_table(mat_design).cell_mode = "silent"
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "could not be confirmed" in res["message"]
+
+    def test_readback_of_a_different_material_is_an_error(self, mat_design):
+        mtbl = _mat_table(mat_design)
+        mtbl.cell_mode = "lies"
+        mtbl.substitute = SimpleNamespace(name="Brass")
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True
+        assert "Brass" in res["message"] and "Steel" in res["message"]
+
+    def test_unknown_configuration_is_refused_naming_it(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials={"Nonexistent": "Steel"})
+        assert res["isError"] is True and "Nonexistent" in res["message"]
+        assert _mat_table(mat_design).columns.count == 0
+
+    def test_material_missing_from_the_design_is_refused_before_mutating(self, mat_design):
+        dc.handler(action="add_configuration", name="Small")
+        res = dc.handler(action="add_material", body="Body1",
+                         materials={"Default": "Steel", "Small": "Unobtanium"})
+        assert res["isError"] is True and "Unobtanium" in res["message"]
+        # nothing was built: a half-populated theme table is exactly what the up-front resolve prevents
+        mtbl = _mat_table(mat_design)
+        assert mtbl.columns.count == 0 and mtbl.rows.count == 0
+
+    def test_duplicate_document_material_name_is_refused(self, monkeypatch):
+        d = _Design(configured=True, bodies={"Body1": _FakeFeature("Body1")},
+                    materials=("Steel", "Steel"))
+        _install(monkeypatch, d)
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "refusing to pick one" in res["message"]
+
+    def test_empty_material_map_is_refused(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials={})
+        assert res["isError"] is True and "materials" in res["message"]
+        assert _mat_table(mat_design).columns.count == 0
+
+    def test_null_column_add_is_an_error(self, mat_design):
+        _mat_table(mat_design).add_returns_null = True
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "null" in res["message"]
 
 
 # ── add_insert: nested configuration (insert a configured part, map per assembly config) ─────

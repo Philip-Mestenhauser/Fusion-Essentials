@@ -18,7 +18,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe
+from ._common import error, iter_collection, ok, safe
 from . import _common
 from . import _inputs
 from . import _outputs
@@ -35,26 +35,17 @@ RETURNS = [
 ]
 
 
-def _iter_collection(coll):
-    """Yield each item of a Fusion count/item(i) collection (empty when the collection is absent)."""
-    n = safe(lambda: coll.count, 0) or 0
-    for i in range(n):
-        it = safe(lambda i=i: coll.item(i))
-        if it is not None:
-            yield it
-
-
 def _catalog(design):
     """Every physical material searchable, as (material, name, scope): the document's own materials
     first (scope 'document'), then each loaded material library (scope = the library name)."""
     out = []
-    for m in _iter_collection(safe(lambda: design.materials)):
+    for m in iter_collection(safe(lambda: design.materials)):
         nm = safe(lambda m=m: m.name)
         if nm:
             out.append((m, nm, "document"))
-    for lib in _iter_collection(safe(lambda: app.materialLibraries)):
+    for lib in iter_collection(safe(lambda: app.materialLibraries)):
         lib_name = safe(lambda lib=lib: lib.name) or "library"
-        for m in _iter_collection(safe(lambda lib=lib: lib.materials)):
+        for m in iter_collection(safe(lambda lib=lib: lib.materials)):
             nm = safe(lambda m=m: m.name)
             if nm:
                 out.append((m, nm, lib_name))
@@ -131,10 +122,10 @@ def handler(target: str = "", material: str = "") -> dict:
         bodies = [entity]
         desc = f"body '{safe(lambda: entity.name)}'"
     elif kind == "occurrence":
-        bodies = list(_iter_collection(safe(lambda: entity.bRepBodies)))
+        bodies = list(iter_collection(safe(lambda: entity.bRepBodies)))
         desc = f"occurrence '{safe(lambda: entity.fullPathName) or safe(lambda: entity.name)}'"
     else: # component
-        bodies = list(_iter_collection(safe(lambda: entity.bRepBodies)))
+        bodies = list(iter_collection(safe(lambda: entity.bRepBodies)))
         desc = f"component '{safe(lambda: entity.name)}'"
 
     if not bodies:

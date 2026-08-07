@@ -132,9 +132,13 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             # asymmetric two-sided revolve: 'ang' one way, 'second' the other. Use
             # setTwoSideAngleExtent, not setTwoSidesExtent .
             second_val = adsk.core.ValueInput.createByReal(math.radians(second))
-            rev_input.setTwoSideAngleExtent(angle_val, second_val)
+            if not rev_input.setTwoSideAngleExtent(angle_val, second_val):
+                return error(f"Fusion refused a two-sided revolve extent ({angle_deg} / "
+                             f"{second_angle_deg} deg), so nothing was revolved.")
         else:
-            rev_input.setAngleExtent(bool(symmetric), angle_val)
+            if not rev_input.setAngleExtent(bool(symmetric), angle_val):
+                return error(f"Fusion refused a {'symmetric ' if symmetric else ''}revolve extent "
+                             f"of {angle_deg} deg, so nothing was revolved.")
     except Exception as e:
         return error(f"Could not set revolve angle: {e}")
 
@@ -144,7 +148,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error(f"Revolve failed: {e}. (A 'cut'/'intersect' needs existing geometry to act "
     "on; the axis and profile must be coplanar.)")
     if not feature:
-        return error("Revolve returned no feature.")
+        return error(_common.no_feature_error(design, "Revolve"))
 
     body_names = []
     bodies = safe(lambda: feature.bodies)

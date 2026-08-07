@@ -48,7 +48,8 @@ _AXIS_PARAMS = {"x_factor": "xScale", "y_factor": "yScale", "z_factor": "zScale"
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
-    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
+                         absent_when="no_timeline_feature"),
     _outputs.ReturnsValue("volume_ratio", "the measured after/before volume change proving the scale took"),
 ]
 
@@ -198,50 +199,50 @@ def _moved(before, after):
     return False
 
 
-def _verify(bodies, before, after, expected):
+def _verify(body_names, before, after, expected, remedy):
     """(error_text, evidence) proving the scale actually resized the geometry.
 
     A uniform factor f multiplies a body's volume by f^3 and per-axis factors by x*y*z, so each body's
     measured ratio is held to that expectation and a mismatch is an error, never a false ok. When the
     expectation is 1.0 (a volume-preserving mix such as 2 x 0.5 x 1), volume cannot discriminate and
-    the check falls back to the geometry having moved at all."""
+    the check falls back to the geometry having moved at all.
+
+    `body_names` are captured BEFORE the mutation (a post-mutation proxy can stop answering .name).
+    `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct path
+    has no timeline feature to send the caller after."""
     ratios, total_before, total_after = [], 0.0, 0.0
     readable = 0
-    for body, b, a in zip(bodies, before, after):
+    for name, b, a in zip(body_names, before, after):
         if (b[0] is not None and a[0] is not None) or (b[1] is not None and a[1] is not None):
             readable += 1
         if b[0] is not None and a[0] is not None and b[0] > _MIN_VOLUME_CM3:
-            ratios.append((safe(lambda bd=body: bd.name) or "?", a[0] / b[0]))
+            ratios.append((name or "?", a[0] / b[0]))
             total_before += b[0]
             total_after += a[0]
     if not readable:
         return ("Scale reported success but no body's volume or bounding box could be read back, so "
-                "the result could not be verified. Re-read the bodies with model_inspect; the feature "
-                "remains in the timeline and design_delete_feature removes it."), {}
+                f"the result could not be verified. Re-read the bodies with model_inspect. {remedy}"), {}
 
     measured = {"volume_ratio": round(total_after / total_before, 6)} if total_before else {}
     if abs(expected - 1.0) > _RATIO_TOL and ratios:
         # Only the named body is known to be wrong; any other body in the call may have resized fine.
         partial = ("The other bodies in this call may have resized, so the result is PARTIAL. "
-                   if len(bodies) > 1 else "")
+                   if len(body_names) > 1 else "")
         for name, got in ratios:
             if abs(got - 1.0) <= _RATIO_TOL:
                 return (f"Scale reported success but body '{name}' is unchanged - its volume did not "
-                        f"move. {partial}The feature remains in the timeline; remove it with "
-                        "design_delete_feature."), {}
+                        f"move. {partial}{remedy}"), {}
             if abs(got - expected) > _RATIO_TOL * expected:
                 return (f"Scale reported success but body '{name}' changed volume by "
                         f"x{round(got, 6)}, not the x{round(expected, 6)} the requested factors "
-                        f"imply. {partial}The feature remains in the timeline; remove it with "
-                        "design_delete_feature."), {}
+                        f"imply. {partial}{remedy}"), {}
         measured["expected_volume_ratio"] = round(expected, 6)
         measured["scale_check"] = "volume_ratio"
         return "", measured
 
     if not any(_moved(b, a) for b, a in zip(before, after)):
         return ("Scale reported success but every body's volume and bounding box is unchanged - "
-                "nothing was resized. The feature remains in the timeline; remove it with "
-                "design_delete_feature."), {}
+                f"nothing was resized. {remedy}"), {}
     measured["scale_check"] = "geometry_changed"
     return "", measured
 
@@ -298,8 +299,10 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
     coll = adsk.core.ObjectCollection.create()
     for b in body_ents:
         coll.add(b)
-    # Pre-mutation read-back: the geometry a scale must move.
+    # Pre-mutation read-back: the geometry a scale must move, plus the NAMES - a post-mutation proxy
+    # can stop answering .name, and a payload must not publish a null for a body that resolved.
     before = [_measure(b) for b in body_ents]
+    body_names = [safe(lambda b=b: b.name) for b in body_ents]
 
     try:
         # createInput always carries the UNIFORM factor; the per-axis path seeds it with 1 and lets
@@ -318,8 +321,13 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         return error(f"Scale failed: {e}. (A parameter expression may not resolve - check it with "
                      "param_get - or the factor may collapse the geometry; try a factor closer "
                      "to 1.)")
-    if not feature:
-        return error("Scale returned no feature.")
+    # MEASURED: scaleFeatures.add returns None in a DIRECT design while the resize LANDS (volume x8
+    # for a x2 factor). The verdict below is the measured volume/bbox read-back off the BODIES, which
+    # needs no feature object - so in direct mode fall through to it. In parametric a None feature is
+    # unmeasured as a success and stays an error.
+    direct_no_feature = _common.direct_feature_absence(design, feature)
+    if not feature and not direct_no_feature:
+        return error(_common.no_feature_error(design, "Scale"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
     if safe(lambda: feature.healthState) == _HEALTH_ERROR:
@@ -337,19 +345,27 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
     # Live-verified: a BRepBody reference held across scaleFeatures.add() stays valid and reads the
     # NEW volume, so before and after measure the same objects.
     after = [_measure(b) for b in body_ents]
-    verr, measured = _verify(body_ents, before, after, expected)
+    verr, measured = _verify(body_names, before, after, expected,
+                             _common.failed_effect_remedy(design, feature))
     if verr:
         return error(verr)
 
     payload = {
         "scaled": True,
-        "feature": safe(lambda: feature.name),
-        "bodies": [safe(lambda b=b: b.name) for b in body_ents],
+        "bodies": body_names,
         "uniform": not non_uniform,
         "anchor": anchor_label,
         "note": "Bodies resized about the anchor point, which stays put. Factors are unitless: 2 "
                 "doubles every dimension and multiplies volume by 8.",
     }
+    # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
+    # against rather than a guessed one. Every other key here is measured off the BODIES, so it
+    # survives the missing feature untouched.
+    if direct_no_feature:
+        payload["no_timeline_feature"] = True
+        payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
+    else:
+        payload["feature"] = safe(lambda: feature.name)
     # An expression is echoed as written AND as the number actually applied, so the agent can see what
     # the parameter resolved to (the feature stores that number, not the expression).
     if non_uniform:
