@@ -32,6 +32,13 @@ class Group:
         object.__setattr__(self, "_frozen", set(frozen))
         object.__setattr__(self, "_clamp", dict(clamp or {}))
 
+    def __dir__(self):
+        # dir() LISTS a member whose getter raises - measured on this build's graphics group, where
+        # three members are dir()-visible and RuntimeError on read. A fake that hid its raising
+        # members would report them as names the build never had, so the presence read under test
+        # would be exercised against a shape the platform does not have.
+        return sorted(set(object.__dir__(self)) | set(self._v) | set(self._raises))
+
     def __getattr__(self, name):
         if name in self._raises:
             raise RuntimeError(f"3 : {name} is not available on this build")
@@ -238,6 +245,32 @@ class TestHonestReads:
         assert out["unreadable_count"] == 2
         assert "graphics.autoThrottleEffects" in out["unreadable"]
 
+    def test_a_member_this_build_does_not_carry_is_unknown_not_unreadable(self, monkeypatch):
+        # The two are different facts. A member that RAISES is a platform fact about this build; a
+        # member the object does not carry at all means the row asking for it is wrong. Collapsing
+        # them publishes a repo typo as "Fusion raises on this" - the exact false platform claim
+        # the census exists to prevent.
+        p = _make_prefs()
+        del p.gridPreferences._v["isLayoutGridLockEnabled"]
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        out = _payload(get.handler(include=["grid"]))
+        rec = out["preferences"]["grid"]["isLayoutGridLockEnabled"]
+        assert rec["value"] is None
+        assert rec["unknown_member"] is True and "unreadable" not in rec
+        assert out["unknown_members"] == ["grid.isLayoutGridLockEnabled"]
+        assert "unreadable" not in out           # never counted as a platform raise
+
+    def test_a_raising_member_is_unreadable_even_though_reading_it_fails(self, monkeypatch):
+        # The other side of the same split: the member IS present (dir lists it) and only the read
+        # failed, so it is unreadable. A presence read that answered "absent" for it - however it is
+        # spelled - would publish a platform member as a bad table row.
+        p = _make_prefs(raises={"grid": ("isLayoutGridLockEnabled",)})
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        out = _payload(get.handler(include=["grid"]))
+        rec = out["preferences"]["grid"]["isLayoutGridLockEnabled"]
+        assert rec["unreadable"] is True and "unknown_member" not in rec
+        assert "unknown_members" not in out
+
     def test_a_member_that_reads_none_is_not_reported_unreadable(self, monkeypatch):
         p = _make_prefs(values={"material": {"appearanceOverride": None}})
         monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
@@ -245,8 +278,63 @@ class TestHonestReads:
         assert rec["value"] is None and "unreadable" not in rec
 
     def test_object_member_is_published_by_name(self, prefs):
+        # by_name is the DECLARED shape - the .name is the reading, so the record carries no
+        # non_scalar flag; that flag marks a member the table reads as a scalar handing back an object.
         rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["defaultMaterial"]
-        assert rec["value"] == "Steel"
+        assert rec["value"] == "Steel" and "non_scalar" not in rec
+
+    def test_a_by_name_member_whose_name_is_empty_falls_back_to_its_type(self, monkeypatch):
+        # an empty name is no reading at all - publishing "" would read as a material actually
+        # called nothing.
+        class Material:
+            name = ""
+        p = _make_prefs(values={"material": {"defaultMaterial": Material()}})
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["defaultMaterial"]
+        assert rec["value"] == "Material" and rec["non_scalar"] is True
+
+    def test_an_object_valued_member_does_not_sink_the_read(self, monkeypatch):
+        # a member the table reads as a scalar can hand back an OBJECT; the whole payload is
+        # JSON-encoded in one call, so that one member would raise and take every other member's
+        # reading down with it. It is published by name and flagged instead.
+        p = _make_prefs(values={"display": {"generalPrecision": types.SimpleNamespace(name="High")}})
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        out = _payload(get.handler(include=["display"]))["preferences"]["display"]
+        assert out["generalPrecision"] == {"value": "High", "tier": get.TIER_WRITABLE,
+                                           "non_scalar": True}
+        assert out["angularPrecision"]["value"] == 0      # the rest of the group still reads
+
+    def test_a_product_item_whose_name_is_not_a_string_is_dropped(self, monkeypatch):
+        # The item name becomes a JSON object KEY and part of the '<group>.<product>.<member>'
+        # address the write resolves. json.dumps rejects a key that is not str/int/float/bool/None,
+        # so one object-valued name would sink the entire read - the same payload-sinking class the
+        # scalar guard fixes one layer up.
+        p = _make_prefs(products=("Design", "CAM"))
+        p.productPreferences._items[1]._v["name"] = types.SimpleNamespace(name="CAM")
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        out = _payload(get.handler(include=["products"]))["preferences"]["products"]
+        assert set(out) == {"Design"}
+
+    def test_a_nameless_object_member_is_published_by_its_type(self, monkeypatch):
+        class Precision:
+            pass
+        p = _make_prefs(values={"display": {"generalPrecision": Precision()}})
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        rec = _payload(get.handler(include=["display"]))["preferences"]["display"]["generalPrecision"]
+        assert rec["value"] == "Precision" and rec["non_scalar"] is True
+
+    def test_a_by_name_member_that_reports_no_name_falls_back_to_its_type(self, monkeypatch):
+        # by_name says "publish .name"; an object that has none still may not reach json.dumps.
+        class Material:
+            pass
+        p = _make_prefs(values={"material": {"defaultMaterial": Material()}})
+        monkeypatch.setattr(get, "app", types.SimpleNamespace(preferences=p))
+        rec = _payload(get.handler(include=["material"]))["preferences"]["material"]["defaultMaterial"]
+        assert rec["value"] == "Material" and rec["non_scalar"] is True
+
+    def test_a_scalar_member_is_not_flagged_non_scalar(self, prefs):
+        rec = _payload(get.handler())["preferences"]["display"]["generalPrecision"]
+        assert rec["value"] == 3 and "non_scalar" not in rec
 
     def test_no_active_preferences_is_an_error(self, monkeypatch):
         monkeypatch.setattr(get, "app", types.SimpleNamespace())
@@ -421,7 +509,10 @@ class TestWriteGuards:
 
     def test_an_integer_is_accepted_for_a_float_member(self, prefs):
         out = _payload(setp.handler(member="general.offlineCachePeriod", value=30))
-        assert out["now"] == 30.0
+        # the value LANDED on the preference, and 'now'/'previous' are the read-back around it -
+        # not an echo of the request (the equality alone passes for a write that never happened)
+        assert prefs.generalPreferences.offlineCachePeriod == 30
+        assert out["now"] == 30 and out["previous"] == 0
 
 
 class TestEnumValues:

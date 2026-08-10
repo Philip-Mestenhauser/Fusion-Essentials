@@ -18,6 +18,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -38,19 +39,6 @@ _DIRECTION = _inputs.Choice("direction", ["inside", "outside", "both"], default=
 RETURNS = [
     _outputs.ReturnsName("feature", of="shell feature"),
 ]
-
-
-def _resolve_body(comp, body_name):
-    """Resolve the body to hollow when no faces are removed. A given value (a find_geometry handle OR a
-    name) resolves through BodyRef (kind-checked solid, precise error). Empty = the most-recent body in
-    the active component. Returns (body, error)."""
-    if body_name in (None, "", []):
-        body = _common.most_recent_body(comp)
-        if not body:
-            return None, ("No body in the active component to shell. Model one first, or pass "
-                          "'remove_faces' = face handles from find_geometry.")
-        return body, None
-    return _BODY.resolve(body_name)
 
 
 def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
@@ -83,7 +71,10 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
         body = safe(lambda: faces[0].body)
         removed_faces = coll.count
     else:
-        body, berr = _resolve_body(comp, body_name)
+        body, berr = _common.resolve_body_or_recent(
+            _BODY, comp, body_name,
+            "No body in the active component to shell. Model one first, or pass 'remove_faces' = "
+            "face handles from find_geometry.")
         if berr:
             return error(berr)
         coll.add(body)
@@ -91,7 +82,7 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
 
     body_label = safe(lambda: body.name) if body else None
     # Pre-mutation read-back: shelling hollows the body, so its volume drops (and face count rises).
-    vol_before = safe(lambda: body.volume, None) if body else None
+    vol_before = _geom.signed_volume(body) if body else None
     faces_before = safe(lambda: body.faces.count, None) if body else None
 
     # isTangentChain=False so exactly the passed faces are removed (no tangent-face propagation).
@@ -110,13 +101,13 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
             design, "Shell", "(The body could not be hollowed at this thickness.)"))
 
     # Post-mutation read-back: prove the body was actually hollowed rather than trust the API's success.
-    vol_after = safe(lambda: body.volume, None) if body else None
+    vol_after = _geom.signed_volume(body) if body else None
     faces_after = safe(lambda: body.faces.count, None) if body else None
     is_solid = safe(lambda: body.isSolid, None) if body else None
 
     changed = None
     if isinstance(vol_before, (int, float)) and isinstance(vol_after, (int, float)):
-        changed = vol_after < vol_before - 1e-9
+        changed = vol_after < vol_before - _common.NO_VOLUME_CHANGE_CM3
     elif isinstance(faces_before, int) and isinstance(faces_after, int):
         changed = faces_after != faces_before
     if changed is False:
@@ -125,10 +116,7 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
                      "count identical). The thickness is likely too large for the geometry - try a "
                      "smaller value.")
 
-    result_bodies = []
-    fbodies = safe(lambda: feature.bodies)
-    for i in range(safe(lambda: fbodies.count, 0) if fbodies else 0):
-        result_bodies.append(safe(lambda i=i: fbodies.item(i).name))
+    result_bodies = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     # Observed thicknesses read back off the feature's ModelParameters (cm -> display units).
     obs_inside = safe(lambda: feature.insideThickness.value, None)

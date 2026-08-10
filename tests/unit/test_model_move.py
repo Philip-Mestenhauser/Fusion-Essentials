@@ -14,7 +14,8 @@ import adsk.fusion
 
 from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepEdge, BRepFace,
                       FakePoint, FakeBoundingBox3D, Line3D, Plane, FakeVector3D, go_stale, payload,
-                      error_message, assert_no_active_design, assert_unknown_units)
+                      error_message, assert_no_active_design, assert_unknown_units,
+                      _NamedCollection)
 
 mm = load_tool("model_move")
 
@@ -173,6 +174,172 @@ def _points(monkeypatch, start=(0.0, 0.0, 0.0), end=(4.0, 0.0, 0.0), rides=None)
     monkeypatch.setattr(mm._TO, "resolve", lambda raw: (second, None))
     return first, second
 
+
+
+# -- a body in a SUB-COMPONENT: the move hosts there, and the axis is proxied ------------------
+#
+# MEASURED: a move on a sub-component body needs BOTH - hosting the feature on the active component
+# raises "object is not in the assembly context of this component" at add(), and a native origin
+# axis on the owning component raises "3 : Invalid entity" at defineAs. The occurrence the axis is
+# proxied into comes from _inputs.single_placement, so a component placed SEVERAL times is refused
+# naming each path instead of resolving to its first instance.
+
+def _sub_component(name="Rail", bodies=(), feats=None):
+    """A sub-component carrying its OWN moveFeatures collection and origin axes - what _host_for
+    has to route to when the moved body lives there."""
+    comp = MakeComp(name=name, bodies=list(bodies))
+    comp.entityToken = "TOKEN:" + name
+    comp.features = types.SimpleNamespace(
+        moveFeatures=feats if feats is not None else FakeMoveFeatures(bodies))
+    comp.xConstructionAxis, comp.yConstructionAxis, comp.zConstructionAxis = (
+        _X_AXIS, _Y_AXIS, _Z_AXIS)
+    return comp
+
+
+class _Proxyable:
+    """An origin ConstructionAxis that answers createForAssemblyContext, recording which occurrence
+    it was lifted into - the read that proves the axis reached the feature in the moved body's
+    assembly context rather than natively."""
+    def __init__(self):
+        self.proxied_into = []
+
+    def createForAssemblyContext(self, occurrence):
+        self.proxied_into.append(occurrence.fullPathName)
+        return ("PROXY", occurrence.fullPathName)
+
+
+def _wire_sub(monkeypatch, sub, *placements):
+    """A root design in which `sub` is placed under the given occurrence fullPathNames."""
+    root = MakeComp(name="Root")
+    root.entityToken = "TOKEN:Root"
+    root.features = types.SimpleNamespace(moveFeatures=FakeMoveFeatures())
+    occs = [types.SimpleNamespace(fullPathName=p) for p in placements]
+    root.allOccurrencesByComponent = lambda comp: _NamedCollection(occs)
+    design = make_design(comp=root)
+    install(mm, design)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)
+    monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: _VI(value=v)))
+    return design
+
+
+class TestSubComponentHosting:
+    def test_the_move_is_hosted_on_the_bodys_own_component_and_the_axis_is_proxied(self, monkeypatch):
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        axis = _Proxyable()
+        sub.xConstructionAxis = axis
+        _wire_sub(monkeypatch, sub, "Assy:1+Rail:1")
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30))
+        assert sub_feats.added == 1                      # the SUB-component built the feature
+        assert axis.proxied_into == ["Assy:1+Rail:1"]    # into the one occurrence that places it
+        assert sub_feats.last_input.definition[1] == ("PROXY", "Assy:1+Rail:1")
+        assert out["moved"] is True
+
+    def test_a_component_placed_twice_is_refused_naming_each_path(self, monkeypatch):
+        # the first-match pick this replaces would have proxied the axis into Rail:1 and aimed the
+        # move somewhere the caller never asked for, with the displacement check still passing
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        _wire_sub(monkeypatch, sub, "Assy:1+Rail:1", "Assy:1+Rail:2")
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        res = mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30)
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "placed 2 times" in msg
+        assert "Assy:1+Rail:1" in msg and "Assy:1+Rail:2" in msg
+        assert sub_feats.added == 0                      # refused before any feature transaction
+
+    def test_an_unplaced_sub_component_is_refused(self, monkeypatch):
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        _wire_sub(monkeypatch, sub)                       # no occurrences at all
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        res = mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30)
+        assert res["isError"] is True
+        assert "not placed in the assembly" in error_message(res)
+        assert sub_feats.added == 0
+
+    def test_a_body_that_is_already_a_proxy_uses_its_own_context(self, monkeypatch):
+        # a proxy body names its instance already, so no placement lookup runs - and a component
+        # placed twice must NOT be refused on a reference that is unambiguous
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        body.assemblyContext = types.SimpleNamespace(fullPathName="Assy:1+Rail:2")
+        axis = _Proxyable()
+        sub.xConstructionAxis = axis
+        _wire_sub(monkeypatch, sub, "Assy:1+Rail:1", "Assy:1+Rail:2")
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30))
+        assert axis.proxied_into == ["Assy:1+Rail:2"]
+        assert out["moved"] is True
+
+
+# -- an axis HANDLE native to another component takes the same lift the body took ---------------
+
+def _foreign_edge(owner, token="e9"):
+    """A straight edge whose BODY belongs to `owner` and which is NOT already a proxy."""
+    edge = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(10, 0, 0)), entity_token=token)
+    edge.assemblyContext = None
+    edge.body = types.SimpleNamespace(parentComponent=owner)
+    return edge
+
+
+class TestForeignAxisHandle:
+    def _root_design(self, monkeypatch, body, edge, owner, *placements):
+        root = MakeComp(name="Root", bodies=[body])
+        root.entityToken = "TOKEN:Root"
+        feats = FakeMoveFeatures([body])
+        root.features = types.SimpleNamespace(moveFeatures=feats)
+        occs = [types.SimpleNamespace(fullPathName=p) for p in placements]
+        root.allOccurrencesByComponent = lambda comp: _NamedCollection(occs)
+        design = make_design(comp=root, tokens={"e9": edge})
+        install(mm, design)
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
+        monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
+        monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)
+        monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
+        monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
+                            staticmethod(lambda v: _VI(value=v)))
+        return feats
+
+    def test_a_native_foreign_axis_handle_is_proxied_into_its_one_occurrence(self, monkeypatch):
+        # the entity a move consumes has to be reachable in the hosting component's context,
+        # whichever input it arrived on - handing the NATIVE edge through is the measured
+        # "3 : Invalid entity" at defineAs
+        body, owner = _body("Block"), MakeComp(name="Rail")
+        owner.entityToken = "TOKEN:Rail"
+        edge = _foreign_edge(owner)
+        proxy = object()
+        edge.createForAssemblyContext = lambda occ, p=proxy: p
+        feats = self._root_design(monkeypatch, body, edge, owner, "Assy:1+Rail:1")
+        out = payload(mm.handler(mode="along_entity", bodies=["Block"], axis="e9", distance=30))
+        assert feats.last_input.definition[1] is proxy
+        assert out["moved"] is True
+
+    def test_a_foreign_axis_handle_from_a_twice_placed_component_is_refused(self, monkeypatch):
+        body, owner = _body("Block"), MakeComp(name="Rail")
+        owner.entityToken = "TOKEN:Rail"
+        edge = _foreign_edge(owner)
+        edge.createForAssemblyContext = lambda occ: object()
+        feats = self._root_design(monkeypatch, body, edge, owner,
+                                  "Assy:1+Rail:1", "Assy:1+Rail:2")
+        res = mm.handler(mode="along_entity", bodies=["Block"], axis="e9", distance=30)
+        assert res["isError"] is True
+        msg = error_message(res)
+        assert "placed 2 times" in msg and "Assy:1+Rail:2" in msg
+        assert feats.added == 0
 
 
 class TestSelection:
@@ -488,20 +655,20 @@ class TestExpectedMagnitude:
         _wire(monkeypatch, [body], FakeMoveFeatures([body], shift=(7.0, 0.0, 0.0)))
         res = mm.handler(bodies=["Block"], dx=30, units="mm")
         assert res["isError"] is True
-        assert "not the 3.0 cm requested" in res["message"]
+        assert "not the 30.0 mm requested" in res["message"]
 
     def test_along_entity_checks_its_distance(self, monkeypatch):
         body = _body()
         _wire(monkeypatch, [body], FakeMoveFeatures([body], shift=(0.25, 0.0, 0.0)))
         res = mm.handler(mode="along_entity", bodies=["Block"], axis="x", distance=10, units="mm")
-        assert res["isError"] is True and "not the 1.0 cm requested" in res["message"]
+        assert res["isError"] is True and "not the 10.0 mm requested" in res["message"]
 
     def test_point_to_point_checks_the_vertex_separation(self, monkeypatch):
         body = _body()
         _wire(monkeypatch, [body], FakeMoveFeatures([body], shift=(1.0, 0.0, 0.0)))
         _points(monkeypatch, start=(0.0, 0.0, 0.0), end=(4.0, 0.0, 0.0))
         res = mm.handler(mode="point_to_point", bodies=["Block"], from_point="v1", to_point="v2")
-        assert res["isError"] is True and "not the 4.0 cm requested" in res["message"]
+        assert res["isError"] is True and "not the 40.0 mm requested" in res["message"]
 
     def test_a_rotation_has_no_expected_magnitude_to_check(self, monkeypatch):
         body = _body(vertices=[(0.0, 0.0, 0.0)])
@@ -547,7 +714,7 @@ class TestMoveToleranceIsPinned:
         over = 3.0 + mm._MOVE_TOL_CM * 2
         _wire(monkeypatch, [body], FakeMoveFeatures([body], shift=(over, 0.0, 0.0)))
         res = mm.handler(bodies=["Block"], dx=30, units="mm")
-        assert res["isError"] is True and "not the 3.0 cm requested" in res["message"]
+        assert res["isError"] is True and "not the 30.0 mm requested" in res["message"]
 
     def test_a_miss_just_under_the_tolerance_passes(self, monkeypatch):
         body = _body()

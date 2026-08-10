@@ -180,7 +180,10 @@ def _resolve_base_feature(design, comp, name):
     if root is not None and not _common.same_component(root, comp):
         candidates.append(root)
     for c in _common.all_components(design):
-        if c is not None and c not in candidates:
+        # same_component, not `in`: `in` compares with ==, which on a component wrapper falls back
+        # to identity - and component wrappers are measured never identity-stable, so the dedupe
+        # would never fire and the same component would be searched twice.
+        if c is not None and not any(_common.same_component(c, k) for k in candidates):
             candidates.append(c)
     for c in candidates:
         bf = safe(lambda c=c: c.features.baseFeatures.itemByName(nm))
@@ -378,10 +381,8 @@ def activate_component_handler(occurrence: str = "") -> dict:
 def _active_occurrence(design):
     """The currently active-edit occurrence, if any (isActive == True). None if root is active."""
     root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrences) if root else None
-    for i in range(safe(lambda: occs.count, 0) if occs else 0):
-        o = safe(lambda i=i: occs.item(i))
-        if o is not None and safe(lambda o=o: o.isActive, False):
+    for o in _common.iter_collection(safe(lambda: root.allOccurrences) if root else None):
+        if safe(lambda o=o: o.isActive, False):
             return o
     return None
 

@@ -150,10 +150,44 @@ class TestCreate:
         assert len(rig.notes.input.segments) == 2      # symbol + text landed on the input
 
     def test_low_input_extension_is_pinned_to_the_default(self, rig):
-        rig.notes.input.leaderLineExtension = 0.13     # below the platform edit floor
+        rig.notes.input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR / 2   # under the floor
         rig.stub_geometry([_face(rig.comp)])
         _payload(pc.handler(kind="note", geometry=["a"], text="X"))
         assert rig.notes.input.leaderLineExtension == pc._pmi.LEADER_EXT_DEFAULT
+
+    def test_an_input_at_or_above_the_floor_is_left_alone(self, rig):
+        rig.notes.input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR
+        rig.stub_geometry([_face(rig.comp)])
+        _payload(pc.handler(kind="note", geometry=["a"], text="X"))
+        assert rig.notes.input.leaderLineExtension == pc._pmi.LEADER_EXT_FLOOR
+
+    def test_an_explicit_leader_extension_is_written_once_and_never_pre_pinned(self, rig):
+        # The pin exists for the case the caller said nothing. When leader_extension IS given, the
+        # caller's value is the only write - pinning first would put the default on the input for
+        # a moment and make the payload's provenance a guess.
+        writes = []
+
+        class _Recording:
+            segments = None
+
+            def __setattr__(self, key, value):
+                if key == "leaderLineExtension":
+                    writes.append(value)
+                object.__setattr__(self, key, value)
+
+        rec = _Recording()
+        object.__setattr__(rec, "leaderLineExtension", pc._pmi.LEADER_EXT_FLOOR / 2)
+        rig.notes.input = rec
+        rig.stub_geometry([_face(rig.comp)])
+        _payload(pc.handler(kind="note", geometry=["a"], text="X",
+                            leader_extension=8, units="mm"))          # 8 mm = 0.8 cm
+        assert writes == [pytest.approx(0.8)]
+
+    def test_an_explicit_extension_under_the_floor_is_refused_not_silently_pinned(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X",
+                                       leader_extension=1, units="mm"))   # 1 mm < 2.5 mm
+        assert "floor" in msg and rig.notes.added is None
 
     def test_null_add_is_an_error(self, rig):
         rig.notes.add = lambda note_input: None
@@ -184,6 +218,47 @@ class TestCreate:
         rig.stub_geometry([_face(rig.comp)])
         out = _payload(pc.handler(kind="note", geometry=["a"], text="X", name="MyNote"))
         assert out["annotation"] == "MyNote" and "rename_warning" not in out
+
+    def test_a_declined_set_annotation_plane_is_an_error_not_a_created_note(self, rig):
+        # setAnnotationPlane returns a bool; a False that is not gated leaves the note on the
+        # PLATFORM's plane while the tool reports the requested one.
+        rig.notes.input.setAnnotationPlane = lambda *a: False
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X", plane="xy"))
+        assert "declined" in msg and "xy" in msg
+        assert rig.notes.added is None                 # nothing was added
+
+    def test_a_raising_set_annotation_plane_names_the_plane_and_the_cause(self, rig):
+        def boom(*a):
+            raise RuntimeError("needs an adjacent face")
+        rig.notes.input.setAnnotationPlane = boom
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X", plane="face"))
+        assert "setAnnotationPlane(face) failed" in msg and "adjacent face" in msg
+
+    def test_an_accepted_plane_reaches_the_input_with_the_mapped_member(self, rig):
+        seen = []
+        rig.notes.input.setAnnotationPlane = lambda *a: (seen.append(a), True)[1]
+        rig.stub_geometry([_face(rig.comp)])
+        _payload(pc.handler(kind="note", geometry=["a"], text="X", plane="xy"))
+        import adsk.fusion
+        assert seen == [(adsk.fusion.LeaderLineNotePlaneTypes.PrincipalXYLeaderLineNotePlaneType,)]
+
+    def test_a_hole_note_display_spec_goes_through_the_shared_writer(self, rig, monkeypatch):
+        # pmi_create and pmi_edit run the SAME display writer - a second copy here is what drifts.
+        seen = []
+        rig.stub_geometry([_face(rig.comp)])
+        monkeypatch.setattr(pc._pmi, "apply_display",
+                            lambda obj, spec: seen.append((obj, spec)))
+        _payload(pc.handler(kind="hole_note", geometry=["a"],
+                            display={"precision": 2, "secondary": {"precision": 4}}))
+        assert seen == [(rig.hole_ann, {"precision": 2, "secondary": {"precision": 4}})]
+
+    def test_a_display_refusal_reports_the_annotation_as_created(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        msg = error_message(pc.handler(kind="hole_note", geometry=["a"],
+                                       display={"units": "furlong"}))
+        assert "must be one of" in msg and "WAS created" in msg
 
     def test_bad_text_point_reports_but_names_the_created_annotation(self, rig):
         rig.stub_geometry([_face(rig.comp)])

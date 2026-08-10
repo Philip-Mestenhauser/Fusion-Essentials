@@ -10,6 +10,7 @@ that edits, drives, or links an existing joint resolves through.
 import adsk.core
 import adsk.fusion
 
+from . import _common
 from ._common import safe
 
 
@@ -41,14 +42,19 @@ MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_mo
              "all_joint_origins (the ONE JointOrigin walk) / find_joint_origins_by_name / "
              "jo_assembly_proxy (the JO leaf ops resolve-one/collect-names/read-axes sit on) + "
              "motion_param_names/OFFSET_PARAM_NOTE (the joint's own offset/angle dNN read + the one "
-             "offset-is-frame-Z wire sentence every joint payload appends)")
+             "offset-is-frame-Z wire sentence every joint payload appends) + "
+             "pending_position/pending_move_guard/PENDING_MOVE_REFUSAL (the ONE moved-but-uncaptured "
+             "position read - Design.snapshots.hasPendingSnapshot as True/False/None - and the "
+             "refusal every joint CREATE returns while it is set, since the create's recompute "
+             "silently reverts the uncaptured pose and freezes the reverted one)")
 
 
 def motion_param_names(joint):
     """The joint's OWN ModelParameter names: {'offset': dNN, 'angle': dNN}, absent ones omitted.
     Joint.offset moves the anchor along the joint frame's TERTIARY (Z) axis (the API's own docstring;
     live-verified) - it is the ONLY parametric position drive a joint has. A slider's slide VALUE has
-    no ModelParameter at all, even after joint_drive poses it (live-verified)."""
+    no ModelParameter at all, even after joint_drive poses it (live-verified), so a slider whose
+    TRAVEL must be parametric is driven by the geometry its anchor sits on, not by a joint param."""
     out = {}
     for key in ("offset", "angle"):
         nm = safe(lambda k=key: getattr(joint, k).name)
@@ -63,7 +69,50 @@ OFFSET_PARAM_NOTE = (
     " model_parameters are the joint's own dNN params: param_set 'offset' to an expression for a "
     "PARAMETRIC position - it ALWAYS moves along the joint FRAME'S Z axis, not the motion axis, and "
     "neither 'flip' (which does not invert its sign) nor 'world_axis' redirects it. A slider's slide "
-    "VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute).")
+    "VALUE has no parameter (joint_drive poses it; driven poses do not survive recompute), so "
+    "parametric TRAVEL comes from co-driving the geometry the joint anchors on - there is no slide "
+    "parameter to set.")
+
+
+# The design-wide moved-but-uncaptured position flag, and the refusal a joint CREATE returns while it
+# is set. Home for both: every joint-creation tool and assembly_capture_position read the same flag,
+# and a second copy is how one of them keeps creating through a pending move after the other stops.
+
+def pending_position(design):
+    """Whether the design carries a moved-but-uncaptured occurrence position
+    (Design.snapshots.hasPendingSnapshot) as True / False / None - None when the flag cannot be read
+    at all (a design exposing no snapshots surface), which is NOT evidence either way.
+
+    A free move (assembly_move) and a joint_drive pose both set this same flag; assembly_capture_position
+    records the pose into the timeline, discards it, or reports the flag. A design_add_instance
+    PLACEMENT does not set it (measured: the flag still reads false after a placed instance, and a
+    capture there refuses with "Nothing to capture")."""
+    return _common.read_flag(lambda: design.snapshots.hasPendingSnapshot)
+
+
+PENDING_MOVE_REFUSAL = (
+    "Uncaptured occurrence moves exist and this joint creation would silently revert them - "
+    "assembly_capture_position(action='capture') first to record the current pose into the timeline, "
+    "or assembly_capture_position(action='discard_pending') to throw the move away deliberately. The "
+    "flag is design-wide, so it does not name the moved occurrences; "
+    "assembly_capture_position(action='status') reports it and lists the captured markers.")
+
+
+def pending_move_guard(design):
+    """The refusal a joint CREATE returns while an uncaptured move is pending, else None.
+
+    Creating a joint recomputes the assembly, and a recompute REVERTS an uncaptured position - the
+    parts snap back to their last captured (or joint-defined) pose and the new joint freezes THAT
+    pose, not the one the caller placed. Refusing beats creating a joint at a position the caller
+    never asked for. Only a flag that reads True refuses: an unreadable flag (None) is not evidence
+    a move is pending, so it never blocks the create.
+
+    Two measured facts bound what this refuses, and both are what keeps an automated
+    move-then-joint sequence from deadlocking on it: driving a joint BACK to 0 clears the flag
+    (joint_drive to 30 sets it, joint_drive to 0 clears it), so a sequence that restores its drives
+    before creating a joint never meets this guard; and a design_add_instance placement never sets
+    the flag at all, so placing instances then jointing them is likewise unaffected."""
+    return _common.error(PENDING_MOVE_REFUSAL) if pending_position(design) is True else None
 
 # axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
 # passing a custom_entity to apply_motion instead).
@@ -80,6 +129,88 @@ def _non_planar_face_geometry(entity, keypoint):
     except Exception as e:
         return None, f"createByNonPlanarFace failed: {e}"
     return g, None if g else "createByNonPlanarFace failed"
+
+
+# Two keypoints agreeing to this in cm are the same point - the trap below misses by whole
+# centimetres, so the band only absorbs float noise.
+_KEYPOINT_TOL_CM = 1e-4
+
+
+def _xyz(pt):
+    """(x, y, z) off a Point3D, or None when any component is unreadable."""
+    if pt is None:
+        return None
+    vals = (safe(lambda: pt.x), safe(lambda: pt.y), safe(lambda: pt.z))
+    return None if any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in vals) else vals
+
+
+def _fmt_point(xyz):
+    """A published coordinate - the caller labels the FRAME it is in. Rounded to 4dp (a micron in
+    cm) so a float artefact never reads as a real offset."""
+    return "(%.4f, %.4f, %.4f)" % xyz
+
+
+def _world_placement(entity):
+    """The Matrix3D taking `entity`'s surface geometry from its component frame into WORLD, or None
+    when that cannot be established.
+
+    A face reached through an assembly proxy carries its occurrence in assemblyContext, and that
+    occurrence's transform2 IS the component-to-world matrix (transform is the LOCAL one and composes
+    no parent). A NATIVE face carries no context: its geometry is already world only when it belongs
+    to the ROOT component. A native face in a placed sub-component has a world placement this cannot
+    resolve without picking among that component's occurrences, so it answers None - and the caller
+    then makes NO judgement rather than a wrong one."""
+    occ = safe(lambda: entity.assemblyContext)
+    if occ is not None:
+        return safe(lambda: occ.transform2)
+    comp = safe(lambda: entity.body.parentComponent)
+    root = safe(lambda: _common.design().rootComponent)
+    if comp is not None and root is not None and _common.same_component(comp, root):
+        return safe(lambda: adsk.core.Matrix3D.create())      # the root frame IS world
+    return None
+
+
+def _world_torus_centre(entity):
+    """The torus face's own centre in WORLD coordinates, or None when it cannot be established.
+
+    Surface geometry is component-LOCAL, so the centre must be lifted through the entity's placement
+    before it can be compared against a keypoint that is measured world-framed."""
+    m = _world_placement(entity)
+    local = safe(lambda: entity.geometry.origin)
+    if m is None or local is None:
+        return None
+    moved = safe(lambda: local.copy())
+    if moved is None or not safe(lambda: moved.transformBy(m)):
+        return None
+    return _xyz(moved)
+
+
+def _torus_keypoint_error(g, entity):
+    """Error text when a TORUS CenterKeyPoint does not describe the torus face, else None.
+
+    Measured rule for createByNonPlanarFace(torus_face, CenterKeyPoint), across three rigs:
+      - a PARAMETRIC torus returns the true centre, world-framed, from a native face or a proxy;
+      - a torus inside a BASE FEATURE returns the OWNING COMPONENT'S ORIGIN, world-framed, whatever
+        the torus centre is - (0,0,0) for a root-component body, the child's world origin for a
+        placed one. Nothing raises, so the returned origin is the only signal there is.
+    The component origin is right only when the torus happens to be centred on it.
+
+    So the discriminating comparison is the keypoint against the torus's own centre lifted into the
+    SAME world frame. A world-origin signature alone would catch only root-component bodies and pass
+    a placed one's plausible-but-wrong point silently; comparing against the raw component-LOCAL
+    centre would false-refuse every placed assembly. Either side unestablished -> no judgement."""
+    kp = _xyz(safe(lambda: g.origin))
+    centre = _world_torus_centre(entity)
+    if kp is None or centre is None:
+        return None
+    if max(abs(a - b) for a, b in zip(kp, centre)) <= _KEYPOINT_TOL_CM:
+        return None
+    return (f"This torus face's joint keypoint came back as {_fmt_point(kp)} cm in WORLD space, but "
+            f"the torus face is centred at {_fmt_point(centre)} cm in WORLD space - the keypoint "
+            "does not describe the face. A torus face inside a BASE FEATURE returns its owning "
+            "COMPONENT'S ORIGIN from this call with no error, so the joint would be anchored there "
+            "instead. Pick a circular EDGE or a planar face on this body, or rebuild the torus "
+            "parametrically (model_revolve).")
 
 
 def build_joint_geometry(entity, edge_keypoint=None):
@@ -106,6 +237,10 @@ def build_joint_geometry(entity, edge_keypoint=None):
                        adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face@center"}
         if st in centre_only:
             g, err = _non_planar_face_geometry(entity, KP.CenterKeyPoint)
+            if err is None and st == adsk.core.SurfaceTypes.TorusSurfaceType:
+                err = _torus_keypoint_error(g, entity)
+                if err:
+                    g = None
             return g, centre_only[st], err
         g, err = _non_planar_face_geometry(entity, KP.MiddleKeyPoint)
         return g, "nonplanar_face@middle", err

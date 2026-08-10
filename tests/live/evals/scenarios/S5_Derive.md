@@ -9,8 +9,8 @@ fixture: the S4 artifact P4-Gimbal (verified BY URN) OPENED by the orchestrator 
   (per-run subfolders + legacy chains), so a by-name search picks the wrong lineage. Missing
   fixture = ask - never create a project.
 budget:
-  max_tool_calls: 63
-  max_tokens: 68000
+  max_tool_calls: 72
+  max_tokens: 76000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -48,7 +48,10 @@ between frame and inner ring):
   else from the source may land: the machining model is the ring ALONE.
 - Confirm what you received: the derived geometry is real, linked, CURRENT against its source,
   and exactly the one component (fresh reads, not assumption).
-- Build the machining-prep layer ON the derived body:
+- Build the machining-prep layer ON the derived body (one element of it: a DATUM PLANE that
+  sits PART-WAY ALONG one of the ring's circular edges - anchored to the edge itself at a
+  fraction of its length, not at a coordinate you typed - so it rides the edge if the ring
+  resizes; report the fraction you chose and the plane's read-back position):
   - DETAIL FEATURES on the derived body itself: at least EXTERNAL FILLETS on outer edges you
     choose (report the edges and the radius) - a derive is locally editable, and the point is
     that these edits live HERE while the source stays authoritative,
@@ -73,6 +76,8 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   platform behavior - report the read honestly, it is diagnostic, not pass/fail).
 - the detail features exist ON the derived body: fresh reads show the fillet feature (its edge
   count and the radius you declared) and the body's volume changed from your pre-fillet read.
+- the along-edge datum plane exists, anchored to the edge at your stated fraction (a fresh
+  construction read reports it; a plane placed at a bare coordinate fails the anchored clause).
 - the prep layer exists: a patch surface per cross-hole opening (report the patch body count
   and which opening each caps; a fresh read shows the central bore still OPEN), offset
   surfaces (>= 2, with the zero and nonzero offsets you declared), the boundary sketch, and

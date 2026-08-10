@@ -24,20 +24,10 @@ RETURNS = [
     _outputs.ReturnsValue("document_modified", "whether the document reads modified after the call"),
 ]
 
-# strategy key -> the DimensionStrategyTypes member name; datum key -> the DatumPositionsTypes member
-# name. Both families live in adsk.drawing, which the measured-enum harness does not seed, so every
-# member is resolved by NAME through getattr at call time and a name this Fusion version does not
+# datum key -> the DatumPositionsTypes member name (the strategy table is the shared
+# _drawing_common.DIMENSION_STRATEGIES, the same one the creation-time generator offers). Every
+# member is read by NAME through _drawing_common.enum_value, and a name this Fusion version does not
 # define is refused (set_verified) instead of silently running the default strategy.
-_STRATEGY_MEMBERS = {
-    "overall": "OverallDimensionStrategyType",
-    "automatic": "AutomaticDimensionStrategyType",
-    "baseline": "BaselineDimensionStrategyType",
-    "chain": "ChainDimensionStrategyType",
-    "ordinate": "OrdinateDimensionStrategyType",
-    "symmetric": "SymmetricDimensionStrategyType",
-    "symmetric_with_baseline": "SymmetricWithBaselineDimensionStrategyType",
-    "symmetric_with_ordinate": "SymmetricWithOrdinateDimensionStrategyType",
-}
 _DATUM_MEMBERS = {
     "bottom_left": "BottomLeftDatumPositionType",
     "bottom_right": "BottomRightDatumPositionType",
@@ -45,7 +35,8 @@ _DATUM_MEMBERS = {
     "top_right": "TopRightDatumPositionType",
 }
 
-_STRATEGY = _inputs.Choice("strategy", list(_STRATEGY_MEMBERS), default="baseline",
+_STRATEGY = _inputs.Choice("strategy", list(_drawing_common.DIMENSION_STRATEGIES),
+                           default="baseline",
                            description="Placement strategy.")
 _DATUM = _inputs.Choice("datum", list(_DATUM_MEMBERS), default="bottom_left",
                         description="Corner dimensions measure from.")
@@ -105,13 +96,14 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
 
     serr = _common.set_verified(
         inp, "dimensionStrategy",
-        safe(lambda: getattr(adsk.drawing.DimensionStrategyTypes, _STRATEGY_MEMBERS[strat_key])),
+        _drawing_common.enum_value("DimensionStrategyTypes",
+                                   _drawing_common.DIMENSION_STRATEGIES[strat_key]),
         f"strategy='{strat_key}'", "AutoDimensionInput")
     if serr:
         return error(serr)
     serr = _common.set_verified(
         inp, "datumLocation",
-        safe(lambda: getattr(adsk.drawing.DatumPositionsTypes, _DATUM_MEMBERS[datum_key])),
+        _drawing_common.enum_value("DatumPositionsTypes", _DATUM_MEMBERS[datum_key]),
         f"datum='{datum_key}'", "AutoDimensionInput")
     if serr:
         return error(serr)

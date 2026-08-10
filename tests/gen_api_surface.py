@@ -29,7 +29,22 @@ _BINDING_GLOBS = (
                        "Fusion 360.app/Contents/Api/Python/packages/adsk"),
 )
 
-_MODULES = ("core", "fusion", "cam")
+_MODULES = ("core", "fusion", "cam", "drawing")
+
+# Classes kept BESIDE the factory-return set below. A create* factory hands back an input object,
+# which is how most classes earn their row; a COLLECTION (its createInput/add/itemsByEntities
+# contract) and a LEAF record reached only by walking one are never returned by a create* method,
+# so nothing else pulls them in. Named here they get the same real-member list, which is what a
+# test fake impersonating them is checked against.
+_EXTRA_CLASSES = (
+    "fusion.PMIAnnotations",
+    "fusion.PMILeaderLineNotes",
+    "fusion.PMIHoleThreadNotes",
+    "fusion.PMIDatumReference",
+    "fusion.PMIDatumModifier",
+    "fusion.PMIDatumTarget",
+    "fusion.PMIRoughness",
+)
 
 
 def find_bindings():
@@ -58,7 +73,7 @@ def _return_class(node):
     if not isinstance(ann, ast.Constant) or not isinstance(ann.value, str):
         return None
     text = ann.value.replace("*", "").strip()
-    m = re.match(r"^adsk\.(core|fusion|cam)\.(\w+)$", text)
+    m = re.match(r"^adsk\.(core|fusion|cam|drawing)\.(\w+)$", text)
     return f"{m.group(1)}.{m.group(2)}" if m else None
 
 
@@ -123,7 +138,10 @@ def build():
     # here cannot open a silent hole. Keeping all 1,670 classes would be a half-megabyte of churn
     # on every Fusion update for no extra coverage.
     factories = {k: v for k, v in factories.items() if k.rsplit(".", 1)[1].startswith("create")}
-    keep = set(factories.values())
+    keep = set(factories.values()) | set(_EXTRA_CLASSES)
+    missing = [c for c in _EXTRA_CLASSES if c not in properties]
+    if missing:
+        raise SystemExit(f"_EXTRA_CLASSES names classes the bindings do not define: {missing}")
     properties = {k: v for k, v in properties.items() if k in keep}
     # A name that returns something OTHER than bool anywhere in the API is ambiguous at a call site
     # (Features.add returns a feature; ObjectCollection.add returns bool), and this lint only ever

@@ -3,6 +3,7 @@ imported annotation refuses text edits, and the below-floor leader extension is 
 a segment edit."""
 
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,16 @@ def _payload(result):
 
 
 class _FakeAnn:
+    """leaderLineExtension starts at _pmi.LEADER_EXT_DEFAULT rather than a literal: the floor the
+    tools refuse below is a tool constant, and the platform value behind it is UNMEASURED on this
+    build (PMI authoring is extension-gated), so a hand-typed number here would encode a fact
+    nothing measured.
+
+    markUpToDate() returning True AND clearing isOutOfDate is this fake's own contract, not a
+    measured one - probe P5 settles what the platform method actually returns and whether the flag
+    clears. The handler gates on BOTH the bool and the re-read, so it is correct against either
+    answer; what is unproven is only that this fake resembles the platform."""
+
     def __init__(self, name="Note1", suffix="PMILeaderLineNote", out_of_date=False):
         self.name = name
         self.objectType = "adsk::fusion::" + suffix
@@ -27,7 +38,8 @@ class _FakeAnn:
         self.isSuppressed = False
         self.errorOrWarningMessage = ""
         self.isLightBulbOn = True
-        self.leaderLineExtension = 0.5
+        self.leaderLineExtension = pe._pmi.LEADER_EXT_DEFAULT
+        self.isPerpendicularLine = False
         self.segments = None
 
     def markUpToDate(self):
@@ -56,7 +68,7 @@ class TestSetText:
         assert "read-only" in msg and "convert_imported" in msg
 
     def test_below_floor_extension_is_normalized_first(self, rig):
-        rig.ann.leaderLineExtension = 0.13
+        rig.ann.leaderLineExtension = pe._pmi.LEADER_EXT_FLOOR / 2
         _payload(pe.handler(action="set_text", annotation="Note1", text="X"))
         assert rig.ann.leaderLineExtension == pe._pmi.LEADER_EXT_DEFAULT
 
@@ -177,25 +189,40 @@ class TestNewActions:
         out = _payload(pe.handler(action="suppress", annotation="Note1"))
         assert out["suppressed"] is True and tl.isSuppressed is True
 
-    def test_unsuppress_reaches_a_suppressed_pmi_through_the_timeline(self, rig):
-        # suppressed PMI leaves the collections; only the suppressed timeline feature's name
-        # survives - unsuppress flips it and verifies the annotation reappears.
-        item = SimpleNamespace(isSuppressed=True)
-        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
-        rig.monkeypatch.setattr(
-            pe._pmi, "find_annotation",
-            lambda d, n, c="": ((None, None, "No PMI named 'Note1'.") if item.isSuppressed
-                                else (rig.ann, rig.comp, None)))
-        out = _payload(pe.handler(action="unsuppress", annotation="Note1"))
-        assert out["suppressed"] is False and item.isSuppressed is False
-
-    def test_unsuppress_rolls_back_a_wrong_same_named_feature(self, rig):
+    def _suppressed(self, rig, hits_after):
+        """A suppressed timeline feature named Note1; `hits_after` is what the PMI collections
+        report once the feature is unsuppressed."""
         item = SimpleNamespace(isSuppressed=True)
         rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",
                                 lambda d, n, c="": (None, None, "No PMI named 'Note1'."))
+        rig.monkeypatch.setattr(
+            pe._pmi, "annotation_hits",
+            lambda d, n, c="": (([] if item.isSuppressed else list(hits_after)), []))
+        return item
+
+    def test_unsuppress_reaches_a_suppressed_pmi_through_the_timeline(self, rig):
+        # suppressed PMI leaves the collections; only the suppressed timeline feature's name
+        # survives - unsuppress flips it and verifies the annotation reappears.
+        item = self._suppressed(rig, [(rig.ann, rig.comp)])
+        out = _payload(pe.handler(action="unsuppress", annotation="Note1"))
+        assert out["suppressed"] is False and item.isSuppressed is False
+
+    def test_unsuppress_rolls_back_a_wrong_same_named_feature(self, rig):
+        item = self._suppressed(rig, [])
         msg = error_message(pe.handler(action="unsuppress", annotation="Note1"))
         assert "not a PMI" in msg and item.isSuppressed is True
+
+    def test_unsuppress_does_not_re_suppress_a_pmi_that_came_back_ambiguously(self, rig):
+        # The PMI DID reappear - in two components. That is the opposite of "no PMI reappeared",
+        # so it must not be reported as a non-PMI feature and must not be flipped back off.
+        other = SimpleNamespace(name="Sub")
+        item = self._suppressed(rig, [(rig.ann, rig.comp), (rig.ann, other)])
+        msg = error_message(pe.handler(action="unsuppress", annotation="Note1"))
+        assert "2 components" in msg and "Root" in msg and "Sub" in msg
+        assert "component=" in msg
+        assert "not a PMI" not in msg
+        assert item.isSuppressed is False              # left unsuppressed - the PMI is back
 
     def test_set_leader_point_on_a_hole_note_is_refused(self, rig):
         rig.ann.objectType = "adsk::fusion::PMIHoleThreadNote"
@@ -218,6 +245,214 @@ class TestNewActions:
     def test_set_display_on_a_leader_note_is_refused(self, rig):
         assert "hole/thread callouts only" in error_message(
             pe.handler(action="set_display", annotation="Note1", display={"precision": 2}))
+
+    def test_set_extension_that_lands_off_target_is_an_error_not_a_rounded_ok(self, rig):
+        # The read-back gate is a 1e-6 cm tolerance, not equality: a platform that quantised the
+        # write to a visibly different length must be reported, and a bit of float noise must not.
+        class Quantising(_FakeAnn):
+            @property
+            def leaderLineExtension(self):
+                return 0.5                      # every write settles back here
+
+            @leaderLineExtension.setter
+            def leaderLineExtension(self, v):
+                pass
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (Quantising(), rig.comp, None))
+        assert "did not take" in error_message(
+            pe.handler(action="set_extension", annotation="Note1", leader_extension=6))
+
+    def test_set_extension_tolerates_float_noise_within_a_micron(self, rig):
+        class Noisy(_FakeAnn):
+            def __init__(self):
+                super().__init__()
+                self._ext = pe._pmi.LEADER_EXT_DEFAULT
+
+            @property
+            def leaderLineExtension(self):
+                return self._ext
+
+            @leaderLineExtension.setter
+            def leaderLineExtension(self, v):
+                self._ext = v + 5e-7            # sub-micron settle, not a dropped write
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (Noisy(), rig.comp, None))
+        out = _payload(pe.handler(action="set_extension", annotation="Note1",
+                                  leader_extension=6))
+        assert out["leader_extension"] == pytest.approx(6.0, abs=1e-4)
+
+    def test_set_extension_needs_a_number(self, rig):
+        assert "must be a number" in error_message(
+            pe.handler(action="set_extension", annotation="Note1", leader_extension="six"))
+
+    def test_set_alignment_publishes_the_perpendicular_it_read_back(self, rig):
+        out = _payload(pe.handler(action="set_alignment", annotation="Note1",
+                                  align="left", perpendicular=True))
+        assert out["align"] == "left" and out["perpendicular"] is True
+        assert rig.ann.isPerpendicularLine is True
+
+    def test_set_alignment_reports_a_perpendicular_that_did_not_take(self, rig):
+        class Frozen(_FakeAnn):
+            @property
+            def isPerpendicularLine(self):
+                return False
+
+            @isPerpendicularLine.setter
+            def isPerpendicularLine(self, v):
+                pass
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (Frozen(), rig.comp, None))
+        assert "'perpendicular'=True" in error_message(
+            pe.handler(action="set_alignment", annotation="Note1", perpendicular=True))
+
+    def test_set_display_writes_both_settings_through_the_shared_writer(self, rig):
+        hole = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        hole.primaryDisplaySettings = None
+        hole.secondaryDisplaySettings = None
+        hole.hasSecondaryDisplaySettings = False
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (hole, rig.comp, None))
+        seen = []
+
+        def _apply(obj, spec):
+            seen.append((obj, spec))
+            return None
+        rig.monkeypatch.setattr(pe._pmi, "apply_display", _apply)
+        _payload(pe.handler(action="set_display", annotation="Hole Note1",
+                            display={"precision": 2, "secondary": {"precision": 4}}))
+        assert seen == [(hole, {"precision": 2, "secondary": {"precision": 4}})]
+
+    def test_set_display_surfaces_the_writers_refusal(self, rig):
+        hole = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (hole, rig.comp, None))
+        rig.monkeypatch.setattr(pe._pmi, "apply_display",
+                                lambda obj, spec: "display.secondary: bad unit")
+        assert "bad unit" in error_message(
+            pe.handler(action="set_display", annotation="Hole Note1",
+                       display={"secondary": {"units": "furlong"}}))
+
+
+class _RecordingTolerance:
+    """Stands in for PMIGeometricValueTolerance.create(): records the number handed to
+    setSymmetric so a test can pin exactly what the tool sends, and reads it back unchanged."""
+
+    def __init__(self):
+        self.symmetric = None
+        self.hasTolerances = True
+        self.toleranceType = 0
+        self.hasUpperTolerance = True
+        self.hasLowerTolerance = False
+        self.hasToleranceClass = False
+        self.hasShaftToleranceClass = False
+        self.upperTolerance = 0.0
+
+    def setSymmetric(self, v):
+        self.symmetric = v
+        self.upperTolerance = v
+        return True
+
+
+class TestSetValues:
+    """A hole callout's values: a length writes value and tolerance in cm, an angle writes its
+    value in radians and REFUSES a tolerance."""
+
+    @pytest.fixture
+    def hole(self, rig):
+        ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        ann.countersinkAngle = SimpleNamespace(hasValue=True, value=0.0,
+                                               isOverriddenValue=False, tolerance=None)
+        ann.diameter = SimpleNamespace(hasValue=True, value=0.0,
+                                       isOverriddenValue=False, tolerance=None)
+        ann.depth = SimpleNamespace(hasValue=True, value=0.0,
+                                    isOverriddenValue=False, tolerance=None)
+        made = []
+
+        def _create():
+            made.append(_RecordingTolerance())
+            return made[-1]
+
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation", lambda d, n, c="": (ann, rig.comp, None))
+        rig.monkeypatch.setattr(pe._pmi.adsk.fusion, "PMIGeometricValueTolerance",
+                                SimpleNamespace(create=_create))
+        return SimpleNamespace(ann=ann, made=made)
+
+    def _set_angle_with_tolerance(self, hole):
+        return pe.handler(action="set_values", annotation="Hole Note1", units="mm",
+                          values={"countersink_angle_deg":
+                                  {"value": 90, "tolerance": {"type": "symmetric", "value": 1}}})
+
+    def test_an_angle_tolerance_is_refused_naming_the_field(self, hole):
+        msg = error_message(self._set_angle_with_tolerance(hole))
+        assert "countersink_angle_deg" in msg and "not written" in msg
+        assert hole.made == []                       # nothing was handed to the platform
+        assert hole.ann.countersinkAngle.value == 0.0        # the refused call wrote nothing
+        assert hole.ann.countersinkAngle.tolerance is None
+
+    def test_a_refused_angle_tolerance_leaves_the_other_values_untouched(self, hole):
+        """The refusal is decided BEFORE the first write, so a good key listed ahead of the
+        refused one is not left half-applied."""
+        msg = error_message(pe.handler(
+            action="set_values", annotation="Hole Note1", units="mm",
+            values={"diameter": {"value": 6, "tolerance": {"type": "symmetric", "value": 0.5}},
+                    "countersink_angle_deg": {"value": 90,
+                                              "tolerance": {"type": "symmetric", "value": 1}}}))
+        assert "countersink_angle_deg" in msg
+        assert hole.ann.diameter.value == 0.0 and hole.ann.diameter.tolerance is None
+        assert hole.ann.countersinkAngle.value == 0.0
+
+    def test_a_malformed_tolerance_refuses_before_any_key_is_written(self, hole):
+        """The tolerance objects are built in the pre-pass, so a bad spec on the SECOND key
+        refuses with the first key still unwritten."""
+        msg = error_message(pe.handler(
+            action="set_values", annotation="Hole Note1", units="mm",
+            values={"diameter": {"value": 6, "tolerance": {"type": "symmetric", "value": 0.5}},
+                    "depth": {"value": 3, "tolerance": {"type": "wonky"}}}))
+        assert "depth" in msg and "wonky" in msg
+        assert hole.ann.diameter.value == 0.0 and hole.ann.diameter.tolerance is None
+        assert hole.ann.depth.value == 0.0
+
+    def test_a_tolerance_only_length_spec_writes_the_bound_and_keeps_the_value(self, hole):
+        out = _payload(pe.handler(
+            action="set_values", annotation="Hole Note1", units="mm",
+            values={"diameter": {"tolerance": {"type": "symmetric", "value": 0.5}}}))
+        assert hole.ann.diameter.value == 0.0            # no value sent, none written
+        assert hole.made[0].symmetric == pytest.approx(0.05)
+        assert out["values"]["diameter"]["tolerance"]["upper"] == 0.5
+
+    def test_a_tolerance_only_angle_spec_refuses_and_writes_no_value(self, hole):
+        msg = error_message(pe.handler(
+            action="set_values", annotation="Hole Note1", units="mm",
+            values={"countersink_angle_deg": {"tolerance": {"type": "symmetric", "value": 1}}}))
+        assert "countersink_angle_deg" in msg
+        assert hole.ann.countersinkAngle.value == 0.0
+
+    def test_an_angle_value_without_a_tolerance_still_writes(self, hole):
+        out = _payload(pe.handler(action="set_values", annotation="Hole Note1", units="mm",
+                                  values={"countersink_angle_deg": 90}))
+        assert hole.ann.countersinkAngle.value == pytest.approx(math.radians(90))
+        assert out["values"]["countersink_angle_deg"]["value"] == 90.0
+
+    def test_an_angle_key_in_any_case_converts_its_value_to_radians(self, hole):
+        out = _payload(pe.handler(action="set_values", annotation="Hole Note1", units="mm",
+                                  values={"Countersink_Angle_Deg": 90}))
+        assert hole.ann.countersinkAngle.value == pytest.approx(math.radians(90))
+        assert out["values"]["Countersink_Angle_Deg"]["value"] == 90.0
+
+    def test_length_tolerance_is_written_in_cm_like_its_value(self, hole):
+        out = _payload(pe.handler(action="set_values", annotation="Hole Note1", units="mm",
+                                  values={"diameter": {"value": 6,
+                                                       "tolerance": {"type": "symmetric",
+                                                                     "value": 0.5}}}))
+        assert hole.ann.diameter.value == pytest.approx(0.6)
+        assert hole.made[0].symmetric == pytest.approx(0.05)
+        applied = out["values"]["diameter"]
+        assert applied["value"] == 6.0 and applied["tolerance"]["upper"] == 0.5
+
+    def test_an_unreadable_value_property_is_refused(self, hole):
+        hole.ann.depth = None
+        assert "not applicable" in error_message(
+            pe.handler(action="set_values", annotation="Hole Note1", values={"depth": 3}))
 
 
 class TestGuards:

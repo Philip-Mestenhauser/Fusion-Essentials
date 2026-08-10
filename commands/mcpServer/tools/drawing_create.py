@@ -29,18 +29,11 @@ RETURNS = [
     _outputs.ReturnsName("drawing_name", of="drawing document"),
 ]
 
-# ISO sizes only apply when standard=iso; ASME sizes only when standard=asme (the API silently ignores a
-# mismatch, so this tool GUARDS it). value -> (required_standard, SheetSizes member name).
-_SHEET_SIZE_MAP = {
-    "a4": ("iso", "A4ISOSheetSize"), "a3": ("iso", "A3ISOSheetSize"),
-    "a2": ("iso", "A2ISOSheetSize"), "a1": ("iso", "A1ISOSheetSize"), "a0": ("iso", "A0ISOSheetSize"),
-    "a": ("asme", "AASMESheetSize"), "b": ("asme", "BASMESheetSize"), "c": ("asme", "CASMESheetSize"),
-    "d": ("asme", "DASMESheetSize"), "e": ("asme", "EASMESheetSize"),
-}
 # sheet_size value -> SheetSizes member, the shape _resolve_members resolves. 'default' is absent:
 # it is not a request, so nothing is set and Fusion picks the sheet.
-_SHEET_SIZE_MEMBERS = dict({key: member for key, (_std, member) in _SHEET_SIZE_MAP.items()},
-                           custom="CustomSizeSheetSize")
+_SHEET_SIZE_MEMBERS = dict(
+    {key: member for key, (_std, member) in _drawing_common.SHEET_SIZE_MAP.items()},
+    custom="CustomSizeSheetSize")
 _CONTENT_MAP = {"full": "FullAssemblyDrawingContentType",
                 "visible": "VisibleOnlyDrawingContentType"}
 _SHEET_SCOPE_MAP = {"all_levels": "AllLevelsSheetCreationType",
@@ -56,12 +49,6 @@ _VIEW_STYLE_MAP = {
     "hidden": "VisibleAndHiddenEdgesDrawingViewStyleType",
     "shaded_hidden": "ShadedAndHiddenEdgesDrawingViewStyleType",
     "shaded_edges": "ShadedVisibleEdgesDrawingViewStyleType",
-}
-_DIM_STRATEGY_MAP = {
-    "overall": "OverallDimensionStrategyType",
-    "automatic": "AutomaticDimensionStrategyType",
-    "baseline": "BaselineDimensionStrategyType",
-    "chain": "ChainDimensionStrategyType",
 }
 # sheet-type name -> GlobalPreferences toggle property.
 _SHEET_TYPE_ATTR = {
@@ -108,7 +95,7 @@ _ENUM_INPUTS = (
     ("base_document", "BaseDocumentTypes", _BASE_DOCUMENT_MAP),
     ("orientation", "SheetOrientationTypes", _ORIENTATION_MAP),
     ("view_style", "DrawingViewStyleTypes", _VIEW_STYLE_MAP),
-    ("auto_dimension", "DimensionStrategyTypes", _DIM_STRATEGY_MAP),
+    ("auto_dimension", "DimensionStrategyTypes", _drawing_common.DIMENSION_STRATEGIES),
     ("hole_annotations", "HolePreferencesTypes", _HOLE_PREF_MAP),
     ("parts_list_location", "TableLocationTypes", _TABLE_LOCATION_MAP),
     ("tangent_edges", "TangentEdgeDisplayTypes", _TANGENT_EDGE_MAP),
@@ -134,9 +121,10 @@ _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"], default=
                               description="No portrait on A0 ISO / E ASME.")
 _SHEET_SCOPE = _inputs.Choice("sheet_scope", ["all_levels", "first_level"], default="all_levels",
                               description="All levels, or first-level only.")
-_AUTO_DIMENSION = _inputs.Choice("auto_dimension", ["default", "off", "overall", "automatic", "baseline", "chain"],
+_AUTO_DIMENSION = _inputs.Choice("auto_dimension",
+                                 ["default", "off"] + list(_drawing_common.DIMENSION_STRATEGIES),
                                  default="default",
-                                 description="'off' disables it; else sets placement. Default: on, overall.")
+                                 description="'off' disables it; else sets placement.")
 _VIEW_STYLE = _inputs.Choice("view_style",
                              ["default", "visible", "hidden", "shaded_hidden", "shaded_edges"],
                              default="default",
@@ -196,6 +184,76 @@ def _processing_lag_hint(ex):
             "minute later. Wait about a minute, then retry this call unchanged.")
 
 
+# A create that outruns the CLIENT's call timeout still finishes and lands the drawing in the
+# project, findable there by name. So a timeout is not a verdict on this call, and a blind retry
+# mints a second drawing.
+_TIMEOUT_IS_NOT_A_VERDICT = (
+    "If a client call TIMES OUT on this tool, that is NOT a failure verdict - the create can still "
+    "land. Re-check before retrying: data_get with 'project' + 'file' (the drawing's name) lists "
+    "it if it was created, and doc_get reads it once it is open. A blind retry creates a SECOND "
+    "drawing.")
+
+
+# CreateDrawingInput.customSize hands out a DEFAULT CustomSheetSize object that takes effect only
+# when it is assigned BACK through the setter, its width/height are unitless numbers in the
+# drawing's own document unit (millimetres under ISO, inches under ASME), and its two zone counts
+# must each be at least 2. Set this to False to refuse sheet_size='custom' outright - the one switch
+# to throw if a live create stops landing the requested extents, since a drawing emitted at some
+# other size while the payload says 'custom' is the failure this path exists to prevent.
+_CUSTOM_SIZE_ENABLED = True
+_CUSTOM_ZONES = 2
+
+_CUSTOM_DISABLED_REFUSAL = (
+    "sheet_size 'custom' is turned OFF in this tool, so nothing was created - a drawing emitted at "
+    "a preset size while this call reported 'custom' is the outcome that refusal prevents. Pass a "
+    "preset sheet_size (a4-a0 under ISO, a-e under ASME); a created drawing's sheet can also be "
+    "resized afterwards with drawing_edit_sheet action='set_size'.")
+
+
+def _apply_custom_size(di, cfg):
+    """Write the requested custom sheet size onto the input and assign it BACK through the setter.
+    Returns '' or the refusal text (nothing is created on a refusal).
+
+    The object the getter returns is a copy: mutating it alone changes nothing, which is why the
+    assignment back is the load-bearing line here. width/height are unitless numbers in the
+    document unit cfg carries, and both zone counts must be at least 2 at creation."""
+    spec = cfg["custom_size"]
+    cs = safe(lambda: di.customSize)
+    if cs is None:
+        return ("This Fusion version's CreateDrawingInput carries no customSize, so a custom sheet "
+                "size cannot be applied and no drawing was created. Use a preset sheet_size.")
+    for prop in ("width", "height"):
+        value = spec[prop]
+        serr = _common.set_verified(cs, prop, value, f"custom sheet {prop} {value} {spec['unit']}",
+                                    "CustomSheetSize")
+        if serr:
+            return (f"{serr} It reads {safe(lambda p=prop: getattr(cs, p))!r} after the assignment. "
+                    "No drawing was created; use a preset sheet_size.")
+    for prop in ("horizontalZones", "verticalZones"):
+        current = safe(lambda p=prop: getattr(cs, p))
+        # A count the input already carries that meets the minimum is the caller's title-block
+        # layout and is left alone, so what the payload reports is READ BACK, never the constant.
+        if not (isinstance(current, int) and not isinstance(current, bool)
+                and current >= _CUSTOM_ZONES):
+            serr = _common.set_verified(cs, prop, _CUSTOM_ZONES, f"custom sheet {prop}",
+                                        "CustomSheetSize")
+            if serr:
+                return f"{serr} No drawing was created; use a preset sheet_size."
+    try:
+        # THE assignment the size hangs on - a failure here must surface, never be swallowed into a
+        # create that emits a differently-sized drawing labelled custom.
+        di.customSize = cs
+    except Exception as ex:
+        return (f"CreateDrawingInput.customSize could not be assigned ({ex}), so the custom size "
+                f"{spec['width']} x {spec['height']} {spec['unit']} would not have been applied. "
+                "No drawing was created; use a preset sheet_size.")
+    spec["width_applied"] = safe(lambda: cs.width)
+    spec["height_applied"] = safe(lambda: cs.height)
+    spec["horizontal_zones_applied"] = safe(lambda: cs.horizontalZones)
+    spec["vertical_zones_applied"] = safe(lambda: cs.verticalZones)
+    return ""
+
+
 def _resolve_members(cfg):
     """Every enum member this tool sets, as {input name: member}, or (None, error). Resolved BEFORE
     the create transaction: a family or member this Fusion version does not carry is reported as a
@@ -220,11 +278,12 @@ def _resolve_members(cfg):
 
 
 def _apply_input_settings(di, cfg, members, template_data_file=None):
-    """Best-effort configuration of the CreateDrawingInput + its automationPreferences tree. Each setter
-    is wrapped in safe() (a property missing on this Fusion version must not sink the create); the
-    requested values are echoed to the caller as 'settings_requested' rather than read back. 'members'
-    is _resolve_members' {input name: enum member} and 'template_data_file' a resolved DataFile -
-    neither is JSON-safe, so both stay out of cfg."""
+    """Best-effort configuration of the CreateDrawingInput + its automationPreferences tree, returning
+    '' or the ONE refusal that is not best-effort (the custom sheet size, which decides how big the
+    drawing is). Every other setter is wrapped in safe() (a property missing on this Fusion version
+    must not sink the create); the requested values are echoed to the caller as 'settings_requested'
+    rather than read back. 'members' is _resolve_members' {input name: enum member} and
+    'template_data_file' a resolved DataFile - neither is JSON-safe, so both stay out of cfg."""
     safe(lambda: setattr(di, "standard", members["standard"]))
     safe(lambda: setattr(di, "units", members["units"]))
     safe(lambda: setattr(di, "content", members["content"]))
@@ -233,10 +292,9 @@ def _apply_input_settings(di, cfg, members, template_data_file=None):
     if size_member is not None:
         safe(lambda m=size_member: setattr(di, "sheetSize", m))
     if cfg["sheet_size"] == "custom":
-        cs = safe(lambda: di.customSize)
-        if cs is not None:
-            safe(lambda: setattr(cs, "width", cfg["custom_width_cm"]))
-            safe(lambda: setattr(cs, "height", cfg["custom_height_cm"]))
+        cerr = _apply_custom_size(di, cfg)
+        if cerr:
+            return cerr
     safe(lambda: setattr(di, "orientationType", members["orientation"]))
     safe(lambda: setattr(di, "sheetCreationType", members["sheet_scope"]))
 
@@ -315,6 +373,7 @@ def _apply_input_settings(di, cfg, members, template_data_file=None):
     safe(lambda: setattr(
         di.automationPreferences.componentPreferences.sheetViewPreferences,
         "isIsometricViewAdded", bool(cfg["isometric"])))
+    return ""
 
 
 def handler(standard: str = "iso", units: str = "mm", content: str = "full", isometric: bool = True,
@@ -373,17 +432,19 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 
     # Guard the two real constraints the API silently ignores rather than reports.
     if size_v not in ("default", "custom"):
-        need_std = _SHEET_SIZE_MAP[size_v][0]
+        need_std = _drawing_common.SHEET_SIZE_MAP[size_v][0]
         if need_std != std:
-            fam = [k for k, v in _SHEET_SIZE_MAP.items() if v[0] == std]
+            fam = [k for k, v in _drawing_common.SHEET_SIZE_MAP.items() if v[0] == std]
             return error(f"sheet_size '{size_v}' is a {need_std.upper()} size but standard is '{std}'. "
                          f"Use an {std.upper()} size ({', '.join(fam)}) or switch the standard.")
         if orient_v == "portrait" and (std, size_v) in _drawing_common.NO_PORTRAIT:
             return error(f"portrait orientation is not supported for the largest {std.upper()} sheet "
                          f"('{size_v}'); use landscape or a smaller sheet.")
 
-    custom_w_cm = custom_h_cm = None
+    custom_size = None
     if size_v == "custom":
+        if not _CUSTOM_SIZE_ENABLED:
+            return error(_CUSTOM_DISABLED_REFUSAL)
         if custom_width_mm is None or custom_height_mm is None:
             return error("sheet_size 'custom' requires both custom_width_mm and custom_height_mm.")
         try:
@@ -393,8 +454,12 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
                          f"{custom_width_mm!r} / {custom_height_mm!r}).")
         if w_mm <= 0 or h_mm <= 0:
             return error(f"custom_width_mm and custom_height_mm must be positive (got {w_mm} / {h_mm}).")
-        custom_w_cm = w_mm * _common.scale("mm")
-        custom_h_cm = h_mm * _common.scale("mm")
+        # The inputs are millimetres; CustomSheetSize takes the DOCUMENT unit, which the standard
+        # fixes through the one shared table.
+        unit = _drawing_common.DOCUMENT_UNIT[std]
+        per_unit = _common.scale("mm") / _common.scale(unit)
+        custom_size = {"width": round(w_mm * per_unit, 6), "height": round(h_mm * per_unit, 6),
+                       "unit": unit, "zone_minimum": _CUSTOM_ZONES}
     elif custom_width_mm is not None or custom_height_mm is not None:
         return error("custom_width_mm/custom_height_mm only apply when sheet_size='custom'.")
 
@@ -443,7 +508,7 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         "template_file": tf_raw,
         "base_document": "template" if template_df is not None else None,
         "custom_width_mm": custom_width_mm, "custom_height_mm": custom_height_mm,
-        "custom_width_cm": custom_w_cm, "custom_height_cm": custom_h_cm,
+        "custom_size": custom_size,
         "hole_annotations": hole_v, "center_line": cl_v, "center_mark": cmk_v, "tangent_edges": te_v,
         "show_interference_edges": (bool(show_interference_edges) if show_interference_edges is not None
                                      else None),
@@ -476,7 +541,9 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
     if not di:
         return error("createDrawingInput returned null - Fusion could not start a drawing from this design.")
 
-    _apply_input_settings(di, cfg, members, template_data_file=template_df)
+    aerr = _apply_input_settings(di, cfg, members, template_data_file=template_df)
+    if aerr:
+        return error(aerr)
 
     try:
         df = dm.createDrawing(di)
@@ -500,6 +567,17 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
                  "layout are not placed by this tool.")
     else:
         note += f" creation_mode was 'manual', which Fusion gates on the template: {_MANUAL_GATE}"
+    if custom_size is not None:
+        note += (f" Custom sheet size: {custom_size['width_applied']} x "
+                 f"{custom_size['height_applied']} {custom_size['unit']} (the document unit), "
+                 f"{custom_size['horizontal_zones_applied']} x "
+                 f"{custom_size['vertical_zones_applied']} zones - every one of those four numbers "
+                 "read back off the input before the create, and a zone count the input already "
+                 f"carried at or above the {custom_size['zone_minimum']} the API takes was kept. "
+                 "The created SHEET's own width/height are not readable from here (this call does "
+                 "not open the drawing), so open it and read them with drawing_edit_sheet to "
+                 "confirm the sheet Fusion built.")
+    note += " " + _TIMEOUT_IS_NOT_A_VERDICT
     return ok({
         "created": True,
         "drawing_name": safe(lambda: df.name),
@@ -513,13 +591,12 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 
 TOOL_DESCRIPTION = (
     "Create a 2D drawing from the active design via Fusion's automatic generator. Configures the "
-    "generator's sheet, annotation and view-display preferences. Manual creation_mode is refused "
-    "without a template_file carrying view placeholders. Source design must be cloud-saved. "
-    "Result is a CLOUD "
+    "generator's sheet, annotation and view-display preferences. Source design must be "
+    "cloud-saved. Result is a CLOUD "
     "file, NOT opened - file_id (lineage URN) returned. Open it ONCE in the Fusion UI before "
     "doc_open/drawing_export can run headlessly (an unreviewed auto-drawing blocks headless open). "
-    "Per-view placement/scale is not API-controllable. This call can run long; it waits rather "
-    "than timing out falsely."
+    "Per-view placement/scale is not API-controllable. A client TIMEOUT is not a verdict here - the "
+    "create can still land; re-check with data_get before retrying, or a retry mints a second drawing."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -539,7 +616,7 @@ tool = (
             "description": "Enabled sheet kinds (others disabled)."})
     .add_input_property(*_AUTO_DIMENSION.as_property())
     .add_input_property("omit_fasteners", {"type": "boolean",
-            "description": "Auto-detect and omit fastener components (default false)."})
+            "description": "Auto-detect and omit fastener components."})
     .add_input_property("fastener_keywords", {"type": "string",
             "description": "Comma-separated fastener-omission keywords."})
     .add_input_property(*_VIEW_STYLE.as_property())
@@ -548,19 +625,19 @@ tool = (
     .add_input_property(*_PARTS_LIST_LOCATION.as_property())
     .add_input_property(*_CREATION_MODE.as_property())
     .add_input_property("template_file", {"type": "string",
-            "description": "DataFile id/URL for a drawing template (doc_open idiom); empty = scratch."})
+            "description": "DataFile id/URL of a drawing template; empty = scratch."})
     .add_input_property("custom_width_mm", {"type": "number",
-            "description": "Sheet width in mm (needs sheet_size='custom')."})
+            "description": "Sheet width in mm (sheet_size='custom')."})
     .add_input_property("custom_height_mm", {"type": "number",
-            "description": "Sheet height in mm (needs sheet_size='custom')."})
+            "description": "Sheet height in mm (sheet_size='custom')."})
     .add_input_property(*_HOLE_ANNOTATIONS.as_property())
     .add_input_property(*_CENTER_LINE.as_property())
     .add_input_property(*_CENTER_MARK.as_property())
     .add_input_property(*_TANGENT_EDGES.as_property())
     .add_input_property("show_interference_edges", {"type": "boolean",
-            "description": "Show interference edges on generated views."})
+            "description": "Show interference edges."})
     .add_input_property("show_thread_edges", {"type": "boolean",
-            "description": "Show thread edges on generated views."})
+            "description": "Show thread edges."})
     .strict_schema()
 )
 

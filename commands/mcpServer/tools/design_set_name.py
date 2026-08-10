@@ -8,9 +8,6 @@ Fusion auto-dedupes a name a sibling already holds - assigning a taken name land
 (measured), so the name is read back after the set and the LANDED name is what the result publishes.
 """
 
-import adsk.core
-import adsk.fusion
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -19,10 +16,10 @@ from . import _common
 from . import _inputs
 from . import _outputs
 
-app = adsk.core.Application.get()
-
 # The renameable kinds. A FACE has no name, and '' (the whole design) is refused - there is nothing
-# to rename - so both are left out of allow=.
+# to rename - so both are left out of allow=. MeshBody.name is settable and STICKS: the assigned name
+# reads back both off the wrapper it was set on and off a fresh meshBodies.item() fetch, so a mesh is
+# a first-class target here, not a best-effort one.
 _TARGET = _inputs.TargetRef("target", allow=("body", "mesh", "occurrence", "component"))
 
 RETURNS = [

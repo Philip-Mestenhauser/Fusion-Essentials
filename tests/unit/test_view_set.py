@@ -816,6 +816,98 @@ class TestSnapshotRestore:
         assert out["missing_occurrences"] == 1
         assert out["restored_occurrences"] == 0
 
+    def test_a_snapshot_under_the_cap_makes_no_truncation_claim(self, monkeypatch):
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}") for i in range(3)]
+        _install(monkeypatch, occs, doc_name="Small")
+        iv._SNAPSHOTS.clear()
+        out = _payload(iv.handler(action="snapshot"))
+        assert out["occurrences_saved"] == 3
+        assert "truncated" not in out and "PARTIAL" not in out["note"]
+
+    def test_a_snapshot_past_the_cap_discloses_the_partial_capture(self, monkeypatch):
+        # An assembly bigger than the cap gets a PARTIAL snapshot. Reporting that as "all
+        # occurrence visibility saved" is the lie: restore cannot put back what was never saved.
+        monkeypatch.setattr(iv, "_MAX_OCC", 3)
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}") for i in range(5)]
+        _install(monkeypatch, occs, doc_name="Huge")
+        iv._SNAPSHOTS.clear()
+        out = _payload(iv.handler(action="snapshot"))
+        assert out["truncated"] is True and out["occurrence_cap"] == 3
+        assert out["occurrences_saved"] == 3
+        assert "PARTIAL" in out["note"]
+
+    def test_a_restore_from_a_partial_snapshot_says_so(self, monkeypatch):
+        monkeypatch.setattr(iv, "_MAX_OCC", 3)
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}", bulb=True) for i in range(5)]
+        _install(monkeypatch, occs, doc_name="HugeRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+        for o in occs:
+            o.isLightBulbOn = False
+        out = _payload(iv.handler(action="restore"))
+        assert out["truncated"] is True and out["occurrence_cap"] == 3
+        assert out["restored_occurrences"] == 3
+        assert "PARTIAL" in out["note"]
+        assert [o.isLightBulbOn for o in occs] == [True, True, True, False, False]
+
+    def test_a_partial_snapshot_stays_partial_when_the_design_later_fits_under_the_cap(
+            self, monkeypatch):
+        # The snapshot is what was CAPTURED; the restore walk only says what is reachable NOW.
+        # If the design shrinks under the cap between the two calls the walk reads complete, so
+        # only the stored flag still knows the capture was partial - reading the walk alone
+        # reports a full restore of a state that was never fully saved.
+        monkeypatch.setattr(iv, "_MAX_OCC", 3)
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}", bulb=True) for i in range(5)]
+        _install(monkeypatch, occs, doc_name="Shrinker")
+        iv._SNAPSHOTS.clear()
+        snap = _payload(iv.handler(action="snapshot"))
+        assert snap["truncated"] is True
+        # two occurrences deleted after the snapshot - the walk now fits under the cap
+        iv.app.activeProduct.rootComponent.allOccurrences = occs[:3]
+        out = _payload(iv.handler(action="restore"))
+        assert out["truncated"] is True and out["occurrence_cap"] == 3
+        assert out["restored_occurrences"] == 3
+        assert "PARTIAL" in out["note"]
+
+    def test_a_complete_snapshot_restored_into_a_grown_design_discloses_the_capped_walk(
+            self, monkeypatch):
+        # The mirror case: the CAPTURE was complete, but the design grew past the cap before the
+        # restore, so the restore only LOOKED at the first cap occurrences. The stored flag says
+        # nothing here - only the current walk knows the restore pass was partial.
+        monkeypatch.setattr(iv, "_MAX_OCC", 3)
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}", bulb=True) for i in range(2)]
+        _install(monkeypatch, occs, doc_name="Grower")
+        iv._SNAPSHOTS.clear()
+        snap = _payload(iv.handler(action="snapshot"))
+        assert "truncated" not in snap                  # the capture itself was complete
+        grown = occs + [FakeOcc(f"N{i}", full_path=f"N{i}") for i in range(4)]
+        iv.app.activeProduct.rootComponent.allOccurrences = grown
+        out = _payload(iv.handler(action="restore"))
+        assert out["truncated"] is True and out["occurrence_cap"] == 3
+        assert "PARTIAL" in out["note"]
+
+    def test_a_full_restore_keeps_the_plain_success_note(self, monkeypatch):
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}", bulb=True) for i in range(2)]
+        _install(monkeypatch, occs, doc_name="FullRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+        out = _payload(iv.handler(action="restore"))
+        assert "truncated" not in out and "PARTIAL" not in out["note"]
+
+    def test_clear_isolation_past_the_cap_discloses_what_it_did_not_check(self, monkeypatch):
+        monkeypatch.setattr(iv, "_MAX_OCC", 2)
+        occs = [FakeOcc(f"O{i}", full_path=f"O{i}", isolated=True) for i in range(4)]
+        _install(monkeypatch, occs)
+        out = _payload(iv.handler(action="clear_isolation"))
+        assert out["cleared_count"] == 2 and out["truncated"] is True
+        assert [o.isIsolated for o in occs] == [False, False, True, True]
+
+    def test_clear_isolation_under_the_cap_claims_nothing_extra(self, monkeypatch):
+        occs = [FakeOcc("A", full_path="A", isolated=True)]
+        _install(monkeypatch, occs)
+        out = _payload(iv.handler(action="clear_isolation"))
+        assert out["cleared_count"] == 1 and "truncated" not in out
+
     def test_same_named_documents_do_not_collide(self, monkeypatch):
         # _SNAPSHOTS is keyed by document id, not name: two open documents that happen to share a
         # name (e.g. two "Untitled") must not clobber each other's saved state. A snapshot saved

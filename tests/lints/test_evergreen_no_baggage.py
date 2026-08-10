@@ -83,9 +83,14 @@ _WO_DIGIT = re.compile(r"\bWO-\d")
 # "Class B" as an English-prose label - capital C only, so Python's `class B:` keyword+name (always
 # lowercase `class`) can never collide with this.
 _CLASS_LETTER = re.compile(r"\bClass [A-I]\b")
-# A bare work-item label like "C7:"/"C9:"/"H2:" opening a comment - the class-letter + item-number
-# shorthand a planning doc uses, meaningless once that doc is gone.
-_ITEM_LABEL = re.compile(r"#\s*[A-I][0-9]{1,2}\s*:")
+# A bare work-item label like "C7:"/"C9:"/"P0.1:" opening a comment - the letter + item-number
+# shorthand a planning doc uses (dotted or plain, any capital letter), meaningless once that doc
+# is gone. Anchored to the comment OPENING with a colon so prose like "# P40 is the fleet
+# percentile" or "# an A3 sheet" never collides.
+_ITEM_LABEL = re.compile(r"#\s*[A-Z][0-9]{1,2}(?:\.[0-9]{1,2})?\s*:")
+# Review-process artifacts quoted into shipped comments ("P2.26 REVIEW PROBES 2+3",
+# "ROUND-2 PROBE P1") - the fact is durable, the round that produced it is not.
+_REVIEW_ARTIFACT = re.compile(r"\bREVIEW PROBES?\b|\bROUND-[0-9]+ PROBE\b")
 # Classic deferral markers. Case-SENSITIVE: the uppercase marker is the convention; a lowercase
 # "todo" can be ordinary prose (tool_verify's "the honest 'todo' ledger").
 _TODO_MARKER = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
@@ -162,6 +167,8 @@ def _line_offenders(path):
                 offenders.append((i, "Class <letter>", line.strip()))
             if _ITEM_LABEL.search(line):
                 offenders.append((i, "item-number label", line.strip()))
+            if _REVIEW_ARTIFACT.search(line):
+                offenders.append((i, "review-process artifact", line.strip()))
             if _TODO_MARKER.search(line):
                 offenders.append((i, "TODO marker", line.strip()))
             if _PHASE_LABEL.search(line):

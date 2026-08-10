@@ -7,6 +7,8 @@ no design), and the honesty contract (an API no-op that creates no body must rep
 swallowed configure/add failure must surface).
 """
 
+import types
+
 import adsk.fusion
 
 from conftest import (load_tool, make_design, install, payload as _payload,
@@ -73,11 +75,17 @@ class FakeSweepFeatures:
         return FakeSweepFeature(bodies_names=self.body_names, is_solid=inp.isSolid)
 
 
+def _built_path(count):
+    """A built adsk.fusion.Path: `count` is the number of edges the path ACTUALLY holds, which is
+    not derivable from how many handles were passed in."""
+    return types.SimpleNamespace(count=count)
+
+
 class FakeFeatures:
     def __init__(self, sweepfeatures):
         self.sweepFeatures = sweepfeatures
         self.path_calls = []
-        self.path_returns = ("PATH",)   # truthy fake Path (index 0 -> first return)
+        self.path_returns = _built_path(1)
 
     def createPath(self, seed, is_chain):
         self.path_calls.append((seed, is_chain))
@@ -163,15 +171,26 @@ class TestSurface:
 # ── path from model edges ───────────────────────────────────────────────────
 
 class TestEdgePath:
-    def test_single_edge_path_chains_from_seed(self):
+    def test_single_edge_path_seeds_createpath(self):
         adsk.fusion.BRepEdge = BRepEdge
         edge = BRepEdge(curve=Line3D())
         sf, design = _install(tokens={"EDGE1": edge})
         out = _payload(sw.handler(profile={"sketch": "Prof"}, path=["EDGE1"]))
-        assert out["path"] == "1 edge(s)"
+        assert out["path"] == "1 edge(s) from 1 seed handle"
         feats = design.rootComponent.features
-        # A single edge is passed to createPath (auto-chain), not Path.create.
+        # A single edge goes to createPath with chaining requested, not to Path.create.
         assert feats.path_calls and feats.path_calls[0][0] is edge
+
+    def test_path_reports_the_edges_the_built_path_holds_not_the_one_passed(self):
+        # The seed expanded: the swept path holds 14 edges though ONE handle was named. The payload
+        # describes the path Fusion built, so an agent reading 'path' is not told the sweep ran over
+        # a single edge.
+        adsk.fusion.BRepEdge = BRepEdge
+        edge = BRepEdge(curve=Line3D())
+        sf, design = _install(tokens={"EDGE1": edge})
+        design.rootComponent.features.path_returns = _built_path(14)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path=["EDGE1"]))
+        assert out["path"] == "14 edge(s) from 1 seed handle"
 
     def test_bad_edge_handle_errors(self):
         adsk.fusion.BRepEdge = BRepEdge
@@ -329,3 +348,106 @@ def test_declared_returns_present_in_payload():
     out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
     for spec in sw.RETURNS:
         assert spec.assert_present(out) == "", spec.key
+
+
+def test_the_path_description_states_the_tangent_continuity_rule():
+    # measured: one seed chains by TANGENT CONTINUITY - a sharp corner stops it, open vs closed
+    # decides nothing (a tangent-continuous closed loop chained all 8 edges from one seed). So the
+    # wire may not promise chaining unconditionally, nor claim a closed loop refuses to chain; what
+    # a seed actually reached is only knowable from the reported count.
+    desc = sw.sweep_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
+    assert "TANGENT connections" in desc
+    assert "sharp corner stops the chain" in desc
+    assert "'path' count is the truth" in desc
+    assert "auto-chain" not in desc.lower()
+    assert "closed loop" not in desc.lower() and "seed edge alone" not in desc
+
+
+# ── path_curves: what the built path HOLDS, beside what the request named ───────────────────────
+#
+# Chaining follows tangent continuity, so a 'sketch:<name>' path can chain a single curve out of a
+# three-curve sketch and sweep a stub of the intended run. Both counts ride on the payload so the
+# shortfall is visible without measuring the body.
+
+class TestPathCurves:
+    def test_sketch_path_publishes_both_counts(self):
+        sf, design = _install()
+        design.rootComponent.features.path_returns = _built_path(3)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_curves"] == 3
+        assert out["path_sketch_curves"] == 3
+
+    def test_a_chain_that_stopped_short_warns_naming_both_counts(self):
+        # The bail case: 1 of the sketch's 3 curves chained, and every other signal (a feature, a
+        # body, is_solid) reports a clean sweep.
+        sf, design = _install()
+        design.rootComponent.features.path_returns = _built_path(1)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_curves"] == 1 and out["path_sketch_curves"] == 3
+        assert "chained 1 of the sketch's 3 curves" in out["note"]
+        assert "tangent continuity" in out["note"]
+
+    def test_a_full_chain_does_not_warn(self):
+        sf, design = _install()
+        design.rootComponent.features.path_returns = _built_path(3)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert "WARNING" not in out["note"]
+
+    def test_an_edge_path_publishes_the_count_with_no_sketch_to_compare(self):
+        adsk.fusion.BRepEdge = BRepEdge
+        sf, design = _install(tokens={"EDGE1": BRepEdge(curve=Line3D())})
+        design.rootComponent.features.path_returns = _built_path(14)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path=["EDGE1"]))
+        assert out["path_curves"] == 14
+        # no source sketch exists for an edge path - a null here would read as an unreadable sketch
+        assert "path_sketch_curves" not in out
+        assert "WARNING" not in out["note"]
+
+    def test_an_unreadable_path_count_is_published_as_unknown(self):
+        # The Path would not answer .count: path_curves is None (unknown), and nothing claims a
+        # shortfall it could not measure.
+        sf, design = _install()
+        design.rootComponent.features.path_returns = types.SimpleNamespace()
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_curves"] is None
+        assert "WARNING" not in out["note"]
+
+    def test_a_longer_chain_than_the_sketch_carries_does_not_warn(self):
+        # A path holding at least the sketch's curves is not a shortfall - only fewer is.
+        sf, design = _install()
+        design.rootComponent.features.path_returns = _built_path(4)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert "WARNING" not in out["note"]
+
+
+class TestConstructionCurvesAreNotPathCurves:
+    def _path_sketch(self, design):
+        return design.rootComponent.sketches.itemByName("PathSketch")
+
+    def test_a_construction_line_is_not_counted_as_a_path_curve(self):
+        # sketchCurves counts CONSTRUCTION geometry too, and construction is not part of any path.
+        # Counting it reports a shortfall on a path that chained everything there was to chain, and
+        # blames tangency for it - a false warning with the wrong cause on a perfectly good sweep.
+        sf, design = _install()
+        self._path_sketch(design).sketchCurves._items.append(
+            types.SimpleNamespace(isConstruction=True))
+        design.rootComponent.features.path_returns = _built_path(3)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_sketch_curves"] == 3        # 4 curves, one of them construction
+        assert "WARNING" not in out["note"]
+
+    def test_a_real_shortfall_still_warns_when_construction_is_present(self):
+        # The construction filter must not silence a genuine short chain.
+        sf, design = _install()
+        self._path_sketch(design).sketchCurves._items.append(
+            types.SimpleNamespace(isConstruction=True))
+        design.rootComponent.features.path_returns = _built_path(1)
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_sketch_curves"] == 3
+        assert "chained 1 of the sketch's 3 curves" in out["note"]
+
+    def test_a_curve_whose_construction_flag_will_not_read_counts_as_real(self):
+        # The conservative side: an unreadable flag can only shrink a warning, never invent one.
+        sf, design = _install()
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["path_sketch_curves"] == 3        # the plain fixture curves read no flag at all

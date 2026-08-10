@@ -21,6 +21,7 @@ from ._common import error, ok, safe, set_verified, build_path
 from . import _common
 from . import _inputs
 from . import _assert
+from . import _outputs
 from .model_pattern import _BODIES, _OCCURRENCES, _owning_component, _resolve_input_entities
 
 app = adsk.core.Application.get()
@@ -31,6 +32,11 @@ _DISTANCE_TYPES = {
     "spacing": "SpacingPatternDistanceType",
     "extent": "ExtentPatternDistanceType",
 }
+
+# What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
+RETURNS = [
+    _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
+]
 
 _DISTANCE_TYPE = _inputs.Choice("distance_type", tuple(_DISTANCE_TYPES), default="spacing")
 _DISTANCE = _inputs.Distance("distance", allow_zero=False, allow_negative=False, required=True,
@@ -117,6 +123,13 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
 
     # Verify the effect: the REAL instance count read off the created feature, never the request.
     real_total = safe(lambda: feature.patternElements.count)
+    note = ("Instances placed along the path. Copies keep the seed's orientation; they do not "
+            "rotate to follow the path. Pair with view_screenshot to view.")
+    if real_total is None:
+        # An unreadable count is published as null and named, never defaulted to the request:
+        # echoing 'quantity' back would turn an unverifiable read into a confirmation of itself.
+        note += (" 'quantity' could NOT be read back off the created feature, so it is reported as "
+                 "null rather than as the count requested - confirm in Fusion, or with design_get.")
     if real_total is not None and int(real_total) != int(quantity):
         return error(
             f"Pattern '{safe(lambda: feature.name)}' created {int(real_total)} instances but "
@@ -130,7 +143,7 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
         "entities": resolved,
         "entity_kind": "bodies" if bodies not in (None, "", []) else "occurrences",
         "path": path_label,
-        "quantity": int(real_total) if real_total is not None else int(quantity),
+        "quantity": int(real_total) if real_total is not None else None,
         "distance_type": dt_key,
         "distance": round(float(distance), 6),
         "units": units,
@@ -138,15 +151,15 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
         "symmetric": bool(symmetric),
         # isOrientationAlongPath is False by default (measured), so the copies translate along the
         # path without turning with it - stated here because nothing else in the payload shows it.
-        "note": "Instances placed along the path. Copies keep the seed's orientation; they do not "
-                "rotate to follow the path. Pair with view_screenshot to view.",
+        "note": note,
     })
 
 
 TOOL_DESCRIPTION = (
 "Pattern component OCCURRENCES or BODIES along a PATH - a curve, where model_pattern_rectangular "
 "gives straight rows and model_pattern_circular a ring. 'quantity' counts the instances including "
-"the original. Pair with view_screenshot to view."
+"the original. Pair with view_screenshot to view.\n"
++ _outputs.produces_block(RETURNS)
 )
 
 pattern_path_tool = (
@@ -154,7 +167,7 @@ pattern_path_tool = (
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve to follow: a find_geometry edge 'handle' (auto-chains connected edges), a JSON list of edge handles (used exactly), or 'sketch:<name>' for a path sketch."})
+            "description": "The curve to follow: a find_geometry edge 'handle' (a single handle chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly), or 'sketch:<name>' for a path sketch."})
     .add_input_property("quantity", {"type": "integer", "description": "Instance count (>=2)."})
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_DISTANCE_TYPE.as_property())

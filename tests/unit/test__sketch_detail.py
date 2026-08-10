@@ -7,12 +7,16 @@ agent reason about a constrained sketch (slots/ellipses/rectangles + their const
 relationships).
 
 Pinned here (no live Fusion): the entityToken->id map, the constraint describer (maps a
-constraint's referenced entities back to ids by token), and the entity/dimension summarizers.
+constraint's referenced entities back to ids by token), the entity/dimension summarizers, and the
+three spline collections - each walked into _entities() with the same per-kind record idiom as
+arcs/ellipses, mapped into the token map, and reported in the 'counts' block - plus the sketch-text
+records (the read half of sketch_set_text: string, height, font, sketch-space bounding box, at the
+'text:<i>' address sketch_delete_entity and sketch_set_text address).
 """
 
 import json
 
-from conftest import load_tool
+from conftest import FakeBoundingBox3D, FakePoint, load_tool
 
 sd = load_tool("_sketch_detail")
 
@@ -76,12 +80,16 @@ class FakeSketchPoint:
 
 
 class _Coll:
-    def __init__(self, items):
+    # item_raises_at models a stale slot: item(i) raises while count still includes it.
+    def __init__(self, items, item_raises_at=None):
         self._i = list(items)
+        self._raises_at = item_raises_at
     @property
     def count(self):
         return len(self._i)
     def item(self, i):
+        if i == self._raises_at:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
         return self._i[i]
 
 
@@ -101,12 +109,61 @@ class CoincidentConstraint:
         self.point, self.entity = point, entity
 
 
+class FakeFittedSpline:
+    def __init__(self, is_construction=False, is_closed=False, fit_point_count=3, tok=None):
+        self.isConstruction = is_construction
+        self.isClosed = is_closed
+        self.entityToken = tok or f"tok-fs-{id(self)}"
+        self.fitPoints = _Coll(list(range(fit_point_count)))
+
+
+class FakeCVSpline:
+    def __init__(self, is_construction=False, is_closed=False, degree=3, control_point_count=4,
+                 tok=None):
+        self.isConstruction = is_construction
+        self.isClosed = is_closed
+        self.degree = degree
+        self.entityToken = tok or f"tok-cv-{id(self)}"
+        self.controlPoints = _Coll(list(range(control_point_count)))
+
+
+class FakeFixedSpline:
+    def __init__(self, is_construction=False, is_closed=False, tok=None):
+        self.isConstruction = is_construction
+        self.isClosed = is_closed
+        self.entityToken = tok or f"tok-fx-{id(self)}"
+
+
+def _sketch_text(expression="'LABEL'", height_cm=0.5, font="Arial", bbox=None, readable=True):
+    """A SketchText carrying only members api_surface lists for fusion.SketchText: textParameter
+    (the live handle on the string - .text is retired), heightParameter (.height is retired),
+    fontName and boundingBox. readable=False models a text no field answers for - every attribute
+    is simply absent, so each read raises the way an invalid proxy's does."""
+    if not readable:
+        return type("T", (), {})()
+    members = {"textParameter": type("Par", (), {"expression": expression})(),
+               "heightParameter": type("Par", (), {"value": height_cm})(),
+               "fontName": font}
+    if bbox is not None:
+        members["boundingBox"] = bbox
+    return type("T", (), members)()
+
+
+def _bbox(x0, y0, x1, y1):
+    """A SketchText.boundingBox in SKETCH space (cm), the frame the bindings define it in."""
+    return FakeBoundingBox3D(FakePoint(x0, y0, 0.0), FakePoint(x1, y1, 0.0))
+
+
 class FakeCurves:
-    def __init__(self, lines, circles, arcs, ellipses=()):
+    def __init__(self, lines, circles, arcs, ellipses=(), splines=(), cv_splines=(),
+                 fixed_splines=()):
         self.sketchLines = _Coll(lines)
         self.sketchCircles = _Coll(circles)
         self.sketchArcs = _Coll(arcs)
         self.sketchEllipses = _Coll(list(ellipses))
+        self.sketchFittedSplines = _Coll(list(splines))
+        self.sketchControlPointSplines = _Coll(list(cv_splines))
+        self.sketchFixedSplines = _Coll(list(fixed_splines))
 
 
 class FakeDim:
@@ -135,10 +192,14 @@ class FakeProfile:
 
 class FakeSketch:
     def __init__(self, name, lines=(), circles=(), arcs=(), ellipses=(), points=(),
-                 constraints=(), dimensions=(), profiles=0, fully_constrained=False):
+                 constraints=(), dimensions=(), profiles=0, fully_constrained=False,
+                 splines=(), cv_splines=(), fixed_splines=(), texts=()):
         self.name = name
-        self.sketchCurves = FakeCurves(list(lines), list(circles), list(arcs), list(ellipses))
+        self.sketchCurves = FakeCurves(list(lines), list(circles), list(arcs), list(ellipses),
+                                       splines, cv_splines, fixed_splines)
         self.sketchPoints = _Coll(list(points))
+        # sketchTexts is its OWN collection on the sketch, not a sketchCurves sub-collection
+        self.sketchTexts = _Coll(list(texts))
         self.geometricConstraints = _Coll(list(constraints))
         self.sketchDimensions = _Coll(list(dimensions))
         # 'profiles' may be an int (count only, legacy) OR a list of FakeProfile (for the per-profile
@@ -733,3 +794,219 @@ class TestUnitsScaling:
         _install(s)
         out = _payload(sd.handler(sketch_name="D", include_entities=True))
         assert out["dimensions"][0]["value"] == 1.5708
+
+
+# ── the three spline collections: entities, token map, counts ───────────────────────────────────
+#
+# Each spline kind has its OWN index space (spline:N / cv_spline:N / fixed_spline:N) and its own
+# readable surface: a fitted spline answers isClosed + fitPoints, a control-point spline answers
+# degree + controlPoints and has NO isClosed, and a fixed spline answers neither.
+
+class TestSplineEntities:
+    def test_fitted_spline_listed(self):
+        s = FakeSketch("S", splines=[FakeFittedSpline(fit_point_count=5, is_closed=False)])
+        entities, _construction = sd._entities(s, 1.0)
+        recs = [e for e in entities if e["type"] == "spline"]
+        assert len(recs) == 1
+        assert recs[0]["id"] == "spline:0"
+        assert recs[0]["fit_point_count"] == 5
+        assert recs[0]["is_closed"] is False
+
+    def test_two_fitted_splines_indexed_in_creation_order(self):
+        s = FakeSketch("S", splines=[FakeFittedSpline(fit_point_count=3),
+                                     FakeFittedSpline(fit_point_count=4)])
+        entities, _ = sd._entities(s, 1.0)
+        ids = [e["id"] for e in entities if e["type"] == "spline"]
+        assert ids == ["spline:0", "spline:1"]
+
+    def test_control_point_spline_listed(self):
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(degree=3, control_point_count=6,
+                                                     is_closed=True)])
+        entities, _ = sd._entities(s, 1.0)
+        recs = [e for e in entities if e["type"] == "cv_spline"]
+        assert len(recs) == 1
+        assert recs[0]["id"] == "cv_spline:0"
+        assert recs[0]["degree"] == 3
+        assert recs[0]["control_point_count"] == 6
+        # SketchControlPointSpline has no isClosed in the live API - the record must not carry one.
+        assert "is_closed" not in recs[0]
+
+    def test_fixed_spline_listed(self):
+        s = FakeSketch("S", fixed_splines=[FakeFixedSpline(is_closed=True)])
+        entities, _ = sd._entities(s, 1.0)
+        recs = [e for e in entities if e["type"] == "fixed_spline"]
+        assert len(recs) == 1
+        assert recs[0]["id"] == "fixed_spline:0"
+        # SketchFixedSpline exposes no shape properties in the live API - id/construction only.
+        assert "is_closed" not in recs[0]
+
+    def test_each_spline_collection_keeps_its_own_index_space(self):
+        s = FakeSketch("S", splines=[FakeFittedSpline()], cv_splines=[FakeCVSpline()],
+                       fixed_splines=[FakeFixedSpline()])
+        entities, _ = sd._entities(s, 1.0)
+        ids = {e["id"] for e in entities}
+        assert {"spline:0", "cv_spline:0", "fixed_spline:0"} <= ids
+
+    def test_construction_count_includes_splines(self):
+        s = FakeSketch("S", splines=[FakeFittedSpline(is_construction=True)],
+                       cv_splines=[FakeCVSpline(is_construction=True)],
+                       fixed_splines=[FakeFixedSpline(is_construction=False)])
+        _, construction = sd._entities(s, 1.0)
+        assert construction == 2
+
+    def test_missing_optional_property_degrades_to_none_not_a_crash(self):
+        # A spline lacking a property this file reads must not raise - safe() degrades the field to
+        # None rather than crashing the whole X-ray, the same pattern every other reader here uses.
+        class _BareFitted:
+            isConstruction = False
+            entityToken = "tok"
+        s = FakeSketch("S", splines=[_BareFitted()])
+        entities, _ = sd._entities(s, 1.0)
+        rec = next(e for e in entities if e["type"] == "spline")
+        assert rec["is_closed"] is None
+        assert rec["fit_point_count"] is None
+
+
+class TestSplineTokenMap:
+    """entityToken -> ref id, so a constraint or dimension referencing a spline reports its id."""
+
+    def test_fitted_spline_token_mapped(self):
+        s = FakeSketch("S", splines=[FakeFittedSpline(tok="TOK-A")])
+        assert sd._build_token_map(s)["TOK-A"] == "spline:0"
+
+    def test_control_point_and_fixed_spline_tokens_mapped(self):
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(tok="TOK-CV")],
+                       fixed_splines=[FakeFixedSpline(tok="TOK-FX")])
+        tok2id = sd._build_token_map(s)
+        assert tok2id["TOK-CV"] == "cv_spline:0"
+        assert tok2id["TOK-FX"] == "fixed_spline:0"
+
+
+class TestSplineCounts:
+    def test_counts_report_each_spline_collection(self):
+        # each collection counted from its OWN source, so a count wired to the wrong one (or to a
+        # constant) shows up as a wrong number rather than as three agreeing zeros
+        s = FakeSketch("S", splines=[FakeFittedSpline(), FakeFittedSpline()],
+                       cv_splines=[FakeCVSpline()],
+                       fixed_splines=[FakeFixedSpline(), FakeFixedSpline(), FakeFixedSpline()])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="S"))
+        assert out["counts"]["splines"] == 2
+        assert out["counts"]["cv_splines"] == 1
+        assert out["counts"]["fixed_splines"] == 3
+
+    def test_counts_zero_when_no_splines_present(self):
+        _install(FakeSketch("S"))
+        out = _payload(sd.handler(sketch_name="S"))
+        assert out["counts"]["splines"] == 0
+        assert out["counts"]["cv_splines"] == 0
+        assert out["counts"]["fixed_splines"] == 0
+
+    def test_include_entities_lists_the_spline_records(self):
+        _install(FakeSketch("S", splines=[FakeFittedSpline(fit_point_count=7)]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        spline_recs = [e for e in out["entities"] if e["type"] == "spline"]
+        assert len(spline_recs) == 1
+        assert spline_recs[0]["fit_point_count"] == 7
+
+
+# ── sketch text: the read half of sketch_set_text ────────────────────────────
+
+class TestSketchTextRecords:
+    """A SketchText is an addressable sketch entity, so the X-ray lists one record per text at the
+    SAME 'text:<i>' address sketch_set_text(index=i) edits and sketch_delete_entity removes."""
+
+    def test_each_text_is_listed_at_its_delete_and_edit_address(self):
+        _install(FakeSketch("S", texts=[_sketch_text("'FIRST'"), _sketch_text("'SECOND'")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        texts = [e for e in out["entities"] if e["type"] == "text"]
+        assert [t["id"] for t in texts] == ["text:0", "text:1"]
+        assert [t["text"] for t in texts] == ["FIRST", "SECOND"]
+
+    def test_string_is_unquoted_from_the_text_parameter(self):
+        # the live handle is textParameter.expression, which holds the string QUOTED; SketchText.text
+        # is retired, so a record echoing the raw expression would ship "'VISE'" with the quotes.
+        _install(FakeSketch("S", texts=[_sketch_text("'Eval VISE'")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in out["entities"] if e["type"] == "text")
+        assert rec["text"] == "Eval VISE"
+
+    def test_height_and_bounding_box_scale_to_the_requested_units(self):
+        # raw values are cm (0.7 high, box (-8,-0.4)..(8,0.4)); mm scales x10, inches /2.54
+        sk = FakeSketch("S", texts=[_sketch_text("'A'", height_cm=0.7,
+                                                   bbox=_bbox(-8.0, -0.4, 8.0, 0.4))])
+        _install(sk)
+        mm = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in mm["entities"] if e["type"] == "text")
+        assert rec["height"] == 7.0
+        assert rec["bounding_box"] == {"min": {"x": -80.0, "y": -4.0},
+                                       "max": {"x": 80.0, "y": 4.0}}
+        inch = _payload(sd.handler(sketch_name="S", include_entities=True, units="in"))
+        rec_in = next(e for e in inch["entities"] if e["type"] == "text")
+        assert rec_in["height"] == round(0.7 / 2.54, 4)
+
+    def test_font_is_published_from_the_font_name_the_text_reports(self):
+        _install(FakeSketch("S", texts=[_sketch_text("'A'", font="Consolas")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in out["entities"] if e["type"] == "text")
+        assert rec["font"] == "Consolas"
+
+    def test_empty_font_name_reads_as_no_font_rather_than_an_empty_string(self):
+        # an empty string is no font at all - publishing "" would read as a font named ""
+        _install(FakeSketch("S", texts=[_sketch_text("'A'", font="")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in out["entities"] if e["type"] == "text")
+        assert rec["font"] is None
+
+    def test_an_unreadable_text_holds_its_index_instead_of_shifting_the_rest(self):
+        # the index IS the address, so a text no field answers for keeps its slot with None fields;
+        # dropping it would slide the third text onto text:1 and mis-address a later delete.
+        _install(FakeSketch("S", texts=[_sketch_text("'zero'"),
+                                        _sketch_text(readable=False),
+                                        _sketch_text("'two'")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        texts = [e for e in out["entities"] if e["type"] == "text"]
+        assert [t["id"] for t in texts] == ["text:0", "text:1", "text:2"]
+        assert texts[1]["text"] is None and texts[1]["font"] is None
+        assert "bounding_box" not in texts[1]
+        assert texts[2]["text"] == "two"
+
+    def test_a_text_whose_item_read_raises_holds_its_slot(self):
+        # the stale-proxy shape one step earlier than unreadable FIELDS: sketchTexts.item(i)
+        # itself raises. The record at that index still exists with None fields, and text:2 still
+        # carries the third text.
+        sk = FakeSketch("S", texts=[_sketch_text("'zero'"), _sketch_text("'dead'"),
+                                    _sketch_text("'two'")])
+        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        _install(sk)
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        texts = [e for e in out["entities"] if e["type"] == "text"]
+        assert [t["id"] for t in texts] == ["text:0", "text:1", "text:2"]
+        assert texts[1]["text"] is None and texts[1]["font"] is None
+        assert texts[2]["text"] == "two"
+
+    def test_text_records_are_not_counted_as_construction_geometry(self):
+        # construction_count tallies construction CURVES; a text carrying construction=false must
+        # not be swept into it (an agent reads that number to see if a sketch has guides)
+        _install(FakeSketch("S", lines=[FakeLine("tc", 0, 0, 1, 1, construction=True)],
+                            texts=[_sketch_text("'A'"), _sketch_text("'B'")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        assert out["construction_count"] == 1
+        # each record carries construction False explicitly (SketchText has no construction flag,
+        # so the field is a stated fact, not a passthrough)
+        recs = [e for e in out["entities"] if e["type"] == "text"]
+        assert all(r["construction"] is False for r in recs)
+
+    def test_counts_report_sketch_texts_in_the_light_overview(self):
+        # without this a sketch whose only content is a label reads as empty, so the X-ray that
+        # carries the text is never asked for
+        _install(FakeSketch("S", texts=[_sketch_text("'A'"), _sketch_text("'B'")]))
+        light = _payload(sd.handler(sketch_name="S"))
+        assert light["counts"]["texts"] == 2
+        assert "entities" not in light
+
+    def test_a_sketch_with_no_texts_reports_none(self):
+        _install(_rich_sketch())
+        out = _payload(sd.handler(sketch_name="S4", include_entities=True))
+        assert out["counts"]["texts"] == 0
+        assert [e for e in out["entities"] if e["type"] == "text"] == []

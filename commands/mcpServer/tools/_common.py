@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), most_recent_body, result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle auto-chains from that seed, a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token (the ONE physical-body identity read - (nativeObject or self).entityToken, safe at both steps - the key that collapses a native body and its occurrence proxies to one body; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -43,17 +43,47 @@ def safe(getter, default=None):
         return default
 
 
+_UNREADABLE = object()      # a getter that RAISED - distinct from one that returned None
+
+
+def read_flag(getter):
+    """A BOOLEAN flag read: True, False, or None when the getter raised or the flag itself read None.
+
+    The counterpart to ``measured`` for a flag. ``safe(read, False)`` turns an unreadable getter into a
+    confident False, and False is an answer ("suppressed: no", "analysis: off"); worse, at a
+    set-then-read-back site it lets a swallowed write pass a ``now != wanted`` gate whenever the wanted
+    value is False and publishes that as a confirmed state. None says the flag is unknown, which is the
+    only thing an unreadable getter supports."""
+    v = safe(getter, _UNREADABLE)
+    return None if (v is _UNREADABLE or v is None) else bool(v)
+
+
 def measured(getter, scale=1.0, places=6):
     """A measured number, scaled and rounded - or None when it cannot be read.
 
     The counterpart to safe() for anything a caller will treat as a MEASUREMENT. safe(read, 0.0)
     turns an unreadable property into a confident zero, and zero is an answer: "no gap", "no mass",
     "parallel". None says the value is unknown, which is the only honest thing an unreadable
-    property can say. Use safe(read, 0) for a TALLY - an absent collection really does hold none."""
+    property can say. safe(read, 0) stays right for a TALLY over a collection that may be ABSENT -
+    absent really does hold none; a COUNT whose unreadability is not a zero goes through counted()."""
     v = safe(getter)
     if not isinstance(v, (int, float)) or isinstance(v, bool):
         return None
     return round(v * scale, places)
+
+
+def counted(getter):
+    """An integer COUNT read: the int, or None when it cannot be read.
+
+    The integer sibling of ``measured`` (a number) and ``read_flag`` (a flag), and deliberately NOT
+    ``safe(read, 0)``: that default is right for a TALLY over a collection that may be ABSENT, where
+    absent really does hold none. This is for a count where an unreadable read is neither 0 nor 1 -
+    a body's lumps, a built path's entities - and where the caller goes on to compare the number. A
+    bool and a non-int both read as unknown: an adsk mock (and an unmodeled live property) hands back
+    a truthy child object, and letting one through turns `n > 1` into a TypeError or worse a
+    comparison against something that is not a count at all."""
+    n = safe(getter)
+    return int(n) if isinstance(n, int) and not isinstance(n, bool) else None
 
 
 # ── design / component resolution ───────────────────────────────────────────
@@ -98,6 +128,24 @@ def same_component(a, b) -> bool:
         return ta == tb
     na = safe(lambda: a.name)
     return bool(na) and na == safe(lambda: b.name)
+
+
+def native_token(entity):
+    """The entityToken of the entity a wrapper STANDS FOR - ``(nativeObject or self).entityToken`` -
+    or None when neither reads. One value per PHYSICAL entity, which the wrapper's own token is not.
+
+    MEASURED: a body and its occurrence PROXY carry DIFFERENT entityTokens (each stable across
+    re-fetches of that wrapper), while ``nativeObject`` reads None on a native and hands back the
+    native on a proxy. So a comparison keyed on the wrapper's own token sees ONE body as two: a de-dup
+    counts it twice, and a same-body guard never fires on a native-vs-proxy pair of the same body.
+    Read this wherever two body references are compared or de-duplicated. It is NOT the key for a
+    HANDLE a tool publishes - a handle is the wrapper's own token, and resolving it back to a
+    context-carrying proxy is the point.
+
+    ``nativeObject`` is read through ``safe``: a wrapper kind that does not answer it at all still has
+    its own token to key on."""
+    native = safe(lambda: entity.nativeObject) or entity
+    return safe(lambda: native.entityToken)
 
 
 def root_body_advisory(d, comp):
@@ -172,20 +220,16 @@ def all_meshes(d):
     """Every MeshBody in the design, as (component, mesh) pairs - walks EVERY component's meshBodies
     (root + every sub-component, via ``all_components``), regardless of which component is ACTIVE.
 
-    LIVE-VERIFIED: an Occurrence proxy exposes ``bRepBodies`` but NOT ``meshBodies`` - the
-    occurrence-based walk ``_inputs._collect_bodies_by_name`` uses to find a BRep body anywhere in the
-    design silently finds NOTHING for a mesh living outside the active/root component. This is the ONE
-    design-wide mesh traversal both mesh name-resolution (``_inputs.MeshBodyRef``) and a post-delete
-    survivor check (``mesh_delete``) build their name-match leaf op on top of, so a mesh in a child
-    component resolves the same way it survivor-checks."""
+    Reaching meshes through COMPONENTS rather than occurrences is what makes the walk design-wide
+    without depending on the assembly structure: a component with no occurrence anywhere is still
+    walked. This is the ONE design-wide mesh traversal both mesh name-resolution
+    (``_inputs.MeshBodyRef``) and a post-delete survivor check (``mesh_delete``) build their
+    name-match leaf op on top of, so a mesh in a child component resolves the same way it
+    survivor-checks."""
     out = []
     for comp in all_components(d):
-        coll = safe(lambda c=comp: c.meshBodies)
-        n = safe(lambda c=coll: c.count, 0) if coll else 0
-        for i in range(n or 0):
-            m = safe(lambda c=coll, i=i: c.item(i))
-            if m is not None:
-                out.append((comp, m))
+        for m in iter_collection(safe(lambda c=comp: c.meshBodies)):
+            out.append((comp, m))
     return out
 
 
@@ -235,6 +279,20 @@ def most_recent_body(comp):
     bodies = safe(lambda: comp.bRepBodies)
     n = safe(lambda: bodies.count, 0) if bodies else 0
     return bodies.item(n - 1) if n else None
+
+
+def resolve_body_or_recent(body_ref, comp, raw, no_body_error):
+    """(body, error) for a 'that body, or the most recent one' input - the ONE resolution every
+    whole-body edit (shell, fillet/chamfer) runs.
+
+    A GIVEN value - a find_geometry handle OR a name - resolves through the caller's own BodyRef
+    kind, which type-checks it and refuses an ambiguous name; empty falls back to ``most_recent_body``
+    in ``comp``. ``no_body_error`` is the sentence for a component holding no body at all, because
+    each tool points at its OWN alternative input there ('edges', 'remove_faces')."""
+    if raw in (None, "", []):
+        body = most_recent_body(comp)
+        return (body, None) if body else (None, no_body_error)
+    return body_ref.resolve(raw)
 
 
 def open_profile_from_sketch(comp, sketch, verb, no_curves_error=None):
@@ -506,6 +564,13 @@ def timeline_health(design):
     return errors, warnings, total
 
 
+# A before/after volume difference (cm3) smaller than this is NO CHANGE - the ONE band every
+# material-changing feature judges "the API reported success but nothing moved" against. One home so
+# a fillet, an extrude, a thread and a pipe cannot disagree about what a zero is; a site whose signal
+# is not a volume (a bounding-box extent, a displacement) keeps its own named tolerance.
+NO_VOLUME_CHANGE_CM3 = 1e-9
+
+
 # ── unit scaling (Fusion's internal length unit is cm) ──────────────────────
 
 UNIT_TO_CM = {"mm": 0.1, "cm": 1.0, "in": 2.54, "inch": 2.54}
@@ -638,6 +703,66 @@ def resolve_entity_refs(sketch, raw, field="entities"):
     return ents, refs, None
 
 
+# ── entity-anchored POSITION references ('<type>:<index>:<anchor>') ──────────
+
+# The optional THIRD colon-segment of a sketch entity ref names WHICH point of the entity is meant.
+# Pinning a position on the owning entity's own point beats a bare 'point:N', which mis-attaches when
+# two entities share coordinates and each mints its own point index. sketch_dimension and
+# sketch_constrain read the SAME forms through this parser.
+SKETCH_ANCHORS = ("start", "end", "mid", "midpoint", "center")
+
+
+def parse_anchor_ref(ref):
+    """Split '<type>:<index>[:<anchor>]' -> (entity_ref, anchor_or_None, error). start/end/mid apply
+    to a line, center to a circle/arc. An unrecognized third segment errors, naming the valid
+    anchors, rather than silently mis-resolving to the bare entity."""
+    s = (ref or "").strip()
+    parts = s.split(":")
+    if len(parts) <= 2:
+        return s, None, None
+    anchor = parts[-1].strip().lower()
+    if anchor not in SKETCH_ANCHORS:
+        return None, None, (f"'{ref}': unknown anchor '{parts[-1]}'. Valid: "
+                            f"{', '.join(SKETCH_ANCHORS)} (e.g. 'line:0:end', 'circle:2:center').")
+    return ":".join(parts[:-1]), anchor, None
+
+
+def _midpoint_sketch_point(sketch, line):
+    """A SketchPoint welded to a line's MIDPOINT (created at the geometric midpoint, then constrained
+    with addMidPoint so it tracks the line parametrically). Returns (point, None) or (None, error)."""
+    sp = safe(lambda: line.startSketchPoint.geometry)
+    ep = safe(lambda: line.endSketchPoint.geometry)
+    if sp is None or ep is None:
+        return None, "anchor 'mid' needs a line with two endpoints."
+    mid = adsk.core.Point3D.create((sp.x + ep.x) / 2.0, (sp.y + ep.y) / 2.0,
+                                   ((safe(lambda: sp.z, 0.0) or 0.0)
+                                    + (safe(lambda: ep.z, 0.0) or 0.0)) / 2.0)
+    pt = sketch.sketchPoints.add(mid)               # MUTATION - let a failure raise into the handler
+    if pt is None:
+        return None, "could not create a midpoint anchor point."
+    safe(lambda: sketch.geometricConstraints.addMidPoint(pt, line))  # best-effort parametric weld
+    return pt, None
+
+
+def anchor_point(sketch, entity, anchor):
+    """The SketchPoint an anchored ref names, as (point, error). start/end need a line's (or arc's)
+    endpoint; center needs a circle/arc; mid/midpoint CREATES a point welded to a line's midpoint,
+    so it adds geometry where the other anchors only read one."""
+    start = safe(lambda: entity.startSketchPoint)
+    end = safe(lambda: entity.endSketchPoint)
+    center = safe(lambda: entity.centerSketchPoint)
+    if anchor == "start":
+        return (start, None) if start is not None else (None, "anchor 'start' needs a line or arc.")
+    if anchor == "end":
+        return (end, None) if end is not None else (None, "anchor 'end' needs a line or arc.")
+    if anchor == "center":
+        return (center, None) if center is not None else (None, "anchor 'center' needs a circle or arc.")
+    # mid / midpoint - a line only (a well-defined addMidPoint target; a circle/arc uses 'center')
+    if center is not None or start is None or end is None:
+        return None, "anchor 'mid' applies to a LINE (line:N:mid); for a circle/arc use 'center'."
+    return _midpoint_sketch_point(sketch, entity)
+
+
 # Operation name -> adsk.fusion.FeatureOperations attribute (extrude/revolve/sweep/loft-style features).
 OPERATIONS = {
     "new": "NewBodyFeatureOperation",
@@ -655,9 +780,12 @@ def build_path(comp, path_raw):
     """Resolve a feature path input to an adsk.fusion.Path. Returns (path, label, error).
 
     'sketch:<name>' -> chain the connected curves of that path sketch (Features.createPath, isChain).
-    Otherwise a find_geometry EDGE handle (single, auto-chained) or a JSON list of edge handles (used
-    exactly, no chaining) -> a model-edge path (Path.create). A path built from several edges requires
-    them to geometrically connect into one path."""
+    Otherwise a find_geometry EDGE handle (ONE, passed to createPath with chaining requested) or a
+    JSON list of edge handles (used exactly, no chaining) -> a model-edge path (Path.create). A path
+    built from several edges requires them to geometrically connect into one path.
+
+    Requesting chaining is not the same as getting it (see the count note at the return): the label
+    reports the built Path's own count, which is the only statement of what the path holds."""
     # _inputs imports _common, so the edge-handle kind is bound at call time rather than at import.
     from . import _inputs
     if isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:"):
@@ -689,7 +817,7 @@ def build_path(comp, path_raw):
         return None, None, err
     if len(edges) == 1:
         try:
-            p = comp.features.createPath(edges[0], True) # chain tangent-connected edges from the seed
+            p = comp.features.createPath(edges[0], True) # request chaining from the seed edge
         except Exception as e:
             return None, None, f"Could not build a path from the edge: {e}"
     else:
@@ -703,7 +831,17 @@ def build_path(comp, path_raw):
             return None, None, f"Could not build a path from the {len(edges)} edges: {e}"
     if not p:
         return None, None, "Path build returned nothing (the edges may not connect into one path)."
-    return p, f"{len(edges)} edge(s)", None
+    # The label publishes the BUILT path's own entity count (Path.count), never the input count.
+    # What a single seed handle produces is not predictable from the request: chaining follows
+    # TANGENT CONTINUITY and nothing else - an arc seed between two tangent lines built a 3-entity
+    # path, a tangent-continuous closed loop chained all 8 of its edges from one seed, and a sharp
+    # corner (including a fillet patch that breaks tangency at the junction) stops it. Open vs
+    # closed does not decide it. So the count is READ off the built Path and the wording asserts no
+    # expansion; only the read number says what was actually swept.
+    built = safe(lambda: int(p.count), 0) or 0
+    how = ("from 1 seed handle" if len(edges) == 1
+           else f"from {len(edges)} handles, used exactly")
+    return p, (f"{built} edge(s) {how}" if built else f"{how}; edge count unreadable"), None
 
 
 def iter_collection(coll):

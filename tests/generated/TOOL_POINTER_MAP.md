@@ -6,8 +6,8 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 183  |  **description breadcrumbs:** 661  |  **note/error breadcrumbs:** 387
-  |  **guidance smells flagged:** 4
+**Tools:** 183  |  **description breadcrumbs:** 668  |  **note/error breadcrumbs:** 387
+  |  **guidance smells flagged:** 6
 ## Blindspots to engineer
 
 ### Dead references (a tip names something that is not a tool - FIX THESE)
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_inspect_toolpaths`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (40)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_edit_sheet`, `drawing_insert_image`, `drawing_update`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_emboss`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_insert_svg`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (36)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_emboss`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -28,22 +28,22 @@ close orphans, factor duplicated guards into shared helpers.
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 4 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "is not available on this Fusion version."
+- **5x** across 1 module(s): "setMotionData reported success on '"
 - **4x** across 3 module(s): "No active design (open a document with design geometry)."
-- **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 91  (desc 10, note 81)
 - `find_geometry`  <- 82  (desc 61, note 21)
-- `view_screenshot`  <- 51  (desc 21, note 30)
+- `view_screenshot`  <- 50  (desc 21, note 29)
 - `data_get`  <- 33  (desc 19, note 14)
 - `design_get`  <- 33  (desc 13, note 20)
 - `sketch_create`  <- 32  (desc 19, note 13)
+- `design_delete_feature`  <- 31  (desc 18, note 13)
 - `cam_get`  <- 30  (desc 20, note 10)
-- `design_delete_feature`  <- 29  (desc 17, note 12)
 - `sketch_get`  <- 28  (desc 14, note 14)
 - `doc_open`  <- 23  (desc 6, note 17)
 - `model_extrude`  <- 22  (desc 21, note 1)
-- `model_inspect`  <- 19  (desc 8, note 11)
+- `doc_get`  <- 19  (desc 13, note 6)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -69,13 +69,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - still reads appearance '
 - ' - the override did not take.
 - Could not apply appearance to
+- body(ies) - each still reads a different appearance (
+- ). Color the bodies directly (target = the body name).
 
 ### `assembly_capture_position`
+- has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does; a design_add_instance placement does NOT). Use capture to record it into the timeline...
 - This design does not expose snapshots (capture position).
+- has_pending is null - the pending-position flag could not be read, so whether a moved-but-uncaptured position exists is UNKNOWN here (it is not a 'no'). The captured markers below were still read.
 - Nothing to revert - there are no captured positions.
 - Fusion declined to revert the latest captured position.
 - Latest captured position discarded (back to the joint-defined state).
-- has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does). Use capture to record it into the timeline, revert to drop the latest capture, or de...
 - Nothing to capture - there is no pending position change. Move a jointed component first (its pose is transient until captured).
 - snapshots.add() returned nothing - the position was not captured.
 - Capture reported success but the snapshot count did not advance (
@@ -305,6 +308,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'output_folder' - the directory where the NC file(s) will be written.
 - No valid toolpaths to post - every operation is out-of-date, errored, or ungenerated. Run cam_generate (in the Manufacture workspace) first. (
 - Omit 'scope' to post the whole document.
+- ' already exists, but its stored operations cannot be compared with what 'scope' resolves to:
+- requested operation(s) have no readable operationId, so whether reconfiguring would overwrite a machinist-curated program is unknown. Omit 'scope', 'post', and 'output_folder' to post it exactly as...
 - ' already exists and its stored operations differ from what 'scope' resolves to - reconfiguring would overwrite a program that may be machinist-curated. Omit 'scope', 'post', and 'output_folder' to...
 - ' output folder to post as-is against - configure it once with 'output_folder' and 'post'.
 - (the API returned null).
@@ -341,8 +346,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `cam_select_geometry`
-- Selection applied; generation is launched and runs in the background - check cam_get_status(target='
-- ') until completed=true. If it completes with has_toolpath False the op produced no path - the warning channel can be silent there; check the heights (a zero-depth cut: drill derives depth from the...
+- Selection applied; generation is launched and runs in the background at its own pace - check cam_get_status(target='
+- ') at whatever cadence you need the progress, until completed=true. If it completes with has_toolpath False the op produced no path - the warning channel can be silent there; check the heights (a z...
 - Selection applied; pass generate=true (or cam_generate) to compute the toolpath.
 - Selection applied but generation failed to launch:
 - . The selection is saved - fix the cause, then run cam_generate(target='
@@ -474,6 +479,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'target_folder' - the destination folder PATH inside the file's own project (e.g. 'Parts/Fixtures'), or '/' for the project root.
 - Could not read the project root folder that '
 - ' lives in - the move destination cannot be resolved against its project.
+- ' could not be resolved: the folders inside '
+- ' could not be read, so whether '
+- ' exists is unknown. Nothing was moved - re-check with data_get(project=<name>, include=['folders']) and retry.
 - ' does not exist in project '
 - . This tool creates nothing - make the folder with data_create_folder first.
 - ' resolved but neither its id nor its name could be read, so a move into it could not be verified afterwards. Refusing to move unverifiably - re-check with data_get(project=<name>, include=['folder...
@@ -534,6 +542,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addExistingComponent returned nothing - no instance of '
 - addExistingComponent returned an occurrence for '
 - ' but it reads isValid=false - the instance did not land.
+- ', but the assembly census that confirms it could not be read - the instance may or may not have landed. Re-read with design_get(include=['tree']).  **[hedge]**
 - The call reported an occurrence for '
 - ' but no new instance appeared in the assembly tree. Re-read with design_get(include=['tree']).
 - ' has no component to instance into.
@@ -552,11 +561,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'feature' - the timeline object name to delete (see design_get(include=['timeline'])).
 - No active design (open a document with design geometry).
 - This design has no timeline (a direct-modelling design has no deletable timeline features). Delete bodies/occurrences directly instead.
-- No timeline feature matching '
-- '. Available (sample):
-- . Use design_get(include=['timeline']) for the full list.
-- ' is ambiguous - matches
-- ). Rename the target in Fusion, or delete its instances another way.
 - ' is a timeline GROUP, which has no deletable entity. Ungroup it (or delete its member features) instead.
 - ' has no associated entity to delete (it may be a group or an unsupported timeline object).
 - Fusion declined to delete '
@@ -601,6 +605,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - : that target is its own component '
 - ' or sits inside it, so the component would contain an instance of itself. Pick a target outside it.
 - moveToComponent returned nothing - '
+- moveToComponent ran for '
+- ', but the assembly census that confirms it could not be read - the move may or may not have taken. Check with design_get(include=['tree']) before acting on this result.  **[hedge]**
 - The move reported success but the assembly is unchanged - '
 - '. Re-read with design_get(include=['tree']).
 
@@ -813,11 +819,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ). Read the history back with doc_get include=['versions'].
 - saveMilestone returned true but the cloud tip has NOT advanced after
 - s of re-fetching (latest reads
-- ). A real milestone save's new version is visible on a fresh fetch at 4.4s (measured), so this is the signature of a save that versioned nothing - the same result an unmodified document gives. Chec...
+- ) - the signature of a save that versioned nothing, the same result an unmodified document gives. Check doc_get include=['versions'] before calling again.
 - was created and IS the milestone '
 - ' (confirmed on a fresh read of the cloud file). Read the history back with doc_get include=['versions'].
-- yet. A milestone becomes readable
-- after the save (measured 15.7s and 19.9s), so this is NOT evidence that no milestone was created. Re-read doc_get include=['versions'] after that to confirm the milestone row.
+- yet. The milestone mark becomes readable some seconds AFTER the version does, so this is NOT evidence that no milestone was created. Re-read doc_get include=['versions'] to confirm the milestone row.
 - was created and the document is no longer modified, but
 - saveMilestone raised saving '
 
@@ -835,7 +840,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - entities onto sketch '
 - : Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion UI if it is not wanted.
 - curves, counted off its own collections. Coordinates were taken as
-- . Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, so only the whole sketch can be deleted, in the Fusion UI. A drawing document has no viewport to screenshot; dra...
+- , which the drawing STANDARD fixes - 'sheet_units' is the dimension display unit and does not move the geometry. Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, s...
 - Could not add a sketch to sheet '
 
 ### `drawing_create`
@@ -912,14 +917,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Image placed on the sheet.
 - The document's modified flag could not be read, so nothing here confirms the insert took.
 - Provide 'image_path' - the local path of the image file to place.
-- Image file not found:
-- . Pass a local path that exists (a cloud file must be downloaded first - see data_download_file).
+- Unsupported image file '
+- '. A sheet image is one of:
 - Provide both 'x' and 'y' - the sheet position to place the image at.
 - No drawing to place an image on: the active document is not a drawing. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
 - The active drawing has no active sheet to place an image on.
 - This sheet exposes no images collection - an image cannot be placed on it.
 - Images.createInput returned nothing - no image can be placed on this sheet.
-- The image path did not take - ImageInsertInput.imageFilePath reads back empty, so the insert would place no image.
 - Images.insert returned false for '
 - ' - Fusion placed nothing. Treating this as a failure.
 - Images.insert reported success for '
@@ -928,21 +932,24 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'x' and 'y' must be numbers in sheet units (got
 - 'scale' must be greater than 0 (got
 - Images.createInput failed:
-- Could not configure the image insert:
+- Could not set the image position:
 - 'scale' must be a number (got
+- 'rotate_deg' must be a number of degrees (got
 
 ### `drawing_update`
+- Refreshed the drawing's out-of-date references to the latest source design (views regenerated; each reference's 'version' now reflects what the views show). The drawing is modified in-session but N...
+- reference(s) could not be read back (null rows) - their post-refresh staleness is unknown, so up-to-date is unverified.
 - No drawing to update: the active document is not a drawing. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
 - The drawing's document references could not be read, so its staleness cannot be determined - refusing to refresh blind.
-- Refreshed the drawing's out-of-date references to the latest source design (views regenerated; each reference's 'version' now reflects what the views show). The drawing is modified in-session but N...
 - Drawing references are already up to date - nothing to refresh. Edit and SAVE the source design first, then this refreshes the drawing's views to match.
+- reference(s) could not be read (null rows) - their staleness is unknown, so up-to-date is unverified. Every readable reference is current; nothing to refresh.
 - updateAllReferences failed:
 
 ### `find_geometry`
 - '. Use mm, cm, or in.
 - No active design (open or create a document first).
 - Could not resolve target '
-- '. Use an occurrence/component name, a body name, or '' for the whole design (see assembly_get / design_get(include=['tree'])).
+- '. Use an occurrence/component name, a body name (bare, or '<occurrence-or-component>:<body>' when several components hold that name), or '' for the whole design (see assembly_get / design_get(incl...
 - Narrow with kind / radius / nearest_to when a part has many similar faces. A match on a body that is not visible carries hidden:true (visible bodies' records omit it).
 
 ### `joint_at_geometry`
@@ -989,6 +996,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - motion on the as-built joint input:
 - setter returned false
 - As-built joint failed:
+- The as-built joint WAS created but renaming it to '
+- ' did not take - AsBuiltJoint.name still reads '
+- '. Rename it in the browser, or remove it with design_delete_feature and retry with a different name.
+- The as-built joint WAS created (Fusion named it '
+- ') but renaming it to '
+- . Rename it in the browser, or remove it with design_delete_feature and retry with a different name.
 
 ### `joint_create_origin`
 - Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch line (draw it with ...
@@ -1043,6 +1056,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This joint has no offset parameter (rigid/inferred or already 0-DOF).
 - This joint has no angle parameter.
 - This joint has no editable motion (rigid/inferred has no limits).
+- ' is an AS-BUILT joint, which exposes no offset parameter for ANY motion type - its position cannot be driven by a parameter or an expression. Delete it (design_delete_feature) and build the pair w...
+- ' is an AS-BUILT joint, which exposes no offset/angle ModelParameter for ANY motion type - no expression can drive it. Delete it (design_delete_feature) and build the pair with joint_create instead.
 
 ### `joint_motion_link`
 - Joints linked - drive ONE member (joint_drive) and the link moves the other proportionally; read the partner's position back instead of driving it too (joint_drive REFUSES the second member for the...
@@ -1215,14 +1230,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Mesh shell raised no error, but nothing could be read back off the mesh afterwards (triangle and vertex counts and volume are all unreadable) - the hollow is UNVERIFIED, so it is reported as a fail...
 - Mesh shell reported success but '
 - ) - nothing was hollowed.
-- The mesh changed but its enclosed volume did not drop (volume_change
-- ), so the hollow is NOT confirmed by volume - check the body with mesh_get.
-- The mesh changed but its enclosed volume could not be read at both ends, so the hollow is NOT confirmed by volume - check the body with mesh_get.
+- ' NO LONGER watertight (is_closed went true -> false), so this is a loss of closure, NOT a hollow.
 - Could not create the mesh-shell input:
 - Could not set the shell thickness:
 - Mesh shell failed (meshShellFeatures.add raised):
 - The shell was created with thickness =
 - was requested - Fusion did not take the value.
+- The body does not report itself watertight after the shell, so a volume drop cannot be read as material coming out - the hollow is NOT confirmed. Check the body with mesh_get.
+- The mesh changed but its enclosed volume did not drop (volume_change
+- ), so the hollow is NOT confirmed by volume - check the body with mesh_get.
+- The mesh changed but its enclosed volume could not be read at both ends, so the hollow is NOT confirmed by volume - check the body with mesh_get.
 
 ### `mesh_smooth`
 - No active design. Open or create a document first (see doc_new).
@@ -1289,6 +1306,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' body count nor the target's volume could be read back - so whether the bodies were combined is UNVERIFIED. Check with design_get(include=['tree']) / model_inspect.
 - . For cut/intersect the bodies must overlap; confirm with design_get(include=['tree']) / model_inspect.
 - Combine reported no error but nothing it could measure changed -
+- Nothing was combined.
 
 ### `model_compute_holder`
 - No active design. Open the holder model first (see doc_open).
@@ -1509,15 +1527,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document with components first.
 - were requested. The feature is left in the timeline for inspection - design_delete_feature removes it.
 - Occurrences patterned around the axis. Pair with view_screenshot to view.
+- No pattern was created.
 - Circular pattern failed:
 
 ### `model_pattern_path`
+- Instances placed along the path. Copies keep the seed's orientation; they do not rotate to follow the path. Pair with view_screenshot to view.
 - quantity must be >= 2 for a path pattern (the original plus at least one copy).
 - No active design. Open or create a document with components first.
 - is not available on this Fusion version.
 - Path pattern createInput returned nothing, so no pattern was created.
 - were requested - the path may be too short for the spacing asked for. The feature is left in the timeline for inspection - design_delete_feature removes it.
-- Instances placed along the path. Copies keep the seed's orientation; they do not rotate to follow the path. Pair with view_screenshot to view.
 - Could not start the path pattern:
 - No pattern was created.
 - . Check that the path is one connected chain and that the entities sit on or near it.
@@ -1560,6 +1579,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `model_replace_face`
 - The listed face(s) of that body now follow the target surface; the deltas below are the measured change on the body.
+- The feature computed cleanly, but NEITHER the body's volume NOR its face count could be read back, so there is no geometric proof the faces were replaced - no deltas are reported. Re-read the body ...
 - No active design. Create or open a document first (see doc_new).
 - 'faces' resolved to face(s) with no readable owning body - cannot replace.
 - 'faces' must all be on ONE body, but they span
@@ -1658,8 +1678,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This component does not support thread features.
 - 'faces' resolved to face(s) with no readable owning body, so a modeled thread's cut cannot be verified. Re-run find_geometry for fresh handles.
 - threadFeatures.createInput returned nothing for '
-- The thread was created but failed to compute:
-- . It remains in the timeline - remove it with design_delete_feature (feature '
+- ' was created but failed to compute:
 - The thread was created but carries designation '
 - ', not the requested '
 - '. Remove it with design_delete_feature (feature '
@@ -1756,7 +1775,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Create or open a document first (see doc_new).
 - '. Use mm, cm, or in.
 - Unknown include slice(s)
-- 'max_results' must be 1..
 
 ### `save_as_mesh`
 - No active design. Open or create a document first (see doc_new).
@@ -1786,6 +1804,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Draw more with sketch_add_geometry, or view_screenshot to view the sketch.
 - Control-point spline drawn - constrain or dimension it as 'cv_spline:<index>' (sketch_get lists the index).
 - Arc slot drawn out of SketchArcs - 'curves_added' counts them and each is addressable as 'arc:<index>' for sketch_dimension / sketch_constrain (sketch_get(include_entities=true) lists the indexes).
+- Slot drawn from 2 solid SketchLines, 1 CONSTRUCTION SketchLine (the centre-to-centre line) and 2 SketchArc end caps - 5 curves, of which 'curves_added' counts the 3 lines. Address any of them as 'l...
 - Slot drawn - 'curves_added' counts its SketchLines: three, four when a length or angle is passed. Its two end caps are SketchArcs. Address either as 'line:<index>' / 'arc:<index>' for sketch_dimens...
 - '. Valid: mm, cm, in.
 - No active design. Create or open a document first (see doc_new).
@@ -1804,19 +1823,29 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `sketch_constrain`
 - Geometric constraint applied - the sketch is now parametric for this relationship.
+- The sketch text's anchor is
+- rectangle lines of its definition, the degree of freedom no geometric constraint can address.
+- The sketch now reads FULLY CONSTRAINED.
+- The sketch is still NOT fully constrained - other geometry holds the remaining freedom (sketch_get(include_entities=true) shows what).
+- The sketch's constrained state did not read back.
 - sketch entities - read their '<type>:<index>' refs with sketch_get.
 - returned no constraint object.
 - ' returned a constraint but added no sketch geometry - nothing was created. Delete it with sketch_delete_entity(target='constraint:<index>').
 - applied with EVERY instance suppressed, so it created no curves - the pattern constraint itself is in the sketch. Re-run with fewer 'suppressed' flags set for a pattern that draws.
+- a 'text:<index>' ref applies to constraint=fix / unfix only - no other constraint takes a sketch TEXT as an operand. '
+- sketch curves or points
 - Could not resolve entity_one '
 - ' (use '<type>:<index>', type =
+- ' needs 'entity_two' (a second '<type>:<index>'). Got '
 - ' needs 'entities' - comma-separated '<type>:<index>' refs. Got '
 - was requested. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
 - instance(s) suppressed, not the
 - requested, so the pattern is not what was asked for. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
 - ' was created with a different distance_type than the '
 - ' requested, so its spacing is not what was asked for. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
-- ' needs 'entity_two' (a second '<type>:<index>'). Got '
+- ' resolved to a sketch text whose definition hands back no rectangle lines - there is no anchor to lock.
+- anchor lines took the
+- - the text's anchor is left partly locked. Re-read the sketch with sketch_get before relying on its constrained state.
 - 'symmetry' needs 'entity_two'. Got '
 - 'symmetry' needs 'symmetry_line' - the axis line ref (e.g. 'line:0').
 - ' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane name, or a face handle from find_geometry
@@ -1831,7 +1860,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - is not available on this Fusion version.
 
 ### `sketch_copy`
-- ', and adding curves RENUMBERS the rest - re-read sketch_get(include_entities=true) before the next edit. 'returned_entity_count' counts the copied endpoints as well as the curves.
+- ', and an added curve APPENDS at the end of its kind, so the ids already in use keep their entities - re-read sketch_get(include_entities=true) for the new ones. 'returned_entity_count' counts the ...
 - The new curves' ids are in '
 - ' but NONE could be identified by entityToken - re-read sketch_get(include_entities=true) for their ids.
 - could be identified (
@@ -1936,7 +1965,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . Create one with sketch_create.
 
 ### `sketch_set_text`
-- . View it with view_screenshot.
 - and design recomputed so any engraving/emboss that consumes it rebuilt
 - Provide 'text' - the string to display.
 - No active design (open a document with sketch text).
@@ -1944,6 +1972,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No sketch text matched index
 - No sketch text found in a sketch named '
 - '. (Use sketch_get to list sketches; the text must live in a sketch with that exact name.)
+- ' could not be read (a stale or deleted text proxy holds that index). Re-read the sketch with sketch_get(include_entities=true) and retry with a readable index.
 - Setting the font of sketch text in '
 - ' did not take - SketchText.fontName reads back '
 - set the font of sketch text in '

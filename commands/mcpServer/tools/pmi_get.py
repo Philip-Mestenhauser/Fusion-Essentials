@@ -5,7 +5,7 @@
 GD&T/dimensions/datums/surface textures) by zoom level. Default: counts by kind + light records.
 include=['segments'|'detail'] deepens (detail is per-kind structured data); kind=/component=/
 geometry= narrow. Design.pmiSettings is never read - the getter raises when no settings object
-exists (platform defect, live-verified). Read-only."""
+exists. Read-only."""
 
 import adsk.core
 import adsk.fusion
@@ -37,11 +37,25 @@ _KIND_FILTER = _inputs.Choice("kind", options=list(_KINDS),
 
 
 def _normalize_include(include):
-    if include is None:
+    if include in (None, "", []):
         return []
     if isinstance(include, str):
         return [s.strip().lower() for s in include.split(",") if s.strip()]
     return [str(s).strip().lower() for s in include]
+
+
+def _row_cap(max_results) -> int:
+    """The record cap this call runs under, in full: an absent/zero/unparseable request falls back
+    to _MAX_RESULTS_DEFAULT, anything else is held inside 1.._MAX_RESULTS_CAP - so a negative
+    request caps at 1, and an over-cap request is clamped rather than refused (every record
+    crosses the wire, so a caller cannot lift the cap). 'truncated' in the payload says when the
+    cap bit. This is pmi_get's own contract and no other tool's: the fleet's capped reads clamp
+    too, but they do NOT agree on what a negative request means."""
+    try:
+        n = int(max_results or _MAX_RESULTS_DEFAULT)
+    except (TypeError, ValueError):
+        n = _MAX_RESULTS_DEFAULT
+    return max(1, min(n, _MAX_RESULTS_CAP))
 
 
 def _slice_segments(rec, ann):
@@ -94,7 +108,11 @@ def _detail_note(rec, ann, out_f):
 
 
 def _detail_hole_note(rec, ann, out_f):
-    rec["is_hole"] = bool(safe(lambda: ann.isHoleAnnotation, True))
+    # is_hole rides only when isHoleAnnotation READS: a failed read defaulted to True publishes
+    # "this callout annotates a hole" as though it had been measured.
+    is_hole = safe(lambda: ann.isHoleAnnotation)
+    if is_hole is not None:
+        rec["is_hole"] = bool(is_hole)
     rec["quantity"] = safe(lambda: ann.quantity)
     for key, on in (("is_through", "isThrough"), ("is_threaded", "isThreaded"),
                     ("threaded_through", "isThreadedThrough"),
@@ -266,13 +284,13 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
         return error(kerr)
     comp_want = (component or "").strip().lower()
 
-    cap = int(max_results or _MAX_RESULTS_DEFAULT)
-    if cap < 1 or cap > _MAX_RESULTS_CAP:
-        return error(f"'max_results' must be 1..{_MAX_RESULTS_CAP} (got {max_results}).")
+    cap = _row_cap(max_results)
 
     # geometry= narrows via each component collection's own itemsByEntities associativity query.
-    # Matches are keyed by (component, name) - each API call returns FRESH wrapper objects, so an
-    # object-identity intersection with the walk would always be empty (live-verified).
+    # Matches are keyed by (component, name) rather than by object identity: identity across two
+    # PMI reads is UNMEASURED on 2705 (it needs authored PMI, which the extension gate blocks),
+    # and every other adsk collection hands out a fresh wrapper per access, so an identity
+    # intersection would silently return nothing.
     only = None
     if geometry:
         ents, gerr = _GEOMETRY.resolve(geometry)
@@ -315,14 +333,20 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
     out = {"total": total, "by_kind": by_kind, "annotations": records, "units": units}
     if truncated:
         out["truncated"] = True
-    # A suppressed PMI leaves the collections entirely and its timeline entity degrades to a bare
-    # Feature (live-verified) - list suppressed feature names so it cannot vanish silently.
+    # Every SUPPRESSED timeline feature, listed by name: a suppressed PMI is expected to be absent
+    # from the collections above with only its timeline name surviving, so listing them is what
+    # keeps one from vanishing silently. That behaviour is UNMEASURED on 2705 (see _pmi's
+    # extension-gate note), which is why the list is unfiltered rather than claiming which rows
+    # are the PMI.
     suppressed = [nm for _item, nm in _pmi.suppressed_pmi_features(d)]
     if suppressed:
         out["suppressed_features"] = suppressed
-        out["suppressed_note"] = ("Suppressed timeline features (a suppressed PMI is among these "
-                                  "but indistinguishable from other features until unsuppressed - "
-                                  "pmi_edit(action='unsuppress', annotation=<name>)).")
+        out["suppressed_note"] = ("Every suppressed timeline feature. A PMI suppressed here is "
+                                  "expected to be among them and not in 'annotations' above "
+                                  "(unconfirmed on this Fusion build); these names are not "
+                                  "narrowed to PMI. Bring one back with "
+                                  "pmi_edit(action='unsuppress', annotation=<name>), which "
+                                  "verifies the annotation reappeared.")
     remaining = [s for s in _SLICES if s not in inc]
     if remaining:
         out["note"] = ("Light records. Pull deeper with include=" + str(remaining) +
@@ -337,7 +361,8 @@ TOOL_DESCRIPTION = (
 "Read the design's PMI (Product Manufacturing Information - 3D annotations attached to model "
 "faces/edges): Fusion-authored leader notes and hole/thread callouts, plus PMI imported with a "
 "STEP/model (dimensions, GD&T frames, datums, surface textures, folders). Default: counts by "
-"kind + light records (name, kind, component, text, visibility), bounded by max_results. "
+"kind + light records (name, kind, component, visibility; text on Fusion-authored kinds only), "
+"bounded by max_results. "
 "include=['segments'] adds each note's {symbol} markup; include=['detail'] adds per-kind "
 "structure - placement/plane/alignment for notes, values+tolerances+thread+display for hole "
 "callouts, nominal/tolerance/datum-frame/roughness data for imported PMI - scaled to 'units'. "

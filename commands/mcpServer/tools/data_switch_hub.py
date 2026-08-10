@@ -15,7 +15,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -26,10 +26,7 @@ _ACTIONS = ("list", "switch")
 def _all_hubs(data):
     """Return [(hub, name, id), ...] for every data hub."""
     out = []
-    hubs = safe(lambda: data.dataHubs)
-    n = safe(lambda: hubs.count, 0) if hubs else 0
-    for i in range(n):
-        h = hubs.item(i)
+    for h in iter_collection(safe(lambda: data.dataHubs)):
         out.append((h, safe(lambda h=h: h.name) or "(unnamed)", safe(lambda h=h: h.id)))
     return out
 

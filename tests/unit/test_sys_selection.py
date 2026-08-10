@@ -193,6 +193,24 @@ class TestSelectionCap:
         # the full count is still honest, even though the array is capped
         assert out["selection_count"] == 60
 
+    def test_a_selection_that_will_not_read_is_refused_not_quietly_dropped(self, monkeypatch):
+        # the user picked three entities. Skipping the one that will not read publishes two records
+        # under a count of three and calls the shortfall 'truncated' - the caller then acts on a
+        # selection list that is missing the pick between the two it can see.
+        ui = self._fake_ui_with([BRepFace(Plane(FakeVector3D(0, 0, 1))) for _ in range(3)])
+        sels = ui.activeSelections
+        intact = sels.item
+
+        def item(i):
+            if i == 1:
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+            return intact(i)
+        monkeypatch.setattr(sels, "item", item)
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        res = sel.get_user_selection_handler()
+        assert res["isError"] is True
+        assert "Could not read the selection" in res["message"]
+
 
 def _payload(result):
     import json
@@ -468,6 +486,27 @@ class TestRequestSelectionImmediatePick:
         assert out["status"] == "picked"
         assert out["selections"][0]["handle"].startswith("TOK1|@face:")
         assert sel._pending["handler"] is None   # short-circuited - never registered a listener
+
+    def test_an_unreadable_selection_in_the_immediate_pick_is_disclosed(self, monkeypatch):
+        # iter_collection drops a selection whose item() raises; publishing the raw count beside
+        # the shorter list would silently claim completeness, so the hole is disclosed.
+        face = BRepFace(Plane(FakeVector3D(0, 0, 1)), centroid=FakePoint(1, 1, 1), entity_token="TOK1")
+        _install_fake_task_manager(monkeypatch)
+        ui = _fake_ui(entities=[face, face])
+        sels = ui.activeSelections
+        real_item = sels.item
+        def item(i, _real=real_item):
+            if i == 1:
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+            return _real(i)
+        monkeypatch.setattr(sels, "item", item, raising=False)
+        monkeypatch.setattr(sel, "_ui", lambda: ui)
+        out = _payload(sel.request_user_selection_handler(clear_current=False, wait_seconds=30))
+        assert out["status"] == "picked"
+        assert out["selection_count"] == 2
+        assert len(out["selections"]) == 1
+        assert out["unread_selections"] == 1
+        assert "could not be read" in out["note"]
 
 
 # ── sys_request_selection: a pick DURING the wait completes the call in one shot ─────────────────

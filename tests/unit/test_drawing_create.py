@@ -16,6 +16,7 @@ import types
 import pytest
 
 import adsk  # the mock package conftest installed at import time
+import live_api_facts
 from conftest import load_tool
 
 
@@ -63,6 +64,17 @@ def _flatpattern_prefs_node():
         orthogonalViewSheetPreferences=_assembly_sheet_node())
 
 
+def _custom_size(ignores=False):
+    """A CustomSheetSize stand-in carrying the API's own defaults (zero extents, zero zones).
+    `ignores` models the SWIG proxy that ACCEPTS an assignment and keeps its default - the shape
+    only a read-back catches."""
+    if ignores:
+        return type("IgnoringCustomSize", (), {"__setattr__": lambda self, k, v: None,
+                                               "width": 0.0, "height": 0.0,
+                                               "horizontalZones": 0, "verticalZones": 0})()
+    return types.SimpleNamespace(width=0.0, height=0.0, horizontalZones=0, verticalZones=0)
+
+
 class FakeInput:
     def __init__(self):
         gp = types.SimpleNamespace(
@@ -86,8 +98,21 @@ class FakeInput:
         self.sheetCreationType = None
         self.baseDocumentType = None
         self.templateFile = None
-        self.customSize = types.SimpleNamespace(width=None, height=None, horizontalZones=None,
-                                                  verticalZones=None)
+        # customSize hands out a DEFAULT CustomSheetSize: every READ returns a fresh object, so
+        # mutating one and never assigning it back leaves the input carrying nothing. What was
+        # assigned is what a later read returns - the only way a custom size can stick.
+        self.custom_ignores = False
+        self.custom_size_assignments = []
+        self._custom = None
+
+    @property
+    def customSize(self):
+        return self._custom if self._custom is not None else _custom_size(self.custom_ignores)
+
+    @customSize.setter
+    def customSize(self, value):
+        self.custom_size_assignments.append(value)
+        self._custom = value
 
 
 class FakeDM:
@@ -136,24 +161,35 @@ _TANGENT_FAMILY = _family("TangentEdgeDisplayType", "Off", "FullLength", "Shorte
 _HOLE_FAMILY = _family("HolePreferencesType", "HoleAndThreadNote", "HoleNoteOnly", "ThreadNoteOnly",
                        "NoHoleAnnotations")
 _TABLE_FAMILY = _family("TableLocationType", "TopLeft", "TopRight", "BottomLeft", "BottomRight")
-_STANDARD_FAMILY = _family("DrawingStandardType", "ISO", "ASME")
-_UNIT_FAMILY = _family("DrawingUnitType", "Inch", "Millimeter")
-_ORIENTATION_FAMILY = _family("SheetOrientationType", "Landscape", "Portrait")
-_STRATEGY_FAMILY = _family("DimensionStrategyType", "Overall", "Automatic", "Baseline", "Chain")
+# The families live_api_facts.ENUMS carries are built from their MEASURED rows. In SheetSizes the
+# falsy member is CustomSizeSheetSize (0) and the presets run A4=1 to E=10; ISO, Inch, Landscape and
+# Overall are each 0 in their own family, so a truthiness test on a resolved member drops a real one.
+def _measured(family, only=None):
+    """One measured adsk.drawing enum family as a stand-in. `only` keeps just the named members, at
+    their measured values - the build-lacks-this-member shape the resolver must refuse on."""
+    members = live_api_facts.ENUMS["drawing." + family]
+    return types.SimpleNamespace(**{k: v for k, v in members.items()
+                                    if only is None or k in only})
+
+
+_STANDARD_FAMILY = _measured("DrawingStandardTypes")
+_UNIT_FAMILY = _measured("DrawingUnitTypes")
+_ORIENTATION_FAMILY = _measured("SheetOrientationTypes")
+_STRATEGY_FAMILY = _measured("DimensionStrategyTypes")
+_SIZE_FAMILY = _measured("SheetSizes")
 
 
 def _make_drawing_module():
     d = types.ModuleType("adsk.drawing")
+    # MEASURED family: the fake carries the measured values so a falsy member (Automatic=0)
+    # exercises the same is-not-None discipline the live values demand.
     d.DrawingCreationModes = types.SimpleNamespace(
-        AutomaticDrawingCreationMode="AUTO", ManualDrawingCreationMode="MANUAL")
+        **live_api_facts.ENUMS["drawing.DrawingCreationModes"])
     d.DrawingStandardTypes = _STANDARD_FAMILY
     d.DrawingUnitTypes = _UNIT_FAMILY
     d.DrawingContentTypes = types.SimpleNamespace(
         FullAssemblyDrawingContentType="FULL", VisibleOnlyDrawingContentType="VIS")
-    d.SheetSizes = types.SimpleNamespace(
-        A4ISOSheetSize="A4", A3ISOSheetSize="A3", A2ISOSheetSize="A2", A1ISOSheetSize="A1",
-        A0ISOSheetSize="A0", AASMESheetSize="A", BASMESheetSize="B", CASMESheetSize="C",
-        DASMESheetSize="D", EASMESheetSize="E", CustomSizeSheetSize="CUSTOM")
+    d.SheetSizes = _SIZE_FAMILY
     d.SheetOrientationTypes = _ORIENTATION_FAMILY
     d.SheetCreationTypes = types.SimpleNamespace(
         FirstLevelOnlySheetCreationType="FIRST", AllLevelsSheetCreationType="ALL")
@@ -240,7 +276,7 @@ class TestHappyPath:
     def test_defaults_to_automatic_creation_mode(self):
         _, dm = _install()
         dc.handler()
-        assert dm.mode == "AUTO"
+        assert dm.mode == live_api_facts.ENUMS["drawing.DrawingCreationModes"]["AutomaticDrawingCreationMode"]
         assert dm.created_with is dm.input_obj
 
     def test_declared_returns_are_present(self):
@@ -370,7 +406,7 @@ class TestInputMapping:
     def test_sheet_size_maps_to_enum(self):
         _, dm = _install()
         dc.handler(sheet_size="a2")
-        assert dm.input_obj.sheetSize == "A2"
+        assert dm.input_obj.sheetSize == _SIZE_FAMILY.A2ISOSheetSize == 3
 
     def test_orientation_and_scope_map_to_enums(self):
         _, dm = _install()
@@ -463,11 +499,32 @@ class TestMeasuredMemberSpellings:
             "e": "EASMESheetSize", "custom": "CustomSizeSheetSize"}
         assert "default" not in dc._SHEET_SIZE_MEMBERS
 
-    def test_dimension_strategy_map_names_the_measured_members(self):
-        assert dc._DIM_STRATEGY_MAP == {
+    def test_dimension_strategy_map_names_every_measured_member(self):
+        # the shared table: this tool sets the strategy the generator runs with, drawing_dimension
+        # sets it per view afterwards, and a strategy legal on one and refused by the other would
+        # be this family's invention - all eight members the enum carries are offered by both
+        assert dc._drawing_common.DIMENSION_STRATEGIES == {
             "overall": "OverallDimensionStrategyType",
             "automatic": "AutomaticDimensionStrategyType",
-            "baseline": "BaselineDimensionStrategyType", "chain": "ChainDimensionStrategyType"}
+            "baseline": "BaselineDimensionStrategyType",
+            "chain": "ChainDimensionStrategyType",
+            "ordinate": "OrdinateDimensionStrategyType",
+            "symmetric": "SymmetricDimensionStrategyType",
+            "symmetric_with_baseline": "SymmetricWithBaselineDimensionStrategyType",
+            "symmetric_with_ordinate": "SymmetricWithOrdinateDimensionStrategyType"}
+        assert list(dc._AUTO_DIMENSION.options) == (
+            ["default", "off"] + list(dc._drawing_common.DIMENSION_STRATEGIES))
+
+    def test_every_strategy_the_choice_offers_reaches_the_input(self):
+        # the refusal this closes: 'ordinate' was schema-legal on the per-view tool and refused
+        # here, for a strategy the platform carries on both
+        for key, member in dc._drawing_common.DIMENSION_STRATEGIES.items():
+            _, dm = _install()
+            out = _payload(dc.handler(auto_dimension=key))
+            ap = dm.input_obj.automationPreferences
+            assert ap.componentPreferences.autoDimensionPreferences.dimensionStrategyType == \
+                getattr(_STRATEGY_FAMILY, member), key
+            assert out["settings_requested"]["auto_dimension"] == key
 
     def test_every_mapped_member_exists_on_the_measured_families(self):
         for input_name, family, member_map in dc._ENUM_INPUTS:
@@ -517,7 +574,7 @@ class TestEnumFamilyResolution:
     def test_an_absent_sheet_size_member_fails_the_call_naming_it(self, monkeypatch):
         _, dm = _install()
         monkeypatch.setattr(_DRAWING, "SheetSizes",
-                            types.SimpleNamespace(A4ISOSheetSize="A4"))
+                            _measured("SheetSizes", only=["A4ISOSheetSize"]))
         res = dc.handler(sheet_size="a2")
         assert res["isError"] is True
         assert "SheetSizes.A2ISOSheetSize" in res["message"]
@@ -526,7 +583,7 @@ class TestEnumFamilyResolution:
     def test_an_absent_custom_size_member_fails_the_call_naming_it(self, monkeypatch):
         _, dm = _install()
         monkeypatch.setattr(_DRAWING, "SheetSizes",
-                            types.SimpleNamespace(A4ISOSheetSize="A4"))
+                            _measured("SheetSizes", only=["A4ISOSheetSize"]))
         res = dc.handler(sheet_size="custom", custom_width_mm=420, custom_height_mm=297)
         assert res["isError"] is True
         assert "SheetSizes.CustomSizeSheetSize" in res["message"]
@@ -635,7 +692,7 @@ class TestCreationMode:
         template_df = FakeDataFile("Smart Template", file_id="urn:adsk.wipprod:dm.lineage:TPL")
         monkeypatch.setattr(dc, "_resolve_data_file", lambda raw: (template_df, raw, [raw]))
         out = _payload(dc.handler(creation_mode="manual", template_file="urn:x"))
-        assert dm.mode == "MANUAL"
+        assert dm.mode == live_api_facts.ENUMS["drawing.DrawingCreationModes"]["ManualDrawingCreationMode"]
         assert dm.input_obj.templateFile is template_df
         assert out["settings_requested"]["creation_mode"] == "manual"
 
@@ -650,6 +707,32 @@ class TestCreationMode:
         _install()
         out = _payload(dc.handler())
         assert "view placeholder" not in out["note"]
+
+    def test_the_description_carries_the_timeout_fact_the_note_cannot_reach(self):
+        # a caller whose call TIMED OUT never receives the ok() note, so the fact it needs most -
+        # that the create can still have landed - has to be on the surface it read beforehand
+        desc = dc.tool.to_dict()["description"]
+        assert "TIMEOUT is not a verdict" in desc
+        assert "data_get" in desc
+        # the server-side "waits rather than timing out falsely" sentence said the opposite thing
+        # to a caller staring at a client timeout, so it is not what this description promises
+        assert "timing out falsely" not in desc
+
+    def test_the_note_denies_that_a_client_timeout_is_a_failure_verdict(self):
+        # a create that outran the client's call timeout has been found landed afterwards, so the
+        # note names the re-check instead of leaving a blind retry as the obvious move
+        _install()
+        out = _payload(dc.handler())
+        assert "TIMES OUT" in out["note"] and "NOT a failure verdict" in out["note"]
+        assert "data_get" in out["note"] and "doc_get" in out["note"]
+        assert "SECOND drawing" in out["note"]
+
+    def test_the_timeout_wording_rides_on_a_custom_size_create_too(self):
+        # the custom-size branch appends its own extents sentence - the timeout fact must not be
+        # the thing it displaces
+        _install()
+        out = _payload(dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333))
+        assert "NOT a failure verdict" in out["note"] and "500.0 x 333.0 mm" in out["note"]
 
     def test_unknown_creation_mode_is_refused(self):
         _, dm = _install()
@@ -720,12 +803,118 @@ class TestTemplateFile:
 
 
 class TestCustomSheetSize:
-    def test_custom_size_sets_sheet_size_and_custom_width_height_in_cm(self):
+    def test_custom_size_is_assigned_back_through_the_setter_in_document_units(self):
+        # BOTH halves of the dead path: CustomSheetSize.width/height are unitless numbers in the
+        # DOCUMENT unit (millimetres under ISO), and the object the getter hands out only takes
+        # effect when it is assigned BACK - a tool that mutates the copy alone emits a default sheet
+        # while reporting the size it asked for.
         _, dm = _install()
-        dc.handler(sheet_size="custom", custom_width_mm=420, custom_height_mm=297)
-        assert dm.input_obj.sheetSize == "CUSTOM"
-        assert dm.input_obj.customSize.width == pytest.approx(42.0)    # 420 mm -> 42 cm
-        assert dm.input_obj.customSize.height == pytest.approx(29.7)   # 297 mm -> 29.7 cm
+        out = _payload(dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333))
+        assert dm.input_obj.custom_size_assignments, "customSize was never assigned back"
+        landed = dm.input_obj.customSize
+        assert landed is dm.input_obj.custom_size_assignments[-1]
+        assert landed.width == pytest.approx(500.0)     # millimetres, NOT the 50.0 of centimetres
+        assert landed.height == pytest.approx(333.0)
+        applied = out["settings_requested"]["custom_size"]
+        assert (applied["width"], applied["height"], applied["unit"]) == (500.0, 333.0, "mm")
+        assert (applied["width_applied"], applied["height_applied"]) == (500.0, 333.0)
+        assert (applied["horizontal_zones_applied"], applied["vertical_zones_applied"]) == (2, 2)
+
+    def test_the_falsy_custom_sheet_size_member_still_reaches_the_input(self):
+        # CustomSizeSheetSize is 0: a truthiness test on the resolved member would skip
+        # di.sheetSize entirely while settings_requested still reported 'custom'.
+        _, dm = _install()
+        out = _payload(dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333))
+        assert _SIZE_FAMILY.CustomSizeSheetSize == 0
+        assert dm.input_obj.sheetSize == 0
+        assert out["settings_requested"]["sheet_size"] == "custom"
+
+    def test_an_asme_custom_size_is_written_in_inches(self):
+        # the document unit follows the STANDARD: inches under ASME, so 508 mm is 20 in
+        _, dm = _install()
+        out = _payload(dc.handler(standard="asme", sheet_size="custom",
+                                  custom_width_mm=508, custom_height_mm=254))
+        assert dm.input_obj.customSize.width == pytest.approx(20.0)
+        assert dm.input_obj.customSize.height == pytest.approx(10.0)
+        assert out["settings_requested"]["custom_size"]["unit"] == "in"
+
+    def test_both_zone_counts_are_raised_to_the_minimum_the_api_takes(self):
+        # a CustomSheetSize created with fewer than 2 zones each way is refused at creation
+        _, dm = _install()
+        dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333)
+        assert dm.input_obj.customSize.horizontalZones == 2
+        assert dm.input_obj.customSize.verticalZones == 2
+
+    def test_a_zone_count_the_input_already_carries_is_left_alone_and_reported_as_it_reads(self):
+        # the payload and the note report the counts READ BACK, so a title block the input already
+        # carries is published as the 6 x 4 it is - never as the 2 x 2 minimum the code would have
+        # written had it needed to
+        _, dm = _install()
+        dm.input_obj.customSize = types.SimpleNamespace(width=0.0, height=0.0,
+                                                        horizontalZones=6, verticalZones=4)
+        out = _payload(dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333))
+        assert (dm.input_obj.customSize.horizontalZones,
+                dm.input_obj.customSize.verticalZones) == (6, 4)
+        applied = out["settings_requested"]["custom_size"]
+        assert (applied["horizontal_zones_applied"], applied["vertical_zones_applied"]) == (6, 4)
+        assert "6 x 4 zones" in out["note"]
+        assert "2 x 2 zones" not in out["note"]
+
+    def test_a_width_that_does_not_take_refuses_instead_of_creating_a_wrong_sheet(self):
+        # the whole point of the read-back: a drawing emitted at some other size while the payload
+        # says 'custom' is worse than no drawing
+        _, dm = _install()
+        dm.input_obj.custom_ignores = True
+        res = dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333)
+        assert res["isError"] is True
+        assert "custom sheet width" in res["message"] and "No drawing was created" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_input_without_customsize_refuses_instead_of_creating(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.setattr(type(dm.input_obj), "customSize",
+                            property(lambda self: None, lambda self, v: None))
+        res = dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333)
+        assert res["isError"] is True
+        assert "no customSize" in res["message"]
+        assert dm.created_with is None
+
+    def test_an_unassignable_customsize_refuses_naming_the_size(self, monkeypatch):
+        _, dm = _install()
+
+        def _boom(self, value):
+            raise RuntimeError("customSize is read-only")
+
+        monkeypatch.setattr(type(dm.input_obj), "customSize",
+                            property(lambda self: _custom_size(), _boom))
+        res = dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333)
+        assert res["isError"] is True
+        assert "read-only" in res["message"] and "500.0 x 333.0 mm" in res["message"]
+        assert dm.created_with is None
+
+    def test_the_note_publishes_the_read_back_extents_and_denies_reading_the_created_sheet(self):
+        _, dm = _install()
+        out = _payload(dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333))
+        assert "500.0 x 333.0 mm" in out["note"]
+        assert "2 x 2 zones" in out["note"]
+        assert "not readable from here" in out["note"]
+
+    def test_the_off_switch_refuses_custom_and_creates_nothing(self, monkeypatch):
+        # the one constant to throw if a live create stops landing the requested extents: custom
+        # REFUSES rather than emitting a preset-sized drawing labelled custom
+        _, dm = _install()
+        monkeypatch.setattr(dc, "_CUSTOM_SIZE_ENABLED", False)
+        res = dc.handler(sheet_size="custom", custom_width_mm=500, custom_height_mm=333)
+        assert res["isError"] is True
+        assert "turned OFF" in res["message"]
+        assert dm.mode is None and dm.created_with is None
+
+    def test_the_off_switch_leaves_preset_sizes_alone(self, monkeypatch):
+        _, dm = _install()
+        monkeypatch.setattr(dc, "_CUSTOM_SIZE_ENABLED", False)
+        out = _payload(dc.handler(sheet_size="a3"))
+        assert out["created"] is True
+        assert dm.input_obj.sheetSize == _SIZE_FAMILY.A3ISOSheetSize
 
     def test_custom_size_missing_height_is_refused(self):
         _install()

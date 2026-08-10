@@ -11,8 +11,8 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._data_common import (resolve_file_reference, _resolve_data_file, _split_path,
-                           _resolve_folder_path, _folder_path_string)
+from ._data_common import (resolve_file_reference, _resolve_data_file, navigate_folder_path,
+                           _folder_path_string)
 
 
 def _folder_identity(folder):
@@ -43,21 +43,19 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
         return error(f"Could not read the project root folder that '{name}' lives in - the move "
                      "destination cannot be resolved against its project.")
 
-    segments = _split_path(want)
-    target, missing = _resolve_folder_path(root, segments)
-    if target is None:
-        here = root                              # deepest segment that DID resolve, for the hint
-        for seg in segments:
-            nxt, _ = _resolve_folder_path(here, [seg])
-            if nxt is None:
-                break
-            here = nxt
-        opts = [safe(lambda f=f: f.name) for f in safe(lambda: here.dataFolders.asArray(), [])]
+    target, _target_path_walked, miss = navigate_folder_path(root, want)
+    if miss and miss["available"] is None:
+        # UNREAD, not absent: "does not exist" would send the caller to data_create_folder to make a
+        # folder that may already be there, and the move would land nowhere either way.
+        return error(f"Target folder '{target_folder}' could not be resolved: the folders inside "
+                     f"'{miss['at']}' could not be read, so whether '{miss['segment']}' exists is "
+                     "unknown. Nothing was moved - re-check with "
+                     "data_get(project=<name>, include=['folders']) and retry.")
+    if miss:
         return error(f"Target folder '{target_folder}' does not exist in project "
-                     f"'{safe(lambda: proj.name)}' (missing segment '{missing}'). Folders at "
-                     f"'{_folder_path_string(here) or '(project root)'}': "
-                     f"{', '.join(n for n in opts if n) or '(none)'}. This tool creates nothing - "
-                     "make the folder with data_create_folder first.")
+                     f"'{safe(lambda: proj.name)}' (missing segment '{miss['segment']}'). Folders at "
+                     f"'{miss['at']}': {', '.join(miss['available']) or '(none)'}. This tool creates "
+                     "nothing - make the folder with data_create_folder first.")
 
     before_id, before_name, before_path = _folder_identity(safe(lambda: df.parentFolder))
     target_id, target_name, target_path = _folder_identity(target)
@@ -93,10 +91,11 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
 
     # POSITIVE evidence only: a verdict needs BOTH sides readable on the SAME axis. Two unreadable
     # values comparing equal is not a match, it is an absence of one - reported as unconfirmed.
+    matched_on = None
     if now_id is not None and target_id is not None:
-        landed = (now_id == target_id)
+        landed, matched_on = (now_id == target_id), "id"
     elif now_name is not None and target_name is not None:
-        landed = (now_name == target_name)
+        landed, matched_on = (now_name == target_name), "name"
     else:
         return error(f"move() reported success for '{name}' but its new parent folder and the "
                      "target share no readable identity to compare on, so the move is UNCONFIRMED. "
@@ -108,12 +107,20 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
 
     note = ("Verified by re-resolving the file and reading its parentFolder back. A project's ROOT "
             "folder reports the PROJECT's name, so a move to '/' shows that name.")
+    if matched_on == "name":
+        # A NAME match is weaker evidence than an id match and must not be published as the same
+        # thing: two sibling folders can share a name, so this confirms the file sits in a folder
+        # CALLED that, not in the one that was targeted.
+        note += (" One of the two folder ids could not be read, so the match is by folder NAME, not "
+                 "by id - it confirms the file is in a folder named '" + str(now_name) + "', not "
+                 "that it is the exact folder targeted.")
     if (meta or {}).get("scope_truncated"):
         note += (" The file was matched by NAME inside a capped listing - files beyond the cap were "
                  "never compared, so confirm 'name'/'file_id' is the file you meant.")
 
     return ok({
         "moved": True,
+        "verified_by": matched_on,
         "name": name,
         "file_id": lineage,
         "project": safe(lambda: proj.name),

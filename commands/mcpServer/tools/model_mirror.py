@@ -82,12 +82,7 @@ def _volume_sample(entities, feature_mode):
         return list(entities)
     out, seen = [], set()
     for ent in entities:
-        coll = safe(lambda ent=ent: ent.bodies)
-        n = int(safe(lambda: coll.count, 0) or 0) if coll is not None else 0
-        for i in range(n):
-            b = safe(lambda i=i: coll.item(i))
-            if b is None:
-                continue
+        for b in _common.iter_collection(safe(lambda ent=ent: ent.bodies)):
             key = safe(lambda b=b: b.entityToken) or id(b)
             if key not in seen:
                 seen.add(key)

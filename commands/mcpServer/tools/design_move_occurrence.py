@@ -10,8 +10,6 @@ everything the result reports is captured before the call or read after through 
 the tree walk. All measured.
 """
 
-import adsk.core
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -20,8 +18,6 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _outputs
-
-app = adsk.core.Application.get()
 
 _OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=True,
         description="The instance to re-parent.")
@@ -123,6 +119,14 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
         return error(f"moveToComponent returned nothing - '{name}' was not moved.")
 
     after = occurrence_paths(design)
+    # An UNREADABLE assembly walk yields the SAME empty set an empty assembly would, and the move
+    # just proved at least one occurrence exists - so an empty census here is a failed read, not a
+    # verdict. Reporting it as "moved" would publish a re-parent nothing confirmed
+    # (design_remove_feature refuses on the same signal).
+    if not after:
+        return error(f"moveToComponent ran for '{name}', but the assembly census that confirms it "
+                     "could not be read - the move may or may not have taken. Check with "
+                     "design_get(include=['tree']) before acting on this result.")
     new_paths = sorted(p for p in (after - before) if p)
     if previous_path in after and not new_paths:
         return error(f"The move reported success but the assembly is unchanged - '{name}' still "
@@ -155,7 +159,8 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
         out["paths"] = new_paths
     if preserved is False:
         out["position_warning"] = (
-            f"The re-parent LANDED, but the part's geometry also moved {round(shift * 10.0, 4)} mm "
+            f"The re-parent LANDED, but the part's geometry also moved "
+            f"{round(shift * _common.CM_TO_UNIT['mm'], 4)} mm "
             "in world space - a re-parent is measured to keep the world position, so check the "
             "placement (assembly_move) before building on it.")
     return ok(out)

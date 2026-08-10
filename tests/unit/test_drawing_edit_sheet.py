@@ -12,7 +12,9 @@ tool can report a change that did not happen:
   - deleteMe returns true while the sheet collection still reports its pre-delete count - the
     boolean IS the effect, and an unchanged count is never a failure;
   - Sheet.tidyUp is a property whose READ tidies the sheet, and on an already-modified document the
-    modified flag cannot confirm it.
+    modified flag cannot confirm it;
+  - an ADDED sheet lands directly after the ACTIVE sheet while a COPY lands last, so the 1-based
+    export indices the payload publishes shift on an add.
 """
 
 import sys
@@ -22,17 +24,38 @@ from types import SimpleNamespace
 import pytest
 
 import adsk  # the mock package conftest installed at import time
+import live_api_facts
 from conftest import error_message, load_tool, payload
 
 es = load_tool("drawing_edit_sheet")
 
-# fake SheetSizes / SheetOrientationTypes values -> the landscape (width, height) the fake sheet
-# derives, the way Fusion derives its read-only width/height from size + orientation. Every pair is
-# in MILLIMETRES, including the ASME ones: an ASME B sheet (17 x 11 in) reads 431.8 x 279.4 and an
-# ASME E sheet reads 863.6 x 1117.6 - Sheet.width/height are mm on every drawing.
-_SIZE_EXTENT = {"A4": (297.0, 210.0), "A3": (420.0, 297.0), "A2": (594.0, 420.0),
-                "A0": (1189.0, 841.0), "B": (431.8, 279.4), "C": (558.8, 431.8),
-                "E": (863.6, 1117.6)}
+# The MEASURED SheetSizes / SheetOrientationTypes / DrawingStandardTypes value spaces, read from the
+# generated facts file. All three are numbered from 0, so each has a member whose value is FALSY -
+# Landscape, ISO and CustomSizeSheetSize are the three - which is why the fake carries their INTS
+# and not readable sentinels: a truthiness guard anywhere on these paths refuses a legitimate
+# landscape sheet.
+_SIZES = live_api_facts.ENUMS["drawing.SheetSizes"]
+_ORIENTATIONS = live_api_facts.ENUMS["drawing.SheetOrientationTypes"]
+_STANDARDS = live_api_facts.ENUMS["drawing.DrawingStandardTypes"]
+_CUSTOM = _SIZES["CustomSizeSheetSize"]
+_A4, _A3, _A2, _A1, _A0 = (_SIZES[k] for k in
+                           ("A4ISOSheetSize", "A3ISOSheetSize", "A2ISOSheetSize",
+                            "A1ISOSheetSize", "A0ISOSheetSize"))
+_A, _B, _C, _D, _E = (_SIZES[k] for k in
+                      ("AASMESheetSize", "BASMESheetSize", "CASMESheetSize",
+                       "DASMESheetSize", "EASMESheetSize"))
+_LAND = _ORIENTATIONS["LandscapeSheetOrientationType"]
+_PORT = _ORIENTATIONS["PortraitSheetOrientationType"]
+_ISO = _STANDARDS["ISODrawingStandardType"]
+_ASME = _STANDARDS["ASMEDrawingStandardType"]
+
+# sheet size -> the landscape (width, height) the fake sheet derives, the way Fusion derives its
+# read-only width/height from size + orientation. Every pair is in MILLIMETRES, including the ASME
+# ones: an ASME B sheet (17 x 11 in) reads 431.8 x 279.4 and an ASME E sheet reads 863.6 x 1117.6 -
+# Sheet.width/height are mm on every drawing.
+_SIZE_EXTENT = {_CUSTOM: (500.0, 333.0), _A4: (297.0, 210.0), _A3: (420.0, 297.0),
+                _A2: (594.0, 420.0), _A0: (1189.0, 841.0), _B: (431.8, 279.4),
+                _C: (558.8, 431.8), _E: (863.6, 1117.6)}
 
 
 class FakeSheet:
@@ -41,7 +64,7 @@ class FakeSheet:
     duplicate, size/orientation assignments that raise the way Fusion does, and tidyUp - a property
     whose READ performs the tidy-up."""
 
-    def __init__(self, name, size="A3", orientation="LAND", views=0, sketches=0, tables=0,
+    def __init__(self, name, size=_A3, orientation=_LAND, views=0, sketches=0, tables=0,
                  delete_result=True, tidy_result=True, rename_lands=True, size_raises=False,
                  size_ignored=False, orientation_raises=False, orientation_ignored=False):
         self._name = name
@@ -103,12 +126,12 @@ class FakeSheet:
     @property
     def width(self):
         w, h = _SIZE_EXTENT[self._size]
-        return w if self._orientation == "LAND" else h
+        return w if self._orientation == _LAND else h
 
     @property
     def height(self):
         w, h = _SIZE_EXTENT[self._size]
-        return h if self._orientation == "LAND" else w
+        return h if self._orientation == _LAND else w
 
     @property
     def tidyUp(self):
@@ -135,6 +158,11 @@ class FakeSheet:
         return made
 
 
+# The MEASURED DrawingUnitTypes values (Inch is 0 - falsy).
+_MM = live_api_facts.ENUMS["drawing.DrawingUnitTypes"]["MillimeterDrawingUnitType"]
+_IN = live_api_facts.ENUMS["drawing.DrawingUnitTypes"]["InchDrawingUnitType"]
+
+
 def _enum(**members):
     return SimpleNamespace(**members)
 
@@ -146,14 +174,10 @@ def _drawing_module():
     only in one collection order."""
     d = types.ModuleType("adsk.drawing")
     d.DrawingDocument = SimpleNamespace(cast=lambda doc: None)
-    d.SheetSizes = _enum(
-        A4ISOSheetSize="A4", A3ISOSheetSize="A3", A2ISOSheetSize="A2", A1ISOSheetSize="A1",
-        A0ISOSheetSize="A0", AASMESheetSize="A", BASMESheetSize="B", CASMESheetSize="C",
-        DASMESheetSize="D", EASMESheetSize="E")
-    d.SheetOrientationTypes = _enum(
-        LandscapeSheetOrientationType="LAND", PortraitSheetOrientationType="PORT")
-    d.DrawingStandardTypes = _enum(ISODrawingStandardType="ISO", ASMEDrawingStandardType="ASME")
-    d.DrawingUnitTypes = _enum(MillimeterDrawingUnitType="MM", InchDrawingUnitType="IN")
+    d.SheetSizes = _enum(**_SIZES)
+    d.SheetOrientationTypes = _enum(**_ORIENTATIONS)
+    d.DrawingStandardTypes = _enum(**_STANDARDS)
+    d.DrawingUnitTypes = _enum(**live_api_facts.ENUMS["drawing.DrawingUnitTypes"])
     return d
 
 
@@ -164,7 +188,7 @@ def wire(monkeypatch):
     monkeypatch.setattr(adsk, "drawing", drawing, raising=False)
     monkeypatch.setitem(sys.modules, "adsk.drawing", drawing)
 
-    def _install(sheets=None, standard="ISO", units="MM", active=0, is_drawing=True,
+    def _install(sheets=None, standard=_ISO, units=_MM, active=0, is_drawing=True,
                  add_result="ok", modified=False, copy_activates=True):
         objs = list(sheets or [FakeSheet("Sheet1")])
         doc = SimpleNamespace(name="Widget Drawing", isModified=modified)
@@ -174,12 +198,16 @@ def wire(monkeypatch):
         dwg = SimpleNamespace(sheets=coll, activeSheet=objs[active] if objs else None,
                               documentSettings=SimpleNamespace(standard=standard, units=units))
 
-        def landing(made, activate=True):
-            """A sheet joining the drawing: it lands last and becomes the active sheet."""
+        def landing(made, activate=True, after_active=False):
+            """A sheet joining the drawing and becoming the active one. A COPY lands last; an ADD
+            lands DIRECTLY AFTER the active sheet (measured), shifting every sheet below it."""
             made.doc = doc
             made.landing = landing
             made.copy_activates = copy_activates
-            objs.append(made)
+            at = len(objs)
+            if after_active and dwg.activeSheet in objs:
+                at = objs.index(dwg.activeSheet) + 1
+            objs.insert(at, made)
             coll.count = len(objs)
             if activate:
                 dwg.activeSheet = made
@@ -210,7 +238,7 @@ def wire(monkeypatch):
                 made.doc = doc
                 made.landing = landing
                 return made
-            landing(made)
+            landing(made, after_active=True)
             return made
 
         coll.createInput = create_input
@@ -257,7 +285,7 @@ class TestSheetTargeting:
 
 class TestAdd:
     def test_new_sheet_inherits_the_active_sheet_and_becomes_active(self, wire):
-        state = wire([FakeSheet("Front", size="A2", orientation="PORT")])
+        state = wire([FakeSheet("Front", size=_A2, orientation=_PORT)])
         out = payload(es.handler(action="add", new_name="Detail"))
         assert out["sheet"] == "Detail"
         assert out["sheet_count_before"] == 1 and out["sheet_count"] == 2
@@ -304,7 +332,7 @@ class TestCopy:
     def test_a_copy_carries_the_source_sheets_settings_not_the_active_sheets(self, wire):
         # a copy takes the SOURCE sheet's size and orientation - only an ADD inherits the active
         # sheet's, so the payload and its note must not claim otherwise
-        wire([FakeSheet("Front", size="A2", orientation="PORT"), FakeSheet("Detail", size="A4")],
+        wire([FakeSheet("Front", size=_A2, orientation=_PORT), FakeSheet("Detail", size=_A4)],
              active=1)
         out = payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
         assert out["facts"]["sheet_size"] == "a2" and out["facts"]["orientation"] == "portrait"
@@ -313,7 +341,7 @@ class TestCopy:
     def test_the_facts_come_from_the_sheet_copy_returned(self, wire):
         # the object copy() handed back is the one to read - not whichever sheet the drawing
         # happens to report as active afterwards
-        wire([FakeSheet("Front", size="A2", sketches=1)], copy_activates=False)
+        wire([FakeSheet("Front", size=_A2, sketches=1)], copy_activates=False)
         out = payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
         assert out["sheet"] == "Front Copy" and out["facts"]["name"] == "Front Copy"
 
@@ -346,7 +374,10 @@ class TestDelete:
         out = payload(es.handler(action="delete", sheet="Detail"))
         assert out["deleted"] is True and out["sheet"] == "Detail"
         assert out["sheet_count_before"] == 2 and out["sheet_count_still_reads"] == 2
-        assert "NOT a verification" in out["note"] and "later call" in out["note"]
+        assert "neither is a verification" in out["note"] and "later call" in out["note"]
+        # the sheets it STILL reports include the deleted one - the payload says so rather than
+        # publishing a list that looks like a post-delete state
+        assert [s["name"] for s in out["sheets_still_read"]] == ["Front", "Detail"]
         assert state.sheets[1].deleted is True
 
     def test_refused_delete_is_an_error(self, wire):
@@ -386,33 +417,33 @@ class TestRename:
 
 class TestSetSize:
     def test_size_and_extent_are_read_back(self, wire):
-        state = wire([FakeSheet("Front", size="A3", orientation="LAND")])
+        state = wire([FakeSheet("Front", size=_A3, orientation=_LAND)])
         out = payload(es.handler(action="set_size", sheet="Front", sheet_size="a4"))
         assert out["sheet_size"] == "a4" and out["previous_sheet_size"] == "a3"
         assert out["width"] == 297.0 and out["height"] == 210.0
         assert out["previous_width"] == 420.0 and out["sheet_units"] == "mm"
-        assert state.sheets[0].sheetSize == "A4"
+        assert state.sheets[0].sheetSize == _A4
 
     def test_a_size_from_the_other_standard_is_refused_before_anything_is_set(self, wire):
         # measured: Fusion RAISES on a mismatched size, and a raise in a drawing document is not
         # reliably rolled back - so the mismatch must never reach the assignment
-        state = wire([FakeSheet("Front", size="A3", size_raises=True)], standard="ISO")
+        state = wire([FakeSheet("Front", size=_A3, size_raises=True)], standard=_ISO)
         msg = error_message(es.handler(action="set_size", sheet="Front", sheet_size="b"))
         # the full phrase is pinned: the refusal reads as English, never "a ASME sheet size"
         assert "The ASME sheet size 'b' is not valid for this drawing" in msg
         assert "Choose one of the ISO sizes." in msg
-        assert state.sheets[0].sheetSize == "A3"
+        assert state.sheets[0].sheetSize == _A3
         assert state.sheets[0].size_sets == 0        # the assignment was never attempted
 
     def test_a_platform_refusal_reaches_the_caller_verbatim(self, wire):
         # standard unreadable -> the guard cannot fire, so the raise itself must be carried
-        state = wire([FakeSheet("Front", size="A3", size_raises=True)], standard=None)
+        state = wire([FakeSheet("Front", size=_A3, size_raises=True)], standard=None)
         msg = error_message(es.handler(action="set_size", sheet="Front", sheet_size="a4"))
         assert "not valid for the active drawing standard" in msg
-        assert state.sheets[0].sheetSize == "A3"
+        assert state.sheets[0].sheetSize == _A3
 
     def test_a_silently_ignored_size_is_an_error(self, wire):
-        wire([FakeSheet("Front", size="A3", size_ignored=True)])
+        wire([FakeSheet("Front", size=_A3, size_ignored=True)])
         assert "did not take" in error_message(es.handler(action="set_size", sheet="Front",
                                                           sheet_size="a4"))
 
@@ -424,13 +455,79 @@ class TestSetSize:
                                                                                    monkeypatch):
         # the member is read BY NAME and answers None on a build that lacks it - assigning that None
         # would set the sheet to nothing, so the guard names the member and stops
-        state = wire([FakeSheet("Front", size="A3")])
+        state = wire([FakeSheet("Front", size=_A3)])
         monkeypatch.setattr(adsk.drawing, "SheetSizes",
-                            SimpleNamespace(A3ISOSheetSize="A3"))
+                            _enum(**{k: v for k, v in _SIZES.items() if v == _A3}))
         msg = error_message(es.handler(action="set_size", sheet="Front", sheet_size="a4"))
         assert "A4ISOSheetSize" in msg and "a4" in msg
         assert state.sheets[0].size_sets == 0
-        assert state.sheets[0].sheetSize == "A3"
+        assert state.sheets[0].sheetSize == _A3
+
+
+class TestFalsyEnumMembers:
+    def test_the_two_families_are_numbered_from_zero(self, wire):
+        # every measured adsk.drawing family starts at 0, so each has ONE member a truthiness test
+        # cannot tell from an absent one - these two
+        assert adsk.drawing.SheetSizes.CustomSizeSheetSize == 0
+        assert adsk.drawing.SheetOrientationTypes.LandscapeSheetOrientationType == 0
+        assert adsk.drawing.SheetSizes.A4ISOSheetSize == 1
+
+    def test_setting_the_falsy_landscape_member_lands_and_reads_back(self, wire):
+        # landscape is 0: a member guard testing truthiness instead of None would refuse this
+        # legitimate reorientation as "this Fusion build has no sheet orientation", and a label
+        # decoder doing the same would report the result as unreadable
+        state = wire([FakeSheet("Front", size=_A4, orientation=_PORT)])
+        out = payload(es.handler(action="set_orientation", sheet="Front",
+                                 orientation="landscape"))
+        assert out["orientation"] == "landscape" and out["previous_orientation"] == "portrait"
+        assert out["width"] == 297.0 and out["height"] == 210.0
+        assert state.sheets[0].orientation == _LAND
+
+    def test_a_sheet_holding_the_falsy_custom_size_is_labelled_null_with_its_extent_kept(self, wire):
+        # CustomSizeSheetSize is 0 and is NOT a preset this tool can set, so the label is null -
+        # the extent is what a custom sheet reports instead, and it must still be published
+        wire([FakeSheet("Front", size=_CUSTOM)])
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["facts"]["sheet_size"] is None
+        assert out["facts"]["width"] == 500.0 and out["facts"]["height"] == 333.0
+
+
+class TestSheetListing:
+    def test_add_publishes_the_new_order_with_one_based_export_indices(self, wire):
+        # no drawing read tool exists, so the export indices drawing_export's sheet_range takes are
+        # obtainable only here - and an add lands DIRECTLY AFTER the active sheet, shifting them
+        state = wire([FakeSheet("Front"), FakeSheet("Tail")])
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["sheets"] == [{"export_index": 1, "name": "Front"},
+                                 {"export_index": 2, "name": "Detail"},
+                                 {"export_index": 3, "name": "Tail"}]
+        assert "export index shifts" in out["note"]
+        assert len(state.sheets) == 3
+
+    def test_copy_publishes_the_listing_with_the_copy_last(self, wire):
+        wire([FakeSheet("Front"), FakeSheet("Tail")])
+        out = payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
+        assert [s["name"] for s in out["sheets"]] == ["Front", "Tail", "Front Copy"]
+        assert out["sheets"][-1]["export_index"] == 3
+
+    def test_an_unreadable_sheet_holds_its_export_index_instead_of_shifting_the_rest(self, wire):
+        # export_index is the number drawing_export's sheet_range takes. A sheet that cannot be read
+        # must keep its slot as a null name - dropping it would slide every later sheet down one and
+        # send sheet_range at the WRONG sheets.
+        state = wire([FakeSheet("Front"), FakeSheet("Middle"), FakeSheet("Tail")])
+        objs = state.sheets
+
+        def item(i):
+            if objs[i].name == "Middle":
+                raise RuntimeError("sheet proxy is stale")
+            return objs[i]
+        state.collection.item = item
+
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["sheets"] == [{"export_index": 1, "name": "Front"},
+                                 {"export_index": 2, "name": "Detail"},
+                                 {"export_index": 3, "name": None},
+                                 {"export_index": 4, "name": "Tail"}]
 
 
 class TestExtentUnits:
@@ -438,20 +535,20 @@ class TestExtentUnits:
         # the defect this closes: an ASME B sheet reads 431.8 x 279.4 MILLIMETRES while the
         # drawing's dimension unit reads inches, so publishing the numbers under sheet_units
         # labelled millimetres as inches
-        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        wire([FakeSheet("Front", size=_B)], standard=_ASME, units=_IN)
         out = payload(es.handler(action="add", new_name="Detail"))
         assert out["facts"]["width"] == 431.8 and out["facts"]["height"] == 279.4
         assert out["facts"]["width_height_unit"] == "mm"
         assert out["sheet_units"] == "in"
 
     def test_a_resize_labels_the_extent_it_publishes(self, wire):
-        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        wire([FakeSheet("Front", size=_B)], standard=_ASME, units=_IN)
         out = payload(es.handler(action="set_size", sheet="Front", sheet_size="c"))
         assert out["width"] == 558.8 and out["width_height_unit"] == "mm"
         assert out["sheet_units"] == "in"
 
     def test_a_reorientation_labels_the_extent_it_publishes(self, wire):
-        wire([FakeSheet("Front", size="B")], standard="ASME", units="IN")
+        wire([FakeSheet("Front", size=_B)], standard=_ASME, units=_IN)
         out = payload(es.handler(action="set_orientation", sheet="Front", orientation="portrait"))
         assert out["width"] == 279.4 and out["width_height_unit"] == "mm"
         assert out["sheet_units"] == "in"
@@ -459,70 +556,70 @@ class TestExtentUnits:
 
 class TestSetOrientation:
     def test_orientation_swaps_the_extent(self, wire):
-        state = wire([FakeSheet("Front", size="A4", orientation="LAND")])
+        state = wire([FakeSheet("Front", size=_A4, orientation=_LAND)])
         out = payload(es.handler(action="set_orientation", sheet="Front", orientation="portrait"))
         assert out["orientation"] == "portrait" and out["previous_orientation"] == "landscape"
         assert out["width"] == 210.0 and out["height"] == 297.0
         assert out["previous_width"] == 297.0
-        assert state.sheets[0].orientation == "PORT"
+        assert state.sheets[0].orientation == _PORT
 
     def test_portrait_on_the_largest_sheet_is_refused_before_anything_is_set(self, wire):
         # measured: portrait on an ISO A0 sheet RAISES
-        state = wire([FakeSheet("Front", size="A0", orientation_raises=True)], standard="ISO")
+        state = wire([FakeSheet("Front", size=_A0, orientation_raises=True)], standard=_ISO)
         msg = error_message(es.handler(action="set_orientation", sheet="Front",
                                        orientation="portrait"))
         # the full phrase is pinned, and the orientation it reports is the one it READ
         assert "portrait orientation on the ISO A0 sheet size" in msg
         assert "keeps its current orientation ('landscape')" in msg
-        assert state.sheets[0].orientation == "LAND"
+        assert state.sheets[0].orientation == _LAND
         assert state.sheets[0].orientation_sets == 0  # the assignment was never attempted
 
     def test_portrait_on_the_largest_asme_sheet_is_refused_before_anything_is_set(self, wire):
         # measured: Fusion answers "3 : Portrait orientation is not supported for ASME E sheet
         # size." - the same refusal as ISO A0, and the shared table carries both pairs
-        state = wire([FakeSheet("Front", size="E", orientation_raises=True)], standard="ASME")
+        state = wire([FakeSheet("Front", size=_E, orientation_raises=True)], standard=_ASME)
         msg = error_message(es.handler(action="set_orientation", sheet="Front",
                                        orientation="portrait"))
         assert "portrait orientation on the ASME E sheet size" in msg
-        assert state.sheets[0].orientation == "LAND"
+        assert state.sheets[0].orientation == _LAND
         assert state.sheets[0].orientation_sets == 0
 
     def test_portrait_on_a_smaller_sheet_of_the_same_standard_is_not_pre_refused(self, wire):
         # only the pairs Fusion actually refuses are guarded - a blanket ASME refusal would block
         # an orientation the platform accepts
-        state = wire([FakeSheet("Front", size="B")], standard="ASME")
+        state = wire([FakeSheet("Front", size=_B)], standard=_ASME)
         out = payload(es.handler(action="set_orientation", sheet="Front", orientation="portrait"))
         assert out["orientation"] == "portrait" and state.sheets[0].orientation_sets == 1
 
     def test_an_unreadable_current_orientation_is_named_as_such(self, wire):
         # the refusal publishes what it READ - an orientation it cannot decode says so
-        wire([FakeSheet("Front", size="A0", orientation="SIDEWAYS")], standard="ISO")
+        wire([FakeSheet("Front", size=_A0, orientation=99)], standard=_ISO)
         msg = error_message(es.handler(action="set_orientation", sheet="Front",
                                        orientation="portrait"))
         assert "keeps its current orientation ('unreadable')" in msg
 
     def test_a_platform_refusal_reaches_the_caller_verbatim(self, wire):
-        state = wire([FakeSheet("Front", size="A4", orientation_raises=True)], standard=None)
+        state = wire([FakeSheet("Front", size=_A4, orientation_raises=True)], standard=None)
         msg = error_message(es.handler(action="set_orientation", sheet="Front",
                                        orientation="portrait"))
         assert "not supported for ISO A0 sheet size" in msg
-        assert state.sheets[0].orientation == "LAND"
+        assert state.sheets[0].orientation == _LAND
 
     def test_a_silently_ignored_orientation_is_an_error(self, wire):
-        wire([FakeSheet("Front", size="A4", orientation_ignored=True)])
+        wire([FakeSheet("Front", size=_A4, orientation_ignored=True)])
         assert "did not take" in error_message(es.handler(action="set_orientation", sheet="Front",
                                                           orientation="portrait"))
 
     def test_an_orientation_this_build_has_no_member_for_is_refused_before_anything_is_set(
             self, wire, monkeypatch):
-        state = wire([FakeSheet("Front", size="A4")])
+        state = wire([FakeSheet("Front", size=_A4)])
         monkeypatch.setattr(adsk.drawing, "SheetOrientationTypes",
-                            SimpleNamespace(LandscapeSheetOrientationType="LAND"))
+                            _enum(**{k: v for k, v in _ORIENTATIONS.items() if v == _LAND}))
         msg = error_message(es.handler(action="set_orientation", sheet="Front",
                                        orientation="portrait"))
         assert "PortraitSheetOrientationType" in msg and "portrait" in msg
         assert state.sheets[0].orientation_sets == 0
-        assert state.sheets[0].orientation == "LAND"
+        assert state.sheets[0].orientation == _LAND
 
     def test_an_unknown_orientation_is_refused(self, wire):
         wire([FakeSheet("Front")])

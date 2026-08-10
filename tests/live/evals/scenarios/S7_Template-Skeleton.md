@@ -9,7 +9,7 @@ fixture: the S6 artifact P6-Vise (verified BY URN) OPENED by the orchestrator as
   subfolders + legacy chains), so a by-name search x-refs and edits the wrong
   lineage. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 183
+  max_tool_calls: 198
   max_tokens: 78000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline - document opens/saves are async and CAN flap; grade recovery)
@@ -68,7 +68,18 @@ GOAL - the template skeleton a machining job drops into:
 
 Finally save the document as P7-Template into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
+Additionally, TAG the template for its consumers: attach a small set of NAMED ATTRIBUTES to
+the template's key timeline features (at minimum the stock feature and the fixture insert) -
+a group name of your choosing plus a key/value per feature that a later consumer could query
+to find them without knowing feature names. Prove the tags land by QUERYING them back through
+whatever search the tools offer (exact and, if offered, a pattern form) and report what the
+query returned.
+
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
+
+- the feature tags exist and are findable: the attribute query returns the tagged features
+  (report the group/keys you chose and the query results; a tag written but not re-found by
+  QUERY fails this).
 
 - the three components exist with the right contents (fresh tree read: model/placeholder,
   stock/block, fixture/vise reference).

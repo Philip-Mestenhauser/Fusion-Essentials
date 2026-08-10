@@ -23,8 +23,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (the convention design_get labels).
-_HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -115,16 +113,19 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
         return error(_common.no_feature_error(design, "Replace face"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
-        return error(f"Replace face was created but failed to compute: {msg}")
+        return error(f"Replace face was created but failed to compute: {msg}. "
+                     + _common.failed_effect_remedy(design, feature))
 
     # Post-mutation read-back: the feature exposes no sourceFaces, so the body's own geometry is the
     # evidence. EITHER signal moving proves the replace landed; neither moving, with at least one
     # readable, is a swallowed no-op.
     vol_delta, vol_readable = _geom.volume_delta(bodies, vol_before)
     face_delta, faces_readable = _geom.face_count_delta(bodies, faces_before)
-    moved = (vol_readable and abs(vol_delta) > 1e-9) or (faces_readable and face_delta != 0)
+    moved = ((vol_readable and abs(vol_delta) > _common.NO_VOLUME_CHANGE_CM3)
+             or (faces_readable and face_delta != 0))
+    effect_unverified = False
     if not vol_readable and not faces_readable:
         if direct_no_feature:
             # With no feature object the geometry is the ONLY evidence - unreadable means the
@@ -133,6 +134,11 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
                          "neither the body's volume nor its face count could be read back - so "
                          "whether the faces were replaced is UNVERIFIED. Re-read the body with "
                          "model_inspect.")
+        # PARAMETRIC with neither signal readable: the feature computed cleanly (the health gate
+        # above passed), which is real evidence, but the GEOMETRIC check this tool advertises did
+        # NOT run. Publishing a plain replaced:true here would claim a reading that never happened,
+        # so the gap is published with the result instead of being dropped.
+        effect_unverified = True
     elif not moved:
         return error(f"Replace face reported success but body '{body_name or '?'}' did not change - "
                      f"{_unchanged_detail(vol_readable, faces_readable)}. "
@@ -145,9 +151,15 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
         "target": target_label,
         "target_kind": target_kind,
         "tangent_chain": bool(tangent_chain),
-        "note": "The listed face(s) of that body now follow the target surface; the deltas below "
-                "are the measured change on the body.",
+        "note": ("The listed face(s) of that body now follow the target surface; the deltas below "
+                 "are the measured change on the body."),
     }
+    if effect_unverified:
+        payload["effect_unverified"] = True
+        payload["note"] = ("The feature computed cleanly, but NEITHER the body's volume NOR its face "
+                           "count could be read back, so there is no geometric proof the faces were "
+                           "replaced - no deltas are reported. Re-read the body with model_inspect "
+                           "before relying on this result.")
     # Direct mode: no feature object, so no name - publish the flag RETURNS declares the omission
     # against. Every other key here is measured off the BODY, so it survives the missing feature.
     if direct_no_feature:

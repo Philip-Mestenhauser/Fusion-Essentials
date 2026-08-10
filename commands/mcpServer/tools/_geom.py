@@ -13,7 +13,8 @@ Also home to body_aabb - the bodies-only bounding box every occurrence/component
 
 import adsk.fusion
 
-from ._common import safe
+from ._common import counted, safe
+from . import _common
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-direction math "
@@ -27,7 +28,14 @@ MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-d
              "reversed mesh reports a negative volume) or on a ratio rather than a delta; "
              "face_counts/face_count_delta - the "
              "same before/after pair over FACE counts, the signal a topology-changing feature "
-             "(delete-face, split-face) verifies with where volume does not move")
+             "(delete-face, split-face) verifies with where volume does not move; lump_count - ONE "
+             "BRep body's DISCONNECTED-piece count (None for a mesh body, which carries no .lumps), "
+             "the read a JOIN is verified with: fusing bodies that touch yields fewer lumps than the "
+             "inputs held between them; aabb_gap - the largest axis gap in cm between two bodies' "
+             "AABBs, the sound not-touching proof for a body kind with no lump count: a positive gap "
+             "PROVES the two cannot touch and is a LOWER BOUND on the real clearance, never the "
+             "clearance itself, and it answers None unless both references live in ONE coordinate "
+             "space (a proxy's box is root-space, its native's component-local)")
 
 # The body entity-types for boundingBox2: solid + surface + mesh, so the box spans real geometry and
 # NOT the sketch/construction datums that the plain .boundingBox counts. The construction contribution
@@ -76,7 +84,14 @@ def owning_bodies(entities):
 
 
 def volumes(bodies):
-    """{id(body): volume-or-None} - the pre/post sample a material-changing feature compares."""
+    """{id(body): volume-or-None} - the pre/post sample a material-changing feature compares.
+
+    PRECONDITION: the caller HOLDS the same body objects across the before/after pair and passes
+    those same objects to volume_delta - the id() key only lines the two samples up while the Python
+    objects live. Re-reading the bodies off the API between the two calls hands back fresh wrappers
+    with new ids, and every entry reads as unreadable. (This is the opposite of owning_bodies, which
+    de-dups across SEPARATE reads and so must key on entityToken.) Every caller resolves its bodies
+    once, before the mutation, and reuses them."""
     return {id(b): safe(lambda b=b: b.volume) for b in bodies}
 
 
@@ -110,7 +125,8 @@ def face_counts(bodies):
 
     The face-count counterpart to volumes(): a delete/split changes how many faces a body carries
     without necessarily moving its volume (a healed face delete measured 7 -> 6 faces), so this is
-    the natural signal where volume is not."""
+    the natural signal where volume is not. Same id() PRECONDITION as volumes(): the caller holds
+    the body objects across the before/after pair rather than re-reading them."""
     return {id(b): safe(lambda b=b: b.faces.count) for b in bodies}
 
 
@@ -127,6 +143,69 @@ def face_count_delta(bodies, before):
             readable = True
             delta += (ca - cb)
     return delta, readable
+
+
+def lump_count(body):
+    """ONE body's LUMP count - how many DISCONNECTED solid pieces it holds - or None when it cannot
+    be read. A MeshBody carries no ``lumps`` at all, so every mesh body answers None.
+
+    The read a JOIN is verified with: fusing bodies that touch collapses lumps, so a result whose
+    lump count still equals what its inputs held between them fused NOTHING - the pieces are floating
+    inside one body, which a body count and a volume both report as a clean combine."""
+    return counted(lambda: body.lumps.count)
+
+
+def _aabb_extents(entity):
+    """[(min, max)] per axis of an entity's body AABB, or None when any coordinate is unreadable."""
+    box = body_aabb(entity)
+    lo, hi = safe(lambda: box.minPoint), safe(lambda: box.maxPoint)
+    out = []
+    for axis in ("x", "y", "z"):
+        a = safe(lambda ax=axis: getattr(lo, ax))
+        b = safe(lambda ax=axis: getattr(hi, ax))
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (a, b)):
+            return None
+        out.append((a, b))
+    return out
+
+
+def _same_space(first, second):
+    """True when two body references are expressed in the SAME coordinate space, so their AABBs can
+    be compared. An occurrence PROXY's box is in root space and its native's is component-LOCAL, so
+    the pair must agree on both the assembly context and the owning component. Component identity
+    goes through _common.same_component - component wrappers are measured never identity-stable."""
+    ctx_a = safe(lambda: first.assemblyContext)
+    ctx_b = safe(lambda: second.assemblyContext)
+    if (ctx_a is None) != (ctx_b is None):
+        return False
+    if ctx_a is not None and not _common.same_component(
+            safe(lambda: ctx_a.component), safe(lambda: ctx_b.component)):
+        return False
+    own_a, own_b = safe(lambda: first.parentComponent), safe(lambda: second.parentComponent)
+    if own_a is None or own_b is None:
+        return ctx_a is None and ctx_b is None and own_a is None and own_b is None
+    return bool(_common.same_component(own_a, own_b))
+
+
+def aabb_gap(first, second):
+    """The largest per-axis GAP in cm between two entities' body AABBs, or None when the number would
+    not mean anything.
+
+    POSITIVE means the boxes are that far apart on some axis, which PROVES the two bodies cannot
+    touch - the sound not-touching test for a body kind carrying no lump count. It is a LOWER BOUND
+    on the real clearance, never the clearance itself: the geometry inside each box can sit anywhere
+    within it. Zero or negative means the boxes overlap, which proves nothing either way.
+
+    PRECONDITION - the two must live in ONE coordinate space, and this returns None when they do not.
+    body_aabb hands back whatever space the reference is expressed in (an occurrence proxy's box is
+    in root space, its native's is component-LOCAL), so subtracting across two wrappers would mint a
+    confident number out of two different frames. None also covers an unreadable box."""
+    if not _same_space(first, second):
+        return None
+    a, b = _aabb_extents(first), _aabb_extents(second)
+    if a is None or b is None:
+        return None
+    return max(max(a[i][0] - b[i][1], b[i][0] - a[i][1]) for i in range(3))
 
 
 def unit_vector(v, decimals: int = 6):

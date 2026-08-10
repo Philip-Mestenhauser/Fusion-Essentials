@@ -58,6 +58,23 @@ class TestLayout:
             "Misplaced test files - move them (a convention-enforcing test goes in lints/ and is "
             "named in _LINT_TESTS; a behavior test goes in unit/):\n  " + "\n  ".join(offenders))
 
+    def test_the_bucket_check_bites(self, tmp_path, monkeypatch):
+        # a lint-named file parked under unit/ must be reported - the detection, not just the
+        # reverse stale-name direction, has a test that goes red when it breaks
+        import test_layout as tl
+        fake_tests = tmp_path
+        (fake_tests / "unit").mkdir()
+        (fake_tests / "lints").mkdir()
+        misplaced = fake_tests / "unit" / "test_wire_ascii.py"   # a _LINT_TESTS name, wrong bucket
+        misplaced.write_text("", encoding="utf-8")
+        monkeypatch.setattr(tl, "TESTS", fake_tests)
+        try:
+            tl.TestLayout().test_each_test_is_in_its_correct_bucket()
+        except AssertionError as e:
+            assert "test_wire_ascii" in str(e)
+        else:
+            raise AssertionError("a misplaced lint-named file was not reported")
+
     def test_no_behavior_tests_under_live(self):
         # tests/live/ holds Fusion-driven scripts; a test_*.py there would be collected by this mock
         # suite and fail with no Fusion. Live checks are run on demand, not pytest-collected.

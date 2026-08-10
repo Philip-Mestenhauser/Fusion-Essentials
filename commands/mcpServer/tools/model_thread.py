@@ -21,8 +21,6 @@ from . import _threads
 
 app = adsk.core.Application.get()
 
-# healthState value for a feature that computed with an ERROR.
-_HEALTH_ERROR = 2
 
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
@@ -47,8 +45,10 @@ def _face_is_internal(face):
     dotting it with the face-point-to-axis-origin vector cancels the axial term and leaves the
     radial sign alone: a normal pointing AT the axis has the material outside it, which is a bore."""
     pt = safe(lambda: face.pointOnFace)
-    # the evaluator's normal is the FACE's outward normal, already accounting for a reversed
-    # parameterization - a bore wall reads isParamReversed=True and still samples outward.
+    # MEASURED, both parameterizations: getNormalAtPoint returns the FACE's OUT-OF-MATERIAL normal
+    # and already accounts for isParamReversed. On a bore wall (isParamReversed True) the sample
+    # dots -1.0 with the outward radial direction - it points AT the axis; on a shaft wall
+    # (isParamReversed False) it dots +1.0. So the sign below needs no correction by isParamReversed.
     nrm = _geom.evaluator_normal_at(face, pt)
     origin = safe(lambda: face.geometry.origin)
     if pt is None or nrm is None or origin is None:
@@ -189,11 +189,10 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
     if not feature:
         return error(_common.no_feature_error(design, "Thread"))
 
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
-        return error(f"The thread was created but failed to compute: {msg}. It remains in the "
-                     f"timeline - remove it with design_delete_feature (feature "
-                     f"'{safe(lambda: feature.name)}').")
+        return error(f"The thread '{safe(lambda: feature.name)}' was created but failed to "
+                     f"compute: {msg}. " + _common.failed_effect_remedy(design, feature))
 
     info = safe(lambda: feature.threadInfo)
     got = safe(lambda: info.threadDesignation) if info is not None else None
@@ -201,6 +200,12 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
         return error(f"The thread was created but carries designation '{got}', not the requested "
                      f"'{designation}'. Remove it with design_delete_feature (feature "
                      f"'{safe(lambda: feature.name)}').")
+    # A redundant SECOND witness, kept because it costs one read. MEASURED: the platform VALIDATES
+    # the ThreadInfo's internal flag against the face at add() and REFUSES a mismatch - an
+    # internal=False ThreadInfo on a bore face raises "3 : input face's externality is different
+    # from what's in the ThreadInfo". So a wrong bore/shaft classification from _face_is_internal
+    # surfaces as a loud add() raise (already reported above) and never as a wrong thread; by the
+    # time a feature exists, this flag cannot disagree with the face.
     got_internal = safe(lambda: info.isInternal) if info is not None else None
     if isinstance(got_internal, bool) and got_internal != internal:
         return error(f"The thread was created as an {'internal' if got_internal else 'external'} "
@@ -266,7 +271,7 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
                          "there is no proof the helix was cut. The feature remains in the timeline; "
                          f"remove it with design_delete_feature (feature "
                          f"'{safe(lambda: feature.name)}').")
-        if abs(delta) < 1e-9:
+        if abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
             return error("A modeled thread cuts the helix into the cylinder, but the affected "
                          "body's volume is unchanged - nothing was cut. The feature remains in the "
                          "timeline; remove it with design_delete_feature (feature "

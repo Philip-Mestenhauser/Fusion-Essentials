@@ -28,8 +28,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (same convention model_draft/workspace_orient read).
-_HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -97,10 +95,11 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         return error(_common.no_feature_error(design, "Offset face"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Offset face was created but failed to compute: {msg}. Try a smaller distance "
-                     "or a different face selection.")
+                     "or a different face selection. "
+                     + _common.failed_effect_remedy(design, feature))
 
     # Post-mutation read-back: prove the body actually moved rather than trust the API's success.
     delta_total, any_readable = _geom.volume_delta(bodies, vol_before)
@@ -110,7 +109,7 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
         return error("Offset face ran in a DIRECT design, which returns no feature object, and no "
                      "affected body's volume could be read back - so whether the faces moved is "
                      "UNVERIFIED. Re-read the body with model_inspect.")
-    if any_readable and abs(delta_total) < 1e-9:
+    if any_readable and abs(delta_total) < _common.NO_VOLUME_CHANGE_CM3:
         return error("Offset face reported success but the affected body's volume is unchanged - "
                      "nothing was actually pushed or pulled. "
                      + _common.failed_effect_remedy(design, feature))

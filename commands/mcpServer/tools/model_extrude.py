@@ -17,6 +17,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component, root_body_advisory
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 
@@ -130,6 +131,9 @@ def _hole_extents(profile):
     if not isinstance(n, int) or isinstance(n, bool):
         return None
     out = []
+    # EVERY loop (and every curve of it below) must read or the verdict is withdrawn (None), so these
+    # stay positional walks: iter_collection drops an unreadable member, which would answer with the
+    # holes that happened to read instead of declining.
     for i in range(n):
         loop = safe(lambda i=i: loops.item(i))
         if loop is None:
@@ -214,10 +218,8 @@ def _solo_solid_body(comp):
     """The SOLE solid body directly in `comp` - the implied through_all cut/intersect target when
     'target_bodies' wasn't given (never guessed when there are zero or several bodies; Fusion's own
     intersection search still runs regardless - this only backs the pre/post volume proof below)."""
-    bodies = safe(lambda: comp.bRepBodies)
-    n = safe(lambda: bodies.count, 0) if bodies else 0
-    items = [safe(lambda i=i: bodies.item(i)) for i in range(n)]
-    solids = [b for b in items if b is not None and safe(lambda b=b: b.isSolid)]
+    solids = [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
+              if safe(lambda b=b: b.isSolid)]
     return solids if len(solids) == 1 else []
 
 
@@ -230,11 +232,9 @@ def _solid_bodies_snapshot(design):
     snap = []
     for comp in _common.all_components(design):
         cname = safe(lambda c=comp: c.name)
-        coll = safe(lambda c=comp: c.bRepBodies)
-        for i in range(safe(lambda: coll.count, 0) if coll else 0):
-            b = safe(lambda i=i, cl=coll: cl.item(i))
-            if b is not None and safe(lambda b=b: b.isSolid):
-                snap.append((b, safe(lambda b=b: b.name), cname, safe(lambda b=b: b.volume)))
+        for b in _common.iter_collection(safe(lambda c=comp: c.bRepBodies)):
+            if safe(lambda b=b: b.isSolid):
+                snap.append((b, safe(lambda b=b: b.name), cname, _geom.signed_volume(b)))
     return snap
 
 
@@ -249,7 +249,7 @@ def _affected_bodies(snap):
         v1 = safe(lambda b=b: b.volume)
         if v1 is None:
             out.append((name, cname, None))          # body consumed
-        elif v0 - v1 > 1e-9:                          # material removed
+        elif v0 - v1 > _common.NO_VOLUME_CHANGE_CM3:   # material removed
             out.append((name, cname, round(v0 - v1, 6)))
     return out
 
@@ -508,8 +508,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     check_bodies = []
     if ext_key == "through_all" and op_key in ("cut", "intersect"):
         check_bodies = list(bodies_ents) if bodies_ents else _solo_solid_body(host)
-    vol_before = {(safe(lambda b=b: b.entityToken) or id(b)): safe(lambda b=b: b.volume)
-                  for b in check_bodies}
+    # check_bodies are HELD across the mutation and re-read afterwards, which is exactly the
+    # id()-keying precondition _geom.volumes documents - so this is the shared sample, not a local one.
+    vol_before = _geom.volumes(check_bodies)
 
     # cut/intersect read-back: capture every solid body's volume design-wide BEFORE the op, so we can
     # report which bodies (and whose components) actually changed - and warn when an UNSCOPED cut bled
@@ -537,25 +538,21 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 
     through_all_removed = None
     if check_bodies:
-        deltas = {}
+        deltas, vol_after = {}, _geom.volumes(check_bodies)
         for b in check_bodies:
-            key = safe(lambda b=b: b.entityToken) or id(b)
             nm = safe(lambda b=b: b.name) or "?"
-            before, after = vol_before.get(key), safe(lambda b=b: b.volume)
+            before, after = vol_before.get(id(b)), vol_after.get(id(b))
             if isinstance(before, (int, float)) and isinstance(after, (int, float)):
                 deltas[nm] = round(before - after, 6)
         if deltas:
             through_all_removed = deltas
-            if all(abs(d) < 1e-9 for d in deltas.values()):
+            if all(abs(d) < _common.NO_VOLUME_CHANGE_CM3 for d in deltas.values()):
                 return error("Extrude reported success but extent=through_all removed no material "
                              f"from {', '.join(deltas)} - the cut ran the wrong way. through_all "
                              "follows the sketch-plane normal, which on an on-face sketch points away "
                              "from the body: pass the opposite 'distance' sign to cut into it.")
 
-    body_names = []
-    bodies = safe(lambda: feature.bodies)
-    for i in range(safe(lambda: bodies.count, 0) if bodies else 0):
-        body_names.append(safe(lambda i=i: bodies.item(i).name))
+    body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     # body-split: a cut/intersect that DISCONNECTS the target leaves it in several pieces. The
     # extruded profile removes no bodies, so any NET increase in the design-wide solid-body count is
@@ -566,10 +563,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if op_key in ("cut", "intersect") and solid_snap:
         post_solids = 0
         for _c in _common.all_components(design):
-            _coll = safe(lambda c=_c: c.bRepBodies)
-            for _i in range(safe(lambda: _coll.count, 0) if _coll else 0):
-                _b = safe(lambda i=_i, cl=_coll: cl.item(i))
-                if _b is not None and safe(lambda b=_b: b.isSolid):
+            for _b in _common.iter_collection(safe(lambda c=_c: c.bRepBodies)):
+                if safe(lambda b=_b: b.isSolid):
                     post_solids += 1
         split_count = post_solids - len(solid_snap)
 

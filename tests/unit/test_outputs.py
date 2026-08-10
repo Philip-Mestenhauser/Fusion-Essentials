@@ -122,3 +122,49 @@ class TestAssertPresentInList:
         k = out.ReturnsName("occurrence_one", of="occurrence", in_list=False)
         payload = {"joints": [{"occurrence_one": "X"}]}      # only nested
         assert k.assert_present(payload) != ""
+
+
+class TestAbsentWhen:
+    """absent_when licenses OMITTING a declared output - but only when the payload itself publishes
+    the condition. Both directions matter: the license must apply when the flag is true, and must
+    NOT apply otherwise, or a run that quietly drops the key passes as declared-conditional."""
+
+    def _kind(self):
+        # design_delete_feature's shape: a direct-mode edit creates no timeline feature, so the
+        # feature name is legitimately absent - and the payload says direct_mode: true.
+        return out.ReturnsName("feature_name", of="feature", absent_when="direct_mode")
+
+    def test_flag_true_licenses_the_omission(self):
+        assert self._kind().assert_present({"direct_mode": True, "deleted": 1}) == ""
+
+    def test_flag_false_does_not_license_the_omission(self):
+        # THE load-bearing direction: a parametric run that silently dropped feature_name while
+        # publishing direct_mode: false is a broken output, not a declared gap.
+        err = self._kind().assert_present({"direct_mode": False, "deleted": 1})
+        assert "feature_name" in err and "direct_mode" in err and "not true" in err
+
+    def test_flag_missing_entirely_does_not_license_the_omission(self):
+        err = self._kind().assert_present({"deleted": 1})
+        assert "feature_name" in err and "direct_mode" in err
+
+    def test_a_truthy_non_true_flag_does_not_license_the_omission(self):
+        # The condition is a published BOOLEAN, not "anything truthy" - a note string or a count
+        # sitting in that key must not buy an omission.
+        for flag in ("yes", 1, ["direct"]):
+            assert self._kind().assert_present({"direct_mode": flag}) != ""
+
+    def test_the_key_being_present_wins_regardless_of_the_flag(self):
+        k = self._kind()
+        assert k.assert_present({"direct_mode": False, "feature_name": "Extrude1"}) == ""
+        assert k.assert_present({"direct_mode": True, "feature_name": "Extrude1"}) == ""
+
+    def test_a_null_value_is_not_satisfied_by_a_false_flag(self):
+        assert self._kind().assert_present({"direct_mode": False, "feature_name": None}) != ""
+
+    def test_note_tells_the_agent_when_to_expect_the_gap(self):
+        note = self._kind().produces_note()
+        assert note.endswith("(omitted when direct_mode=true)")
+
+    def test_a_kind_without_absent_when_errors_without_the_condition_clause(self):
+        err = out.ReturnsName("feature_name", of="feature").assert_present({"deleted": 1})
+        assert "feature_name" in err and "not true" not in err

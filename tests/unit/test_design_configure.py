@@ -875,6 +875,105 @@ class TestAddMaterial:
         assert res["isError"] is True and "null" in res["message"]
 
 
+class TestAddMaterialRefusesBeforeAndDuringTheBuild:
+    """The material build is a multi-step table mutation, so every step reads its result back.
+    A step that answers nothing stops the call NAMING that step - the half-built table is never
+    reported as a configured material."""
+
+    def test_a_missing_body_is_refused(self, mat_design):
+        res = dc.handler(action="add_material", materials={"Default": "Steel"})
+        assert res["isError"] is True and "Provide 'body'" in res["message"]
+        assert _mat_table(mat_design).columns.count == 0
+
+    def test_an_unresolvable_body_is_refused_with_the_resolver_reason(self, mat_design):
+        res = dc.handler(action="add_material", body="Ghost", materials={"Default": "Steel"})
+        assert res["isError"] is True and "No body named 'Ghost'" in res["message"]
+        assert _mat_table(mat_design).columns.count == 0
+
+    def test_a_design_with_no_material_table_is_named(self, mat_design):
+        mat_design.configurationTopTable.materialTable = None
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "no material table" in res["message"]
+
+    def test_a_table_with_no_theme_column_is_named(self, mat_design):
+        # the column exists from the first call, so this second one reaches the theme-column read
+        _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"}))
+        _mat_table(mat_design).parentTableColumn = None
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "no theme column" in res["message"]
+
+    def test_a_theme_row_that_will_not_add_is_an_error(self, mat_design):
+        # 'Small' must be moved off the row it shares with 'Default', so it mints one - and the
+        # mint answering null is the failure this names.
+        dc.handler(action="add_configuration", name="Small")
+        mtbl = _mat_table(mat_design)
+        real_add = mtbl.rows.add
+        mtbl.rows.add = lambda name: None if name.startswith("Material ") else real_add(name)
+        res = dc.handler(action="add_material", body="Body1",
+                         materials={"Default": "Steel", "Small": "ABS Plastic"})
+        assert res["isError"] is True and "returned null" in res["message"]
+
+    def test_a_theme_row_absent_from_the_table_after_adding_it_is_an_error(self, mat_design):
+        # add() answered a row object, but the table never gained it: reporting the material
+        # against a row nothing references is exactly the false ok this catches.
+        dc.handler(action="add_configuration", name="Small")
+        mtbl = _mat_table(mat_design)
+        real_add = mtbl.rows.add
+        mtbl.rows.add = (lambda name: SimpleNamespace(name=name)
+                         if name.startswith("Material ") else real_add(name))
+        res = dc.handler(action="add_material", body="Body1",
+                         materials={"Default": "Steel", "Small": "ABS Plastic"})
+        assert res["isError"] is True and "is not in the material table" in res["message"]
+
+    def test_a_column_with_no_cell_at_the_theme_row_is_an_error(self, mat_design):
+        mtbl = _mat_table(mat_design)
+        real_add = mtbl.columns.add
+
+        def add_cell_less_column(entity):
+            col = real_add(entity)
+            col.getCell = lambda idx: None
+            return col
+
+        mtbl.columns.add = add_cell_less_column
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "No material cell at theme index" in res["message"]
+
+    def test_a_configuration_with_no_theme_cell_is_an_error(self, mat_design):
+        # the column and its theme row already exist; the LINK step is the one with no cell
+        _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"}))
+        theme_col = _mat_table(mat_design).parentTableColumn
+        real_by_name = theme_col.getCellByRowName
+        calls = {"n": 0}
+
+        def gone_by_the_link_step(name):
+            calls["n"] += 1
+            return None if calls["n"] > 1 else real_by_name(name)
+
+        theme_col.getCellByRowName = gone_by_the_link_step
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
+        assert res["isError"] is True and "No theme cell for configuration 'Default'" in res["message"]
+
+
+class TestMapInputParsing:
+    """Every {name: value} input crosses the wire through one parser. A non-map is refused naming
+    the field and its type - never iterated as characters, which sprays per-character refusals."""
+
+    def test_a_blank_string_is_read_as_no_map_not_as_a_refusal(self, mat_design):
+        # blank 'appearances' is simply absent, so the missing-map refusal is what answers
+        res = dc.handler(action="add_material", body="Body1", materials="   ")
+        assert res["isError"] is True and "Provide 'materials'" in res["message"]
+
+    def test_json_text_holding_a_list_is_refused_naming_the_type(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials='["Default", "Steel"]')
+        assert res["isError"] is True
+        assert "'materials'" in res["message"] and "got list" in res["message"]
+
+    def test_a_non_string_non_map_value_is_refused_naming_the_type(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials=7)
+        assert res["isError"] is True
+        assert "'materials'" in res["message"] and "got int" in res["message"]
+
+
 # ── add_insert: nested configuration (insert a configured part, map per assembly config) ─────
 
 class TestAddInsert:

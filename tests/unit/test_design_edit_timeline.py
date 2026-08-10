@@ -306,6 +306,12 @@ class FakeAttributes:
         return attr
 
 
+def _raising_item_by_name(groupName, name):
+    """A replacement itemByName that raises instead of answering - a read-back that yields no
+    verdict, distinct from a readable None."""
+    raise RuntimeError("3 : An API Object refers to a deleted Object")
+
+
 class FakeAttributeVector:
     """Design.findAttributes hands back an AttributeVector: len() and [i], with NO .count - reading
     .count raises, exactly as it does live."""
@@ -416,7 +422,8 @@ class TestRollToFeature:
         group = FakeTimelineGroup("Base", 0, members=members, collapsed=True)
         wire(FakeTimeline([group, FakeTimelineObject("Fillet1", 1)], groups=[group]))
         msg = error_message(et.handler(action="roll", feature="Chamfer9"))
-        assert "No timeline object named 'Chamfer9'" in msg and "Base@0" in msg
+        assert "no timeline feature named 'Chamfer9'" in msg
+        assert "Base" in msg and "Fillet1" in msg      # what the timeline DOES hold
 
     def test_collapsed_group_rolls(self, wire):
         group = FakeTimelineGroup("Group1", 1, collapsed=True)
@@ -525,10 +532,13 @@ class TestSuppress:
 
 class TestNameResolution:
     def test_repeated_name_is_refused_with_candidates(self, wire):
-        wire(FakeTimeline([FakeTimelineObject("Extrude1", 0), FakeTimelineObject("Extrude1", 2)]))
+        tl = wire(FakeTimeline([FakeTimelineObject("Extrude1", 0), FakeTimelineObject("Extrude1", 2)]))
         msg = error_message(et.handler(action="suppress", feature="Extrude1"))
-        assert "names 2 timeline objects" in msg
+        # the shared timeline vocabulary, prefixed by THIS call's noun for the target
+        assert msg.startswith("the object to suppress: ")
+        assert "matches 2 timeline objects" in msg
         assert "Extrude1@0" in msg and "Extrude1@2" in msg
+        assert [o.isSuppressed for o in tl._items] == [False, False]
 
     def test_name_at_index_targets_that_item(self, wire):
         a = FakeTimelineObject("Extrude1", 0)
@@ -538,19 +548,39 @@ class TestNameResolution:
         assert b.isSuppressed is True and a.isSuppressed is False
 
     def test_name_at_index_mismatch_is_refused(self, wire):
-        wire(FakeTimeline([FakeTimelineObject("Sketch1", 0), FakeTimelineObject("Extrude1", 1)]))
+        # 'Extrude1@0' pairs a name with an index no object carries together - refused as given,
+        # never widened to the Extrude1 that sits at index 1.
+        tl = wire(FakeTimeline([FakeTimelineObject("Sketch1", 0), FakeTimelineObject("Extrude1", 1)]))
         msg = error_message(et.handler(action="suppress", feature="Extrude1@0"))
-        assert "at index 0" in msg
+        assert "no timeline feature named 'Extrude1@0'" in msg
+        assert tl._items[1].isSuppressed is False
 
     def test_partial_name_does_not_match(self, wire):
         # 'Extrude' is not 'Extrude1' - a loose match would target the wrong item.
-        wire(_timeline())
+        tl = wire(_timeline())
         msg = error_message(et.handler(action="suppress", feature="Extrude"))
-        assert "No timeline object named 'Extrude'" in msg and "Extrude1@1" in msg
+        assert "no timeline feature named 'Extrude'" in msg and "Extrude1" in msg
+        assert tl._items[1].isSuppressed is False
 
     def test_name_match_is_case_insensitive(self, wire):
         tl = wire(_timeline())
         payload(et.handler(action="suppress", feature="extrude1"))
+        assert tl._items[1].isSuppressed is True
+
+    def test_an_object_whose_name_carries_a_leading_space_is_addressable(self, wire):
+        # Fusion names an occurrence-create timeline object ' InsProbe:1' (probe_fix_campaign.log
+        # [F74]); the space is in no listing an agent reads, so the name it CAN type must resolve.
+        tl = wire(FakeTimeline([FakeTimelineObject(" InsProbe:1", 0)]))
+        payload(et.handler(action="suppress", feature="InsProbe:1"))
+        assert tl._items[0].isSuppressed is True
+
+    def test_a_padded_input_resolves_the_same_object(self, wire):
+        # A REDUNDANCY check, and only red when BOTH layers lose it: this tool strips its own
+        # 'feature' before dispatch AND the shared matcher strips the want it is handed. Single
+        # mutants survive it by design - the WANT half is pinned where it lives, on the matcher
+        # (test_inputs.TestTimelineNameWhitespace::test_the_WANT_side_is_stripped).
+        tl = wire(_timeline())
+        payload(et.handler(action="suppress", feature="  Extrude1  "))
         assert tl._items[1].isSuppressed is True
 
 
@@ -922,6 +952,44 @@ class TestDeleteAttribute:
                                  attribute_group="shop", attribute_name="finish"))
         assert out["attribute_deleted"] is True
         assert "deleteMe returned false" in out["note"]
+
+    def test_an_unreadable_read_back_is_not_a_confirmed_delete(self, wire):
+        # itemByName raising and itemByName reading None are the same answer through safe(): only
+        # the second one says the attribute is gone, and the first must not be published as it.
+        tl = self._seeded(wire)
+        attrs = tl._items[0].entity.attributes
+        attr = attrs.itemByName("shop", "finish")
+        delete = attr.deleteMe
+
+        def delete_then_blind():
+            did = delete()
+            attrs.itemByName = _raising_item_by_name
+            return did
+        attr.deleteMe = delete_then_blind
+        msg = error_message(et.handler(action="delete_attribute", feature="Sketch1",
+                                       attribute_group="shop", attribute_name="finish"))
+        assert "reading it back raised" in msg and "UNCONFIRMED" in msg
+        # the refusal has to leave the caller a way to settle it - repeating the call is the read:
+        # an absent-attribute refusal IS the delete having landed.
+        assert "delete_attribute call again" in msg and "'shop/finish' as absent" in msg
+
+    def test_an_unreadable_lookup_before_the_delete_is_not_an_absent_attribute(self, wire):
+        # the pre-delete lookup answers the same question as the read-back, so it needs the same
+        # sentinel: swallowed into None, a collection that answers nothing reads as "carries no
+        # attribute" - the absent verdict the read-back's own advice sends the caller here to read.
+        tl = self._seeded(wire)
+        tl._items[0].entity.attributes.itemByName = _raising_item_by_name
+        msg = error_message(et.handler(action="delete_attribute", feature="Sketch1",
+                                       attribute_group="shop", attribute_name="finish"))
+        assert "whether it is there cannot be told" in msg and "nothing was deleted" in msg
+        assert "carries no attribute" not in msg
+
+    def test_a_read_back_of_none_still_confirms_the_delete(self, wire):
+        # the other direction of the same gate: a readable None IS the attribute being gone.
+        self._seeded(wire)
+        out = payload(et.handler(action="delete_attribute", feature="Sketch1",
+                                 attribute_group="shop", attribute_name="finish"))
+        assert out["attribute_deleted"] is True
 
     def test_deleting_an_absent_attribute_is_refused(self, wire):
         wire(_tagged())

@@ -23,13 +23,13 @@ from _input_resolution import _bindings, _collection_vars, _iter_tool_files, _sc
 
 # Calls whose bool is genuinely uninteresting, each with the reason. Shrink-only.
 _ALLOWED = {
-    "assembly_transform.py:201": "Matrix3D math on a LOCAL matrix - the resulting transform is "
+    "assembly_transform.py:199": "Matrix3D math on a LOCAL matrix - the resulting transform is "
                                  "written to the occurrence and read back, and an unchanged pose "
                                  "after a move is already an error",
-    "assembly_transform.py:208": "as above",
-    "assembly_transform.py:218": "as above",
-    "assembly_transform.py:219": "as above",
-    "assembly_transform.py:230": "as above",
+    "assembly_transform.py:206": "as above",
+    "assembly_transform.py:216": "as above",
+    "assembly_transform.py:217": "as above",
+    "assembly_transform.py:228": "as above",
     "doc_insert_occurrence.py:87": "Matrix3D math on a local matrix, before it is handed to "
                                    "addExistingComponent; the placed occurrence is read back",
     "model_create_component.py:79": "Matrix3D math on a local matrix that places a new "
@@ -105,6 +105,26 @@ class TestBoolReturnsChecked:
         stale = sorted(set(_ALLOWED) - live)
         assert not stale, ("these allowlist entries no longer name a discarded bool - remove "
                            "them:\n  " + "\n  ".join(stale))
+
+    def test_the_detector_bites_on_both_shapes(self, tmp_path):
+        # both discard shapes must trip, and the checked form must not: the bare statement, the
+        # bare safe() wrap (the WORSE one - the bool and any exception are both swallowed), and
+        # the guarded `if not safe(...):` which reads the bool and acts on it.
+        src = tmp_path / "t.py"
+        src.write_text(
+            "def handler(profile, op):\n"
+            "    feats = comp.features.extrudeFeatures\n"
+            "    inp = feats.createInput(profile, op)\n"
+            "    inp.setDistanceExtent(d)\n"                      # bare statement -> offender
+            "    safe(lambda: inp.setOneSideExtent(e))\n"         # bare safe()    -> offender
+            "    if not safe(lambda: inp.setPositionAtCenter(p)):\n"   # guarded    -> clean
+            "        return None\n",
+            encoding="utf-8")
+        found = _offenders_in(str(src))
+        methods = sorted(m for _l, _v, m, _h in found)
+        assert methods == ["setDistanceExtent", "setOneSideExtent"], found
+        hows = {m: h for _l, _v, m, h in found}
+        assert "swallowed" in hows["setOneSideExtent"], "the bare-safe() shape lost its wording"
 
     def test_the_generated_name_list_is_populated_and_narrowed(self):
         """An empty or over-wide list would make this gate meaningless in opposite directions."""

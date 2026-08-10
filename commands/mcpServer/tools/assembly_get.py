@@ -378,9 +378,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
     occurrences = []
     grounded_names = []
-    occs = safe(lambda: root.occurrences)
-    for i in range(safe(lambda: occs.count, 0) if occs else 0):
-        occ = occs.item(i)
+    for occ in _common.iter_collection(safe(lambda: root.occurrences)):
         name = safe(lambda: occ.name)
         grounded = bool(safe(lambda: occ.isGrounded, False))
         if grounded:
@@ -408,11 +406,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # root body can't be jointed/grounded (it isn't an occurrence). Report it so the kinematic picture
     # isn't silently missing root-level geometry the user built.
     root_bodies = []
-    rbodies = safe(lambda: root.bRepBodies)
-    for i in range(safe(lambda: rbodies.count, 0) if rbodies else 0):
-        b = safe(lambda i=i: rbodies.item(i))
-        if b is not None:
-            root_bodies.append(safe(lambda b=b: b.name) or f"Body{i+1}")
+    for i, b in enumerate(_common.iter_collection(safe(lambda: root.bRepBodies))):
+        root_bodies.append(safe(lambda b=b: b.name) or f"Body{i+1}")
 
     # HEALTH ROLLUP - the thing a user sees FIRST (a yellow "Compute Failed" in the timeline)
     # before any functional test. A joint can be created + wired correctly yet FAIL TO COMPUTE
@@ -421,11 +416,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # errored/warning feature (not just joints).
     broken_joints = [j["name"] for j in joints if not j.get("healthy", True)]
     timeline_problems = []
-    tl = safe(lambda: design.timeline)
-    for i in range(safe(lambda: tl.count, 0) if tl else 0):
-        o = safe(lambda i=i: tl.item(i))
-        if o is None:
-            continue
+    for o in _common.iter_collection(safe(lambda: design.timeline)):
         healthy, msg = _health(o)
         if not healthy:
             timeline_problems.append({"name": safe(lambda o=o: o.name), "error": msg})

@@ -105,23 +105,35 @@ class FakeRectFeatures:
 
 
 class FakeCircInput:
-    def __init__(self, coll, axis):
+    """`ignores` names properties whose assignment the platform silently DROPS - the SWIG-proxy
+    shape set_verified exists to catch (the value lands on a dead attribute, no exception, and the
+    object keeps its API default)."""
+    def __init__(self, coll, axis, ignores=()):
+        object.__setattr__(self, "_ignores", set(ignores))
         self.coll = coll
         self.axis = axis
         self.quantity = None
         self.totalAngle = None
         self.isSymmetric = False
 
+    def __setattr__(self, name, value):
+        if name in self._ignores:
+            return
+        object.__setattr__(self, name, value)
+
 
 class FakeCircFeatures:
-    def __init__(self):
+    def __init__(self, ignores=()):
         self.last_input = None
+        self.ignores = ignores
+        self.add_calls = 0
 
     def createInput(self, coll, axis):
-        self.last_input = FakeCircInput(coll, axis)
+        self.last_input = FakeCircInput(coll, axis, self.ignores)
         return self.last_input
 
     def add(self, inp):
+        self.add_calls += 1
         return type("F", (), {"name": "C-Pattern1"})()
 
 
@@ -160,8 +172,8 @@ class FakeDesign:
         self.rootComponent = FakeRoot(occurrences, rf, cf)
 
 
-def _install(occ_names, refuse_two=False):
-    rf, cf = FakeRectFeatures(refuse_two), FakeCircFeatures()
+def _install(occ_names, refuse_two=False, circ_ignores=()):
+    rf, cf = FakeRectFeatures(refuse_two), FakeCircFeatures(circ_ignores)
     occs = [FakeOcc(n) for n in occ_names]
     design = FakeDesign(occs, rf, cf)
     pt.app = type("A", (), {"activeProduct": design})()
@@ -303,6 +315,17 @@ class TestCircular:
         _, cf = _install(["Spoke:1"])
         _payload(pt.circular_handler(occurrences="Spoke:1", quantity=4, symmetric=True))
         assert cf.last_input.isSymmetric is True
+        assert cf.add_calls == 1
+
+    def test_a_symmetric_the_platform_drops_refuses_before_the_pattern_runs(self):
+        # A SWIG proxy ACCEPTS an assignment it then ignores, with no exception - and the only
+        # read-back a pattern has (patternElements.count) is IDENTICAL for a symmetric and an
+        # asymmetric spread, so nothing downstream would ever catch it.
+        _, cf = _install(["Spoke:1"], circ_ignores=("isSymmetric",))
+        res = pt.circular_handler(occurrences="Spoke:1", quantity=4, symmetric=True)
+        assert res["isError"] is True
+        assert "symmetric" in res["message"] and "No pattern was created" in res["message"]
+        assert cf.add_calls == 0
 
     def test_quantity_must_be_at_least_two(self):
         _install(["Spoke:1"])

@@ -13,7 +13,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, terse
+from ._common import iter_collection, ok, error, safe, terse
 from ._cam_common import get_cam, find_operation
 from . import _inputs
 
@@ -213,9 +213,7 @@ def _grouped_visible_params(param_coll):
     agent reads, organized like the Fusion panel, not a flat 400-row dump."""
     groups = {}
     current = "General"
-    n = safe(lambda: param_coll.count, 0)
-    for i in range(n):
-        p = param_coll.item(i)
+    for p in iter_collection(param_coll):
         if not (safe(lambda p=p: p.isVisible, False) and safe(lambda p=p: p.isEnabled, False)):
             continue
         nm = safe(lambda p=p: p.name) or ""
@@ -258,10 +256,8 @@ def _slice_tool(cam, operation, preset):
     t = safe(lambda: op.tool)
     if not t:
         return {"operation": safe(lambda: op.name), "tool": None}, None
-    presets = safe(lambda: t.presets)
-    pnames = []
-    for i in range(safe(lambda: presets.count, 0) if presets else 0):
-        pnames.append(safe(lambda i=i: presets.item(i).name))
+    presets = list(iter_collection(safe(lambda: t.presets)))
+    pnames = [safe(lambda p=p: p.name) for p in presets]
     from . import _cam_common as _cc
     out = {"operation": safe(lambda: op.name),
            "tool": safe(lambda: t.description),
@@ -270,8 +266,7 @@ def _slice_tool(cam, operation, preset):
     want_preset = (preset or "").strip()
     if want_preset:
         chosen = None
-        for i in range(safe(lambda: presets.count, 0) if presets else 0):
-            ps = presets.item(i)
+        for ps in presets:
             if (safe(lambda ps=ps: ps.name) or "") == want_preset:
                 chosen = ps
                 break
@@ -279,9 +274,7 @@ def _slice_tool(cam, operation, preset):
             return None, error(f"No preset named '{want_preset}' on this tool. Available: "
                                f"{', '.join(n for n in pnames if n)}.")
         exprs = {}
-        pp = safe(lambda: chosen.parameters)
-        for j in range(safe(lambda: pp.count, 0) if pp else 0):
-            param = pp.item(j)
+        for param in iter_collection(safe(lambda: chosen.parameters)):
             exprs[safe(lambda param=param: param.name)] = safe(lambda param=param: param.expression)
         out["preset"] = {"name": want_preset, "expressions": exprs}
     return out, None

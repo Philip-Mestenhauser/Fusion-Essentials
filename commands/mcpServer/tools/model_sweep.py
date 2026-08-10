@@ -41,6 +41,7 @@ _ORIENTATIONS = {
 RETURNS = [
     _outputs.ReturnsValue("result_bodies", "the names of the bodies the sweep created/modified"),
     _outputs.ReturnsValue("is_solid", "whether the sweep produced a SOLID (vs an open surface)"),
+    _outputs.ReturnsValue("path_curves", "how many curves the built path actually holds"),
 ]
 
 
@@ -53,6 +54,28 @@ def _sketch_for_open(comp, profile_raw):
         sk, _ = _common.target_sketch(comp, nm)
         return sk
     return None
+
+
+def _path_sketch_curves(host, path_raw):
+    """How many SWEEPABLE curves the sketch a 'sketch:<name>' path names carries - None for any other
+    path form or an unreadable sketch. Chaining from that sketch follows TANGENT CONTINUITY, so the
+    built path can hold FEWER curves than the sketch does; publishing both is what makes a short
+    chain visible.
+
+    sketchCurves counts CONSTRUCTION geometry too, and a construction line is not part of any path -
+    counting it would report a shortfall on a path that chained everything there was to chain, and
+    blame tangency for it. Only real curves are counted; a curve whose isConstruction will not read
+    counts as real (the conservative side: it can only shrink a warning, never invent one)."""
+    if not (isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:")):
+        return None
+    sk, _ = _common.target_sketch(host, path_raw.split(":", 1)[1].strip())
+    if sk is None:
+        return None
+    curves = safe(lambda: sk.sketchCurves)
+    if _common.counted(lambda: curves.count) is None:
+        return None
+    return sum(1 for c in _common.iter_collection(curves)
+               if not bool(safe(lambda c=c: c.isConstruction, False)))
 
 
 def _resolve_profile(comp, profile_raw, as_surface):
@@ -113,6 +136,10 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     sweep_path, path_label, patherr = build_path(host, path)
     if patherr:
         return error(patherr)
+    # What the built Path HOLDS, beside what the request named: the profile is driven over these
+    # curves and no others, so a chain that stopped short sweeps a stub of the intended run.
+    path_curves = _common.counted(lambda: sweep_path.count)
+    sketch_curves = _path_sketch_curves(host, path)
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
@@ -150,10 +177,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     if not feature:
         return error(_common.no_feature_error(design, "Sweep"))
 
-    body_names = []
-    bodies = safe(lambda: feature.bodies)
-    for i in range(safe(lambda: bodies.count, 0) if bodies else 0):
-        body_names.append(safe(lambda i=i: bodies.item(i).name))
+    body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     # An operation that reports success but produced no body is a silent no-op - fail it honestly.
     if op_key == "new" and not body_names:
@@ -171,13 +195,18 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         adv = root_body_advisory(design, host)
         if adv:
             note += " " + adv
+    if path_curves is not None and sketch_curves is not None and path_curves < sketch_curves:
+        note += (f" WARNING: the path chained {path_curves} of the sketch's {sketch_curves} curves, so "
+                 "the sweep covers only that run - chaining follows tangent continuity and a sharp "
+                 "corner stops it. Make the junction tangent, or sweep each run separately.")
 
-    return ok({
+    payload = {
         "swept": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
         "component": safe(lambda: feature.parentComponent.name),
         "path": path_label,
+        "path_curves": path_curves,
         "orientation": orient_key,
         "as_surface": bool(open_profile or is_solid is False),
         "open_profile": bool(open_profile),
@@ -185,7 +214,12 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         "scoped_to_bodies": scoped_to,
         "result_bodies": body_names,
         "note": note,
-    })
+    }
+    # Only a 'sketch:<name>' path has a source curve count to compare against; for an edge path there
+    # is no such number, and publishing a null would read as an unreadable sketch.
+    if sketch_curves is not None:
+        payload["path_sketch_curves"] = sketch_curves
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (
@@ -203,7 +237,7 @@ sweep_tool = (
     .add_input_property("profile", {"type": ["string", "object"],
             "description": "The cross-section: a profile 'handle' from sketch_get (robust), or a {sketch, profile_index} selector. An open-curve sketch (no closed region) sweeps into a SURFACE."})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The sweep path: a find_geometry edge 'handle' (a single handle auto-chains connected edges), a JSON list of edge handles (used exactly - they must connect into one path), OR 'sketch:<name>' to chain a path sketch's curves."})
+            "description": "The sweep path: a find_geometry edge 'handle' (a single handle chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly - they must connect into one path), OR 'sketch:<name>' to chain a path sketch's curves."})
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property("orientation", {"type": "string", "enum": ["perpendicular", "parallel"],
             "description": "How the profile is oriented along the path: perpendicular (default) keeps it normal to the path; parallel keeps it parallel to its start plane."})

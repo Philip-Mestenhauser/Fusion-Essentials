@@ -100,6 +100,91 @@ _OPTIONAL_ENTITY_ONE = ("entity_list", "offset", "rect_pattern")
 # Kinds that ADD sketch geometry rather than only relating existing entities.
 _CREATOR_KINDS = ("offset", "rect_pattern", "circ_pattern")
 
+# Kinds whose add* takes entity_one AND entity_two as its two operands.
+_TWO_ENTITY_KINDS = ("two_curve", "point_curve", "two_point")
+
+# constraint -> (entity_one takes a point anchor, entity_two takes one). An anchored ref
+# ('circle:0:center', 'line:1:end' - _common.parse_anchor_ref, the grammar sketch_dimension reads)
+# resolves to that entity's OWN SketchPoint, which is exactly what these slots take; every other
+# constraint takes whole entities, so an anchor there is refused rather than resolved to something
+# the add* would reject.
+_ANCHOR_SLOTS = {
+    "coincident": (True, True),
+    "midpoint": (True, False),              # entity_two is the curve the point rides
+    "horizontal_points": (True, True),
+    "vertical_points": (True, True),
+    "coincident_to_surface": (True, False),  # entity_two is a surface, not a sketch entity
+    "circular_pattern": (True, False),       # entity_one is the pattern centre point
+}
+_ANCHORED_CONSTRAINTS = ", ".join(sorted(_ANCHOR_SLOTS))
+# 'midpoint' is the long spelling of 'mid' - one form per anchor in agent-facing text.
+_ANCHOR_FORMS = "/".join(f"':{a}'" for a in _common.SKETCH_ANCHORS if a != "midpoint")
+
+
+# ── 'text:<i>' - a SketchText, an operand for fix/unfix ONLY ────────────────
+# A SketchText's anchor degree of freedom lives on the four rectangle lines of its definition, and
+# no geometric constraint takes a SketchText as an operand - so without this route a text-bearing
+# sketch can never read fully constrained. MEASURED (2705.0.87): fixing all four rectangleLines
+# flips Sketch.isFullyConstrained from false to true. definition.rectangleLines is a SketchLineVector
+# that iterates PLAINLY - it carries no .count/.item - so it is list()ed, never indexed.
+
+
+def _is_text_ref(ref):
+    """Whether this ref uses the 'text:<i>' grammar (_inputs owns that parse - the same address
+    sketch_get publishes and sketch_set_text/sketch_delete_entity edit by)."""
+    return _inputs._split_text_ref(ref) is not None
+
+
+def _text_at_ref(sketch, ref):
+    """(SketchText, error) for a 'text:<index>' ref, indexed in the sketch this call already
+    resolved. A sketch-qualified address is refused rather than half-honored: this tool constrains
+    the ONE sketch 'sketch_name' names."""
+    sname, idx = _inputs._split_text_ref(ref)
+    if sname:
+        return None, (f"'{ref}': name the sketch in 'sketch_name', not in the ref - this tool "
+                      "constrains one named sketch.")
+    n = safe(lambda: sketch.sketchTexts.count, 0) or 0
+    if not n:
+        return None, (f"'{ref}' addresses a sketch text, but this sketch holds none. Create one "
+                      "with sketch_set_text.")
+    if idx is None or idx < 0 or idx >= n:
+        return None, (f"'{ref}' does not address one of this sketch's {n} sketch text(s) "
+                      f"(text:0..text:{n - 1}).")
+    text = safe(lambda: sketch.sketchTexts.item(idx))
+    if text is None:
+        return None, f"'{ref}': the sketch would not hand that text back."
+    return text, None
+
+
+def _text_anchor_lines(text):
+    """The definition rectangle lines carrying a SketchText's anchor DOF, as a list. The vector is a
+    plain iterable, so it is list()ed - a .count/.item walk over it reads nothing."""
+    return safe(lambda: list(text.definition.rectangleLines)) or []
+
+
+# The curve kinds whose keypoint is a CENTRE; every other curve kind carries endpoints instead, so
+# the remedy the coincident note offers is read off the operand's own kind.
+_CENTRE_BEARING = ("circle", "arc", "ellipse")
+
+
+def _coincident_curve_note(ref):
+    """The success-path note for coincident onto a CURVE, or None when entity_two names a point (a
+    point operand is the ordinary point-to-point case, with no keypoint to miss)."""
+    kind = ref.strip().lower().rpartition(":")[0]
+    if kind in ("", "point"):
+        return None
+    forms = (f"'{ref.strip()}:center'" if kind in _CENTRE_BEARING
+             else f"'{ref.strip()}:start' (or ':end'/':mid')")
+    return (" Coincident onto a CURVE puts entity_one's point ON that curve, at no particular place "
+            f"along it - to land on a KEYPOINT of {ref.strip()} instead, anchor entity_two: {forms}.")
+
+
+def _anchor_refusal(cname, label, anchor):
+    """The refusal for an anchor on a slot that takes a whole entity - it names the constraints that
+    DO take one, so the caller can see whether the anchor or the constraint is the wrong half."""
+    return (f"'{cname}' takes a whole entity as {label}, not a point anchor - drop the ':{anchor}'. "
+            f"The {_ANCHOR_FORMS} anchors apply to: {_ANCHORED_CONSTRAINTS}.")
+
 # addCoincidentToSurface and addPerpendicularToSurface take a `surface: Base` and accept a CURVED
 # face - both were applied to a cylinder live. The other two carry PlanarSurface in the API name and
 # in the parameter, so they stay on PlaneRef; only these two resolve through the wider kind.
@@ -351,6 +436,21 @@ def _strategy_families():
             "linear_diameter_dims": safe(lambda: adsk.fusion.LinearDiameterDimensionPreferenceTypes)}
 
 
+def _already_full_noop(sketch, option_key):
+    """The clean no-op for an ALREADY fully constrained sketch. The platform RAISES
+    "AutoConstrain cannot be applied to a fully constrained sketch" (measured live on 2705.0.87),
+    so the call is refused there by Fusion itself - a sketch with nothing left to constrain
+    answers with the truth instead of surfacing that raise."""
+    return ok({"applied": "auto", "sketch": safe(lambda: sketch.name),
+               "result_option_requested": option_key,
+               "added_dimensions": 0, "added_constraints": 0,
+               "dimension_count": safe(lambda: sketch.sketchDimensions.count, 0) or 0,
+               "constraint_count": safe(lambda: sketch.geometricConstraints.count, 0) or 0,
+               "is_fully_constrained": True,
+               "note": "The sketch is already fully constrained - nothing to add. (Fusion refuses "
+                       "AutoConstrain on a fully constrained sketch, so no call was made.)"})
+
+
 def _apply_auto(sketch, option_key, strategies):
     """Auto-constrain the WHOLE sketch, as (AutoConstrainResult, error). A NULL result is this
     method's FAILURE channel ("Returns null in the case of a failure or if the input is invalid"),
@@ -497,12 +597,55 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
     if uerr:
         return error(uerr)
 
+    # A ref's optional third segment names WHICH point of the entity is meant ('circle:0:center') -
+    # the same grammar sketch_dimension reads, parsed here before the bare ref is resolved.
+    base_one, anchor_one, aerr = _common.parse_anchor_ref(entity_one)
+    if aerr:
+        return error(aerr)
+    base_two, anchor_two, aerr2 = _common.parse_anchor_ref(entity_two)
+    if aerr2:
+        return error(aerr2)
+    takes_one, takes_two = _ANCHOR_SLOTS.get(cname, (False, False))
+    if anchor_one and not takes_one:
+        return error(_anchor_refusal(cname, "entity_one", anchor_one))
+    if anchor_two and not takes_two:
+        return error(_anchor_refusal(cname, "entity_two", anchor_two))
+
+    # A SketchText is an operand for fix/unfix alone - every other constraint's add* takes sketch
+    # curves or points, which a text is not.
+    text_obj, anchor_lines = None, []
+    if _is_text_ref(base_one):
+        if kind != "fix":
+            return error(f"a 'text:<index>' ref applies to constraint=fix / unfix only - no other "
+                         f"constraint takes a sketch TEXT as an operand. '{cname}' takes "
+                         f"{_REQUIRES.get(cname, 'sketch curves or points')}.")
+        text_obj, terr = _text_at_ref(sketch, base_one)
+        if terr:
+            return error(terr)
+
     e1 = None
-    if kind != "auto" and (kind not in _OPTIONAL_ENTITY_ONE or (entity_one or "").strip()):
-        e1 = _common.resolve_entity_ref(sketch, entity_one)
+    if text_obj is None and kind != "auto" and (kind not in _OPTIONAL_ENTITY_ONE or base_one.strip()):
+        e1 = _common.resolve_entity_ref(sketch, base_one)
         if not e1:
             return error(f"Could not resolve entity_one '{entity_one}' "
                          f"(use '<type>:<index>', type = {'/'.join(_common.ENTITY_REF_KINDS)}).")
+    # BOTH refs resolve before EITHER anchor is built: a 'mid' anchor CREATES a point and a midpoint
+    # constraint, so a refusal after that leaves an orphan behind in the sketch. Nothing is added
+    # until every operand this call needs is in hand.
+    e2 = None
+    if kind in _TWO_ENTITY_KINDS:
+        e2 = _common.resolve_entity_ref(sketch, base_two)
+        if not e2:
+            return error(f"'{cname}' needs 'entity_two' (a second '<type>:<index>'). "
+                         f"Got '{entity_two}'.")
+    if anchor_one:
+        e1, perr = _common.anchor_point(sketch, e1, anchor_one)
+        if perr:
+            return error(f"entity_one '{entity_one}': {perr}")
+    if anchor_two:
+        e2, perr = _common.anchor_point(sketch, e2, anchor_two)
+        if perr:
+            return error(f"entity_two '{entity_two}': {perr}")
 
     ents = None
     if kind in _LIST_OPERAND_KINDS:
@@ -522,21 +665,35 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
             auto_before = (safe(lambda: sketch.sketchDimensions.count, 0) or 0,
                            safe(lambda: sketch.geometricConstraints.count, 0) or 0,
                            bool(safe(lambda: sketch.isFullyConstrained)))
+            if auto_before[2]:
+                return _already_full_noop(sketch, choices["result_option"])
             result_obj, aerr = _apply_auto(sketch, choices["result_option"], strategies)
             if aerr:
                 return error(aerr)
         elif kind == "fix":
+            want = (cname == "fix")
             # The requested mutation - set it directly (inside this try) so a failure is reported, not
             # swallowed by safe() into the unconditional result_obj=True below.
-            e1.isFixed = (cname == "fix")
-            result_obj = (safe(lambda: e1.isFixed) == (cname == "fix"))
+            if text_obj is not None:
+                anchor_lines = _text_anchor_lines(text_obj)
+                if not anchor_lines:
+                    return error(f"'{entity_one}' resolved to a sketch text whose definition hands "
+                                 "back no rectangle lines - there is no anchor to lock.")
+                for ln in anchor_lines:
+                    ln.isFixed = want
+                landed = sum(1 for ln in anchor_lines
+                             if _common.read_flag(lambda ln=ln: ln.isFixed) is want)
+                if landed != len(anchor_lines):
+                    return error(f"{landed} of {len(anchor_lines)} anchor lines took the {cname} - "
+                                 "the text's anchor is left partly locked. Re-read the sketch with "
+                                 "sketch_get before relying on its constrained state.")
+                result_obj = True
+            else:
+                e1.isFixed = want
+                result_obj = (safe(lambda: e1.isFixed) == want)
         elif kind == "one_line":
             result_obj = getattr(gc, method)(e1)
-        elif kind in ("two_curve", "point_curve", "two_point"):
-            e2 = _common.resolve_entity_ref(sketch, entity_two)
-            if not e2:
-                return error(f"'{cname}' needs 'entity_two' (a second '<type>:<index>'). "
-                              f"Got '{entity_two}'.")
+        elif kind in _TWO_ENTITY_KINDS:
             result_obj = getattr(gc, method)(e1, e2)
         elif kind == "symmetry":
             e2 = _common.resolve_entity_ref(sketch, entity_two)
@@ -661,6 +818,31 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         "symmetry_line": symmetry_line or None,
         "note": "Geometric constraint applied - the sketch is now parametric for this relationship.",
     }
+    # addCoincident(point, curve) SUCCEEDS on the wrong geometry: it lands the point ON the curve.
+    # The caller who meant "centre this circle here" gets a clean ok and a circle hanging off its
+    # own rim, so the trap is stated on the SUCCESS path, where that caller actually is - with the
+    # anchor that expresses the other intent, which is the one THIS curve kind has. The '<type>'
+    # half of the entity_two ref says whether the operand was a curve or a point; an ANCHORED ref
+    # already resolved to a point.
+    if text_obj is not None:
+        # What the lock was WORTH is the sketch's own constrained state, read back after it: the
+        # anchor is one DOF among however many the sketch holds, so this says whether the text was
+        # the last of them rather than implying it.
+        fully = _common.read_flag(lambda: sketch.isFullyConstrained)
+        payload["anchor_lines_fixed"] = len(anchor_lines)
+        payload["is_fully_constrained"] = fully
+        payload["note"] = (
+            f"The sketch text's anchor is {'LOCKED' if cname == 'fix' else 'RELEASED'} - "
+            f"{cname} applied to the {len(anchor_lines)} rectangle lines of its definition, the "
+            "degree of freedom no geometric constraint can address. "
+            + ("The sketch now reads FULLY CONSTRAINED." if fully is True else
+               "The sketch is still NOT fully constrained - other geometry holds the remaining "
+               "freedom (sketch_get(include_entities=true) shows what)." if fully is False else
+               "The sketch's constrained state did not read back."))
+    if cname == "coincident" and not anchor_two:
+        curve_note = _coincident_curve_note(base_two)
+        if curve_note:
+            payload["note"] += curve_note
     if kind in _CREATOR_KINDS or kind == "entity_list":
         payload["entities"] = entities
     if kind in _CREATOR_KINDS:
@@ -697,8 +879,8 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 
 TOOL_DESCRIPTION = (
     "Apply a geometric CONSTRAINT to sketch entities - the Sketch Constrain menu - so the sketch "
-    "captures design intent. Entities are '<type>:<index>' refs within 'sketch_name' (e.g. "
-    "'line:0'), from sketch_get(include_entities=true); a constraint given the wrong ones names "
+    "captures design intent. Entities are '<type>:<index>' refs within 'sketch_name', "
+    "from sketch_get(include_entities=true); a constraint given the wrong ones names "
     "what it takes. constraint='auto' constrains the WHOLE sketch and takes no entity refs. The "
     "offset and pattern kinds CREATE curves - re-read "
     "sketch_get for the new refs. Remove a wrong constraint with "
@@ -710,7 +892,7 @@ tool = (
     .add_input_property(*_inputs.Choice("constraint", list(_CONSTRAINTS),
             description="The relationship to apply.").as_property())
     .add_input_property("sketch_name", {"type": "string", "description": "The sketch to constrain."})
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref; a POINT for midpoint/coincident and circular_pattern's centre, a direction LINE for rectangular_pattern."})
+    .add_input_property("entity_one", {"type": "string", "description": "First entity ref; a POINT for midpoint/coincident and circular_pattern's centre, a direction LINE for rectangular_pattern. Point slots take an anchor, e.g. 'circle:0:center'; fix/unfix also take 'text:<i>'."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; rectangular_pattern's second direction LINE."})
     .add_input_property("symmetry_line", {"type": "string", "description": "Axis line for 'symmetry'."})
     .add_input_property("entities", {"type": "string", "description": "Comma-separated refs for polygon/offset/pattern."})

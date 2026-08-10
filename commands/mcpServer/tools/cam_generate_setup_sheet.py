@@ -62,7 +62,7 @@ def handler(scope: str = "", format: str = "html", output_folder: str = "") -> d
 
     cam, cerr = get_cam()
     if cerr:
-        return cerr
+        return error(cerr)
     if not (output_folder or "").strip():
         return error("Provide 'output_folder' - the directory the setup sheet will be written to.")
     out_dir = os.path.abspath(output_folder.strip())

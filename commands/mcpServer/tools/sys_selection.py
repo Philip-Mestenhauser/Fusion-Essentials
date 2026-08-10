@@ -26,7 +26,8 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, measured, design as _active_design, design_wide_counts
+from ._common import (ok, error, safe, iter_collection, measured, design as _active_design,
+                      design_wide_counts)
 from . import _geom
 from . import _inputs
 from . import _outputs
@@ -431,16 +432,25 @@ def _begin_request(kind, clear_current, wait_seconds, expect_document):
         sels = safe(lambda: ui.activeSelections)
         count = safe(lambda: sels.count, 0) if sels is not None else 0
         if count:
-            selections = [_selection_record(sels.item(i)) for i in range(count)]
-            out["immediate"] = ok({
+            selections = [_selection_record(s) for s in iter_collection(sels)]
+            note = (_outputs.produces_block(RETURNS)
+                    + "\nAlready selected when this call ran (clear_current=false) - returned "
+                    "without waiting.")
+            payload = {
                 "status": "picked",
                 "requested_kind": kind,
                 "selection_count": count,
                 "selections": selections,
                 "active_document": doc_name,
-                "note": _outputs.produces_block(RETURNS)
-                + "\nAlready selected when this call ran (clear_current=false) - returned without waiting.",
-            })
+                "note": note,
+            }
+            # iter_collection drops a selection that will not read, so a short list beside the raw
+            # count would silently claim completeness - disclose the hole instead.
+            if len(selections) < count:
+                payload["unread_selections"] = count - len(selections)
+                payload["note"] = note + (f" {count - len(selections)} of {count} selection(s) "
+                                          "could not be read and are missing from 'selections'.")
+            out["immediate"] = ok(payload)
             return out
 
     if wait_seconds <= 0:
@@ -569,6 +579,8 @@ def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_
 
     cap = max(1, int(max_results))
     selections = []
+    # The except turns an unreadable selection into an honest refusal, so this stays a positional
+    # walk: iter_collection would skip it, publishing a short list and labelling it 'truncated'.
     try:
         for i in range(min(count, cap)):
             selections.append(_selection_record(sels.item(i)))

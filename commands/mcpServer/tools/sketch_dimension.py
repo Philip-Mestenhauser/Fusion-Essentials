@@ -113,68 +113,14 @@ _TYPE_NOTES = {
                "sketch_get to confirm the shape is still what was drawn."),
 }
 
-# Entity-anchored POSITION references: pinning a distance to an ENTITY's own point (a line end, a
-# circle center) instead of a bare 'point:N' avoids the silent mis-attach when two entities share
-# coordinates and each mints its own point index. A ref may carry an anchor as a third colon-segment.
-_ANCHORS = ("start", "end", "mid", "midpoint", "center")
-
-
-def _parse_anchor_ref(ref):
-    """Split '<type>:<index>[:<anchor>]' -> (entity_ref, anchor_or_None, error). The optional third
-    colon-segment names WHICH point of the entity (start/end/mid for a line, center for a circle/arc).
-    An unrecognized third segment errors, naming the valid anchors, rather than silently mis-resolving."""
-    s = (ref or "").strip()
-    parts = s.split(":")
-    if len(parts) <= 2:
-        return s, None, None
-    anchor = parts[-1].strip().lower()
-    if anchor not in _ANCHORS:
-        return None, None, (f"'{ref}': unknown anchor '{parts[-1]}'. Valid: {', '.join(_ANCHORS)} "
-                            "(e.g. 'line:0:end', 'circle:2:center').")
-    return ":".join(parts[:-1]), anchor, None
-
-
-def _midpoint_sketch_point(sketch, line):
-    """A SketchPoint welded to a line's MIDPOINT (created at the geometric midpoint, then constrained
-    with addMidPoint so it tracks the line parametrically). Returns (point, None) or (None, error)."""
-    sp = safe(lambda: line.startSketchPoint.geometry)
-    ep = safe(lambda: line.endSketchPoint.geometry)
-    if sp is None or ep is None:
-        return None, "anchor 'mid' needs a line with two endpoints."
-    mid = adsk.core.Point3D.create((sp.x + ep.x) / 2.0, (sp.y + ep.y) / 2.0,
-                                   ((safe(lambda: sp.z, 0.0) or 0.0) + (safe(lambda: ep.z, 0.0) or 0.0)) / 2.0)
-    pt = sketch.sketchPoints.add(mid)               # MUTATION - let a failure raise into the handler
-    if pt is None:
-        return None, "could not create a midpoint anchor point."
-    safe(lambda: sketch.geometricConstraints.addMidPoint(pt, line))  # best-effort parametric weld
-    return pt, None
-
-
-def _point_at_anchor(sketch, entity, anchor):
-    """The SketchPoint a distance dimension pins for an explicit anchor. start/end need a line's
-    endpoint; center needs a circle/arc; mid builds a constrained midpoint on a line. Returns
-    (point, None) or (None, error)."""
-    start = safe(lambda: entity.startSketchPoint)
-    end = safe(lambda: entity.endSketchPoint)
-    center = safe(lambda: entity.centerSketchPoint)
-    if anchor == "start":
-        return (start, None) if start is not None else (None, "anchor 'start' needs a line or arc.")
-    if anchor == "end":
-        return (end, None) if end is not None else (None, "anchor 'end' needs a line or arc.")
-    if anchor == "center":
-        return (center, None) if center is not None else (None, "anchor 'center' needs a circle or arc.")
-    # mid / midpoint - a line only (a well-defined addMidPoint target; a circle/arc uses 'center')
-    if center is not None or start is None or end is None:
-        return None, "anchor 'mid' applies to a LINE (line:N:mid); for a circle/arc use 'center'."
-    return _midpoint_sketch_point(sketch, entity)
-
 
 def _dim_point(sketch, entity, anchor):
     """The SketchPoint for a distance dimension: the default _point_of when no anchor is given, else
-    the explicit anchor point. Returns (point, None) or (None, error)."""
+    the explicit anchor point (_common.anchor_point - the same ':start/:end/:mid/:center' grammar
+    sketch_constrain reads). Returns (point, None) or (None, error)."""
     if anchor is None:
         return _point_of(entity), None
-    return _point_at_anchor(sketch, entity, anchor)
+    return _common.anchor_point(sketch, entity, anchor)
 
 
 def _radial_text_point(curve):
@@ -192,6 +138,152 @@ def _radial_text_point(curve):
         return P(1, 0, 0)                          # last-resort non-degenerate point
     off = r if r > 1e-9 else 1.0                   # a sane non-zero offset even for a tiny/odd curve
     return P(c.x + off, c.y, getattr(c, "z", 0.0))
+
+
+# ── the post-solve read-back ────────────────────────────────────────────────
+# A distance dimension is UNSIGNED, so the solver is free to satisfy it by moving EITHER referenced
+# entity. The dimension's own value says nothing about which one moved, so the payload reads the
+# referenced entities' geometry back after the solve and publishes it, plus how far each one moved.
+
+_MM = 10.0            # cm -> mm; the solved read-back publishes millimetres
+# How much further than the change it DEMANDED a solve may move an entity before the move is called
+# out: the dimension closes |gap_before - value|, so twice that is generous headroom for the second
+# entity of a pair moving too. The floor keeps a dimension that demanded no change at all (its value
+# already matched the gap) from flagging a rounding-level nudge.
+_MOVE_SLACK = 2.0
+_MOVE_FLOOR_CM = 0.01   # 0.1 mm
+
+
+def _xyz(geo):
+    """(x, y, z) in cm off a point geometry, or None when it does not read."""
+    x = safe(lambda: float(geo.x))
+    y = safe(lambda: float(geo.y))
+    if x is None or y is None:
+        return None
+    return (x, y, safe(lambda: float(geo.z), 0.0) or 0.0)
+
+
+def _mm3(p):
+    return [round(v * _MM, 4) for v in p]
+
+
+def _distance_cm(a, b):
+    return sum((p - q) ** 2 for p, q in zip(a, b)) ** 0.5
+
+
+def _entity_solved(entity):
+    """(facts, positions) for ONE sketch entity: `facts` is the mm geometry the payload publishes -
+    a circle/arc's center + radius, a line's span and midpoint, a point's position - and `positions`
+    are the cm points a MOVE is measured on. ({}, []) for an entity whose geometry does not read."""
+    center = safe(lambda: entity.centerSketchPoint)
+    if center is not None:
+        c = _xyz(safe(lambda: center.geometry))
+        r = safe(lambda: float(entity.geometry.radius))
+        facts = {}
+        if c is not None:
+            facts["center_mm"] = _mm3(c)
+        if r is not None:
+            facts["radius_mm"] = round(r * _MM, 4)
+        return facts, ([c] if c is not None else [])
+    start = safe(lambda: entity.startSketchPoint)
+    end = safe(lambda: entity.endSketchPoint)
+    if start is not None and end is not None:
+        a = _xyz(safe(lambda: start.geometry))
+        b = _xyz(safe(lambda: end.geometry))
+        if a is None or b is None:
+            return {}, [p for p in (a, b) if p is not None]
+        mid = tuple((p + q) / 2.0 for p, q in zip(a, b))
+        return ({"start_mm": _mm3(a), "end_mm": _mm3(b), "mid_mm": _mm3(mid),
+                 "length_mm": round(_distance_cm(a, b) * _MM, 4)}, [a, b])
+    p = _xyz(safe(lambda: entity.geometry))
+    if p is not None:
+        return {"position_mm": _mm3(p)}, [p]
+    return {}, []
+
+
+def _referenced_pairs(*refs_and_entities):
+    """The (ref, entity) pairs to read back, ONE per referenced entity. Two refs into the same
+    entity ('line:0:start' + 'line:0:end', which both name line:0) collapse to a single pair, so the
+    payload cannot carry two rows describing the same geometry under one key."""
+    pairs, seen = [], set()
+    for ref, ent in refs_and_entities:
+        if ent is None or not ref or ref in seen:
+            continue
+        seen.add(ref)
+        pairs.append((ref, ent))
+    return pairs
+
+
+def _positions_of(pairs):
+    """{ref: positions} for the (ref, entity) pairs a call referenced - the before half of the move
+    measurement, read the same way the after half is."""
+    return {ref: _entity_solved(ent)[1] for ref, ent in pairs}
+
+
+def _gap_cm(dt, p1, p2):
+    """The distance this dimension MEASURES between its two points, before it solves, in cm - the
+    euclidean span for an aligned distance, the axis projection for a horizontal/vertical one (those
+    two measure one component, so their demanded change is computed on that component). None when
+    either point does not read."""
+    a = _xyz(safe(lambda: p1.geometry))
+    b = _xyz(safe(lambda: p2.geometry))
+    if a is None or b is None:
+        return None
+    if dt == "horizontal_distance":
+        return abs(a[0] - b[0])
+    if dt == "vertical_distance":
+        return abs(a[1] - b[1])
+    return _distance_cm(a, b)
+
+
+def _moved_cm(before, after):
+    """The furthest one entity's sampled points moved, in cm, or None when the two reads do not
+    describe the same points (nothing can be said about a move that was not measured twice)."""
+    if not before or not after or len(before) != len(after):
+        return None
+    return max(_distance_cm(a, b) for a, b in zip(before, after))
+
+
+def _solved_block(pairs, before):
+    """(solved rows, [(ref, moved_cm), ...]) - each referenced entity's post-solve geometry, and how
+    far it moved while the dimension was applied. Rows whose geometry does not read are dropped."""
+    rows, moves = [], []
+    for ref, ent in pairs:
+        facts, positions = _entity_solved(ent)
+        moved = _moved_cm(before.get(ref), positions)
+        if moved is not None:
+            moves.append((ref, moved))
+            facts["moved_mm"] = round(moved * _MM, 4)
+        if facts:
+            rows.append(dict(ref=ref, **facts))
+    return rows, moves
+
+
+def _moved_warning(moves, value_cm, gap_before_cm):
+    """The teleport warning, or None - for the DISTANCE family, whose value and gap are both lengths
+    in cm.
+
+    The discriminator is the CHANGE the dimension demanded, not its value: closing a gap of
+    `gap_before` to `value` demands |gap_before - value| of movement, so a solve that moves a
+    referenced entity far beyond that moved something the dimension did not ask to move - the
+    signature of a dimension attached to the unintended entity (a distance is unsigned, so the
+    solver may move either side). Pulling two edges 30 mm apart together with a 0 mm dimension is
+    therefore silent, while a dimension that changed almost nothing yet slid an entity 38 mm is not.
+    Named with its numbers; a legitimate outsized solve exists, so this warns and never refuses."""
+    if value_cm is None or gap_before_cm is None:
+        return None
+    demanded = abs(gap_before_cm - abs(value_cm))
+    limit = max(demanded * _MOVE_SLACK, _MOVE_FLOOR_CM)
+    jumps = [(ref, moved) for ref, moved in moves if moved > limit]
+    if not jumps:
+        return None
+    named = ", ".join(f"{ref} by {round(moved * _MM, 4)} mm" for ref, moved in jumps)
+    return (f"The solver moved {named}, but satisfying this dimension demanded only "
+            f"{round(demanded * _MM, 4)} mm of change ({round(gap_before_cm * _MM, 4)} mm measured "
+            f"before it, driven to {round(abs(value_cm) * _MM, 4)} mm) - a move far beyond that is "
+            "what a dimension attached to the UNINTENDED entity looks like (a distance is unsigned, "
+            "so the solver may move either side). Verify the geometry that moved is the one meant; "
+            "'solved' holds each referenced entity's post-solve position.")
 
 
 def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str = "",
@@ -216,7 +308,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         return error(f"No sketch named '{requested}'." if requested else
     "No sketch to dimension. Create one first with sketch_create.")
 
-    base1, anchor1, aerr1 = _parse_anchor_ref(entity_one)
+    base1, anchor1, aerr1 = _common.parse_anchor_ref(entity_one)
     if aerr1:
         return error(aerr1)
     e1 = _common.resolve_entity_ref(sketch, base1)
@@ -243,7 +335,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
                          f"'{entity_one}' is not a line. Give entity_two ('<type>:<index>').")
         lone_line = True
     elif need_two:
-        base2, anchor2, aerr2 = _parse_anchor_ref(entity_two)
+        base2, anchor2, aerr2 = _common.parse_anchor_ref(entity_two)
         if aerr2:
             return error(aerr2)
         e2 = _common.resolve_entity_ref(sketch, base2)
@@ -307,6 +399,13 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         p1, perr1 = _dim_point(sketch, e1, anchor1)
         if perr1:
             return error(f"entity_one: {perr1}")
+    # The entities this dimension references, and where they sit BEFORE it solves - the baseline the
+    # post-solve read-back measures each one's movement against. gap_before is what the dimension
+    # MEASURES between its two points right now, which is what says how much change driving it to
+    # 'value' actually demands.
+    pairs = _referenced_pairs((base1, e1), (base2, e2))
+    before = _positions_of(pairs)
+    gap_before = _gap_cm(dt, p1, p2) if dt in _DISTANCE_TYPES else None
     try:
         if dt in _DISTANCE_TYPES:
             orient = {
@@ -394,6 +493,22 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             "the signed offset, flipping it across its reference; if that spot coincides with another "
             "point the two merge silently. For a reflection use sketch_constrain symmetry; for a "
             "magnitude use a positive value. Re-read sketch_get to confirm the geometry.")
+    # The dimensioned entities as they sit AFTER the solve, each with how far it travelled getting
+    # there: the solve is free to move EITHER side, and the value alone does not say which one it
+    # picked, so the geometry is read back and a move larger than the value itself is called out.
+    solved, moves = _solved_block(pairs, before)
+    if solved:
+        out["solved"] = solved
+        out["note"] += (" 'solved' is each REFERENCED entity's geometry read back after the solve, "
+                        "with the distance it moved (moved_mm) getting there; geometry the solve "
+                        "moved elsewhere in the sketch is not covered - read that back with "
+                        "sketch_get(include_entities=true).")
+    # Only the DISTANCE family: its value and its gap are both lengths in the same internal cm, so
+    # they are comparable. A parameter's value is in DATABASE units - an angular dimension's is
+    # radians - which no length threshold can be applied to.
+    jump = _moved_warning(moves, eval_cm, gap_before) if dt in _DISTANCE_TYPES else None
+    if jump:
+        out["solver_moved_warning"] = jump
     return ok(out)
 
 

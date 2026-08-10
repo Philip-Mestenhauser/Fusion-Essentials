@@ -18,7 +18,7 @@ import types
 
 import pytest
 
-from conftest import load_tool, payload, error_message
+from conftest import MeshBody, load_tool, payload, error_message
 
 mrn = load_tool("mesh_reverse_normal")
 
@@ -29,44 +29,9 @@ _FLIPPED = [-v for v in _NORMALS]
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
 
-class PolygonMesh:
-    """MeshBody.mesh - only the normal vectors matter here."""
-    def __init__(self, normals):
-        self.normalVectorsAsDouble = list(normals)
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody. `volume` RAISES when the mesh is not closed - the case
-    that leaves the cheap sign gate unusable and the normals as the only check."""
-    def __init__(self, name="Scan1", is_closed=True, volume=1.0, normals=None, token=None,
-                 parent=None, normals_readable=True):
-        self.name = name
-        self._is_closed = is_closed
-        self.volume_cm3 = volume
-        self.normals = list(normals if normals is not None else _NORMALS)
-        self.normals_readable = normals_readable
-        self.entityToken = token or f"MTOK::{name}"
-        self.parentComponent = parent
-
-    @property
-    def mesh(self):
-        if not self.normals_readable:
-            raise RuntimeError("3 : the polygon mesh is unavailable")
-        return PolygonMesh(self.normals)
-
-    @property
-    def isClosed(self):
-        return self._is_closed
-
-    @property
-    def isOriented(self):
-        return True
-
-    @property
-    def volume(self):
-        if not self._is_closed:
-            raise RuntimeError("3 : the mesh is not closed and encloses no volume")
-        return self.volume_cm3
+def _mesh(name="Scan1", normals=None, **kw):
+    """conftest's shared MeshBody carrying this file's measured normal array by default."""
+    return MeshBody(name=name, normals=_NORMALS if normals is None else normals, **kw)
 
 
 class _Coll:
@@ -151,7 +116,7 @@ class _Design:
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
-    mesh = mesh if mesh is not None else MeshBody()
+    mesh = mesh if mesh is not None else _mesh()
     comp = _Comp(meshes=[mesh])
     mesh.parentComponent = comp
     feats = _ReverseFeatures(on_add=on_add, **feat_kw)
@@ -167,15 +132,15 @@ def _flip(mesh, volume=True, normals=True):
     """The measured flip: signed volume changes sign, normal vectors negate componentwise."""
     def _apply():
         if volume:
-            mesh.volume_cm3 = -mesh.volume_cm3
+            mesh._volume_cm3 = -mesh._volume_cm3
         if normals:
-            mesh.normals = [-v for v in mesh.normals]
+            mesh._normals = [-v for v in mesh._normals]
     return _apply
 
 
 @pytest.fixture
 def rig(monkeypatch):
-    mesh = MeshBody(volume=1.0)
+    mesh = _mesh(volume=1.0)
     _m, comp, feats = _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh))
     return types.SimpleNamespace(mesh=mesh, comp=comp, feats=feats, monkeypatch=monkeypatch)
 
@@ -245,22 +210,24 @@ class TestVerification:
         assert "is_closed" not in out and "is_oriented" not in out
 
     def test_an_open_mesh_is_confirmed_by_the_normals_alone(self, monkeypatch):
-        # volume raises on an open mesh, so the cheap sign gate is unusable
-        mesh = MeshBody(is_closed=False)
+        # an open mesh READS 0.0 rather than raising, and a zero has no sign to flip - so the gate
+        # still comes back null off the value itself, without ever needing an exception.
+        mesh = _mesh(is_closed=False, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh, volume=False))
+        assert mesh.volume == 0.0                       # the reading, not a raise
         out = payload(mrn.handler(mesh="H"))
         assert out["volume_sign_flipped"] is None
         assert out["normals_negated"] is True
 
     def test_unreadable_normals_are_confirmed_by_the_sign_flip_alone(self, monkeypatch):
-        mesh = MeshBody(volume=1.0, normals_readable=False)
+        mesh = _mesh(volume=1.0, mesh_readable=False)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh, normals=False))
         out = payload(mrn.handler(mesh="H"))
         assert out["volume_sign_flipped"] is True
         assert out["normals_negated"] is None
 
     def test_a_zero_volume_does_not_count_as_a_sign_flip(self, monkeypatch):
-        mesh = MeshBody(volume=0.0)
+        mesh = _mesh(volume=0.0)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh, volume=False))
         out = payload(mrn.handler(mesh="H"))
         assert out["volume_sign_flipped"] is None
@@ -272,7 +239,7 @@ class TestVerification:
         assert "still points the same way" in msg and "Scan1" in msg
 
     def test_neither_signal_readable_is_reported_as_unverified(self, monkeypatch):
-        mesh = MeshBody(is_closed=False, normals_readable=False)
+        mesh = _mesh(is_closed=False, mesh_readable=False)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh))
         msg = error_message(mrn.handler(mesh="H"))
         assert "UNVERIFIED" in msg and "is_oriented" in msg
@@ -282,7 +249,7 @@ class TestVerification:
 
 class TestModeRouting:
     def test_direct_mode_returns_no_feature_yet_the_landed_flip_is_success(self, monkeypatch):
-        mesh = MeshBody(volume=1.0)
+        mesh = _mesh(volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh), design_type=0, none_feature=True)
         out = payload(mrn.handler(mesh="H"))
         assert out["reversed"] is True
@@ -295,6 +262,6 @@ class TestModeRouting:
         assert "still points the same way" in error_message(mrn.handler(mesh="H"))
 
     def test_parametric_no_feature_return_stays_an_honest_error(self, monkeypatch):
-        mesh = MeshBody(volume=1.0)
+        mesh = _mesh(volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_flip(mesh), design_type=1, none_feature=True)
         assert "returned no feature" in error_message(mrn.handler(mesh="H"))

@@ -13,6 +13,7 @@ carriers; the fake NCPrograms collection acts on the real output folder the hand
 program's parameters, writing (or not writing) a file there.
 """
 
+import itertools
 import json
 import os
 import types
@@ -133,8 +134,30 @@ class _NCPrograms:
 
 
 class _Op:
-    def __init__(self, name):
+    """An Operation. operationId is the identity the overwrite guard compares on - the SHAPES table
+    lists it on Operation, which carries no entityToken. These fakes hold the guard's own premise:
+    distinct objects sharing one operationId - the shape the guard is built against; the live
+    stability of that id across fetches is CAM-1's measurement."""
+    _seq = itertools.count(1)
+
+    def __init__(self, name, operation_id=None):
         self.name = name
+        if operation_id is not None:
+            self.operationId = operation_id
+        else:
+            self.operationId = next(self._seq)
+
+
+class _IdlessOp(_Op):
+    """An operation whose operationId cannot be read - reading it raises, as a stale/invalid proxy
+    does."""
+    @property
+    def operationId(self):
+        raise RuntimeError("operationId is unavailable on this object")
+
+    @operationId.setter
+    def operationId(self, value):
+        pass
 
 
 class _Setup:
@@ -485,9 +508,10 @@ class TestAsIsMode:
 
 class TestOverwriteGuard:
     def test_refuses_when_stored_operations_differ_from_requested_scope(self, monkeypatch, tmp_path):
-        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1", operation_id=11)])],
+                                         existing=["JOB1"]))
         prog = cam.ncPrograms.itemByName("JOB1")
-        prog.operations = [_Op("SomeOtherOp")]           # a DIFFERENT stored configuration
+        prog.operations = [_Op("SomeOtherOp", operation_id=22)]   # a DIFFERENT stored configuration
         prog.postConfiguration = object()
         res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
                          program_name="JOB1")
@@ -506,16 +530,57 @@ class TestOverwriteGuard:
         assert prog.operations == [s1]                   # reconfigured to the requested scope
 
     def test_identical_operation_sets_proceed_without_overwrite(self, monkeypatch, tmp_path):
-        # The idempotent re-post case: the stored set and the requested scope resolve to the SAME
-        # operations - no friction, overwrite is never required.
-        face1 = _Op("Face1")
-        s1 = _Setup("S1", [face1])
+        # THE RE-POST BITE: the stored set and the requested scope are the SAME operation reached by
+        # two different fetches - DISTINCT Python objects carrying one operationId, which is what the
+        # live API hands back. An identity that falls back to id() sees two different sets here and
+        # refuses every legitimate re-post.
+        s1 = _Setup("S1", [_Op("Face1", operation_id=42)])
         cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
         prog = cam.ncPrograms.itemByName("JOB1")
-        prog.operations = [face1]                         # same operation object the scope resolves to
+        stored = _Op("Face1", operation_id=42)
+        assert stored is not s1._ops[0]
+        prog.operations = [stored]
         data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
                                    program_name="JOB1"))
         assert data["posted"] is True and data.get("partial") is not True
+
+    def test_an_unreadable_operation_id_refuses_instead_of_guessing(self, monkeypatch, tmp_path):
+        # No identity means no comparison: the guard must say so and write nothing, never treat an
+        # uncomparable pair as a match (or as a difference) on a stand-in identity.
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1", operation_id=42)])],
+                                         existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [_IdlessOp("Face1")]
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="JOB1")
+        assert res["isError"] is True
+        assert "JOB1" in res["message"] and "operationId" in res["message"]
+        assert isinstance(prog.operations[0], _IdlessOp)   # refused BEFORE any write
+        assert cam.posted == []
+
+    def test_an_unreadable_id_on_the_REQUESTED_side_refuses_too(self, monkeypatch, tmp_path):
+        # the requested scope holds an operation with no readable id, so the comparable ids ({42})
+        # match the stored set while a real difference hides behind the unreadable one - checking
+        # only the stored side would reconfigure the program on a comparison that never happened.
+        s1 = _Setup("S1", [_Op("Face1", operation_id=42), _IdlessOp("Ghost")])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [_Op("Face1", operation_id=42)]
+        res = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                         program_name="JOB1")
+        assert res["isError"] is True
+        assert "0 stored and 1 requested" in res["message"]
+        assert cam.posted == []
+
+    def test_overwrite_true_skips_the_unreadable_id_refusal(self, monkeypatch, tmp_path):
+        s1 = _Setup("S1", [_Op("Face1", operation_id=42)])
+        cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
+        prog = cam.ncPrograms.itemByName("JOB1")
+        prog.operations = [_IdlessOp("Face1")]
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="JOB1", overwrite=True))
+        assert data["posted"] is True
+        assert prog.operations == [s1]
 
 
 # -- the honesty gate: a real file must land -----------------------------------

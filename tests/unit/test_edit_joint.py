@@ -124,8 +124,10 @@ class FakeJoints:
 
 
 class FakeRoot:
-    def __init__(self, joints):
+    def __init__(self, joints, as_built=()):
         self.joints = FakeJoints(joints)
+        # asBuiltJoints is a SEPARATE collection from joints - find_joint searches both
+        self.asBuiltJoints = FakeJoints(as_built)
         self.allOccurrences = []
         self.xConstructionAxis = "WAXIS_X"
         self.yConstructionAxis = "WAXIS_Y"
@@ -150,8 +152,8 @@ class _FakeTimeline:
 
 
 class FakeDesign:
-    def __init__(self, joints, timeline_items=None):
-        self.rootComponent = FakeRoot(joints)
+    def __init__(self, joints, timeline_items=None, as_built=()):
+        self.rootComponent = FakeRoot(joints, as_built)
         self.computeAll_called = False
         # ONE stable timeline instance so the handler's markerPosition restore is observable.
         self._timeline = _FakeTimeline(timeline_items or [_FakeTLItem("Joint1", 0), _FakeTLItem("Pattern1", 0)])
@@ -176,6 +178,27 @@ def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None)
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return design, joints[0]
+
+
+def _install_as_built(monkeypatch, name="Slider_R"):
+    """A design whose only joint is an AS-BUILT slider, in the asBuiltJoints collection. It carries
+    NO offset/angle attribute at all - api_surface lists neither on fusion.AsBuiltJoint - and
+    adsk.fusion.AsBuiltJoint is patched to a real class so is_as_built_joint is a genuine isinstance
+    check rather than the degrade-to-False path a Mock type takes."""
+    import adsk.fusion, adsk.core
+    cls = type("AsBuiltJoint", (), {})
+    monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", cls)
+    joint = cls()
+    joint.name = name
+    joint.timelineObject = FakeTimelineObject()
+    joint.jointMotion = SliderJointMotion()
+    design = FakeDesign([], as_built=[joint])
+    # joint_create_edit has no module-level 'app' - it reads the design through _common
+    monkeypatch.setattr(jt._common, "app", type("A", (), {"activeProduct": design})())
+    monkeypatch.setattr(adsk.fusion.Design, "cast",
+                        lambda x: x if isinstance(x, FakeDesign) else None)
+    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: ("real", v)))
+    return design, joint
 
 
 def _payload(result):
@@ -279,6 +302,46 @@ class TestOffsetAngle:
         _install(["BoomPivot"])
         res = jt.edit_handler(joint_name="BoomPivot", offset=5, units="furlongs")
         assert res["isError"] is True and "Unknown units" in res["message"]
+
+    def test_as_built_offset_refusal_routes_to_the_regular_joint(self, monkeypatch):
+        # An AsBuiltJoint has no offset parameter for ANY motion - a slider included. The generic
+        # "rigid/inferred or already 0-DOF" wording sends the agent looking for a DOF it already
+        # has; the recovery is to rebuild the pair with joint_create, whose offset IS a parameter.
+        _install_as_built(monkeypatch)
+        res = jt.edit_handler(joint_name="Slider_R", offset=5)
+        assert res["isError"] is True
+        assert "AS-BUILT" in res["message"] and "Slider_R" in res["message"]
+        assert "joint_create" in res["message"]
+        assert "rigid/inferred" not in res["message"]
+
+    def test_a_regular_joint_without_an_offset_keeps_the_generic_refusal(self, monkeypatch):
+        # the as-built branch must not swallow the ordinary case: a real Joint whose offset is
+        # absent is still "rigid/inferred or already 0-DOF", not an as-built joint
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
+        _, joint = _install(["BoomPivot"])
+        del joint.offset
+        res = jt.edit_handler(joint_name="BoomPivot", offset=5)
+        assert res["isError"] is True
+        assert "rigid/inferred" in res["message"] and "AS-BUILT" not in res["message"]
+
+    def test_as_built_angle_refusal_routes_to_the_regular_joint(self, monkeypatch):
+        # the angle arm mirrors the offset arm: an AsBuiltJoint exposes no angle parameter either,
+        # and the dead-end "no angle parameter" wording must not be what an as-built joint gets
+        _install_as_built(monkeypatch)
+        res = jt.edit_handler(joint_name="Slider_R", angle=30)
+        assert res["isError"] is True
+        assert "AS-BUILT" in res["message"] and "joint_create" in res["message"]
+        assert res["message"] != "This joint has no angle parameter."
+
+    def test_a_regular_joint_without_an_angle_keeps_the_generic_refusal(self, monkeypatch):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
+        _, joint = _install(["BoomPivot"])
+        del joint.angle
+        res = jt.edit_handler(joint_name="BoomPivot", angle=30)
+        assert res["isError"] is True
+        assert "no angle parameter" in res["message"] and "AS-BUILT" not in res["message"]
 
 
 # ── joint limits: rotation (deg/rad) AND linear (mm/cm) + rest ──────────────
@@ -422,3 +485,34 @@ class TestAutoRecompute:
         assert out["recomputed"] is True
         assert out["timeline_errors_after"] == ["Pattern1"]
         assert "over-constrain" in out["note"]
+
+
+class TestEditIsNotPendingGuarded:
+    """The pending-move refusal is scoped to joint CREATION, deliberately. A create adds a NEW joint
+    that would freeze whatever pose the revert produced; an edit changes an EXISTING joint's
+    definition and is the very call an agent reaches for to repair one. Blocking it behind a captured
+    position would strand a caller whose only route back is the tool being refused - so joint_edit
+    lands with the flag set, and only the create tools refuse."""
+
+    def _pending(self, design):
+        design.snapshots = type("S", (), {"hasPendingSnapshot": True})()
+        return design
+
+    def test_flip_still_lands_while_a_move_is_pending(self):
+        design, joint = _install(["BoomPivot"])
+        self._pending(design)
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", flip=True))
+        assert out["flipped"] is True and joint.isFlipped is True
+
+    def test_a_motion_change_still_lands_while_a_move_is_pending(self):
+        design, joint = _install(["BoomPivot"])
+        self._pending(design)
+        out = _payload(jt.edit_handler(joint_name="BoomPivot", joint_type="slider", axis="x"))
+        assert out["joint_type"] == "slider" and out["axis"] == "x"
+
+    def test_the_edit_refusal_vocabulary_never_reaches_this_handler(self):
+        design, _ = _install(["BoomPivot"])
+        self._pending(design)
+        res = jt.edit_handler(joint_name="BoomPivot", flip=True)
+        assert res["isError"] is False
+        assert "would silently revert" not in json.dumps(res)

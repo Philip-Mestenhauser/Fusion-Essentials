@@ -62,10 +62,8 @@ def _base_appearance(design):
     if n:
         return apps.item(0)
     # fallback: first appearance of the first material library that has any
-    libs = safe(lambda: app.materialLibraries)
-    ln = safe(lambda: libs.count, 0) or 0
-    for i in range(ln):
-        lib_apps = safe(lambda i=i: libs.item(i).appearances)
+    for lib in _common.iter_collection(safe(lambda: app.materialLibraries)):
+        lib_apps = safe(lambda lib=lib: lib.appearances)
         if lib_apps and (safe(lambda: lib_apps.count, 0) or 0) > 0:
             return lib_apps.item(0)
     return None
@@ -98,10 +96,7 @@ def _make_colored_appearance(design, rgb, opacity, name):
     # (named 'Color' / 'Albedo' / etc.) - set every ColorProperty so the override takes regardless of
     # the localized name.
     set_any = False
-    props = safe(lambda: appr.appearanceProperties)
-    pn = safe(lambda: props.count, 0) or 0
-    for i in range(pn):
-        p = props.item(i)
+    for p in _common.iter_collection(safe(lambda: appr.appearanceProperties)):
         if safe(lambda p=p: type(p).__name__) == "ColorProperty":
             try:
                 p.value = color
@@ -113,40 +108,63 @@ def _make_colored_appearance(design, rgb, opacity, name):
     return appr, reused, None
 
 
-def _occurrence_fanout(occ, appr_name):
+def _reads_as(entity, appr_id, appr_name):
+    """True / False / None - does `entity` (a body, face, or occurrence) now read the exact
+    appearance this call just applied? None means the comparison could not be made.
+
+    BOTH keys must match, because NEITHER alone identifies an appearance INSTANCE:
+
+    - NAME alone is meaningless across the catalog: names are non-unique (MEASURED: 92 of 172
+      distinct names over 530 library appearances are shared), so a body that kept a same-named
+      appearance of its own reads as reached.
+    - ID alone is not an instance either. An id identifies the SOURCE ASSET: two appearances this
+      tool minted seconds apart from the same base library asset carry byte-identical ids
+      (MEASURED - a copy keeps its source's id), and the tool mints EVERY color from one base, so
+      that is the common case, not the corner. Reproduced live: after a body-level override, an
+      occurrence write in a different color listed the overridden body as reached on id alone
+      while the body had plainly kept its own appearance.
+
+    Together they hold: this tool controls the name (it minted or reused exactly one appearance
+    under a name it chose), so name pins the instance among same-id copies while id pins the asset
+    among same-name strangers. Unreadable on either side answers None - a one-sided fallback would
+    answer with the key that cannot discriminate.
+    """
+    got_id = safe(lambda: entity.appearance.id)
+    got_name = safe(lambda: entity.appearance.name)
+    if got_id is None or got_name is None or appr_id is None or appr_name is None:
+        return None
+    return got_id == appr_id and got_name == appr_name
+
+
+def _occurrence_fanout(occ, appr_id, appr_name):
     """(reached, not_reached, unverified) after an OCCURRENCE-level appearance write.
 
-    MEASURED (probe_w10.log "W10 P5"): an occurrence-level assignment fans onto the occurrence's
-    bodies, but a body that already carried its own appearance kept it - while the occurrence's
-    .appearance still read back as the newly set one. So the occurrence read-back is not proof the
-    bodies changed; each body is compared by appearance NAME (a proxy body hands out a fresh wrapper
-    per read, so identity cannot carry the comparison), and what is reported is the OBSERVATION -
-    which appearance each body reads now - not a cause this function never read.
+    MEASURED: an occurrence-level assignment fans onto the occurrence's bodies, but a body that
+    already carried its own appearance keeps it - while the occurrence's .appearance still reads
+    back as the newly set one. So the occurrence read-back is not proof the bodies changed, and
+    each body is compared through _reads_as instead.
 
     Anything the comparison cannot be made on is 'unverified', never a classification: a body whose
-    appearance declines to answer, and - since there is nothing to compare against - every body when
-    the newly set appearance's own name could not be read.
+    appearance declines to answer, and - since there is nothing to compare against - every body
+    when the newly applied appearance's own id or name could not be read.
 
-    The CAUSE of a miss (BRepBody.appearanceSourceType, which separates a body carrying its own
-    appearance from one the occurrence reached) is deliberately not read here: that enum family is
-    not in the generated live_api_facts.ENUMS yet, and referencing an unmeasured family is what
-    test_enum_families_measured refuses. Measure it, then this can name the cause.
+    The CAUSE of a miss is not read here. BRepBody.appearanceSourceType does separate a body
+    carrying its own appearance from one the occurrence reached, but adsk.fusion.
+    AppearanceSourceTypes has no row in the generated live_api_facts.ENUMS, and a reference to a
+    family with no row is what test_enum_families_measured refuses - so this reports the
+    OBSERVATION (which appearance each body reads now) and never a cause.
     """
     reached, not_reached, unverified = [], [], []
-    bodies = safe(lambda: occ.bRepBodies)
-    n = (safe(lambda: bodies.count, 0) or 0) if bodies is not None else 0
-    for i in range(n):
-        b = safe(lambda i=i: bodies.item(i))
-        if b is None:
-            continue
+    for i, b in enumerate(_common.iter_collection(safe(lambda: occ.bRepBodies))):
         bname = safe(lambda b=b: b.name) or f"body #{i}"
-        got = safe(lambda b=b: b.appearance.name)
-        if got is None or appr_name is None:
+        verdict = _reads_as(b, appr_id, appr_name)
+        if verdict is None:
             unverified.append(bname)
-        elif got == appr_name:
+        elif verdict:
             reached.append(bname)
         else:
-            not_reached.append({"body": bname, "appearance": got})
+            not_reached.append({"body": bname,
+                                "appearance": safe(lambda b=b: b.appearance.name)})
     return reached, not_reached, unverified
 
 
@@ -184,6 +202,9 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
     failed = []
     not_reached = []
     unverified = []
+    # The two keys every read-back below compares against - read ONCE off the appearance this call
+    # actually applied, so a later re-read of the object cannot drift the comparison.
+    appr_id, appr_landed_name = safe(lambda: appr.id), safe(lambda: appr.name)
     if kind == "component":
         # a Component has no single .appearance; apply to each of its bodies. A failure on one body
         # must not hide that other bodies already got colored - collect per-body, don't abort the loop.
@@ -191,16 +212,15 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         bn = safe(lambda: bodies.count, 0) or 0
         if bn == 0:
             return error(f"{desc} has no bodies to color.")
-        for i in range(bn):
-            b = bodies.item(i)
+        for b in _common.iter_collection(bodies):
             name = safe(lambda b=b: b.name)
             try:
                 b.appearance = appr
             except Exception as e:
                 failed.append({"body": name, "error": str(e)})
                 continue
-            got = safe(lambda b=b: b.appearance.name)
-            if got is not None and got != safe(lambda: appr.name):
+            if _reads_as(b, appr_id, appr_landed_name) is False:
+                got = safe(lambda b=b: b.appearance.name)
                 failed.append({"body": name, "error": f"appearance still reads '{got}' after the set"})
             else:
                 applied_to.append(name)
@@ -213,8 +233,8 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
             entity.appearance = appr
         except Exception as e:
             return error(f"Could not apply appearance to {desc}: {e}")
-        got = safe(lambda: entity.appearance.name)
-        if got is not None and got != safe(lambda: appr.name):
+        if _reads_as(entity, appr_id, appr_landed_name) is False:
+            got = safe(lambda: entity.appearance.name)
             return error(f"Assignment was accepted but {desc} still reads appearance '{got}' - "
                          "the override did not take.")
         # a BRepFace has no .name; fall back to the target description
@@ -222,8 +242,17 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         if kind == "occurrence":
             # The occurrence read-back above agrees with what was just set even for a body the write
             # never reached - read the BODIES back to publish where the color actually landed.
-            reached, not_reached, unverified = _occurrence_fanout(entity, safe(lambda: appr.name))
+            reached, not_reached, unverified = _occurrence_fanout(entity, appr_id,
+                                                                  appr_landed_name)
             applied_to.extend(reached)
+            # NOT ONE body took the appearance while at least one demonstrably kept another: the
+            # occurrence's own read-back is the only thing that "succeeded", and it agrees with the
+            # write whether or not anything changed. The component branch already errors here.
+            if not reached and not_reached:
+                names = ", ".join(o["body"] for o in not_reached[:5])
+                return error(f"Assignment to {desc} reached NONE of its {len(not_reached)} "
+                             f"body(ies) - each still reads a different appearance ({names}). "
+                             "Color the bodies directly (target = the body name).")
 
     note = ("Appearance override applied. Set a new color anytime; to revert, the override is on "
             "the body/occurrence (.appearance). Pair with view_screenshot to see it.")
@@ -245,7 +274,7 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
         "color_rgb": list(rgb),
         "color_hex": f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}",
         "opacity": opacity,
-        "appearance": safe(lambda: appr.name),
+        "appearance": appr_landed_name,
         "appearance_reused": appr_reused,
         "applied_to": applied_to,
         "note": note,

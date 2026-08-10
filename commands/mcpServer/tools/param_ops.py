@@ -8,6 +8,8 @@
   breaks a downstream feature is rolled back and reported rather than silently corrupting the model.
 """
 
+from itertools import islice
+
 import adsk.core
 import adsk.fusion
 
@@ -94,8 +96,9 @@ def handler(name: str = "", include_model_parameters: bool = False) -> dict:
     user_params = []
     try:
         ups = design.userParameters
-        for i in range(min(ups.count, _MAX_PARAMS)):
-            user_params.append(_param_summary(ups.item(i)))
+        cap = min(ups.count, _MAX_PARAMS)   # an uncountable collection is a refusal, not an empty read
+        for p in islice(_common.iter_collection(ups), cap):
+            user_params.append(_param_summary(p))
     except Exception as e:
         return error(f"Could not read user parameters: {e}")
 

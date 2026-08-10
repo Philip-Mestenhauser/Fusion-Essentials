@@ -8,13 +8,22 @@ from ._common import safe
 
 MAP_BLURB = (
     "active_drawing (the ONE active-document -> Drawing read every drawing tool gates on - "
-    "None when the active document is not a drawing), sheet_units (the ONE "
+    "None when the active document is not a drawing), active_drawing_document (the same cast "
+    "stopped one level earlier, at the DrawingDocument the reference/refresh surface hangs off), "
+    "SHEET_SIZE_MAP (the ONE sheet-size key -> (required standard, SheetSizes member) table both "
+    "the creation-time and the set_size path resolve through), DIMENSION_STRATEGIES (the ONE "
+    "auto-dimension strategy key -> DimensionStrategyTypes member table - all eight members the "
+    "family carries), sheet_units (the ONE "
     "documentSettings.units decode -> the drawing's DIMENSION display unit 'mm' / 'in' / None, "
     "never a guessed default - it does NOT describe Sheet.width/height), SHEET_EXTENT_UNIT (the "
     "ONE honest label for Sheet.width/height: 'mm' on EVERY drawing, a constant fact, not a read), "
     "enum_value (the ONE adsk.drawing enum member read BY NAME -> its value, None on a build "
     "carrying neither the family nor the member), standard_label (the ONE documentSettings.standard "
-    "decode -> 'iso' / 'asme' / None), "
+    "decode -> 'iso' / 'asme' / None), DOCUMENT_UNIT + coordinate_unit (the ONE standard -> length "
+    "unit table a drawing's own numbers are authored in - 'mm' under ISO, 'in' under ASME - and the "
+    "read that decodes it for one drawing, None when the standard is unreadable: the unit sheet "
+    "GEOMETRY lands in and the unit a custom sheet size is written in, neither of which "
+    "sheet_units describes), "
     "NO_PORTRAIT (the ONE measured (standard, sheet size) table Fusion refuses portrait on), "
     "resolve_sheet (the ONE sheet-by-name resolver: case-insensitive EXACT - sheet names are "
     "measured case-insensitively unique, a duplicate add RAISES and a duplicate rename "
@@ -32,11 +41,45 @@ SHEET_EXTENT_UNIT = "mm"
 # document is not reliably rolled back, so both consumers pre-guard on this table instead.
 NO_PORTRAIT = {("iso", "a0"), ("asme", "e")}
 
+# sheet-size key -> (the standard the size belongs to, its SheetSizes member name). Fusion silently
+# IGNORES a size belonging to the other standard at creation and RAISES on one assigned to a sheet,
+# so both consumers guard the pairing off this table. CustomSizeSheetSize is deliberately absent:
+# it is not a preset, and it cannot be assigned to Sheet.sheetSize at all.
+SHEET_SIZE_MAP = {
+    "a4": ("iso", "A4ISOSheetSize"), "a3": ("iso", "A3ISOSheetSize"),
+    "a2": ("iso", "A2ISOSheetSize"), "a1": ("iso", "A1ISOSheetSize"), "a0": ("iso", "A0ISOSheetSize"),
+    "a": ("asme", "AASMESheetSize"), "b": ("asme", "BASMESheetSize"), "c": ("asme", "CASMESheetSize"),
+    "d": ("asme", "DASMESheetSize"), "e": ("asme", "EASMESheetSize"),
+}
+
+# auto-dimension strategy key -> the DimensionStrategyTypes member name. The family carries exactly
+# these eight members, so the creation-time generator and the per-view dimensioning call offer the
+# same set - a strategy legal on one and refused on the other would be this tool family's invention.
+DIMENSION_STRATEGIES = {
+    "overall": "OverallDimensionStrategyType",
+    "automatic": "AutomaticDimensionStrategyType",
+    "baseline": "BaselineDimensionStrategyType",
+    "chain": "ChainDimensionStrategyType",
+    "ordinate": "OrdinateDimensionStrategyType",
+    "symmetric": "SymmetricDimensionStrategyType",
+    "symmetric_with_baseline": "SymmetricWithBaselineDimensionStrategyType",
+    "symmetric_with_ordinate": "SymmetricWithOrdinateDimensionStrategyType",
+}
+
+
+def active_drawing_document():
+    """The active document cast to a DrawingDocument, or None when it is not a drawing.
+
+    The DrawingDocument - not the Drawing - is what carries documentReferences and
+    updateAllReferences, so a caller that needs those stops here.
+    """
+    doc = safe(lambda: adsk.core.Application.get().activeDocument)
+    return safe(lambda: adsk.drawing.DrawingDocument.cast(doc))
+
 
 def active_drawing():
     """The active document's Drawing, or None when the active document is not a drawing."""
-    doc = safe(lambda: adsk.core.Application.get().activeDocument)
-    dd = safe(lambda: adsk.drawing.DrawingDocument.cast(doc))
+    dd = active_drawing_document()
     return safe(lambda: dd.drawing) if dd else None
 
 
@@ -85,6 +128,27 @@ def standard_label(dwg):
         if known is not None and value == known:
             return key
     return None
+
+
+# standard label -> the length unit a drawing's OWN numbers are authored in. The DrawingSketch
+# geometry docstrings state the rule: "Coordinates are in drawing length units (millimeters when the
+# drawing standard includes ISO; inches when the standard is ASME without ISO)", and
+# CreateDrawingInput's CustomSheetSize takes the same unit for its width and height. One table, so a
+# reader that authors a number and a reader that measures one cannot disagree about the unit.
+DOCUMENT_UNIT = {"iso": "mm", "asme": "in"}
+
+
+def coordinate_unit(dwg):
+    """The length unit sheet COORDINATES land in - 'mm' under ISO, 'in' under ASME, None when the
+    standard cannot be read.
+
+    Keyed to the STANDARD, never to documentSettings.units: those two are set independently at
+    creation, so a drawing made standard='iso' with units='inch' takes coordinates in millimetres
+    while its dimensions display in inches. Labelling a coordinate with sheet_units is wrong by
+    25.4x on exactly that drawing. None is published as null - a guessed default puts a unit on the
+    wire that no read backs.
+    """
+    return DOCUMENT_UNIT.get(standard_label(dwg))
 
 
 def resolve_sheet(dwg, name):

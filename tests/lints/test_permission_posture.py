@@ -85,13 +85,25 @@ class TestPermissionPostureNeverAutoAllowsDestructive:
         assert _auto_allow_violations(hatch_leak, banned) == [("modeling", gen_posture.SCRIPT_HATCH)]
 
 
-def _fusion_allow_diff(allow_entries, read_names):
+# Write-kind tools the local permission config auto-approves anyway, each with the reason it is
+# exempt from prompting. The tool's write= stays honest on the wire; this table governs only the
+# local prompt. Grows only on an owner call.
+_OWNER_ALLOWED_WRITES = {
+    "view_screenshot": "screenshots are agent-to-agent workflow - a prompt on every capture "
+                       "blocks unattended runs, and the file write overwrites only a "
+                       "caller-named PNG",
+}
+
+
+def _fusion_allow_diff(allow_entries, read_names, owner_writes=None):
     """(missing, extra) between the committed allow list's fusion-wire entries and the registry's
-    read bucket. Non-fusion entries (another server's tools, shell rules) are out of scope - the
-    invariant governs only what THIS server auto-approves."""
+    read bucket plus the owner's explicit write exceptions. Non-fusion entries (another server's
+    tools, shell rules) are out of scope - the invariant governs only what THIS server
+    auto-approves."""
     prefix = gen_posture.WIRE_PREFIX
     committed = {e[len(prefix):] for e in allow_entries if e.startswith(prefix)}
-    reads = set(read_names)
+    writes = _OWNER_ALLOWED_WRITES if owner_writes is None else owner_writes
+    reads = set(read_names) | set(writes)
     return sorted(reads - committed), sorted(committed - reads)
 
 
@@ -112,7 +124,16 @@ class TestCommittedSettingsMatchTheReadBucket:
     def test_the_diff_bites_both_ways(self):
         reads = ["cam_get", "doc_get"]
         wire = [gen_posture.WIRE_PREFIX + n for n in reads]
-        assert _fusion_allow_diff(wire + ["Bash(git status)"], reads) == ([], [])
-        assert _fusion_allow_diff(wire[:1], reads) == (["doc_get"], [])
-        assert _fusion_allow_diff(wire + [gen_posture.WIRE_PREFIX + "cam_delete"], reads) == (
-            [], ["cam_delete"])
+        assert _fusion_allow_diff(wire + ["Bash(git status)"], reads, owner_writes={}) == ([], [])
+        assert _fusion_allow_diff(wire[:1], reads, owner_writes={}) == (["doc_get"], [])
+        assert _fusion_allow_diff(wire + [gen_posture.WIRE_PREFIX + "cam_delete"], reads,
+                                  owner_writes={}) == ([], ["cam_delete"])
+
+    def test_an_owner_write_exception_is_allowed_and_still_required(self):
+        # the exception makes the committed entry legal AND missing-if-absent - an entry the owner
+        # approved must actually be in the file, so the two surfaces cannot drift apart silently.
+        reads = ["cam_get"]
+        wire = [gen_posture.WIRE_PREFIX + "cam_get", gen_posture.WIRE_PREFIX + "view_screenshot"]
+        exc = {"view_screenshot": "reason"}
+        assert _fusion_allow_diff(wire, reads, owner_writes=exc) == ([], [])
+        assert _fusion_allow_diff(wire[:1], reads, owner_writes=exc) == (["view_screenshot"], [])

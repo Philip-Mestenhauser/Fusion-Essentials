@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.0.87"
-VERIFIED_ON = "2026-08-06"
+VERIFIED_ON = "2026-08-07"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -33,6 +33,15 @@ ENUMS = {
         "AllLoops": 0,
         "OnlyOutsideLoops": 1,
         "OnlyInsideLoops": 2,
+    },
+    "cam.MachineTemplate": {
+        "GenericLathe": 0,
+        "Generic3Axis": 1,
+        "Generic4Axis": 2,
+        "Generic5AxisHeadHead": 3,
+        "Generic5AxisHeadTable": 4,
+        "Generic5AxisTableTable": 5,
+        "GenericFFF": 6,
     },
     "cam.OperationStates": {
         "IsValidOperationState": 0,
@@ -133,9 +142,30 @@ ENUMS = {
         "AutomaticDrawingCreationMode": 0,
         "ManualDrawingCreationMode": 1,
     },
+    "drawing.DrawingStandardTypes": {
+        "ISODrawingStandardType": 0,
+        "ASMEDrawingStandardType": 1,
+    },
     "drawing.DrawingUnitTypes": {
         "InchDrawingUnitType": 0,
         "MillimeterDrawingUnitType": 1,
+    },
+    "drawing.SheetOrientationTypes": {
+        "LandscapeSheetOrientationType": 0,
+        "PortraitSheetOrientationType": 1,
+    },
+    "drawing.SheetSizes": {
+        "CustomSizeSheetSize": 0,
+        "A4ISOSheetSize": 1,
+        "A3ISOSheetSize": 2,
+        "A2ISOSheetSize": 3,
+        "A1ISOSheetSize": 4,
+        "A0ISOSheetSize": 5,
+        "AASMESheetSize": 6,
+        "BASMESheetSize": 7,
+        "CASMESheetSize": 8,
+        "DASMESheetSize": 9,
+        "EASMESheetSize": 10,
     },
     "fusion.ArrangeSolverTypes": {
         "Arrange2DTrueShapeSolverType": 0,
@@ -439,14 +469,19 @@ BEHAVIOR = {
     "alloperations_drops_folder_objects": True,
     "alloperations_flattens_folder_children": True,
     "collection_item_out_of_range_raises": True,
+    "fillet_feature_has_edges": False,
     "find_entity_token_empty_on_miss": True,
     "internal_length_unit_is_cm": True,
     "item_by_name_none_on_miss": True,
     "machining_time_args_inert": True,
+    "mesh_repair_density_default": 128.0,
+    "mesh_repair_feature_has_parameters": False,
     "meshbodies_has_itembyname": False,
+    "meshbody_volume_open_raises": False,
     "number_of_completed_is_completion_signal": False,
     "open_base_feature_hidden": True,
     "save_image_options_defaults": True,
+    "thread_same_designation_types_identical": True,
     "vector3d_normalize_true_on_zero": True,
     "viewport_camera_returns_copy": True,
 }
@@ -568,6 +603,15 @@ SHAPES = {
         "isColinearTo", "isValid", "objectType", "set", "startPoint", "this",
         "thisown", "transformBy",
     ],
+    "MeshBody": [
+        "appearance", "appearanceSourceType", "area", "assemblyContext", "attributes", "baseOrFormFeature",
+        "boundingBox", "calculateCollisionsWithRay", "cast", "classType", "copy", "copyToComponent",
+        "createComponent", "createForAssemblyContext", "cut", "deleteMe", "displayMesh", "displayOverrides",
+        "entityToken", "faceGroups", "findByTempId", "isClosed", "isLightBulbOn", "isOriented",
+        "isSelectable", "isValid", "isVisible", "material", "mesh", "moveToComponent",
+        "name", "nativeObject", "objectType", "opacity", "orientedMinimumBoundingBox", "parentComponent",
+        "silhouette", "textureMapControl", "this", "thisown", "visibleOpacity", "volume",
+    ],
     "ObjectCollection": [
         "add", "asArray", "cast", "classType", "clear", "contains",
         "count", "create", "createWithArray", "find", "isValid", "item",
@@ -610,6 +654,12 @@ SHAPES = {
         "set", "setWithArray", "this", "thisown", "transformBy", "translateBy",
         "vectorTo", "x", "y", "z",
     ],
+    "PolygonMesh": [
+        "cast", "classType", "compareWith", "isValid", "nodeCoordinates", "nodeCoordinatesAsDouble",
+        "nodeCoordinatesAsFloat", "nodeCount", "nodeCountPerPolygon", "normalVectors", "normalVectorsAsDouble", "normalVectorsAsFloat",
+        "objectType", "polygonCount", "polygonNodeIndices", "quadCount", "quadNodeIndices", "this",
+        "thisown", "triangleCount", "triangleFaceGroupTempIds", "triangleNodeIndices", "wallThickness",
+    ],
     "Profile": [
         "areaProperties", "assemblyContext", "boundingBox", "cast", "classType", "createForAssemblyContext",
         "entityToken", "face", "isOnSketchPlane", "isValid", "nativeObject", "objectType",
@@ -642,6 +692,17 @@ SHAPES = {
         "scale", "setCenterlineState", "setConstructionState", "sketchCurves", "sketchDimensions", "sketchPoints",
         "sketchTexts", "sketchToModelSpace", "this", "thisown", "timelineObject", "transform",
         "xDirection", "yDirection",
+    ],
+    "Torus": [
+        "axis", "cast", "classType", "copy", "create", "evaluator",
+        "getData", "isValid", "majorRadius", "minorRadius", "objectType", "origin",
+        "set", "surfaceType", "this", "thisown", "transformBy",
+    ],
+    "TriangleMesh": [
+        "cast", "classType", "isValid", "nodeCoordinates", "nodeCoordinatesAsDouble", "nodeCoordinatesAsFloat",
+        "nodeCount", "nodeIndices", "normalVectors", "normalVectorsAsDouble", "normalVectorsAsFloat", "objectType",
+        "surfaceTolerance", "textureCoordinates", "textureCoordinatesAsDouble", "textureCoordinatesAsFloat", "this", "thisown",
+        "triangleCount",
     ],
     "Vector3D": [
         "add", "angleTo", "asArray", "asPoint", "cast", "classType",

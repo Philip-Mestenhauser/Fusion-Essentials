@@ -743,3 +743,95 @@ class TestCreateHandler:
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
         assert res["isError"] is True
         assert "assembly context" not in res["message"]
+
+
+class TestAxisIsAdvertisedFrameRelative:
+    """'axis' names an axis of the JOINT GEOMETRY's frame, not a world axis (measured: a snap whose
+    local Z points along world Y pivots about world Y). Both tools take that same frame-relative
+    axis, so both must say so: a description that reads as if it were a world direction sends a
+    caller to rebuild the joint instead of re-pointing it with joint_edit(world_axis=...)."""
+
+    def _axis_property(self, t):
+        return t.to_dict()["inputSchema"]["properties"]["axis"]["description"]
+
+    def test_create_axis_input_says_frame_relative(self):
+        assert "FRAME-relative" in self._axis_property(joint.tool)
+
+    def test_edit_axis_input_says_the_same_thing(self):
+        assert "FRAME-relative" in self._axis_property(joint.edit_tool)
+
+    def test_create_description_names_the_frame_and_the_fix(self):
+        desc = joint.TOOL_DESCRIPTION
+        assert "FRAME-relative" in desc
+        assert "joint_edit(world_axis=" in desc      # the tool that re-points it
+
+
+_UNREADABLE_FLAG = object()
+
+
+class _BlindSnapshots:
+    """Design.snapshots whose pending flag RAISES - the unknown-flag case, not a False."""
+    @property
+    def hasPendingSnapshot(self):
+        raise RuntimeError("pending flag unreadable")
+
+
+class TestPendingMoveRefusal:
+    """A joint CREATE recomputes the assembly, and a recompute REVERTS an uncaptured occurrence
+    position: the parts snap back and the new joint freezes the reverted pose. So a create while
+    Design.snapshots.hasPendingSnapshot is set is refused, naming capture / discard_pending. An
+    UNREADABLE flag is not evidence a move is pending and must not block the create."""
+
+    def _install(self, monkeypatch, pending):
+        d, coll = _install_create(monkeypatch)
+        if pending is _UNREADABLE_FLAG:
+            d.snapshots = _BlindSnapshots()
+        else:
+            d.snapshots = SimpleNamespace(hasPendingSnapshot=pending)
+        return d, coll
+
+    def test_refuses_the_create_while_a_move_is_pending(self, monkeypatch):
+        _, coll = self._install(monkeypatch, True)
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "would silently revert" in res["message"]
+        assert coll.added is None                       # nothing was created
+
+    def test_the_refusal_names_both_remedies(self, monkeypatch):
+        self._install(monkeypatch, True)
+        msg = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")["message"]
+        assert "assembly_capture_position(action='capture')" in msg
+        assert "action='discard_pending'" in msg
+
+    def test_creates_normally_with_nothing_pending(self, monkeypatch):
+        _, coll = self._install(monkeypatch, False)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert out["created"] is True and coll.added is not None
+
+    def test_an_unreadable_flag_does_not_refuse(self, monkeypatch):
+        _, coll = self._install(monkeypatch, _UNREADABLE_FLAG)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert out["created"] is True and coll.added is not None
+
+
+class TestSlideValueHasNoParameter:
+    """A slider's slide VALUE carries no ModelParameter (measured twice in anger), so the shared
+    offset note has to say both halves: there is no slide parameter to set, and parametric TRAVEL
+    comes from co-driving the anchor geometry - otherwise the next caller re-derives it by failing."""
+
+    def test_the_offset_note_states_there_is_no_slide_parameter(self):
+        note = joint._OFFSET_PARAM_NOTE
+        assert "slide" in note and "no parameter" in note
+
+    def test_the_offset_note_names_the_parametric_travel_route(self):
+        assert "co-driving the geometry" in joint._OFFSET_PARAM_NOTE
+
+    def test_a_created_joint_carrying_params_appends_the_note(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
+        coll.add = lambda ji: SimpleNamespace(
+            name="Slider1", jointMotion=None,
+            offset=SimpleNamespace(name="d12"), angle=SimpleNamespace(name="d13"))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="slider"))
+        assert out["model_parameters"] == {"offset": "d12", "angle": "d13"}
+        assert "co-driving the geometry" in out["note"]

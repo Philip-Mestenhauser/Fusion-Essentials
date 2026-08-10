@@ -118,7 +118,9 @@ def env(monkeypatch):
 
 class TestEnumMaps:
     def test_strategy_map_matches_the_measured_member_names(self):
-        assert dim._STRATEGY_MEMBERS == EXPECTED_STRATEGY_MEMBERS
+        # the table is the shared _drawing_common one, so this pins what BOTH the creation-time
+        # generator and this tool offer: all eight members the family carries
+        assert dim._drawing_common.DIMENSION_STRATEGIES == EXPECTED_STRATEGY_MEMBERS
 
     def test_datum_map_matches_the_measured_member_names(self):
         assert dim._DATUM_MEMBERS == EXPECTED_DATUM_MEMBERS

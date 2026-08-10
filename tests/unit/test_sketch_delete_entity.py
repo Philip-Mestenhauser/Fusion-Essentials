@@ -137,7 +137,7 @@ def _sketch():
 
 
 def _full_sketch():
-    """Also holds an ellipse and one of each spline kind, for P0.1's new-kind delete coverage."""
+    """Also holds an ellipse and one of each spline kind, for the ellipse/spline delete coverage."""
     return FakeSketch("S",
                       lines=[FakeEntity("L0")],
                       ellipses=[FakeEntity("E0")],
@@ -186,7 +186,7 @@ class TestDeleteCurve:
         assert res["isError"] is True and "consumed by a dimension" in res["message"]
 
 
-# ── P0.1: ellipse/spline/cv_spline/fixed_spline delete through the shared resolver ────────────
+# ── ellipse/spline/cv_spline/fixed_spline delete through the shared resolver ────────────
 
 class TestDeleteNewKinds:
     def test_delete_ellipse(self):

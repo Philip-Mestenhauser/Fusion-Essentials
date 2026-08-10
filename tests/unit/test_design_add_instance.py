@@ -12,7 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import MakeComp, MakeDesign, error_message, install, load_tool, payload
+from conftest import (MakeComp, MakeDesign, error_message, go_stale, install, load_tool,
+                      payload)
 
 ai = load_tool("design_add_instance")
 
@@ -265,6 +266,27 @@ class TestHonesty:
         wire(refuse="none")
         assert "returned nothing" in error_message(ai.handler(component="Bolt"))
 
+    def test_an_unreadable_census_is_named_as_such_not_as_no_instance_appeared(self, wire):
+        # An unreadable allOccurrences walk gives the SAME empty set an empty assembly gives. The
+        # host this instanced into proves the assembly is not empty, so "no new instance appeared"
+        # would state a verdict the walk never delivered - a wrong cause the caller acts on.
+        wire()
+        original = ai.occurrence_paths
+        calls = {"n": 0}
+
+        def blind(design):
+            calls["n"] += 1
+            return original(design) if calls["n"] == 1 else set()
+
+        ai.occurrence_paths = blind
+        try:
+            msg = error_message(ai.handler(component="Bolt"))
+        finally:
+            ai.occurrence_paths = original
+        assert "could not be read" in msg
+        assert "may or may not have landed" in msg
+        assert "no new instance appeared" not in msg
+
     def test_a_raising_call_reports_its_reason(self, wire):
         wire(refuse="raise")
         msg = error_message(ai.handler(component="Bolt"))
@@ -273,6 +295,21 @@ class TestHonesty:
     def test_an_invalid_occurrence_is_an_error(self, wire):
         wire(refuse="invalid")
         assert "isValid=false" in error_message(ai.handler(component="Bolt"))
+
+    def test_an_UNREADABLE_isValid_is_not_treated_as_false(self, wire):
+        # read_flag answers None for a flag that could not be read, and None is not a refusal: the
+        # instance is in the tree, so refusing here would report a landed instance as failed.
+        des = wire()
+        real = des.rootComponent.occurrences.addExistingComponent
+
+        def add_then_hide_the_flag(component, transform):
+            occ = real(component, transform)
+            del occ.isValid
+            return occ
+
+        des.rootComponent.occurrences.addExistingComponent = add_then_hide_the_flag
+        out = payload(ai.handler(component="Bolt"))
+        assert out["created"] is True and out["occurrence"] == "Bolt:2"
 
 
 # ── the self-nesting refusal ─────────────────────────────────────────────────
@@ -355,3 +392,98 @@ class TestGuards:
         monkeypatch.setattr(ai._common, "design", lambda: None)
         monkeypatch.setattr(ai._inputs._common, "design", lambda: None)
         assert "No active design" in error_message(ai.handler(component="Bolt"))
+
+
+class TestUnreadableStructure:
+    """Each read between the resolved target and the mutation is guarded; an unreadable one names
+    what could not be reached and stops BEFORE addExistingComponent, so no instance lands off a
+    half-resolved target."""
+
+    def test_an_occurrence_that_cannot_name_its_component_is_refused(self, wire):
+        des = wire()
+        go_stale(des.tree[0], attrs=("component",))    # resolves by path, then answers no component
+        msg = error_message(ai.handler(component="Bolt:1"))
+        assert "Could not reach the component behind 'Bolt:1'" in msg
+        assert getattr(des, "added", None) is None
+
+    def test_a_host_occurrence_that_cannot_name_its_component_is_refused(self, wire):
+        des = wire(names=("Outer", "Bolt"))
+        go_stale(des.tree[0], attrs=("component",))
+        msg = error_message(ai.handler(component="Bolt", into_component="Outer:1"))
+        assert "Occurrence 'Outer:1' has no component to instance into" in msg
+        assert getattr(des, "added", None) is None
+
+    def test_an_unreachable_root_is_refused(self, wire, monkeypatch):
+        # the root answers while the target resolves and not when the tool reads it for the host -
+        # the guard is what keeps that from being carried into addExistingComponent as None.
+        des = wire()
+        real = ai._COMPONENT.resolve
+
+        def resolve_then_lose_the_root(raw):
+            out = real(raw)
+            des.rootComponent = None
+            return out
+
+        monkeypatch.setattr(ai._COMPONENT, "resolve", resolve_then_lose_the_root)
+        msg = error_message(ai.handler(component="Bolt"))
+        assert "Could not reach the root component to instance into" in msg
+        assert getattr(des, "added", None) is None
+
+    def test_a_host_with_no_occurrences_collection_is_refused(self, wire):
+        des = wire()
+        des.rootComponent.occurrences = None
+        msg = error_message(ai.handler(component="Bolt"))
+        assert "Could not access the occurrences of the root component" in msg
+        assert len(des.tree) == 1
+
+    def test_a_rotation_the_matrix_refuses_stops_the_call(self, wire, monkeypatch):
+        # setToRotation returns a bool. Ignoring a false would place the instance UNROTATED while
+        # the payload reported the angle - so the call stops instead.
+        import adsk.core
+        des = wire()
+        refusing = _matrix()
+        refusing.setToRotation = lambda angle, axis, origin: False
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: refusing))
+        msg = error_message(ai.handler(component="Bolt", rotate_deg=45.0, rotate_axis="z"))
+        assert "Could not build the placement rotation (45.0 deg about 'z')" in msg
+        assert "the instance was not created" in msg
+        assert getattr(des, "added", None) is None
+
+
+class TestPlacementCannotBeCaptured:
+    """A placed instance reads durable off the assembly tree, and measured, it SURVIVES a later joint
+    in a design holding no captured position markers - but in a design that holds markers, two such
+    placements came back at the ORIGIN after a joint creation. The placement also sets no
+    pending-position flag, so capturing it is impossible (assembly_capture_position refuses). The
+    payload states the risk and a remedy that exists; naming capture as the remedy would send the
+    caller into a refusal."""
+
+    def test_a_translated_instance_is_told_the_placement_cannot_be_captured(self, wire):
+        wire()
+        out = payload(ai.handler(component="Bolt", x=10.0, units="mm"))
+        assert "cannot be captured" in out["note"]
+        assert "sets no pending-position flag" in out["note"]
+
+    def test_the_note_never_prescribes_capture(self, wire):
+        # capture REFUSES for a placement ("Nothing to capture"), so prescribing it is a dead end
+        wire()
+        note = payload(ai.handler(component="Bolt", z=4.0))["note"]
+        assert "action='capture'" not in note
+        assert "action='discard_pending'" not in note
+
+    def test_the_note_names_the_marker_condition_and_a_real_remedy(self, wire):
+        wire()
+        note = payload(ai.handler(component="Bolt", x=10.0))["note"]
+        assert "HOLDS captured position markers" in note      # the condition it reverts under
+        assert "ORIGIN" in note                               # where it reverts to
+        assert "model_inspect" in note                        # the remedy that actually works
+
+    def test_a_rotated_instance_gets_the_same_warning(self, wire):
+        wire()
+        assert "cannot be captured" in payload(ai.handler(component="Bolt", rotate_deg=90.0))["note"]
+
+    def test_an_instance_at_the_origin_makes_no_placement_claim(self, wire):
+        wire()
+        out = payload(ai.handler(component="Bolt"))
+        assert out["position"] == "origin"
+        assert "cannot be captured" not in out["note"]

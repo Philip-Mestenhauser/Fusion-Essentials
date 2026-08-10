@@ -560,6 +560,80 @@ class TestDirectModeNoFeature:
 
 # ── declared output contract ─────────────────────────────────────────────────
 
+class TestVolumePreservingMix:
+    """A per-axis mix whose factors multiply to 1 (2 x 0.5 x 1) expects NO volume change, so the
+    ratio check cannot discriminate and the verdict falls to "did the geometry move at all". Volume
+    is one of the two signals that answers that, and it is the ONLY one left when the bounding box
+    cannot be read."""
+
+    def test_a_volume_only_move_still_proves_the_scale_took(self, monkeypatch):
+        # bbox unreadable, volume readable and MOVED: without the volume half of the moved test this
+        # comes back as "nothing was resized" on a scale that plainly landed
+        body = _body(volume=8.0)
+        feats = FakeScaleFeatures([body], volume_ratio=2.0, extent_ratios=(1.0, 1.0, 1.0))
+        _wire(monkeypatch, [body], feats)
+        monkeypatch.setattr(ms, "_measure",
+                            lambda b, seen=[]: (seen.append(b) or None) or
+                            ((8.0, None) if len(seen) == 1 else (16.0, None)))
+        out = payload(ms.handler(bodies=["Block"], x_factor=2, y_factor=0.5, z_factor=1))
+        assert out["scaled"] is True
+        assert out["scale_check"] == "geometry_changed"
+        assert out["volume_ratio"] == 2.0
+
+    def test_neither_signal_moving_is_an_error_not_a_false_ok(self, monkeypatch):
+        # volume identical AND every extent identical: the scale did nothing, and the expectation of
+        # 1.0 means the ratio branch cannot catch it - only this gate can
+        body = _body(volume=8.0)
+        feats = FakeScaleFeatures([body], volume_ratio=1.0, extent_ratios=(1.0, 1.0, 1.0))
+        _wire(monkeypatch, [body], feats)
+        res = ms.handler(bodies=["Block"], x_factor=2, y_factor=0.5, z_factor=1)
+        assert res["isError"] is True
+        assert "nothing was resized" in res["message"]
+
+
+class TestVolumeCheckThatCouldNotRun:
+    def test_a_bbox_only_verdict_declares_the_volume_check_did_not_run(self, monkeypatch):
+        # No body offers a before/after volume pair, so no volume_ratio exists to publish. The
+        # DECLARED key may only be absent when the payload states the condition itself, so the flag
+        # plus the note is what keeps the promised volume check from reading as one that ran.
+        body = _body(volume=8.0)
+        feats = FakeScaleFeatures([body])
+        _wire(monkeypatch, [body], feats)
+        boxes = [((0.0, 0.0, 0.0)), ((2.0, 2.0, 2.0))]
+        monkeypatch.setattr(ms, "_measure",
+                            lambda b, seen=[]: (seen.append(b) or None) or
+                            (None, boxes[0] if len(seen) == 1 else boxes[1]))
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        assert out["scaled"] is True
+        assert out["scale_check"] == "geometry_changed"
+        assert out["volume_check_skipped"] is True
+        assert "volume_ratio" not in out
+        # the sentence names what the branch ACTUALLY tests - the floor, not readability: it fires
+        # for a volume that read fine but sits below _MIN_VOLUME_CM3 too
+        assert "no body offered a before/after volume pair above the floor" in out["note"].lower()
+        assert "volume check did NOT run" in out["note"]
+
+    def test_the_declared_outputs_still_pass_on_that_path(self, monkeypatch):
+        # volume_ratio is declared absent_when='volume_check_skipped', so the contract holds only
+        # BECAUSE the payload states the condition itself
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body]))
+        boxes = [((0.0, 0.0, 0.0)), ((2.0, 2.0, 2.0))]
+        monkeypatch.setattr(ms, "_measure",
+                            lambda b, seen=[]: (seen.append(b) or None) or
+                            (None, boxes[0] if len(seen) == 1 else boxes[1]))
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        for spec in ms.RETURNS:
+            assert spec.assert_present(out) == "", spec.key
+
+    def test_a_measured_volume_publishes_the_ratio_and_no_skip_flag(self, monkeypatch):
+        body = _body(volume=8.0)
+        _wire(monkeypatch, [body], FakeScaleFeatures([body]))
+        out = payload(ms.handler(bodies=["Block"], factor=2))
+        assert out["volume_ratio"] == 8.0
+        assert "volume_check_skipped" not in out
+
+
 class TestOutputContract:
     def test_declared_outputs_are_minted(self, monkeypatch):
         body = _body(volume=8.0)

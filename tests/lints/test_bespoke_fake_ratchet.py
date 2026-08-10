@@ -23,9 +23,19 @@ The baseline is PER FILE and must match measured reality exactly, moving only do
   immediately means a deleted legacy fake in one file can never fund a new bespoke fake in another.
 
 Cleaning up the existing counts is a dedicated migration nobody has green-lit, so the entries are
-measured legacy reality, not accepted targets. A genuinely novel test surface (an object graph the
-conftest fakes do not model) may raise its OWN file's entry with a one-line reason comment. The
-total across files is printed for information only - it gates nothing.
+measured legacy reality, not accepted targets. The total across files is printed for information
+only - it gates nothing.
+
+Two different things move a number here, and they are kept apart:
+
+- WIDENING THE DETECTION (counting nested classes, counting adsk-named classes) re-measures every
+  file at once. That is not a growth of bespoke fakes, so ``_PER_FILE_BASELINE`` is re-pasted
+  wholesale from the failure message's paste-ready dict - many entries rise in one diff, and no
+  per-file reason exists to give.
+- ADDING A BESPOKE FAKE to a file is a growth, and it goes in ``_RAISED``, where the reason is a
+  required string the lint reads rather than a comment it cannot (the shape
+  test_helper_duplication's ``_ALLOWLIST`` uses). ``_PER_FILE_BASELINE`` stays at the measured
+  count, so the exemption is visible as its own line and collapses the moment the fake goes away.
 """
 
 import ast
@@ -39,17 +49,21 @@ CONFTEST_PATH = os.path.join(TESTS_DIR, "conftest.py")
 
 # Measured bespoke-fake class count per tests/unit file (module-level + nested). Shrink-only:
 # a file may only match or drop below its entry; a stale (higher) entry fails with a paste-ready
-# replacement. Files without an entry must have zero. A genuinely novel test surface may raise its
-# own file's entry with a one-line reason comment.
+# replacement. Files without an entry must have zero. A genuinely novel test surface goes in
+# _RAISED below, never in this table.
 _PER_FILE_BASELINE = {
     "test__cam_common.py": 1,
+    # FakeEmbossFeatures: records createInput/add ordering with a per-call raise hook - the
+    # transaction shape MakeComp's feature collections cannot express.
     "test_model_emboss.py": 1,
     "test__data_read.py": 5,
     "test__geom.py": 2,
-    "test__sketch_detail.py": 12,
+    "test__sketch_detail.py": 17,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test__view_common.py": 3,
     "test_appearance_set.py": 11,
     "test_assembly_get.py": 5,
+    # The interference pipeline (input -> results -> per-pair bodies) incl. the input variant that
+    # REFUSES coincident bodies - a createInput transaction surface no conftest fake models.
     "test_assembly_inspect_interference.py": 11,
     "test_assembly_joints_advanced.py": 10,
     "test_assembly_transform.py": 8,
@@ -72,8 +86,8 @@ _PER_FILE_BASELINE = {
     "test_common.py": 1,
     "test_data_management.py": 11,
     "test_data_switch_hub.py": 3,
-    "test_design_configure.py": 3,
-    "test_design_delete_feature.py": 3,
+    "test_design_configure.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
+    "test_design_delete_feature.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_design_delete_occurrence.py": 6,
     "test_design_export.py": 15,   # FakeOptions: an *ExportOptions attribute bag with a poison .units property - no conftest fake models an options object
     "test_design_mode.py": 3,
@@ -96,11 +110,11 @@ _PER_FILE_BASELINE = {
     "test_joint_create_origin.py": 14,
     "test_joint_drive.py": 6,
     "test_joint_motion_link.py": 6,
-    "test_mesh_combine.py": 3,
+    "test_mesh_combine.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_mesh_delete.py": 5,   # meshBodies + MeshRemoveFeatures: an object graph the conftest solid-body fakes do not model
-    "test_mesh_edit.py": 4,
-    "test_mesh_export.py": 15,
-    "test_mesh_ops.py": 6,
+    "test_mesh_edit.py": 7,   # MeshBody/PolygonMesh/TriangleMesh are in SHAPES, so the local mesh fakes count
+    "test_mesh_export.py": 17,   # same SHAPES-named mesh fakes as test_mesh_edit
+    "test_mesh_ops.py": 9,   # same SHAPES-named mesh fakes; its OWN MeshBody fake is a deliberate local one
     "test_model_arrange.py": 10,
     "test_model_combine.py": 7,
     "test_model_compute_holder.py": 2,
@@ -130,7 +144,6 @@ _PER_FILE_BASELINE = {
     "test_sketch_constrain.py": 15,   # the offset/pattern input+result object graphs conftest cannot model
     "test_sketch_core.py": 3,
     "test_sketch_delete_entity.py": 6,
-    "test_sketch_detail.py": 5,   # the three spline SketchCurves collections with per-kind shape properties - not modeled by the conftest solid fakes
     "test_sketch_dimension.py": 15,   # ellipse + fitted-spline dimension operands, plus the arc and bare-SketchPoint operands the new dim types take: sketch-entity shapes the conftest solid fakes do not model
     "test_sketch_get_merge.py": 1,
     "test_sketch_project.py": 1,
@@ -138,7 +151,7 @@ _PER_FILE_BASELINE = {
     "test_surface_create.py": 17,
     "test_surface_edit.py": 20,
     "test_surface_ops.py": 16,
-    "test_sys_api_doc.py": 3,
+    "test_sys_api_doc.py": 4,   # widened detection: a class named like an api_surface adsk class is counted whatever its prefix
     "test_view_screenshot.py": 3,
     "test_view_screenshot_multi.py": 3,
     "test_view_section.py": 12,
@@ -146,6 +159,41 @@ _PER_FILE_BASELINE = {
     "test_workspace_orient.py": 16,
     "test_write_guard.py": 4,
 }
+
+# file -> (ceiling, why this file needs MORE bespoke fakes than its measured entry above). Where a
+# NEW bespoke fake lands: the reason is DATA the lint reads, not a comment it cannot, so adding one
+# without stating why is impossible rather than discouraged (the shape test_helper_duplication's
+# allowlist uses). _raise_offenders keeps each entry real - a ceiling at or below the file's
+# baseline entry has nothing to justify and must collapse back into it.
+_RAISED = {
+    "test__sketch_detail.py": (
+        20,
+        "the three spline SketchCurves collections (fitted / cv / fixed), each carrying its own "
+        "per-kind shape properties - the conftest solid-body fakes model no sketch-curve "
+        "collection at all"),
+}
+
+
+def _ceilings(baseline=None, raised=None):
+    """The effective per-file ceiling: the measured baseline, lifted only where a _RAISED entry
+    states a reason for the rise. The tables default to the live ones and are passed in by the
+    test that exercises the merge on data."""
+    baseline = _PER_FILE_BASELINE if baseline is None else baseline
+    raised = _RAISED if raised is None else raised
+    return dict(baseline, **{fn: count for fn, (count, _why) in raised.items()})
+
+
+def _raise_offenders(raised, baseline):
+    """[complaint] for every _RAISED entry that states no reason, or whose ceiling does not sit
+    above the file's baseline entry (an exemption that exempts nothing, hiding the next growth)."""
+    out = []
+    for fn, (count, why) in sorted(raised.items()):
+        if not (why or "").strip():
+            out.append(f"{fn}: a raised ceiling needs a plain-English reason, not an empty string")
+        if count <= baseline.get(fn, 0):
+            out.append(f"{fn}: ceiling {count} is not above its baseline entry "
+                       f"{baseline.get(fn, 0)} - delete the _RAISED entry")
+    return out
 
 
 def _all_classes(path):
@@ -163,10 +211,22 @@ def _conftest_fake_names():
     return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
 
 
+def _adsk_class_names():
+    """Every bare class name the installed bindings carry, from the generated api_surface dump -
+    a test class named exactly like a real adsk class is a stand-in for it whatever its prefix,
+    so naming convention alone can no longer hide a bespoke fake from this count."""
+    import api_surface
+    names = set()
+    for table in (api_surface.PROPERTIES, api_surface.FACTORIES):
+        for key in table:
+            names.add(key.rsplit(".", 1)[-1])
+    return names
+
+
 def _offenders_in_file(path, conftest_names, shape_names):
     """[(name, lineno)] for every class in `path` (module-level or nested) matching the bespoke-fake
-    shape: Fake/_Fake-prefixed, OR shadows a conftest shared-fake name, OR matches a live adsk type
-    name in live_api_facts.SHAPES."""
+    shape: Fake/_Fake-prefixed, OR shadows a conftest shared-fake name, OR named exactly like an
+    adsk class (live_api_facts.SHAPES or the api_surface dump)."""
     out = []
     for name, lineno in _all_classes(path):
         if (name.startswith("Fake") or name.startswith("_Fake")
@@ -179,7 +239,7 @@ def _measured_counts():
     """({file: count}, {file: [(name, lineno)]}) for every tests/unit/*.py with at least one
     bespoke fake-shaped class."""
     conftest_names = _conftest_fake_names()
-    shape_names = set(live_api_facts.SHAPES)
+    shape_names = set(live_api_facts.SHAPES) | _adsk_class_names()
     counts, details = {}, {}
     for fn in sorted(os.listdir(UNIT_DIR)):
         if not fn.endswith(".py"):
@@ -216,7 +276,7 @@ class TestBespokeFakeRatchet:
         measured, details = _measured_counts()
         print(f"bespoke fake-shaped classes in tests/unit: {sum(measured.values())} total "
               f"across {len(measured)} files (informational - the gate is per-file)")
-        regressions, stale = _deltas(measured, _PER_FILE_BASELINE)
+        regressions, stale = _deltas(measured, _ceilings())
         if regressions:
             report = []
             for fn, n, base in regressions:
@@ -228,14 +288,36 @@ class TestBespokeFakeRatchet:
                 "fakes - BRepFace/BRepEdge/Plane/Cylinder/Line3D/Circle3D/FakePoint/FakeVector3D - "
                 "or extend them in conftest (only an attribute that is real, i.e. present in "
                 "live_api_facts.SHAPES). A genuinely novel object graph the conftest fakes cannot "
-                "model may raise its own file's _PER_FILE_BASELINE entry with a one-line reason "
-                "comment.\n" + "\n".join(report))
+                "model gets a _RAISED entry - the file's new ceiling plus the reason string this "
+                "lint reads - and never a bumped _PER_FILE_BASELINE entry, which is the measured "
+                "floor.\n" + "\n".join(report))
         if stale:
             drops = ", ".join(f"{fn} {b} -> {n}" for fn, n, b in stale)
             assert not stale, (
                 f"_PER_FILE_BASELINE is stale - counts dropped ({drops}). Lock the win in so it "
                 "cannot fund a new bespoke fake elsewhere: replace _PER_FILE_BASELINE in "
                 "test_bespoke_fake_ratchet.py with:\n" + _baseline_literal(measured))
+
+    def test_a_raised_ceiling_states_its_reason(self):
+        # a new bespoke fake must say what object graph the shared fakes cannot model; a raise that
+        # no longer sits above the file's measured entry is exempting nothing and hides the next
+        # growth, so it must collapse back into the baseline
+        bad = _raise_offenders(_RAISED, _PER_FILE_BASELINE)
+        assert not bad, "_RAISED entries:\n  " + "\n  ".join(bad)
+
+    def test_the_raise_check_bites(self):
+        # the live table is empty most of the time, so the check is exercised on data: an empty
+        # reason and a ceiling that is not a rise must each be caught, and a real raise must pass
+        baseline = {"a.py": 2, "b.py": 5}
+        assert _raise_offenders({"a.py": (3, "")}, baseline) == [
+            "a.py: a raised ceiling needs a plain-English reason, not an empty string"]
+        assert _raise_offenders({"b.py": (5, "a real reason")}, baseline) == [
+            "b.py: ceiling 5 is not above its baseline entry 5 - delete the _RAISED entry"]
+        assert len(_raise_offenders({"a.py": (1, "   ")}, baseline)) == 2, (
+            "an entry that is both reasonless and not a rise must report both")
+        assert _raise_offenders({"a.py": (3, "the transaction graph MakeComp cannot express")},
+                                baseline) == []
+        assert _raise_offenders({}, baseline) == []
 
     def test_the_scan_bites(self, tmp_path):
         conftest_names = _conftest_fake_names()
@@ -277,3 +359,10 @@ class TestBespokeFakeRatchet:
             "a dropped count and a vanished file must both mark the baseline stale")
         assert _deltas({"a.py": 2}, {"a.py": 2}) == ([], []), (
             "an exact match must be clean")
+        # a reasoned ceiling lifts that ONE file and nothing else - through the same merge the
+        # gate runs on, so a merge that stopped honouring _RAISED fails here
+        ceilings = _ceilings({"a.py": 2, "b.py": 1},
+                             {"a.py": (3, "the transaction graph MakeComp cannot express")})
+        assert ceilings == {"a.py": 3, "b.py": 1}
+        assert _deltas({"a.py": 3, "b.py": 2}, ceilings) == ([("b.py", 2, 1)], []), (
+            "a raised ceiling must absorb its own file's growth and no other's")

@@ -75,8 +75,7 @@ def _measurable_geometry(entity):
         return bodies.item(0), f" (body '{safe(lambda: bodies.item(0).name)}')"
     # Several bodies: measure the largest by world-AABB volume (best single-body proxy).
     best, best_vol, best_name = None, -1.0, None
-    for i in range(n):
-        b = bodies.item(i)
+    for b in _common.iter_collection(bodies):
         bb = safe(lambda b=b: b.boundingBox)
         if not bb:
             continue
@@ -152,20 +151,24 @@ def _bbox(design, entity, desc, frame, units):
     mx = safe(lambda: bb.maxPoint)
     if mn is None or mx is None:
         return error(f"Bounding box for {desc} has no min/max points.")
-    dx = (safe(lambda: mx.x, 0.0) - safe(lambda: mn.x, 0.0)) * f
-    dy = (safe(lambda: mx.y, 0.0) - safe(lambda: mn.y, 0.0)) * f
-    dz = (safe(lambda: mx.z, 0.0) - safe(lambda: mn.z, 0.0)) * f
+    # Every number below is a MEASUREMENT, so an unreadable corner reads null - the same contract the
+    # oriented branch above holds under the SAME keys. safe(..., 0.0) here would publish a 0 mm
+    # extent, and 0 is an answer: "this body is flat in Z", "the centre is on the origin".
+    def _span(axis):
+        lo = _common.measured(lambda: getattr(mn, axis), f)
+        hi = _common.measured(lambda: getattr(mx, axis), f)
+        return (None, None) if lo is None or hi is None else (round(hi - lo, 6),
+                                                              round((hi + lo) / 2, 6))
+    (dx, cx), (dy, cy), (dz, cz) = (_span("x"), _span("y"), _span("z"))
     return ok({
         "target": desc,
         "frame": "world axes (axis-aligned)",
         "oriented": False,
         "units": units,
-        "x": round(dx, 6), "y": round(dy, 6), "z": round(dz, 6),
+        "x": dx, "y": dy, "z": dz,
         "min_point": _common.ptxyz(mn, f),
         "max_point": _common.ptxyz(mx, f),
-        "center": {"x": round((safe(lambda: mx.x, 0.0) + safe(lambda: mn.x, 0.0)) / 2 * f, 6),
-                   "y": round((safe(lambda: mx.y, 0.0) + safe(lambda: mn.y, 0.0)) / 2 * f, 6),
-                   "z": round((safe(lambda: mx.z, 0.0) + safe(lambda: mn.z, 0.0)) / 2 * f, 6)},
+        "center": {"x": cx, "y": cy, "z": cz},
     })
 
 
@@ -236,9 +239,7 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
         # root and any component expose .occurrences; an identity test against rootComponent can
         # never be true (each property access mints a new proxy), so resolve by attribute only.
         occ_source = safe(lambda: getattr(entity, "occurrences", None))
-        n = safe(lambda: occ_source.count, 0) if occ_source else 0
-        for i in range(n):
-            o = occ_source.item(i)
+        for o in _common.iter_collection(occ_source):
             opp = safe(lambda o=o: o.getPhysicalProperties(acc))
             if opp is None:
                 continue
@@ -320,6 +321,10 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
     if e:
         return e
     out["kind"] = kind
+    if kind == "body":
+        # A body's disconnected-piece count: a multi-lump body is usually a shipped defect (a join
+        # that fused nothing), and no interference or bbox read can show it. None = unreadable.
+        out["lump_count"] = _geom.lump_count(ent)
     if "mass" in inc:
         out["mass"], e = _unwrap(_physical_properties(design, ent, desc, units, accuracy, per_body))
         if e:

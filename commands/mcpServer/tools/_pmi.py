@@ -3,9 +3,18 @@
 
 """Shared PMI (Product Manufacturing Information) substrate: the design-wide annotation walk, the
 by-name resolver (ambiguity across components refused), the {symbol} text markup <-> PMISegment
-codec, and the light record every pmi_* tool reports through. API gotcha (live-verified):
-Design.pmiSettings RAISES InternalValidationError when no settings object exists - even on a design
-that already holds Fusion-authored PMI - so no pmi_* tool reads it."""
+codec, and the light record every pmi_* tool reports through.
+
+No pmi_* tool reads Design.pmiSettings: the getter raises InternalValidationError when no settings
+object exists, so the substrate never touches it and nothing depends on which designs carry one.
+
+EXTENSION GATE: PMI authoring on Fusion 2705.0.87 raises "3 : Manufacturing or Design Extension is
+required", so probes P0-P5 - can pmi_create succeed at all, is the leader-extension floor a
+constant or derived from the annotation size, does a below-floor extension brick every later
+assignment, does the annotation plane reject an off-plane text point, can two annotations in one
+component share a name, does markUpToDate() return a bool and clear isOutOfDate - cannot run on
+this build. Every platform fact those probes would settle is UNMEASURED here, and the code below
+says so at each point of use: what the tools claim is what their own gates read back."""
 
 import re
 
@@ -20,15 +29,17 @@ MAP_BLURB = ("walk_annotations (the ONE design-wide PMI walk) + find_annotation 
              "build_segments/segments_markup (the {symbol} text markup <-> PMISegment codec) + "
              "annotation_record (the shared light record) + kind_of (objectType -> kind label) + "
              "enum_label (adsk PMI enum int -> snake name) + build_tolerance/tolerance_record + "
-             "build_display/display_record (PMIDisplaySettings codec) + apply_note_format + "
-             "set_text_point/set_leader_target (verified anchor moves) + PLANE_TYPES/H_ALIGN/"
-             "V_ALIGN (the closed choice vocabularies) + LEADER_EXT floor facts")
+             "build_display/display_record (PMIDisplaySettings codec) + apply_note_format "
+             "(every format set re-read) + apply_display (the ONE display writer) + "
+             "normalize_extension (the ONE below-floor lift) + set_text_point/set_leader_target "
+             "(verified anchor moves) + PLANE_TYPES/H_ALIGN/V_ALIGN (the closed choice "
+             "vocabularies) + the LEADER_EXT floor the tools refuse below")
 
-# Live-verified extension facts: a created note whose leaderLineExtension sits below half the
-# annotation size (0.25 cm at the default size) refuses EVERY later segment/extension edit with
-# 'Leader line extension is too small', and the platform's own creation default can land below that
-# floor unless the input's extension is pinned explicitly. 0.5 cm is the input default the platform
-# accepts and later edits fine.
+# The extension floor these tools refuse below, and the extension pmi_create pins onto an input
+# that arrives under it. Whether the platform's own floor is this constant or is derived from the
+# annotation size, and whether a note created below it can have its extension repaired in place at
+# all, are UNMEASURED on 2705 (probes P2/P3, blocked by the extension gate above). The behaviour
+# does not rest on either answer: normalize_extension tries the repair and reports the raise.
 LEADER_EXT_FLOOR = 0.25
 LEADER_EXT_DEFAULT = 0.5
 
@@ -161,14 +172,12 @@ def walk_annotations(d):
                 yield comp, a
 
 
-def find_annotation(d, name, component=""):
-    """(annotation, component, error): case-insensitive EXACT name match across every component
-    (or only 'component' when given). PMI names are unique per component but NOT design-wide, so a
-    name found in several components is REFUSED naming each hit - pass component= to disambiguate.
-    A miss lists the names that exist."""
+def annotation_hits(d, name, component=""):
+    """([(annotation, component)], available_names): every case-insensitive EXACT name match across
+    the design (or only 'component' when given), with the names that exist in that scope. The raw
+    resolution find_annotation refuses on - a caller that needs to tell a MISS from an AMBIGUITY
+    (pmi_edit's suppressed-PMI re-check does) reads the hit count instead of the error text."""
     want = (name or "").strip()
-    if not want:
-        return None, None, "'annotation' is required (a PMI name from pmi_get)."
     comp_want = (component or "").strip()
     hits, available = [], []
     for comp, a in walk_annotations(d):
@@ -177,8 +186,22 @@ def find_annotation(d, name, component=""):
             continue
         nm = safe(lambda a=a: a.name, "") or ""
         available.append(nm)
-        if nm.lower() == want.lower():
+        if want and nm.lower() == want.lower():
             hits.append((a, comp))
+    return hits, available
+
+
+def find_annotation(d, name, component=""):
+    """(annotation, component, error): case-insensitive EXACT name match across every component
+    (or only 'component' when given). Whether two annotations in ONE component can share a name is
+    UNMEASURED on 2705 (probe P4, blocked by the extension gate), so a name matching more than one
+    annotation is REFUSED naming each hit's component - pass component= to narrow. A miss lists the
+    names that exist."""
+    want = (name or "").strip()
+    if not want:
+        return None, None, "'annotation' is required (a PMI name from pmi_get)."
+    comp_want = (component or "").strip()
+    hits, available = annotation_hits(d, want, comp_want)
     if not hits:
         scope = f" in component '{comp_want}'" if comp_want else ""
         listing = ", ".join(sorted(available)[:40]) or "none"
@@ -190,26 +213,35 @@ def find_annotation(d, name, component=""):
     return hits[0][0], hits[0][1], None
 
 
+def normalize_extension(ann):
+    """Lift an annotation whose leaderLineExtension reads below LEADER_EXT_FLOOR back to
+    LEADER_EXT_DEFAULT before a geometric/segment edit. Returns an error string when the repair
+    set itself RAISES - the note is then recreate-only - else None. The ONE normalize both
+    set_text_point and pmi_edit's actions run."""
+    cur = safe(lambda: ann.leaderLineExtension)
+    if cur is None or cur >= LEADER_EXT_FLOOR:
+        return None
+    try:
+        ann.leaderLineExtension = LEADER_EXT_DEFAULT
+    except Exception as e:
+        return (f"This note's leader extension ({cur} cm) is below the {LEADER_EXT_FLOOR} cm "
+                f"floor and the repair set raised ({e}) - delete and recreate it (pmi_delete + "
+                "pmi_create pins the extension on the input).")
+    return None
+
+
 def set_text_point(ann, xyz, f):
     """Assign the annotation's text anchor from a model-space [x,y,z] (display units, scaled by f
-    to cm), PROJECTED onto the annotation plane first - the platform refuses any point off that
-    plane (live-verified: 'annotation point must be on the annotation plane'). The assignment is
-    re-read. Returns (Point3D_read_back, error)."""
+    to cm), PROJECTED onto the annotation plane first: whether the platform accepts an off-plane
+    point is UNMEASURED on 2705 (probe P0's gate), so the projection is unconditional and the
+    assignment is re-read. Returns (Point3D_read_back, error)."""
     try:
         x, y, z = (float(v) for v in xyz)
     except Exception:
         return None, "'text_point' must be [x, y, z] numbers (model space, in 'units')."
-    # A note whose extension sits below the platform floor refuses EVERY geometric edit, and its
-    # extension setter is itself bricked (any value re-raises 'too small' - live-verified), so a
-    # failed normalize is a recreate-only condition.
-    cur = safe(lambda: ann.leaderLineExtension)
-    if cur is not None and cur < LEADER_EXT_FLOOR:
-        try:
-            ann.leaderLineExtension = LEADER_EXT_DEFAULT
-        except Exception:
-            return None, (f"This note's leader extension ({cur} cm) is below the platform floor "
-                          "and cannot be repaired in place - delete and recreate it "
-                          "(pmi_delete + pmi_create pins a legal extension).")
+    nerr = normalize_extension(ann)
+    if nerr:
+        return None, nerr
     pt = adsk.core.Point3D.create(x * f, y * f, z * f)
     plane = safe(lambda: ann.plane)
     target = pt
@@ -287,7 +319,7 @@ def enum_label(owner, cls_name, suffix, value):
 def build_tolerance(spec, f):
     """(PMIGeometricValueTolerance, error) from a wire spec dict: type= symmetric (value) |
     deviation (upper, lower) | limits | limits_linear (min, max) | max | min | fits_stacked |
-    fits_linear | fits_size_limits | fits_tolerance (size, hole_fit, shaft_fit). Lengths are in
+    fits_linear | fits_size_limits | fits_tolerance (size, hole_fit, shaft_fit). Bounds are in
     display units and scale by f to cm. Every set*() bool is gated."""
     if not isinstance(spec, dict) or not spec.get("type"):
         return None, ("'tolerance' must be an object with 'type' - one of: symmetric, deviation, "
@@ -330,7 +362,8 @@ def build_tolerance(spec, f):
 
 
 def tolerance_record(tol, out_f):
-    """The readable record of a PMIGeometricValueTolerance (lengths scaled by out_f), or None."""
+    """The readable record of a PMIGeometricValueTolerance, or None. The bounds scale by out_f -
+    callers pass the factor the bounded value itself was converted with."""
     if tol is None or not safe(lambda: tol.hasTolerances, False):
         return None
     rec = {"type": enum_label(adsk.fusion, "PMIToleranceTypes", "PMIToleranceType",
@@ -360,7 +393,9 @@ def value_record(gv, out_f, angle=False):
     rec = {"value": round(math.degrees(raw), 4) if angle else round(raw * out_f, 6)}
     if safe(lambda: gv.isOverriddenValue, False):
         rec["overridden"] = True
-    tr = tolerance_record(safe(lambda: gv.tolerance), out_f)
+    # The bounds are published through the same conversion as the value they bound: the degrees
+    # conversion for an angle, out_f (a LENGTH factor, meaningless on an angle) otherwise.
+    tr = tolerance_record(safe(lambda: gv.tolerance), math.degrees(1.0) if angle else out_f)
     if tr:
         rec["tolerance"] = tr
     return rec
@@ -403,8 +438,9 @@ def display_record(ds):
 
 
 def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm=None):
-    """Apply the shared leader/text format knobs to a note or note-input `obj`; each set is
-    re-read. Returns an error string, or None."""
+    """Apply the shared leader/text format knobs to a note or note-input `obj`. EVERY set is
+    re-read and a value that did not take is an error - including the two bools/numbers a caller
+    cannot see fail any other way. Returns an error string, or None."""
     try:
         if align:
             attr = H_ALIGN.get(align.strip().lower())
@@ -423,14 +459,49 @@ def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm
             if safe(lambda: obj.verticalAlignment) != want:
                 return f"'valign'={valign} did not take on this annotation."
         if perpendicular is not None:
-            obj.isPerpendicularLine = bool(perpendicular)
+            want_perp = bool(perpendicular)
+            obj.isPerpendicularLine = want_perp
+            got_perp = safe(lambda: obj.isPerpendicularLine)
+            if got_perp is None or bool(got_perp) != want_perp:
+                return (f"'perpendicular'={want_perp} did not take on this annotation "
+                        f"(re-read {got_perp}).")
         if extension_cm is not None:
             if extension_cm < LEADER_EXT_FLOOR:
-                return (f"'leader_extension' is below the platform floor ({LEADER_EXT_FLOOR} cm - "
-                        "half the annotation size); a note below it refuses every later edit.")
+                return (f"'leader_extension'={extension_cm} cm is under the {LEADER_EXT_FLOOR} cm "
+                        "floor these tools refuse below.")
             obj.leaderLineExtension = float(extension_cm)
+            got_ext = safe(lambda: obj.leaderLineExtension)
+            if got_ext is None or abs(got_ext - float(extension_cm)) > 1e-6:
+                return (f"'leader_extension'={extension_cm} cm did not take on this annotation "
+                        f"(re-read {got_ext}).")
     except Exception as e:
         return f"Note format set failed: {e}"
+    return None
+
+
+def apply_display(obj, display):
+    """Apply a display spec - {precision, units, leading_zeros, trailing_zeros,
+    unit_abbreviation, secondary: {...}} - to a hole/thread note. The ONE display writer both
+    pmi_create and pmi_edit run. Returns an error string, or None."""
+    spec = dict(display) if isinstance(display, dict) else display
+    secondary = spec.pop("secondary", None) if isinstance(spec, dict) else None
+    if isinstance(spec, dict) and spec:
+        ds, derr = build_display(spec)
+        if derr:
+            return derr
+        try:
+            obj.primaryDisplaySettings = ds
+        except Exception as e:
+            return f"Primary display settings set failed: {e}"
+    if secondary is not None:
+        ds2, derr2 = build_display(secondary)
+        if derr2:
+            return "display.secondary: " + derr2
+        try:
+            obj.hasSecondaryDisplaySettings = True
+            obj.secondaryDisplaySettings = ds2
+        except Exception as e:
+            return f"Secondary display settings set failed: {e}"
     return None
 
 
@@ -486,30 +557,60 @@ def apply_hole_flags(note, flags):
 def apply_hole_values(note, values, f):
     """Override a hole note's geometric values from a {wire_key: number} dict (display units;
     countersink_angle_deg in degrees) and/or attach a tolerance: a value spec may also be
-    {value: n, tolerance: {...}}. Each PMIGeometricValue is get-modify-set and re-read.
+    {value: n, tolerance: {...}}. A tolerance on the ANGLE field is refused. Every REFUSAL (bad
+    key, non-numeric value, angle tolerance, unreadable property, malformed tolerance spec) is
+    decided before the first write, so a refused call writes nothing; a platform FAILURE during
+    the writes (a set that raises, a value that will not read back) stops at that key, names it,
+    and leaves the keys already written. Each PMIGeometricValue is get-modify-set and re-read.
     Returns (applied_dict, error)."""
     import math
     if not isinstance(values, dict):
         return None, f"'values' must be an object with any of: {', '.join(HOLE_VALUE_PROPS)}."
-    applied = {}
+    # PRE-PASS: resolve every key and refuse every refusable spec BEFORE the first write, so a
+    # refused call leaves the note exactly as it was instead of half-applied.
+    plan = []
     for key, spec in values.items():
-        attr = HOLE_VALUE_ATTR.get(str(key).strip().lower())
+        norm = str(key).strip().lower()
+        attr = HOLE_VALUE_ATTR.get(norm)
         if attr is None:
             return None, f"Unknown value '{key}'. Legal values: {', '.join(HOLE_VALUE_PROPS)}."
-        angle = key == "countersink_angle_deg"
+        angle = norm == "countersink_angle_deg"
         num = spec.get("value") if isinstance(spec, dict) else spec
         tol_spec = spec.get("tolerance") if isinstance(spec, dict) else None
+        # The coercion is decidable from the request alone, so it refuses HERE beside the other
+        # four refusal classes rather than raising mid-write with earlier keys already applied.
+        if num is not None:
+            try:
+                num = float(num)
+            except (TypeError, ValueError):
+                return None, (f"'{key}' must be a number (in 'units'"
+                              + (", degrees" if angle else "") + f"), got {num!r}.")
+        # The unit an angle BOUND is stored in is not measured, and the two candidates differ by
+        # 57x, so this tool writes no angle tolerance at all rather than a possibly wrong one.
+        if tol_spec is not None and angle:
+            return None, (f"'{key}'.tolerance was not written - the unit Fusion stores an angle "
+                          "tolerance in is unmeasured here, so any bound written could be wrong "
+                          "by a factor of 57. Nothing was written. Add the angle tolerance in the "
+                          "Fusion PMI dialog, or set a tolerance on a length value instead.")
         gv = safe(lambda a=attr: getattr(note, a))
         if gv is None:
             return None, (f"'{key}' is not readable on this note (not applicable to this "
                           "hole/boss shape).")
+        tol = None
+        if tol_spec is not None:
+            # Free-standing object: building it here touches no note state, so a malformed spec
+            # refuses with the earlier keys still unwritten.
+            tol, terr = build_tolerance(tol_spec, f)
+            if terr:
+                return None, f"'{key}'.tolerance: {terr}"
+        plan.append((key, attr, angle, num, tol, gv))
+
+    applied = {}
+    for key, attr, angle, num, tol, gv in plan:
         try:
             if num is not None:
-                gv.value = math.radians(float(num)) if angle else float(num) * f
-            if tol_spec is not None:
-                tol, terr = build_tolerance(tol_spec, 1.0 if angle else f)
-                if terr:
-                    return None, f"'{key}'.tolerance: {terr}"
+                gv.value = math.radians(num) if angle else num * f
+            if tol is not None:
                 gv.tolerance = tol
             setattr(note, attr, gv)
         except Exception as e:
@@ -523,10 +624,12 @@ def apply_hole_values(note, values, f):
 
 
 def suppressed_pmi_features(d):
-    """[(timeline_item, name)] for every SUPPRESSED timeline feature. A suppressed PMI leaves the
-    pmiAnnotations collections entirely and its timeline entity degrades to a bare Feature
-    (live-verified), so the NAME is the only surviving identity - callers must verify the
-    annotation reappears in the collection after unsuppressing, and roll back if it does not."""
+    """[(timeline_item, name)] for every SUPPRESSED timeline feature - the only handle a suppressed
+    PMI can be reached through, because a suppressed annotation is absent from the pmiAnnotations
+    collections and its timeline entity reads as a bare Feature, leaving the NAME as its whole
+    identity. That collection-exit behaviour is UNMEASURED on 2705 (it needs authored PMI, which
+    the extension gate blocks), so callers do not trust it: they verify the annotation reappears
+    in the collection after unsuppressing and roll the flip back when it does not."""
     out = []
     tl = safe(lambda: d.timeline)
     n = int(safe(lambda: tl.count, 0) or 0) if tl else 0
@@ -542,14 +645,19 @@ def suppressed_pmi_features(d):
 
 def annotation_record(comp, ann):
     """The light per-annotation record every pmi_* read/verify reports: name, kind, component,
-    text, visibility, plus warning flags only when set."""
+    visibility, plus warning flags only when set. 'text' rides only when plainText READS - the
+    property lives on the two Fusion-authored classes (PMILeaderLineNote, PMIHoleThreadNote) and
+    on no imported PMI class, so publishing it unconditionally would print text:null on every
+    imported row against the description's promise."""
     rec = {
         "name": safe(lambda: ann.name),
         "kind": kind_of(ann),
         "component": safe(lambda: comp.name),
-        "text": safe(lambda: ann.plainText),
         "visible": bool(safe(lambda: ann.isVisible, False)),
     }
+    text = safe(lambda: ann.plainText)
+    if text is not None:
+        rec["text"] = text
     if safe(lambda: ann.isOutOfDate, False):
         rec["out_of_date"] = True
     if safe(lambda: ann.isSuppressed, False):

@@ -20,8 +20,6 @@ from . import _common
 from . import _inputs
 from . import _outputs
 
-app = adsk.core.Application.get()
-
 # The component to instance: one of its occurrences (unambiguous) or its name. A body/face target is
 # not a component, so allow= keeps those kinds out and TargetRef names the kind it got when refusing.
 # collapse_ambiguous_occurrences: the target here IS the component, so a name matching several of its
@@ -123,13 +121,21 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
     if not occ:
         return error(f"addExistingComponent returned nothing - no instance of '{comp_name}' was "
                      "created.")
-    if safe(lambda: occ.isValid) is False:
+    # read_flag: the ONE unreadable-flag read - None is unknown, so only a real False refuses.
+    if _common.read_flag(lambda: occ.isValid) is False:
         return error(f"addExistingComponent returned an occurrence for '{comp_name}' but it reads "
                      "isValid=false - the instance did not land.")
 
-    # Read the instance back off the assembly tree. Fusion numbers it from a global per-component
-    # counter, so the landed name is a READ, never a prediction.
-    new_paths = sorted(p for p in (occurrence_paths(design) - before) if p)
+    # Read the instance back off the assembly tree - the landed name is a READ, never a prediction.
+    after = occurrence_paths(design)
+    # An UNREADABLE walk yields the SAME empty set an empty assembly would, and the host occurrence
+    # this instanced into proves the assembly is not empty - so an empty census is a failed read.
+    # Naming "no new instance appeared" over it states a verdict the walk never delivered.
+    if not after:
+        return error(f"addExistingComponent returned an occurrence for '{comp_name}', but the "
+                     "assembly census that confirms it could not be read - the instance may or may "
+                     "not have landed. Re-read with design_get(include=['tree']).")
+    new_paths = sorted(p for p in (after - before) if p)
     if not new_paths:
         return error(f"The call reported an occurrence for '{comp_name}' but no new instance "
                      "appeared in the assembly tree. Re-read with design_get(include=['tree']).")
@@ -158,6 +164,18 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
     if len(host_instances) > 1:
         note += (f" The host has {len(host_instances)} instances, so the one call landed the instance "
                  "under each of them (see 'paths').")
+    # Measured on an x/y placement: it does NOT set the pending-position flag, so it cannot be
+    # captured - assembly_capture_position refuses with "Nothing to capture". The same placement
+    # SURVIVED a later as-built joint in a design holding no captured position markers, while two
+    # placements in a design that DID hold markers came back at the origin after a joint creation:
+    # the revert is a rollback to the marker state, which an instance born after the marker has no
+    # position in. The placement reads durable off the tree, so that has to be said here.
+    if x or y or z or rotate_deg:
+        note += (" The placement cannot be captured - it sets no pending-position flag, so "
+                 "assembly_capture_position refuses it. In a design that HOLDS captured position "
+                 "markers, a later joint creation can revert this instance to the ORIGIN. Read the "
+                 "position back with model_inspect after the next joint creation, or place the "
+                 "instance BY that joint instead of by x/y/z.")
 
     out = {
         "created": True,
@@ -197,7 +215,7 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("rotate_deg", {"type": "number",
             "description": "Orient: rotate this many degrees about 'rotate_axis' (default 0)."})
-    .add_input_property(*_inputs.world_axis("rotate_axis", default="z",
+    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z",
             description="World axis for the orientation rotation.").as_property())
     .strict_schema()
 )

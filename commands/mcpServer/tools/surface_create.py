@@ -460,7 +460,7 @@ surface_revolve_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch whose OPEN curves form the profile (omit = most recent)."})
     .add_input_property("curves", _CURVES.schema())
-    .add_input_property(*_inputs.world_axis("axis", default="z", description="Component origin axis to revolve about.").as_property())
+    .add_input_property(*_inputs.frame_axis("axis", default="z", description="Component origin axis to revolve about.").as_property())
     .add_input_property("angle_deg", {"type": "number", "description": "Sweep angle in degrees (360 = full, default)."})
     .add_input_property("symmetric", {"type": "boolean", "description": "Split the angle both ways (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())

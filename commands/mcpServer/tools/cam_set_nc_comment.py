@@ -11,7 +11,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam
 
 _COMMENT_PARAM = "nc_program_comment"
@@ -68,16 +68,11 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
         return error("This document has no NC programs.")
 
     want = (program or "").strip()
-    targets = []
-    for i in range(count):
-        ncp = programs.item(i)
-        nm = safe(lambda ncp=ncp: ncp.name) or ""
-        if want and nm != want:
-            continue
-        targets.append((ncp, nm))
+    present = [(ncp, safe(lambda ncp=ncp: ncp.name)) for ncp in iter_collection(programs)]
+    targets = [(ncp, nm or "") for ncp, nm in present if not want or (nm or "") == want]
 
     if not targets:
-        available = [safe(lambda i=i: programs.item(i).name) for i in range(count)]
+        available = [nm for _, nm in present]
         return error(f"No NC program named '{program}'. Available: "
                       f"{', '.join(str(a) for a in available)}.")
 

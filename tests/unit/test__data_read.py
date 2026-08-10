@@ -108,35 +108,77 @@ def _sample_project():
     return FakeProject("CAM", "proj-cam-id", root)
 
 
-# ── _child_folder_by_name ──────────────────────────────────────────────────
+# ── navigate_folder_path: the shared folder-path walk this lister scopes through ────
 
-class TestChildFolderByName:
+class TestNavigateFolderPath:
     def test_exact_match(self):
         proj = _sample_project()
-        sub = dm._child_folder_by_name(proj.rootFolder, "Workflow Templates")
-        assert sub is not None and sub.name == "Workflow Templates"
+        folder, path, miss = dm.navigate_folder_path(proj.rootFolder, "Workflow Templates")
+        assert miss is None and folder.name == "Workflow Templates" and path == "Workflow Templates"
 
-    def test_case_insensitive(self):
+    def test_case_insensitive_reports_the_folders_own_name(self):
         proj = _sample_project()
-        sub = dm._child_folder_by_name(proj.rootFolder, "workflow templates")
-        assert sub is not None and sub.name == "Workflow Templates"
+        folder, path, miss = dm.navigate_folder_path(proj.rootFolder, "workflow templates")
+        assert miss is None and folder.name == "Workflow Templates"
+        assert path == "Workflow Templates"
 
-    def test_whitespace_trimmed(self):
+    def test_whitespace_and_stray_slashes_trimmed(self):
         proj = _sample_project()
-        sub = dm._child_folder_by_name(proj.rootFolder, "  Parts  ")
-        assert sub is not None and sub.name == "Parts"
+        folder, path, miss = dm.navigate_folder_path(proj.rootFolder, "  /Parts/ / Fixtures/ ")
+        assert miss is None and folder.name == "Fixtures" and path == "Parts/Fixtures"
 
-    def test_missing_returns_none(self):
+    def test_empty_path_is_the_root_itself(self):
         proj = _sample_project()
-        assert dm._child_folder_by_name(proj.rootFolder, "Nope") is None
+        folder, path, miss = dm.navigate_folder_path(proj.rootFolder, "")
+        assert miss is None and folder is proj.rootFolder and path == ""
 
-    def test_robust_to_broken_folder(self):
-        # A folder whose dataFolders access raises must not blow up the search.
+    def test_a_miss_names_the_segment_where_it_stopped_and_the_siblings(self):
+        proj = _sample_project()
+        folder, path, miss = dm.navigate_folder_path(proj.rootFolder, "Parts/Nope")
+        assert folder is None and path is None
+        assert miss["segment"] == "Nope" and miss["at"] == "Parts"
+        assert miss["available"] == ["Fixtures"]
+
+    def test_a_miss_at_the_root_names_the_root(self):
+        proj = _sample_project()
+        _folder, _path, miss = dm.navigate_folder_path(proj.rootFolder, "Nope")
+        assert miss["at"] == "(project root)"
+        assert set(miss["available"]) == {"Workflow Templates", "Parts"}
+
+    def test_an_unreadable_folder_reports_available_None_not_an_empty_list(self):
+        # A folder whose dataFolders access raises is a HOLE in the search space: the segment may
+        # be sitting in a listing that never opened. Reporting [] would say the folder was looked
+        # into and is childless - the same lie _walk_folder's truncated['unread'] exists to avoid.
         class Broken:
             @property
             def dataFolders(self):
                 raise RuntimeError("boom")
-        assert dm._child_folder_by_name(Broken(), "x") is None
+        folder, _path, miss = dm.navigate_folder_path(Broken(), "x")
+        assert folder is None and miss["segment"] == "x"
+        assert miss["available"] is None
+
+    def test_a_genuinely_childless_folder_reports_an_empty_list(self):
+        # the other side of the same distinction: the walk DID look, and there is nothing there.
+        empty = FakeFolder("Empty")
+        _folder, _path, miss = dm.navigate_folder_path(empty, "x")
+        assert miss["available"] == []
+
+    def test_the_listing_refusal_says_unread_not_none_when_the_walk_could_not_look(self):
+        # the consumer side: '(none)' would publish an unread folder as an empty one.
+        class Broken:
+            name = "Root"
+            @property
+            def dataFolders(self):
+                raise RuntimeError("boom")
+
+            @property
+            def dataFiles(self):
+                raise RuntimeError("boom")
+        _install_app([FakeProject("CAM", "proj-cam-id", Broken())])
+        msg = error_message(dm.list_project_files_handler(project="CAM", folder="Nope"))
+        assert "could not be read" in msg and "is unknown" in msg
+        assert "(none)" not in msg
+        assert "not found" not in msg          # a verdict this walk never reached
 
 
 # ── list_project_files_handler: project resolution ─────────────────────────
@@ -251,6 +293,36 @@ class TestFolderScoping:
 
 
 # ── _file_summary: per-file fields + guarded getters ───────────────────────
+
+class TestUnreadableFolders:
+    """A folder whose enumeration RAISES is a hole in the search space, not an empty folder. The
+    same listing resolves a file BY NAME, so swallowing the failure turns an ambiguity into a
+    confident unique match - the listing has to say a folder went unread."""
+
+    class _BoomFolder(FakeFolder):
+        @property
+        def dataFiles(self):
+            raise RuntimeError("3 : folder could not be enumerated")
+
+    def _project_with_a_dead_folder(self):
+        dead = self._BoomFolder("Archive")
+        root = FakeFolder("Root", files=[FakeFile("RootPart", "urn:lin:ROOT")],
+                          subfolders=[dead])
+        return FakeProject("CAM", "proj-cam-id", root)
+
+    def test_the_listing_names_and_counts_the_unread_folder(self):
+        _install_app([self._project_with_a_dead_folder()])
+        out = _payload(dm.list_project_files_handler(project="CAM"))
+        assert out["folders_unreadable"] == 1
+        assert out["folders_unreadable_at"] == ["Archive"]
+        assert out["file_count"] == 1                  # the readable half still lands
+
+    def test_a_fully_readable_project_publishes_no_such_key(self):
+        _install_app([_sample_project()])
+        out = _payload(dm.list_project_files_handler(project="CAM"))
+        assert "folders_unreadable" not in out
+        assert "folders_unreadable_at" not in out
+
 
 class TestFileSummary:
     def test_all_fields_populated(self):

@@ -18,6 +18,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 
@@ -28,6 +29,55 @@ _TOOLS = _inputs.BodyRefList("tools", required=True, description="The tool bodie
 app = adsk.core.Application.get()
 
 _OPERATIONS = ("join", "cut", "intersect")   # combine needs an existing target; no "new"
+
+
+def _join_verdict(result_bodies, result_lumps, input_lumps, direct_no_feature,
+                  before_bodies, after_bodies, tool_count, keep_tools, new_component):
+    """(payload fields, warning sentence) for a JOIN that did not fuse - ({}, "") when nothing the
+    call could read says it failed.
+
+    MEASURED (parametric, 2705.0.87): a join of two DISJOINT solids reports success and its feature
+    result holds BOTH input bodies - nothing is consumed and nothing merges. So MORE THAN ONE RESULT
+    BODY is the nothing-fused verdict, and it is the primary one; the pieces are separate bodies, not
+    lumps of one.
+
+    The lump read is the second arm, for the single-result-body case: one body carrying several
+    DISCONNECTED lumps also fused nothing. It stays unstated when the count cannot be read.
+
+    Direct mode has no feature whose result bodies could be counted, so the census answers instead: a
+    join that consumed its tools drops the host's body count by one per tool body. Any tool body left
+    standing did not fuse. The census cannot speak when the tools were KEPT on purpose or the result
+    was moved to a new component, so neither case claims a verdict."""
+    # keep_tools is excluded from this arm: what a KEPT tool body does to the feature's result set is
+    # not measured, so a several-body result there could be the kept copies rather than a failed fuse,
+    # and a warning that can fire on a good join is worse than silence.
+    if len(result_bodies) > 1 and not keep_tools:
+        named = ", ".join(n for n in result_bodies if n)
+        return ({"disjoint_join": True, "fused": False, "result_body_count": len(result_bodies)},
+                f"WARNING: this join fused NOTHING - it left {len(result_bodies)} separate bodies "
+                f"({named}), which is what a join of pieces that do not touch produces.")
+
+    if result_lumps is not None and result_lumps > 1:
+        # input_lump_total rides as DATA beside the verdict (null when any input's lumps would not
+        # read), so 'nothing fused' is computable from the payload instead of parsed out of prose.
+        total_in = (sum(input_lumps) if all(isinstance(n, int) for n in input_lumps) else None)
+        fields = {"disjoint_join": True, "input_lump_total": total_in}
+        if total_in is not None:
+            fields["fused"] = total_in != result_lumps
+        return (fields,
+                f"WARNING: this join produced a {result_lumps}-lump body - {result_lumps} pieces "
+                "that do not touch each other"
+                + (f" (nothing fused: the result holds the same {total_in} lumps the inputs did)"
+                   if total_in == result_lumps else "") + ".")
+
+    if (direct_no_feature and not keep_tools and not new_component
+            and isinstance(before_bodies, int) and isinstance(after_bodies, int)):
+        survived = after_bodies - (before_bodies - tool_count)
+        if survived > 0:
+            return ({"disjoint_join": True, "fused": False, "unfused_tool_bodies": survived},
+                    f"WARNING: {survived} of the {tool_count} tool bodies did not fuse into the "
+                    "target - it is still standing after the join, so those pieces do not touch.")
+    return {}, ""
 
 
 def handler(target: str = "", tools=None, operation: str = "join",
@@ -51,14 +101,16 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if lerr:
         return error(lerr)
 
-    # same-body guard: compared by entityToken, never by Python identity alone - the API mints a
-    # FRESH wrapper per access (live-measured on face.body/edge.body), so `is` can read False for two
-    # references to the same physical body and the guard would never fire. Same shape as
-    # mesh_combine's guard, which already compares tokens.
-    tgt_token = safe(lambda: tgt.entityToken)
+    # same-body guard: compared by _common.native_token, never by Python identity alone - the API
+    # mints a FRESH wrapper per access (live-measured on face.body/edge.body), so `is` can read False
+    # for two references to the same physical body and the guard would never fire. The NATIVE token,
+    # because the target and a tool can name one body through DIFFERENT wrappers ('Jaw' - a
+    # single-body COMPONENT name - resolving to the native, 'Pin' / 'Jaw:1:Pin' to that occurrence's
+    # proxy), whose own tokens differ - in either direction. Same shape as mesh_combine's guard.
+    tgt_token = _common.native_token(tgt)
     coll = adsk.core.ObjectCollection.create()
     for b in tool_bodies:
-        b_token = safe(lambda b=b: b.entityToken)
+        b_token = _common.native_token(b)
         if b is tgt or (tgt_token and b_token and b_token == tgt_token):
             return error("A tool body is the same as the target - pick distinct bodies.")
         coll.add(b)
@@ -80,6 +132,10 @@ def handler(target: str = "", tools=None, operation: str = "join",
     host = _common.census_host(tgt, comp)
     before_bodies = _common.body_count(host)
     before_volume = _common.measured(lambda: tgt.volume)
+    # The LUMPS every input holds between them - the join's own effect check. A join of bodies that
+    # touch collapses lumps; a result still carrying the inputs' total fused nothing, which neither
+    # the body count nor the volume can see (both read a clean combine either way).
+    input_lumps = [_geom.lump_count(b) for b in [tgt] + list(tool_bodies)]
     target_name = safe(lambda: tgt.name)
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     host_name = safe(lambda: host.name)
@@ -87,8 +143,14 @@ def handler(target: str = "", tools=None, operation: str = "join",
     try:
         ci = comp.features.combineFeatures.createInput(tgt, coll)
         ci.operation = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
-        ci.isKeepToolBodies = bool(keep_tools)
-        ci.isNewComponent = bool(new_component)
+        # Both flags go through set_verified: a SWIG proxy accepts an assignment it then ignores, and
+        # neither flag leaves a trace anywhere else in the result - a swallowed isKeepToolBodies
+        # consumes bodies the caller asked to keep and the census below still reads a clean combine.
+        for prop, value, label in (("isKeepToolBodies", bool(keep_tools), "keep_tools"),
+                                   ("isNewComponent", bool(new_component), "new_component")):
+            seterr = _common.set_verified(ci, prop, value, label, "CombineFeatureInput")
+            if seterr:
+                return error(f"{seterr} Nothing was combined.")
         feature = comp.features.combineFeatures.add(ci)
     except Exception as e:
         return error(f"Combine failed: {e}. (Bodies must overlap for cut/intersect; all bodies "
@@ -128,11 +190,14 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # exactly one target here, unlike an unscoped extrude, so no multi-body ambiguity). This read is
     # SKIPPED in direct mode - there is no feature to read it off, and an empty list there would read
     # as "no disconnection was found" rather than "the check could not run" (the note says which).
-    result_bodies = []
-    if not direct_no_feature:
-        fb = safe(lambda: feature.bodies)
-        for i in range(safe(lambda: fb.count, 0) if fb else 0):
-            result_bodies.append(safe(lambda i=i: fb.item(i).name))
+    result_objs = [] if direct_no_feature else _common.result_bodies(feature)
+    result_bodies = [f["name"] for f in _common.body_facts(result_objs)]
+
+    # The body a JOIN landed in: the feature's single result body, or - in direct mode, where there is
+    # no feature to read - the target the join was built on. Its lump count is read back FRESH off
+    # that body (an input reference can go invalid once the feature rebuilds).
+    joined = result_objs[0] if len(result_objs) == 1 else (tgt if direct_no_feature else None)
+    result_lumps = _geom.lump_count(joined) if joined is not None else None
 
     payload = {
         "combined": True,
@@ -153,6 +218,16 @@ def handler(target: str = "", tools=None, operation: str = "join",
                             "result bodies) - check with design_get(include=['tree']).")
     else:
         payload["feature"] = safe(lambda: feature.name)
+    if result_lumps is not None:
+        payload["lump_count"] = result_lumps
+    if op_key == "join":
+        fields, warning = _join_verdict(
+            result_bodies, result_lumps, input_lumps, direct_no_feature,
+            before_bodies, after_bodies, len(tool_bodies), keep_tools, new_component)
+        payload.update(fields)
+        if warning:
+            payload["note"] += (" " + warning + " " + _common.failed_effect_remedy(design, feature)
+                                + " Move the pieces into contact (model_move) and join again.")
     if op_key in ("cut", "intersect") and len(result_bodies) > 1:
         payload["body_split"] = result_bodies
         payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(result_bodies)} "

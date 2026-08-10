@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, _NamedCollection, entity_proxy,
+from conftest import (BRepBody, MakeComp, MakeDesign, MeshBody, _NamedCollection, entity_proxy,
                       error_message, install, load_tool, payload)
 
 sn = load_tool("design_set_name")
@@ -75,8 +75,9 @@ class _Occurrence:
 def wire(monkeypatch):
     """Build a design and patch BOTH design seams (the tool's own ``_common`` and the one
     ``_inputs`` resolves the target through). Returns (design, root)."""
-    def _make(bodies=(), occurrences=(), components=(), root_name="Root"):
+    def _make(bodies=(), occurrences=(), components=(), root_name="Root", meshes=()):
         root = MakeComp(name=root_name, bodies=list(bodies), occurrences=list(occurrences))
+        root.meshBodies = _NamedCollection(list(meshes))
         design = MakeDesign(comp=root, all_components=[root, *components])
         occs = list(occurrences)
         root.allOccurrencesByComponent = lambda comp: _NamedCollection(
@@ -285,3 +286,49 @@ class TestLabel:
 
     def test_body_label_names_the_kind(self):
         assert sn._label(SimpleNamespace(name="Plate"), "body") == "body 'Plate'"
+
+
+@pytest.fixture
+def mesh_wire(wire, monkeypatch):
+    """`wire` plus the MeshBody TYPE the mesh/body kind split is decided on - _is_mesh asks
+    isinstance(entity, adsk.fusion.MeshBody), so an unbound type would classify every mesh as a
+    BRep body."""
+    import adsk.fusion
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    return wire
+
+
+class TestMeshRename:
+    """MeshBody.name is settable and the assignment sticks - the new name reads back off the wrapper
+    it was set on AND off a fresh meshBodies fetch. That is why 'mesh' is in the target kinds; drop
+    it and these go red."""
+
+    def test_mesh_target_renames_and_publishes_the_landed_name(self, mesh_wire):
+        _design, root = mesh_wire(meshes=[MeshBody(name="Scan1")])
+        out = payload(sn.handler(target="Scan1", new_name="ScannedHousing"))
+        assert out["renamed"] is True and out["changed"] is True
+        assert out["kind"] == "mesh"
+        assert out["previous_name"] == "Scan1"
+        assert out["name"] == "ScannedHousing"
+        # the MODEL, re-fetched from the collection - not just the payload the handler assembled
+        assert root.meshBodies.item(0).name == "ScannedHousing"
+
+    def test_mesh_kind_is_advertised_on_the_target_input(self):
+        assert "mesh" in sn._TARGET.allow
+
+    def test_mesh_rename_that_silently_does_not_take_is_an_error(self, mesh_wire):
+        class _StuckMesh(MeshBody):
+            """The other failure the read-back exists to catch: the setter is ACCEPTED and the name
+            silently does not move."""
+            @property
+            def name(self):
+                return "Scan1"
+
+            @name.setter
+            def name(self, value):
+                pass
+
+        mesh_wire(meshes=[_StuckMesh(name="Scan1")])
+        res = sn.handler(target="Scan1", new_name="ScannedHousing")
+        assert res["isError"] is True
+        assert "did not take" in error_message(res)

@@ -76,8 +76,9 @@ class _PipeInput:
     _TRACKED = ("sectionType", "sectionSize", "isHollow", "sectionThickness",
                 "distanceOne", "distanceTwo")
 
-    def __init__(self, path, operation, ignores=()):
+    def __init__(self, path, operation, ignores=(), thickness_clears_hollow=False):
         object.__setattr__(self, "_ignores", set(ignores))
+        object.__setattr__(self, "_thickness_clears_hollow", bool(thickness_clears_hollow))
         object.__setattr__(self, "order", [])
         self.path = path
         self.operation = operation
@@ -99,7 +100,7 @@ class _PipeInput:
         if name == "isHollow" and value is True:
             object.__setattr__(self, "sectionThickness", ("real", _DEFAULT_WALL_CM))
         elif name == "sectionThickness" and value is not None:
-            object.__setattr__(self, "isHollow", True)
+            object.__setattr__(self, "isHollow", not self._thickness_clears_hollow)
 
 
 class _PipeFeatures:
@@ -109,7 +110,7 @@ class _PipeFeatures:
 
     def __init__(self, comp, body_names=("Pipe1",), body_volume=5.0, returns_none=False,
                  ignores=(), create_raises=False, input_is_none=False, add_raises=False,
-                 force_thickness_cm="mirror", effect=None):
+                 force_thickness_cm="mirror", effect=None, thickness_clears_hollow=False):
         self.comp = comp
         self.body_names = tuple(body_names)
         self.body_volume = body_volume
@@ -120,6 +121,7 @@ class _PipeFeatures:
         self.add_raises = add_raises
         self.force_thickness_cm = force_thickness_cm
         self.effect = effect
+        self.thickness_clears_hollow = thickness_clears_hollow
         self.last = None
         self.add_calls = 0
 
@@ -128,7 +130,7 @@ class _PipeFeatures:
             raise RuntimeError("createInput boom")
         if self.input_is_none:
             return None
-        self.last = _PipeInput(path, operation, self.ignores)
+        self.last = _PipeInput(path, operation, self.ignores, self.thickness_clears_hollow)
         return self.last
 
     def add(self, inp):
@@ -210,12 +212,15 @@ class TestSolidPipe:
         assert "section_type=square" in msg and "No pipe was created" in msg
         assert pf.add_calls == 0
 
-    def test_measured_size_and_caps_come_from_the_feature(self):
+    def test_measured_size_comes_from_the_feature_and_no_cap_count_is_claimed(self):
         _wire()
         out = payload(mp.handler(path="sketch:Spine", section_size=20, units="mm"))
         # read back off the feature's own parameter (2.0 cm -> 20 mm), not echoed from the request
         assert out["section_size_measured"] == 20.0
-        assert out["capped_ends"] == 2
+        # MEASURED: startFaces/endFaces/sideFaces all read an EMPTY collection (count 0) on a freshly
+        # added pipe, so they cannot tell a capped end from an uncapped one - the payload must not
+        # carry a cap count derived from them.
+        assert "capped_ends" not in out
 
 
 # ── hollow: the isHollow / sectionThickness coupling ────────────────────────
@@ -378,6 +383,33 @@ class TestHonesty:
         assert out["scoped_to_bodies"] == ["Block"]
         assert pf.last.participantBodies == [block]
 
+    def test_the_scope_is_published_as_a_request_not_as_a_verified_effect(self):
+        # MEASURED: participantBodies is WRITE-ONLY - the assignment succeeds and reading the
+        # property back raises AttributeError - so no read-back exists. Nor does the volume gate
+        # stand in for one: it sums ONE total delta over the whole watched set, and a scope the
+        # platform dropped moves that total MORE, not less. The key must not read as a confirmation.
+        block = BRepBody("Block", volume=12.0)
+
+        def _shrink(comp):
+            block.volume = 9.0
+
+        _wire(bodies=[block], effect=_shrink)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut",
+                                 target_bodies=["Block"]))
+        assert "REQUESTED" in out["note"]
+        assert "write-only" in out["note"] and "model_inspect" in out["note"]
+
+    def test_an_unscoped_cut_makes_no_scope_claim_at_all(self):
+        block = BRepBody("Block", volume=12.0)
+
+        def _shrink(comp):
+            block.volume = 9.0
+
+        _wire(bodies=[block], effect=_shrink)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut"))
+        assert out["scoped_to_bodies"] is None
+        assert "write-only" not in out["note"]
+
     def test_cut_watches_a_participant_in_another_component(self, monkeypatch):
         # The participant lives in a DIFFERENT component from the pipe. A census scoped to the
         # pipe's own component sees only the untouched body, so a successful cut would be reported
@@ -433,6 +465,60 @@ class TestDirectMode:
         assert "body count did not rise" in error_message(res)
 
 
+# -- the isHollow <-> sectionThickness overwrite defenses --------------------
+#
+# The two input properties SET EACH OTHER: isHollow=true resets the thickness to the API's own
+# default, and writing a thickness turns isHollow on. Both directions of that coupling can fail
+# silently - a SWIG proxy accepts an assignment it then drops - and the pipe would come out with the
+# wrong wall while every other read-back looks clean. These are the two guards that stop it.
+
+class TestHollowCouplingDefenses:
+    def test_an_isHollow_the_platform_drops_refuses_before_any_pipe_is_built(self):
+        # isHollow is set FIRST and through set_verified: dropped, the wall would land on a SOLID
+        # input and the pipe would be built without one.
+        pf = _wire(ignores=("isHollow",))
+        res = mp.handler(path="sketch:Spine", section_size=20, wall_thickness=2)
+        msg = error_message(res)
+        assert "hollow=true" in msg and "No pipe was created" in msg
+        assert pf.add_calls == 0
+
+    def test_a_thickness_that_switches_the_input_back_to_solid_is_refused(self):
+        # The other direction of the coupling: writing sectionThickness clears isHollow. Nothing
+        # downstream would catch it - the feature would read back a solid pipe the caller asked to
+        # be hollow - so the input is re-read after the write and the call refuses.
+        pf = _wire(thickness_clears_hollow=True)
+        res = mp.handler(path="sketch:Spine", section_size=20, wall_thickness=2)
+        msg = error_message(res)
+        assert "back to SOLID" in msg and "No pipe was created" in msg
+        assert pf.add_calls == 0
+
+
+# -- DIRECT mode, cut/join/intersect: no feature AND no readable volume ------
+
+class TestDirectModeBooleanIsUnverified:
+    def test_a_direct_cut_whose_volumes_cannot_be_read_is_unverified_not_ok(self):
+        # A direct design returns no feature object, so the volume census is the ONLY evidence a
+        # cut/join/intersect changed anything. With no body's volume readable at both ends there is
+        # nothing to judge on, and an ok() here would report an unmeasured edit as a success.
+        blind = BRepBody("Rail", volume=None)
+        _wire(bodies=[blind], design_type=0, returns_none=True)
+        res = mp.handler(path="sketch:Spine", section_size=20, operation="cut")
+        msg = error_message(res)
+        assert "UNVERIFIED" in msg and "DIRECT" in msg
+
+    def test_a_direct_cut_whose_volume_moved_is_reported_with_its_delta(self):
+        # the same path with a READABLE census: the delta carries the verdict, no feature needed
+        moved = BRepBody("Rail", volume=10.0)
+
+        def _cut(_comp):
+            moved.volume = 6.0
+
+        _wire(bodies=[moved], design_type=0, returns_none=True, effect=_cut)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut"))
+        assert out["volume_delta_cm3"] == -4.0
+        assert out["no_timeline_feature"] is True
+
+
 # ── guards ──────────────────────────────────────────────────────────────────
 
 class TestGuards:
@@ -483,3 +569,15 @@ def test_declared_returns_present_in_payload():
     out = payload(mp.handler(path="sketch:Spine", section_size=20))
     for spec in mp.RETURNS:
         assert spec.assert_present(out) == "", spec.key
+
+
+def test_the_path_description_states_the_tangent_continuity_rule():
+    # measured through THIS tool: a tangent-continuous closed loop chained all 8 edges from one
+    # seed, while a fillet patch that breaks tangency at the junction stops the chain. Chaining
+    # follows tangent continuity, not open-vs-closed, and only the reported count says what ran.
+    desc = mp.pipe_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
+    assert "TANGENT connections" in desc
+    assert "sharp corner stops the chain" in desc
+    assert "'path' count is the truth" in desc
+    assert "auto-chain" not in desc.lower()
+    assert "closed loop" not in desc.lower() and "seed edge alone" not in desc

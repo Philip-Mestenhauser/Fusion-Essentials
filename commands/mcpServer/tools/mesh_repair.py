@@ -116,7 +116,7 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
             return error(f"'density' must be between {_DENSITY_MIN} and {_DENSITY_MAX} "
                          f"(got {dens}).")
 
-    comp = safe(lambda: mb.parentComponent) or _target_component(design)
+    comp = _common.census_host(mb, _target_component(design))
     feats = safe(lambda: comp.features.meshRepairFeatures)
     if feats is None:
         return error("This design has no meshRepairFeatures collection (mesh repair unavailable "
@@ -201,7 +201,6 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
     # a bare "nothing moved" verdict reported healthy geometry as an error. is_closed is the only
     # defect state a MeshBody exposes, so it is the only one that can convict: an OPEN mesh handed
     # to a hole-closing repair must change something.
-    already_watertight = before["is_closed"] and after["is_closed"]
     closes_holes = rtype in ("close_holes", "one_touch_fix", "wrap")
     if not moved and closes_holes and before["is_closed"] is False:
         return error(f"The {rtype} repair reported success but the mesh is unchanged "
@@ -268,8 +267,9 @@ TOOL_DESCRIPTION = (
     "Repair a MESH body with the MeshRepair feature - close holes, stitch and remove, wrap, rebuild "
     "or a one-touch fix (the BRep tools cannot reach a mesh). rebuild_method, density and offset "
     "apply to repair_type='rebuild' only. The effect is read back off the body (triangles, "
-    "vertices, the is_closed watertight flag, mesh body count, volume): a repair that moved none of "
-    "them is an error, not a success."
+    "vertices, the is_closed watertight flag, mesh body count, volume): a hole-closing repair "
+    "(close_holes, one_touch_fix, wrap) that changes none of them and leaves the mesh open is an "
+    "error; any other unchanged result is reported as measured."
 )
 
 tool = (

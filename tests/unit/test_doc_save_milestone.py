@@ -2,9 +2,9 @@
 
 Pins the measured contract: saveMilestone returns TRUE on a clean document while creating nothing,
 so a clean document is REFUSED up front; the confirming read goes through a FRESH findFileById
-fetch (the handle the save was issued on never advances) and RETRIES until the new tip appears at
-about 4.4s; the milestone mark itself only becomes readable at about 15.7s, so it is reported
-pending with the observed reason - never as a milestone that landed, never as one that did not.
+fetch (the handle the save was issued on never advances) and RETRIES until the new tip appears; the
+milestone MARK lags the version, so it is reported pending with the observed reason - never as a
+milestone that landed, never as one that did not.
 """
 
 import json
@@ -116,7 +116,7 @@ class TestHappyPath:
         out = _payload(dsm.handler(milestone_name="v2 release", description="ready"))
         assert out["save_call_returned_true"] is True
         assert out["latest_version_before"] == 1 and out["latest_version_after"] == 2
-        assert out["version_confirmed"] is True
+        assert out["cloud_tip_advanced"] is True
         assert out["milestone_confirmed"] is True
         assert out.get("pending") is None
         assert out["milestone_count_after"] == 1
@@ -135,35 +135,36 @@ class TestHappyPath:
         doc = _Doc(_StaleFile(vnum=1, latest=1))
         _use(monkeypatch, doc, _FreshFile(latest=2, is_milestone=True, names=("MS",)))
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert out["version_confirmed"] is True
+        assert out["cloud_tip_advanced"] is True
         assert out["milestone_confirmed"] is True
         assert doc.dataFile.latestVersionNumber == 1        # the stale handle never advanced
 
     def test_version_is_confirmed_only_because_the_pump_retried(self, monkeypatch):
         # measured: the new tip is not visible the instant saveMilestone returns - it appears on a
-        # fresh fetch at about 4.4s. A single-shot fetch would report this successful save pending.
+        # later fresh fetch. A single-shot fetch would report this successful save pending.
         doc = _Doc(_StaleFile(latest=1))
         not_yet = _FreshFile(latest=1, is_milestone=False, names=())
         landed = _FreshFile(latest=2, is_milestone=True, names=("MS",))
         app = _use(monkeypatch, doc, [not_yet, landed], deadline=5.0)
         out = _payload(dsm.handler(milestone_name="MS"))
         assert app.data.calls >= 2                  # the first fetch did NOT show the new tip
-        assert out["version_confirmed"] is True
+        assert out["cloud_tip_advanced"] is True
         assert out["latest_version_after"] == 2
 
 
 class TestPendingReportsWhatWasObserved:
     def test_flag_reading_false_is_named_as_false(self, monkeypatch):
-        # inside the measured 15-20s window: the tip is there, its isMilestone flag still reads False.
+        # inside the lag window: the tip is there, its isMilestone flag still reads False.
         doc = _Doc(_StaleFile())
         _use(monkeypatch, doc, _FreshFile(latest=2, is_milestone=False, names=()))
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert out["version_confirmed"] is True
+        assert out["cloud_tip_advanced"] is True
         assert out["milestone_confirmed"] is False
         assert out["pending"] is True
         assert "reads FALSE" in out["note"]
-        # the measured RANGE (both runs), never one run's number and never "minutes"
-        assert "15-20s" in out["note"] and "15.7s and 19.9s" in out["note"]
+        # The note may not read as evidence the milestone failed, and it may not quote a duration
+        # nothing in the repo measures - it points at the re-read instead.
+        assert "NOT evidence" in out["note"]
         assert "doc_get include=['versions']" in out["note"]
 
     def test_unreadable_flag_is_named_as_unreadable_not_as_false(self, monkeypatch):
@@ -192,7 +193,7 @@ class TestPendingReportsWhatWasObserved:
         doc = _Doc(_StaleFile())
         _use(monkeypatch, doc, None)                 # findFileById returns nothing
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert out["version_confirmed"] is False
+        assert out["cloud_tip_advanced"] is False
         assert out["milestone_confirmed"] is False
         assert out["latest_version_after"] is None
         assert out["milestone_count_after"] is None
@@ -200,16 +201,16 @@ class TestPendingReportsWhatWasObserved:
 
 class TestVersionNeverAdvanced:
     def test_note_names_the_nothing_happened_signature_without_a_lag_excuse(self, monkeypatch):
-        # measured: a real milestone save's version is visible at 4.4s. After the full pump, a tip
-        # that has not moved is the clean-document signature, not cloud lag.
+        # A real save's new tip arrives well inside the pump, so after the full pump a tip that has
+        # not moved is the clean-document signature, not cloud lag.
         doc = _Doc(_StaleFile(latest=1))
         _use(monkeypatch, doc, _FreshFile(latest=1, is_milestone=False, names=()))
         out = _payload(dsm.handler(milestone_name="MS"))
-        assert out["version_confirmed"] is False
+        assert out["cloud_tip_advanced"] is False
         assert out["pending"] is True
         note = out["note"]
         assert "versioned nothing" in note
-        assert "4.4s" in note
+        assert f"{dsm._VERSION_DEADLINE_S:.0f}s of re-fetching" in note   # what was actually waited
         assert "lag" not in note.lower()
 
     def test_an_unreadable_pre_save_tip_is_reported_as_such_not_diagnosed(self, monkeypatch):
@@ -231,7 +232,7 @@ class TestVersionNeverAdvanced:
         assert app.data.calls == 1                  # nothing to settle against - no fake wait
         assert out["latest_version_before"] is None
         assert out["latest_version_after"] == 7     # what WAS read is still reported
-        assert out["version_confirmed"] is False and out["pending"] is True
+        assert out["cloud_tip_advanced"] is False and out["pending"] is True
         note = out["note"]
         assert "could not be read BEFORE the save" in note and "7" in note
         assert "versioned nothing" not in note      # a verdict on a comparison that never happened
@@ -246,7 +247,7 @@ class TestVersionNeverAdvanced:
         out = _payload(dsm.handler(milestone_name="MS"))
         assert app.data.calls >= 2                  # it retried rather than single-shotting
         assert out["latest_version_after"] == 3     # the LAST reading, not a dropped one
-        assert out["version_confirmed"] is False
+        assert out["cloud_tip_advanced"] is False
         assert "versioned nothing" in out["note"]
 
 
@@ -306,8 +307,12 @@ class TestLineageFork:
         assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
         assert out["document_id"] == "urn:new"
         assert app.data.queried == ["urn:new"]
-        assert out["version_confirmed"] is True      # the new lineage answered with its tip
+        # NOT confirmed: the pre-save number belongs to the abandoned stream, so no comparison ran.
+        # A tip number coming back on the new lineage is a reading, not a confirmation.
+        assert out["cloud_tip_advanced"] is False
+        assert out["latest_version_after"] == 1      # what WAS read is still reported
         assert out["pending"] is True                # the mark is unconfirmed there
+        assert "not decidable" in out["note"]
         assert "NEW LINEAGE" in out["note"] and "NOT applied" in out["note"]
 
     def test_a_fork_whose_new_lineage_reads_back_nothing_is_not_diagnosed(self, monkeypatch):
@@ -325,7 +330,7 @@ class TestLineageFork:
         out = _payload(dsm.handler(milestone_name="MS"))
         assert app.data.calls == 1                  # no baseline to settle against - no fake wait
         assert out["lineage_changed"] == {"from": "urn:old", "to": "urn:new"}
-        assert out["version_confirmed"] is False and out["pending"] is True
+        assert out["cloud_tip_advanced"] is False and out["pending"] is True
         note = out["note"]
         assert "NEW lineage" in note and "not decidable" in note
         assert "versioned nothing" not in note      # a verdict against an abandoned version stream
@@ -338,3 +343,46 @@ class TestLineageFork:
         assert "lineage_changed" not in out
         assert out["document_id"] == "urn:same"
         assert "NEW LINEAGE" not in out["note"]
+
+
+class TestPostconditionKeyIsNotShadowed:
+    """`version_confirmed` is _assert.VersionAdvanced's key - it reports that the document is no
+    longer MODIFIED. This handler measures something else (the cloud tip number moved), so it
+    publishes its own key: under one name the kernel's setdefault silently drops the postcondition's
+    reading and the caller reads one word for two different facts."""
+
+    def test_handler_publishes_cloud_tip_advanced_not_version_confirmed(self, monkeypatch):
+        doc = _Doc(_StaleFile())
+        _use(monkeypatch, doc, _FreshFile(latest=2, is_milestone=True, names=("MS",)))
+        out = _payload(dsm.handler(milestone_name="MS"))
+        assert out["cloud_tip_advanced"] is True
+        assert "version_confirmed" not in out       # left free for the postcondition to supply
+
+
+class TestMilestoneWalkIsBounded:
+    """The name match walks a CLOUD collection on the main thread, so it is capped. Past the cap the
+    answer is UNKNOWN, never "the collection holds no entry named that" - an unbounded walk both
+    stalls the thread and, if it were merely cut short, would report a miss it never established."""
+
+    def _huge(self, over_cap):
+        names = tuple(f"MS-{i}" for i in range(dsm._MILESTONE_WALK_CAP + over_cap))
+        return _FreshFile(latest=2, is_milestone=True, names=names)
+
+    def test_a_name_past_the_cap_is_unknown_not_absent(self, monkeypatch):
+        _use(monkeypatch, _Doc(_StaleFile()), self._huge(5))
+        out = _payload(dsm.handler(milestone_name=f"MS-{dsm._MILESTONE_WALK_CAP + 2}"))
+        assert out["milestone_confirmed"] is False
+        note = out["note"]
+        assert f"more than the {dsm._MILESTONE_WALK_CAP} this call walks" in note
+        assert "holds no entry named" not in note        # never a miss it did not establish
+
+    def test_a_name_inside_the_cap_still_confirms(self, monkeypatch):
+        _use(monkeypatch, _Doc(_StaleFile()), self._huge(5))
+        out = _payload(dsm.handler(milestone_name="MS-0"))
+        assert out["milestone_confirmed"] is True
+
+    def test_a_short_collection_still_reports_a_real_miss(self, monkeypatch):
+        _use(monkeypatch, _Doc(_StaleFile()),
+             _FreshFile(latest=2, is_milestone=True, names=("Other",)))
+        note = _payload(dsm.handler(milestone_name="MS"))["note"]
+        assert "holds no entry named 'MS'" in note

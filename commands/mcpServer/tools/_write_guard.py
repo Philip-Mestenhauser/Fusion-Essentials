@@ -10,8 +10,10 @@ when the active document no longer matches the one the agent meant, and 'acted_o
 write result with the document actually mutated {name, document_id}. A bare NAME shared by several
 open documents is REFUSED too (blocked_by:['ambiguous_document_name'], candidates listed) - a URN
 is always exact. Applied generically at registration (Item.create_tool_item) for write/destructive
-tools. READ tools get the lighter wrap_read: no guard, but every result is stamped with
-'active_document' - the document the read actually came from.
+tools. MAIN-THREAD read tools get the lighter wrap_read: no guard, but every result is stamped with
+'active_document' - the document the read actually came from. Main-thread tools only - the identity
+read touches adsk, which a pure-Python off-thread handler must never do, so an off-main-thread read
+(sys_find_tool) carries no stamp.
 """
 
 import json
@@ -19,6 +21,11 @@ import json
 import adsk.core
 
 app = adsk.core.Application.get()
+
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = ("_active_identity - the ONE active-document identity read ((name, urn), either may be "
+             "None), the same read the write guard stamps 'acted_on' from; _cam_common's generation "
+             "registry and cam_get_status use it to bind a launch to its document")
 
 
 def _active_identity():

@@ -3,12 +3,11 @@
 
 """Lifecycle for the three assembly relations - rigid group, motion link, assembly constraint:
 suppress/unsuppress, delete, and reverse or re-value a motion link. Editing a rigid group's
-MEMBERSHIP after creation raises at EVERY timeline marker position (measured on Fusion 2704.1.39),
-so set_occurrences refuses up front and names the delete-and-recreate path instead.
+MEMBERSHIP after creation raises on Fusion 2705.0.87, so set_occurrences refuses up front and
+names the delete-and-recreate path instead.
 """
 
 import adsk.core
-import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -17,8 +16,6 @@ from ._common import error, ok, safe, timeline_health
 from . import _common
 from . import _inputs
 from . import _relations
-
-app = adsk.core.Application.get()
 
 # Which actions each relation kind supports. Only a motion link carries a direction and a pair of
 # coupled values; all three carry isSuppressed and deleteMe (measured on the installed bindings).
@@ -45,16 +42,18 @@ _OCCURRENCES = _inputs.OccurrenceRefList(
 
 _RATIO_TOLERANCE = 1e-6
 
-# Measured on Fusion 2704.1.39: RigidGroup.setOccurrences raises at EVERY marker position - with
-# the marker at the end or immediately AFTER the group, and with it rolled BEFORE the group (the
-# position the binding prose instructs). A same-membership no-op raises too, and the members read
-# back unchanged after each raise, so post-creation membership editing is unusable on this build.
+def _flag(obj, prop):
+    """A boolean flag read off `obj`, or None when it is unknown - `_common.read_flag` is the ONE
+    unreadable-flag read; this only names the property."""
+    return _common.read_flag(lambda: getattr(obj, prop))
+
+# Measured on Fusion 2705.0.87: RigidGroup.setOccurrences on a group created in the same session
+# raises "3 : Cannot be edited before rolling back", and the members read back unchanged - so
+# post-creation membership editing is unusable on this build and the tool refuses it up front.
 _SET_OCCURRENCES_REFUSAL = (
-    "action='set_occurrences' is refused: this Fusion build will not edit a rigid group's members "
-    "after it is created. Measured at every marker position - with the marker at the end or just "
-    "after the group, setOccurrences raises '3 : Cannot be edited before rolling back'; with the "
-    "marker rolled to just BEFORE the group, it raises '3 : Provided input paths or alignments are "
-    "not valid.' Even a same-membership call raises. To change the members: "
+    "action='set_occurrences' is refused: this Fusion build (2705.0.87) will not edit a rigid "
+    "group's members after it is created - setOccurrences raises '3 : Cannot be edited before "
+    "rolling back' and the members read back unchanged. To change the members: "
     "assembly_edit_relations(kind='rigid_group', name=..., action='delete'), then "
     "assembly_rigid_group with the occurrences you want. Nothing was changed."
 )
@@ -89,21 +88,25 @@ def _suppress_note(kind, state):
 
 def _do_suppress(design, obj, kind, name, suppressed):
     label = _relations.kind_label(kind)
-    was = safe(lambda: obj.isSuppressed)
+    was = _flag(obj, "isSuppressed")
     errors_before, _w, _t = timeline_health(design)
     try:
         obj.isSuppressed = bool(suppressed)
     except Exception as e:
         return error(f"Could not set isSuppressed on {label} '{name}': {e}")
-    now = safe(lambda: obj.isSuppressed)
-    if bool(now) != bool(suppressed):
+    now = _flag(obj, "isSuppressed")
+    if now is None:
+        return error(f"isSuppressed cannot be read on {label} '{name}' after setting it to "
+                     f"{bool(suppressed)}, so the change is UNCONFIRMED. Re-read the relation with "
+                     "assembly_get(include=['relations']).")
+    if now != bool(suppressed):
         return error(f"Setting isSuppressed={bool(suppressed)} on {label} '{name}' did not take - "
                      f"it reads {now}.")
     new_errors, warnings = _health_delta(errors_before, design)
-    out = {"kind": kind, "name": name, "is_suppressed": bool(now),
+    out = {"kind": kind, "name": name, "is_suppressed": now,
            # null, not False, when the prior flag could not be read - an unreadable state is not "off".
-           "was_suppressed": (None if was is None else bool(was)),
-           "note": _suppress_note(kind, bool(now))}
+           "was_suppressed": was,
+           "note": _suppress_note(kind, now)}
     if new_errors:
         out["timeline_errors_after"] = new_errors
         out["note"] = (f"The change left {len(new_errors)} feature(s) in error: "
@@ -144,21 +147,25 @@ def _do_delete(design, obj, kind, name):
 
 
 def _do_reverse(ml, name):
-    was = safe(lambda: ml.isReversed)
+    was = _flag(ml, "isReversed")
     if was is None:
         return error(f"Motion link '{name}' does not report isReversed, so there is no direction to "
                      "flip.")
-    want = not bool(was)
+    want = not was
     try:
         ml.isReversed = want
     except Exception as e:
         return error(f"Could not set isReversed on motion link '{name}': {e}")
-    now = safe(lambda: ml.isReversed)
-    if bool(now) != want:
+    now = _flag(ml, "isReversed")
+    if now is None:
+        return error(f"isReversed cannot be read on motion link '{name}' after setting it to "
+                     f"{want}, so the flip is UNCONFIRMED. Re-read the link with "
+                     "assembly_get(include=['relations']).")
+    if now != want:
         return error(f"Setting isReversed={want} on motion link '{name}' did not take - it reads "
                      f"{now}.")
-    return ok({"kind": "motion_link", "name": name, "reversed": bool(now),
-               "was_reversed": bool(was),
+    return ok({"kind": "motion_link", "name": name, "reversed": now,
+               "was_reversed": was,
                "note": "The linked joints now move in the opposite sense relative to each other. "
                        "Drive ONE member (joint_drive) and read the partner back."})
 
@@ -181,7 +188,7 @@ def _do_set_values(ml, name, ratio):
                      "freedom it links.")
     # setMotionData carries isReversed, so the SIGN of ratio SETS the direction outright: a positive
     # ratio clears an existing reversal. was_reversed reports what that overwrote.
-    was_rev = safe(lambda: ml.isReversed)
+    was_rev = _flag(ml, "isReversed")
     reversed_link = r < 0
     mag = abs(r)
     v1 = adsk.core.ValueInput.createByReal(1.0)
@@ -196,7 +203,7 @@ def _do_set_values(ml, name, ratio):
                      "false) - its ratio is unchanged.")
     one = safe(lambda: ml.valueOne.value)
     two = safe(lambda: ml.valueTwo.value)
-    now_rev = safe(lambda: ml.isReversed)
+    now_rev = _flag(ml, "isReversed")
     if one is None or two is None:
         return error(f"setMotionData reported success on '{name}' but its valueOne/valueTwo "
                      "parameters cannot be read back, so nothing confirms the new ratio.")
@@ -207,12 +214,17 @@ def _do_set_values(ml, name, ratio):
     if abs(got - mag) > max(_RATIO_TOLERANCE, _RATIO_TOLERANCE * mag):
         return error(f"setMotionData reported success on '{name}' but its parameters read "
                      f"{one}:{two} (a ratio of {got}), not {mag} - the ratio did not take.")
-    if bool(now_rev) != reversed_link:
+    if now_rev is None:
+        return error(f"setMotionData reported success on '{name}' and its parameters read "
+                     f"{one}:{two}, but isReversed cannot be read back, so the direction the SIGN "
+                     "of ratio sets is UNCONFIRMED. Re-read the link with "
+                     "assembly_get(include=['relations']).")
+    if now_rev != reversed_link:
         return error(f"setMotionData reported success on '{name}' but it reads isReversed="
-                     f"{bool(now_rev)}, not {reversed_link} - the direction did not take.")
+                     f"{now_rev}, not {reversed_link} - the direction did not take.")
     return ok({"kind": "motion_link", "name": name, "ratio": r, "value_one": one, "value_two": two,
-               "reversed": bool(now_rev),
-               "was_reversed": (None if was_rev is None else bool(was_rev)),
+               "reversed": now_rev,
+               "was_reversed": was_rev,
                "note": "Coupling re-valued: joint_two moves |ratio| per unit of joint_one, and the "
                        "SIGN of ratio SETS the direction - so a positive ratio CLEARS an existing "
                        "reversal (was_reversed reports what it overwrote). To flip the direction "

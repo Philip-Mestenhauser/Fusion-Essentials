@@ -25,8 +25,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (same convention workspace_orient reads).
-_HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -66,12 +64,18 @@ def _resolve_cutter(split_plane, split_tool_body):
     return _TOOLBODY.resolve(split_tool_body)
 
 
-def _health_error(feature):
-    """An error result if the feature computed with a health ERROR, else None."""
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+def _health_error(design, feature):
+    """An error result if the feature computed with a health ERROR, else None.
+
+    The failed feature is LEFT on the timeline and the closing sentence says so - it is
+    _common.failed_effect_remedy, the one aftermath every health-error refusal in this family ends
+    with. Leaving it keeps the platform's own errorOrWarningMessage inspectable in Fusion, which is
+    the only thing that says why the cutter missed."""
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Split feature was created but failed to compute: {msg}. The cutter may not "
-                     "fully cross the target - try extend_tool=true or a larger cutter.")
+                     "fully cross the target - try extend_tool=true or a larger cutter. "
+                     + _common.failed_effect_remedy(design, feature))
     return None
 
 
@@ -99,7 +103,7 @@ def _split_body(design, comp, target, cutter, extend_tool):
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Split body"))
-    herr = _health_error(feature)
+    herr = _health_error(design, feature)
     if herr:
         return herr
 
@@ -116,7 +120,7 @@ def _split_body(design, comp, target, cutter, extend_tool):
     else:
         fb = safe(lambda: feature.bodies)
         rc = safe(lambda: fb.count, 0) if fb else 0
-        names = [safe(lambda i=i: fb.item(i).name) for i in range(rc)]
+        names = [safe(lambda b=b: b.name) for b in _common.iter_collection(fb)]
     # A split that yields a single body did not actually divide anything - report it, never a false ok.
     if rc < 2:
         return error(f"Split produced {rc} body - the cutter did not divide "
@@ -173,7 +177,7 @@ def _split_face(design, comp, faces, cutter, extend_tool):
     direct_no_feature = _common.direct_feature_absence(design, feature)
     if not feature and not direct_no_feature:
         return error(_common.no_feature_error(design, "Split face"))
-    herr = _health_error(feature)
+    herr = _health_error(design, feature)
     if herr:
         return herr
 

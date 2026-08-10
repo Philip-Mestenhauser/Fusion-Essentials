@@ -18,10 +18,15 @@ from ._common import safe
 MAP_BLURB = ("cloud data-model helpers shared by data_ops, doc_lifecycle, _data_read, doc_open, "
              "doc_insert_occurrence (hub/project/folder/URN) + resolve_file_reference (the ONE "
              "URN-or-name-in-a-project DataFile resolver, which REFUSES a name matching several files) "
-             "and FUSION_NATIVE_EXTENSIONS/name_extension (the download-refusal fact: the NAME carries "
-             "the true extension, fileExtension does not)")
+             "+ navigate_folder_path (the ONE folder-PATH walk from a project root, creating nothing: "
+             "it hands back the folder and its cleaned path, or the miss triple - the segment that did "
+             "not resolve, the deepest folder that DID, and the subfolder names there - that each "
+             "caller words its own refusal from) and FUSION_NATIVE_EXTENSIONS/name_extension (the "
+             "download-refusal fact: the NAME carries the true extension, fileExtension does not)")
 
 app = adsk.core.Application.get()
+
+_UNREAD = object()      # a collection read that RAISED - distinct from one that came back empty
 
 # Every save made through this server is authored by an AI agent, not a human. Document.save/saveAs
 # has no author field, so the version description carries the attribution. _agent_description() is the
@@ -95,6 +100,42 @@ def _resolve_folder_path(root, segments):
             return None, seg
         cur = nxt
     return cur, None
+
+
+def navigate_folder_path(root, path):
+    """Walk a raw folder PATH string from `root`, creating nothing - the ONE folder-path navigation
+    every cloud tool scopes a project read/move through.
+
+    Returns (folder, path_string, miss). On success `folder` is the deepest folder and `path_string`
+    its cleaned path ("" for `root` itself), miss None. On a miss `folder`/`path_string` are None and
+    `miss` carries the facts a refusal names: {'segment' - the segment that did not resolve, 'at' -
+    the path of the deepest folder that DID ("(project root)" for `root`), 'available' - that
+    folder's subfolder names, or None when the enumeration RAISED}. Each caller words its own refusal
+    from them, so one walk serves the file listing, the by-name file resolver and a move destination
+    without their nouns converging.
+
+    available=None and available=[] are DIFFERENT answers and no caller may render them alike: a
+    folder whose dataFolders enumeration failed is a hole in the search space (the segment may well
+    be there), while an empty list means the walk looked and the folder is genuinely childless. The
+    same distinction _walk_folder draws with truncated['unread'].
+    """
+    cur, cur_path = root, ""
+    for seg in _split_path(path):
+        nxt = _child_folder_by_name(cur, seg)
+        if nxt is None:
+            # _child_folder_by_name answers None for BOTH 'no such child' and 'the enumeration
+            # raised', so the sibling read is taken here with its own sentinel to tell them apart.
+            folders = safe(lambda: cur.dataFolders.asArray(), _UNREAD)
+            names = (None if folders is _UNREAD
+                     else [n for n in (safe(lambda f=f: f.name) for f in folders) if n])
+            return None, None, {"segment": seg, "at": cur_path or "(project root)",
+                                "available": names}
+        # The folder's OWN name, not the segment as typed: the match is case-insensitive, and the
+        # path this returns is published as the folder the walk landed in.
+        cur_path = f"{cur_path}/{safe(lambda n=nxt: n.name) or seg}" if cur_path else (
+            safe(lambda n=nxt: n.name) or seg)
+        cur = nxt
+    return cur, cur_path, None
 
 
 def _ensure_folder_path(root, segments):
@@ -206,9 +247,12 @@ def name_extension(name):
 
 
 def _looks_like_identifier(raw):
-    """True when `raw` is a URN or a Fusion web URL rather than a file NAME."""
+    """True when `raw` is a URN or a Fusion web URL rather than a file NAME. PREFIX-only: a file NAME
+    may legally start with 'http' ('httpd-mount.f3d') or carry '://' anywhere in it, and routing such
+    a name down the URN path loses the project-scoped name lookup it needed - the miss then reads as
+    'no cloud file resolves from ...' instead of listing the project's names."""
     low = (raw or "").strip().lower()
-    return low.startswith("urn:") or low.startswith("http") or "://" in low
+    return low.startswith("urn:") or low.startswith("http://") or low.startswith("https://")
 
 
 def _name_hint(names):
@@ -260,15 +304,16 @@ def resolve_file_reference(raw, project="", project_id="", folder=""):
     if root is None:
         return None, None, f"Could not access the root folder of project '{safe(lambda: proj.name)}'."
 
-    start, start_path = root, ""
-    segments = _split_path(folder)
-    if segments:
-        start, missing = _resolve_folder_path(root, segments)
-        if not start:
-            return None, None, (f"Folder '{folder}' not found in project "
-                                f"'{safe(lambda: proj.name)}' (missing segment '{missing}'). See "
-                                "data_get(project=<name>, include=['folders']).")
-        start_path = "/".join(segments)
+    start, start_path, miss = navigate_folder_path(root, folder)
+    if miss:
+        # An UNREAD sibling list makes 'not found' an overclaim - the segment may be sitting in a
+        # folder listing that never opened, so the refusal says which of the two happened.
+        why = (" - the subfolders of that folder could not be READ, so whether the segment is "
+               "there is unknown" if miss["available"] is None else "")
+        return None, None, (f"Folder '{folder}' not resolved in project "
+                            f"'{safe(lambda: proj.name)}' (missing segment '{miss['segment']}' in "
+                            f"'{miss['at']}'{why}). See data_get(project=<name>, "
+                            "include=['folders']).")
 
     # ONE traversal: the same capped walk data_get's file listing uses (_data_read._walk_folder) -
     # this resolver only differs in its leaf op, matching a name over the summaries it collects.
@@ -281,6 +326,13 @@ def resolve_file_reference(raw, project="", project_id="", folder=""):
     scope = f"project '{safe(lambda: proj.name)}'" + (f", folder '{start_path}'" if start_path else "")
     capped = (" The listing hit its cap, so files beyond it were not searched - scope with 'folder'."
               if truncated.get("value") else "")
+    # A folder that would not enumerate is a hole in the search space, not an empty folder: a second
+    # file of this name could be sitting in it, so neither a miss nor a UNIQUE match may be reported
+    # as settled without saying so.
+    if truncated.get("unread_count"):
+        capped += (f" {truncated['unread_count']} folder(s) could not be read and were not searched"
+                   + (f" ({', '.join(truncated.get('unread', []))})" if truncated.get("unread") else "")
+                   + " - pass the file's id if this answer looks wrong.")
 
     if not matches:
         return None, None, (f"No file named '{ident}' in {scope}. Files there: "
@@ -288,7 +340,8 @@ def resolve_file_reference(raw, project="", project_id="", folder=""):
     if len(matches) > 1:
         rows = "; ".join(f"{m.get('folder_path')} (id {m.get('id')})" for m in matches)
         return None, None, (f"'{ident}' names {len(matches)} files in {scope} - refusing to guess "
-                            f"which: {rows}. Pass one of those ids as 'file', or scope with 'folder'.")
+                            f"which: {rows}. Pass one of those ids as 'file', or scope with "
+                            f"'folder'.{capped}")
 
     hit = matches[0]
     df, resolved, tried = _resolve_data_file(hit.get("id") or "")
@@ -298,4 +351,5 @@ def resolve_file_reference(raw, project="", project_id="", folder=""):
     # One match inside a CAPPED listing is not proof of uniqueness - files past the cap were never
     # compared. The flag travels with the result so every caller can say so instead of implying it.
     return df, {"matched_by": "name", "urn": resolved, "folder_path": hit.get("folder_path"),
-                "scope_truncated": bool(truncated.get("value"))}, None
+                "scope_truncated": bool(truncated.get("value")),
+                "folders_unreadable": truncated.get("unread_count", 0)}, None

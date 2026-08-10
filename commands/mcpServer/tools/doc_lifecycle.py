@@ -21,7 +21,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from . import _assert
 from ._data_common import (
     _data, _agent_description, _find_project, _split_path,
@@ -55,10 +55,11 @@ def _report_lineage_change(payload, doc, lineage_before):
             and lineage_before != lineage_after):
         payload["lineage_changed"] = {"from": lineage_before, "to": lineage_after}
         payload["note"] = (payload.get("note", "") +
-                           " THIS SAVE MOVED THE DOCUMENT TO A NEW LINEAGE URN (measured: the "
-                           "first save after a configured-design conversion does this). Address "
-                           "the file by lineage_changed.to from now on - lineage_changed.from opens the "
-                           "pre-conversion file, and its version history does not continue.").strip()
+                           " THIS SAVE MOVED THE DOCUMENT TO A NEW LINEAGE URN. Address the file by "
+                           "lineage_changed.to from now on - lineage_changed.from opens the file "
+                           "this one forked from, and its version history does not continue. One "
+                           "measured cause is the first save after a configured-design conversion; "
+                           "this payload reports the change, not why it happened.").strip()
 
 
 def _settled_lineage_urn(doc):
@@ -357,10 +358,9 @@ def _is_document_open(file_id):
         return False
     try:
         docs = app.documents
-        for i in range(safe(lambda: docs.count, 0) or 0):
-            d = safe(lambda: docs.item(i))
-            df = safe(lambda: d.dataFile) if d else None
-            if df and safe(lambda: df.id) == file_id:
+        for d in iter_collection(docs):
+            df = safe(lambda d=d: d.dataFile)
+            if df and safe(lambda df=df: df.id) == file_id:
                 return True
     except Exception:
         pass
@@ -653,10 +653,15 @@ def _find_open_document(name):
     if docs is None:
         return None, names, False
 
+    # A document's INDEX in app.documents is its address here ('open:N' below indexes open_docs, and
+    # doc_get publishes the same open_index), so this stays a positional walk: iter_collection drops
+    # an unreadable document, which would slide every later doc onto the wrong 'open:N'. item(i)
+    # itself is guarded too - a stale document proxy burns its slot (a None entry) instead of
+    # raising the whole resolve away.
     open_docs = []
     for i in range(safe(lambda: docs.count, 0)):
-        d = docs.item(i)
-        nm = safe(lambda d=d: d.name) or ""
+        d = safe(lambda i=i: docs.item(i))
+        nm = safe(lambda d=d: d.name) or "" if d is not None else ""
         names.append(nm)
         open_docs.append((d, nm))
 
@@ -739,7 +744,7 @@ def close_document_handler(name: str = "", save_changes: bool = False,
         return error("No documents are open.")
 
     if close_all:
-        targets = [docs.item(i) for i in range(safe(lambda: docs.count, 0))]
+        targets = list(iter_collection(docs))
     elif name.strip():
         d, names, ambiguous = _find_open_document(name)
         if ambiguous:

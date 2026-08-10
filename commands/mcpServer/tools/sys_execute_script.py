@@ -6,9 +6,12 @@
 """High-risk MCP tool: execute arbitrary Fusion API Python in the live session.
 
 The general "go do X" escape hatch. NOT registered unless the user explicitly enables it
-(mcpServer settings -> allow_execute_api_script, default False). MEASURED: an UNCAUGHT raise of
-either kind rolls the whole script back, printed output with it. Catching an error is no guarantee
-the earlier work survived either - some Fusion API errors take the command down even when caught.
+(mcpServer settings -> allow_execute_api_script, default False). MEASURED on DESIGN documents: an
+UNCAUGHT raise of either kind rolls the whole script back, printed output with it. Catching an error
+is no guarantee the earlier work survived either - some Fusion API errors take the command
+down even when caught. On a DRAWING document rollback is not guaranteed in either direction: the same
+add-a-sheet-then-raise script has been measured leaving the sheet behind on one rig and cleaning it
+up on another.
 """
 
 import os
@@ -21,6 +24,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
+from . import _drawing_common
 
 app = adsk.core.Application.get()
 
@@ -130,10 +134,22 @@ def _extract_script_error(tb: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
+# Appended to a FAILURE result on a drawing document only - the caller needs it exactly when a
+# script raised there, and it would be noise on every design-document failure. The description
+# carries the one-sentence rule; this carries what to DO about it.
+_DRAWING_ROLLBACK_ADVICE = (
+    "\n\nThe active document is a DRAWING: rollback is not guaranteed either way here - a failing "
+    "script has been measured both leaving the sheet it added behind and cleaning it up. Re-read the "
+    "sheets before assuming this call changed nothing."
+)
+
+
 def _error_result(text: str) -> dict:
     # Intentionally NOT _common.error(text): that helper mirrors the same text into both `content`
     # and `message`. Here we want a TERSE fixed `message` ("Script execution failed") while `content`
     # carries the full traceback - a deliberately different contract for arbitrary-script execution.
+    if _drawing_common.active_drawing() is not None:
+        text += _DRAWING_ROLLBACK_ADVICE
     return {
     "content": [{"type": "text", "text": text}],
     "isError": True,
@@ -151,10 +167,11 @@ TOOL_DESCRIPTION = (
     "pause script execution and the agent cannot dismiss them.\n"
     "- Let exceptions raise rather than swallowing them, so the error text is returned.\n"
     "- ONE mutation per call is the safe shape: a script gets no per-item failure isolation, so a "
-    "bulk edit that half-fails cannot report WHICH item failed. An UNCAUGHT raise (Fusion API error "
-    "or plain Python) always rolls the WHOLE script back, earlier mutations and printed output with "
-    "it - and catching an error is NO GUARANTEE the earlier work survived: some Fusion API errors "
-    "take the whole command down even when caught. Batch work belongs in separate calls.\n"
+    "bulk edit that half-fails cannot report WHICH item failed. On a DESIGN document an UNCAUGHT "
+    "raise (Fusion API error or plain Python) always rolls the WHOLE script back, earlier mutations "
+    "and printed output with it - and catching an error is NO GUARANTEE the earlier work survived: "
+    "some Fusion API errors take the whole command down even when caught. On a DRAWING document "
+    "rollback is NOT GUARANTEED either way. Batch work belongs in separate calls.\n"
     "- Use print() to return values/information; printed output is included in the result.\n\n"
     "Read the state first (e.g. workspace_orient), and verify it again after."
 )

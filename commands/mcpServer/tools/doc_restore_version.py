@@ -12,7 +12,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 
 app = adsk.core.Application.get()
 
@@ -22,10 +22,7 @@ def _find_version(df, version_number, version_id):
     Returns (target_DataFile_or_None, available_version_numbers_desc)."""
     available = []
     candidates = [df]
-    coll = safe(lambda: df.versions)
-    total = safe(lambda: coll.count, 0) if coll is not None else 0
-    for i in range(total):
-        candidates.append(safe(lambda i=i: coll.item(i)))
+    candidates.extend(iter_collection(safe(lambda: df.versions)))
     found = None
     for v in candidates:
         if v is None:

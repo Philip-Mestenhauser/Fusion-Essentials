@@ -412,6 +412,44 @@ class TestChildGeometryMoved:
         assert res["isError"] is True
         assert "did not propagate" in res["message"].lower()
 
+    def test_world_transform_is_read_off_transform2_not_transform(self, monkeypatch):
+        # .transform is the occurrence's LOCAL matrix - a nested proxy under a rotated+translated
+        # parent reads its parent's placement OUT of it - while .transform2 is the composed WORLD
+        # matrix. This kind compares the translation against a WORLD geometry point, so reading the
+        # local one reports "moved" against geometry that did not move (or the reverse). Here the
+        # LOCAL matrix stays put across the handler while the WORLD one moves with the geometry:
+        # off .transform the kind would see an expected-zero move and pass anything.
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        wrapper.transform2 = types.SimpleNamespace(translation=_pt(50, 0, 0))
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform2.translation = _pt(58.5, 8.5, 0)   # world moved
+            # the LOCAL matrix never changes - the parent absorbed the placement
+            return _ok({"created": True})
+
+        res = kernel.wrap(handler, [p])()
+        assert res["isError"] is True                  # the world move did NOT reach the geometry
+        assert "did not propagate" in res["message"].lower()
+
+    def test_transform_is_the_fallback_when_transform2_is_absent(self, monkeypatch):
+        # A build (or a proxy) carrying no transform2 must still be gated, not silently skipped.
+        cbody = _body(_pt(0, 0, 0))
+        child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
+        wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
+        assert not hasattr(wrapper, "transform2")
+        p = self._wire(monkeypatch, [wrapper])
+
+        def handler(**kw):
+            wrapper.transform.translation = _pt(8.5, 8.5, 0)
+            return _ok({"created": True})
+
+        res = kernel.wrap(handler, [p])()
+        assert res["isError"] is True
+        assert "did not propagate" in res["message"].lower()
+
     def test_occurrence_without_bodies_is_skipped(self, monkeypatch):
         empty = _occ("Empty:1", _pt(0, 0, 0))   # no bodies anywhere - nothing to gate
         p = self._wire(monkeypatch, [empty])

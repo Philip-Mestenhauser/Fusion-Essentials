@@ -21,7 +21,7 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import BRepBody, load_tool, payload, error_message
+from conftest import BRepBody, MeshBody, load_tool, payload, error_message
 
 ms = load_tool("mesh_shell")
 
@@ -33,52 +33,6 @@ class _ValueInput:
     Carries the real number so a scaling assertion can read it back."""
     def __init__(self, real):
         self.real = real
-
-
-class TriangleMesh:
-    def __init__(self, tri, nodes):
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody. `volume` RAISES when the mesh is not closed - an open
-    mesh encloses no volume. `dead` models an invalidated wrapper, which raises on every read;
-    `counts_readable=False` models a body whose displayMesh cannot be reached while its volume
-    still can - the two halves of the census fail independently."""
-    def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, token=None,
-                 parent=None, counts_readable=True):
-        self.name = name
-        self.dead = False
-        self._display = TriangleMesh(tri, nodes)
-        self._is_closed = is_closed
-        self.volume_cm3 = volume
-        self.counts_readable = counts_readable
-        self.entityToken = token or f"MTOK::{name}"
-        self.parentComponent = parent
-
-    def _live(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-
-    @property
-    def displayMesh(self):
-        self._live()
-        if not self.counts_readable:
-            raise RuntimeError("3 : the display mesh is unavailable")
-        return self._display
-
-    @property
-    def isClosed(self):
-        self._live()
-        return self._is_closed
-
-    @property
-    def volume(self):
-        self._live()
-        if not self._is_closed:
-            raise RuntimeError("3 : the mesh is not closed and encloses no volume")
-        return self.volume_cm3
 
 
 class _Coll:
@@ -203,12 +157,16 @@ def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     return mesh, comp, feats
 
 
-def _hollow(mesh, tri=30370, nodes=15189, volume=0.1159):
-    """The measured in-place hollow: the body is re-triangulated and its volume drops."""
+def _hollow(mesh, tri=30370, nodes=15189, volume=0.1159, close=None):
+    """The measured in-place hollow: the body is re-triangulated and its volume drops. `close=False`
+    leaves the body reading OPEN afterwards - no mechanism is claimed for that, only the flag; an
+    open body's volume then reads 0.0 whatever volume says here, because it encloses nothing."""
     def _apply():
         mesh.displayMesh.triangleCount = tri
         mesh.displayMesh.nodeCount = nodes
-        mesh.volume_cm3 = volume
+        mesh._volume_cm3 = volume
+        if close is not None:
+            mesh._is_closed = close
     return _apply
 
 
@@ -318,12 +276,19 @@ class TestVerification:
         assert "unchanged" in msg and "12 triangles, 8 vertices, the same volume" in msg
 
     def test_the_no_effect_error_omits_a_volume_it_could_not_read(self, monkeypatch):
-        # an open mesh's volume is unreadable at both ends, so "the same volume" would be a claim
-        # about a number nobody measured
-        _rig(monkeypatch, mesh=MeshBody(tri=12, nodes=8, is_closed=False))
+        # a volume neither end could report would be a claim about a number nobody measured. An
+        # OPEN mesh is not that case - it reads 0.0 - so the unreadable half is modelled directly.
+        _rig(monkeypatch, mesh=MeshBody(tri=12, nodes=8, volume_readable=False))
         msg = error_message(ms.handler(mesh="H", thickness=2.0))
         assert "12 triangles, 8 vertices)" in msg
         assert "volume" not in msg
+
+    def test_the_no_effect_error_does_name_an_open_meshs_volume_it_did_read(self, monkeypatch):
+        # the mirror of the clause above: an open mesh's 0.0 IS a reading taken at both ends, so
+        # "the same volume" is a measured claim here and belongs in the sentence.
+        _rig(monkeypatch, mesh=MeshBody(tri=12, nodes=8, is_closed=False))
+        msg = error_message(ms.handler(mesh="H", thickness=2.0))
+        assert "12 triangles, 8 vertices, the same volume" in msg
 
     def test_the_no_effect_error_omits_counts_it_could_not_read(self, monkeypatch):
         # the mirror case: the display mesh is unreachable, so "None triangles" must not appear
@@ -342,8 +307,92 @@ class TestVerification:
         assert out["changed"] == ["triangle_count", "vertex_count"]
         assert "did not drop" in out["note"]
 
-    def test_an_open_mesh_reports_no_volume_change_rather_than_a_wrong_one(self, monkeypatch):
+    def test_an_open_mesh_reports_a_measured_zero_volume_change(self, monkeypatch):
+        # an open mesh reads 0.0 at BOTH ends, so the change is a measured zero rather than an
+        # unreadable field - and a body that was never closed cannot have been hollowed either.
         mesh = MeshBody(tri=12, nodes=8, is_closed=False)
+        _rig(monkeypatch, mesh=mesh, on_add=_hollow(mesh))
+        out = payload(ms.handler(mesh="H", thickness=2.0))
+        assert out["volume_change"] == 0.0
+        assert out["hollowed"] is False
+        assert out["watertight"] is False
+        assert out["changed"] == ["triangle_count", "vertex_count"]
+        assert "does not report itself watertight" in out["note"]
+
+    def test_a_shell_that_broke_the_closure_is_not_reported_as_a_hollow(self, monkeypatch):
+        # the trap the measured 0.0 opens: a body that stops reading watertight reports volume 0.0
+        # because it encloses nothing, so the delta is the full -1.0 cm3 - the LARGEST drop this
+        # tool can see. Read on the number alone that is the deepest hollow; read with the closure
+        # flag it is the worst outcome the operation has.
+        mesh = MeshBody(tri=12, nodes=8, is_closed=True, volume=1.0)
+        _rig(monkeypatch, mesh=mesh, on_add=_hollow(mesh, close=False))
+        out = payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
+        assert out["volume_change"] == pytest.approx(-1000.0)   # the full magnitude came out
+        assert out["hollowed"] is False
+        assert out["watertight"] is False
+        assert "NO LONGER watertight" in out["note"] and "NOT a hollow" in out["note"]
+        # the number in the sentence is the one the payload published, never a constant
+        assert "-1000.0 mm3" in out["note"] and "reads 0.0" not in out["note"]
+
+    def test_a_lost_closure_whose_volume_is_unreadable_claims_no_number(self, monkeypatch):
+        # the closure went, and the volume could not be read at both ends - so there is no change
+        # to explain and the note must not assert the 0.0 an unreadable field never reported.
+        mesh = MeshBody(tri=12, nodes=8, is_closed=True, volume=1.0)
+
+        def _lose_closure_and_the_volume():
+            mesh.displayMesh.triangleCount = 30370
+            mesh._is_closed = False
+            mesh._volume_readable = False
+        _rig(monkeypatch, mesh=mesh, on_add=_lose_closure_and_the_volume)
+        out = payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
+        assert out["volume_change"] is None
+        assert out["hollowed"] is False
+        assert out["watertight"] is False
+        assert "NO LONGER watertight" in out["note"]
+        assert "volume could not be read" in out["note"]
+        assert "0.0" not in out["note"] and "None" not in out["note"]
+
+    def test_a_closure_flag_readable_before_but_not_after_is_not_a_lost_closure(self, monkeypatch):
+        # closure_lost needs the after-flag to SAY false. A flag that stopped reading is not a
+        # false one: it leaves the hollow unconfirmed, and claiming the closure was lost would
+        # invent a reading nobody got.
+        mesh = MeshBody(tri=12, nodes=8, is_closed=True, volume=1.0)
+
+        def _hollow_then_lose_the_flag():
+            mesh.displayMesh.triangleCount = 30370
+            mesh._volume_cm3 = 0.1159
+            mesh._closed_readable = False
+        _rig(monkeypatch, mesh=mesh, on_add=_hollow_then_lose_the_flag)
+        out = payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
+        assert out["watertight"] is None
+        assert out["hollowed"] is False
+        assert "does not report itself watertight" in out["note"]
+        assert "NO LONGER watertight" not in out["note"]
+
+    def test_a_volume_that_ROSE_is_not_a_hollow(self, monkeypatch):
+        # a hollow is a DROP. A shell that left the body enclosing MORE than it started with did
+        # not take material out, and a gate keyed on "the volume moved" would call it a hollow.
+        mesh = MeshBody(tri=12, nodes=8, is_closed=True, volume=1.0)
+        _rig(monkeypatch, mesh=mesh, on_add=_hollow(mesh, volume=1.5))
+        out = payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
+        assert out["volume_change"] == pytest.approx(500.0)
+        assert out["hollowed"] is False
+        assert "did not drop" in out["note"]
+
+    def test_an_unreadable_closure_flag_cannot_confirm_a_hollow(self, monkeypatch):
+        # the flag has to SAY closed: an unreadable one leaves the drop unexplained, so it must not
+        # be waved through as a hollow the way a False would be reported as a closure loss.
+        mesh = MeshBody(tri=12, nodes=8, is_closed=True, volume=1.0)
+        _rig(monkeypatch, mesh=mesh, on_add=_hollow(mesh))
+        mesh._closed_readable = False
+        out = payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
+        assert out["watertight"] is None
+        assert out["hollowed"] is False
+        assert "does not report itself watertight" in out["note"]
+
+    def test_an_unreadable_volume_reports_null_and_says_so(self, monkeypatch):
+        # the only shape that makes volume_change null - never the 0.0 an open mesh reports.
+        mesh = MeshBody(tri=12, nodes=8, volume_readable=False)
         _rig(monkeypatch, mesh=mesh, on_add=_hollow(mesh))
         out = payload(ms.handler(mesh="H", thickness=2.0))
         assert out["volume_change"] is None
@@ -356,7 +405,7 @@ class TestVerification:
         _m, comp, feats = _rig(monkeypatch, mesh=mesh)
 
         def _wipe():
-            mesh.dead = True
+            mesh._dead = True
             comp.dead = True
         feats._on_add = _wipe
         assert "UNVERIFIED" in error_message(ms.handler(mesh="H", thickness=2.0))

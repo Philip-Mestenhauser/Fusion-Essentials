@@ -15,8 +15,8 @@ adsk.cam is mocked. What we PIN is the handler's own logic:
   - diameter filtering of cylinder faces (mm), and the empty-after-filter guard;
   - height setting via _mode/_offset (never _value), validated-before-mutate;
   - generation LAUNCH-and-return: the handler never pumps/waits on the future - it registers the
-    future in cam_generate._GENERATIONS (keeps it alive) and the note teaches the
-    cam_get_status(target=...) poll;
+    future in _cam_common._GENERATIONS (keeps it alive) and the note teaches the
+    cam_get_status(target=...) read;
   - the guards (bad selection, no CAM, missing/ambiguous op, 0 selections, no faces after filter).
 
 The GeometryHandleList/BodyRefList input kinds have their own tests; here we patch those resolve
@@ -33,6 +33,7 @@ from conftest import load_tool, make_cam, install, make_sketch, MakeComp, MakeDe
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 cg = load_tool("cam_select_geometry")
+_cam = load_tool("_cam_common")
 
 
 @pytest.fixture(autouse=True)
@@ -48,13 +49,13 @@ def _restore_resolver():
 
 @pytest.fixture(autouse=True)
 def _clean_generations():
-    """A launch registers a future in cam_generate._GENERATIONS (shared, session-lived) - clear it
+    """A launch registers a future in _cam_common._GENERATIONS (shared, session-lived) - clear it
     around each test so entries never leak into test_cam_generate's registry assertions."""
-    cg.cam_generate._GENERATIONS.clear()
-    cg.cam_generate._HANDLE_SEQ[0] = 0
+    _cam._GENERATIONS.clear()
+    _cam._HANDLE_SEQ[0] = 0
     yield
-    cg.cam_generate._GENERATIONS.clear()
-    cg.cam_generate._HANDLE_SEQ[0] = 0
+    _cam._GENERATIONS.clear()
+    _cam._HANDLE_SEQ[0] = 0
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -142,6 +143,18 @@ class _DeafHoleDiameter(_Selection):
 
     @minimumHoleDiameter.setter
     def minimumHoleDiameter(self, value):
+        pass
+
+
+class _ClampingDepth(_Selection):
+    """A selection that CLAMPS the pocket-depth bound to its own minimum (5.08 cm = 2 in) instead of
+    keeping what was written - a read-back that is a wrong NUMBER, not a missing one."""
+    @property
+    def minimumPocketDepth(self):
+        return 5.08
+
+    @minimumPocketDepth.setter
+    def minimumPocketDepth(self, value):
         pass
 
 
@@ -386,6 +399,55 @@ class TestCurveSelection:
         assert res["isError"] is True and "0 selection" in res["message"]
 
 
+# ── each curve kind takes ONE object type, enforced by the real handle kind ──
+#
+# ChainSelection.inputGeometry takes B-Rep EDGES and Pocket/FaceContour take BRepFACES: the class
+# states one type and Fusion rejects the other. These two run the REAL GeometryHandleList (no
+# resolve patch), so the require= the tool wires per kind is what the refusal rests on - handing
+# 'chain' a face handle must be refused HERE, not applied and then rejected downstream with the
+# operation's previous selection already cleared.
+
+class TestHandleKindRequirement:
+    def _resolves_to(self, monkeypatch, entity):
+        """The real handle kind, against a design whose one handle resolves to `entity`."""
+        import adsk.fusion
+        adsk.fusion.BRepFace = _Face
+        adsk.fusion.BRepEdge = _Edge
+        monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: entity)
+        monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
+
+    def test_chain_refuses_a_face_handle_naming_the_type_it_got(self, monkeypatch):
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        self._resolves_to(monkeypatch, _Face())
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "must be an edge" in res["message"] and "_Face" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0   # nothing was applied
+
+    def test_pocket_refuses_an_edge_handle_naming_the_type_it_got(self, monkeypatch):
+        op = _curve_op(name="2D Pocket1")
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        self._resolves_to(monkeypatch, _Edge())
+        res = cg.handler(operation="2D Pocket1", selection="pocket", handles=["h"], generate=False)
+        assert res["isError"] is True
+        assert "must be a face" in res["message"] and "_Edge" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_the_matching_handle_kind_still_resolves(self, monkeypatch):
+        # The two refusals above must come from the require=, not from the real kind refusing
+        # everything this fixture hands it.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        self._resolves_to(monkeypatch, _Edge())
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  generate=False))
+        assert out["selections"] == 1 and _selection_of(op).kind == "chain"
+
+
 # ── the two body selections (silhouette / pocket_recognition) ────────────────
 
 class TestBodySelections:
@@ -443,9 +505,11 @@ class TestPocketFilter:
         sel = _selection_of(op)
         assert res["isError"] is False
         assert sel.areHolesIncluded is True
-        assert sel.minimumHoleDiameter == pytest.approx(0.25)      # 2.5 mm -> 0.25
+        assert sel.minimumHoleDiameter == pytest.approx(0.25)      # 2.5 mm -> 0.25 cm internally
         assert sel.writes.index("areHolesIncluded") < sel.writes.index("minimumHoleDiameter")
-        assert _payload(res)["pocket_filter_applied"] == {"holes": True, "min_hole_diameter": 0.25}
+        # published back in the units the caller spoke, not the internal cm
+        assert _payload(res)["pocket_filter_applied"] == {"holes": True, "min_hole_diameter": 2.5}
+        assert _payload(res)["pocket_filter_units"] == "mm"
 
     def test_every_length_lands_scaled_and_is_published(self, monkeypatch):
         op, res = self._run(monkeypatch, {"min_corner_radius": 1.0, "max_corner_radius": 8.0,
@@ -454,15 +518,22 @@ class TestPocketFilter:
         assert res["isError"] is False
         assert (sel.minimumCornerRadius, sel.maximumCornerRadius) == pytest.approx((0.1, 0.8))
         assert (sel.minimumPocketDepth, sel.maximumPocketDepth) == pytest.approx((0.3, 4.0))
-        assert _payload(res)["pocket_filter_applied"] == {
-            "min_corner_radius": 0.1, "max_corner_radius": 0.8,
-            "min_depth": 0.3, "max_depth": 4.0}
+        # the properties hold cm; the payload restates each read-back in the caller's mm
+        out = _payload(res)
+        assert out["pocket_filter_applied"] == {
+            "min_corner_radius": 1.0, "max_corner_radius": 8.0,
+            "min_depth": 3.0, "max_depth": 40.0}
+        assert out["pocket_filter_units"] == "mm"
 
     def test_inch_units_scale_the_filter(self, monkeypatch):
+        # 1 in lands as 2.54 cm on the property and is published back as 1.0 in - a payload that
+        # echoed the internal number would tell an inch caller their 1" depth is 2.54".
         op, res = self._run(monkeypatch, {"min_depth": 1.0}, units="in")
         assert res["isError"] is False
         assert _selection_of(op).minimumPocketDepth == pytest.approx(2.54)
-        assert _payload(res)["pocket_filter_applied"] == {"min_depth": 2.54}
+        out = _payload(res)
+        assert out["pocket_filter_applied"] == {"min_depth": 1.0}
+        assert out["pocket_filter_units"] == "in"
 
     def test_a_filter_value_the_selection_drops_is_an_error(self, monkeypatch):
         # min_hole_diameter is refused when holes is false; when holes is TRUE but the selection
@@ -480,6 +551,32 @@ class TestPocketFilter:
                          pocket_filter={"holes": True, "min_hole_diameter": 2.5}, generate=False)
         assert res["isError"] is True and "min_hole_diameter" in res["message"]
         assert pv.applied == 0
+
+    def test_a_dropped_value_states_the_read_back_in_the_callers_units(self, monkeypatch):
+        # the failure path publishes a number too: an inch caller who sent 1.0 and is told the
+        # selection "reads back 5.08" is reading Fusion's internal cm, not their own units.
+        op = _curve_op(name="Adaptive1")
+        cam = _CAM([_Setup([op])])
+        _install_bodies(monkeypatch, cam, [_Body("Carrier")])
+        pv = op.parameters.itemByName("contours").value
+        def _clamping(kind):
+            sel = _ClampingDepth(kind)
+            pv._cs._sels.append(sel)
+            return sel
+        pv._cs._make = _clamping
+        res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
+                         pocket_filter={"min_depth": 1.0}, units="in", generate=False)
+        assert res["isError"] is True and "min_depth" in res["message"]
+        assert "reads back 2.0 in" in res["message"]      # 5.08 cm stated in the caller's inches
+        assert "5.08" not in res["message"]
+        assert pv.applied == 0
+
+    def test_a_flag_only_filter_carries_no_units_key(self, monkeypatch):
+        # 'holes' is a boolean - a units key beside it would state units for a value that has none.
+        op, res = self._run(monkeypatch, {"holes": True})
+        out = _payload(res)
+        assert out["pocket_filter_applied"] == {"holes": True}
+        assert "pocket_filter_units" not in out
 
     def test_unknown_filter_key_is_refused(self, monkeypatch):
         op, res = self._run(monkeypatch, {"min_taper": 3.0})
@@ -768,7 +865,7 @@ class TestHeights:
         assert res["isError"] is True and "topHeight_offset" in res["message"]
 
 
-# ── generation: launch-and-return (the poll owns the pumping) ────────────────
+# ── generation: launch-and-return (it runs in the background on its own) ─────
 
 class TestGenerate:
     def test_returns_immediately_without_pumping_while_future_incomplete(self, monkeypatch):
@@ -786,19 +883,19 @@ class TestGenerate:
         assert out["launched"] is True
         assert pumps == []                                # returned with the future still incomplete
 
-    def test_future_registered_in_cam_generate_registry(self, monkeypatch):
-        # The returned handle keys cam_generate._GENERATIONS and the entry holds THE launched future:
+    def test_future_registered_in_the_shared_generation_registry(self, monkeypatch):
+        # The returned handle keys _cam_common._GENERATIONS and the entry holds THE launched future:
         # a dropped future is garbage-collected and Fusion abandons the generation; the registry is
-        # also what cam_get_status's handle path polls and cleans up.
+        # also what cam_get_status's handle path reads and cleans up.
         op = _curve_op()
         cam = _CAM([_Setup([op])], future=_Future(complete=False))
         _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
-        entry = cg.cam_generate._GENERATIONS[out["handle"]]
+        entry = _cam._GENERATIONS[out["handle"]]
         assert entry["future"] is cam._future
         assert entry["scope"] == "operation" and "2D Contour1" in entry["target"]
 
-    def test_note_teaches_cam_get_status_target_poll(self, monkeypatch):
+    def test_note_teaches_the_cam_get_status_target_read(self, monkeypatch):
         op = _curve_op()
         cam = _CAM([_Setup([op])], future=_Future(complete=False))
         _install(monkeypatch, cam, [_Edge()])
@@ -829,4 +926,4 @@ class TestGenerate:
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                                   generate=False))
         assert "launched" not in out and cam.generated == []
-        assert cg.cam_generate._GENERATIONS == {}
+        assert _cam._GENERATIONS == {}

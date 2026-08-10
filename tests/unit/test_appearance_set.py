@@ -95,8 +95,13 @@ class FakeProps:
 
 
 class FakeAppearance:
-    def __init__(self, name, color_props=1):
+    """`id` and `name` are independent axes, because live NEITHER identifies an appearance
+    instance: two different assets can share a name, and two different appearances can share an
+    id (a copy keeps its source asset's id - see addByCopy below)."""
+
+    def __init__(self, name, color_props=1, appearance_id=None):
         self.name = name
+        self.id = appearance_id if appearance_id is not None else f"asset:{name}"
         props = [FakeColorProperty() for _ in range(color_props)] + [_OtherProperty()]
         self.appearanceProperties = FakeProps(props)
 
@@ -121,12 +126,19 @@ class FakeAppearances:
 
     def addByCopy(self, base, name):
         # the real API refuses a duplicate name (returns nothing) - model that, so a handler that
-        # skips the lookup-first reuse path fails here the way it fails live
+        # skips the lookup-first reuse path fails here the way it fails live.
+        # MEASURED: a copy KEEPS its source asset's id, so every appearance this tool mints from
+        # one base shares an id and differs only by name. That is the normal case (the tool copies
+        # one base for every colour), not a corner, so the fake models it by default.
         if self.itemByName(name) is not None:
             return None
-        a = FakeAppearance(name)
+        a = FakeAppearance(name, appearance_id=safe_id(base))
         self.copied.append((base, name, a))
         return a
+
+
+def safe_id(appearance):
+    return getattr(appearance, "id", None)
 
 
 class FakeBody:
@@ -174,20 +186,31 @@ class FakeOcc:
         self.component = component or FakeComponent(name + "_comp")
 
 
+# The id every appearance this tool mints in these tests carries: the copy keeps the base's id,
+# and _install*/_install_mp seed "Base" as the design's only existing appearance.
+MINTED_ID = "asset:Base"
+
+
 class FanoutOcc(FakeOcc):
     """An occurrence whose .appearance assignment fans onto its bodies the way Fusion's does
-    (MEASURED, probe_w10.log "W10 P5"): every body without an override of its own takes the new
-    appearance, a body holding a body-level override silently KEEPS it, and the occurrence's own
-    .appearance still reads back as the newly assigned one either way. `silent` bodies model a body
-    whose appearance read declines to answer (stays None)."""
+    (MEASURED): every body without an override of its own takes the new appearance, a body holding
+    a body-level override silently KEEPS it, and the occurrence's own .appearance still reads back
+    as the newly assigned one either way. `silent` bodies model a body whose appearance read
+    declines to answer (stays None).
 
-    def __init__(self, name, bodies=(), keeps_override=(), silent=()):
+    A kept override defaults to the SAME-BASE case measured live: the body carries an appearance
+    this same tool minted earlier from the same base, so it shares the applied appearance's id and
+    differs only by name. `kept_name`/`kept_id` override either axis for the mirror case."""
+
+    def __init__(self, name, bodies=(), keeps_override=(), silent=(), kept_name=None,
+                 kept_id=None):
         self._keeps = set(keeps_override)
         self._silent = set(silent)
         super().__init__(name, bodies=bodies)
         for b in bodies:
             if b.name in self._keeps:
-                b.appearance = FakeAppearance("OwnColor_" + b.name)
+                b.appearance = FakeAppearance(kept_name or ("OwnColor_" + b.name),
+                                              appearance_id=kept_id or MINTED_ID)
 
     def __setattr__(self, key, value):
         object.__setattr__(self, key, value)
@@ -250,6 +273,15 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
+def _silent_body(name):
+    """A body that ACCEPTS an appearance assignment but whose .appearance read answers None - the
+    unverifiable read-back, which is neither a confirmed landing nor a confirmed miss. Built with
+    type() rather than a class statement so it stays one shared shape, not another bespoke fake."""
+    cls = type("SilentBody", (FakeBody,), {
+        "appearance": property(lambda self: None, lambda self, v: None)})
+    return cls(name)
+
+
 def _resolve_to(entity, kind):
     """Stub TargetRef to hand the handler an already-resolved (entity, kind). Target RESOLUTION is
     covered once in test_inputs.TestTargetRef; here we pin appearance_set's own job — copy a base
@@ -289,6 +321,55 @@ class TestApply:
         res = ap.handler(target="Body1", color="#1E8E3E")
         assert res["isError"] is True
         assert "did not take" in res["message"]
+
+    def test_a_body_left_holding_a_same_base_copy_is_not_a_success(self):
+        # The direct-write branches run the SAME two-key comparison as the fan-out: a body that
+        # silently kept an earlier copy minted from the same base shares the applied appearance's
+        # id, so an id-only read-back would call this stuck write a success.
+        stuck = FakeAppearance("AgentColor_FF0000", appearance_id="asset:Base")
+        body = FakeBody("Body1")
+        body.__class__ = type("StuckBody", (FakeBody,), {
+            "appearance": property(lambda self: stuck, lambda self, v: None)})
+        _install(FakeRoot(bodies=[body]))
+        res = ap.handler(target="Body1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert "did not take" in res["message"] and "AgentColor_FF0000" in res["message"]
+
+    def test_a_body_whose_appearance_will_not_read_back_is_still_a_success(self):
+        # The comparison answers None here - not False. An unreadable read-back is not evidence
+        # the write missed, so the direct-write branch must NOT raise "the override did not take";
+        # only a comparison that came back False may. (`is False` is load-bearing: `is not True`
+        # turns every unverifiable read into a fabricated failure.)
+        body = _silent_body("Body1")
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert out["applied"] is True and out["applied_to"] == ["Body1"]
+        assert "failed" not in out
+
+    def test_a_component_body_whose_appearance_will_not_read_back_is_not_marked_failed(self):
+        # Same rule inside the component loop: the unverifiable body joins applied_to, and
+        # 'failed' stays absent rather than carrying an invented "still reads 'None'" row.
+        quiet, good = _silent_body("Quiet"), FakeBody("Good")
+        comp = FakeComponent("Multi", bodies=[quiet, good])
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
+        out = _payload(ap.handler(target="Multi", color="#1E8E3E"))
+        assert out["applied_to"] == ["Quiet", "Good"]
+        assert "failed" not in out
+        assert "failed" not in out["note"]
+
+    def test_a_component_body_left_holding_a_same_base_copy_lands_in_failed(self):
+        stuck = FakeAppearance("AgentColor_FF0000", appearance_id="asset:Base")
+        good, bad = FakeBody("Good"), FakeBody("Bad")
+        bad.__class__ = type("StuckBody2", (FakeBody,), {
+            "appearance": property(lambda self: stuck, lambda self, v: None)})
+        comp = FakeComponent("Multi", bodies=[good, bad])
+        _install(FakeRoot())
+        _resolve_to(comp, "component")
+        out = _payload(ap.handler(target="Multi", color="#1E8E3E"))
+        assert out["applied_to"] == ["Good"]
+        assert out["failed"] == [
+            {"body": "Bad", "error": "appearance still reads 'AgentColor_FF0000' after the set"}]
 
     def test_color_a_single_face_by_handle(self):
         # a find_geometry FACE handle colors just that one face (BRepFace.appearance), not the body
@@ -461,38 +542,97 @@ class TestGuards:
 
 # ── occurrence fan-out: where an occurrence-level write actually landed ───────
 
+def _install_mp(monkeypatch, root, existing_appearances=("Base",), tokens=None):
+    """The monkeypatch install (tests/CLAUDE.md canonical pattern): every seam is torn down after
+    the test instead of left poked on the module."""
+    apps = FakeAppearances([FakeAppearance(n) for n in existing_appearances])
+    design = FakeDesign(root, apps, tokens)
+    import adsk.core, adsk.fusion
+    monkeypatch.setattr(ap._common, "design", lambda: design)
+    monkeypatch.setattr(adsk.core.Color, "create",
+                        staticmethod(lambda r, g, b, o: ("color", r, g, b, o)))
+    monkeypatch.setattr(adsk.fusion, "BRepFace", FakeFace)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", FakeBody)
+    monkeypatch.setattr(ap._inputs, "handle_token", lambda s: s)
+    return design, apps
+
+
 class TestOccurrenceFanout:
     """An occurrence write is NOT one assignment: it fans onto the bodies, and the occurrence's own
     read-back agrees with what was set even for bodies it never reached. The payload publishes the
     real reach, so a caller is never told a body changed when it did not."""
 
-    def test_applied_to_names_the_occurrence_and_every_body_reached(self):
+    def test_applied_to_names_the_occurrence_and_every_body_reached(self, monkeypatch):
         b1, b2 = FakeBody("B1"), FakeBody("B2")
         occ = FanoutOcc("Wheel:1", bodies=[b1, b2])
-        design, apps = _install(FakeRoot(occurrences=[occ]))
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
         out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
         assert out["applied_to"] == ["Wheel:1", "B1", "B2"]
         assert "bodies_not_reached" not in out and "unverified_bodies" not in out
 
-    def test_body_the_write_did_not_reach_is_disclosed_as_a_partial_not_swallowed(self):
+    def test_body_the_write_did_not_reach_is_disclosed_as_a_partial_not_swallowed(self, monkeypatch):
+        # The default kept override is the SAME-BASE case measured live: the body carries an
+        # appearance this tool minted earlier from the same base, so it shares the applied
+        # appearance's id. An id-only comparison calls this body reached.
         b1, b2 = FakeBody("Kept"), FakeBody("Reached")
         occ = FanoutOcc("Wheel:1", bodies=[b1, b2], keeps_override=["Kept"])
-        design, apps = _install(FakeRoot(occurrences=[occ]))
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
         out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        assert b1.appearance.id == MINTED_ID                  # same source asset id...
+        assert b1.appearance.name == "OwnColor_Kept"          # ...different appearance
         # a disclosed partial: still applied, but 'Kept' is named as NOT reached
         assert out["applied"] is True
         assert out["applied_to"] == ["Wheel:1", "Reached"]
         assert out["bodies_not_reached"] == [{"body": "Kept", "appearance": "OwnColor_Kept"}]
         assert "PARTIAL" in out["note"] and "Kept" in out["note"]
-        assert b1.appearance.name == "OwnColor_Kept"          # the body genuinely kept its own
 
-    def test_the_note_and_the_key_report_the_observation_not_an_unread_cause(self):
+    def test_a_same_id_kept_appearance_is_not_reached(self, monkeypatch):
+        # The live defect, isolated: the kept appearance shares the applied one's id EXACTLY
+        # (a copy keeps its source asset's id, and the tool mints every colour from one base).
+        # Only the name separates them, so an id-only comparison reports a false reach.
+        kept, reached = FakeBody("Kept"), FakeBody("Reached")
+        occ = FanoutOcc("Wheel:1", bodies=[kept, reached], keeps_override=["Kept"],
+                        kept_name="AgentColor_FF0000", kept_id=MINTED_ID)
+        design, apps = _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        assert apps.copied[0][2].id == kept.appearance.id     # the two ids are identical
+        assert out["applied_to"] == ["Wheel:1", "Reached"]
+        assert out["bodies_not_reached"] == [
+            {"body": "Kept", "appearance": "AgentColor_FF0000"}]
+
+    def test_a_same_named_kept_appearance_is_still_not_reached(self, monkeypatch):
+        # The mirror: names are non-unique live (92 names shared by two or more of 530
+        # appearances), so a body that KEPT a DIFFERENT asset carrying the same name must not be
+        # classified as reached either. A name-only comparison reports this body as coloured.
+        kept, reached = FakeBody("Kept"), FakeBody("Reached")
+        occ = FanoutOcc("Wheel:1", bodies=[kept, reached], keeps_override=["Kept"],
+                        kept_name="AgentColor_1E8E3E", kept_id="asset:SomeOtherBase")
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
+        out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
+        assert out["appearance"] == "AgentColor_1E8E3E"        # same NAME as the kept one
+        assert kept.appearance.id != MINTED_ID                 # different asset
+        assert out["applied_to"] == ["Wheel:1", "Reached"]
+        assert out["bodies_not_reached"] == [
+            {"body": "Kept", "appearance": "AgentColor_1E8E3E"}]
+
+    def test_reaching_no_body_at_all_is_an_error_not_an_applied_true(self, monkeypatch):
+        # Every body demonstrably still reads another appearance: the occurrence's own read-back
+        # is the only thing that agreed, and it agrees whether or not anything changed. Reporting
+        # applied:true here would be a swallowed no-op.
+        occ = FanoutOcc("Wheel:1", bodies=[FakeBody("Kept")], keeps_override=["Kept"])
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
+        res = ap.handler(target="Wheel:1", color="#1E8E3E")
+        assert res["isError"] is True
+        assert "NONE" in res["message"] and "Kept" in res["message"]
+
+    def test_the_note_and_the_key_report_the_observation_not_an_unread_cause(self, monkeypatch):
         # The tool reads WHICH appearance each body carries; it never reads why
         # (BRepBody.appearanceSourceType is not consulted). So neither the note NOR the payload key
         # may name a body-level override as the cause - a key called 'overridden_bodies' asserts
         # exactly what the note is careful not to.
-        occ = FanoutOcc("Wheel:1", bodies=[FakeBody("Kept")], keeps_override=["Kept"])
-        design, apps = _install(FakeRoot(occurrences=[occ]))
+        occ = FanoutOcc("Wheel:1", bodies=[FakeBody("Kept"), FakeBody("Reached")],
+                        keeps_override=["Kept"])
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
         out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
         partial = out["note"].split("Appearance override applied")[0]   # the fan-out clause only
         assert "do NOT carry the new appearance" in partial
@@ -501,30 +641,61 @@ class TestOccurrenceFanout:
         assert "bodies_not_reached" in out                          # the key states the observation
         assert not [k for k in out if "overridden" in k]
 
-    def test_unreadable_appearance_name_classifies_nothing_it_could_not_compare(self):
-        # If the appearance just set cannot report its own NAME there is nothing to compare against,
-        # so every body is UNVERIFIED. Calling them not-reached would publish a comparison the tool
-        # never made - a fabricated classification.
+    @pytest.mark.parametrize("applied_id,applied_name", [
+        (None, "AgentColor_1E8E3E"),        # the applied appearance's id would not read
+        ("asset:Base", None),               # ...or its name would not
+        (None, None),
+    ])
+    def test_an_unreadable_applied_key_classifies_nothing_it_could_not_compare(
+            self, applied_id, applied_name):
+        # With either key missing there is nothing to compare on, so every body is UNVERIFIED.
+        # Calling them reached or not-reached would publish a comparison the tool never made.
         b1, b2 = FakeBody("B1"), FakeBody("B2")
         b1.appearance = FakeAppearance("Blue")
         b2.appearance = FakeAppearance("Green")
         occ = FakeOcc("Wheel:1", bodies=[b1, b2])
-        reached, not_reached, unverified = ap._occurrence_fanout(occ, None)
+        reached, not_reached, unverified = ap._occurrence_fanout(occ, applied_id, applied_name)
         assert reached == [] and not_reached == []
         assert unverified == ["B1", "B2"]
 
-    def test_body_whose_appearance_does_not_read_back_is_unverified_not_applied(self):
+    def test_a_body_with_no_readable_id_is_unverified_even_when_the_names_match(self):
+        # The shape a name-only fallback would "rescue": the body's appearance answers with a
+        # matching NAME but no id. Unverified is the honest answer - a name match alone cannot
+        # tell this body from one carrying a same-named stranger.
+        b = FakeBody("Quiet")
+        b.appearance = FakeAppearance("AgentColor_1E8E3E")
+        del b.appearance.id
+        occ = FakeOcc("Wheel:1", bodies=[b])
+        reached, not_reached, unverified = ap._occurrence_fanout(occ, MINTED_ID,
+                                                                 "AgentColor_1E8E3E")
+        assert reached == [] and not_reached == [] and unverified == ["Quiet"]
+
+    def test_a_body_with_no_readable_name_is_unverified_even_when_the_ids_match(self):
+        # The mirror, and the one an id-only comparison would wrongly rescue: the body's
+        # appearance answers with the matching source-asset id but no name, so it cannot be told
+        # from a same-base copy the write never reached.
+        b = FakeBody("Quiet")
+        b.appearance = FakeAppearance("AgentColor_1E8E3E", appearance_id=MINTED_ID)
+        del b.appearance.name
+        occ = FakeOcc("Wheel:1", bodies=[b])
+        reached, not_reached, unverified = ap._occurrence_fanout(occ, MINTED_ID,
+                                                                 "AgentColor_1E8E3E")
+        assert reached == [] and not_reached == [] and unverified == ["Quiet"]
+
+    def test_body_whose_appearance_does_not_read_back_is_unverified_not_applied(self, monkeypatch):
         b1, b2 = FakeBody("Quiet"), FakeBody("Reached")
         occ = FanoutOcc("Wheel:1", bodies=[b1, b2], silent=["Quiet"])
-        design, apps = _install(FakeRoot(occurrences=[occ]))
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
         out = _payload(ap.handler(target="Wheel:1", color="#1E8E3E"))
         assert out["applied_to"] == ["Wheel:1", "Reached"]     # never counted as applied
         assert out["unverified_bodies"] == ["Quiet"]
         assert "UNCONFIRMED" in out["note"]
 
-    def test_bodyless_occurrence_reports_just_the_occurrence(self):
+    def test_bodyless_occurrence_reports_just_the_occurrence(self, monkeypatch):
+        # No body reached and none NOT reached: nothing contradicts the occurrence read-back, so
+        # the zero-reach error must not fire on an occurrence that simply holds no bodies.
         occ = FanoutOcc("Empty:1", bodies=[])
-        design, apps = _install(FakeRoot(occurrences=[occ]))
+        _install_mp(monkeypatch, FakeRoot(occurrences=[occ]))
         out = _payload(ap.handler(target="Empty:1", color="#1E8E3E"))
         assert out["applied_to"] == ["Empty:1"]
 

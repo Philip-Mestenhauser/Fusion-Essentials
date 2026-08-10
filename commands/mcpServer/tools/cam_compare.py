@@ -7,7 +7,7 @@ not a domain disclosure, so it stays its own tool rather than a cam_get slice)."
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, find_operation
 
 
@@ -88,8 +88,7 @@ def _operation_params(op):
     values, titles = {}, {}
     try:
         params = op.parameters
-        for i in range(params.count):
-            p = params.item(i)
+        for p in iter_collection(params):
             name = safe(lambda: p.name)
             if not name:
                 continue

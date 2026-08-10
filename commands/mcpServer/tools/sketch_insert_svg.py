@@ -60,7 +60,8 @@ def _resolve_path(file_path):
                       "disk.")
     if os.path.splitext(path)[1].lower() != ".svg":
         return None, (f"'{path}' is not an .svg file. This tool imports SVG only; for STEP/IGES/"
-                      "SAT/SMT/F3D or DXF use doc_insert_import.")
+                      "SAT/SMT/F3D or DXF use doc_insert_import - which imports svg as well, on "
+                      "the same 1/96-inch convention, with no offset or scale to pass.")
     # MANDATORY pre-call check: importSVG on a path that is not a file raises RuntimeError
     # ("3 : invalid argument filename, not found") and that raise rolls back the whole surrounding
     # transaction, so the miss is caught HERE, by name, before Fusion is touched.
@@ -164,7 +165,9 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
 TOOL_DESCRIPTION = (
     "Import an SVG from LOCAL DISK into an EXISTING sketch, placed at (x,y) in the sketch's "
     "own frame. SIZE: width/height and viewBox in the file are IGNORED - 1 SVG user unit lands as "
-    "1/96 inch times 'scale', so scale=3.7795 makes 1 user unit = 1 mm.\n"
+    "1/96 inch times 'scale', so scale=3.7795 makes 1 user unit = 1 mm. PLACEMENT: SVG's y axis "
+    "points DOWN and lands as NEGATIVE sketch y, so art imported at y=0 occupies y from -height "
+    "to 0. doc_insert_import imports svg as well, with no offset or scale to pass.\n"
     + _outputs.produces_block(RETURNS)
 )
 

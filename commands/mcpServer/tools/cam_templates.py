@@ -11,7 +11,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, find_setup
 from . import _inputs
 
@@ -363,7 +363,7 @@ def _as_cam_template(result):
     else:
         cnt = safe(lambda: result.count)
         if cnt is not None:
-            items = [safe(lambda i=i: result.item(i)) for i in range(cnt)]
+            items = list(iter_collection(result))
     if items:
         for it in items:
             t = safe(lambda it=it: adsk.cam.CAMTemplate.cast(it))

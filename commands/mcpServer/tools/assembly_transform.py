@@ -134,10 +134,8 @@ def _occurrence_joint_names(occ):
     recompute against the new pose and break), so the move guard refuses unless forced.
     """
     out = []
-    coll = safe(lambda: occ.joints)
-    n = safe(lambda: coll.count, 0) or 0
-    for i in range(n):
-        nm = safe(lambda i=i: coll.item(i).name)
+    for j in _common.iter_collection(safe(lambda: occ.joints)):
+        nm = safe(lambda j=j: j.name)
         if nm:
             out.append(nm)
     return out

@@ -72,20 +72,37 @@ def _auto_mapped(class_names, shapes):
     return {n: _stripped(n) for n in class_names if _stripped(n) in shapes}
 
 
-def _is_fake_shaped(name, shapes):
+def _is_fake_shaped(name, live_names):
     """test_bespoke_fake_ratchet's fake-shape discriminator, mirrored (that file is owned
-    separately): Fake/_Fake-prefixed or the bare name of a live adsk type in SHAPES - plus the
-    Make prefix conftest's builder fakes use."""
+    separately): Fake/_Fake-prefixed or the bare name of a live adsk type - plus the Make prefix
+    conftest's builder fakes use."""
     return (name.startswith("Fake") or name.startswith("_Fake") or name.startswith("Make")
-            or name in shapes)
+            or name in live_names)
 
 
-def _unmapped_fakes(class_names, shapes, manual, allowlist):
+def _live_type_names():
+    """Every live adsk class name a bare conftest class could be standing in for: the MEASURED
+    SHAPES keys plus every class in the generated api_surface dump - the ratchet's widened
+    discriminator, mirrored. Without the api_surface half, a conftest fake named exactly like a
+    live type that has no shape dump YET is invisible to the completeness gate, which is the one
+    case that most needs it. Only the DISCRIMINATOR widens: the auto-map still keys on SHAPES,
+    since a fake can only be swept against a type that has been measured."""
+    import api_surface
+    names = set(live_api_facts.SHAPES)
+    for table in (api_surface.PROPERTIES, api_surface.FACTORIES):
+        for key in table:
+            names.add(key.rsplit(".", 1)[-1])
+    return names
+
+
+def _unmapped_fakes(class_names, shapes, manual, allowlist, live_names=None):
     """Fake-shaped conftest classes the sweep would silently skip: neither manually mapped, nor
-    auto-mapped, nor excused by the allowlist."""
+    auto-mapped, nor excused by the allowlist. `live_names` is the discriminator's name set
+    (defaults to `shapes`); the auto-map always keys on `shapes`."""
     auto = _auto_mapped(class_names, shapes)
+    live_names = shapes if live_names is None else live_names
     return [n for n in sorted(class_names)
-            if _is_fake_shaped(n, shapes)
+            if _is_fake_shaped(n, live_names)
             and n not in manual and n not in auto and n not in allowlist]
 
 
@@ -148,7 +165,8 @@ class TestSharedFakeShapesExist:
         # entry, or measure the missing live type), never just be left out.
         tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())
         classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
-        unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _FAKE_TO_LIVE, _UNMAPPED_OK)
+        unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _FAKE_TO_LIVE, _UNMAPPED_OK,
+                                   live_names=_live_type_names())
         assert not unmapped, (
             "fake-shaped conftest classes the shape sweep would silently skip - map each to a "
             "SHAPES key (auto: name it after the live type; or add a _FAKE_TO_LIVE entry; or "
@@ -184,6 +202,14 @@ class TestSharedFakeShapesExist:
         assert _unmapped_fakes(["WidgetHelper"], shapes, {}, {}) == []
         # a bare live-type shadow (the ratchet's third shape) is fake-shaped too - and auto-maps.
         assert _is_fake_shaped("Widget", shapes) and _unmapped_fakes(["Widget"], shapes, {}, {}) == []
+        # ...and a bare shadow of a live type with NO shape dump is caught by the widened
+        # discriminator while the auto-map (SHAPES only) correctly refuses to map it.
+        assert _unmapped_fakes(["Gadget"], shapes, {}, {}) == []
+        assert _unmapped_fakes(["Gadget"], shapes, {}, {},
+                               live_names=set(shapes) | {"Gadget"}) == ["Gadget"]
+        # the real name set carries both halves: measured shapes and api_surface-only classes
+        live = _live_type_names()
+        assert set(live_api_facts.SHAPES) <= live and "MeshRepairFeature" in live
 
     def test_allowlist_entries_still_trip(self):
         tree = ast.parse(open(_CONFTEST, encoding="utf-8").read())

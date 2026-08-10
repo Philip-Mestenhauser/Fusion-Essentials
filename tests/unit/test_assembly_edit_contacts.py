@@ -409,6 +409,25 @@ class TestCreate:
         assert "3 : ContactSetRequest: bad occurrences" in msg
         assert "0 contact set(s)" in msg and sets.count == 0
 
+    def test_two_sets_appearing_under_a_raise_are_refused_not_first_matched(self, world):
+        # The raise-but-landed adoption is only sound while EXACTLY ONE new set appeared. With two,
+        # which one the call made is unknowable - taking the first names a set the caller never
+        # asked for and reports it as theirs.
+        sets = _ContactSets(raise_on_add="3 : Internal error")
+        original = sets._mint
+
+        def mint_two(members):
+            cs = original(members)
+            sets._items.append(_ContactSet("StrayContactSet", members=members, home=sets))
+            return cs
+
+        sets._mint = mint_two
+        world(sets=sets, occurrences=["A:1", "B:1"])
+        msg = error_message(ec.handler(action="create", members=["A:1", "B:1"]))
+        assert "3 : Internal error" in msg
+        assert "2 contact set(s)" in msg
+        assert "StrayContactSet" not in msg          # no set is adopted by position
+
     def test_a_create_that_returns_nothing_and_lands_nothing_is_an_error(self, world):
         world(sets=_ContactSets(add_returns_none=True), occurrences=["A:1", "B:1"])
         msg = error_message(ec.handler(action="create", members=["A:1", "B:1"]))
@@ -509,6 +528,26 @@ class TestRename:
         assert out["contact_set"] == "Taken (1)" and out["requested_name"] == "Taken"
         assert "auto-deduped" in out["note"]
 
+    def test_a_landed_name_of_another_shape_is_reported_without_a_dedupe_cause(self, world):
+        # The 'Name (1)' dedupe is the MEASURED cause, and it has a shape. A landed name that does
+        # not match it changed for a reason nothing here read - claiming the dedupe over it hands
+        # the caller a diagnosis the tool invented.
+
+        class _Rewriting(_ContactSet):
+            @property
+            def name(self):
+                return self._name
+
+            @name.setter
+            def name(self, value):
+                self._name = value.upper() + "_X"
+
+        world(sets=_ContactSets([_Rewriting("ContactSet1")]))
+        out = payload(ec.handler(action="rename", name="ContactSet1", new_name="Frame"))
+        assert out["contact_set"] == "FRAME_X"
+        assert "auto-deduped" not in out["note"]
+        assert "not readable from here" in out["note"]
+
     def test_a_swallowed_rename_is_an_error(self, world):
         world(sets=_ContactSets([_StickyName("ContactSet1")]))
         assert "did not take" in error_message(
@@ -557,6 +596,22 @@ class TestSuppress:
         world(sets=_ContactSets([_UnreadableSuppress("ContactSet1")]))
         msg = error_message(ec.handler(action="unsuppress", name="ContactSet1"))
         assert "UNCONFIRMED" in msg and "cannot be read" in msg
+
+
+class TestScopeWriteGuard:
+    def test_an_unreadable_analysis_flag_is_not_treated_as_off(self, world):
+        # The "the platform refuses a scope write while analysis is off" refusal is a fact about
+        # analysis being OFF. Asserting it over a flag that never answered names a cause nothing
+        # observed - the same conflation this file refuses everywhere else.
+        world(design_cls=_UnreadableFlagsDesign)
+        msg = error_message(ec.handler(action="set_analysis_scope", scope="contact_sets"))
+        assert "cannot be read" in msg and "UNKNOWN" in msg
+        assert "Contact analysis is disabled" not in msg     # never the asserted platform cause
+
+    def test_an_unreadable_scope_flag_after_the_write_is_unconfirmed_not_wrong(self, world):
+        world(design_cls=_UnreadableScopeDesign, enabled=True)
+        msg = error_message(ec.handler(action="set_analysis_scope", scope="contact_sets"))
+        assert "UNCONFIRMED" in msg
 
 
 class TestDelete:

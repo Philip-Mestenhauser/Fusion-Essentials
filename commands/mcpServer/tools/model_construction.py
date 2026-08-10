@@ -174,7 +174,7 @@ def _datum_geometry(design, obj):
     would false-error every gate below on a correct call into a transformed component.
     createForAssemblyContext(activeOccurrence) restores world space (measured exact, and measured
     class-independent: a ConstructionAxis reads local origin z=0.0 and its proxy z=3.0, same as the
-    plane class - probe_w6.log "FIX-REVIEW PROBES 1+2+3").
+    plane class).
 
     An entity that ALREADY carries an assemblyContext needs no lift and must not be given one:
     measured, such a proxy already reads WORLD (centroid.z=4.0) and createForAssemblyContext on it
@@ -280,7 +280,7 @@ def _on_path_distance(comp, design, k, path_raw, at_raw, dtype_raw, m):
     distance_type='absolute' reads 'at' as a length in 'units' (or a parameter expression) measured
     from the path start; 'proportional' reads it as a unitless ratio. An absolute distance is not
     clamped at EITHER end - a negative one places the datum before the path start and one past the
-    length places it beyond the end, both along the tangent and both healthy (probe_w11_live.log
+    length places it beyond the end, both along the tangent and both healthy (measured live
     "ON_PATH ROUND-2") - so both are legal placements, reported against the measured path extent
     rather than refused. Proportional is the one that must be range-guarded: it RAISES."""
     dtype, derr = _DISTANCE_TYPE.resolve(dtype_raw)
@@ -313,12 +313,14 @@ def _path_length_cm(path):
     """A Path's total length in cm, or None if any part of it cannot be read. adsk.fusion.Path
     carries no length member, so each entity's curve is measured through its evaluator
     (getParameterExtents, then getLengthAtParameter over that span) and the entities are summed
-    (probe_w11_live.log "PATH LENGTH"). The evaluator answers are the binding's leading-flag result
+    (measured live). The evaluator answers are the binding's leading-flag result
     tuples; anything else reads as unavailable, so a caller gets no number rather than a wrong one."""
     n = safe(lambda: path.count, 0) or 0
     if not n:
         return None
     total = 0.0
+    # EVERY segment must measure or the length is withdrawn (None), so this stays a positional walk:
+    # iter_collection drops an unreadable entity, which would publish a SHORT total as the path length.
     for i in range(n):
         ev = safe(lambda i=i: path.item(i).curve.evaluator)
         if ev is None:
@@ -338,8 +340,8 @@ def _path_extent_report(obj, path, inv_k, with_offset=False):
     display units, so the comparison runs in one unit system. The landed position is read off the
     definition's ModelParameters, whose .value is internal cm, so an expression placement is
     measured the same as a literal one; a to-object plane's position is the target's along-path
-    distance PLUS its signed offset, two separate parameters (probe_2705_surface.log [L02],
-    probe_w11_live.log "ON_PATH ROUND-2" [P2]).
+    distance PLUS its signed offset, two separate parameters (measured live:
+    measured live).
 
     Every number comes through _common.measured: an unreadable property must yield NO verdict, and
     the confident-zero a safe(read, 0.0) would hand back reads as "sits exactly at the path start,
@@ -934,7 +936,7 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
 
     # The datum's own entityToken, so the next call can point AT what was just created. Measured:
     # a ConstructionAxis carries one and design.findEntityByToken returns the same axis back
-    # (probe_w10.log "W10 P4") - which is how AxisRef/PlaneRef resolve a datum handle. Published null
+    # (measured live) - which is how AxisRef/PlaneRef resolve a datum handle. Published null
     # rather than omitted when it cannot be read, and the note then promises nothing.
     handle = safe(lambda: obj.entityToken) or None
     out = {
@@ -1000,7 +1002,7 @@ construction_tool = (
     .add_input_property(*_FACE.as_property())
     .add_input_property("angle", {"type": "number", "description": "Degrees (mode=at_angle/at_angle_on_face)."})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve: one find_geometry edge 'handle' (auto-chains), a JSON list of them (used exactly), or 'sketch:<name>'."})
+            "description": "The curve: one find_geometry edge 'handle' (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list (used exactly), or 'sketch:<name>'."})
     .add_input_property("at", {"type": ["number", "string"],
             "description": "Position along 'path' (mode=on_path): a 0-1 ratio or a length in 'units', per 'distance_type'."})
     .add_input_property(*_DISTANCE_TYPE.as_property())

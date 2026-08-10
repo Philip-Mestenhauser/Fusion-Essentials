@@ -5,6 +5,8 @@ visibility bookkeeping: find the named occurrence, hide the others, return a res
 them back on. That's exactly the bug-prone part (matching + restore), so it gets unit coverage.
 """
 
+import base64
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +86,36 @@ class TestIsolateForFit:
         restore, err = gs._isolate_for_fit("A:1")
         restore()
         assert b.isLightBulbOn is False      # we never turned it on
+
+    def test_a_clean_restore_reports_nothing_stuck(self):
+        a, b = FakeOcc("A:1"), FakeOcc("B:1")
+        _install([a, b])
+        restore, _err = gs._isolate_for_fit("A:1")
+        assert restore() == []
+
+    def test_a_bulb_that_will_not_come_back_on_is_named_by_the_restore(self):
+        # This tool MUTATES visibility to take its picture. A restore that silently failed leaves
+        # a read tool having changed the document, so the failure has to be reportable.
+        class OneWay(FakeOcc):
+            """A bulb that switches OFF and then refuses to come back ON - so the hide takes and
+            the restore silently does not, which is the only shape that leaves a read tool
+            having changed the document."""
+
+            def __init__(self, name):
+                super().__init__(name)
+                object.__setattr__(self, "_armed", True)
+
+            def __setattr__(self, key, value):
+                if key == "isLightBulbOn" and value is True and getattr(self, "_armed", False):
+                    return
+                object.__setattr__(self, key, value)
+
+        stuck = OneWay("B:1")
+        object.__setattr__(stuck, "fullPathName", "Sub:1+B:1")
+        _install([FakeOcc("A:1"), stuck])
+        restore, _err = gs._isolate_for_fit("A:1")
+        assert stuck.isLightBulbOn is False           # the hide DID take
+        assert restore() == ["Sub:1+B:1"]
 
 
 # ── active-component note: a non-root activation dims everything else to ghosts ──
@@ -173,6 +205,193 @@ class TestCaptureSwitchPassThrough:
                             lambda *a, **k: (None, "Viewport capture failed."))
         result = gs.handler(transparent_background=True)
         assert result["isError"] is True and "capture failed" in result["message"]
+
+
+class TestFitToRestoreDisclosure:
+    """fit_to hides the other occurrences to frame one - a mutation a READ tool must undo. A
+    restore that did not take is surfaced on the result, never swallowed in a finally."""
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        monkeypatch.setattr(gs._view_common, "capture_png_b64",
+                            lambda *a, **k: ("B64DATA", None))
+        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        return monkeypatch
+
+    def _stub_isolate(self, monkeypatch, stuck):
+        monkeypatch.setattr(gs, "_isolate_for_fit", lambda name: (lambda: list(stuck), None))
+
+    def test_a_clean_restore_leaves_the_image_alone(self, rig):
+        self._stub_isolate(rig, [])
+        result = gs.handler(fit_to="Bracket:1")
+        assert result["isError"] is False
+        assert [c["type"] for c in result["content"]] == ["image"]
+
+    def test_a_failed_restore_rides_on_the_successful_shot(self, rig):
+        self._stub_isolate(rig, ["Sub:1+Gear:1"])
+        result = gs.handler(fit_to="Bracket:1")
+        assert result["isError"] is False              # the picture WAS taken
+        text = result["content"][0]["text"]
+        assert "Sub:1+Gear:1" in text and "view_set" in text
+        assert [c["type"] for c in result["content"]] == ["text", "image"]
+
+    def test_a_restore_that_raises_is_reported_not_swallowed(self, rig):
+        def boom():
+            raise RuntimeError("occurrence went invalid")
+        rig.setattr(gs, "_isolate_for_fit", lambda name: (boom, None))
+        result = gs.handler(fit_to="Bracket:1")
+        assert "occurrence went invalid" in result["content"][0]["text"]
+
+    def test_a_failed_orient_still_names_the_bulb_it_could_not_restore(self, rig):
+        # The orient blows up AFTER fit_to hid the others. This exit returns before the capture
+        # block, so without its own restore disclosure a stuck bulb is named nowhere at all while
+        # the document is left with occurrences hidden.
+        self._stub_isolate(rig, ["Sub:1+Gear:1"])
+        rig.setattr(gs._view_common, "apply_named_view",
+                    lambda v, name: (_ for _ in ()).throw(RuntimeError("camera is busy")))
+        result = gs.handler(view="top", fit_to="Bracket:1")
+        assert result["isError"] is True
+        assert "Failed to set view 'top'" in result["message"]
+        assert "Sub:1+Gear:1" in result["message"] and "view_set" in result["message"]
+
+    def test_a_failed_orient_with_a_clean_restore_says_nothing_extra(self, rig):
+        self._stub_isolate(rig, [])
+        rig.setattr(gs._view_common, "apply_named_view",
+                    lambda v, name: (_ for _ in ()).throw(RuntimeError("camera is busy")))
+        result = gs.handler(view="top", fit_to="Bracket:1")
+        assert result["isError"] is True and "could NOT turn" not in result["message"]
+
+    def test_a_failed_restore_is_appended_to_a_capture_error_too(self, rig):
+        self._stub_isolate(rig, ["Sub:1+Gear:1"])
+        rig.setattr(gs._view_common, "capture_png_b64",
+                    lambda *a, **k: (None, "Viewport capture failed."))
+        result = gs.handler(fit_to="Bracket:1")
+        assert result["isError"] is True
+        assert "capture failed" in result["message"] and "Sub:1+Gear:1" in result["message"]
+
+    def test_the_description_discloses_the_hide_and_restore(self):
+        assert "hides the others" in gs.TOOL_DESCRIPTION
+        assert "restores them" in gs.TOOL_DESCRIPTION
+
+
+class TestFilePathWrite:
+    """'file_path' writes the captured PNG to local disk - the raster file drawing_insert_image
+    needs. The inline image is returned either way; a file that does not land is a failure, since
+    the caller asked for a path to hand on."""
+
+    PNG = b"\x89PNG\r\n\x1a\nSTUB-BYTES"
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        oriented = []
+        monkeypatch.setattr(gs._view_common, "apply_named_view",
+                            lambda v, name: oriented.append(name))
+        monkeypatch.setattr(gs._view_common, "capture_png_b64",
+                            lambda *a, **k: (base64.b64encode(self.PNG).decode("ascii"), None))
+        return SimpleNamespace(monkeypatch=monkeypatch, oriented=oriented)
+
+    def _text(self, result):
+        return " ".join(c["text"] for c in result["content"] if c["type"] == "text")
+
+    def test_the_captured_png_bytes_land_on_disk(self, rig, tmp_path):
+        out = str(tmp_path / "shot.png")
+        result = gs.handler(file_path=out)
+        assert result["isError"] is False
+        # the file carries the CAPTURED bytes, not the base64 text of them
+        assert open(out, "rb").read() == self.PNG
+
+    def test_the_path_and_size_are_published_beside_the_image(self, rig, tmp_path):
+        out = str(tmp_path / "shot.png")
+        result = gs.handler(file_path=out)
+        text = self._text(result)
+        assert f"file_path={out}" in text
+        assert f"size_bytes={len(self.PNG)}" in text
+        assert [c["type"] for c in result["content"]] == ["text", "image"]
+
+    def test_omitting_file_path_writes_nothing_and_returns_the_image_alone(self, rig, tmp_path):
+        result = gs.handler()
+        assert [c["type"] for c in result["content"]] == ["image"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_missing_png_extension_is_appended(self, rig, tmp_path):
+        # the capture IS a PNG whatever the path says - the fleet's export idiom appends rather
+        # than leaving PNG bytes under another format's name
+        result = gs.handler(file_path=str(tmp_path / "shot.jpg"))
+        assert (tmp_path / "shot.jpg.png").read_bytes() == self.PNG
+        assert "shot.jpg.png" in self._text(result)
+
+    def test_an_existing_png_extension_is_not_doubled(self, rig, tmp_path):
+        gs.handler(file_path=str(tmp_path / "SHOT.PNG"))
+        assert (tmp_path / "SHOT.PNG").exists()
+        assert not (tmp_path / "SHOT.PNG.png").exists()
+
+    def test_a_missing_output_directory_is_created(self, rig, tmp_path):
+        out = str(tmp_path / "renders" / "deep" / "shot.png")
+        result = gs.handler(file_path=out)
+        assert result["isError"] is False and os.path.isfile(out)
+
+    def test_an_uncreatable_directory_refuses_before_the_camera_moves(self, rig, tmp_path):
+        # the refusal costs the caller nothing: a read tool that reoriented the view and then
+        # failed would have moved the user's camera for no picture at all
+        rig.monkeypatch.setattr(gs._export.os, "makedirs",
+                                lambda *a, **k: (_ for _ in ()).throw(OSError("read-only volume")))
+        result = gs.handler(view="top", file_path=str(tmp_path / "nope" / "shot.png"))
+        assert result["isError"] is True
+        assert "read-only volume" in result["message"] and "nope" in result["message"]
+        assert rig.oriented == []
+
+    def test_a_zero_byte_write_is_a_failure_not_an_ok_carrying_the_image(self, rig, tmp_path):
+        # a captured-but-empty file is the false success this gate exists for: the caller would be
+        # sent to a path holding nothing
+        rig.monkeypatch.setattr(gs._view_common, "capture_png_b64", lambda *a, **k: ("", None))
+        out = str(tmp_path / "shot.png")
+        result = gs.handler(file_path=out)
+        assert result["isError"] is True
+        assert "size_bytes=0" in result["message"] and out in result["message"]
+
+    def test_an_undecodable_capture_is_reported_naming_the_path(self, rig, tmp_path):
+        rig.monkeypatch.setattr(gs._view_common, "capture_png_b64", lambda *a, **k: ("ABC", None))
+        out = str(tmp_path / "shot.png")
+        result = gs.handler(file_path=out)
+        assert result["isError"] is True
+        assert "could not be decoded" in result["message"] and out in result["message"]
+
+    def test_a_capture_failure_writes_no_file(self, rig, tmp_path):
+        # the capture's OWN error must survive to the caller: attempting the decode/write on a
+        # failed capture would relabel it as a decode failure and point at the wrong cause
+        rig.monkeypatch.setattr(gs._view_common, "capture_png_b64",
+                                lambda *a, **k: (None, "Viewport capture failed."))
+        out = str(tmp_path / "shot.png")
+        result = gs.handler(file_path=out)
+        assert result["isError"] is True
+        assert "capture failed" in result["message"]
+        assert "could not be decoded" not in result["message"]
+        assert not os.path.exists(out)
+
+    def test_the_users_camera_is_restored_after_a_reoriented_shot(self, rig, tmp_path):
+        # the shot reorients the camera; a read the user sees as a moved view is a side effect
+        # this tool undoes - the snapshot goes back whether or not a file was requested
+        vp = gs.app.activeViewport
+        snapshot = vp.camera
+
+        def orient(viewport, name):
+            viewport.camera = SimpleNamespace(viewExtents=9.0)    # the orient moves the camera
+
+        rig.monkeypatch.setattr(gs._view_common, "apply_named_view", orient)
+        gs.handler(view="top", file_path=str(tmp_path / "shot.png"))
+        assert vp.camera is snapshot
+
+    def test_the_surface_offers_the_path_and_says_the_image_still_returns(self):
+        props = gs.tool.to_dict()["inputSchema"]["properties"]
+        assert props["file_path"]["type"] == "string"
+        assert ".png" in props["file_path"]["description"]
+        assert "file_path" in gs.TOOL_DESCRIPTION and "inline" in gs.TOOL_DESCRIPTION
 
 
 class TestKeepVisible:

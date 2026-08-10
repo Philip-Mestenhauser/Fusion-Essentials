@@ -12,6 +12,7 @@ import json
 from conftest import load_tool
 
 cco = load_tool("cam_create_operation")
+_cam = load_tool("_cam_common")
 
 
 # ── fakes mirroring the proven adsk.cam create path ─────────────────────────
@@ -181,18 +182,18 @@ class TestCreate:
 
     def test_generation_future_is_REGISTERED_not_dropped(self, monkeypatch):
         # Fusion ABANDONS an in-progress generation whose Future is garbage-collected, so the launch
-        # must hand it to cam_generate.register_future - the one thing keeping it alive - and return
+        # must hand it to _cam_common.register_future - the one thing keeping it alive - and return
         # the handle cam_get_status polls. Discarding it reports generation_started with nothing
         # actually generating.
-        cco.cam_generate._GENERATIONS.clear()
+        _cam._GENERATIONS.clear()
         cam = _install(monkeypatch)
         out = _payload(cco.handler(setup="Setup1", strategy="adaptive",
                                    tool_library_url="u", tool_index=1, generate=True))
         assert out["generation_started"] is True
         handle = out["generation_handle"]
-        entry = cco.cam_generate._GENERATIONS[handle]
+        entry = _cam._GENERATIONS[handle]
         assert entry["future"] is cam.futures[-1]      # THE launched future, still referenced
-        cco.cam_generate._GENERATIONS.clear()
+        _cam._GENERATIONS.clear()
 
     def test_a_null_future_is_reported_not_claimed_as_started(self, monkeypatch):
         # generateToolpath returning nothing means no generation is running; saying otherwise sends

@@ -106,13 +106,32 @@ class _Coll:
         self.last = None
     def _make(self, *a):
         c = _Curve(); self._items.append(c); self.last = a; return c
+    def _land(self, n=1, construction=False):
+        """n curves landing in this collection WITHOUT a factory call on it - what a Sketch-level
+        constructor (addCenterToCenterSlot, the slot constructors) does. 'last' stays untouched, so
+        a test can still tell a factory call on this collection from a landing in it. Returns the
+        curves it created, in creation order."""
+        made = []
+        for _ in range(n):
+            c = _Curve()
+            c.isConstruction = construction
+            self._items.append(c)
+            made.append(c)
+        return made
+
+    def _make_many(self, n, *a):
+        """n curves from ONE factory call - the shape a rectangle constructor has: the handler must
+        publish the collection's own delta, not one-per-call."""
+        made = [self._make(*a) for _ in range(n)]
+        return made[0]
     # the various add* methods the handler calls
     def addByTwoPoints(self, a, b): return self._make("line", a, b)
-    def addTwoPointRectangle(self, a, b): return self._make("rect", a, b)
-    def addCenterPointRectangle(self, c, corner): return self._make("crect", c, corner)
+    def addTwoPointRectangle(self, a, b): return self._make_many(4, "rect", a, b)
+    def addCenterPointRectangle(self, c, corner): return self._make_many(4, "crect", c, corner)
     def addByCenterRadius(self, c, r): return self._make("circle", c, r)
     def addByCenterStartSweep(self, c, s, sw): return self._make("arc", c, s, sw)
-    def addScribedPolygon(self, c, n, a, r, b): return self._make("poly", c, n, r)
+    # a scribed polygon lands one SketchLine per side, all from the one factory call
+    def addScribedPolygon(self, c, n, a, r, b): return self._make_many(int(n), "poly", c, n, r)
     def addByAngle(self, c, major, minor, start, sweep):
         return self._make("elliptical_arc", c, major, minor, start, sweep)
     def add(self, *a): return self._make("add", *a)
@@ -182,9 +201,17 @@ class FakeSketch:
 
     # addCenterToCenterSlot is on the Sketch, NOT sketchLines. Capturing it here (and not on _Coll)
     # makes a call to curves.sketchLines.addCenterToCenterSlot AttributeError instead of passing.
+    # Measured landing: 2 solid SketchLines + 1 CONSTRUCTION SketchLine (the centre-to-centre line)
+    # + 2 SketchArc end caps = 5 sketch curves. The return is a BaseVector: len() answers 5, [0]
+    # indexes, iteration yields the two ARCS FIRST and then the three lines; item() and objectType
+    # do not answer on it. A plain Python list carries exactly that surface, so the fake returns
+    # one - and the collection deltas, not the return, are what verify the draw.
     def addCenterToCenterSlot(self, p1, p2, width):
         self.slot_call = {"p1": p1, "p2": p2, "width": width}
-        return _Curve()
+        sides = self.sketchLines._land(2)
+        centre_line = self.sketchLines._land(1, construction=True)
+        caps = self.sketchArcs._land(2)
+        return caps + sides + centre_line
 
     # Both arc-slot constructors are Sketch methods too, and each builds the slot out of five
     # SketchArcs (two end caps plus the inner/centre/outer arcs) - so the fake lands them in
@@ -290,6 +317,9 @@ class TestNewKinds:
         assert tag == "real" and abs(val - 0.6) < 1e-9    # ValueInput, full width 6mm -> 0.6cm
         # and it must NOT have gone through sketchLines
         assert s.sketchLines.last is None
+        # the measured landing: 2 solid lines + the construction centre-to-centre line, 2 arc caps
+        assert s.sketchLines.count == 3 and s.sketchArcs.count == 2
+        assert [c.isConstruction for c in s.sketchLines._items] == [False, False, True]
 
     def test_point(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
@@ -674,6 +704,94 @@ class TestCoreKinds:
         assert out["kind"] == "circle"
 
 
+class TestKindCollectionFallback:
+    """A kind whose curves land in its OWN '<type>:<index>' collection resolves through _common, so
+    the factory-returned-but-nothing-landed gate runs for line/circle/arc/ellipse/point/spline as
+    well as for the kinds the two exception tables name, and each of them publishes 'curves_added'.
+
+    The tables answer FIRST, and that order is load-bearing: _common holds no token for conic or
+    elliptical_arc, so a lookup that reached it before _NO_REF_CURVE_ATTR would resolve those two to
+    None and take their gate away."""
+
+    def test_a_line_that_never_lands_is_an_error(self, monkeypatch):
+        # addByTwoPoints hands back a curve without it reaching sketchLines: a false success
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(s.sketchLines, "addByTwoPoints", lambda a, b: _Curve())
+        res = sk.add_sketch_geometry_handler(kind="line", x1=0, y1=0, x2=20, y2=0)
+        assert res["isError"] is True and "did not change" in res["message"]
+        # a kind neither table names still has its collection NAMED in the refusal
+        assert "own line collection" in res["message"]
+
+    def test_a_line_reports_the_one_curve_it_added(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="line", x1=0, y1=0, x2=20, y2=0))
+        assert out["curves_added"] == 1
+
+    def test_a_rectangle_counts_every_line_the_one_call_landed(self, monkeypatch):
+        # a rectangle is built BY the SketchLines factory, so 'line' is its collection and
+        # curves_added counts the pieces - not one per factory call
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="rectangle", x1=0, y1=0, x2=20, y2=10))
+        assert out["curves_added"] == 4
+
+    def test_a_rectangle_that_never_lands_is_an_error(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(s.sketchLines, "addTwoPointRectangle", lambda a, b: _Curve())
+        res = sk.add_sketch_geometry_handler(kind="rectangle", x1=0, y1=0, x2=20, y2=10)
+        assert res["isError"] is True and "did not change" in res["message"]
+        # the refusal names the collection that was COUNTED - there is no 'rectangle' collection
+        assert "own line collection" in res["message"]
+        assert "rectangle collection" not in res["message"]
+
+    def test_every_kind_resolves_a_collection_to_count(self, monkeypatch):
+        # the gate is only real for a kind whose collection answers: a kind resolving to None draws
+        # unverified and silently omits curves_added, which is exactly the defect this closes
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        unresolved = [k for k in sk._KINDS if sk._kind_curve_collection(s, k) is None]
+        assert unresolved == [], f"kinds with no collection to count: {unresolved}"
+
+    def test_a_polygon_counts_one_line_per_side(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="polygon", cx=0, cy=0, radius=10,
+                                                      sides=6))
+        assert out["curves_added"] == 6
+
+    def test_a_closed_path_counts_its_segments_including_the_closing_one(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="closed_path",
+                                                      points=[[0, 0], [10, 0], [10, 10]]))
+        assert out["curves_added"] == 3      # 3 points + the repeated first = 3 segments
+
+    def test_the_plain_slot_gates_on_the_lines_it_lands(self, monkeypatch):
+        # addCenterToCenterSlot is a Sketch method, but its curves land in the sketch's own
+        # collections: 3 SketchLines (2 solid + the construction centre-to-centre line) and 2 arcs
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        assert sk._kind_curve_collection(s, "slot") is s.sketchLines
+        out = _payload(sk.add_sketch_geometry_handler(kind="slot", x1=0, y1=0, x2=20, y2=0, radius=3))
+        assert out["curves_added"] == 3
+        assert "2 solid SketchLines" in out["note"] and "CONSTRUCTION" in out["note"]
+
+    def test_a_plain_slot_that_never_lands_is_an_error(self, monkeypatch):
+        # the BaseVector return is not proof the curves reached the sketch - the delta is
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(s, "addCenterToCenterSlot", lambda p1, p2, width: ["slot-entity"])
+        res = sk.add_sketch_geometry_handler(kind="slot", x1=0, y1=0, x2=20, y2=0, radius=3)
+        assert res["isError"] is True and "did not change" in res["message"]
+
+    def test_a_point_counts_against_the_sketch_points_collection(self, monkeypatch):
+        # 'point' is the ref kind that lives on the sketch itself, not under sketchCurves
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.add_sketch_geometry_handler(kind="point", cx=5, cy=5))
+        assert out["curves_added"] == 1
+        assert sk._kind_curve_collection(s, "point") is s.sketchPoints
+
+    def test_the_ref_less_kinds_keep_their_own_collection(self, monkeypatch):
+        # conic/elliptical_arc have no ref token for _common to resolve; their table answers first
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        assert sk._kind_curve_collection(s, "conic") is s.sketchConicCurves
+        assert sk._kind_curve_collection(s, "elliptical_arc") is s.sketchEllipticalArcs
+
+
 class TestConic:
     """SketchConicCurves.add(startPoint, endPoint, apexPoint, rhoValue) - the apex rides on cx,cy,
     and the binding states rhoValue must be greater than zero and less than one."""
@@ -969,6 +1087,36 @@ class TestMarkConstructionHonesty:
         import pytest
         with pytest.raises(RuntimeError, match="isConstruction is locked"):
             sk._mark_recent_construction(sketch, 0)
+
+
+class TestMarkConstructionWindow:
+    """before_count is an INDEX into sketchCurves, so the marking window is [before_count, count).
+    A walk that renumbers the collection by POSITION slides that window onto curves that were
+    already in the sketch - marking somebody else's geometry construction and missing a new curve."""
+
+    def _curves(self, items):
+        coll = SimpleNamespace(_items=list(items))
+        coll.count = len(coll._items)
+        coll.item = lambda i: coll._items[i]
+        return SimpleNamespace(sketchCurves=coll)
+
+    def test_only_the_curves_added_since_the_marker_are_marked(self):
+        pre = [SimpleNamespace(isConstruction=False) for _ in range(3)]
+        new = [SimpleNamespace(isConstruction=False) for _ in range(2)]
+        sketch = self._curves(pre + new)
+        sk._mark_recent_construction(sketch, 3)
+        assert [c.isConstruction for c in pre] == [False, False, False]
+        assert [c.isConstruction for c in new] == [True, True]
+
+    def test_an_unreadable_earlier_curve_does_not_slide_the_window(self):
+        # the pre-existing curve at index 1 reads back as nothing. Its slot still belongs to it, so
+        # the window opening at 3 must still land on exactly the two curves that were just drawn.
+        pre = [SimpleNamespace(isConstruction=False), None, SimpleNamespace(isConstruction=False)]
+        new = [SimpleNamespace(isConstruction=False) for _ in range(2)]
+        sketch = self._curves(pre + new)
+        sk._mark_recent_construction(sketch, 3)
+        assert [c.isConstruction for c in new] == [True, True]
+        assert pre[0].isConstruction is False and pre[2].isConstruction is False
 
 
 class TestPolyline:

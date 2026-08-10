@@ -24,8 +24,12 @@ _PREVIEW_MAX = 12                        # cap the discard preview; the count ca
 _ATTR_MAX_CHARS = 10000
 _CLIP = 60                               # how much of a value an error message quotes
 # Design.findAttributes reads a leading lowercase 're:' as a regular expression rather than a
-# literal name, so the check that refuses one is case-SENSITIVE - it matches that exact prefix.
+# literal name, and it runs that expression case-SENSITIVELY over names - a bare pattern with no
+# prefix is matched literally (measured live). So the check that refuses the prefix
+# matches that exact lower-case spelling: 'RE:shop' is an ordinary literal group name.
 _REGEX_PREFIX = "re:"
+
+_UNREADABLE = object()      # a read-back that RAISED - distinct from one that reads None
 
 _ACTION = _inputs.Choice(
     "action", list(_ACTIONS), default="roll",
@@ -40,9 +44,10 @@ _ATTR_TARGET = _inputs.FeatureRef("feature")
 
 
 def _objects(timeline):
-    """Every TimelineObject in timeline order, unreadable slots dropped."""
-    n = safe(lambda: timeline.count, 0) or 0
-    return [o for o in (safe(lambda i=i: timeline.item(i)) for i in range(n)) if o is not None]
+    """Every TimelineObject in timeline order, unreadable slots dropped - the shared collection walk,
+    so this list and the one FeatureRef resolves against skip the same slots. A skip leaves a HOLE, so
+    a position here is NOT an object's .index; everything addressing an index reads .index itself."""
+    return list(_common.iter_collection(timeline))
 
 
 def _index(obj):
@@ -66,11 +71,7 @@ def _groups(timeline):
     """Every TimelineGroup, unreadable slots dropped. Read from timelineGroups, NOT from
     timeline.item(): an EXPANDED group is absent from the timeline enumeration entirely - only its
     members appear there - so a walk of timeline.item() sees collapsed groups only."""
-    groups = safe(lambda: timeline.timelineGroups)
-    if groups is None:
-        return []
-    n = safe(lambda: groups.count, 0) or 0
-    return [g for g in (safe(lambda i=i: groups.item(i)) for i in range(n)) if g is not None]
+    return list(_common.iter_collection(safe(lambda: timeline.timelineGroups)))
 
 
 def _member_span(group):
@@ -91,35 +92,21 @@ def _member_count(obj):
 
 
 def _resolve_object(timeline, want, role):
-    """(TimelineObject, error_text) for ONE object named `want`. The 'name@index' form targets that
-    exact timeline index, confirmed by name; a bare name matches case-insensitively and EXACTLY, and
-    a name carried by several objects is refused with the name@index candidates."""
-    objs = _objects(timeline)
-    base, at, idx = want.rpartition("@")
-    if at and base.strip() and idx.strip().isdigit():
-        i = int(idx.strip())
-        for o in objs:
-            if _index(o) == i and (safe(lambda o=o: o.name) or "").lower() == base.strip().lower():
-                return o, None
-        return None, (f"No timeline object named '{base.strip()}' at index {i} ({role}). Re-read "
-                      "design_get(include=['timeline']) - an index shifts after every add or delete.")
-    low = want.lower()
-    hits = [o for o in objs if (safe(lambda o=o: o.name) or "").lower() == low]
-    if not hits:
-        # A COLLAPSED group hides its members from timeline.item() entirely, so a real feature reads
-        # as absent. Name the group holding it rather than claim it does not exist.
-        holder = _group_holding(timeline, low)
-        if holder:
-            return None, (f"'{want}' is inside the collapsed timeline group '{holder}' ({role}), so "
-                          "the timeline does not expose it directly. Expand the group in Fusion, or "
-                          f"target '{holder}' itself - rolling to a collapsed group works.")
-        return None, (f"No timeline object named '{want}' ({role}). Timeline holds: "
-                      f"{_sample([_label(o) for o in objs]) or '(nothing)'}. Full list: "
-                      "design_get(include=['timeline']).")
-    if len(hits) > 1:
-        return None, (f"'{want}' names {len(hits)} timeline objects ({_sample([_label(o) for o in hits])}) "
-                      "- refusing to guess. Re-issue it in the 'name@index' form.")
-    return hits[0], None
+    """(TimelineObject, error_text) for ONE object named `want`, through the shared timeline by-name
+    resolver - so this tool and the FeatureRef kind answer the same input with the same refusal.
+    `role` is this call's own noun for the target ('the first item of the group'), which prefixes it.
+    The one thing only this tool can say rides in as the miss hint: a COLLAPSED group hides its
+    members from timeline.item() entirely, so a real feature reads as absent."""
+    def collapsed_group_hint(name):
+        holder = _group_holding(timeline, name.lower())
+        if not holder:
+            return None
+        return (f"'{name}' is inside the collapsed timeline group '{holder}', so the timeline does "
+                "not expose it directly. Expand the group in Fusion, or target "
+                f"'{holder}' itself - rolling to a collapsed group works.")
+
+    return _inputs.resolve_timeline_object(_objects(timeline), want, role,
+                                           miss_hint=collapsed_group_hint)
 
 
 def _group_holding(timeline, low_name):
@@ -129,10 +116,8 @@ def _group_holding(timeline, low_name):
     for g in _groups(timeline):
         if safe(lambda g=g: g.isCollapsed) is not True:
             continue
-        n = safe(lambda g=g: g.count, 0) or 0
-        for j in range(n):
-            m = safe(lambda g=g, j=j: g.item(j))
-            if m is not None and (safe(lambda m=m: m.name) or "").lower() == low_name:
+        for m in _common.iter_collection(g):
+            if (safe(lambda m=m: m.name) or "").lower() == low_name:
                 return safe(lambda g=g: g.name) or "(unnamed group)"
     return None
 
@@ -500,7 +485,14 @@ def _do_delete_attribute(design, feature, group, name):
     attrs, aerr = _attributes_of(entity, label)
     if aerr:
         return error(aerr)
-    attr = safe(lambda: attrs.itemByName(group, name))
+    attr = safe(lambda: attrs.itemByName(group, name), _UNREADABLE)
+    if attr is _UNREADABLE:
+        # Sentinelled like the read-back below, and for the same reason: swallowed into None this
+        # lookup would answer "carries no attribute" - the absent verdict - for a collection that
+        # answered nothing at all, which is also the answer the read-back's advice sends the caller
+        # back here to read.
+        return error(f"Reading attribute '{group}/{name}' on '{label}' raised, so whether it is "
+                     "there cannot be told and nothing was deleted.")
     if attr is None:
         return error(f"'{label}' carries no attribute '{group}/{name}', so nothing was deleted. "
                      "Attach one with action='set_attribute'.")
@@ -512,8 +504,15 @@ def _do_delete_attribute(design, feature, group, name):
     except Exception as e:
         return error(f"Deleting attribute '{group}/{name}' from '{label}' failed: {e}")
     # The delete lands inside this call: after deleteMe, itemByName reads None and findAttributes
-    # reports the drop in the same transaction, so both read-backs below are ground truth here.
-    back = safe(lambda: attrs.itemByName(group, name))
+    # reports the drop in the same transaction, so both read-backs below are ground truth here - as
+    # long as the read-back RAN. An itemByName that raises tells nothing apart: gone and unreadable
+    # look the same through safe(), so the sentinel keeps a failed read out of the gone claim.
+    back = safe(lambda: attrs.itemByName(group, name), _UNREADABLE)
+    if back is _UNREADABLE:
+        return error(f"Deleting attribute '{group}/{name}' from '{label}' returned {bool(did)} but "
+                     "reading it back raised, so nothing confirms it is gone - the delete is "
+                     "UNCONFIRMED. Run this same delete_attribute call again: a refusal naming "
+                     f"'{group}/{name}' as absent is the attribute being gone.")
     if back is not None:
         return error(f"Deleting attribute '{group}/{name}' from '{label}' returned {bool(did)} but "
                      f"itemByName still returns it (value '{_clip(safe(lambda: back.value))}') - it "

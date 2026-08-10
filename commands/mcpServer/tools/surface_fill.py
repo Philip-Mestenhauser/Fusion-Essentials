@@ -43,7 +43,6 @@ _LISTING_CAP = 20
 # same "sealed into a body" sentence a new-body fill does.
 _OP_EFFECT = {
     "new": "sealed into a new body",
-    "new_body": "sealed into a new body",
     "join": "sealed and joined into the target body",
     "cut": "cut away from the target body",
     "intersect": "intersected with the target body",
@@ -72,10 +71,8 @@ def _solid_snapshot(design):
     that worked."""
     out = []
     for comp in _common.all_components(design):
-        coll = safe(lambda c=comp: c.bRepBodies)
-        for i in range(safe(lambda: coll.count, 0) if coll else 0):
-            b = safe(lambda i=i, cl=coll: cl.item(i))
-            if b is not None and safe(lambda b=b: b.isSolid):
+        for b in _common.iter_collection(safe(lambda c=comp: c.bRepBodies)):
+            if safe(lambda b=b: b.isSolid):
                 out.append(b)
     return out
 
@@ -89,6 +86,9 @@ def _cell_volumes(fill_input, factor):
     if cells is None:
         return None, []
     total = int(safe(lambda: cells.count, 0) or 0)
+    # A cell's INDEX is its address (_cell_listing publishes '[0] 12.5 mm3, ...' and 'keep' takes
+    # those indices back), so this stays a positional walk: iter_collection drops an unreadable
+    # cell, which would slide every later volume onto the wrong index.
     return cells, [_common.measured(lambda i=i: cells.item(i).cellBody.volume, factor)
                    for i in range(total)]
 
@@ -136,6 +136,9 @@ def _select_kept_cells(cells, total, keep):
     be. Each write goes through set_verified, since a property assignment that does not take cannot
     raise. Returns an error string, or ''."""
     keep_set = set(keep)
+    # A cell's INDEX is its address ('keep' holds indices and the refusal names the index), so this
+    # stays a positional walk: iter_collection drops an unreadable cell, which would select a
+    # different set of cells than the one requested instead of refusing.
     for i in range(total):
         cell = safe(lambda i=i: cells.item(i))
         if cell is None:
@@ -227,7 +230,7 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
     # bodies - the merge landed INTO the target tool body, and remove_tools then consumed the tools
     # including the merged result. There is no measured way to consume only the surface tools, so
     # the combination is refused rather than half-served.
-    if remove_tools and op_key not in ("new", "new_body"):
+    if remove_tools and op_key != "new":
         return error(
             f"remove_tools=true is not supported with operation='{op_key}'. For join/cut/intersect "
             "the target body must itself be among 'tools', and remove_tools consumes the tools "
@@ -342,7 +345,7 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
     # reported rather than errored, because feature.bodies is known to also list a pre-existing
     # source body for some feature types (live-verified for surface offset), which would inflate
     # result_volume for a fill that was in fact correct.
-    if (op_key in ("new", "new_body") and predicted and result_volume is not None
+    if (op_key == "new" and predicted and result_volume is not None
             and abs(result_volume - predicted) > abs(predicted) * _VOLUME_TOLERANCE):
         note.append(f"The bodies produced measure {result_volume} {units_key}3, not the "
                     f"{predicted} {units_key}3 the kept cell(s) predicted - check what landed with "

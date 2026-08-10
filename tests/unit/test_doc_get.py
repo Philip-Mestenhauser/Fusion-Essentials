@@ -37,10 +37,16 @@ class _Doc:
 
 
 class _Docs:
-    def __init__(self, docs): self._d = docs
+    """item_raises_at models a stale collection slot: item(i) raises while count still includes it."""
+    def __init__(self, docs, item_raises_at=None):
+        self._d = docs
+        self._raises_at = item_raises_at
     @property
     def count(self): return len(self._d)
-    def item(self, i): return self._d[i]
+    def item(self, i):
+        if i == self._raises_at:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return self._d[i]
 
 
 def _install(active=None, open_docs=None):
@@ -91,8 +97,8 @@ class TestActiveIdentity:
         # and no 'never_saved' exception on a doc that plainly has a data file
         assert out["summary"]["exceptions"] == []
 
-    def test_active_identity_reads_datafile_once(self):
-        # every doc.dataFile access is a cloud round-trip on the main thread - _active_identity must
+    def test_the_active_block_reads_datafile_once(self):
+        # every doc.dataFile access is a cloud round-trip on the main thread - the active block must
         # resolve it ONCE and reuse it for the URN/version fields, not re-fetch per field. With no
         # other open docs, the active doc's dataFile is read exactly once across the whole handler.
         class _CountingDoc:
@@ -154,6 +160,22 @@ class TestOpenList:
         _install(u1, [u1, u2])
         rows = _payload(dg.handler())["open_documents"]
         assert [r["open_index"] for r in rows] == [0, 1]
+
+    def test_a_doc_whose_item_read_raises_holds_its_open_index_as_a_null_row(self):
+        # documents.item(i) raising (a stale proxy) must not slide the 'open:N' address space or
+        # claim anything about the dead slot's save state - it holds its index as a null row and
+        # stays out of the unsaved-work exceptions.
+        a = _Doc("A", data_file=_DataFile())
+        c = _Doc("C", saved=False, data_file=None)
+        _install(a, [a, _Doc("dead"), c])
+        dg.app.documents._raises_at = 1
+        out = _payload(dg.handler())
+        rows = out["open_documents"]
+        assert [r["open_index"] for r in rows] == [0, 1, 2]
+        assert rows[1] == {"name": None, "open_index": 1}
+        assert rows[2]["name"] == "C"                    # the third doc, at its own address
+        assert out["summary"]["open_count"] == 3
+        assert [e["name"] for e in out["summary"]["exceptions"]] == ["C"]
 
     def test_summary_leads_with_unsaved_exceptions(self):
         # the summary names the docs with unsaved work (what close-all would lose) before the
@@ -332,7 +354,7 @@ class TestVersionMilestones:
 
     def test_flag_false_while_the_collection_names_it_resolves_to_milestone(self):
         # The defensive precedence, not a measured window: in both measured runs the collection and
-        # the flag arrived on the same poll (roughly 15-20s after doc_save_milestone), so neither
+        # the flag and the collection arrive together after a doc_save_milestone, so neither
         # source is known to lead. Where the collection DOES list a version whose own flag still
         # reads false, the collection wins and the row publishes flag_lagging.
         v2 = _Ver(2, is_milestone=False)
@@ -346,6 +368,16 @@ class TestVersionMilestones:
         assert row["flag_lagging"] is True
         assert out["milestone_count"] == 1
         assert "flag_lagging" in out["note"]
+
+    def test_the_note_carries_the_MEASURED_lag_window_not_a_vague_few_seconds(self):
+        # "re-read in a moment" is unactionable; the measured windows are what tell a caller how
+        # long to wait before a false is_milestone means anything (tip 2.9-4.4s; the flag and the
+        # collection arrive together at 15.7-19.9s).
+        df = _DFileVers(open_num=1, latest=1, others=[], milestones=_MStones([]))
+        _install(_Doc("Bracket", data_file=df))
+        note = dg._slice_versions()["note"]
+        assert "2.9-4.4s" in note and "15.7-19.9s" in note
+        assert "UNKNOWN" in note
 
     def test_milestone_walk_is_bounded_by_the_row_cap(self):
         # each entry's .version hop is a cloud read - the walk may not outrun the cap that bounds

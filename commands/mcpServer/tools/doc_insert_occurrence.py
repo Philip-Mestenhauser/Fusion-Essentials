@@ -151,7 +151,7 @@ tool = (
     .add_input_property("z", {"type": "number", "description": "Placement Z in 'units' (default 0)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("rotate_deg", {"type": "number", "description": "Orient: rotate this many degrees about 'rotate_axis' (default 0)."})
-    .add_input_property(*_inputs.world_axis("rotate_axis", default="z", description="World axis for orientation.").as_property())
+    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for orientation.").as_property())
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

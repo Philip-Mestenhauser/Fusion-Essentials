@@ -87,9 +87,11 @@ def _polygon_count(mb):
 def _mesh_summary(mb, include_polygon=True, inv_scale=1.0):
     """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler.
 
-    area/volume are read per-field with safe(): a non-CLOSED mesh has no enclosed volume and
-    MeshBody.volume can raise on it, so that field reports null rather than sinking the whole record
-    (mirrors is_closed - check that flag before trusting volume). inv_scale is 1/(units->cm factor),
+    area/volume are read per-field with safe(). MeshBody.volume does NOT raise on a mesh that is not
+    closed: it returns 0.0 (measured on a single-triangle STL reading is_closed false), so 0.0 is the
+    API's ANSWER for a body that encloses nothing, and a null volume here means the field could not
+    be read at all - the two are never merged. Check is_closed before reading a 0.0 as an enclosed
+    volume. inv_scale is 1/(units->cm factor),
     same convention as _bbox_record - area scales by inv_scale^2, volume by inv_scale^3 from the
     internal cm^2/cm^3 the API reports (see model_inspect._full_props for the same cm-based idiom)."""
     area = safe(lambda: mb.area)
@@ -134,16 +136,7 @@ def _bbox_record(mb, inv_scale):
 
 def _iter_meshes(comp):
     """Yield the MeshBodies of a component (safe over count/item)."""
-    coll = safe(lambda: comp.meshBodies)
-    if coll is None:
-        return []
-    n = safe(lambda: coll.count, 0) or 0
-    out = []
-    for i in range(n):
-        mb = safe(lambda i=i: coll.item(i))
-        if mb is not None:
-            out.append(mb)
-    return out
+    return list(_common.iter_collection(safe(lambda: comp.meshBodies)))
 
 
 # ── mesh_get ────────────────────────────────────────────────────────────────────────────────────
@@ -206,7 +199,8 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
     note = ("These are MESH bodies (not BRep). Inspect one with model_inspect (it reports mesh "
             "stats on a mesh target), edit with mesh_reduce / mesh_remesh, or convert with "
             "mesh_to_brep. A mesh has no BRep faces/edges, so find_geometry returns nothing on it. "
-            "'volume' is null for a mesh that is not watertight (is_closed=false).")
+            "'volume' reads 0.0 on a mesh that is not watertight (is_closed=false) - it encloses "
+            "nothing; a null 'volume' means the field could not be read at all.")
     if truncated:
         note += f" meshes was capped at {cap} of {total}; raise max_results to see the rest."
 
@@ -237,7 +231,8 @@ def mesh_measure_of_body(mb, units="mm") -> dict:
     rec["units"] = (units or "mm").strip().lower()
     if rec.get("is_closed") is False:
         rec["note"] = ("This mesh is NOT watertight (is_closed=false), so it has no closed volume for "
-    "mesh_to_brep to convert to a solid - repair with mesh_remesh first.")
+    "mesh_to_brep to convert to a solid - repair with mesh_remesh first. Its 'volume' reads 0.0 "
+    "because there is nothing enclosed to report, not because the body is empty.")
     return ok(rec)
 
 
@@ -323,10 +318,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     inv_scale = 1.0 / unit_cm
     bodies = []
     rename = (name or "").strip()
-    for i in range(count):
-        mb = safe(lambda i=i: mesh_list.item(i))
-        if mb is None:
-            continue
+    for mb in _common.iter_collection(mesh_list):
         if rename and count == 1:
             safe(lambda: setattr(mb, "name", rename))
         bodies.append(_mesh_summary(mb, inv_scale=inv_scale))
@@ -395,7 +387,7 @@ def mesh_reduce_handler(mesh: str = "", target: str = "proportion", value: float
         return error("For target=max_deviation, 'value' must be a positive length (in 'units').")
 
     before_tri = _tri_count(mb)
-    comp = safe(lambda: mb.parentComponent) or _target_component(design)
+    comp = _common.census_host(mb, _target_component(design))
     feats = safe(lambda: comp.features.meshReduceFeatures)
     if feats is None:
         return error("This design has no meshReduceFeatures collection (mesh reduce unavailable here).")
@@ -515,7 +507,7 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
         return error(merr)
 
     before_tri = _tri_count(mb)
-    comp = safe(lambda: mb.parentComponent) or _target_component(design)
+    comp = _common.census_host(mb, _target_component(design))
     feats = safe(lambda: comp.features.meshRemeshFeatures)
     if feats is None:
         return error("This design has no meshRemeshFeatures collection (mesh remesh unavailable here).")
@@ -638,7 +630,7 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     "(exact, one BRep face per triangle, heavy), or enable the extension. Not silently falling "
     "back to a different method.")
 
-    comp = safe(lambda: mb.parentComponent) or _target_component(design)
+    comp = _common.census_host(mb, _target_component(design))
     feats = safe(lambda: comp.features.meshConvertFeatures)
     if feats is None:
         return error("This design has no meshConvertFeatures collection (mesh->BRep unavailable here).")
@@ -662,16 +654,8 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     # modes this tool runs in. Snapshot the BRep bodies BEFORE the add so the before/after comparison
     # is valid whether add returns a feature (parametric) or None (non-parametric).
     def _brep_snapshot():
-        coll = safe(lambda: comp.bRepBodies)
-        if coll is None:
-            return []
-        n = safe(lambda: coll.count, 0) or 0
-        out = []
-        for i in range(n):
-            b = safe(lambda i=i: coll.item(i))
-            if b is not None:
-                out.append((safe(lambda: b.entityToken), safe(lambda: b.name), b))
-        return out
+        return [(safe(lambda b=b: b.entityToken), safe(lambda b=b: b.name), b)
+                for b in _common.iter_collection(safe(lambda: comp.bRepBodies))]
 
     def inner_op(base_feature):
         # createInput -> configure -> snapshot -> add, all INSIDE the (possibly open) base-feature scope
@@ -743,14 +727,9 @@ def mesh_to_brep_handler(mesh: str = "", method: str = "prismatic", resolution: 
     brep_bodies = []
     # Parametric path: the feature object carries .bodies - use it directly.
     if feat is not None:
-        bodies = safe(lambda: feat.bodies)
-        if bodies is not None:
-            n = safe(lambda: bodies.count, 0) or 0
-            for i in range(n):
-                b = safe(lambda i=i: bodies.item(i))
-                if b is not None:
-                    brep_bodies.append({"name": safe(lambda: b.name),
-        "handle": safe(lambda: b.entityToken)})
+        for b in _common.iter_collection(safe(lambda: feat.bodies)):
+            brep_bodies.append({"name": safe(lambda b=b: b.name),
+        "handle": safe(lambda b=b: b.entityToken)})
 
     # Non-parametric path (feat is None) OR a feature with no readable .bodies: diff the component's
     # BRep bodies - the NEW body(ies) are the conversion result.
@@ -794,7 +773,8 @@ mesh_get_tool = (
             "solids/surfaces, so the BRep tools (find_geometry / model_inspect) can't see them "
             "as solids - this is how you find them. Inspect one with model_inspect (mesh "
             "target), edit with mesh_reduce / mesh_remesh, convert with mesh_to_brep, remove "
-            "with mesh_delete. 'volume' is null for a mesh that is not watertight. 'meshes' is "
+            "with mesh_delete. 'volume' reads 0.0 on a mesh that is not watertight (it encloses "
+            "nothing) and null only when the field could not be read. 'meshes' is "
             "capped (max_results, default 50); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
     .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50)."})

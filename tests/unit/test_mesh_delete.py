@@ -3,7 +3,8 @@ gated delete, and the component-scoped, count-based survivor re-check. Modeled o
 file; `_MESH.resolve` is monkeypatched for most tests so they exercise mesh_delete's own logic, and
 `TestDesignWideMeshResolution` drives the real resolver against a multi-component design.
 
-Live-verified behavior these tests pin: an Occurrence proxy exposes bRepBodies but not meshBodies;
+Behavior these tests pin: dir(occurrence) LISTS meshBodies but READING occ.meshBodies raises
+AttributeError while occ.bRepBodies reads fine;
 after a successful delete a held wrapper's isValid stays True and an entityToken lookup still
 resolves the pre-remove body; and a same-named mesh in another component is not a survivor of this
 delete, so the verdict is n_after == n_before - 1 within the owning component."""
@@ -338,10 +339,11 @@ class TestParametricDelete:
 
 # ── design-wide mesh NAME resolution (exercises the REAL _inputs.MeshBodyRef, not monkeypatched) ───
 #
-# LIVE-VERIFIED: an Occurrence proxy exposes bRepBodies but NOT meshBodies, so with the mesh's owner
-# component NOT active, an occurrence-based walk finds nothing (root.allOccurrences is deliberately
-# [] here - no occurrence proxies are modeled at all, so this can only pass via the design-wide
-# component sweep, never the occurrence path).
+# dir(occurrence) LISTS meshBodies, but READING occ.meshBodies raises AttributeError while
+# occ.bRepBodies reads fine - so with the mesh's owner component NOT active, an occurrence-based
+# walk finds nothing (root.allOccurrences is deliberately [] here - no occurrence proxies are
+# modeled at all, so this can only pass via the design-wide component sweep, never the occurrence
+# path).
 
 class TestDesignWideMeshResolution:
     def test_child_component_mesh_resolves_with_root_active(self, monkeypatch):

@@ -20,9 +20,10 @@ from conftest import load_tool
 
 # ── fake adsk.drawing (DrawingDocument.cast + the DWGFormats enum) ────────────
 
-# The two measured DWGFormats member NAMES, carrying opaque sentinels: the tool selects a member by
-# name off the live enum, so no integer value belongs in a test either.
-_DWG_FORMATS = types.SimpleNamespace(SimplifiedDWGFormat=object(), AutoCADDWGFormat=object())
+# The MEASURED DWGFormats family: the tool selects a member by name off the live enum, and the
+# fake carries the measured values (Simplified is 0 - falsy - so truthiness cannot carry it).
+import live_api_facts
+_DWG_FORMATS = types.SimpleNamespace(**live_api_facts.ENUMS["drawing.DWGFormats"])
 
 
 def _ignoring_opts(path):
@@ -106,14 +107,22 @@ def drawing_env(monkeypatch):
     monkeypatch.setattr(de, "_LAND_POLL_SLEEP", 0.001)
 
 
-def _install(*, active_doc="drawing"):
-    em = FakeExportManager()
-    if active_doc == "drawing":
-        active_doc = FakeDrawingDoc(em)
-    elif active_doc == "notdrawing":
-        active_doc = object()
-    de.app = types.SimpleNamespace(activeDocument=active_doc)
-    return em, active_doc
+@pytest.fixture
+def install(monkeypatch):
+    """Install an active document (a drawing unless asked otherwise) and hand back its export
+    manager. The active-document seam is adsk.core.Application.get - the ONE read _drawing_common's
+    cast goes through - and monkeypatch owns it, so the patch is undone with the test rather than
+    left for the next one."""
+    def _install(*, active_doc="drawing"):
+        em = FakeExportManager()
+        if active_doc == "drawing":
+            active_doc = FakeDrawingDoc(em)
+        elif active_doc == "notdrawing":
+            active_doc = object()
+        holder = types.SimpleNamespace(activeDocument=active_doc)
+        monkeypatch.setattr(adsk.core.Application, "get", lambda: holder)
+        return em, active_doc
+    return _install
 
 
 def _payload(res):
@@ -133,21 +142,21 @@ def _run(**kwargs):
 # ── happy path ────────────────────────────────────────────────────────────────
 
 class TestHappyPath:
-    def test_exports_pdf_and_verifies_file(self, tmp_path):
-        _install()
+    def test_exports_pdf_and_verifies_file(self, install, tmp_path):
+        install()
         out = _payload(_run(format="pdf", file_path=str(tmp_path / "sheet.pdf")))
         assert out["exported"] is True
         assert out["size_bytes"] > 0
         assert out["file_path"].lower().endswith(".pdf")
 
-    def test_extension_appended_when_missing(self, tmp_path):
-        em, _ = _install()
+    def test_extension_appended_when_missing(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="pdf", file_path=str(tmp_path / "noext")))
         assert out["file_path"].lower().endswith(".pdf")
         assert em.opts.path.lower().endswith(".pdf")
 
-    def test_declared_returns_are_present(self, tmp_path):
-        _install()
+    def test_declared_returns_are_present(self, install, tmp_path):
+        install()
         out = _payload(_run(file_path=str(tmp_path / "d.pdf")))
         for spec in de.RETURNS:
             assert spec.assert_present(out) == "", spec.assert_present(out)
@@ -160,22 +169,22 @@ class TestFormats:
         prop = dict(de._FORMAT.as_property()[1])
         assert prop["enum"] == ["pdf", "dxf", "dwg"]
 
-    def test_dxf_uses_the_dxf_factory_and_extension(self, tmp_path):
-        em, _ = _install()
+    def test_dxf_uses_the_dxf_factory_and_extension(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "plate")))
         assert em.factory_used == "createDXFExportOptions"
         assert out["file_path"].lower().endswith(".dxf")
         assert out["format"] == "dxf"
 
-    def test_dwg_uses_the_dwg_factory_and_extension(self, tmp_path):
-        em, _ = _install()
+    def test_dwg_uses_the_dwg_factory_and_extension(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "plate")))
         assert em.factory_used == "createDWGExportOptions"
         assert out["file_path"].lower().endswith(".dwg")
         assert out["format"] == "dwg"
 
-    def test_unknown_format_rejected(self, tmp_path):
-        _install()
+    def test_unknown_format_rejected(self, install, tmp_path):
+        install()
         res = _run(format="svg", file_path=str(tmp_path / "x.svg"))
         assert res["isError"] is True
         assert "svg" in res["message"] and "dxf" in res["message"]
@@ -184,21 +193,21 @@ class TestFormats:
 # ── DXF options ───────────────────────────────────────────────────────────────
 
 class TestDxfOptions:
-    def test_splines_as_splines_lands_on_the_options_and_is_reported(self, tmp_path):
-        em, _ = _install()
+    def test_splines_as_splines_lands_on_the_options_and_is_reported(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "s.dxf"),
                             splines_as_splines=True))
         assert em.opts.exportSplinesAsSplines is True
         assert out["splines_as_splines"] is True
 
-    def test_splines_default_is_false(self, tmp_path):
-        em, _ = _install()
+    def test_splines_default_is_false(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "d.dxf")))
         assert em.opts.exportSplinesAsSplines is False
         assert out["splines_as_splines"] is False
 
-    def test_an_option_that_does_not_take_is_an_error(self, tmp_path):
-        em, _ = _install()
+    def test_an_option_that_does_not_take_is_an_error(self, install, tmp_path):
+        em, _ = install()
         em.opts_factory = _ignoring_opts       # assignment silently ignored, as a SWIG proxy can
         res = _run(format="dxf", file_path=str(tmp_path / "i.dxf"), splines_as_splines=True)
         assert res["isError"] is True
@@ -208,27 +217,27 @@ class TestDxfOptions:
 # ── DWG variant: the member is chosen by NAME off the live enum ───────────────
 
 class TestDwgVariant:
-    def test_default_variant_is_autocad(self, tmp_path):
-        em, _ = _install()
+    def test_default_variant_is_autocad(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "a.dwg")))
-        assert em.opts.format is _DWG_FORMATS.AutoCADDWGFormat
+        assert em.opts.format == _DWG_FORMATS.AutoCADDWGFormat
         assert out["dwg_variant"] == "autocad"
 
-    def test_simplified_selects_the_simplified_member(self, tmp_path):
-        em, _ = _install()
+    def test_simplified_selects_the_simplified_member(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "s.dwg"),
                             dwg_variant="simplified"))
-        assert em.opts.format is _DWG_FORMATS.SimplifiedDWGFormat
+        assert em.opts.format == _DWG_FORMATS.SimplifiedDWGFormat
         assert out["dwg_variant"] == "simplified"
 
-    def test_unknown_variant_rejected(self, tmp_path):
-        _install()
+    def test_unknown_variant_rejected(self, install, tmp_path):
+        install()
         res = _run(format="dwg", file_path=str(tmp_path / "x.dwg"), dwg_variant="acad2000")
         assert res["isError"] is True
         assert "acad2000" in res["message"] and "simplified" in res["message"]
 
-    def test_missing_enum_member_is_reported_not_guessed(self, tmp_path, monkeypatch):
-        em, _ = _install()
+    def test_missing_enum_member_is_reported_not_guessed(self, install, tmp_path, monkeypatch):
+        em, _ = install()
         monkeypatch.delattr(_DRAWING, "DWGFormats")
         res = _run(format="dwg", file_path=str(tmp_path / "n.dwg"))
         assert res["isError"] is True
@@ -238,44 +247,44 @@ class TestDwgVariant:
 # ── format-scoped options: refused for the wrong format, naming the value ─────
 
 class TestFormatScoping:
-    def test_sheet_range_refused_for_dxf(self, tmp_path):
-        _install()
+    def test_sheet_range_refused_for_dxf(self, install, tmp_path):
+        install()
         res = _run(format="dxf", file_path=str(tmp_path / "r.dxf"), sheet_range="1-2")
         assert res["isError"] is True
         assert "1-2" in res["message"] and "format=pdf" in res["message"]
 
-    def test_sheet_range_refused_for_dwg(self, tmp_path):
-        _install()
+    def test_sheet_range_refused_for_dwg(self, install, tmp_path):
+        install()
         res = _run(format="dwg", file_path=str(tmp_path / "r.dwg"), sheet_range="3")
         assert res["isError"] is True
         assert "'sheet_range=3'" in res["message"]
 
-    def test_line_weights_refused_for_dxf(self, tmp_path):
-        _install()
+    def test_line_weights_refused_for_dxf(self, install, tmp_path):
+        install()
         res = _run(format="dxf", file_path=str(tmp_path / "l.dxf"), line_weights=False)
         assert res["isError"] is True
         assert "line_weights" in res["message"] and "format=pdf" in res["message"]
 
-    def test_dwg_variant_refused_for_pdf(self, tmp_path):
-        _install()
+    def test_dwg_variant_refused_for_pdf(self, install, tmp_path):
+        install()
         res = _run(format="pdf", file_path=str(tmp_path / "v.pdf"), dwg_variant="simplified")
         assert res["isError"] is True
         assert "dwg_variant=simplified" in res["message"] and "format=dwg" in res["message"]
 
-    def test_splines_refused_for_pdf(self, tmp_path):
-        _install()
+    def test_splines_refused_for_pdf(self, install, tmp_path):
+        install()
         res = _run(format="pdf", file_path=str(tmp_path / "p.pdf"), splines_as_splines=True)
         assert res["isError"] is True
         assert "splines_as_splines" in res["message"] and "format=dxf" in res["message"]
 
-    def test_each_option_is_accepted_by_its_own_format(self, tmp_path):
-        em, _ = _install()
+    def test_each_option_is_accepted_by_its_own_format(self, install, tmp_path):
+        em, _ = install()
         assert _payload(_run(format="pdf", file_path=str(tmp_path / "ok.pdf"),
                              sheet_range="1", line_weights=False))["line_weights"] is False
-        em2, _ = _install()
+        em2, _ = install()
         assert _payload(_run(format="dxf", file_path=str(tmp_path / "ok.dxf"),
                              splines_as_splines=True))["splines_as_splines"] is True
-        em3, _ = _install()
+        em3, _ = install()
         assert _payload(_run(format="dwg", file_path=str(tmp_path / "ok.dwg"),
                              dwg_variant="simplified"))["dwg_variant"] == "simplified"
 
@@ -283,44 +292,44 @@ class TestFormatScoping:
 # ── sheet selection + line weights (PDF) ──────────────────────────────────────
 
 class TestSheetSelection:
-    def test_sheet_range_is_passed_to_options_and_echoed(self, tmp_path):
-        em, _ = _install()
+    def test_sheet_range_is_passed_to_options_and_echoed(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "r.pdf"), sheet_range="1-2,5"))
         assert em.opts.sheetRange == "1-2,5"      # range set on the export options
         assert out["sheet_range"] == "1-2,5"
 
-    def test_no_range_defaults_to_all_and_sets_no_range(self, tmp_path):
-        em, _ = _install()
+    def test_no_range_defaults_to_all_and_sets_no_range(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "a.pdf")))
         assert out["sheet_range"] == "all"
         assert not hasattr(em.opts, "sheetRange")  # empty range leaves the all-sheets default
 
-    def test_line_weights_default_true_and_togglable(self, tmp_path):
-        em, _ = _install()
+    def test_line_weights_default_true_and_togglable(self, install, tmp_path):
+        em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "lw.pdf")))
         assert em.opts.useLineWeights is True
         assert out["line_weights"] is True
-        em2, _ = _install()
+        em2, _ = install()
         out2 = _payload(_run(file_path=str(tmp_path / "lw2.pdf"), line_weights=False))
         assert em2.opts.useLineWeights is False
         assert out2["line_weights"] is False
 
-    def test_openpdf_is_forced_false(self, tmp_path):
-        em, _ = _install()
+    def test_openpdf_is_forced_false(self, install, tmp_path):
+        em, _ = install()
         _payload(_run(file_path=str(tmp_path / "o.pdf")))
         assert em.opts.openPDF is False           # never auto-open (would drive UI we can't dismiss)
 
-    def test_a_pdf_option_that_does_not_take_is_an_error(self, tmp_path):
+    def test_a_pdf_option_that_does_not_take_is_an_error(self, install, tmp_path):
         # The PDF options read back (measured), so a dropped assignment is caught here too - not
         # only on the DXF/DWG branches.
-        em, _ = _install()
+        em, _ = install()
         em.opts_factory = _ignoring_opts
         res = _run(file_path=str(tmp_path / "i.pdf"), line_weights=False)
         assert res["isError"] is True
         assert "did not take" in res["message"].lower()
 
-    def test_a_sheet_range_that_does_not_take_is_an_error(self, tmp_path):
-        em, _ = _install()
+    def test_a_sheet_range_that_does_not_take_is_an_error(self, install, tmp_path):
+        em, _ = install()
         em.opts_factory = _ignoring_opts
         res = _run(file_path=str(tmp_path / "i2.pdf"), sheet_range="2")
         assert res["isError"] is True
@@ -330,17 +339,17 @@ class TestSheetSelection:
 # ── the file-landed gate (the load-bearing honesty check) ─────────────────────
 
 class TestFileLandedGate:
-    def test_execute_true_but_no_file_is_a_failure(self, tmp_path):
-        em, _ = _install()
+    def test_execute_true_but_no_file_is_a_failure(self, install, tmp_path):
+        em, _ = install()
         em.write_file = False        # execute() lies: returns true, writes nothing
         res = _run(format="pdf", file_path=str(tmp_path / "ghost.pdf"))
         assert res["isError"] is True
         assert "no file was written" in res["message"].lower()
 
-    def test_a_file_that_lands_late_is_not_a_false_failure(self, tmp_path, monkeypatch):
+    def test_a_file_that_lands_late_is_not_a_false_failure(self, install, tmp_path, monkeypatch):
         # Measured: the write can finish AFTER execute() returns, so the gate polls. verify_written
         # reports nothing on the first two looks and the file appears on the third.
-        em, _ = _install()
+        em, _ = install()
         em.write_file = False
         real = de._export.verify_written
         state = {"calls": 0}
@@ -357,8 +366,8 @@ class TestFileLandedGate:
         assert state["calls"] >= 3                # it kept looking instead of stat-ing once
         assert out["size_bytes"] > 0
 
-    def test_the_wait_gives_up_and_reports_the_miss(self, tmp_path, monkeypatch):
-        em, _ = _install()
+    def test_the_wait_gives_up_and_reports_the_miss(self, install, tmp_path, monkeypatch):
+        em, _ = install()
         em.write_file = False
         real = de._export.verify_written
         state = {"calls": 0}
@@ -375,8 +384,8 @@ class TestFileLandedGate:
         # The premise of the wait: the write had not finished when the call returned.
         assert "of the export call returning" in res["message"]
 
-    def test_a_pre_existing_zero_byte_file_is_not_a_landing(self, tmp_path):
-        em, _ = _install()
+    def test_a_pre_existing_zero_byte_file_is_not_a_landing(self, install, tmp_path):
+        em, _ = install()
         em.write_file = False
         path = tmp_path / "empty.dwg"
         path.write_bytes(b"")            # the file EXISTS but carries no export
@@ -384,18 +393,18 @@ class TestFileLandedGate:
         assert res["isError"] is True
         assert "size_bytes=0" in res["message"]
 
-    def test_a_size_still_climbing_is_not_reported_as_landed(self, tmp_path, monkeypatch):
+    def test_a_size_still_climbing_is_not_reported_as_landed(self, install, tmp_path, monkeypatch):
         # Two consecutive EQUAL samples are the gate, so a size read mid-write is never the one
         # reported: the sizes below climb 10 -> 20 before holding.
-        em, _ = _install()
+        em, _ = install()
         sizes = [10, 20]
         monkeypatch.setattr(de._export, "verify_written",
                             lambda path: (sizes.pop(0) if sizes else 20, None))
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "grow.dwg")))
         assert out["size_bytes"] == 20            # the settled size, not the first non-zero one
 
-    def test_a_file_that_never_settles_is_refused(self, tmp_path, monkeypatch):
-        em, _ = _install()
+    def test_a_file_that_never_settles_is_refused(self, install, tmp_path, monkeypatch):
+        em, _ = install()
         state = {"size": 0}
 
         def growing(path):
@@ -407,16 +416,16 @@ class TestFileLandedGate:
         assert res["isError"] is True
         assert "still growing" in res["message"]
 
-    def test_execute_false_is_a_failure(self, tmp_path):
-        em, _ = _install()
+    def test_execute_false_is_a_failure(self, install, tmp_path):
+        em, _ = install()
         em.execute_result = False
         em.write_file = False
         res = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))
         assert res["isError"] is True
         assert "returned false" in res["message"].lower()
 
-    def test_export_exception_is_reported(self, tmp_path):
-        em, _ = _install()
+    def test_export_exception_is_reported(self, install, tmp_path):
+        em, _ = install()
         em.raise_exc = RuntimeError("disk full")
         res = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))
         assert res["isError"] is True
@@ -460,16 +469,16 @@ class TestWaitForFile:
 # ── the preview-feature disclosure (DXF/DWG option creators only) ─────────────
 
 class TestPreviewNote:
-    def test_dxf_and_dwg_notes_disclose_the_preview_banner(self, tmp_path):
-        _install()
+    def test_dxf_and_dwg_notes_disclose_the_preview_banner(self, install, tmp_path):
+        install()
         assert "preview" in _payload(_run(format="dxf",
                                           file_path=str(tmp_path / "p.dxf")))["note"].lower()
-        _install()
+        install()
         assert "preview" in _payload(_run(format="dwg",
                                           file_path=str(tmp_path / "p.dwg")))["note"].lower()
 
-    def test_pdf_note_carries_no_preview_claim(self, tmp_path):
-        _install()
+    def test_pdf_note_carries_no_preview_claim(self, install, tmp_path):
+        install()
         assert "preview" not in _payload(_run(format="pdf",
                                               file_path=str(tmp_path / "p.pdf")))["note"].lower()
 
@@ -477,25 +486,25 @@ class TestPreviewNote:
 # ── sheet coverage: DXF/DWG write ONE sheet, PDF is the multi-sheet channel ───
 
 class TestSingleSheetCoverage:
-    def test_dxf_and_dwg_notes_state_single_sheet_coverage(self, tmp_path):
-        _install()
+    def test_dxf_and_dwg_notes_state_single_sheet_coverage(self, install, tmp_path):
+        install()
         assert "SINGLE sheet" in _payload(_run(format="dxf",
                                                file_path=str(tmp_path / "s.dxf")))["note"]
-        _install()
+        install()
         assert "SINGLE sheet" in _payload(_run(format="dwg",
                                                file_path=str(tmp_path / "s.dwg")))["note"]
 
-    def test_the_note_names_the_first_sheet_and_denies_the_active_one(self, tmp_path):
+    def test_the_note_names_the_first_sheet_and_denies_the_active_one(self, install, tmp_path):
         # WHICH sheet is the load-bearing half: the measured DXF of an 8-sheet drawing carried
         # sheet index 0 and NOT the active sheet, so a caller who reads "the active sheet" here
         # exports the wrong one and cannot tell from the payload.
-        _install()
+        install()
         note = _payload(_run(format="dxf", file_path=str(tmp_path / "which.dxf")))["note"]
         assert "first sheet" in note
         assert "not the active one" in note
 
-    def test_pdf_note_claims_no_single_sheet_limit(self, tmp_path):
-        _install()
+    def test_pdf_note_claims_no_single_sheet_limit(self, install, tmp_path):
+        install()
         note = _payload(_run(format="pdf", file_path=str(tmp_path / "s.pdf")))["note"]
         assert "SINGLE sheet" not in note and "all sheets" in note
 
@@ -503,20 +512,49 @@ class TestSingleSheetCoverage:
 # ── guards ────────────────────────────────────────────────────────────────────
 
 class TestGuards:
-    def test_active_doc_not_a_drawing_errors(self, tmp_path):
-        _install(active_doc="notdrawing")
+    def test_active_doc_not_a_drawing_errors(self, install, tmp_path):
+        install(active_doc="notdrawing")
         res = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))
         assert res["isError"] is True
         assert "not a drawing" in res["message"].lower()
 
-    def test_missing_path_errors(self):
-        _install()
+    def test_missing_path_errors(self, install):
+        install()
         res = _run(format="pdf")
         assert res["isError"] is True
         assert "file_path" in res["message"]
 
-    def test_missing_path_names_the_formats_extension(self):
-        _install()
+    def test_missing_path_names_the_formats_extension(self, install):
+        install()
         res = _run(format="dwg")
         assert res["isError"] is True
         assert ".dwg" in res["message"]
+
+
+class TestSheetRangeCarriesTheWedgeFact:
+    """Measured on 2705.0.87: a single-sheet sheet_range export twice wedged the Fusion main thread -
+    every later call timed out and the session never recovered on its own - while the all-sheets
+    export of the same drawing ran clean. Until that is discriminated the input itself has to carry
+    the fact, at its observed SEVERITY: a caller who reaches for sheet_range cannot recover a wedged
+    session from the result, and "it may be slow" would understate what it costs."""
+
+    def _sheet_range_description(self):
+        return de.tool.to_dict()["inputSchema"]["properties"]["sheet_range"]["description"]
+
+    def test_the_input_states_the_measured_wedge(self):
+        desc = self._sheet_range_description()
+        assert "2705.0.87" in desc
+        assert "wedged" in desc
+
+    def test_the_input_states_the_observed_severity(self):
+        # the session did not recover by itself - that is what makes this worth a wire warning
+        desc = self._sheet_range_description()
+        assert "did not recover" in desc
+        assert "outside intervention" in desc
+
+    def test_the_input_says_prefer_omitting_it(self):
+        assert "prefer omitting" in self._sheet_range_description()
+
+    def test_the_all_sheets_comparison_is_kept(self):
+        # without the clean all-sheets half the fact reads as "PDF export is broken", which it is not
+        assert "all-sheets export of the same drawing ran clean" in self._sheet_range_description()

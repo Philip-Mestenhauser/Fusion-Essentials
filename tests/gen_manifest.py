@@ -155,8 +155,15 @@ def _collect_kinds():
 # explicitly (not by globbing tools/_*.py) so a NEW helper is a deliberate one-line add here AND a
 # MAP_BLURB on the module — the same self-disclosing pattern as a kind's MAP_HINT. (test conftest's
 # load_tool is the importer; _data_common etc. import cleanly under mocked adsk.)
-_HELPER_MODULES = ("_common", "_inputs", "_outputs", "_holder", "_data_common", "_cam_common", "_export",
-                   "_joints", "_view_common", "_threads", "_geom", "_drawing_common")
+def _helper_modules():
+    """Every `_`-prefixed module under tools/ - the catalog enrolls them ALL, so a shared helper
+    cannot be silently invisible to the reuse map (a hardcoded list dropped 8 of 20 once, five of
+    them carrying a MAP_BLURB that reached nothing)."""
+    tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "commands", "mcpServer", "tools")
+    return tuple(sorted(
+        fn[:-3] for fn in os.listdir(tools_dir)
+        if fn.startswith("_") and fn.endswith(".py") and fn != "__init__.py"))
 
 
 def _collect_helpers():
@@ -164,7 +171,7 @@ def _collect_helpers():
     terse 'what to reuse from here'), falling back to the first docstring line. A helper with neither
     shows up blank — the signal to add a MAP_BLURB."""
     out = []
-    for name in _HELPER_MODULES:
+    for name in _helper_modules():
         mod = load_tool(name)
         blurb = getattr(mod, "MAP_BLURB", "")
         if not blurb:

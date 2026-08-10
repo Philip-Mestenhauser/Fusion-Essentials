@@ -31,7 +31,8 @@ import zlib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-from tool_verify import call, health_gate  # noqa: E402  (the one HTTP driver, reused)
+# the one HTTP driver AND the one step engine, reused - the status vocabulary cannot fork
+from tool_verify import NOTE_MAX, call, health_gate, run_steps, _refused  # noqa: E402
 
 RESULTS_DIR = os.path.join(_HERE, "results")
 OUT_DIR = os.path.join(RESULTS_DIR, "drawing_verify")
@@ -55,45 +56,15 @@ def _write_png(path, size=64, rgb=(255, 140, 0)):
 
 
 def _run_steps(steps, ctx):
-    """tool_verify's step contract: rows of (tool, args, expect, save). args may be callable(ctx);
-    expect is 'ok' / 'refused' / callable(payload)->bool; save is (key, extract(payload))."""
-    rows = []
-    for tool, args, expect, save in steps:
-        try:
-            arguments = args(ctx) if callable(args) else dict(args)
-        except KeyError as e:
-            rows.append((tool, "blocked", str(e)))
-            continue
-        is_error, payload = call(tool, arguments)
-        if callable(expect):
-            if is_error:
-                status, note = "FAIL", str(payload)[:160]
-            else:
-                try:
-                    good = bool(expect(payload))
-                except Exception as e:
-                    good, payload = False, f"predicate raised: {e}"
-                status, note = ("pass", "") if good else ("FAIL", str(payload)[:160])
-        elif expect == "ok" and not is_error:
-            status, note = "pass", ""
-        elif expect == "refused" and is_error:
-            status, note = "expected-refusal", str(payload)[:100]
-        else:
-            status, note = "FAIL", str(payload)[:160]
-        if status == "pass" and save is not None and not is_error:
-            key, extract = save
-            try:
-                ctx[key] = extract(payload)
-            except Exception as e:
-                status, note = "FAIL", f"saved-value extraction failed: {e}"
-        rows.append((tool, status, note))
-        print(f"  {status:18} {tool:26} {note}", flush=True)
-        time.sleep(0.1)
-    return rows
+    """tool_verify.run_steps with a per-step printed line - same engine, same vocabulary."""
+    return run_steps(steps, ctx,
+                     on_result=lambda tool, status, note:
+                     print(f"  {status:18} {tool:26} {note}", flush=True))
 
 
 def _report(rows, phase):
-    fails = [r for r in rows if r[1] in ("FAIL", "blocked")]
+    # pass* blocks here exactly as it blocks the sweep receipt: a payload-shape mismatch.
+    fails = [r for r in rows if r[1] in ("FAIL", "blocked", "pass*")]
     os.makedirs(RESULTS_DIR, exist_ok=True)
     path = os.path.join(RESULTS_DIR, f"drawing-verify-{time.strftime('%Y%m%d-%H%M%S')}.json")
     with open(path, "w", encoding="utf-8") as fh:
@@ -140,18 +111,41 @@ def stage():
     print("-- STAGE: source design + the two drawing_create beats --")
     rows = _run_steps(steps, ctx)
 
-    # The two real create beats the blind sweep cannot carry (they mint cloud files). Fusion
-    # auto-names both drawings identically, so identity is the lineage URN.
-    for label, args in (
-            ("iso", {}),
+    # The real create beats the blind sweep cannot carry (they mint cloud files). Fusion
+    # auto-names every drawing from the source design, so identity is the lineage URN.
+    # Each row is (label, args, extra_predicate_or_None) - the URN check runs on all of them.
+    def _custom_500x333(p):
+        """The custom sheet the create ASKED for, read back off the input at create time: all four
+        numbers land, and the zone counts sit at or above the minimum the API takes."""
+        cs = ((p.get("settings_requested") or {}).get("custom_size") or {})
+        return (abs((cs.get("width_applied") or 0) - 500.0) < 1e-6
+                and abs((cs.get("height_applied") or 0) - 333.0) < 1e-6
+                and cs.get("horizontal_zones_applied") == 2
+                and cs.get("vertical_zones_applied") == 2)
+
+    for label, args, extra in (
+            ("iso", {}, None),
             ("asme", {"standard": "asme", "units": "inch", "sheet_size": "b",
                       "view_style": "shaded_hidden", "tangent_edges": "shortened",
                       "hole_annotations": "thread", "parts_list": True,
-                      "parts_list_location": "bottom_right", "auto_dimension": "baseline"})):
+                      "parts_list_location": "bottom_right", "auto_dimension": "baseline"}, None),
+            # a CUSTOM sheet, live-gated: the setter is assign-back checked and the size is written
+            # in the DOCUMENT unit the standard fixes, so 500 x 333 mm has to read back as 500/333
+            # with 2x2 zones. This beat pins that path for every future sweep.
+            ("iso_custom", {"standard": "iso", "sheet_size": "custom",
+                            "custom_width_mm": 500, "custom_height_mm": 333}, _custom_500x333),
+            # ordinate is a platform-legal auto-dimension strategy and is offered as one.
+            ("iso_ordinate", {"auto_dimension": "ordinate"}, None)):
         is_error, payload = _create_drawing_with_retry(args)
         good = (not is_error) and isinstance(payload, dict) and _created_urn(payload)
+        if good and extra is not None:
+            try:
+                good = bool(extra(payload))
+            except Exception as e:
+                good, payload = False, f"predicate raised: {e}"
         status = "pass" if good else "FAIL"
-        rows.append(("drawing_create", status, "" if good else str(payload)[:160]))
+        # the create beats are judged here rather than by run_steps, so they truncate the same way
+        rows.append(("drawing_create", status, "" if good else str(payload)[:NOTE_MAX]))
         print(f"  {status:18} {'drawing_create':26} [{label}]", flush=True)
         if good:
             ctx[f"drawing_{label}"] = (payload.get("drawing_name"), payload.get("file_id"))
@@ -159,13 +153,15 @@ def stage():
     rc = _report(rows, "stage")
     if rc == 0:
         state = {"design_name": design_name, "design_urn": ctx.get("design_urn"),
-                 "drawing_iso": ctx.get("drawing_iso"), "drawing_asme": ctx.get("drawing_asme")}
+                 "drawing_iso": ctx.get("drawing_iso"), "drawing_asme": ctx.get("drawing_asme"),
+                 "drawing_iso_custom": ctx.get("drawing_iso_custom"),
+                 "drawing_iso_ordinate": ctx.get("drawing_iso_ordinate")}
         with open(STAGE_FILE, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2)
         iso_name = state["drawing_iso"][0] if state["drawing_iso"] else "?"
         print(f"\nstage state -> {STAGE_FILE}")
-        print(f"\nNEXT (one human step): both drawings carry the name '{iso_name}'. In the Fusion")
-        print(f"UI ({PROJECT}) open EACH of them once (review + close is fine), then run:")
+        print(f"\nNEXT (one human step): every staged drawing carries the name '{iso_name}'. In the")
+        print(f"Fusion UI ({PROJECT}) open EACH of them once (review + close is fine), then run:")
         print("  py -3 tests/live/drawing_verify.py --run")
     return rc
 
@@ -217,11 +213,20 @@ def run():
         ("drawing_dimension", {"view": 0, "strategy": "ordinate", "datum": "top_right"},
          lambda p: p.get("dimensioned") is True, None),
 
-        # drawing_insert_image - the locally written PNG.
+        # drawing_insert_image - the locally written PNG. An image POSITION is standard-keyed
+        # (millimetres under ISO), and the anchor is bounds-checked against the sheet before
+        # anything is placed: 'position_bounds_checked' says the check RAN, which is what separates
+        # a passed bound from one that was silently skipped.
         ("drawing_insert_image", {"image_path": png, "x": 150, "y": 100},
-         lambda p: p.get("inserted") is True, None),
+         lambda p: p.get("inserted") is True and p.get("position_bounds_checked") is True, None),
         ("drawing_insert_image", {"image_path": png, "x": 40, "y": 40, "scale": 2},
-         lambda p: p.get("inserted") is True and p.get("scale") == 2.0, None),
+         lambda p: p.get("inserted") is True and p.get("scale") == 2.0
+         and p.get("position_bounds_checked") is True, None),
+        # off the sheet in the drawing's own unit: an off-sheet insert returns success and renders
+        # NOTHING, and an image cannot be read back or moved afterwards - so the refusal names the
+        # anchor and the extent it fell outside, and nothing is placed.
+        ("drawing_insert_image", {"image_path": png, "x": 9999, "y": 10},
+         _refused("off sheet", "which spans 0 to"), None),
         ("drawing_insert_image", {"image_path": png + ".missing", "x": 0, "y": 0}, "refused", None),
         ("drawing_insert_image", {"image_path": png, "x": 0, "y": 0, "scale": 0}, "refused", None),
         ("drawing_insert_image", {"image_path": png}, "refused", None),
@@ -247,8 +252,16 @@ def run():
         ("drawing_edit_sheet", {"action": "add"},
          lambda p: p.get("added") is True and p.get("sheet_count") == p.get("sheet_count_before") + 1,
          None),
+        # the second add runs on a drawing that ALREADY holds two sheets, so this is where the
+        # listing has to be read: 'sheets' comes back 1-based and contiguous - the numbering
+        # drawing_export's sheet_range takes, obtainable nowhere else - with the new sheet directly
+        # after the one that was active (the previous add left that one last, so here the position
+        # after the active is also the last index).
         ("drawing_edit_sheet", {"action": "add", "new_name": "SweepSheetA"},
-         lambda p: p.get("sheet") == "SweepSheetA", None),
+         lambda p: p.get("sheet") == "SweepSheetA" and p.get("sheet_count_before", 0) >= 2
+         and [s["export_index"] for s in p["sheets"]] == list(range(1, len(p["sheets"]) + 1))
+         and next(s["export_index"] for s in p["sheets"] if s["name"] == "SweepSheetA")
+         == p["sheet_count_before"] + 1, None),
         ("drawing_edit_sheet", {"action": "add", "new_name": "SweepDup"},
          lambda p: p.get("sheet") == "SweepDup", None),
         ("drawing_edit_sheet", {"action": "add", "new_name": "SweepDup"}, "refused", None),
@@ -307,6 +320,33 @@ def run():
     ]
     print(f"-- RUN: user-present drawing beats on '{iso_name}' --")
     rows = _run_steps(steps, ctx)
+
+    # THE STANDARD-KEYED POSITION UNIT, on the staged ASME drawing: an image anchor is INCHES under
+    # ASME and millimetres under ISO (both measured by placing an image and reading where it
+    # rendered), while Sheet.width/height stay millimetres whatever the standard - so the bound has
+    # to convert before it compares. (5,3) in is on a B sheet; (100,50) in is 2540 x 1270 mm, which
+    # would render nothing at all.
+    asme = state.get("drawing_asme")
+    if asme:
+        asme_name, asme_urn = asme
+        is_error, payload = call("doc_activate", {"name": asme_urn})
+        if is_error:
+            is_error, payload = call("doc_open", {"file_id": asme_urn, "force_api_open": True})
+            if not is_error:
+                time.sleep(3)
+        if is_error:
+            rows.append(("drawing_insert_image", "skipped",
+                         f"the staged ASME drawing ({asme_urn}) could not be reached: {payload}"))
+            print(f"  {'skipped':18} {'drawing_insert_image':26} ASME drawing unreachable")
+        else:
+            print(f"-- RUN: the ASME position-unit beats on '{asme_name}' --")
+            rows += _run_steps([
+                ("drawing_insert_image", {"image_path": png, "x": 100, "y": 50},
+                 _refused("off sheet", "which spans 0 to"), None),
+                ("drawing_insert_image", {"image_path": png, "x": 5, "y": 3},
+                 lambda p: p.get("inserted") is True
+                 and p.get("position_bounds_checked") is True, None),
+            ], ctx)
     rc = _report(rows, "run")
     if rc == 0:
         print("\nEYEBALL (the human half of this verification):")

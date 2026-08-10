@@ -159,8 +159,12 @@ def _create_note(d, ents, text, leader_point, plane, plane_face, align, valign,
                             "this Fusion build may not support PMI authoring.")
     try:
         note_in = notes.createInput(ent)
-        # Pin the extension explicitly: an unpinned input can land the note below the platform's
-        # edit-time floor, bricking every later edit (live-verified).
+        # Lift the input's extension to the default in exactly one case: the caller named no
+        # leader_extension AND the input arrived UNDER the floor (an unreadable extension counts).
+        # An explicit leader_extension is the caller's, and apply_note_format below refuses it if
+        # it is under the floor. A note created under the floor is the one state pmi_edit can only
+        # answer with a recreate; what the platform's own floor is stays UNMEASURED on 2705 (see
+        # _pmi's extension-gate note).
         cur = safe(lambda: note_in.leaderLineExtension)
         if ext_cm is None and (cur is None or cur < _pmi.LEADER_EXT_FLOOR):
             note_in.leaderLineExtension = _pmi.LEADER_EXT_DEFAULT
@@ -231,35 +235,11 @@ def _create_hole_note(d, ents, text, align, valign, perpendicular, ext_cm, flags
     if values is not None and post_err is None:
         _vals, post_err = _pmi.apply_hole_values(ann, values, f)
     if display is not None and post_err is None:
-        post_err = _apply_display(ann, display)
+        post_err = _pmi.apply_display(ann, display)
     if post_err:
         return None, None, (post_err + f" (the annotation WAS created: '{safe(lambda: ann.name)}'"
                             " - adjust with pmi_edit)")
     return ann, comp, None
-
-
-def _apply_display(ann, display):
-    """Apply a display spec (with optional 'secondary') to a hole note. Error string or None."""
-    spec = dict(display) if isinstance(display, dict) else display
-    secondary = spec.pop("secondary", None) if isinstance(spec, dict) else None
-    if isinstance(spec, dict) and spec:
-        ds, derr = _pmi.build_display(spec)
-        if derr:
-            return derr
-        try:
-            ann.primaryDisplaySettings = ds
-        except Exception as e:
-            return f"Primary display settings set failed: {e}"
-    if secondary is not None:
-        ds2, derr2 = _pmi.build_display(secondary)
-        if derr2:
-            return "display.secondary: " + derr2
-        try:
-            ann.hasSecondaryDisplaySettings = True
-            ann.secondaryDisplaySettings = ds2
-        except Exception as e:
-            return f"Secondary display settings set failed: {e}"
-    return None
 
 
 TOOL_DESCRIPTION = (
@@ -297,9 +277,9 @@ tool = (
     .add_input_property("perpendicular", {"type": "boolean",
         "description": "Text perpendicular to the leader line (default parallel)."})
     .add_input_property("leader_extension", {"type": "number",
-        "description": "Leader line extension length in 'units' (min 2.5mm)."})
+        "description": "Leader line extension length in 'units'; under 2.5mm is refused."})
     .add_input_property("flags", {"type": "object",
-        "description": "hole_note bools: quantity_note, all_matching, flip_normal, through, threaded, threaded_through."})
+        "description": "hole_note bools: quantity_note, all_matching, flip_normal, through, threaded, threaded_through, show_imported_geometry."})
     .add_input_property("values", {"type": "object",
         "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}; keys incl. depth, counterbore_*, countersink_*, thread_depth."})
     .add_input_property("display", {"type": "object",

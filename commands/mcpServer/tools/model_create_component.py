@@ -174,7 +174,7 @@ tool = (
     .add_input_property("activate", {"type": "boolean",
             "description": "Make the new component the active edit target (default false)."})
     .add_input_property("rotate_deg", {"type": "number", "description": "Optionally orient: rotate this many degrees about 'rotate_axis' (default 0)."})
-    .add_input_property(*_inputs.world_axis("rotate_axis", default="z", description="World axis for the orientation rotation.").as_property())
+    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for the orientation rotation.").as_property())
     .add_input_property(*_PARENT.as_property())
     .strict_schema()
 )

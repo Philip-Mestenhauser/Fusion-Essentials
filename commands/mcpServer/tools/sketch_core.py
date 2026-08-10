@@ -7,6 +7,7 @@ polygon/etc), sketch_add_3d_line. Together these are the front half of the model
 accept mm | cm | in (default mm) and convert to the API's internal centimeters.
 """
 
+import importlib
 import math
 
 import adsk.core
@@ -96,9 +97,8 @@ def get_sketches_handler() -> dict:
     sketches = []
     try:
         for comp in _common.all_components(design):
-            coll = safe(lambda c=comp: c.sketches)
-            for i in range(safe(lambda: coll.count, 0) if coll else 0):
-                rec = _sketch_summary(coll.item(i))
+            for sk in _common.iter_collection(safe(lambda c=comp: c.sketches)):
+                rec = _sketch_summary(sk)
                 rec["component"] = safe(lambda c=comp: c.name)
                 sketches.append(rec)
     except Exception as e:
@@ -106,13 +106,22 @@ def get_sketches_handler() -> dict:
     return ok({"sketch_count": len(sketches), "sketches": sketches})
 
 
+def _detail_engine():
+    """The _sketch_detail engine, looked up in the module table at CALL time.
+
+    Kept out of the module-level imports so the delegation carries no load-order dependency, and
+    resolved by name rather than through the package attribute: that attribute is bound once, by
+    whichever module imported the engine first, so a caller that swaps the engine in the module
+    table would otherwise be bypassed."""
+    return importlib.import_module("._sketch_detail", __package__)
+
+
 def sketch_get_handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm") -> dict:
     """No 'sketch_name': a summary list of every sketch. With one: that sketch's overview (or the
     full X-ray with include_entities=true) via the _sketch_detail engine, in 'units' (mm default)."""
     if (sketch_name or "").strip():
-        # delegate to the detail engine (imported lazily; no circular dependency)
-        from . import _sketch_detail as sketch_detail
-        return sketch_detail.handler(sketch_name=sketch_name, include_entities=include_entities, units=units)
+        return _detail_engine().handler(sketch_name=sketch_name,
+                                        include_entities=include_entities, units=units)
     return get_sketches_handler()
 
 
@@ -252,24 +261,43 @@ _REF_LESS_NOTES = {
 
 # kind -> the '<type>:<index>' REF TOKEN whose collection its curves land in, where the kind's own
 # name is not that token. _common owns the token -> sub-collection mapping, so these resolve there.
+# The composite kinds are built BY a SketchLines factory (addTwoPointRectangle,
+# addCenterPointRectangle, addScribedPolygon, addByTwoPoints per polyline segment), so every one of
+# them lands its curves in 'line' - the collection whose delta verifies the draw and counts the
+# pieces the shape was built from. 'slot' lands there too: addCenterToCenterSlot builds a slot out
+# of 2 solid SketchLines + 1 CONSTRUCTION SketchLine (the centre-to-centre line) + 2 SketchArc end
+# caps, 5 sketch curves in all, so its line delta is 3.
 _KIND_REF_TOKEN = {"cv_spline": "cv_spline",
                    "center_point_arc_slot": "arc",
                    "three_point_arc_slot": "arc",
                    "overall_slot": "line",
-                   "center_point_slot": "line"}
+                   "center_point_slot": "line",
+                   "slot": "line",
+                   "rectangle": "line",
+                   "center_rectangle": "line",
+                   "polygon": "line",
+                   "polyline": "line",
+                   "closed_path": "line"}
 
 
 def _kind_curve_collection(sketch, kind):
     """The sketch sub-collection this kind's factory adds to - the one the before/after count that
-    VERIFIES the draw is read from. None when the kind has no dedicated collection to count."""
+    VERIFIES the draw is read from. None when no collection answers for the kind.
+
+    Both exception tables answer BEFORE the fall-through, and that order is what keeps the ref-less
+    kinds working: _common knows no token for conic/elliptical_arc, so reaching it first would
+    resolve them to None and drop their own collections. Every kind the tables do not name IS its
+    own ref token (line/circle/arc/ellipse/point/spline), so it resolves through _common - the one
+    owner of the token -> sub-collection map. Every kind this tool draws lands in a collection some
+    entry names, so the count gate runs for all of them."""
     token = _KIND_REF_TOKEN.get(kind)
     if token is not None:
         return _common.entity_collection(sketch, token)
     attr = _NO_REF_CURVE_ATTR.get(kind)
-    if attr is None:
-        return None
-    curves = safe(lambda: sketch.sketchCurves)
-    return safe(lambda: getattr(curves, attr)) if curves is not None else None
+    if attr is not None:
+        curves = safe(lambda: sketch.sketchCurves)
+        return safe(lambda: getattr(curves, attr)) if curves is not None else None
+    return _common.entity_collection(sketch, kind)
 
 
 def _kind_curve_count(sketch, kind):
@@ -325,6 +353,8 @@ def _all_sketch_curves_count(sketch):
 
 def _mark_recent_construction(sketch, before_count):
     """Mark every sketch curve added since 'before_count' as construction geometry."""
+    # 'before_count' is an INDEX into sketchCurves, so this stays a positional walk: iter_collection
+    # drops an unreadable curve, which would slide the window onto curves that were already there.
     curves = safe(lambda: sketch.sketchCurves)
     n = safe(lambda: curves.count, 0) if curves else 0
     for i in range(before_count, n):
@@ -755,9 +785,13 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if before_kind is not None and after_kind is not None:
         delta = after_kind - before_kind
         if delta < 1:
-            return error(f"Drawing {kind} returned an entity but the sketch's own {kind} collection "
-                         f"count did not change ({before_kind} -> {after_kind}) - nothing was "
-                         "added. Re-read sketch_get.")
+            # Name the collection that was COUNTED, not the kind: a rectangle/polygon/slot/polyline
+            # is built out of lines, so 'rectangle collection' would send the caller looking for a
+            # collection the sketch does not have.
+            counted = _KIND_REF_TOKEN.get(kind, kind)
+            return error(f"Drawing {kind} returned an entity but the sketch's own {counted} "
+                         f"collection count did not change ({before_kind} -> {after_kind}) - "
+                         "nothing was added. Re-read sketch_get.")
 
     out = {
     "drawn": label,
@@ -785,6 +819,12 @@ def add_sketch_geometry_handler(kind: str = "", sketch_name: str = "", units: st
     if kind in _ARC_SLOT_KINDS:
         out["note"] = ("Arc slot drawn out of SketchArcs - 'curves_added' counts them and each is "
                        "addressable as 'arc:<index>' for sketch_dimension / sketch_constrain "
+                       "(sketch_get(include_entities=true) lists the indexes).")
+    if kind == "slot":
+        out["note"] = ("Slot drawn from 2 solid SketchLines, 1 CONSTRUCTION SketchLine (the "
+                       "centre-to-centre line) and 2 SketchArc end caps - 5 curves, of which "
+                       "'curves_added' counts the 3 lines. Address any of them as 'line:<index>' "
+                       "or 'arc:<index>' for sketch_dimension / sketch_constrain "
                        "(sketch_get(include_entities=true) lists the indexes).")
     if kind in _LINEAR_SLOT_KINDS:
         out["note"] = ("Slot drawn - 'curves_added' counts its SketchLines: three, four when a "

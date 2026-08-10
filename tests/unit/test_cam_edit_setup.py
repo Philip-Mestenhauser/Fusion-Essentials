@@ -171,14 +171,14 @@ def _install(monkeypatch, setups=("Setup1",), require_enable=True):
     monkeypatch.setattr(ces, "_resolve_bodies", _resolve_bodies)
     cam._bodies = bodies
     # machine resolver seam: a known 'vendor|model' -> a fake Machine, anything else -> a refusal.
-    # (Patched so it auto-restores - TestMachineResolver exercises the REAL _resolve_machine.)
+    # (Patched so it auto-restores - TestMachineResolver exercises the REAL resolve_machine.)
     known = {"Haas|VF-2": _Machine("Haas VF-2")}
-    def _resolve_machine(name):
+    def resolve_machine(name):
         m = known.get(name)
         if not m:
             return None, None, "no machine '%s'" % name
         return m, m.description, None
-    monkeypatch.setattr(ces, "_resolve_machine", _resolve_machine)
+    monkeypatch.setattr(ces, "resolve_machine", resolve_machine)
     cam._machines = known
     # WCS handle resolver seam: a known handle string -> a fake entity; unknown -> a refusal. The
     # apply logic (mode-set + in-place bind + read-back) still runs against the fake setup params.
@@ -350,7 +350,7 @@ class TestMachine:
         # never a false ok.
         cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS), machine_sticks=False)])
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
-        monkeypatch.setattr(ces, "_resolve_machine",
+        monkeypatch.setattr(ces, "resolve_machine",
                             lambda name: (_Machine("Haas VF-2"), "Haas VF-2", None))
         res = ces.handler(setup="Setup1", machine="Haas|VF-2")
         assert res["isError"] is True and "did not take" in res["message"].lower()
@@ -364,9 +364,9 @@ class TestMachine:
 
 # ── bind the WCS to geometry (the associative, from-selection WCS) ──────────
 
-# ── machine RESOLUTION: exact-match-first beats a shared prefix (the real _resolve_machine) ─────────
+# ── machine RESOLUTION: exact-match-first beats a shared prefix (the real resolve_machine) ─────────
 #
-# The tests above patch the _resolve_machine seam; these exercise the REAL resolver against a
+# The tests above patch the resolve_machine seam; these exercise the REAL resolver against a
 # SimpleNamespace machine library whose query PREFIX-matches the model (the live behaviour: 'VF-2'
 # returns the plain machine AND its 'VF-2 with TRT100/160' variants).
 
@@ -410,7 +410,7 @@ class TestMachineResolver:
         # 'Haas|VF-2' prefix-matches all three; exact-match-first must select the model that is
         # exactly 'VF-2', NOT refuse as ambiguous. (Flip the exact pass off and this goes red.)
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
-        m, label, err = ces._resolve_machine("Haas|VF-2")
+        m, label, err = ces.resolve_machine("Haas|VF-2")
         assert err is None
         assert m.model == "VF-2" and label == "Haas VF-2"
 
@@ -418,19 +418,19 @@ class TestMachineResolver:
         # The name an agent SEES is the label 'Haas VF-2'; passed bare it must resolve (label-recovery
         # re-splits it to vendor|model), not miss because no model literally starts with 'Haas VF-2'.
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
-        m, label, err = ces._resolve_machine("Haas VF-2")
+        m, label, err = ces.resolve_machine("Haas VF-2")
         assert err is None and m.model == "VF-2"
 
     def test_doubled_vendor_label_is_selectable(self, monkeypatch):
         # 'Haas|Haas VF-2' (vendor accidentally repeated in the model) resolves via the same recovery.
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
-        m, label, err = ces._resolve_machine("Haas|Haas VF-2")
+        m, label, err = ces.resolve_machine("Haas|Haas VF-2")
         assert err is None and m.model == "VF-2"
 
     def test_no_exact_is_still_ambiguous(self, monkeypatch):
         # A prefix that matches several with NO exact winner stays refused, listing the distinct LABELS.
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
-        m, label, err = ces._resolve_machine("Haas|VF")
+        m, label, err = ces.resolve_machine("Haas|VF")
         assert m is None and "Ambiguous" in err
         assert "Haas VF-2 with TRT100" in err and "exact names" in err
 
@@ -441,24 +441,24 @@ class TestMachineResolver:
                _machine("Haas", "VF-2", "Haas VF-2 with TRT100"),
                _machine("Haas", "VF-2", "Haas VF-2 with TRT160")]
         _install_machine_lib(monkeypatch, fam)
-        m, label, err = ces._resolve_machine("Haas VF-2 with TRT100")
+        m, label, err = ces.resolve_machine("Haas VF-2 with TRT100")
         assert err is None and label == "Haas VF-2 with TRT100"       # the exact variant, not the base
         # the base description also resolves to the base, not a TRT variant
-        m2, label2, err2 = ces._resolve_machine("Haas VF-2")
+        m2, label2, err2 = ces.resolve_machine("Haas VF-2")
         assert err2 is None and label2 == "Haas VF-2"
         # vendor|model alone can't pick one -> ambiguous, listing the three descriptions
-        m3, _l3, err3 = ces._resolve_machine("Haas|VF-2")
+        m3, _l3, err3 = ces.resolve_machine("Haas|VF-2")
         assert m3 is None and "Haas VF-2 with TRT160" in err3
 
     def test_unique_prefix_resolves(self, monkeypatch):
         # A single match needs no exact tie-break.
         _install_machine_lib(monkeypatch, [_machine("Tormach", "1100MX")])
-        m, label, err = ces._resolve_machine("Tormach|1100")
+        m, label, err = ces.resolve_machine("Tormach|1100")
         assert err is None and m.model == "1100MX"
 
     def test_no_match_names_the_input(self, monkeypatch):
         _install_machine_lib(monkeypatch, _VF2_FAMILY)
-        m, label, err = ces._resolve_machine("Okuma|Genos")
+        m, label, err = ces.resolve_machine("Okuma|Genos")
         assert m is None and "No machine matches" in err
 
 
@@ -530,7 +530,7 @@ class TestMachineStripSimulation:
         src = _machine("Haas", "VF-2", "Haas VF-2")
         src.hasSimulationModel = True
         src.clearSimulationModel = lambda: setattr(src, "hasSimulationModel", False)
-        monkeypatch.setattr(ces, "_resolve_machine", lambda name: (src, "Haas VF-2", None))
+        monkeypatch.setattr(ces, "resolve_machine", lambda name: (src, "Haas VF-2", None))
         return cam, src
 
     def test_strip_then_assign_reports_both(self, monkeypatch):

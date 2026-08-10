@@ -150,6 +150,9 @@ def _curve_ref_by_token(sketch):
     pieces a split returns carry one token, see _sketch_detail.curve_id) - a shared token names
     neither of them, so it is dropped rather than resolved to the first hit."""
     refs, shared = {}, set()
+    # The index IS the published address ('<kind>:<index>' is what _common.resolve_entity_ref reads
+    # back with coll.item(index)), so this stays a positional walk: iter_collection drops an
+    # unreadable curve, which would mint refs pointing at the wrong entities.
     for kind, coll in _sketch_detail._curve_collections(sketch):
         for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
             tok = safe(lambda coll=coll, i=i: coll.item(i).entityToken)
@@ -299,7 +302,7 @@ def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str =
     # line returns 3), so the curve-count delta on the TARGET is the honest read-back, and the
     # nativeObject bridge (see _copied_refs) is what turns the returned entities into refs.
     n = safe(lambda: created.count, 0) or 0
-    items = [c for c in (safe(lambda i=i: created.item(i)) for i in range(n)) if c is not None]
+    items = list(_common.iter_collection(created))
     new_curves = _copied_refs(target, items)
     after_n = safe(lambda: target.sketchCurves.count, 0) or 0
     if after_n <= before_n:
@@ -307,10 +310,10 @@ def copy_handler(sketch_name: str = "", entities: str = "", target_sketch: str =
                      f"{after_n} curve(s) - nothing landed in it.")
 
     landed = after_n - before_n
-    note = ("The new curves' ids are in '" + (target_name or "the target sketch") + "', and "
-            "adding curves RENUMBERS the rest - re-read sketch_get(include_entities=true) "
-            "before the next edit. 'returned_entity_count' counts the copied endpoints as "
-            "well as the curves.")
+    note = ("The new curves' ids are in '" + (target_name or "the target sketch") + "', and an "
+            "added curve APPENDS at the end of its kind, so the ids already in use keep their "
+            "entities - re-read sketch_get(include_entities=true) for the new ones. "
+            "'returned_entity_count' counts the copied endpoints as well as the curves.")
     # The count delta is what proves the copy landed; the refs are the convenience on top. When a
     # copied curve's token does not answer (or two curves share one), say which of the landed curves
     # went unnamed instead of returning a short list that reads as the whole truth.

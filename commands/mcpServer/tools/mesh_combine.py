@@ -15,6 +15,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from . import _geom
 from ._common import target_component as _target_component
 from . import _inputs
 from .design_mode import run_in_base_feature
@@ -54,6 +55,32 @@ _ALGORITHMS = {
 }
 
 
+_UNSET = object()
+
+
+def _algorithm_held(inp, at):
+    """(algorithm_key, why_not) - the algorithm the INPUT actually holds, mapped back through
+    _ALGORITHMS, or (None, reason).
+
+    Read off inp.algorithmType and matched against the enum family member by member, so what is
+    published is a value that was read, never the coercion the API doc predicts. The three ways
+    this comes back unknown are DIFFERENT facts and each says so: the family is absent on this
+    build (so nothing was ever assigned and nothing can be decoded), the property itself would not
+    read, or it read a value matching no member of the family."""
+    if at is None:
+        return None, ("MeshCombineAlgorithmTypes is not available on this Fusion version, so the "
+                      "algorithm was never set and cannot be decoded")
+    got = safe(lambda: inp.algorithmType, _UNSET)
+    if got is _UNSET:
+        return None, "MeshCombineFeatureInput.algorithmType could not be read back"
+    for key, member in _ALGORITHMS.items():
+        known = safe(lambda member=member: getattr(at, member))
+        if known is not None and got == known:
+            return key, ""
+    return None, ("MeshCombineFeatureInput.algorithmType read back a value matching no member of "
+                  "MeshCombineAlgorithmTypes")
+
+
 def handler(target: str = "", tools=None, operation: str = "join",
             algorithm: str = "enhanced") -> dict:
     """See TOOL_DESCRIPTION."""
@@ -78,12 +105,14 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if aerr:
         return error(aerr)
 
-    # same-body guard: the target must NOT also be a tool body. Compared by entityToken, never by
-    # Python identity - the API mints a FRESH wrapper per access, so `is` reads False even when both
-    # references name the same physical body and the guard would never fire.
-    tgt_token = safe(lambda: tgt.entityToken)
+    # same-body guard: the target must NOT also be a tool body. Compared by _common.native_token,
+    # never by Python identity - the API mints a FRESH wrapper per access, so `is` reads False even
+    # when both references name the same physical body and the guard would never fire. The NATIVE
+    # token, because two wrappers of one body (a native and an occurrence proxy) carry DIFFERENT
+    # tokens of their own.
+    tgt_token = _common.native_token(tgt)
     for b in tool_bodies:
-        b_token = safe(lambda b=b: b.entityToken)
+        b_token = _common.native_token(b)
         if b is tgt or (tgt_token and b_token and b_token == tgt_token):
             return error("A tool body is the same as the target - pick distinct mesh bodies "
     "(the target is combined INTO, the tools are combined FROM).")
@@ -93,6 +122,17 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # tools list published nulls for the very bodies that were combined.
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     tgt_name = safe(lambda: tgt.name)
+
+    # A JOIN of meshes that do not touch lands ONE body still holding both shells - a result the
+    # triangle/body census below reads as a clean combine. A MeshBody carries no lump or shell count
+    # to check it with (BRepBody.lumps has no mesh counterpart), but its AABB is readable: boxes that
+    # do not overlap PROVE the two cannot touch. Measured here, BEFORE the add consumes the tools.
+    apart = []
+    if op_key == "join":
+        for b, nm in zip(tool_bodies, tool_names):
+            gap = _geom.aabb_gap(tgt, b)
+            if gap is not None and gap > 0:
+                apart.append({"tool": nm, "gap_cm": round(gap, 4)})
 
     # The design's OWN mode, read before any scope opens: designType reads DIRECT while a
     # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
@@ -133,12 +173,21 @@ def handler(target: str = "", tools=None, operation: str = "join",
         # algorithmType "is only effective in non-parametric mode - in parametric mode the algorithm
         # type is always LegacyMeshCombineAlgorithmType" (API doc), so a read-back mismatch here is
         # the platform's documented coercion, not a failure: report what landed instead of erroring.
+        # What landed is READ OFF THE INPUT, never inferred from the doc - the same set_verified
+        # failure also covers a member missing on this build and a setattr that raised, and in
+        # neither of those did anything coerce to legacy. Unreadable is published as null plus the
+        # reason, so the caller can tell "it ran legacy" from "nobody knows which it ran".
         at = safe(lambda: adsk.fusion.MeshCombineAlgorithmTypes)
         aerr2 = _common.set_verified(
             inp, "algorithmType",
             safe(lambda: getattr(at, _ALGORITHMS[alg_key])) if at is not None else None,
             f"algorithm='{alg_key}'", _IN)
-        algorithm_applied = alg_key if not aerr2 else "legacy"
+        algorithm_applied, algorithm_unverified = alg_key, None
+        if aerr2:
+            algorithm_applied, why_not = _algorithm_held(inp, at)
+            if algorithm_applied is None:
+                algorithm_unverified = (
+                    f"{aerr2} {why_not}, so which algorithm ran is unknown.")
 
         # Snapshot the target's mesh body set BEFORE the add (inside inner_op so it is valid in both
         # direct and base-feature modes) so a non-parametric None return can still be reported.
@@ -155,6 +204,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
     "intersect the meshes must overlap; all must be MESH bodies.)")
         return {"feature": feature, "before_mesh_count": before_mesh_count,
     "before_tri": before_tri, "algorithm_applied": algorithm_applied,
+    "algorithm_unverified": algorithm_unverified,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None,
     "after_mesh_count": safe(lambda: comp.meshBodies.count)}
 
@@ -196,8 +246,19 @@ def handler(target: str = "", tools=None, operation: str = "join",
     bf_name = result["base_feature_name"]
     if feature is None:
         note += " " + _common.null_feature_note(design, feature, bf_name, "combine")
+    if apart:
+        # Only what was measured: each named tool cannot touch the TARGET. It may still have fused
+        # through another tool in the same call (A touches the target, B touches A), so nothing here
+        # claims what the result body holds. 'gap_cm' is the bounding-box separation - a LOWER BOUND
+        # on the clearance, not the distance to move.
+        note += (" WARNING: " + ", and ".join(
+            f"'{a['tool']}' is at least {a['gap_cm']} cm clear of the target" for a in apart)
+            + " - a join cannot fuse what does not touch, so nothing of the target fused with "
+              "those directly ('gap_cm' is the bounding-box separation, a LOWER BOUND on the real "
+              "clearance). Check the result with model_inspect, or move them into contact "
+              "(model_move) and join again.")
 
-    return ok({
+    payload = {
         "combined": True,
         "feature": safe(lambda: feature.name) if feature else None,
         "design_mode": design_mode,
@@ -209,7 +270,12 @@ def handler(target: str = "", tools=None, operation: str = "join",
         "result_bodies": result_bodies,
         "mesh_body_count": after_mesh_count,
         "note": note,
-    })
+    }
+    if result["algorithm_unverified"]:
+        payload["algorithm_unverified"] = result["algorithm_unverified"]
+    if apart:
+        payload["disjoint_tools"] = apart
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (

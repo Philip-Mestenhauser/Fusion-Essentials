@@ -22,7 +22,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, all_components
+from ._common import iter_collection, ok, error, safe, all_components
 
 
 def _ref_name(ref):
@@ -39,12 +39,7 @@ def _derive_refs(doc):
         return []
     out = []
     for comp in all_components(design):
-        derive_feats = safe(lambda c=comp: c.features.deriveFeatures)
-        n = safe(lambda df=derive_feats: df.count, 0) if derive_feats is not None else 0
-        for i in range(n or 0):
-            feat = safe(lambda df=derive_feats, i=i: df.item(i))
-            if feat is None:
-                continue
+        for feat in iter_collection(safe(lambda c=comp: c.features.deriveFeatures)):
             dref = safe(lambda f=feat: f.documentReference)
             if dref is None:
                 continue
@@ -100,13 +95,7 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
     if not doc:
         return error("No active document.")
 
-    refs = safe(lambda: doc.documentReferences)
-    ref_count = safe(lambda: refs.count, 0) if refs is not None else 0
-    xref_items = []
-    for i in range(ref_count):
-        r = safe(lambda i=i: refs.item(i))
-        if r is not None:
-            xref_items.append((_ref_name(r), r))
+    xref_items = [(_ref_name(r), r) for r in iter_collection(safe(lambda: doc.documentReferences))]
     derive_items = _derive_refs(doc)
 
     if not xref_items and not derive_items:

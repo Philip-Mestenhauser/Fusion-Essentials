@@ -21,7 +21,8 @@ from . import _geom
 from . import _assert
 from ._joints import (AXES as _AXES, OFFSET_PARAM_NOTE, apply_motion,
                       build_joint_geometry as _joint_geometry_for,
-                      is_joint_origin as _is_joint_origin, motion_param_names)
+                      is_joint_origin as _is_joint_origin, motion_param_names,
+                      pending_move_guard)
 
 app = adsk.core.Application.get()
 
@@ -35,9 +36,8 @@ RETURNS = [
 _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
 
 # The motions that consume NO axis input. Rigid has no motion to aim; a ball joint's
-# setAsBallJointMotion hard-codes pitch=Z / yaw=X and reads neither the axis keyword nor a custom
-# entity, so the landed motion is identical whatever 'axis' says (measured: ball with axis='x' is
-# byte-identical to ball with axis='auto'). Reporting an axis for either would be a false claim.
+# setAsBallJointMotion takes no selectable axis at all - pitch is Z and yaw is X - so it reads
+# neither the axis keyword nor a custom entity. Reporting an axis for either would be a false claim.
 _NO_AXIS_MOTIONS = {"rigid", "ball"}
 
 _AXIS = _inputs.Choice(
@@ -70,9 +70,14 @@ def _joint_input_for(entity):
 
 
 def _occ_origin(occ):
-    """The moving occurrence's origin as (x,y,z) cm, from its transform. Parent-relative, which for a
-    root-level part is world; the DISTANCE it moves is frame-invariant either way. None if unreadable."""
-    m = safe(lambda: occ.transform)
+    """The moving occurrence's origin as (x,y,z) cm, in WORLD space. None if unreadable.
+
+    transform2, not transform: measured on a nested proxy whose parent is rotated 90deg and
+    translated, .transform reads the occurrence's LOCAL matrix with the parent NOT composed in while
+    .transform2 reads the composed WORLD matrix. They agree only while every ancestor is identity, so
+    a joint reposition measured off .transform under a placed sub-assembly reports the wrong frame.
+    .transform is the fallback for a build that does not carry transform2."""
+    m = safe(lambda: occ.transform2) or safe(lambda: occ.transform)
     t = safe(lambda: m.translation) if m is not None else None
     if t is None:
         return None
@@ -164,6 +169,10 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     design = _common.design()
     if not design:
         return error("No active design.")
+
+    pending = pending_move_guard(design)
+    if pending:
+        return pending
 
     # Resolve each handle via the shared GeometryHandle kind (require='any' - joints accept faces, edges,
     # vertices, construction/sketch points; the per-kind validation happens in _joint_geometry_for). This

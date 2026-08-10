@@ -26,8 +26,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR.
-_HEALTH_ERROR = 2
 
 # Sample points closer together than this (cm) are the same position.
 _MOVE_EPS_CM = 1e-7
@@ -90,10 +88,10 @@ def _body_points(body):
             pt = _xyz(safe(lambda c=corner: getattr(box, c)))
             if pt:
                 pts.append(pt)
-    verts = safe(lambda: body.vertices)
-    count = min(safe(lambda: verts.count, 0) or 0, _VERTEX_SAMPLE) if verts is not None else 0
-    for i in range(count):
-        pt = _xyz(safe(lambda i=i: verts.item(i).geometry))
+    for i, v in enumerate(_common.iter_collection(safe(lambda: body.vertices))):
+        if i >= _VERTEX_SAMPLE:
+            break
+        pt = _xyz(safe(lambda v=v: v.geometry))
         if pt:
             pts.append(pt)
     return tuple(pts) if pts else None
@@ -133,14 +131,16 @@ def _expected_cm(mode_key, offsets_cm, dist_cm, start_pt, end_pt):
     return None
 
 
-def _verify(before, after, remedy, expected_cm=None):
+def _verify(before, after, remedy, expected_cm=None, scale_factor=1.0, units="cm"):
     """(error_text, largest_displacement_cm) proving the move displaced the geometry - and, when the
     mode fixes the distance up front, that it moved by exactly that much. Every sample point of a
     rigid translation travels the same vector, so the largest displacement IS the expected magnitude;
     a rotation has no single expected scalar and passes expected_cm=None.
 
-    `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct path
-    has no timeline feature to send the caller after."""
+    The mismatch is reported in the caller's OWN units: the request was made in them, so a millimetre
+    caller reading a centimetre number would compare two different scales and call a correct move
+    wrong. `remedy` is the mode-aware closing sentence from _common.failed_effect_remedy - the direct
+    path has no timeline feature to send the caller after."""
     dists = [d for d in (_displacement(b, a) for b, a in zip(before, after)) if d is not None]
     if not dists:
         return ("Move reported success but no moved geometry could be read back, so the result "
@@ -150,20 +150,37 @@ def _verify(before, after, remedy, expected_cm=None):
         return ("Move reported success but the geometry sits exactly where it was - nothing was "
                 f"displaced. {remedy}"), None
     if expected_cm is not None and abs(biggest - expected_cm) > _MOVE_TOL_CM:
-        return (f"Move displaced the geometry by {round(biggest, 6)} cm, not the {round(expected_cm, 6)} "
-                f"cm requested - the move did not land where it was asked to. {remedy}"), None
+        return (f"Move displaced the geometry by {round(biggest / scale_factor, 6)} {units}, not the "
+                f"{round(expected_cm / scale_factor, 6)} {units} requested - the move did not land "
+                f"where it was asked to. {remedy}"), None
     return "", biggest
 
 
-def _axis_entity(raw, comp, context=None):
+def _axis_entity(raw, comp, design, context=None):
     """(linear entity, error) for the axis a move takes its direction from. A move is defined by a
     linear ENTITY, so a world axis resolves to the component's origin ConstructionAxis and a handle
-    to the straight edge or sketch line itself."""
+    to the straight edge or sketch line itself.
+
+    A HANDLE native to another component takes the same _inputs.single_placement lift the moved body
+    took - the entity a feature consumes has to be reachable in the hosting component's assembly
+    context, whichever input it arrived on."""
     tagged, aerr = _AXIS.resolve(raw)
     if aerr:
         return None, aerr
     if tagged[0] == "edge":
-        return tagged[1], None
+        ent = tagged[1]
+        occ, cerr = _inputs.single_placement("'axis': that entity", ent, comp, design)
+        if cerr:
+            return None, cerr
+        if occ is None:
+            return ent, None
+        proxy = safe(lambda: ent.createForAssemblyContext(occ))
+        if proxy is None:
+            path = safe(lambda: occ.fullPathName) or "its one occurrence"
+            return None, (f"'axis': that entity could not be brought into the move's assembly "
+                          f"context ({path}). Pass a handle at geometry in the moved body's own "
+                          "component, or a world axis (x/y/z).")
+        return proxy, None
     ent = _inputs.world_construction_axis(comp, raw)
     if ent is None:
         return None, (f"'axis': the active component has no {raw} origin construction axis to move "
@@ -176,22 +193,29 @@ def _axis_entity(raw, comp, context=None):
 
 
 def _host_for(design, body):
-    """(component that must host the move feature, occurrence the axis is proxied into) for `body`.
-    Measured: a move on a sub-component body needs BOTH - hosting on the active component raises
-    "object is not in the assembly context of this component" at add(), and a native axis on the
-    owning component raises "3 : Invalid entity" at defineAs. Together they succeed."""
+    """(component that must host the move feature, occurrence the axis is proxied into, error) for
+    `body`. Measured: a move on a sub-component body needs BOTH - hosting on the active component
+    raises "object is not in the assembly context of this component" at add(), and a native axis on
+    the owning component raises "3 : Invalid entity" at defineAs. Together they succeed.
+
+    The occurrence comes from _inputs.single_placement, so a component placed SEVERAL times is
+    refused naming each path rather than resolved to its first instance: the instances sit in
+    different places, and the axis proxied into the wrong one aims the move somewhere else while the
+    displacement check still passes."""
     root = safe(lambda: design.rootComponent)
     owner = safe(lambda: body.parentComponent) or root
     # same_component, not `is`: component wrappers are never identity-stable, so `owner is root` reads
     # False even for a ROOT body, which then takes the sub-component path (a pointless
     # allOccurrencesByComponent lookup that finds nothing).
     if owner is None or _common.same_component(owner, root):
-        return root, None
+        return root, None, None
     ctx = safe(lambda: body.assemblyContext)
-    if ctx is None:
-        occs = safe(lambda: root.allOccurrencesByComponent(owner))
-        ctx = safe(lambda: occs.item(0)) if (safe(lambda: occs.count, 0) or 0) else None
-    return owner, ctx
+    if ctx is not None:
+        return owner, ctx, None
+    occ, err = _inputs.single_placement("'bodies': that body", body, root, design)
+    if err:
+        return None, None, err
+    return owner, occ, None
 
 
 def _translation_cm(dx, dy, dz, scale_factor):
@@ -266,11 +290,13 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
     ents, eerr = _BODIES.resolve(bodies)
     if eerr:
         return error(eerr)
-    comp, axis_ctx = _host_for(design, ents[0])
+    comp, axis_ctx, herr = _host_for(design, ents[0])
+    if herr:
+        return error(herr)
 
     axis_ent, start_pt, end_pt = None, None, None
     if mode_key in (_ALONG, _ROTATE):
-        axis_ent, aerr = _axis_entity(axis, comp, axis_ctx)
+        axis_ent, aerr = _axis_entity(axis, comp, design, axis_ctx)
         if aerr:
             return error(aerr)
     elif mode_key == _POINT_TO_POINT:
@@ -327,14 +353,15 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
         return error(_common.no_feature_error(design, "Move"))
 
     # A feature can be ADDED yet fail to compute.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Move feature was created but failed to compute: {msg}. Try a smaller move, "
-                     "or a different axis/point selection.")
+                     "or a different axis/point selection. "
+                     + _common.failed_effect_remedy(design, feature))
 
     after = [_body_points(e) for e in ents]
     verr, moved_cm = _verify(before, after, _common.failed_effect_remedy(design, feature),
-                             expected_cm)
+                             expected_cm, scale_factor, units)
     if verr:
         return error(verr)
 

@@ -42,6 +42,58 @@ class TestSafe:
         assert common.safe(boom, "fallback") == "fallback"
 
 
+class TestReadFlag:
+    """A BOOLEAN read: True / False / None. The whole point is that an unreadable flag is NOT a
+    False - `safe(read, False)` at a set-then-read-back site lets a swallowed write pass a
+    `now != wanted` gate whenever the wanted value is False and publishes that as confirmed."""
+
+    def test_true_and_false_pass_through(self):
+        assert common.read_flag(lambda: True) is True
+        assert common.read_flag(lambda: False) is False
+
+    def test_a_raising_getter_is_none_not_false(self):
+        def boom():
+            raise RuntimeError("3 : not available on this build")
+        assert common.read_flag(boom) is None
+
+    def test_a_flag_that_reads_none_is_none(self):
+        assert common.read_flag(lambda: None) is None
+
+    def test_a_truthy_non_bool_is_normalised_to_a_bool(self):
+        # A SWIG getter can answer with an int; the caller compares against a bool, so 1 must not
+        # come back as 1 (which `is True` would then reject).
+        assert common.read_flag(lambda: 1) is True
+        assert common.read_flag(lambda: 0) is False
+
+    def test_the_unreadable_sentinel_never_escapes(self):
+        def boom():
+            raise RuntimeError("x")
+        assert common.read_flag(boom) is not common._UNREADABLE
+
+
+class TestAllComponentsRootFallback:
+    def test_an_unreadable_component_list_still_walks_the_root(self):
+        # allComponents reading as an empty/unreadable collection must not shrink a design-wide walk
+        # to nothing: the root component is always there to walk, and returning [] would make every
+        # by-name lookup built on this miss silently.
+        root = MakeComp(name="Root")
+
+        class _Blind:
+            rootComponent = root
+
+            @property
+            def allComponents(self):
+                raise RuntimeError("3 : cannot enumerate")
+
+        assert common.all_components(_Blind()) == [root]
+
+    def test_an_all_none_component_list_still_walks_the_root(self):
+        root = MakeComp(name="Root")
+        coll = SimpleNamespace(count=2, item=lambda i: None)
+        d = SimpleNamespace(rootComponent=root, allComponents=coll)
+        assert common.all_components(d) == [root]
+
+
 class TestScale:
     def test_known_units(self):
         assert common.scale("mm") == 0.1
@@ -280,6 +332,106 @@ class TestResolveEntityRefs(TestResolveEntityRef):
         assert "in 'targets'" in err
 
 
+class _GP:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _AnchorPoint:
+    def __init__(self, tag, x=0.0, y=0.0, z=0.0):
+        self.tag = tag
+        self.geometry = _GP(x, y, z)
+
+
+class _AnchorLine:
+    def __init__(self):
+        self.startSketchPoint = _AnchorPoint("start", 0.0, 0.0, 0.0)
+        self.endSketchPoint = _AnchorPoint("end", 4.0, 0.0, 0.0)
+
+
+class _AnchorCircle:
+    def __init__(self):
+        self.centerSketchPoint = _AnchorPoint("center", 1.0, 1.0, 0.0)
+
+
+class _AnchorArc:
+    def __init__(self):
+        self.startSketchPoint = _AnchorPoint("astart")
+        self.endSketchPoint = _AnchorPoint("aend")
+        self.centerSketchPoint = _AnchorPoint("acenter")
+
+
+class _MidSketch:
+    """Records the SketchPoint and the midpoint constraint the 'mid' anchor creates."""
+    def __init__(self):
+        self.added = []
+        self.midpoints = []
+        self.sketchPoints = self
+        self.geometricConstraints = self
+    def add(self, p):
+        self.added.append(p)
+        return _AnchorPoint("midpoint")
+    def addMidPoint(self, pt, line):
+        self.midpoints.append((pt, line))
+        return True
+
+
+class TestParseAnchorRef:
+    """The optional THIRD segment of a '<type>:<index>' ref - the ONE grammar sketch_dimension and
+    sketch_constrain both read, so an anchor form one verb accepts cannot be rejected by the other."""
+
+    def test_a_bare_ref_carries_no_anchor(self):
+        assert common.parse_anchor_ref("line:0") == ("line:0", None, None)
+
+    def test_a_line_endpoint_anchor_splits_off(self):
+        assert common.parse_anchor_ref("line:0:end") == ("line:0", "end", None)
+
+    def test_a_circle_centre_anchor_splits_off(self):
+        assert common.parse_anchor_ref("circle:2:center") == ("circle:2", "center", None)
+
+    def test_the_anchor_segment_is_case_insensitive(self):
+        # entity refs resolve case-insensitively; an anchor that did not would turn a shouted ref
+        # into an "unknown anchor" refusal for a form the tools accept in lower case
+        assert common.parse_anchor_ref("CIRCLE:0:CENTER") == ("CIRCLE:0", "center", None)
+
+    def test_an_unknown_third_segment_errors_naming_the_valid_anchors(self):
+        # silently dropping it would dimension/constrain the WRONG point of the entity
+        base, anchor, err = common.parse_anchor_ref("line:0:bogus")
+        assert base is None and anchor is None
+        assert "unknown anchor" in err and "center" in err
+
+
+class TestAnchorPoint:
+    def test_line_end_and_start(self):
+        assert common.anchor_point(None, _AnchorLine(), "end")[0].tag == "end"
+        assert common.anchor_point(None, _AnchorLine(), "start")[0].tag == "start"
+
+    def test_circle_centre(self):
+        assert common.anchor_point(None, _AnchorCircle(), "center")[0].tag == "center"
+
+    def test_start_on_a_circle_is_refused(self):
+        pt, err = common.anchor_point(None, _AnchorCircle(), "start")
+        assert pt is None and "line or arc" in err
+
+    def test_centre_on_a_line_is_refused(self):
+        pt, err = common.anchor_point(None, _AnchorLine(), "center")
+        assert pt is None and "circle or arc" in err
+
+    def test_mid_on_a_line_creates_a_parametrically_welded_point(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
+        sk = _MidSketch()
+        pt, err = common.anchor_point(sk, _AnchorLine(), "mid")
+        assert err is None and pt.tag == "midpoint"
+        assert sk.added == [("pt", 2.0, 0.0, 0.0)]     # the geometric midpoint of 0..4
+        assert len(sk.midpoints) == 1                  # welded with a midpoint constraint
+
+    def test_mid_on_an_arc_is_refused(self):
+        # an arc has a centre, so 'mid' (a line-only addMidPoint target) is refused, not mis-applied
+        pt, err = common.anchor_point(None, _AnchorArc(), "mid")
+        assert pt is None and "LINE" in err
+
+
 class TestOperations:
     def test_maps_every_verb_to_a_feature_operation_attribute_name(self):
         for key in ("new", "new_body", "join", "cut", "intersect"):
@@ -464,3 +616,119 @@ class TestRootBodyAdvisory:
 
     def test_silent_without_a_component(self):
         assert common.root_body_advisory(_FakeDesignWithRoot(_root()), None) == ""
+
+
+# ── all_meshes: the ONE design-wide mesh walk, reached through COMPONENTS ────
+
+def _comp_with_meshes(name, mesh_names=(), meshes=None):
+    """A component whose meshBodies collection holds the named meshes. `meshes` overrides the
+    collection outright (a raiser / a collection yielding None) for the degradation tests."""
+    coll = _Coll([type("M", (), {"name": n})() for n in mesh_names]) if meshes is None else meshes
+    return type("C", (), {"name": name, "meshBodies": coll})()
+
+
+class TestAllMeshes:
+    def test_walks_every_component_not_just_the_root(self):
+        # A mesh imported into a sub-component is design-wide reachable: the walk goes through
+        # all_components, so no occurrence needs to exist for the mesh to be found.
+        root = _comp_with_meshes("Root")
+        sub = _comp_with_meshes("Scan", ["ScanMesh"])
+        pairs = common.all_meshes(_design_with(root, [sub]))
+        assert [(c.name, m.name) for c, m in pairs] == [("Scan", "ScanMesh")]
+
+    def test_each_mesh_is_paired_with_its_owning_component(self):
+        root = _comp_with_meshes("Root", ["A"])
+        sub = _comp_with_meshes("Scan", ["B", "C"])
+        pairs = common.all_meshes(_design_with(root, [sub]))
+        assert [(c.name, m.name) for c, m in pairs] == [
+            ("Root", "A"), ("Scan", "B"), ("Scan", "C")]
+
+    def test_a_component_with_an_unreadable_collection_does_not_sink_the_walk(self):
+        # A single bad component must not cost every other component's meshes - the survivor check
+        # mesh_delete runs on this walk would otherwise report a deleted mesh as still present.
+        class _Raiser:
+            @property
+            def count(self):
+                raise RuntimeError("meshBodies unreadable")
+
+        bad = _comp_with_meshes("Broken", meshes=_Raiser())
+        good = _comp_with_meshes("Scan", ["ScanMesh"])
+        pairs = common.all_meshes(_design_with(bad, [good]))
+        assert [m.name for _c, m in pairs] == ["ScanMesh"]
+
+    def test_a_none_item_is_skipped(self):
+        root = _comp_with_meshes("Root", meshes=_Coll([None, type("M", (), {"name": "Real"})()]))
+        assert [m.name for _c, m in common.all_meshes(_design_with(root, []))] == ["Real"]
+
+    def test_no_meshes_anywhere_is_empty(self):
+        assert common.all_meshes(_design_with(_comp_with_meshes("Root"), [])) == []
+
+
+# ── build_path: the label describes the path BUILT, not the handles passed ───
+
+class _BuiltPath:
+    """An adsk.fusion.Path stand-in: `count` is the number of edges the built path holds."""
+
+    def __init__(self, count):
+        self.count = count
+
+
+class _UnreadablePath:
+    @property
+    def count(self):
+        raise RuntimeError("count unreadable")
+
+
+class TestBuildPathLabel:
+    """The 'path' string model_sweep / model_pipe / model_pattern_path publish. What one seed handle
+    yields is not predictable from the request - chaining follows tangent continuity, so a seed
+    expands to whatever stays tangent (a closed tangent loop chains fully) and stops at a sharp
+    corner - so the count must come off the built Path, never off the input."""
+
+    def _stub_handles(self, monkeypatch, n):
+        edges = [type("E", (), {})() for _ in range(n)]
+        inputs = load_tool("_inputs")
+        monkeypatch.setattr(inputs, "GeometryHandleList",
+                            lambda *a, **kw: SimpleNamespace(
+                                resolve=lambda handles: (edges, None)))
+        return edges
+
+    def _comp(self, built):
+        return SimpleNamespace(features=SimpleNamespace(
+            createPath=lambda seed, is_chain: built))
+
+    def test_a_seed_that_expanded_reports_the_built_count(self, monkeypatch):
+        self._stub_handles(monkeypatch, 1)
+        _p, label, err = common.build_path(self._comp(_BuiltPath(14)), "EDGE1")
+        assert err is None
+        assert label == "14 edge(s) from 1 seed handle"
+
+    def test_a_seed_that_did_not_expand_reports_one(self, monkeypatch):
+        self._stub_handles(monkeypatch, 1)
+        _p, label, err = common.build_path(self._comp(_BuiltPath(1)), "EDGE1")
+        assert err is None and label == "1 edge(s) from 1 seed handle"
+
+    def test_unreadable_count_says_so_instead_of_echoing_the_input(self, monkeypatch):
+        self._stub_handles(monkeypatch, 1)
+        _p, label, err = common.build_path(self._comp(_UnreadablePath()), "EDGE1")
+        assert err is None
+        assert label == "from 1 seed handle; edge count unreadable"
+
+    def test_several_handles_are_used_exactly(self, monkeypatch):
+        import adsk.fusion
+        self._stub_handles(monkeypatch, 3)
+        monkeypatch.setattr(adsk.fusion.Path, "create",
+                            staticmethod(lambda coll, opts: _BuiltPath(3)))
+        _p, label, err = common.build_path(self._comp(None), ["E1", "E2", "E3"])
+        assert err is None and label == "3 edge(s) from 3 handles, used exactly"
+
+    def test_the_map_blurb_states_the_tangent_continuity_rule(self):
+        # the helper map is what an author reads before wiring build_path: it must promise neither
+        # unconditional chaining nor its opposite (a tangent-continuous CLOSED loop chained all 8
+        # edges from one seed) - only tangent continuity, and the built count as the answer.
+        blurb = common.MAP_BLURB
+        assert "TANGENT connections" in blurb
+        assert "sharp corner stops the chain" in blurb
+        assert "count is the truth" in blurb
+        assert "auto-chain" not in blurb.lower()
+        assert "closed loop" not in blurb.lower() and "seed edge alone" not in blurb

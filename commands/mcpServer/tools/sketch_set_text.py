@@ -54,6 +54,12 @@ _DEFINITION_READBACKS = {
 _CREATE_ONLY = ("mode", "path", "above_path", "align", "character_spacing", "angle_deg",
                 "flip_h", "flip_v", "x", "y")
 
+# The read half of this tool: a written text is re-readable as its own entity record, so a caller
+# verifying a label does not have to fall back to a screenshot.
+_READ_BACK_POINTER = (
+    " Read it back with sketch_get(sketch_name=..., include_entities=true): the 'text:<i>' entity "
+    "carries the string, height, font and sketch-space bounding box.")
+
 
 def _given(value) -> bool:
     """True if the caller actually supplied this optional input (False/0 count as supplied)."""
@@ -196,9 +202,13 @@ def _align_key_of(value):
     return None
 
 
-def _definition_facts(st, mode):
+def _definition_facts(st, mode, index, sketch_name):
     """(facts, error) read off the created text's definition - which mode actually landed, and the
-    placement values the definition itself reports. A value that will not read is None."""
+    placement values the definition itself reports. A value that will not read is None.
+
+    `index` is the created text's own creation-order index in sketch.sketchTexts, and `sketch_name`
+    the sketch it landed in, so a refusal can hand over the exact sketch_delete_entity call (that
+    tool resolves its sketch by name too - a bare target would resolve against the wrong sketch)."""
     definition = safe(lambda: st.definition)
     obj_type = safe(lambda: definition.objectType)
     obj_type = obj_type if isinstance(obj_type, str) and obj_type else None
@@ -215,8 +225,8 @@ def _definition_facts(st, mode):
     if landed:
         return facts, (f"Asked for mode '{mode}' but the new text reports a '{landed[0]}' "
                        f"definition ({obj_type}), so it is laid out the wrong way. The text WAS "
-                       "created - undo in Fusion to remove it (sketch_delete_entity targets sketch "
-                       "curves, points and constraints, not text), then retry.")
+                       f"created - remove it with sketch_delete_entity(sketch_name="
+                       f"'{sketch_name}', target='text:{index}'), then retry.")
     return facts, ""
 
 
@@ -323,16 +333,18 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
             f"Sketch text did not materialize in '{safe(lambda: sk.name)}': sketchTexts count stayed "
             f"at {before} after add(). Nothing was created. " + tail)
 
-    facts, derr = _definition_facts(st, mode)
+    # SketchTexts.add appends, so the text just created is at count - 1 (pinned by the TextDel act
+    # in tool_verify), and that is the index the refusals below hand to sketch_delete_entity.
+    facts, derr = _definition_facts(st, mode, after - 1, sketch_name)
     if derr:
         return error(derr)
 
     landed_font = _font_read_back(st) if _given(font_name) else None
     if landed_font and landed_font != font_name:
         return error(f"Asked for font '{font_name}' but the new text reports '{landed_font}', so "
-                     "the font did not take. The text WAS created - undo in Fusion to remove it "
-                     "(sketch_delete_entity targets sketch curves, points and constraints, not "
-                     "text), then retry.")
+                     "the font did not take. The text WAS created - remove it with "
+                     f"sketch_delete_entity(sketch_name='{sketch_name}', "
+                     f"target='text:{after - 1}'), then retry.")
 
     if mode == "multi_line":
         note = (f"Sketch text created (verified: sketchTexts {before} -> {after}). (x,y) are "
@@ -346,6 +358,7 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
         note = (f"Sketch text created on '{path}' (verified: {verified}). A CLOSED path such as a "
                 "circle wraps the text right around it. Extrude/emboss the sketch to engrave it, "
                 "or edit the string later with sketch_set_text (without create).")
+    note += _READ_BACK_POINTER
     out = {
     "created": True,
     "sketch": safe(lambda: sk.name),
@@ -403,16 +416,21 @@ def _iter_sketch_texts(design, sketch_name):
             sketches = comp.sketches
         except Exception:
             continue
-        for i in range(safe(lambda: sketches.count, 0)):
-            sk = sketches.item(i)
+        for sk in _common.iter_collection(sketches):
             sk_name = safe(lambda sk=sk: sk.name) or ""
             if want and sk_name != want:
                 continue
             texts = safe(lambda sk=sk: sk.sketchTexts)
             if not texts:
                 continue
+            # A text's INDEX within its sketch is its address (the 'index' input picks the Nth text,
+            # and it is the same index sketch_delete_entity('text:<index>') deletes by), so this stays
+            # a positional walk: iter_collection drops an unreadable text, which would slide every
+            # later text onto the wrong index. item(j) is guarded the same way - a stale text proxy
+            # burns its slot (st None) instead of raising the whole walk away.
             for j in range(safe(lambda texts=texts: texts.count, 0)):
-                yield (safe(lambda comp=comp: comp.name), sk_name, texts.item(j))
+                yield (safe(lambda comp=comp: comp.name), sk_name,
+                       safe(lambda texts=texts, j=j: texts.item(j)))
 
 
 def handler(text: str = "", sketch_name: str = "", index: int = -1,
@@ -454,15 +472,28 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     changed = []
     skipped = 0
     truncated = False
-    # Track per-sketch running index so 'index' selects the Nth text within that sketch.
+    # Track per-sketch running index so 'index' selects the Nth text within that sketch. Keyed by
+    # (component, sketch) - a sketch NAME alone is not unique across components, and a name-keyed
+    # counter would interleave two same-named sketches' texts onto wrong indices.
     per_sketch_counter = {}
     for comp_name, sk_name, st in targets:
         if len(changed) >= _MAX:
             truncated = True
             break
-        k = per_sketch_counter.get(sk_name, 0)
-        per_sketch_counter[sk_name] = k + 1
+        k = per_sketch_counter.get((comp_name, sk_name), 0)
+        per_sketch_counter[(comp_name, sk_name)] = k + 1
         if want_index >= 0 and k != want_index:
+            skipped += 1
+            continue
+        if st is None:
+            # The slot is burned (the index space must not slide), but the text itself would not
+            # read - editing it blind is impossible, and silently skipping a SELECTED index would
+            # report success over a hole.
+            if want_index >= 0:
+                return error(f"Sketch text {k} in '{sk_name}' could not be read (a stale or "
+                             "deleted text proxy holds that index). Re-read the sketch with "
+                             "sketch_get(include_entities=true) and retry with a readable index."
+                             + _already_changed(changed))
             skipped += 1
             continue
         before = _unquote(safe(lambda st=st: st.textParameter.expression))
@@ -522,7 +553,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     "truncated": truncated,
     "recomputed": recomputed,
     "note": ("Sketch text updated" + (" and design recomputed so any engraving/emboss that "
-                "consumes it rebuilt" if recomputed else "") + ". View it with view_screenshot."),
+                "consumes it rebuilt" if recomputed else "") + "." + _READ_BACK_POINTER),
     }
     if _given(font_name):
         out["note"] += (f" Each entry's 'font' is what the text reports after applying "

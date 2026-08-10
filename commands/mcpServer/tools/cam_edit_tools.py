@@ -14,7 +14,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, expression_error
 
 app = adsk.core.Application.get()
@@ -89,11 +89,13 @@ class _Target:
         lib = self.refetch()
         if lib is None:
             return None
-        return [_read_tool_number(safe(lambda i=i: lib.item(i)))
-                for i in range(safe(lambda: lib.count, 0) or 0)]
+        return [_read_tool_number(t) for t in iter_collection(lib)]
 
     @property
     def tools(self):
+        # A tool's INDEX is its address ('tool', 'remove_indices', reread_param all key on it), so
+        # this stays a positional walk: iter_collection drops an unreadable item, which would slide
+        # every later tool onto the wrong index.
         return [safe(lambda i=i: self._lib.item(i)) for i in range(safe(lambda: self._lib.count, 0) or 0)]
 
     def add(self, tool):
@@ -120,8 +122,8 @@ class _Target:
             for i in range(len(ops)):
                 out.append(safe(lambda i=i: ops[i].name))
         except Exception:
-            for i in range(safe(lambda: ops.count, 0) or 0):
-                out.append(safe(lambda i=i: ops.item(i).name))
+            out.extend(safe(lambda o=o: o.name)
+                       for o in iter_collection(ops))
         return out
 
 
@@ -197,15 +199,41 @@ def _resolve_target(scope, library):
     lib = safe(lambda: libs.toolLibraryAtURL(lib_url))
     if not lib:
         return None, f"Could not load {scope} library '{target}'."
+    # A write to this library makes any cached copy of it stale, so persist drops that entry.
+    cache_key = safe(lambda: lib_url.toString())
+
+    def _persist():
+        _invalidate_library(cache_key)
+        return libs.updateToolLibrary(lib_url, lib)
+
     return _Target(lib, is_document=False,
-                   persist_fn=lambda: libs.updateToolLibrary(lib_url, lib),
+                   persist_fn=_persist,
                    refetch_fn=lambda: safe(lambda: libs.toolLibraryAtURL(lib_url))), None
 
 
 # library url string -> the ToolLibrary already fetched for it. Loading one is a cloud round-trip
 # costing seconds (measured: 1.4s for 66 tools, 6.7s for 266), and a type lookup reads the same
 # library twice - once to map its types, once to take the tool - inside a 30s handler budget.
+# The entries are LIVE ToolLibrary objects held for the life of the process, so the dict is bounded
+# (oldest insertion evicted) and a persist DROPS the library it wrote, since a cached pre-write copy
+# would hand the next call a library that no longer matches storage.
+_LIBRARY_CACHE_MAX = 8
 _library_cache = {}
+
+
+def _cache_library(key, lib):
+    """Keep a fetched library under `key`, evicting the oldest entry past _LIBRARY_CACHE_MAX."""
+    if not key or lib is None:
+        return
+    _library_cache[key] = lib
+    while len(_library_cache) > _LIBRARY_CACHE_MAX:
+        _library_cache.pop(next(iter(_library_cache)))
+
+
+def _invalidate_library(key):
+    """Drop the cached copy of a library that has just been written to."""
+    if key:
+        _library_cache.pop(key, None)
 
 
 def _source_tool(library_url, index):
@@ -217,8 +245,7 @@ def _source_tool(library_url, index):
     if lib is None:
         url = safe(lambda: adsk.core.URL.create(library_url))
         lib = safe(lambda: libs.toolLibraryAtURL(url)) if url else None
-        if lib is not None:
-            _library_cache[library_url] = lib
+        _cache_library(library_url, lib)
     if not lib:
         return None, f"Could not load source library '{library_url}'."
     n = safe(lambda: lib.count, 0) or 0
@@ -279,6 +306,10 @@ def _build_type_map(want=None):
     a restart pays it. `want` stops as soon as that type is found, so adding a flat end mill reads
     ONE library (~1.4s) instead of five. Libraries already read stay cached, and _scanned records
     which, so a later call never re-fetches one.
+
+    ONLY a library that resolved AND was walked counts as scanned. A cloud fetch that comes back
+    empty is transient: recording it would truncate the type vocabulary for the whole process life
+    and short out the full-walk fallback _sample_for_type falls back to, so the next call retries it.
     """
     global _type_map_cache
     if _type_map_cache is None:
@@ -297,12 +328,14 @@ def _build_type_map(want=None):
                 continue
             u = next((a for a in children if ln in (safe(lambda a=a: a.leafName) or "")), None)
             if not u:
-                scanned.add(ln)
                 continue
             key = safe(lambda u=u: u.toString())
             lib = _library_cache.get(key) or safe(lambda: libs.toolLibraryAtURL(u))
-            if lib is not None and key:
-                _library_cache[key] = lib     # _source_tool reads the SAME library moments later
+            if lib is None:
+                continue                      # the fetch failed - retry it on the next call
+            _cache_library(key, lib)          # _source_tool reads the SAME library moments later
+            # The index is the tool's ADDRESS in this library (_source_tool takes it), so the walk
+            # keeps its own positions rather than the present-item positions iter_collection yields.
             for i in range(safe(lambda: lib.count, 0) or 0):
                 ty = safe(lambda lib=lib, i=i: lib.item(i).parameters.itemByName("tool_type").value.value)
                 if ty and ty not in out:
@@ -501,8 +534,7 @@ def _preset_param_of(preset, candidates, word):
         p = safe(lambda nm=nm: params.itemByName(nm))
         if p is not None:
             return p, None
-    present = [safe(lambda i=i: params.item(i).name) or ""
-               for i in range(safe(lambda: params.count, 0) or 0)]
+    present = [safe(lambda p=p: p.name) or "" for p in iter_collection(params)]
     return None, [nm for nm in present if word in nm.lower()]
 
 
@@ -595,7 +627,10 @@ def _apply_preset_values(preset, spec):
 
 
 def _preset_names(presets):
-    """Every preset's name, in index order."""
+    """Every preset's name, in index order - a positional walk, not the shared iter_collection one:
+    the published list is read against preset_count and against the INDEX _presets_named hands to
+    presets.remove(), so an unreadable preset has to hold its slot (as a null) rather than shrink
+    the list and slide every later name onto the wrong index."""
     return [safe(lambda i=i: presets.item(i).name)
             for i in range(safe(lambda: presets.count, 0) or 0)]
 
@@ -1025,12 +1060,8 @@ def _do_parameters(target, tool_index):
         return error(f"Provide a valid 'tool' index (0..{len(tools) - 1}).")
     tool = tools[tool_index]
     params = safe(lambda: tool.parameters)
-    n = safe(lambda: params.count, 0) or 0 if params is not None else 0
     rows = []
-    for i in range(n):
-        p = safe(lambda i=i: params.item(i))
-        if p is None:
-            continue
+    for p in iter_collection(params):
         name = safe(lambda p=p: p.name)
         expr = safe(lambda p=p: p.expression)
         row = {"name": name, "expression": expr,

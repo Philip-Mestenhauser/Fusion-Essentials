@@ -47,20 +47,6 @@ def _require_created(ann, what):
     return None
 
 
-def _normalize_extension(ann):
-    """A note below the platform extension floor refuses every edit and its own extension setter
-    is bricked (live-verified) - normalize when possible, else name the recreate path."""
-    cur = safe(lambda: ann.leaderLineExtension)
-    if cur is not None and cur < _pmi.LEADER_EXT_FLOOR:
-        try:
-            ann.leaderLineExtension = _pmi.LEADER_EXT_DEFAULT
-        except Exception:
-            return (f"This note's leader extension ({cur} cm) is below the platform floor and "
-                    "cannot be repaired in place - delete and recreate it (pmi_delete + "
-                    "pmi_create pins a legal extension).")
-    return None
-
-
 def _do_set_text(ann, comp, text):
     gerr = _require_created(ann, "set_text")
     if gerr:
@@ -68,7 +54,7 @@ def _do_set_text(ann, comp, text):
     segs, serr = _pmi.build_segments(text)
     if serr:
         return error(serr)
-    nerr = _normalize_extension(ann)
+    nerr = _pmi.normalize_extension(ann)
     if nerr:
         return error(nerr)
     try:
@@ -129,7 +115,7 @@ def _do_set_leader_point(ann, comp, leader_point, f):
     if _pmi.kind_of(ann) != "note":
         return error(f"set_leader_point applies to leader notes only ('{safe(lambda: ann.name)}' "
                      f"is {_pmi.kind_of(ann)} - a hole callout leads to its hole).")
-    nerr = _normalize_extension(ann)
+    nerr = _pmi.normalize_extension(ann)
     if nerr:
         return error(nerr)
     got, err = _pmi.set_leader_target(ann, leader_point or [], f)
@@ -151,7 +137,7 @@ def _do_set_plane(ann, comp, plane, plane_face):
         pface, pferr = _PLANE_FACE.resolve(plane_face)
         if pferr:
             return error(pferr)
-    nerr = _normalize_extension(ann)
+    nerr = _pmi.normalize_extension(ann)
     if nerr:
         return error(nerr)
     ptype = getattr(adsk.fusion.LeaderLineNotePlaneTypes, _pmi.PLANE_TYPES[plane_v])
@@ -239,28 +225,12 @@ def _do_set_values(ann, comp, values, f):
 def _do_set_display(ann, comp, display):
     if _pmi.kind_of(ann) != "hole_note":
         return error("set_display applies to hole/thread callouts only.")
-    spec = dict(display) if isinstance(display, dict) else None
-    if not spec:
+    if not isinstance(display, dict) or not display:
         return error("action='set_display' needs 'display' - {precision, units, leading_zeros, "
                      "trailing_zeros, unit_abbreviation, secondary: {...}}.")
-    secondary = spec.pop("secondary", None)
-    if spec:
-        ds, derr = _pmi.build_display(spec)
-        if derr:
-            return error(derr)
-        try:
-            ann.primaryDisplaySettings = ds
-        except Exception as e:
-            return error(f"Primary display settings set failed: {e}")
-    if secondary is not None:
-        ds2, derr2 = _pmi.build_display(secondary)
-        if derr2:
-            return error("display.secondary: " + derr2)
-        try:
-            ann.hasSecondaryDisplaySettings = True
-            ann.secondaryDisplaySettings = ds2
-        except Exception as e:
-            return error(f"Secondary display settings set failed: {e}")
+    derr = _pmi.apply_display(ann, display)
+    if derr:
+        return error(derr)
     rec = _pmi.annotation_record(comp, ann)
     rec["display"] = _pmi.display_record(safe(lambda: ann.primaryDisplaySettings))
     if safe(lambda: ann.hasSecondaryDisplaySettings, False):
@@ -283,15 +253,20 @@ def _do_suppress(ann, comp, on):
     rec = _pmi.annotation_record(comp, ann)
     rec["suppressed"] = got
     if on:
-        rec["note"] = ("Suppressed PMI leaves the pmi_get listing entirely - "
-                       "pmi_edit(action='unsuppress') brings it back by name.")
+        rec["note"] = ("A suppressed PMI is expected to drop out of the pmi_get listing entirely "
+                       "(unconfirmed on this Fusion build) - pmi_edit(action='unsuppress') "
+                       "brings it back by name either way, and verifies it reappeared.")
     return ok(rec)
 
 
-def _do_unsuppress_by_timeline(d, name):
-    """A suppressed PMI is GONE from the collections and its timeline entity reads as a bare
+def _do_unsuppress_by_timeline(d, name, component=""):
+    """A suppressed PMI is absent from the collections and its timeline entity reads as a bare
     Feature - only the name survives. Flip the matching suppressed feature, then verify the
-    annotation reappears in the PMI collection; a wrong same-named feature is re-suppressed."""
+    annotation reappears in the PMI collection; a wrong same-named feature is re-suppressed.
+
+    The re-check reads the HIT COUNT, not find_annotation's error text: several hits means the PMI
+    DID come back (in more than one component), which is the opposite of the 'nothing reappeared'
+    case and must not be re-suppressed with that cause."""
     want = (name or "").strip().lower()
     hits = [(item, nm) for item, nm in _pmi.suppressed_pmi_features(d) if nm.lower() == want]
     if not hits:
@@ -304,8 +279,13 @@ def _do_unsuppress_by_timeline(d, name):
         item.isSuppressed = False
     except Exception as e:
         return error(f"Timeline unsuppress failed: {e}")
-    ann, comp, ferr = _pmi.find_annotation(d, nm)
-    if ferr or ann is None:
+    found, _available = _pmi.annotation_hits(d, nm, component)
+    if len(found) > 1:
+        where = ", ".join(sorted((safe(lambda c=c: c.name, "") or "?") for _a, c in found))
+        return error(f"'{nm}' was unsuppressed and now names a PMI in {len(found)} components "
+                     f"({where}) - the annotation IS back and was left unsuppressed. Re-run "
+                     "action='unsuppress' with component= to report which one.")
+    if not found:
         try:
             item.isSuppressed = True
         except Exception:
@@ -313,6 +293,7 @@ def _do_unsuppress_by_timeline(d, name):
                          "re-suppressing it failed - check the timeline.")
         return error(f"Suppressed feature '{nm}' is not a PMI annotation (no PMI reappeared) - "
                      "it was left suppressed.")
+    ann, comp = found[0]
     rec = _pmi.annotation_record(comp, ann)
     rec["suppressed"] = False
     return ok(rec)
@@ -370,7 +351,7 @@ def handler(action=None, annotation="", component="", text="", new_name="", text
         # A suppressed PMI is absent from every collection - unsuppress reaches it through the
         # suppressed timeline features instead of failing the name lookup.
         if action_v == "unsuppress":
-            res = _do_unsuppress_by_timeline(d, annotation)
+            res = _do_unsuppress_by_timeline(d, annotation, component)
             if res is not None:
                 return res
         return error(ferr)
@@ -439,7 +420,7 @@ tool = (
     .add_input_property("perpendicular", {"type": "boolean",
         "description": "set_alignment: text perpendicular to the leader line."})
     .add_input_property("leader_extension", {"type": "number",
-        "description": "set_extension: length in 'units' (min 2.5mm)."})
+        "description": "set_extension: leader length in 'units'; under 2.5mm is refused."})
     .add_input_property("flags", {"type": "object",
         "description": "set_flags: {quantity_note, all_matching, flip_normal, through, threaded, threaded_through, show_imported_geometry}."})
     .add_input_property("values", {"type": "object",

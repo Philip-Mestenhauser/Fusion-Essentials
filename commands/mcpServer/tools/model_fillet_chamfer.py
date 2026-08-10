@@ -65,8 +65,6 @@ _CORNER_TYPE = _inputs.Choice("corner_type", list(_CORNER_TYPES),
                 "it, 'miter' extends the chamfer faces to intersect, 'blend' fits a blend "
                 "surface. Omit for Fusion's default.")
 
-_NO_VOLUME_CHANGE_CM3 = 1e-9
-
 app = adsk.core.Application.get()
 
 # edge_filter caveat (shared by both tools): convex/concave classify each edge by its LOCAL dihedral
@@ -91,27 +89,13 @@ def _qualified_body_name(body):
     return name
 
 
-def _resolve_body(comp, body_name):
-    """Resolve the body to fillet/chamfer ALL edges of. A given value (a find_geometry handle OR a
-    name) resolves through BodyRef (kind-checked solid, with a precise error). Empty = the most-recent
-    body in the active component (the default). Returns (body, error)."""
-    if body_name in (None, "", []):
-        body = _common.most_recent_body(comp)
-        if not body:
-            return None, ("No body in the active component to fillet/chamfer. Model one first, or "
-                          "pass 'edges' = edge handles from find_geometry.")
-        return body, None
-    return _BODY.resolve(body_name)
-
-
 def _collect_edges(body, edge_filter):
     """ObjectCollection of the body's edges matching 'edge_filter' (all | convex | concave)."""
     flt = (edge_filter or "all").strip().lower()
     coll = adsk.core.ObjectCollection.create()
     edges = safe(lambda: body.edges)
     n = safe(lambda: edges.count, 0) if edges else 0
-    for i in range(n):
-        e = edges.item(i)
+    for e in _common.iter_collection(edges):
         if flt == "all":
             coll.add(e)
         else:
@@ -246,12 +230,12 @@ def _angle_spec(angle_deg, distance_two):
 def _chamfer_readback(feature, sz, k, angle, corner_key):
     """(verified payload fields, unverified field names, error) read off the CREATED chamfer.
 
-    set_verified proves only that the INPUT took a value, and a chamfer offers no indirect signal:
-    measured live, all three corner types build the SAME face count on the same vertex, so an
-    ignored corner type is invisible unless the feature itself is asked. Measured read-back shapes:
-    feature.cornerType answers the member that was set (0/1/2), and a distance-and-angle chamfer's
-    chamferTypeDefinition is a DistanceAndAngleChamferTypeDefinition whose .distance and .angle are
-    ModelParameters reading CM and RADIANS (2 mm at 45 deg read 0.2 and 0.7853981633974483)."""
+    set_verified proves only that the INPUT took a value, and a chamfer offers no indirect signal -
+    a corner type the platform declined leaves no trace anywhere else - so the feature itself is
+    asked. The read-back shapes this checks against: feature.cornerType answers the member that was
+    set, and a distance-and-angle chamfer's chamferTypeDefinition is a
+    DistanceAndAngleChamferTypeDefinition whose .distance and .angle are ModelParameters carrying CM
+    and RADIANS, which is what the comparisons below convert to before comparing."""
     fields, unverified = {}, []
     if corner_key:
         cts = safe(lambda: adsk.fusion.ChamferCornerTypes)
@@ -372,7 +356,10 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
                          f"'concave') to sweep the body. An omitted scope never means the whole body.")
         if flt not in ("all", "convex", "concave"):
             return error("edge_filter must be: all | convex | concave.")
-        body, berr = _resolve_body(comp, body_name)
+        body, berr = _common.resolve_body_or_recent(
+            _BODY, comp, body_name,
+            "No body in the active component to fillet/chamfer. Model one first, or pass 'edges' = "
+            "edge handles from find_geometry.")
         if berr:
             return error(berr)
         edges, total = _collect_edges(body, flt)
@@ -397,9 +384,9 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             ci = comp.features.chamferFeatures.createInput(edges, True)
             d2 = float(distance_two or 0.0)
             if angle is not None:
-                # Live-measured: a ValueInput built from a REAL is read as RADIANS, so the wire's
-                # degrees are converted here - setToDistanceAndAngle(0.3, radians(30)) cut a bevel
-                # whose legs measured 0.3 cm and 0.1732 cm, i.e. 'distance' and distance*tan(angle).
+                # A ValueInput built from a REAL carries RADIANS for an angle, so the wire's
+                # degrees are converted here; 'distance' is the leg along the first face and the
+                # angle turns the bevel off it.
                 ang = adsk.core.ValueInput.createByReal(math.radians(angle))
                 if not ci.setToDistanceAndAngle(val, ang):
                     return error(f"Fusion refused a distance-and-angle chamfer of {sz} "
@@ -431,11 +418,12 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
 
     # Measured READ-BACK off the created feature - the input collection's count is only the request.
     # A fillet/chamfer can consume fewer edges than handed in, so report what the feature says it
-    # holds, not what we asked for. feature.faces.count is the fillet FACES created (live-verified:
-    # a real fillet reports >=1; a no-op on a tangent edge reports 0 with the body volume unchanged).
+    # holds, not what we asked for. feature.faces.count is the fillet FACES created: a real fillet
+    # reports >=1, and the 0-face no-op it distinguishes is gated separately below.
     faces_created = safe(lambda: feature.faces.count)
-    # FilletFeature/ChamferFeature expose NO .edges collection (measured live) - the created faces
-    # are the only per-edge effect read-back the feature offers.
+    # FilletFeature/ChamferFeature expose no .edges collection - "edges" is absent from dir() and
+    # reading it raises AttributeError - so the created faces are the only per-edge effect read-back
+    # the feature offers.
 
     # A feature can come back with an ERROR health state and no message at all: a variable-radius
     # chain listed out of connected order does exactly that, and it reads 0 faces like a tangent
@@ -472,10 +460,11 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # Partial-application guard (both kinds): a handle can still resolve to SOME live entity (the
     # locator fallback in _inputs._resolve_token_entity recovers a stale token by kind+position) yet
     # not actually participate in the feature - consuming fewer edges than requested while the API
-    # still reports success (live-verified: 2 edges requested, 1 stale, faces_created:1 was the only
-    # hint). A fully-applied fillet creates one face per requested edge even on a tangent LOOP
-    # (live-verified: 8 tangent-connected edges incl. arcs -> 8 faces), so a face shortfall means at
-    # least one edge was dropped - roll the feature back rather than report a false blanket success.
+    # still reports success, with the created feature's face count the only hint. A fully-applied
+    # fillet creates one face per requested edge even on a tangent LOOP: MEASURED, one seed edge of
+    # an 8-edge tangent chain (4 lines + 4 arcs, isTangentChain True) built a feature holding 8
+    # faces. So a face shortfall means at least one edge was dropped - roll the feature back rather
+    # than report a false blanket success.
     applied = faces_created
     if applied is not None and applied < edges.count:
         removed = safe(lambda: feature.deleteMe())
@@ -501,7 +490,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # A fillet either cuts a convex corner away or fills a concave one, so an unchanged volume
     # means nothing was rounded however healthy the feature looks.
     vol_delta, vol_readable = _geom.volume_delta(verify_bodies, vol_before)
-    if vol_readable and abs(vol_delta) < _NO_VOLUME_CHANGE_CM3:
+    if vol_readable and abs(vol_delta) < _common.NO_VOLUME_CHANGE_CM3:
         removed = safe(lambda: feature.deleteMe())
         return error(
             "Fillet reported success but moved no material - the filleted body's measured volume "
@@ -613,7 +602,7 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
 
     faces_created = safe(lambda: feature.faces.count)
     vol_delta, vol_readable = _geom.volume_delta(verify_bodies, vol_before)
-    moved = abs(vol_delta) >= _NO_VOLUME_CHANGE_CM3 if vol_readable else faces_created != 0
+    moved = abs(vol_delta) >= _common.NO_VOLUME_CHANGE_CM3 if vol_readable else faces_created != 0
     if not moved:
         removed = safe(lambda: feature.deleteMe())
         return error(

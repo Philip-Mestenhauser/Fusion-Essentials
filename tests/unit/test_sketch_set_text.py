@@ -87,12 +87,16 @@ class FakeText:
 
 class _Coll:
     # Like a live adsk collection: counted (count/item) AND iterable - consumers use both styles.
-    def __init__(self, items):
+    # item_raises_at models a stale slot: item(i) raises while count still includes it.
+    def __init__(self, items, item_raises_at=None):
         self._i = list(items)
+        self._raises_at = item_raises_at
     @property
     def count(self):
         return len(self._i)
     def item(self, i):
+        if i == self._raises_at:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
         return self._i[i]
     def __iter__(self):
         return iter(self._i)
@@ -187,10 +191,44 @@ class TestEditHandler:
         assert sk.sketchTexts.item(0).textParameter.expression == "'zero'"
         assert sk.sketchTexts.item(2).textParameter.expression == "'two'"
 
+    def test_an_unreadable_text_holds_its_index_instead_of_shifting_the_rest(self):
+        # 'index' is the Nth text WITHIN the sketch - the same address sketch_delete_entity's
+        # 'text:<index>' takes. A text that reads back as nothing must burn its number: dropping it
+        # would slide the third text onto index 1 and edit the wrong nameplate.
+        sk = FakeSketch("S", [FakeText("'zero'"), None, FakeText("'two'")])
+        _install([FakeComp("Root", [sk])])
+        out = _payload(st.handler(text="Picked", index=2))
+        assert out["changed_count"] == 1
+        assert out["changed"][0]["before"] == "two" and out["changed"][0]["after"] == "Picked"
+        assert sk.sketchTexts.item(0).textParameter.expression == "'zero'"
+
     def test_index_out_of_range_is_error(self):
         design = _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
         res = st.handler(text="X", index=5)
         assert res["isError"] is True and "index 5" in res["message"]
+
+    def test_a_text_whose_item_read_raises_burns_its_slot(self):
+        # The stale-proxy shape one step earlier than an unreadable STRING: sketchTexts.item(i)
+        # itself raises. The slot burns its index (index=2 still reaches the third text) instead
+        # of the raise taking the whole edit down or sliding the address space.
+        sk = FakeSketch("S", [FakeText("'zero'"), FakeText("'dead'"), FakeText("'two'")])
+        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        _install([FakeComp("Root", [sk])])
+        out = _payload(st.handler(text="Picked", index=2))
+        assert out["changed_count"] == 1
+        assert out["changed"][0]["before"] == "two" and out["changed"][0]["after"] == "Picked"
+        assert sk.sketchTexts.item(0).textParameter.expression == "'zero'"
+
+    def test_selecting_the_raising_slot_is_an_honest_refusal(self):
+        # editing a text that will not read is impossible - a silent skip would report success
+        # over a hole, so the SELECTED unreadable index refuses and names the re-read.
+        sk = FakeSketch("S", [FakeText("'zero'"), FakeText("'dead'"), FakeText("'two'")])
+        sk.sketchTexts = _Coll(sk.sketchTexts._i, item_raises_at=1)
+        _install([FakeComp("Root", [sk])])
+        res = st.handler(text="X", index=1)
+        assert res["isError"] is True
+        assert "could not be read" in res["message"] and "sketch_get" in res["message"]
+        assert sk.sketchTexts.item(2).textParameter.expression == "'two'"   # untouched
 
     def test_index_counter_is_per_sketch(self):
         # index=0 must pick the FIRST text of EACH sketch, not the first overall
@@ -729,6 +767,19 @@ class TestDefinitionReadBack:
         assert res["isError"] is True
         assert "multi_line" in res["message"] and "WAS created" in res["message"]
 
+    def test_the_wrong_mode_message_names_the_texts_own_delete_index(self):
+        # sketch_delete_entity takes target='text:<index>' and the created text is the LAST in
+        # sketchTexts, so the refusal hands over the real number - a placeholder or an off-by-one
+        # would send the caller at a text that is not the one this call created.
+        texts = FakeSketchTexts(initial=3, definition_type="adsk::fusion::MultiLineTextDefinition")
+        design, sk = _install_create(texts=texts, lines=1)
+        res = st.handler(text="A", create=True, sketch_name="Plate", mode="along_path",
+                         path="line:0")
+        assert "sketch_delete_entity(sketch_name='Plate', target='text:3')" in res["message"]
+        assert "<index>" not in res["message"]
+        assert "not text" not in res["message"]
+        assert "undo in Fusion" not in res["message"]
+
     def test_an_unrecognised_definition_is_published_without_a_claim(self):
         texts = FakeSketchTexts(definition_type="adsk::fusion::SomethingElse")
         design, sk = _install_create(texts=texts, lines=1)
@@ -852,6 +903,15 @@ class TestFontOnCreate:
         assert res["isError"] is True
         assert "'Arial'" in res["message"] and "'Courier New'" in res["message"]
         assert "WAS created" in res["message"]
+
+    def test_the_font_mismatch_message_names_the_texts_own_delete_index(self):
+        # the created text is the LAST in sketchTexts, so the message can hand over the exact
+        # target sketch_delete_entity takes instead of sending the caller to the Fusion UI.
+        texts = FakeSketchTexts(initial=2, landed_font="Courier New")
+        design, sk = _install_create(texts=texts)
+        res = st.handler(text="A", create=True, sketch_name="Plate", font_name="Arial")
+        assert "sketch_delete_entity(sketch_name='Plate', target='text:2')" in res["message"]
+        assert "undo in Fusion" not in res["message"]
 
     def test_unreadable_font_is_published_none_and_falls_back_to_requested(self):
         texts = FakeSketchTexts(blind_font=True)
@@ -1016,4 +1076,22 @@ class TestFontOnEdit:
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
         out = _payload(st.handler(text="X"))
         assert "font" not in out["changed"][0]
-        assert "font" not in out["note"].lower()
+        # the applied-font clause is absent; the read-back pointer names 'font' as a field
+        # sketch_get returns, which is true whether or not this call set one
+        assert "after applying" not in out["note"]
+
+
+class TestReadBackPointer:
+    """A written text is re-readable as its own entity record, so both paths must point at the read
+    instead of leaving a screenshot as the only way to check a label."""
+
+    def test_create_note_points_at_the_sketch_get_read_back(self):
+        _install_create()
+        out = _payload(st.handler(text="LBL", create=True, sketch_name="Plate"))
+        assert "sketch_get(sketch_name=..., include_entities=true)" in out["note"]
+        assert "'text:<i>'" in out["note"]
+
+    def test_edit_note_points_at_the_sketch_get_read_back(self):
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        out = _payload(st.handler(text="X"))
+        assert "sketch_get(sketch_name=..., include_entities=true)" in out["note"]

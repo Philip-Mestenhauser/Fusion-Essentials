@@ -270,6 +270,26 @@ class TestHonesty:
         msg = error_message(mo.handler(occurrence="A:1", into_component="B:1"))
         assert "the assembly is unchanged" in msg and "A:1" in msg
 
+    def test_an_unreadable_assembly_census_is_an_error_not_a_confirmed_move(self, wire):
+        # allOccurrences going unreadable yields the SAME empty set an empty assembly gives. The
+        # move just proved an occurrence exists, so an empty census after it is a FAILED READ - and
+        # falling through publishes changed:true for a re-parent nothing confirmed.
+        des = wire()
+        original = mo.occurrence_paths
+        calls = {"n": 0}
+
+        def blind(design):
+            calls["n"] += 1
+            return original(design) if calls["n"] == 1 else set()   # before reads, after does not
+
+        mo.occurrence_paths = blind
+        try:
+            msg = error_message(mo.handler(occurrence="A:1", into_component="B:1"))
+        finally:
+            mo.occurrence_paths = original
+        assert "could not be read" in msg
+        assert "may or may not have taken" in msg
+
     def test_nothing_returned_is_an_error(self, wire):
         wire(refuse="none")
         assert "returned nothing" in error_message(mo.handler(occurrence="A:1", into_component="B:1"))

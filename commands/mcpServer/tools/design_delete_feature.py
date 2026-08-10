@@ -14,6 +14,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from . import _inputs
 
 
 def _timeline(design):
@@ -25,54 +26,34 @@ def _timeline(design):
 from ._common import timeline_health as _timeline_health
 
 
-def _find_objects_by_name(timeline, want):
-    """All timeline objects whose name matches `want`. Accepts the exact 'name@index' form the
-    ambiguity error prints (name@timelineIndex) - targets the object at that timeline index when its
-    name matches, so two same-named features are individually deletable. Otherwise: exact name matches
-    first, else case-insensitive substring. Returns a list - the caller refuses when it is not exactly
-    one (ambiguity guard)."""
-    n = safe(lambda: timeline.count, 0) or 0
-    objs = [timeline.item(i) for i in range(n)]
-    # 'name@index' - the disambiguation target (e.g. 'Extrude1@4'): the object at that exact timeline
-    # index, confirmed by name. A stale/wrong pairing is refused (empty), never widened to a name match.
-    base, at, idx = want.rpartition("@")
-    if at and base.strip() and idx.strip().isdigit():
-        i = int(idx.strip())
-        if 0 <= i < n and (safe(lambda o=objs[i]: o.name) or "").lower() == base.strip().lower():
-            return [objs[i]]
-        return []
-    exact = [o for o in objs if (safe(lambda o=o: o.name) or "") == want]
-    if exact:
-        return exact
-    low = want.lower()
-    return [o for o in objs if low in (safe(lambda o=o: o.name) or "").lower()]
+def _find_object(timeline, want):
+    """(TimelineObject, error_text) for the ONE object named `want`, through the shared timeline
+    by-name resolver - the same match and the same refusal design_edit_timeline and the FeatureRef
+    kind answer this input with. A DELETE gets no laxer contract than they do: the match is EXACT
+    (case-insensitive), never a substring, so 'Fillet' cannot delete 'Fillet12'; a repeated name is
+    refused with the 'name@index' candidates, which is the form that targets one of them."""
+    return _inputs.resolve_timeline_object(_inputs._timeline_objects(timeline), want,
+                                           "the feature to delete")
 
 
 def _remove_features_named(design, name):
     """Every RemoveFeature named `name`, as (feature, component_name) - itemByName over each
-    component's features.removeFeatures. A list, so the caller refuses a duplicate instead of
-    grabbing the first hit."""
-    comps = safe(lambda: design.allComponents)
-    n = (safe(lambda: comps.count, 0) or 0) if comps is not None else 0
+    component's features.removeFeatures, across the shared design-wide component walk. A list, so
+    the caller refuses a duplicate instead of grabbing the first hit."""
     hits = []
-    for i in range(n):
-        comp = safe(lambda i=i: comps.item(i))
-        feats = safe(lambda: comp.features.removeFeatures) if comp is not None else None
+    for comp in _common.all_components(design):
+        feats = safe(lambda c=comp: c.features.removeFeatures)
         feat = safe(lambda: feats.itemByName(name)) if feats is not None else None
         if feat is not None:
-            hits.append((feat, safe(lambda: comp.name)))
+            hits.append((feat, safe(lambda c=comp: c.name)))
     return hits
 
 
 def _occurrence_present(design, path):
-    """Is an occurrence with `path` as its fullPathName in the design right now? The walk is guarded
-    as a whole, so a collection that cannot be read answers False (not confirmed) rather than
-    raising."""
-    root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrences) if root is not None else None
-    if occs is None:
-        return False
-    return bool(safe(lambda: any(safe(lambda o=o: o.fullPathName) == path for o in occs), False))
+    """Is an occurrence with `path` as its fullPathName in the design right now? Reads the shared
+    assembly-context path census, so a collection that cannot be read answers False (not confirmed)
+    rather than raising."""
+    return path in _common.occurrence_paths(design)
 
 
 def handler(feature: str = "") -> dict:
@@ -96,19 +77,10 @@ def handler(feature: str = "") -> dict:
         return error("This design has no timeline (a direct-modelling design has no deletable timeline "
                      "features). Delete bodies/occurrences directly instead.")
 
-    matches = _find_objects_by_name(timeline, want)
-    if not matches:
-        names = [safe(lambda o=o: o.name) for o in
-                 (timeline.item(i) for i in range(min(safe(lambda: timeline.count, 0) or 0, 12)))]
-        sample = ", ".join(n for n in names if n)
-        return error(f"No timeline feature matching '{want}'. Available (sample): {sample or '(none)'}. "
-                     "Use design_get(include=['timeline']) for the full list.")
-    if len(matches) > 1:
-        cands = ", ".join(f"{safe(lambda o=o: o.name)}@{safe(lambda o=o: o.index)}" for o in matches[:8])
-        return error(f"'{want}' is ambiguous - matches {len(matches)} timeline objects ({cands}). "
-                     "Rename the target in Fusion, or delete its instances another way.")
+    obj, rerr = _find_object(timeline, want)
+    if rerr:
+        return error(rerr)
 
-    obj = matches[0]
     name = safe(lambda: obj.name) or want
     index = safe(lambda: obj.index)
 

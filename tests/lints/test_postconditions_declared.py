@@ -9,9 +9,9 @@ ledger, one line per tool naming which class its inline verification falls into)
 DECLARATION (``postconditions=[...]``) is for a DETACHABLE effect - one a shared _assert.Postcondition
 kind can capture/verify without touching handler-local payload assembly. This lint makes the choice a
 structural requirement either way: a write tool either passes postconditions=[...] to
-Item.create_tool_item, or appears in _EXEMPT with a one-line audited reason. The table only ever
-SHRINKS (an entry is deleted by declaring postconditions); adding a new write tool to it needs the
-same deliberation as adding a naming-vocabulary verb.
+Item.create_tool_item, or appears in _EXEMPT with a one-line audited reason. Entries come and go
+as tools gain or lose postconditions; the gap: COUNT is what only shrinks (_GAP_CEILING below),
+and adding a new write tool here needs the same deliberation as adding a naming-vocabulary verb.
 """
 
 import inspect
@@ -45,23 +45,26 @@ def _postconditions_of(item):
 #             to independently verify.
 #   gap:    - NO effective read-back exists; the platform can report success while changing
 #             nothing and the tool returns ok. Each is a defect awaiting an inline gate or a
-#             new kernel kind, not an accepted state.
-# A few async/system entries keep bespoke reasons. This table only shrinks.
+#             new kernel kind, not an accepted state. The gap: COUNT is ratcheted shrink-only
+#             below (_GAP_CEILING): a new gap: is a deliberate, visible diff to that number,
+#             never a quiet exit from the inline read-back detector.
+# A few async/system entries keep bespoke reasons. Entries come and go as tools gain or lose
+# postconditions; what only shrinks is the gap: count.
 _EXEMPT = {
-    'appearance_set': 'inline: each appearance= assignment is read back; a mismatch lands in failed or errors',
+    'appearance_set': 'inline: each appearance= assignment is read back and a mismatch is an error or lands in failed; an OCCURRENCE-level write additionally re-reads EVERY body and compares Appearance.id, never the name (measured: same-named appearances are distinct assets, so a name compare calls a body that kept its own color reached) - reached / bodies_not_reached / unverified_bodies are published, and reaching no body while at least one demonstrably kept another is an error',
     'drawing_add_sketch': 'inline: sketches.add() is followed by a per-collection count diff on the created sketch - lines/rectangles/arcs/circles/ellipses - and any collection short of its requested curve count is an error(...) naming what landed and what did not',
     'drawing_edit_sheet': 'inline: Sheets.add() is followed by a re-read of the sheet count and of the name the created sheet REPORTS, the name= / sheetSize= / orientation= sets are each re-read off the sheet and a silent no-op becomes an error(...) naming what it still reports, copy() facts are read off the returned sheet, and tidyUp is gated on the isModified transition publishing modified_confirmed; deleteMe() alone cannot be verified in-call - a drawing delete is invisible inside its own transaction, so the payload publishes the boolean and marks the count a reading, never a verification',
     'drawing_dimension': 'gap: adsk.drawing has NO dimension entity class, so the dimensions placed cannot be counted, listed or re-read - autoDimension() returning true plus an isModified flip is the whole gate, and it cannot discriminate a document that was already modified',
     'drawing_insert_image': 'gap: the Images collection exposes only createInput and insert - no count, item or delete - so an inserted image cannot be re-read; insert() returning true plus an isModified flip is the whole gate, and it cannot discriminate a document that was already modified',
     'assembly_capture_position': 'inline: snaps.add() is gated and the snapshot count must advance; discard_pending gates revertPendingSnapshot() and re-reads hasPendingSnapshot; delete gates deleteMe() and re-reads the collection for a survivor',
-    'design_edit_timeline': 'inline: rollTo/moveToEnd/isSuppressed=/groups.add/deleteMe/deleteAllAfterMarker each gate on a read-back taken after them - markerPosition plus isRolledBack, isSuppressed, and the group and timeline counts; attributes.add() gates on itemByName plus a value match and publishes previous_value, and the attribute deleteMe() gates on itemByName reading None in the same call',
+    'design_edit_timeline': 'inline: rollTo/moveToEnd/isSuppressed=/groups.add/deleteMe/deleteAllAfterMarker each gate on a read-back taken after them - markerPosition plus isRolledBack, isSuppressed, and the group and timeline counts; attributes.add() gates on itemByName plus a value match and publishes previous_value, and the attribute deleteMe() gates on itemByName reading None in the same call, with a RAISING read-back refused as UNCONFIRMED rather than published as a claimed delete',
     'mesh_repair': 'inline: meshRepairFeatures.add() is followed by a re-read of the INPUT mesh (a MeshFeature reports no bodies of its own) - triangle and vertex counts, is_closed and volume - and an unverifiable or unrepaired result is an error(...)',
     'mesh_shell': 'inline: meshShellFeatures.add() is followed by a re-read of the INPUT mesh (a MeshFeature reports no bodies of its own) - triangle and vertex counts plus the volume delta - and a shell that moved none of them, or an unreadable one, is an error(...); the thickness that landed is read off the feature ModelParameter and a mismatch is an error',
     'mesh_smooth': 'inline: meshSmoothFeatures.add() is followed by a full nodeCoordinatesAsDouble diff on the INPUT mesh - measured, the triangle/vertex counts and is_closed all hold still across a successful smooth, so the coordinate diff is the only verdict and an unmoved or unreadable one is an error(...); the smoothness that landed is read off the feature ModelParameter and a mismatch is an error',
     'mesh_separate': 'inline: meshSeparateFeatures.add() is followed by a before/after census of the OWNING component mesh body names - the pieces are auto-named and the input is consumed, so the new-name set IS the payload and fewer than two new names is an error(...)',
     'mesh_reverse_normal': 'inline: meshReverseNormalFeatures.add() is followed by a signed-volume sign check and a componentwise negation check of normalVectorsAsDouble on the INPUT mesh - neither moving is an error(...) and neither being readable is reported UNVERIFIED',
     'assembly_constrain': 'inline: constraint healthState is read after add(); a failed solve is an error',
-    'assembly_edit_relations': 'inline: each acting action gates on a read-back taken after it - the isSuppressed= set is re-read, deleteMe() is followed by a re-list of the kind, the isReversed= set by a re-read, and setMotionData() by the valueOne/valueTwo ratio (set_occurrences mutates nothing: the platform refuses the edit, so the action refuses up front)',
+    'assembly_edit_relations': 'inline: each acting action gates on a read-back taken after it - the isSuppressed= set is re-read, deleteMe() is followed by a re-list of the kind, the isReversed= set by a re-read, and setMotionData() by the valueOne/valueTwo ratio plus an isReversed= re-read; every flag read-back is sentinelled, so an UNREADABLE flag is refused as UNCONFIRMED, never published as a confirmed False (set_occurrences mutates nothing: the platform refuses the edit, so the action refuses up front)',
     'assembly_edit_contacts': 'inline: each acting action gates on a read-back taken after it - contactSets.add() is followed by a re-list of the design\'s sets and a member re-read, the occurencesAndBodies= and isSuppressed= and name= sets are each re-read, deleteMe() is followed by a re-list, and the isContactAnalysisEnabled= / isContactSetAnalysis= flags are re-read after assignment',
     'assembly_ground': 'inline: the isGroundToParent= assignment is re-read (safe) and a flag that did not take is an error',
     'assembly_move': 'inline: the transform is re-read after the transform2= set; an unchanged pose errors, position is the actual',
@@ -69,17 +72,17 @@ _EXEMPT = {
     'cam_activate_setup': 'inline: target.isActive is re-read after activate() and gates the claim',
     'cam_apply_template': 'inline: allOperations is recounted around createFromCAMTemplate2(); no growth is an error',
     'cam_create_operation': 'inline: operations recounted around add(); stale post-launch reads are omitted',
-    'cam_create_machine': 'effect: the payload re-resolves the created machine through the same cam_edit_setup._resolve_machine query an assignment uses, after importMachine and a machineAtURL load-back; a create that does not resolve back returns isError',
+    'cam_create_machine': 'effect: the payload re-resolves the created machine through the same _cam_common.resolve_machine query an assignment uses, after importMachine and a machineAtURL load-back; a create that does not resolve back returns isError',
     'cam_create_setup': 'inline: cam.setups is re-listed after add() to confirm the setup landed',
     'cam_delete': 'inline: deleteMe() bool is read at the call site and authors the named decline error',
     'cam_edit_folders': 'inline: addFolder()/moveInto() and the name= rename gate on read-backs; create trusts addFolder returning a live object',
     'cam_edit_operation': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); the observed value is the payload',
     'cam_edit_setup': 'inline: params re-read for .error after each expression= set (unevaluated -> rollback+error); machine/stock/fixture/wcs writes each re-read and gated',
-    'cam_edit_tools': 'inline: add()/remove() re-fetch the library from its url after persist',
+    'cam_edit_tools': 'inline: no path trusts an API return - after add()/remove() the library is persisted and RE-READ from its url, and a count that disagrees is an error; the auto-assigned tool numbers are checked twice (off the in-memory tools, then against the set the re-read stored library holds), and an edit or a preset change re-reads the parameter expression and the preset names off that same re-read, since updateTool/updateToolLibrary returning true is evidence of neither - a document-scope target has no url to re-read, so the payload publishes verified_in_memory_only',
     'cam_generate': 'effect: the launch handle is the effect; cam_get_status confirms completion separately',
     'cam_reorder': 'inline: moveBefore()/moveAfter() bool is read and reported as a named error on false',
     'cam_save_template': 'inline: the template is re-fetched at new_url (templateAtURL) after importTemplate()',
-    'cam_select_geometry': 'inline: selection count is gated after applyCurveSelections(); generation is pumped to completion first',
+    'cam_select_geometry': 'inline: applyCurveSelections() is followed by a re-read of what the operation now HOLDS - the selection count, the paths and segments Fusion resolved off outputGeometry, the entity set the selection reports, and its own error/warning channel - and a rejected selection or a count of 0 is an error naming what to re-select; the holes path gates on the applied face count the same way (the async generation this can launch is confirmed separately by cam_get_status, never here)',
     'cam_show_toolpath': 'inline: isLightBulbOn is re-read after every isLightBulbOn= set; failed toggles error or are listed',
     'cam_set_nc_comment': 'inline: each program comment/name expression= write is re-read post-set; before/after is the payload',
     'data_create_folder': 'inline: the parent folder is re-listed after add() to confirm the new folder landed',
@@ -111,7 +114,7 @@ _EXEMPT = {
     'joint_edit': 'inline: post-edit computeAll() + a timeline health walk build timeline_errors_after and note',
     'joint_motion_link': 'inline: setMotionData failure rolls the link back via deleteMe() and authors the ratio error',
     'mesh_combine': 'inline: target triangle+body counts are diffed around add(); an unchanged target mesh is an error',
-    'mesh_delete': 'inline: deleteMe() / meshRemoveFeatures add() are gated, then every component meshBodies collection is re-scanned for an entityToken survivor and isValid; a survivor is an error',
+    'mesh_delete': 'inline: the delete is gated at the call - a deleteMe() returning false is an error, an add() that raises is an error - and then a FRESH design-wide mesh walk re-counts the meshes named like the target in its OWNING component; anything but one fewer is an error (measured: the held wrapper keeps reading isValid and its entityToken still resolves the removed body, so only the census can tell)',
     'mesh_generate_face_groups': 'inline: faceGroups.count is read back after add() and zero authors the no-groups failure',
     'mesh_insert': 'inline: the imported mesh_list count is gated after add(); zero authors the empty-import error',
     'mesh_plane_cut': 'inline: mesh body count is diffed around add() and gates became_split for split_body',
@@ -151,13 +154,32 @@ _EXEMPT = {
     'sys_execute_script': 'arbitrary user code - there is no declared effect to verify',
     'sys_reload_addin': 'restarts the server itself - nothing left in-process to verify',
     'sys_request_selection': 'effect is a user interaction, not a model mutation',
+    'view_screenshot': 'inline: the only mutation is the optional file_path PNG - fh.write() is followed by _export.verify_written on the landed path, and an absent or zero-byte file becomes an error(...) that suppresses the inline image; the kernel cannot see it either way, since this tool returns image/text content blocks rather than an ok() payload',
     'view_set': 'camera/visibility state actions - inline read-backs; not model mutations',
     'view_section': 'section analyses are view state; clear() has inline count read-back',
     'view_switch_workspace': 'workspace state read-back is inline; camera/UI state, not model state',
 }
 
 
+# The measured gap: count. Shrink-only: closing a gap (an inline gate or a kernel kind lands)
+# lowers it; raising it means a NEW tool shipped with no effective read-back, which is a
+# deliberate decision this number makes visible instead of a free exit from the detector.
+_GAP_CEILING = 2
+
+
 class TestPostconditionsDeclared:
+    def test_the_gap_count_only_shrinks(self):
+        gaps = sorted(t for t, r in _EXEMPT.items() if r.startswith("gap:"))
+        assert len(gaps) <= _GAP_CEILING, (
+            f"{len(gaps)} gap: exemptions exceed the ceiling of {_GAP_CEILING}. A gap: entry is a "
+            "tool whose success cannot be verified at all - adding one is a deliberate decision: "
+            "raise _GAP_CEILING in the same diff with the new tool's named defect, or give the "
+            "tool a real read-back.\n  " + "\n  ".join(gaps))
+        if len(gaps) < _GAP_CEILING:
+            raise AssertionError(
+                f"only {len(gaps)} gap: exemptions remain - lower _GAP_CEILING to {len(gaps)} to "
+                "lock the win in:\n  " + "\n  ".join(gaps))
+
     def test_every_write_tool_declares_or_is_exempt(self):
         missing = []
         for it in register_all_tools():

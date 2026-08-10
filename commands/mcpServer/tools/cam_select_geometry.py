@@ -11,10 +11,9 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, scale, set_verified
-from ._cam_common import get_cam, resolve_cam_node
+from ._common import CM_TO_UNIT, ok, error, safe, scale, set_verified
+from ._cam_common import get_cam, resolve_cam_node, register_future
 from . import _inputs
-from . import cam_generate  # its _GENERATIONS registry keeps a launched Future alive (see below)
 
 # The selection kinds. All but 'holes' are the CURVE (A) family - one CurveSelections builder each;
 # 'holes' is the DIRECT (B) family and handled separately.
@@ -98,8 +97,8 @@ def _curve_param(op):
 
 def _launch_generation(cam, op, op_name):
     """Launch toolpath generation for the op and return IMMEDIATELY - never wait; generation runs
-    in the background on its own. The Future is registered in cam_generate._GENERATIONS (if it were
-    garbage-collected, Fusion would ABANDON the in-progress generation; the registry also gives
+    in the background on its own. The Future goes into _cam_common.register_future (if it were
+    garbage-collected, Fusion would ABANDON the in-progress generation; that registry also gives
     cam_get_status's handle path the same read-and-cleanup lifecycle a cam_generate launch gets).
     Returns (handle, None) or (None, err)."""
     try:
@@ -108,8 +107,8 @@ def _launch_generation(cam, op, op_name):
         return None, str(e)
     if not fut:
         return None, "generateToolpath returned no future."
-    handle, _total = cam_generate.register_future(fut, f"operation '{op_name}'", "operation", False,
-                                                  target_name=op_name)
+    handle, _total = register_future(fut, f"operation '{op_name}'", "operation", False,
+                                     target_name=op_name)
     return handle, None
 
 
@@ -147,12 +146,16 @@ def _resolve_geometry(selection, handles, bodies, sketches):
 
 # ── selection appliers ───────────────────────────────────────────────────────
 
-def _set_knob(sel, prop, value, label):
+def _set_knob(sel, prop, value, label, inv=1.0, units=""):
     """Set ONE property on a curve selection and CONFIRM it took, returning WHAT IT READS BACK - the
     only number a payload may publish, since the value written and the value kept are not the same
     claim. A number is compared within 1e-9 (a stored double need not echo the assigned literal bit
     for bit); everything else goes through set_verified, which catches the SWIG proxy accepting an
-    assignment to a name it does not define. Returns (read_back, '') or (None, error)."""
+    assignment to a name it does not define. Returns (read_back, '') or (None, error).
+
+    A length is written and compared in Fusion's internal cm, but the read-back the ERROR states is
+    scaled by inv and labelled with units - the caller sent their own units and cannot tell an
+    internal number from a wrong one. The returned read_back is the raw cm the caller scales itself."""
     if isinstance(value, float):
         try:
             setattr(sel, prop, value)          # MUTATION
@@ -160,7 +163,8 @@ def _set_knob(sel, prop, value, label):
             return None, f"Could not set {label}: {e}"
         back = safe(lambda: getattr(sel, prop))
         if back is None or abs(float(back) - value) > 1e-9:
-            return None, (f"Setting {label} did not take - the selection reads back {back}, so the "
+            shown = "None" if back is None else f"{round(float(back) * inv, 6)}{units}"
+            return None, (f"Setting {label} did not take - the selection reads back {shown}, so the "
                           "operation would run on its default criteria.")
         return back, ""
     err = set_verified(sel, prop, value, label, "the selection")
@@ -169,11 +173,14 @@ def _set_knob(sel, prop, value, label):
     return safe(lambda: getattr(sel, prop)), ""
 
 
-def _apply_pocket_filter(sel, flt, factor, extra):
-    """Set the pocket-recognition search criteria, publishing what each one READS BACK. Returns an
+def _apply_pocket_filter(sel, flt, factor, units, extra):
+    """Set the pocket-recognition search criteria, publishing what each one READS BACK. The
+    read-back is in Fusion's internal cm, so it is published back through the CALLER'S units (the
+    same units the value arrived in) and the payload carries the units it is stated in. Returns an
     error string, or None."""
     if not flt:
         return None
+    inv = CM_TO_UNIT[units]                # cm -> the caller's units, for the published read-back
     if not isinstance(flt, dict):
         return f"'pocket_filter' must be an object with the keys {', '.join(_POCKET_FILTER_KEYS)}."
     unknown = sorted(k for k in flt if k not in _POCKET_FILTER_KEYS)
@@ -185,6 +192,7 @@ def _apply_pocket_filter(sel, flt, factor, extra):
         return ("'pocket_filter.min_hole_diameter' needs holes=true - the API accepts the hole "
                 "diameter bound only while holes are being interpreted as pockets.")
     applied = {}
+    lengths = False
     # areHolesIncluded GATES minimumHoleDiameter, so it is set first.
     if holes is not None:
         back, err = _set_knob(sel, "areHolesIncluded", bool(holes), "pocket_filter.holes")
@@ -199,16 +207,19 @@ def _apply_pocket_filter(sel, flt, factor, extra):
             scaled = float(v) * factor
         except (TypeError, ValueError):
             return f"'pocket_filter.{key}' must be a number; got '{v}'."
-        back, err = _set_knob(sel, prop, scaled, f"pocket_filter.{key}")
+        back, err = _set_knob(sel, prop, scaled, f"pocket_filter.{key}", inv, f" {units}")
         if err:
             return err
-        applied[key] = round(float(back), 6)
+        applied[key] = round(float(back) * inv, 6)
+        lengths = True
     if applied:
         extra["pocket_filter_applied"] = applied
+        if lengths:
+            extra["pocket_filter_units"] = units    # the units every length above is stated in
     return None
 
 
-def _apply_knobs(sel, selection, entities, knobs, factor, extra):
+def _apply_knobs(sel, selection, entities, knobs, factor, units, extra):
     """Set the per-selection properties this kind carries, each confirmed by a read-back. Returns an
     error string, or None."""
     if selection == _CHAIN:
@@ -234,7 +245,7 @@ def _apply_knobs(sel, selection, entities, knobs, factor, extra):
                     return err
                 extra[key] = v
     if selection == _POCKET_RECOGNITION:
-        return _apply_pocket_filter(sel, knobs.get("pocket_filter"), factor, extra)
+        return _apply_pocket_filter(sel, knobs.get("pocket_filter"), factor, units, extra)
     return None
 
 
@@ -249,6 +260,10 @@ def _read_back(cs, selection):
     if sel is None:
         return record, None
     resolved = {}
+    # Both reads are list()-under-safe() rather than the shared iter_collection walk because that is
+    # the protocol these two objects speak: outputGeometry is a Curve3DPathVector and value a
+    # BaseVector, and NEITHER carries count or item - they are plain iterables. An iter_collection
+    # walk over them would publish a fabricated 0; safe() leaves the field OFF when a read fails.
     paths = safe(lambda: list(sel.outputGeometry))
     if paths is not None:
         resolved["curve_paths"] = len(paths)
@@ -272,7 +287,7 @@ def _read_back(cs, selection):
     return record, None
 
 
-def _apply_curve(op, selection, entities, knobs, factor, extra):
+def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     """Mechanism (A): build a CurveSelection of the given kind from `entities`, apply it, and read the
     applied selection back. Returns (record, None) or (None, error)."""
     p = _curve_param(op)
@@ -293,7 +308,7 @@ def _apply_curve(op, selection, entities, knobs, factor, extra):
         sel.inputGeometry = entities          # MUTATION
     except Exception as e:
         return None, f"Could not set inputGeometry for the {selection} selection: {e}"
-    kerr = _apply_knobs(sel, selection, entities, knobs, factor, extra)
+    kerr = _apply_knobs(sel, selection, entities, knobs, factor, units, extra)
     if kerr:
         return None, kerr
     try:
@@ -396,7 +411,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     if kerr:
         return error(kerr)
 
-    factor = scale(units)
+    units_key = (units or "mm").strip().lower()
+    factor = scale(units_key)
     if factor is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
 
@@ -447,7 +463,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         count, aerr = _apply_holes(op, faces)
         record = None if aerr else {"selections": count}
     else:
-        record, aerr = _apply_curve(op, selection, entities, knobs, factor, extra)
+        record, aerr = _apply_curve(op, selection, entities, knobs, factor, units_key, extra)
     if aerr:
         return error(aerr)
     if not record.get("selections"):
@@ -474,8 +490,9 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         return ok(result)
     result["launched"] = True
     result["handle"] = handle
-    result["note"] = (f"Selection applied; generation is launched and runs in the background - "
-                      f"check cam_get_status(target='{op_name}') until completed=true. If it "
+    result["note"] = (f"Selection applied; generation is launched and runs in the background at its "
+                      f"own pace - check cam_get_status(target='{op_name}') at whatever cadence you "
+                      "need the progress, until completed=true. If it "
                       "completes with has_toolpath False the op produced no path - the "
                       "warning channel can be silent there; check the heights (a zero-depth cut: drill "
                       "derives depth from the holes, contour does not) and the selection.")
@@ -492,8 +509,8 @@ TOOL_DESCRIPTION = (
     "pocket_recognition; a knob passed to another kind is REFUSED. top_mode/top_offset + "
     "bottom_mode/bottom_offset set the heights (never the resolved _value). The result reports what "
     "Fusion resolved, and its reason when it rejects the selection. 'generate' (default true) "
-    "LAUNCHES regeneration and returns "
-    "immediately - poll cam_get_status(target=<operation>) until completed=true. Pair: "
+    "LAUNCHES regeneration and returns immediately - it runs in the background; check "
+    "cam_get_status(target=<operation>) until completed=true. Pair: "
     "cam_create_operation -> this; find_geometry supplies handles."
 )
 
@@ -521,7 +538,7 @@ tool = (
     .add_input_property("top_offset", {"type": "string", "description": "top height offset, e.g. '0 mm'."})
     .add_input_property("bottom_mode", {"type": "string", "description": "bottom height mode, e.g. 'from contour'."})
     .add_input_property("bottom_offset", {"type": "string", "description": "bottom height offset, e.g. '-10 mm'."})
-    .add_input_property("generate", {"type": "boolean", "description": "Launch regeneration after (default true; async - poll cam_get_status)."})
+    .add_input_property("generate", {"type": "boolean", "description": "Launch regeneration after (default true; async - read cam_get_status)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

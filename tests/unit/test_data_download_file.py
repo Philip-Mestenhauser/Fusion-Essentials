@@ -48,9 +48,9 @@ def _cloud_file(name="probe_note.txt", file_extension="sql", writes=None, return
 @pytest.fixture
 def resolves(monkeypatch):
     """Point the tool's file resolution at a stand-in (or at a refusal)."""
-    def _use(df=None, err=None):
-        monkeypatch.setattr(ddf, "resolve_file_reference",
-                            lambda *a, **kw: (df, {"matched_by": "urn", "urn": "urn:lin:AAA"}, err))
+    def _use(df=None, err=None, scope_truncated=False):
+        meta = {"matched_by": "urn", "urn": "urn:lin:AAA", "scope_truncated": scope_truncated}
+        monkeypatch.setattr(ddf, "resolve_file_reference", lambda *a, **kw: (df, meta, err))
     return _use
 
 
@@ -117,8 +117,42 @@ class TestPathHandling:
         assert "bare filename" in msg
 
     def test_missing_destination_folder_is_named(self, resolves):
-        resolves(_cloud_file())
-        assert "destination_folder" in error_message(ddf.handler(file="urn:lin:AAA"))
+        df = _cloud_file()
+        resolves(df)
+        msg = error_message(ddf.handler(file="urn:lin:AAA"))
+        assert "Provide 'destination_folder'" in msg and "LOCAL folder" in msg
+        assert df.calls == []            # refused before the transfer, never into the process cwd
+
+    def test_an_unreadable_cloud_name_asks_for_file_name_instead_of_guessing(self, resolves,
+                                                                             tmp_path):
+        # No name and no 'file_name' leaves nothing to write to - joining an empty name would
+        # target the destination FOLDER itself.
+        df = _cloud_file(name="", file_extension="")
+        resolves(df)
+        msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        assert "pass 'file_name'" in msg
+        assert df.calls == []
+
+    def test_an_unnamed_file_downloads_under_the_file_name_given(self, resolves, tmp_path):
+        # the guard above is about the MISSING pair, not about an unreadable name alone.
+        resolves(_cloud_file(name="", file_extension="", writes="hello"))
+        out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path),
+                                   file_name="chosen.txt"))
+        assert out["file_path"] == str(tmp_path / "chosen.txt")
+
+    def test_a_destination_folder_that_cannot_be_created_is_named(self, resolves, tmp_path,
+                                                                  monkeypatch):
+        df = _cloud_file(writes="hello")
+        resolves(df)
+        dest = str(tmp_path / "new")
+
+        def refuse(path, exist_ok=False):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(ddf.os, "makedirs", refuse)
+        msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=dest))
+        assert f"Could not create destination folder '{dest}'" in msg and "permission denied" in msg
+        assert df.calls == []
 
     def test_a_missing_destination_folder_is_created(self, resolves, tmp_path):
         df = _cloud_file(writes="hello")
@@ -148,6 +182,25 @@ class TestStaleFileTrap:
         res = _landed(file="urn:lin:AAA", destination_folder=str(tmp_path), overwrite=True)
         assert "no file was written" in error_message(res)
         assert not target.exists()
+
+    def test_a_stale_file_that_cannot_be_removed_stops_the_call(self, resolves, tmp_path,
+                                                                monkeypatch):
+        # Downloading over a file the remove failed on would leave the landed gate reading the
+        # STALE file as this download's result.
+        target = tmp_path / "probe_note.txt"
+        target.write_text("previous", encoding="utf-8")
+        df = _cloud_file(writes="fresh")
+        resolves(df)
+
+        def refuse(path):
+            raise OSError("file is locked")
+
+        monkeypatch.setattr(ddf.os, "remove", refuse)
+        msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path),
+                                        overwrite=True))
+        assert f"Could not replace the existing '{target}'" in msg and "file is locked" in msg
+        assert df.calls == []
+        assert target.read_text(encoding="utf-8") == "previous"
 
     def test_overwrite_replaces_the_content(self, resolves, tmp_path):
         target = tmp_path / "probe_note.txt"
@@ -192,6 +245,20 @@ class TestFailureIsNeverASuccess:
         resolves(_cloud_file(writes=""))
         res = _landed(file="urn:lin:AAA", destination_folder=str(tmp_path))
         assert "size_bytes=0" in error_message(res)
+
+    def test_a_name_matched_inside_a_capped_listing_says_so_in_the_note(self, resolves, tmp_path):
+        # A unique match inside a CAPPED listing is not proof of uniqueness - files past the cap
+        # were never compared, and the download is of whichever one was found.
+        resolves(_cloud_file(writes="hello"), scope_truncated=True)
+        out = _payload(ddf.handler(file="probe_note.txt", project="P1",
+                                   destination_folder=str(tmp_path)))
+        assert "capped listing" in out["note"] and "lineage URN is exact" in out["note"]
+
+    def test_an_uncapped_match_does_not_carry_that_caveat(self, resolves, tmp_path):
+        resolves(_cloud_file(writes="hello"))
+        out = _payload(ddf.handler(file="probe_note.txt", project="P1",
+                                   destination_folder=str(tmp_path)))
+        assert "capped listing" not in out["note"]
 
     def test_an_ambiguous_name_refusal_is_passed_through(self, resolves, tmp_path):
         resolves(err="'notes.txt' names 2 files in project 'P1' - refusing to guess which")

@@ -7,8 +7,7 @@ DISTINCT members: measured on Fusion 2704.1.39, contactSets.add with one member 
 twice) raises '3 : ContactSetRequest: bad occurrences'.
 """
 
-import adsk.core
-import adsk.fusion
+import re
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -18,7 +17,9 @@ from . import _common
 from . import _contacts
 from . import _inputs
 
-app = adsk.core.Application.get()
+# The shape Fusion's auto-dedupe lands: the requested name followed by ' (N)'. A landed name that
+# does NOT match this is a divergence with no cause the tool can read.
+_DEDUPED_NAME = re.compile(r"^.+ \(\d+\)$")
 
 _ACTIONS = ("create", "set_members", "rename", "suppress", "unsuppress", "delete",
             "enable_analysis", "disable_analysis", "set_analysis_scope")
@@ -39,9 +40,10 @@ _SCOPE = _inputs.Choice(
 
 
 def _flags(design):
-    """(isContactAnalysisEnabled, isContactSetAnalysis) as read, None when unreadable."""
-    return (safe(lambda: design.isContactAnalysisEnabled),
-            safe(lambda: design.isContactSetAnalysis))
+    """(isContactAnalysisEnabled, isContactSetAnalysis), each True/False or None when unreadable -
+    read through the ONE unreadable-flag read so a raising getter never lands as a confident False."""
+    return (_common.read_flag(lambda: design.isContactAnalysisEnabled),
+            _common.read_flag(lambda: design.isContactSetAnalysis))
 
 
 def _analysis_fields(enabled, use_sets):
@@ -206,19 +208,26 @@ def _do_rename(cs, name, new_name):
            "note": f"The set is now named '{landed}' - address it by that name from here."}
     if landed != want:
         # Measured: assigning a name another set already holds raises nothing and lands 'Name (1)'.
-        out["note"] = (f"Fusion landed the name '{landed}', not the requested '{want}' - a name "
-                       "already in use is auto-deduped to 'Name (1)'. Address the set by "
-                       f"'{landed}' from here.")
+        # Only a landed name of THAT shape carries the dedupe cause; any other divergence is
+        # reported as what was read, with no cause invented for it.
+        if _DEDUPED_NAME.match(landed) and landed.startswith(want):
+            out["note"] = (f"Fusion landed the name '{landed}', not the requested '{want}' - a name "
+                           "already in use is auto-deduped to 'Name (1)'. Address the set by "
+                           f"'{landed}' from here.")
+        else:
+            out["note"] = (f"Fusion landed the name '{landed}', not the requested '{want}' - the "
+                           "platform changed it and the reason is not readable from here. Address "
+                           f"the set by '{landed}' from here.")
     return ok(out)
 
 
 def _do_suppress(cs, name, suppressed):
-    was = safe(lambda: cs.isSuppressed)
+    was = _common.read_flag(lambda: cs.isSuppressed)
     try:
         cs.isSuppressed = bool(suppressed)
     except Exception as e:
         return error(f"Could not set isSuppressed on contact set '{name}': {e}")
-    now = safe(lambda: cs.isSuppressed)
+    now = _common.read_flag(lambda: cs.isSuppressed)
     # An UNREADABLE flag is not a False: treating it as one would let a swallowed write pass the
     # mismatch gate below and report ok. It is unconfirmed, and says so.
     if now is None:
@@ -295,7 +304,13 @@ def _do_scope(design, scope):
     if not scope:
         return error("'scope' is required for action='set_analysis_scope': contact_sets (analysis "
                      "uses the sets) or all_bodies (analysis ignores them).")
-    enabled = safe(lambda: design.isContactAnalysisEnabled)
+    enabled = _common.read_flag(lambda: design.isContactAnalysisEnabled)
+    if enabled is None:
+        # UNREADABLE is not OFF: the platform's refusal below is a fact about analysis being off,
+        # and asserting it over a read that never answered would name a cause nothing observed.
+        return error("isContactAnalysisEnabled cannot be read on this design, so whether contact "
+                     "analysis is on - the precondition for a scope write - is UNKNOWN. Nothing was "
+                     "changed. Re-read with assembly_get(include=['contacts']).")
     if not enabled:
         # Measured: the platform itself refuses the write while analysis is off - assigning
         # isContactSetAnalysis then raises '3 : Contact analysis is disabled.' and nothing lands.

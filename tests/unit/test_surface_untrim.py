@@ -67,9 +67,7 @@ class _UntrimFeatures:
 def _types(monkeypatch):
     monkeypatch.setattr(adsk.fusion, "BRepFace", _Face, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", _Body, raising=False)
-    monkeypatch.setattr(adsk.fusion, "UntrimLoopTypes", types.SimpleNamespace(
-        AllLoopsUntrimType="all", ExternalLoopsUntrimType="external",
-        InternalLoopsUntrimType="internal"), raising=False)
+    # UntrimLoopTypes stays the MEASURED family conftest seeds from live_api_facts.
     # capture the scaled extension the handler hands to ValueInput.createByReal
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                         staticmethod(lambda v: ("real", v)), raising=False)
@@ -111,7 +109,7 @@ def test_loop_type_maps_to_enum():
     uf = _wire(feat, {"H1": f})
     payload(su.untrim_handler(faces=["H1"], loop_type="external"))
     _faces, loop_type, _ext = uf.create_calls[0]
-    assert loop_type == "external"
+    assert loop_type == adsk.fusion.UntrimLoopTypes.ExternalLoopsUntrimType
 
 
 def test_extension_scaled_to_cm():

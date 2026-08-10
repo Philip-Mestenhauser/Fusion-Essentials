@@ -34,7 +34,11 @@ _CALL_SEQ = 0
 
 _ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation",
     "style", "restore", "save_view", "apply_view", "list_views")
-_MAX_OCC = 1000  # cap occurrence snapshot/restore for huge assemblies
+# The occurrence cap snapshot/restore/clear_isolation run under. An assembly with more occurrences
+# than this gets a PARTIAL snapshot, so every payload built off the walk publishes 'truncated' and
+# the count it stopped at - a restore that silently put back 1000 of 1500 bulbs would report
+# success for a state it never reinstated.
+_MAX_OCC = 1000
 
 _TARGET = _inputs.OccurrenceRefList("target",
         description="Occurrence(s) to isolate/show/hide - a fullPathName/name, or a list of them.")
@@ -140,10 +144,19 @@ def _show_with_ancestors(occ):
 # action handlers
 # ---------------------------------------------------------------------------
 
+def _capped_occurrences(design):
+    """(occurrences, truncated) - the occurrence walk every snapshot/restore/clear_isolation runs
+    over, bounded by _MAX_OCC. `truncated` is True when the design holds MORE than the cap, which
+    is what turns "all visibility saved" into a claim the payload has to qualify."""
+    occs = _common.all_occurrences(design, cap=_MAX_OCC + 1)
+    return occs[:_MAX_OCC], len(occs) > _MAX_OCC
+
+
 def _do_snapshot(design):
     vp = app.activeViewport
     occ_state = {}
-    for o in _common.all_occurrences(design, cap=_MAX_OCC):
+    occs, truncated = _capped_occurrences(design)
+    for o in occs:
         fp = safe(lambda o=o: o.fullPathName)
         if fp is None:
             continue
@@ -155,12 +168,21 @@ def _do_snapshot(design):
                          "camera": cam,
                          "visualStyle": int(safe(lambda: vp.visualStyle, 0)),
                          "occ": occ_state,
+                         "truncated": truncated,
     }
-    return ok({"action": "snapshot", "saved_for": _doc_key(),
-        "occurrences_saved": len(occ_state),
-        "visual_style": int(safe(lambda: vp.visualStyle, 0)),
-        "note": "Current camera, visual style, and all occurrence visibility saved. "
-        "Explore freely; call view_set(restore) to put it all back."})
+    note = ("Current camera, visual style, and all occurrence visibility saved. "
+            "Explore freely; call view_set(restore) to put it all back.")
+    out = {"action": "snapshot", "saved_for": _doc_key(),
+           "occurrences_saved": len(occ_state),
+           "visual_style": int(safe(lambda: vp.visualStyle, 0))}
+    if truncated:
+        out["truncated"] = True
+        out["occurrence_cap"] = _MAX_OCC
+        note = (f"PARTIAL: this assembly holds more than {_MAX_OCC} occurrences, so only the first "
+                f"{len(occ_state)} had their visibility saved - restore will not reinstate the "
+                "rest. Camera and visual style are complete.")
+    out["note"] = note
+    return ok(out)
 
 
 def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
@@ -299,14 +321,21 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
 def _do_visibility(design, action, target):
     if action == "clear_isolation":
         cleared = 0
-        for o in _common.all_occurrences(design, cap=_MAX_OCC):
+        occs, truncated = _capped_occurrences(design)
+        for o in occs:
             if safe(lambda o=o: o.isIsolated):
                 try:
                     o.isIsolated = False
                     cleared += 1
                 except Exception:
                     pass
-        return ok({"action": action, "cleared_count": cleared})
+        out = {"action": action, "cleared_count": cleared}
+        if truncated:
+            out["truncated"] = True
+            out["occurrence_cap"] = _MAX_OCC
+            out["note"] = (f"PARTIAL: only the first {_MAX_OCC} occurrences were checked - an "
+                           "isolation past the cap is still set.")
+        return ok(out)
     if not target:
         return error(f"Provide 'target' for {action}.")
     if action == "isolate":
@@ -402,7 +431,8 @@ def _do_restore(design):
     missing = 0
     # restore visibility per occurrence (clear isolation first so bulbs apply cleanly)
     by_path = {}
-    for o in _common.all_occurrences(design, cap=_MAX_OCC):
+    occs, walk_truncated = _capped_occurrences(design)
+    for o in occs:
         fp = safe(lambda o=o: o.fullPathName)
         if fp is not None:
             by_path[fp] = o
@@ -424,9 +454,17 @@ def _do_restore(design):
     safe(lambda: setattr(vp, "camera", snap["camera"]))
     vp.refresh()
     _SNAPSHOTS.pop(key, None)
-    return ok({"action": "restore", "restored_occurrences": restored_occ,
-        "missing_occurrences": missing,
-        "note": "Camera, visual style, and visibility restored to the pre-snapshot state."})
+    truncated = bool(snap.get("truncated")) or walk_truncated
+    out = {"action": "restore", "restored_occurrences": restored_occ,
+           "missing_occurrences": missing,
+           "note": "Camera, visual style, and visibility restored to the pre-snapshot state."}
+    if truncated:
+        out["truncated"] = True
+        out["occurrence_cap"] = _MAX_OCC
+        out["note"] = (f"PARTIAL: this assembly is past the {_MAX_OCC}-occurrence cap, so "
+                       f"{restored_occ} occurrence(s) were restored and the rest keep whatever "
+                       "visibility they carry now. Camera and visual style are restored in full.")
+    return ok(out)
 
 
 def _named_views(design):
@@ -479,9 +517,7 @@ def _do_apply_view(design, view_name):
     except Exception:
         nv = None
     if not nv:
-        names = []
-        for i in range(safe(lambda: nvs.count, 0)):
-            names.append(safe(lambda i=i: nvs.item(i).name))
+        names = [safe(lambda v=v: v.name) for v in _common.iter_collection(nvs)]
         return error(f"No named view '{name}'. Saved views: {', '.join(n for n in names if n) or '(none)'}.")
     safe(lambda: nv.apply())
     app.activeViewport.refresh()
@@ -496,8 +532,7 @@ def _do_list_views(design):
     if nvs is None:
         return error("This design does not expose Named Views.")
     views = []
-    for i in range(safe(lambda: nvs.count, 0)):
-        nv = nvs.item(i)
+    for nv in _common.iter_collection(nvs):
         views.append({"name": safe(lambda nv=nv: nv.name),
         "built_in": safe(lambda nv=nv: nv.isBuiltIn)})
     return ok({"action": "list_views", "count": len(views), "named_views": views})

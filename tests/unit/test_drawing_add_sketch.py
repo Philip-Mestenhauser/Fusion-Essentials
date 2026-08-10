@@ -27,8 +27,13 @@ _ADSK = dw.adsk
 
 # The two DrawingUnitTypes members the units decode compares against - stable objects, so a test can
 # hand the drawing's settings the very member it expects to be recognised.
-_MM = SimpleNamespace(member="MillimeterDrawingUnitType")
-_INCH = SimpleNamespace(member="InchDrawingUnitType")
+import live_api_facts
+# The MEASURED DrawingUnitTypes values (Inch is 0 - falsy, the value truthiness cannot carry).
+_MM = live_api_facts.ENUMS["drawing.DrawingUnitTypes"]["MillimeterDrawingUnitType"]
+_INCH = live_api_facts.ENUMS["drawing.DrawingUnitTypes"]["InchDrawingUnitType"]
+# The MEASURED DrawingStandardTypes values. ISO is 0 - a FALSY member - so a truthiness test in the
+# decode drops every ISO drawing.
+_STANDARDS = SimpleNamespace(**live_api_facts.ENUMS["drawing.DrawingStandardTypes"])
 
 
 def _point(x, y):
@@ -87,7 +92,7 @@ def _sheet(name, sketch, landed_name=None):
 @pytest.fixture
 def wire(monkeypatch):
     def _install(sheets=("Sheet1",), active=0, units="mm", is_drawing=True, landed_name=None,
-                 no_sketches=False):
+                 no_sketches=False, standard="iso"):
         sk = _sketch()
         objs = [_sheet(n, sk, landed_name) for n in sheets]
         if no_sketches:
@@ -95,7 +100,13 @@ def wire(monkeypatch):
                 o.sketches = None
         # the sheets collection is walked count/item - the shared resolver's own idiom.
         sheets_coll = SimpleNamespace(count=len(objs), item=lambda i: objs[i])
-        settings = SimpleNamespace(units={"mm": _MM, "in": _INCH}.get(units,
+        # units and standard are SEPARATE settings and a drawing can be minted with them split
+        # (drawing_create takes each from its own Choice), which is exactly the case the coordinate
+        # unit has to survive.
+        settings = SimpleNamespace(
+            units={"mm": _MM, "in": _INCH}.get(units, SimpleNamespace(member="other")),
+            standard={"iso": _STANDARDS.ISODrawingStandardType,
+                      "asme": _STANDARDS.ASMEDrawingStandardType}.get(standard,
                                                                      SimpleNamespace(member="other")))
         dwg = SimpleNamespace(sheets=sheets_coll, activeSheet=objs[active] if objs else None,
                               documentSettings=settings)
@@ -103,8 +114,8 @@ def wire(monkeypatch):
         drawing_ns = SimpleNamespace(
             DrawingDocument=SimpleNamespace(
                 cast=lambda d: SimpleNamespace(drawing=dwg) if is_drawing else None),
-            DrawingUnitTypes=SimpleNamespace(MillimeterDrawingUnitType=_MM,
-                                             InchDrawingUnitType=_INCH),
+            DrawingUnitTypes=SimpleNamespace(**live_api_facts.ENUMS["drawing.DrawingUnitTypes"]),
+            DrawingStandardTypes=_STANDARDS,
         )
         monkeypatch.setattr(_ADSK, "drawing", drawing_ns, raising=False)
         monkeypatch.setitem(sys.modules, "adsk.drawing", drawing_ns)
@@ -331,4 +342,46 @@ class TestDrawingDocument:
         wire(units="???")
         out = payload(dw.handler(geometry=[_CIRCLE]))
         assert out["sheet_units"] is None
+        assert out["coordinate_unit"] == "mm"          # the standard still reads
+
+
+# ── the coordinate unit: keyed to the STANDARD, not to the dimension display unit ─────────────
+
+class TestCoordinateUnit:
+    def test_a_split_drawing_keys_coordinates_to_the_standard_not_the_dimension_unit(self, wire):
+        # drawing_create's standard and units are separate Choices, so standard='iso' with
+        # units='inch' is mintable. Coordinates are in drawing length units - millimetres when the
+        # standard includes ISO - so the two fields disagree and the payload must say so.
+        wire(standard="iso", units="in")
+        out = payload(dw.handler(geometry=[_CIRCLE]))
+        assert out["coordinate_unit"] == "mm"
+        assert out["sheet_units"] == "in"
+        assert "taken as mm" in out["note"]
+
+    def test_an_asme_drawing_takes_coordinates_in_inches(self, wire):
+        wire(standard="asme", units="mm")
+        out = payload(dw.handler(geometry=[_CIRCLE]))
+        assert out["coordinate_unit"] == "in"
+        assert out["sheet_units"] == "mm"
+        assert "taken as in" in out["note"]
+
+    def test_an_unreadable_standard_is_null_and_the_note_states_the_rule(self, wire):
+        wire(standard="???")
+        out = payload(dw.handler(geometry=[_CIRCLE]))
+        assert out["coordinate_unit"] is None
         assert "mm under ISO, in under ASME" in out["note"]
+
+    def test_the_note_never_ties_the_coordinates_to_sheet_units(self, wire):
+        wire(standard="iso", units="in")
+        note = payload(dw.handler(geometry=[_CIRCLE]))["note"]
+        assert "STANDARD fixes" in note
+        assert "taken as in" not in note
+
+
+class TestToolDescription:
+    def test_the_description_keys_coordinates_to_the_standard(self):
+        # the description is all an agent has before the first call, so it carries the rule that
+        # decides whether a 100 lands as 100 mm or as 2540 mm.
+        desc = dw.tool.to_dict()["description"]
+        assert "STANDARD fixes" in desc and "mm under ISO, in under ASME" in desc
+        assert "reported as coordinate_unit" in desc

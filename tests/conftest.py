@@ -123,7 +123,10 @@ def install_mock_adsk():
 
     # Seed every measured enum family onto the mock namespaces, so comparison/branch code sees
     # the live integers without per-test hand-wiring. The drawing namespace gets the same strict
-    # seeding - its measured families (SheetSizes, DimensionStrategyTypes, ...) would otherwise be
+    # seeding, and its measured families now include the ones reached only by NAME through
+    # _drawing_common.enum_value - SheetSizes, SheetOrientationTypes and DrawingStandardTypes - as
+    # well as the ones referenced as literal adsk.drawing.<Family>: the harvester scans both, so
+    # every family a drawing tool can read is measured here. Without that seeding they would be
     # fabricatable child Mocks, the exact silent-drop class the strict enums exist to refuse.
     ns = {"core": core, "fusion": fusion, "cam": cam, "drawing": drawing}
     for family, members in _api_facts.ENUMS.items():
@@ -425,12 +428,17 @@ class BRepBody:
     read-back check (e.g. a cut's volume delta). Visibility mirrors the live contract:
     isLightBulbOn is the body's OWN settable browser bulb; isVisible is the EFFECTIVE state
     (own bulb AND every ancestor's, modeled by hidden_by_ancestor) and has no setter. `vertices`
-    takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry."""
+    takes FakePoints and wraps each as a BRepVertex-shaped item exposing .geometry.
+
+    This is a NATIVE body: nativeObject reads None and assemblyContext reads None, the pair a live
+    component-owned body answers. Its occurrence proxy is ``body_proxy(this)``."""
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
                  light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
                  face_count=0):
         self.name = name
         self.parentComponent = parent_component
+        self.nativeObject = None
+        self.assemblyContext = None
         self.boundingBox = bbox
         self.vertices = _NamedCollection([_Vertex(p) for p in vertices])
         self.faces = _NamedCollection([None] * face_count)
@@ -443,6 +451,106 @@ class BRepBody:
     @property
     def isVisible(self):
         return bool(self.isLightBulbOn) and not self._hidden_by_ancestor
+
+
+class _FakeTriangleMesh:
+    """MeshBody.displayMesh - the triangle/vertex census a mesh feature is judged on. Held as ONE
+    object per body so a feature fake can mutate the counts in place the way a real repair does."""
+    def __init__(self, tri, nodes):
+        self.triangleCount = tri
+        self.nodeCount = nodes
+
+
+class _FakePolygonMesh:
+    """MeshBody.mesh - the flat x,y,z node coordinates a smooth moves and the flat normal
+    components a reverse negates."""
+    def __init__(self, coords, normals):
+        self.nodeCoordinatesAsDouble = list(coords)
+        self.normalVectorsAsDouble = list(normals)
+
+
+class MeshBody:
+    """Matches type(entity).__name__ == 'MeshBody' - the shared mesh fake every mesh-feature tool
+    test builds on (repair, shell, smooth, separate, reverse_normal).
+
+    `volume` on a mesh that is NOT closed RETURNS 0.0 rather than raising - that reading comes from
+    live_api_facts.BEHAVIOR["meshbody_volume_open_raises"], so the platform fact lives in one place
+    and a change to it flips every mesh test at once. An open mesh encloses nothing, so the 0.0 is
+    the API's ANSWER: it is comparable at both ends of a repair, it carries no sign for a reverse to
+    flip, and it makes a percentage undefined for a smooth.
+
+    `isValid` stays True after a feature consumes the body - the measured lie - so a handler that
+    trusts it instead of a fresh collection walk cannot pass on that flag; ``go_stale`` drops the
+    identity reads a consumed body no longer answers.
+
+    Every harness knob is PRIVATE, so the public surface is only what a live MeshBody answers and
+    test_fake_shapes_exist sweeps it against the measured dump. The readability switches model the
+    reads that fail INDEPENDENTLY, each one making exactly one published field null: `_dead` (an
+    invalidated wrapper - every read raises), `_counts_readable` (displayMesh), `_volume_readable`,
+    `_closed_readable`, `_mesh_readable` (the PolygonMesh behind both the coordinates and the
+    normals). A test flips one on the instance to break that read mid-flight."""
+    def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, coords=(),
+                 normals=(), token=None, parent=None, counts_readable=True, volume_readable=True,
+                 closed_readable=True, mesh_readable=True):
+        self.name = name
+        self.isValid = True
+        self._dead = False
+        self._display = _FakeTriangleMesh(tri, nodes)
+        self._is_closed = is_closed
+        self._volume_cm3 = volume
+        self._coords = list(coords)
+        self._normals = list(normals)
+        self._counts_readable = counts_readable
+        self._volume_readable = volume_readable
+        self._closed_readable = closed_readable
+        self._mesh_readable = mesh_readable
+        self.entityToken = token or f"MTOK::{name}"
+        self.parentComponent = parent
+
+    def _live(self):
+        if self._dead:
+            raise RuntimeError("3 : object is no longer valid")
+
+    @property
+    def displayMesh(self):
+        self._live()
+        if not self._counts_readable:
+            raise RuntimeError("3 : the display mesh is unavailable")
+        return self._display
+
+    @property
+    def mesh(self):
+        self._live()
+        if not self._mesh_readable:
+            raise RuntimeError("3 : the polygon mesh is unavailable")
+        return _FakePolygonMesh(self._coords, self._normals)
+
+    @property
+    def isClosed(self):
+        self._live()
+        if not self._closed_readable:
+            raise RuntimeError("3 : the watertight flag of this body is unavailable")
+        return self._is_closed
+
+    @isClosed.setter
+    def isClosed(self, value):
+        self._is_closed = value
+
+    @property
+    def isOriented(self):
+        self._live()
+        return True
+
+    @property
+    def volume(self):
+        self._live()
+        if not self._volume_readable:
+            raise RuntimeError("3 : the volume of this body is unavailable")
+        if self._is_closed:
+            return self._volume_cm3
+        if _api_facts.BEHAVIOR["meshbody_volume_open_raises"]:
+            raise RuntimeError("3 : the volume of this body is unavailable")
+        return 0.0
 
 
 class _EntityProxy:
@@ -479,6 +587,53 @@ def entity_proxy(obj):
     the fakes - they expose only attributes the live types have.
     """
     return _EntityProxy(obj)
+
+
+class _OccurrenceProxy(_EntityProxy):
+    """See ``body_proxy``. Every read but the three that make a proxy a proxy goes to the native."""
+
+    def __init__(self, native, occurrence=None, entity_token=None):
+        _EntityProxy.__init__(self, native)          # explicit: zero-arg super() and __class__ clash
+        # One token PER PLACEMENT: a proxy's token addresses a body IN one occurrence (a handle for
+        # instance 2 must not resolve to instance 1), so two placements' proxies read distinct
+        # tokens live - the fake folds the occurrence into the default for the same reason.
+        token = entity_token or (f"PROXY::{getattr(occurrence, 'name', None)}"
+                                 f"::{getattr(native, 'entityToken', None)}")
+        object.__setattr__(self, "_token", token)
+        object.__setattr__(self, "_occurrence", occurrence)
+
+    @property
+    def __class__(self):
+        # A proxy IS a BRepBody live, and body code isinstance-checks against adsk.fusion.BRepBody.
+        # isinstance consults __class__, so the proxy answers the wrapped fake's type.
+        return type(object.__getattribute__(self, "_obj"))
+
+    @property
+    def entityToken(self):
+        return object.__getattribute__(self, "_token")
+
+    @property
+    def nativeObject(self):
+        return object.__getattribute__(self, "_obj")
+
+    @property
+    def assemblyContext(self):
+        return object.__getattribute__(self, "_occurrence")
+
+
+def body_proxy(native, occurrence=None, entity_token=None):
+    """The occurrence PROXY of `native` - what an occurrence's bRepBodies hands back for a body its
+    component owns natively.
+
+    LIVE-MEASURED, and the reason a token cannot be the de-dup key on its own: a proxy's entityToken
+    DIFFERS from its native's (each is stable across re-fetches of that wrapper), while
+    ``proxy.nativeObject`` IS the native and a native's own ``nativeObject`` reads None. One physical
+    body therefore answers two tokens, and a walk that reaches it both natively and through an
+    occurrence sees two entities unless it keys on ``(nativeObject or self).entityToken``. `occurrence`
+    is the Occurrence the proxy hangs off (its fullPathName is the body's context); every other read
+    and write delegates to `native`, so a mutation is visible through both.
+    """
+    return _OccurrenceProxy(native, occurrence, entity_token)
 
 
 class _NamedCollection:

@@ -350,7 +350,12 @@ class ChildGeometryMoved(Postcondition):
     _MOVE_TOL_CM = 0.01                   # 0.1 mm - below this a "move" is joint-solver noise
 
     def _translation(self, occ):
-        m = safe(lambda: occ.transform)
+        """The occurrence's WORLD translation. transform2, not transform: measured on a nested proxy
+        under a rotated+translated parent, .transform reads the LOCAL matrix (parent not composed in)
+        while .transform2 reads the composed world matrix - and this postcondition compares that
+        translation against a WORLD-space geometry point, so a local matrix would read "moved" against
+        geometry that did not, or the reverse. .transform is the fallback for a build without it."""
+        m = safe(lambda: occ.transform2) or safe(lambda: occ.transform)
         t = safe(lambda: m.translation) if m is not None else None
         if t is None:
             return None

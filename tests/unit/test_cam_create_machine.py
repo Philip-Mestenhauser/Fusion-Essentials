@@ -5,15 +5,14 @@ refusal that runs BEFORE anything is created, the description/vendor/model write
 Local-library store, and the gate that re-resolves the new machine through the SAME query
 ``cam_edit_setup`` assigns from - a create that cannot be found again is an error, not a false ok.
 
-The machine library fake serves BOTH this tool and the real ``cam_edit_setup`` helpers it calls
-(``read_machines`` for the catalog, ``_resolve_machine`` for the gate), so the integration seam is
+The machine library fake serves BOTH this tool and the real ``_cam_common`` helpers it calls
+(``machine_catalog`` for the catalog, ``resolve_machine`` for the gate), so the integration seam is
 exercised rather than stubbed. Its ``createQuery`` matches vendor exactly and model by prefix - the
-shape ``cam_edit_setup``'s own resolver is written against, whose widen block (:193-208) re-splits a
-label into (vendor, model) because a label does not match the model field. Whether the live query
-ALSO indexes the description is unmeasured, which is why the tool writes the name to both fields and
-gates on a re-resolve rather than assuming. ``importMachine`` hands the library its OWN copy with a
-distinct id, so a payload assembled from the pre-store object reports a machine the library has not
-got.
+shape ``resolve_machine`` is written against, whose widen path re-splits a label into (vendor, model)
+because a label does not match the model field. The tool writes the name to both fields and gates on
+a re-resolve, so what the query indexes never has to be assumed. ``importMachine`` hands the library
+its OWN copy with a distinct id, so a payload assembled from the pre-store object reports a machine
+the library has not got.
 """
 
 import json
@@ -169,7 +168,7 @@ class TestRefusals:
         assert e.asked == [] and e.lib.imported == []
 
     def test_a_name_matching_an_existing_VENDOR_MODEL_is_refused(self, env):
-        # 'Haas VF-2' as a vendor|model pair is the second rung _exact_machine selects on.
+        # 'Haas VF-2' as a vendor|model pair is the second rung the exact match selects on.
         e = env(f360=[_Mach(description="The Big One", vendor="Haas", model="VF-2")])
         res = ccm.handler(name="Haas VF-2")
         assert res["isError"] is True
@@ -195,8 +194,7 @@ class TestRefusals:
     def test_a_capped_catalog_read_refuses_rather_than_risking_a_duplicate(self, env, monkeypatch):
         # The collision check's evidence is the catalog read; a truncated one proves nothing.
         e = env()
-        monkeypatch.setattr(ccm, "read_machines",
-                            lambda *a, **k: ccm.ok({"machines": [], "count": 0, "truncated": True}))
+        monkeypatch.setattr(ccm, "machine_catalog", lambda *a, **k: ([], True, None))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True and "cannot be proven free" in res["message"]
         assert e.asked == [] and e.lib.imported == []
@@ -213,9 +211,9 @@ class TestFieldWrites:
         assert e.lib.imported == []          # the refusal happens BEFORE the store
 
     def test_the_name_lands_on_description_and_model(self, env):
-        # cam_edit_setup's widen block (:193-208) exists because a label does not match the model
-        # field its query is keyed on, so a machine left carrying the template's shared
-        # 'Generic 3-axis Mill' model is not reachable by its own name.
+        # resolve_machine's widen path exists because a label does not match the model field its
+        # query is keyed on, so a machine left carrying the template's shared model is not
+        # reachable by its own name.
         e = env()
         out = _payload(ccm.handler(name="Sweep3Axis"))
         assert e.machine.description == "Sweep3Axis" and e.machine.model == "Sweep3Axis"
@@ -253,7 +251,7 @@ class TestStoreAndGate:
 
     def test_a_name_resolving_to_a_different_machine_is_an_error(self, env, monkeypatch):
         env()
-        monkeypatch.setattr(ccm, "_resolve_machine",
+        monkeypatch.setattr(ccm, "resolve_machine",
                             lambda name: (_Mach(description="Someone Else"), "Someone Else", None))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True

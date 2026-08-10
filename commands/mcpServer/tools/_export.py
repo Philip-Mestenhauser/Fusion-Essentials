@@ -14,7 +14,9 @@ from ._common import safe, all_components
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("sanitize/component_by_name/verify_written/split_by_occurrence - the export-to-disk "
-             "substrate shared by design_export + mesh_export; pump_until - the shared "
+             "substrate shared by design_export + mesh_export; prepare_out_path - the ONE "
+             "output-path prep (strip, append the format's extension, create the directory); "
+             "pump_until - the shared "
              "CLOCK-BOUNDED doEvents-pumping wait for an asynchronous write (the caller passes its "
              "own probe - a file appearing, a size going stable, a version tip advancing - and "
              "words its own give-up); a TRY-COUNT-bounded pump stays local")
@@ -26,6 +28,28 @@ def sanitize(name):
     base = (name or "part").split(":")[0]
     out = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in base)
     return out or "part"
+
+
+def prepare_out_path(file_path, ext):
+    """The local output path an export writes to: (path, error). An empty request is (None, None) -
+    the caller decides whether that is a refusal or an omitted option.
+
+    Two steps every writer here repeats: surrounding whitespace and quotes come off, `ext` is
+    APPENDED when the path does not already end with it (the file's real format is what the name
+    must say), and the output directory is created. Call it BEFORE the export runs, so an unusable
+    destination refuses without the work."""
+    path = (file_path or "").strip().strip('"')
+    if not path:
+        return None, None
+    if ext and not path.lower().endswith(ext.lower()):
+        path = path + ext
+    out_dir = os.path.dirname(path)
+    if out_dir and not os.path.isdir(out_dir):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            return None, f"Could not create output directory '{out_dir}': {e}"
+    return path, None
 
 
 def component_by_name(design, name):

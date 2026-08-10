@@ -28,15 +28,12 @@ _EXTEND_TYPES = {
 "perpendicular": "PerpendicularSurfaceExtendType",
 }
 # SurfaceExtendAlignment's member names are BARE - no '...SurfaceExtendAlignment' suffix, unlike
-# every neighbouring enum. The names here are bindings-sourced until the enum sweep measures the
-# family; only the VALUE is measured (a fresh createInput's extendAlignment reads 0). set_verified
-# turns a name that does not resolve into a refusal rather than a silent default.
+# every neighbouring enum. set_verified turns a name that does not resolve into a refusal rather
+# than a silent default.
 _EXTEND_ALIGNMENTS = {
 "free_edges": "FreeEdges",
 "align_edges": "AlignEdges",
 }
-# Member names bindings-sourced until the enum sweep measures ThickenTypes; the measured fact is
-# the VALUE a fresh createInput's thickenType reads (0).
 _THICKEN_TYPES = {
 "sharp": "SharpThickenType",
 "rounded": "RoundedThickenType",
@@ -81,6 +78,9 @@ def _select_cells(trim_input, keep):
         return None, None, 0, "the trim tool does not divide the surface (no cells)."
 
     areas = [float(safe(lambda i=i: cells.item(i).cellBody.area, 0.0) or 0.0) for i in range(total)]
+    # A cell's INDEX is its address ('keep' takes an int index, 'areas' is indexed by it, and the
+    # kept indices are published), so this walk and the selection walk below stay positional:
+    # iter_collection drops an unreadable cell, sliding every later cell onto the wrong index.
 
     keep_set = None
     if isinstance(keep, str):
@@ -148,8 +148,8 @@ def _created_bodies(feature):
         return [], 0, False
     bodies, seen = [], set()
     n = int(safe(lambda: faces.count, 0) or 0)
-    for i in range(n):
-        b = safe(lambda i=i: faces.item(i).body)
+    for f in _common.iter_collection(faces):
+        b = safe(lambda f=f: f.body)
         if b is None:
             continue
         key = safe(lambda b=b: b.entityToken) or id(b)

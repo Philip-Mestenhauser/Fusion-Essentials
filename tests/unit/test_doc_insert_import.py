@@ -191,6 +191,18 @@ class TestSolidImport:
         mod.handler(file_path=cad("part.step"))
         assert calls["targets"] == [design.rootComponent]
 
+    def test_an_unreadable_created_object_drops_out_of_the_listing(self, wire, cad):
+        # the created objects are counted and named, never addressed by position, so one that will
+        # not read is simply absent - the readable ones keep their names and the count matches them
+        design = make_design()
+        room = design.rootComponent
+        wire(design=design, created=[BRepBody("First"), None, BRepBody("Third")],
+             on_import=lambda: room.bRepBodies._items.append(BRepBody("First")))
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert out["objects_created"] == 2
+        assert out["created"] == [{"name": "First", "type": "BRepBody"},
+                                  {"name": "Third", "type": "BRepBody"}]
+
     def test_nothing_landed_is_an_error(self, wire, cad):
         wire(created=[])
         msg = error_message(mod.handler(file_path=cad("part.step")))
@@ -231,6 +243,41 @@ class TestSolidImport:
         msg = error_message(mod.handler(file_path=cad("part.step"), into_component="Ghost"))
         assert "Ghost" in msg
         assert calls["targets"] == []
+
+    def test_an_occurrence_with_no_component_is_refused_before_importing(self, wire, cad):
+        occ = _occurrence("Bracket:1")
+        occ.component = None
+        design = make_design(occurrences=[occ])
+        _design, _mgr, calls = wire(design=design, created=[BRepBody("Imported")])
+        msg = error_message(mod.handler(file_path=cad("part.step"), into_component="Bracket:1"))
+        assert "Occurrence 'Bracket:1' has no component to import into" in msg
+        assert calls["targets"] == []
+
+    def test_a_design_with_no_component_to_import_into_is_refused(self, wire, cad, monkeypatch):
+        _design, _mgr, calls = wire(created=[BRepBody("Imported")])
+        monkeypatch.setattr(mod._common, "target_component", lambda design: None)
+        msg = error_message(mod.handler(file_path=cad("part.step")))
+        assert "exposes no component to import into" in msg
+        assert calls["targets"] == []
+
+
+class TestTheBuildLacksTheFactory:
+    """ImportManager gains factories over Fusion versions - a build without the one this format
+    needs is named, never AttributeError'd out of the handler."""
+
+    def test_a_missing_options_factory_is_named_with_the_format(self, wire, cad):
+        _design, mgr, calls = wire(created=[BRepBody("Imported")])
+        del mgr.createSTEPImportOptions
+        msg = error_message(mod.handler(file_path=cad("part.step")))
+        assert "no ImportManager.createSTEPImportOptions" in msg and "STEP import is unavailable" in msg
+        assert calls["targets"] == []
+
+    def test_a_missing_factory_stops_a_new_document_import_too(self, wire, cad):
+        _design, mgr, calls = wire()
+        del mgr.createIGESImportOptions
+        msg = error_message(mod.handler(file_path=cad("part.iges"), new_document=True))
+        assert "no ImportManager.createIGESImportOptions" in msg
+        assert calls["new_documents"] == 0
 
 
 class TestDxfImport:
@@ -276,6 +323,27 @@ class TestDxfImport:
         assert "NoSuchPlane" in msg
         assert calls["targets"] == []
 
+    def test_options_the_factory_would_not_build_are_reported_with_both_causes(self, wire, cad):
+        # createDXF2DImportOptions answering nothing means the FILE or the PLANE was rejected -
+        # the refusal names both rather than guessing which.
+        _design, _mgr, calls = wire(design=self._design_with_plane(), options=None)
+        msg = error_message(mod.handler(file_path=cad("plate.dxf")))
+        assert "createDXF2DImportOptions returned nothing" in msg
+        assert "planar face" in msg
+        assert calls["targets"] == []
+
+    def test_a_raising_dxf_import_is_an_error_not_a_false_ok(self, wire, cad):
+        wire(design=self._design_with_plane(), fail=RuntimeError("layer table is corrupt"))
+        msg = error_message(mod.handler(file_path=cad("plate.dxf")))
+        assert "importToTarget2 raised" in msg and "layer table is corrupt" in msg
+
+    def test_a_design_with_no_component_refuses_the_dxf_import(self, wire, cad, monkeypatch):
+        _design, _mgr, calls = wire(design=self._design_with_plane(), created=[_sketch("Outline")])
+        monkeypatch.setattr(mod._common, "target_component", lambda design: None)
+        msg = error_message(mod.handler(file_path=cad("plate.dxf")))
+        assert "exposes no component to import into" in msg
+        assert calls["targets"] == []
+
 
 class TestSvgImport:
     def test_curves_land_in_the_named_sketch(self, wire, cad):
@@ -311,6 +379,20 @@ class TestSvgImport:
         msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
         assert "gained no" in msg and "Logo" in msg
 
+    def test_options_the_factory_would_not_build_are_reported(self, wire, cad):
+        design = make_design(sketches=[_sketch("Logo")])
+        _design, _mgr, calls = wire(design=design, options=None)
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert "createSVGImportOptions returned nothing" in msg
+        assert calls["targets"] == []
+
+    def test_a_raising_svg_import_is_an_error_not_a_false_ok(self, wire, cad):
+        target = _sketch("Logo")
+        design = make_design(sketches=[target])
+        wire(design=design, fail=RuntimeError("path data is malformed"))
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert "importToTarget2 raised" in msg and "path data is malformed" in msg
+
 
 class TestNewDocument:
     def test_bodies_are_read_back_off_the_new_document(self, wire, cad):
@@ -340,3 +422,34 @@ class TestNewDocument:
         wire(fail=RuntimeError("unreadable archive"))
         msg = error_message(mod.handler(file_path=cad("part.f3d"), new_document=True))
         assert "importToNewDocument raised" in msg
+
+
+class TestFeatureHealthAcrossADocumentSwitch:
+    """FeatureHealthy captures the ACTIVE design's timeline count before the handler and walks the
+    items past it after. new_document=True activates a DIFFERENT document, so the two reads describe
+    two different timelines - the walked slice is meaningless and can skip a feature that failed to
+    compute. The gate declares itself unrun instead."""
+
+    def test_the_gate_is_declared_unrun_when_the_import_made_a_new_document(self):
+        post = mod._FeatureHealthyHere()
+        reason, evidence = post.verify({"new_document": True}, {"imported": True}, 0)
+        assert reason == ""
+        assert evidence["feature_health_verified"] is False
+        assert "NEW document" in evidence["feature_health_note"]
+
+    def test_a_same_document_import_still_runs_the_real_gate(self, monkeypatch):
+        # The skip may only apply to the new-document path: an import into the OPEN design must
+        # still fail on a feature that computed with an error.
+        post = mod._FeatureHealthyHere()
+        broken = types.SimpleNamespace(name="Imported1", healthState=post._ERROR,
+                                       errorOrWarningMessage="bad geometry")
+        timeline = types.SimpleNamespace(count=1, item=lambda i: broken)
+        monkeypatch.setattr(post, "_timeline", lambda: timeline)
+        reason, _evidence = post.verify({"new_document": False}, {"imported": True}, 0)
+        assert "FAILED to compute" in reason
+        assert "Imported1" in reason
+
+    def test_the_kind_declares_the_input_it_reads(self):
+        # wrap() checks input_keys against the handler signature, so a typo here would fail at
+        # registration rather than silently reading None and skipping nothing.
+        assert mod._FeatureHealthyHere.input_keys == ("new_document",)

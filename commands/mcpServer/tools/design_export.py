@@ -29,9 +29,9 @@ app = adsk.core.Application.get()
 
 # format -> (file extension, ExportManager factory name, geom_first). geom_first=True: the mesh-style
 # arg order factory(geometry, path); geom_first=False: the neutral-CAD arg order
-# factory(path, geometry). Both orders live-verified for every format listed. USD note (live-verified):
-# Fusion writes .usdz and appends that extension itself when the path carries a different one, so the
-# ext here must be .usdz or the landed file's name won't match the path this tool verifies.
+# factory(path, geometry). Both orders live-verified for every format listed. USD: the ext here must
+# be .usdz - Fusion writes .usdz and appends that extension itself when the path carries a different
+# one, so any other ext leaves the landed file's name mismatching the path this tool verifies.
 # "dxf" is a 2D SKETCH/face-profile export handled separately (_export_dxf) - its tuple entry exists
 # only so Choice validates the name.
 _FORMATS = {
@@ -55,15 +55,17 @@ _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
 _STL_UNITS = _inputs.Choice("stl_units", options=["mm", "cm", "m", "in", "ft"], required=False,
     description="format=stl only: bake these output units into the file. Omit to keep the factory default.")
 
-# There is deliberately NO dxf_units input: merely READING DXFSketchExportOptions.units aborts the
-# whole script transaction ("Distance unit is not supported by DXF", live-verified) - the property is
-# untouchable, so the DXF is written in the design's default length unit.
+# There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
+# call UNCATCHABLY - no surrounding try/except runs, no later line lands, and the whole transaction
+# rolls back reporting "3 : Distance unit is not supported by DXF" (measured live).
+# The property is untouchable, so the DXF is written in the design's default length unit.
 
 # format=dxf inputs: a whole SKETCH by name, or a planar FACE's projected outline (find_geometry
 # handle). Exactly one of these is required when format=dxf; both are ignored otherwise.
 _DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=False,
     description="format=dxf only: a find_geometry PLANAR-FACE handle - its outline is projected "
-                "into a scratch sketch, written to DXF, then the scratch sketch is removed.")
+                "into a scratch sketch, written to DXF, then the scratch sketch is removed (the "
+                "note says so if the removal failed). Pass this OR 'dxf_sketch', never both.")
 
 # mm/cm/m/in/ft -> adsk.fusion.DistanceUnits member name. STLExportOptions.unitType takes
 # DistanceUnits, NOT MeshUnits (live-verified): the two enums have mm/cm ints SWAPPED, so a
@@ -135,7 +137,8 @@ def _configure_export_options(fmt, opts, incl_bodies, incl_comps, stl_binary, st
     and read back so the payload can report what actually took. Never fails the export over a missing
     or wrongly-typed attribute (the file landing on disk is the deliverable this tool is graded on,
     verified separately by verify_written/_assert.DeliverablesExist) - mirrors mesh_export.py's
-    _apply_refinement. Returns a dict of the knobs that were requested and whether each took.
+    _apply_refinement. Returns (applied, refused): applied maps each knob that LANDED to the value
+    read back off the options object, refused lists the knob names that did not.
     """
     applied, refused = {}, []
 
@@ -191,8 +194,9 @@ def _write_dxf(design, sk, path, want_construction, want_points, want_projected)
     unfiltered), this exposes three content flags. Each defaults to True (matching that
     all-inclusive output) unless the caller explicitly narrows it. Signature is
     (filename, sketch), live-verified - (sketch, filename) raises TypeError. The options
-    object's 'units' property is never touched: reading it aborts the transaction (live-verified),
-    so the DXF is written in the design's default length unit. Returns (size_bytes_or_None, error_or_None).
+    object's 'units' property is never touched: the first read of it kills the call uncatchably and
+    rolls the transaction back (measured live), so the DXF is written in the design's
+    default length unit. Returns (size_bytes_or_None, error_or_None).
     """
     em = safe(lambda: design.exportManager)
     if em is None:
@@ -328,9 +332,8 @@ def _export_dxf_face(design, dxf_face, path, want_construction, want_points, wan
             msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
         return error(msg)
 
-    # The face path's ENTIRE content is projected geometry - default isProjectedGeometryExported to
-    # True here regardless (an explicit False would write an empty DXF, which is the caller's choice
-    # to make, not silently override), same defaulting _write_dxf already applies.
+    # The face path's ENTIRE content is projected geometry, so want_projected=False writes an empty
+    # DXF. That is the caller's choice to make and is passed through unchanged, not overridden here.
     size, werr = _write_dxf(design, sk, path, want_construction, want_points, want_projected)
     cleaned = _cleanup()
     if werr:
@@ -404,8 +407,13 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return error("No top-level occurrences to split - the design has no component instances. "
                          "Export without split_by_component to write the whole design as one file.")
 
+        # Each file gets its OWN freshly-created options object, so each one has its own knob
+        # read-back. Both are collected: dropping them would let the split path report a clean
+        # export while Fusion silently refused an option the single-file path would have disclosed.
+        applied_seen, refused_union = [], []
+
         def _write_one(occ, fpath):
-            okk, eerr, _applied = _export_one(em, factory_name, geom_first, occ, fpath, configure)
+            okk, eerr, knobs = _export_one(em, factory_name, geom_first, occ, fpath, configure)
             if not okk:
                 return None, eerr
             # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT
@@ -413,6 +421,12 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             size, verr = _export.verify_written(fpath)
             if verr:
                 return None, f"{fmt.upper()} export reported success but {verr}"
+            file_applied, file_refused = knobs
+            if file_applied not in applied_seen:
+                applied_seen.append(file_applied)
+            for name in file_refused:
+                if name not in refused_union:
+                    refused_union.append(name)
             return size, None
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
@@ -426,6 +440,18 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} files. Each "
             "top-level occurrence is one file - ready to print/assemble individually.",
         }
+        if applied_seen and applied_seen[0]:
+            out["options_applied"] = applied_seen[0]
+            if len(applied_seen) > 1:
+                # The knobs are format-level, so files landing DIFFERENT values is the platform
+                # disagreeing with itself - reported, never averaged away.
+                out["options_applied_consistent"] = False
+                out["note"] += (" The option values read back differ between files; "
+                                "'options_applied' is the first file's read-back.")
+        if refused_union:
+            out["options_refused"] = refused_union
+            out["note"] += (" The files landed, but Fusion did not take these options on at least "
+                            "one of them: " + ", ".join(refused_union) + ".")
         if errors:
             out["failed"] = errors
         return ok(out)
@@ -490,12 +516,8 @@ TOOL_DESCRIPTION = (
     "printing wants) into the DIRECTORY 'file_path' ('target' is ignored in that mode). "
     "include_invisible_bodies/include_invisible_components widen any of these formats past the "
     "visible-only default. format=dxf is a different shape - a 2D laser/waterjet/sheet-metal export of "
-    "a SKETCH ('dxf_sketch', by name) or a planar FACE's projected outline ('dxf_face', a find_geometry "
-    "handle); pass exactly one of the two ('target'/'split_by_component' are ignored in this mode; the "
-    "face path uses a scratch sketch that is removed afterward, leaving the design unchanged); "
-    "dxf_export_construction/dxf_export_points/dxf_export_projected narrow its content "
-    "(each defaults to including everything; the DXF is written in the design's default length "
-    "unit). format=stl also "
+    "a SKETCH ('dxf_sketch') or a planar FACE's projected outline ('dxf_face'), narrowed by the "
+    "dxf_export_* flags; the design is left unchanged either way. format=stl also "
     "takes stl_binary/stl_units. Pair with data_upload_file to round-trip the file back into the cloud "
     "(STEP/IGES are translated to a Fusion design there). WRITES a file to disk (does not modify the "
     "design)."
@@ -518,14 +540,14 @@ tool = (
             "description": "format=stl only: true=binary STL, false=ASCII. Omit to keep the factory default."})
     .add_input_property(_STL_UNITS.name, _STL_UNITS.schema())
     .add_input_property("dxf_sketch", {"type": "string",
-            "description": "format=dxf only: the NAME of the sketch to write whole. Use this OR 'dxf_face', not both."})
+            "description": "format=dxf only: the NAME of the sketch to write whole. Pass this OR 'dxf_face', never both and never neither; 'target'/'split_by_component' are ignored for dxf. The file is written in the design's default length unit."})
     .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .add_input_property("dxf_export_construction", {"type": "boolean",
             "description": "format=dxf only: include construction geometry (default true - Sketch.saveAsDXF writes everything unfiltered)."})
     .add_input_property("dxf_export_points", {"type": "boolean",
             "description": "format=dxf only: include sketch points (default true - Sketch.saveAsDXF writes everything unfiltered)."})
     .add_input_property("dxf_export_projected", {"type": "boolean",
-            "description": "format=dxf only: include projected/reference geometry - the dxf_face path is ENTIRELY projected geometry, so false there writes an empty file (default true)."})
+            "description": "format=dxf only: include projected/reference geometry - the dxf_face path is ENTIRELY projected geometry, so false there writes an empty file (default true, as with the other dxf_export_* flags)."})
     .strict_schema()
 )
 

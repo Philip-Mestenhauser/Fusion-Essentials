@@ -137,13 +137,9 @@ class FakeParentOcc:
 
 
 def _install(intent=None):
-    # Give the mock its DesignIntentTypes enum (distinct sentinel objects).
+    # DesignIntentTypes is a MEASURED family: conftest seeds it from live_api_facts, and the fake
+    # maps through whatever the family holds - no hand-seeded values.
     import adsk.fusion, adsk.core
-    class _T:
-        PartDesignIntentType = "PART_INTENT"
-        HybridDesignIntentType = "HYBRID_INTENT"
-        AssemblyDesignIntentType = "ASSEMBLY_INTENT"
-    adsk.fusion.DesignIntentTypes = _T
     design = FakeDesign(intent=intent)
     cc.app = type("A", (), {"activeProduct": design})()
     cc._common.app = cc.app

@@ -73,8 +73,15 @@ class _PathPatternFeatures:
         return self._feature
 
 
+def _built_path(curve, is_chain, count):
+    """A built adsk.fusion.Path. Records the createPath arguments for the assertions below, and
+    reports `count` - the edges the BUILT path holds, which is not derivable from the number of
+    handles named."""
+    return types.SimpleNamespace(kind="path", curve=curve, is_chain=is_chain, count=count)
+
+
 def _wire(feature=None, ignores=(), tokens=None, sketches=(), input_is_none=False, raises=None,
-          bodies=()):
+          bodies=(), path_count=1):
     """A design whose root component owns the pattern feature collection AND the path factory."""
     if feature is None:
         feature = _Feature()
@@ -82,7 +89,7 @@ def _wire(feature=None, ignores=(), tokens=None, sketches=(), input_is_none=Fals
     comp = MakeComp(bodies=bodies, sketches=sketches)
     comp.features = types.SimpleNamespace(
         pathPatternFeatures=ppf,
-        createPath=lambda curve, is_chain=True: ("path", curve, is_chain))
+        createPath=lambda curve, is_chain=True: _built_path(curve, is_chain, path_count))
     design = make_design(comp=comp, tokens=tokens or {})
     install(pp, design)
     return ppf
@@ -221,18 +228,27 @@ def test_extent_distance_type_selected():
 def test_path_is_built_from_the_sketch_curves():
     ppf = _wire(bodies=["Boss"], sketches=[_path_sketch(curves=3)])
     out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=3, distance=10))
-    kind, _curve, is_chain = ppf.last_input.path
-    assert kind == "path" and is_chain is True               # the connected curves are chained
+    built = ppf.last_input.path
+    assert built.kind == "path" and built.is_chain is True    # chaining requested for the curves
     assert out["path"] == "sketch:Spine"
 
 
-def test_single_edge_handle_is_chained():
+def test_single_edge_handle_seeds_createpath():
     edge = BRepEdge(curve=None)
     ppf = _wire(bodies=["Boss"], tokens={"E1": edge})
     out = payload(pp.handler(bodies="Boss", path="E1", quantity=3, distance=10))
-    _kind, curve, is_chain = ppf.last_input.path
-    assert curve is edge and is_chain is True
-    assert out["path"] == "1 edge(s)"
+    built = ppf.last_input.path
+    assert built.curve is edge and built.is_chain is True
+    assert out["path"] == "1 edge(s) from 1 seed handle"
+
+
+def test_expanded_path_publishes_the_built_edge_count():
+    # ONE handle named, but the built path holds 9 edges: 'path' describes the path the pattern
+    # actually runs along, not the request.
+    edge = BRepEdge(curve=None)
+    _wire(bodies=["Boss"], tokens={"E1": edge}, path_count=9)
+    out = payload(pp.handler(bodies="Boss", path="E1", quantity=3, distance=10))
+    assert out["path"] == "9 edge(s) from 1 seed handle"
 
 
 def test_start_point_and_symmetric_reach_the_input():
@@ -308,3 +324,67 @@ def test_body_targets_reported_as_bodies():
     _wire(bodies=["Boss"], sketches=[_path_sketch()])
     out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=3, distance=10))
     assert out["entity_kind"] == "bodies" and out["entities"] == ["Boss"]
+
+
+# -- an unreadable instance count is NULL and named, never the request echoed back ---------------
+
+
+class _BlindElements:
+    """patternElements whose .count read RAISES - a feature proxy that stopped answering."""
+    @property
+    def count(self):
+        raise RuntimeError("patternElements unavailable")
+
+
+def _blind_feature(name="Path-Pattern1"):
+    f = _Feature(name=name)
+    f.patternElements = _BlindElements()
+    return f
+
+
+def test_an_unreadable_instance_count_is_published_as_null():
+    # publishing int(quantity) here would echo the REQUEST back under a key the comment above it
+    # promises is read off the feature - an unverifiable read turned into a confirmation of itself
+    _wire(feature=_blind_feature(), bodies=["Boss"], sketches=[_path_sketch()])
+    out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=7, distance=10))
+    assert out["patterned"] is True
+    assert out["quantity"] is None
+
+
+def test_an_unreadable_instance_count_is_disclosed_in_the_note():
+    _wire(feature=_blind_feature(), bodies=["Boss"], sketches=[_path_sketch()])
+    out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=7, distance=10))
+    assert "could NOT be read back" in out["note"]
+    assert "7" not in out["note"]                  # the request is not smuggled into the prose
+
+
+def test_a_readable_count_carries_no_disclosure():
+    _wire(feature=_Feature(elements=3), bodies=["Boss"], sketches=[_path_sketch()])
+    out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=3, distance=10))
+    assert out["quantity"] == 3
+    assert "could NOT be read back" not in out["note"]
+
+
+def test_declared_returns_present_in_payload():
+    _wire(bodies=["Boss"], sketches=[_path_sketch()])
+    out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=3, distance=10))
+    for spec in pp.RETURNS:
+        assert spec.assert_present(out) == "", spec.key
+
+
+def test_the_description_publishes_what_it_produces():
+    assert "PRODUCES:" in pp.TOOL_DESCRIPTION
+    assert "design_delete_feature" in pp.TOOL_DESCRIPTION
+
+
+def test_the_path_description_states_the_tangent_continuity_rule():
+    # measured: one seed chains by TANGENT CONTINUITY - a sharp corner stops it, open vs closed
+    # decides nothing (a tangent-continuous closed loop chained all 8 edges from one seed). So the
+    # wire may not promise chaining unconditionally, nor claim a closed loop refuses to chain; what
+    # a seed actually reached is only knowable from the reported count.
+    desc = pp.pattern_path_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
+    assert "TANGENT connections" in desc
+    assert "sharp corner stops the chain" in desc
+    assert "'path' count is the truth" in desc
+    assert "auto-chain" not in desc.lower()
+    assert "closed loop" not in desc.lower() and "seed edge alone" not in desc

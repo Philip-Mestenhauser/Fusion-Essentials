@@ -1,10 +1,11 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: stamp a closed sketch profile onto the faces of a body - raised or engraved.
+"""MCP building block: stamp a closed sketch profile - or a sketch TEXT - onto the faces of a body,
+raised or engraved.
 
-  model_emboss -> part marking, logos, ribs and recesses on an existing face, without the
-                  extrude-and-position dance. WRITES.
+  model_emboss -> part marking, nameplates, logos, ribs and recesses on an existing face, without
+                  the extrude-and-position dance. WRITES.
 
 EmbossFeatures.createInput takes PLAIN PYTHON LISTS for both collection arguments. MEASURED both
 ways: list/list is accepted and add() hands back a real EmbossFeature, while an ObjectCollection in
@@ -25,9 +26,6 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (the convention model_offset_face,
-# model_draft and workspace_orient all read).
-_HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -35,8 +33,11 @@ RETURNS = [
                          absent_when="no_timeline_feature"),
 ]
 
-_PROFILES = _inputs.ProfileRefList("profiles", required=True,
-    description="The closed profile(s) to stamp.")
+# allow_text: EmbossFeatures.createInput documents its profiles array as "Profile and SketchText
+# objects", so a sketch text is stamped as itself - the route a nameplate needs, since a SketchText
+# carries no Profile of its own.
+_PROFILES = _inputs.ProfileRefList("profiles", required=True, allow_text=True,
+    description="The closed profile(s) or sketch text(s) to stamp.")
 _FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
     description="The face(s) to stamp onto - all on ONE body.")
 # EmbossFeatureInput carries NO operation property and createInput takes no operation argument, so
@@ -124,10 +125,11 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") ->
         return error(_common.no_feature_error(design, "Emboss"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Emboss was created but failed to compute: {msg}. Try a smaller depth, or move "
-                     "the profile fully onto the target face(s).")
+                     "the profile fully onto the target face(s). "
+                     + _common.failed_effect_remedy(design, feature))
 
     # Post-mutation verdict. The volume delta is the ONLY evidence of which way the material went -
     # a feature object does not carry that - so an unreadable volume is a failure, not a success
@@ -137,7 +139,7 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") ->
         return error("Emboss raised no error, but the affected body's volume could not be read back "
                      "afterwards - whether the profile was raised or engraved is UNVERIFIED, so it "
                      "is reported as a failure. Re-read the body with model_inspect.")
-    if abs(delta_total) < 1e-9:
+    if abs(delta_total) < _common.NO_VOLUME_CHANGE_CM3:
         return error("Emboss reported success but the body's volume is unchanged - nothing was "
                      "raised or engraved. " + _common.failed_effect_remedy(design, feature))
     if (delta_total > 0) != (depth_cm > 0):
@@ -176,7 +178,8 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm") ->
 
 
 TOOL_DESCRIPTION = (
-    "Stamp sketch profile(s) onto solid face(s): part marking, logos, ribs. 'depth' is "
+    "Stamp sketch profile(s) or sketch text(s) onto solid face(s): nameplates, part marking, "
+    "logos, ribs. 'depth' is "
     "signed: positive raises, negative engraves. WRITES; the returned 'mode' echoes that sign, and "
     "the call is REFUSED unless the volume moved that way.\n"
     + _outputs.produces_block(RETURNS)

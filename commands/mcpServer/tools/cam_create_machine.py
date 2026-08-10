@@ -12,11 +12,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _inputs
-from .cam_get import _unwrap
-from .cam_edit_setup import _resolve_machine, read_machines
+# The catalog read and the by-name resolver are the shared CAM substrate's: this tool checks a new
+# name against the SAME rows cam_get publishes and gates on the SAME query an assignment resolves by.
+from ._cam_common import machine_catalog, resolve_machine
 
-# Wire value -> the adsk.cam.MachineTemplate member it builds from. These seven are every member
-# MachineTemplate exposes (measured); the template fixes the new machine's kinematics tree.
+# Wire value -> the adsk.cam.MachineTemplate member it builds from. The template fixes the new
+# machine's kinematics tree; a member this Fusion version does not expose is refused by name.
 _TEMPLATES = {
     "generic_3_axis": "Generic3Axis",
     "generic_4_axis": "Generic4Axis",
@@ -45,20 +46,20 @@ def _machine_library():
 
 def _catalog_clash(name):
     """The catalog row `name` already reaches and the KEY it reaches it by - read from the same
-    Local + Fusion360 catalog cam_edit_setup resolves an assignment out of. Every key that resolver
-    selects on is compared (case-insensitively, EXACT): cam_edit_setup._exact_machine matches a
-    label, then 'vendor model', then the model, so a new machine taking any of them as its name
-    retargets an assignment string that resolves to a different machine.
+    Local + Fusion360 catalog an assignment resolves out of. Every key that resolver selects on is
+    compared (case-insensitively, EXACT): _cam_common's exact-match rung takes a label, then
+    'vendor model', then the model, so a new machine taking any of them as its name retargets an
+    assignment string that resolves to a different machine.
     Returns (row, key, None), (None, None, None) when the name is free, or (None, None, error)."""
-    payload, err = _unwrap(read_machines("", "", _CATALOG_CAP))
+    rows, truncated, err = machine_catalog("", "", _CATALOG_CAP)
     if err is not None:
-        return None, None, f"Could not read the machine catalog to check '{name}': {err.get('message')}"
-    if payload.get("truncated"):
+        return None, None, f"Could not read the machine catalog to check '{name}': {err}"
+    if truncated:
         return None, None, (f"The machine catalog holds more than {_CATALOG_CAP} machines, so the "
                             f"name '{name}' cannot be proven free - refused instead of risking a "
                             "duplicate.")
     want = name.strip().lower()
-    for row in (payload.get("machines") or []):
+    for row in (rows or []):
         vendor, model = (row.get("vendor") or ""), (row.get("model") or "")
         for key, value in (("name", row.get("name")), ("model", model),
                            ("vendor model", (vendor + " " + model).strip())):
@@ -118,14 +119,13 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
     if machine is None:
         return error(f"Machine.createFromTemplate('{key}') returned nothing - no machine was created.")
 
-    # A Generic3Axis machine arrives already described ('Generic 3-axis' / 'Autodesk' / 'Generic
-    # 3-axis Mill', measured live; the other six templates' defaults are NOT measured), so the name
-    # REPLACES a default every machine off that template shares. It goes on the MODEL too:
-    # cam_edit_setup._resolve_machine carries a widen block (:193-208) that re-splits a label into
+    # A machine off a template arrives carrying that template's own description/vendor/model, which
+    # every machine built from it shares, so the name REPLACES them. It goes on the MODEL too:
+    # _cam_common.resolve_machine widens a failed lookup by re-splitting a label into
     # (vendor, model) precisely BECAUSE a label does not match the model field its query is keyed
     # on - so a machine whose model stays the template default is not reachable by its own name.
-    # Whether the query ALSO indexes the description is unmeasured; the gates below prove this
-    # machine's reachability per call instead of assuming either answer.
+    # The gates below prove THIS machine's reachability per call rather than resting on which
+    # fields the library query indexes.
     for prop, value in (("description", name), ("vendor", (vendor or "").strip()),
                         ("model", name)):
         if not value:
@@ -151,7 +151,7 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
     # The honesty gate: re-resolve through the SAME query cam_edit_setup assigns from. A machine
     # that cannot be found again by its name is a create the caller cannot use.
     stored_url = safe(lambda: url.toString())
-    found, label, rerr = _resolve_machine(name)
+    found, label, rerr = resolve_machine(name)
     if found is None:
         return error(f"Machine '{name}' was stored in the Local machine library ({stored_url}) but "
                      f"it does not resolve back through the query cam_edit_setup assigns from: "

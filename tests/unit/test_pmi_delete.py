@@ -65,6 +65,36 @@ class TestDelete:
         rig.ann.deleteMe = lambda: True                # does NOT flip .deleted
         assert "still resolves" in error_message(pd.handler(annotation="Note1"))
 
+    def test_a_handle_still_reporting_isValid_is_an_error_even_when_the_name_is_gone(self, rig):
+        # The two survivor checks are independent: the NAME can stop resolving (a re-resolve
+        # after the collection dropped it) while the deleted handle still reads isValid=True.
+        # Trusting the name alone reports a delete that did not happen.
+        rig.ann.isValid = True
+        assert "still resolves" in error_message(pd.handler(annotation="Note1"))
+
+    def test_a_handle_that_went_invalid_confirms_the_delete(self, rig):
+        rig.ann.isValid = False
+        out = _payload(pd.handler(annotation="Note1"))
+        assert out["deleted"] == "Note1"
+
+    def test_an_unreadable_isValid_does_not_block_a_confirmed_delete(self, rig):
+        # A deleted proxy commonly refuses every read; that is not evidence of a survivor, and
+        # the NAME re-resolve is what carries the confirmation there.
+        class Dead(_FakeAnn):
+            @property
+            def isValid(self):
+                raise RuntimeError("object has been deleted")
+        dead = Dead()
+        rig.ann = dead
+        out = _payload(pd.handler(annotation="Note1"))
+        assert out["deleted"] == "Note1"
+
+    def test_the_remaining_count_comes_from_the_design_wide_walk(self, rig):
+        rig.monkeypatch.setattr(
+            pd._pmi, "walk_annotations",
+            lambda d: iter([(rig.comp, object()), (rig.comp, object())]))
+        assert _payload(pd.handler(annotation="Note1"))["remaining_pmi"] == 2
+
     def test_resolver_error_surfaces(self, rig):
         rig.monkeypatch.setattr(pd._pmi, "find_annotation",
                                 lambda d, n, c="": (None, None, "No PMI named 'X'."))

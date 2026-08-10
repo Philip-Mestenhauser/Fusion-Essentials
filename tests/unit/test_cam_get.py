@@ -365,6 +365,65 @@ class TestDuplicateOperationName:
         assert "Face1" in msg and "Adaptive1" in msg
 
 
+class _PresetColl:
+    """A ToolPresets collection (count/item), the shape _slice_tool walks for preset names."""
+    def __init__(self, items): self._i = items
+    @property
+    def count(self): return len(self._i)
+    def item(self, i): return self._i[i]
+
+
+class _Preset:
+    def __init__(self, name, exprs):
+        self.name = name
+        self.parameters = _PresetColl(
+            [type("PP", (), {"name": k, "expression": v})() for k, v in exprs.items()])
+
+
+class TestToolSlicePresets:
+    """include=['tool'] publishes the tool's preset NAMES + count, and 'preset' drills ONE preset's
+    expressions. The names come off a count/item walk, so a tool holding several presets must
+    report every one - and a miss must name what IS available."""
+
+    def _wire(self, monkeypatch, presets):
+        tool = type("T", (), {"description": "6mm flat", "presets": _PresetColl(presets)})()
+        op = type("O", (), {"name": "Adaptive1", "tool": tool})()
+        monkeypatch.setattr(cg, "find_operation", lambda cam, name: (op, []))
+        return op
+
+    def test_every_preset_name_is_published_with_its_count(self, monkeypatch):
+        self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
+                                 _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min"}),
+                                 _Preset("Brass", {"tool_spindleSpeed": "14000"})])
+        out, err = cg._slice_tool(object(), "Adaptive1", "")
+        assert err is None
+        assert out["preset_names"] == ["Alu roughing", "Steel finishing", "Brass"]
+        assert out["preset_count"] == 3
+        assert out["tool"] == "6mm flat"
+
+    def test_preset_drill_returns_that_presets_expressions(self, monkeypatch):
+        self._wire(monkeypatch, [_Preset("Alu roughing", {"tool_feedCutting": "3000 mm/min"}),
+                                 _Preset("Steel finishing", {"tool_feedCutting": "800 mm/min",
+                                                             "tool_spindleSpeed": "4500"})])
+        out, err = cg._slice_tool(object(), "Adaptive1", "Steel finishing")
+        assert err is None
+        assert out["preset"] == {"name": "Steel finishing",
+                                 "expressions": {"tool_feedCutting": "800 mm/min",
+                                                 "tool_spindleSpeed": "4500"}}
+
+    def test_preset_miss_names_the_available_presets(self, monkeypatch):
+        self._wire(monkeypatch, [_Preset("Alu roughing", {}), _Preset("Steel finishing", {})])
+        out, err = cg._slice_tool(object(), "Adaptive1", "Titanium")
+        assert out is None
+        msg = err["message"]
+        assert "Titanium" in msg and "Alu roughing" in msg and "Steel finishing" in msg
+
+    def test_a_tool_with_no_presets_reports_an_empty_list_not_a_miss(self, monkeypatch):
+        self._wire(monkeypatch, [])
+        out, err = cg._slice_tool(object(), "Adaptive1", "")
+        assert err is None and out["preset_names"] == [] and out["preset_count"] == 0
+
+
 class TestInspectionSlice:
     """include=['inspection'] = the recorded probing results, delegated to _cam_common's
     get_inspection_results_handler; 'measure'/'max_results'/'units' scope and bound it."""

@@ -20,12 +20,10 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _assert
+from . import _geom
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (same convention model_draft/
-# model_offset_face read).
-_HEALTH_ERROR = 2
 
 # Relative tolerance on the measured volume ratio. A scale is an exact linear map, so a body that
 # really scaled lands on f^3 (or x*y*z) far inside this band, while a wrong factor or an untouched
@@ -50,7 +48,10 @@ _AXIS_PARAMS = {"x_factor": "xScale", "y_factor": "yScale", "z_factor": "zScale"
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
                          absent_when="no_timeline_feature"),
-    _outputs.ReturnsValue("volume_ratio", "the measured after/before volume change proving the scale took"),
+    _outputs.ReturnsValue("volume_ratio", "the measured after/before volume change proving the scale took",
+                          absent_when="volume_check_skipped"),
+    _outputs.ReturnsValue("scale_check", "which evidence carried the verdict: volume_ratio or "
+                          "geometry_changed"),
 ]
 
 # A SOLID-body kind: the volume read-back this tool verifies with needs a closed body, and typing the
@@ -175,9 +176,7 @@ def _resolved_factor(requested, feature, param_attr):
 def _measure(body):
     """(volume_cm3, (dx, dy, dz)) for a body - the geometry evidence a scale has to move. Either half
     is None when the read is unavailable."""
-    vol = safe(lambda: body.volume)
-    if not isinstance(vol, (int, float)) or isinstance(vol, bool):
-        vol = None
+    vol = _geom.signed_volume(body)
     bb = safe(lambda: body.boundingBox)
     mn = safe(lambda: bb.minPoint) if bb is not None else None
     mx = safe(lambda: bb.maxPoint) if bb is not None else None
@@ -244,6 +243,11 @@ def _verify(body_names, before, after, expected, remedy):
         return ("Scale reported success but every body's volume and bounding box is unchanged - "
                 f"nothing was resized. {remedy}"), {}
     measured["scale_check"] = "geometry_changed"
+    if "volume_ratio" not in measured:
+        # No body offered a before/after volume pair above _MIN_VOLUME_CM3, so the ratio check the
+        # description promises did NOT run and no volume_ratio is published. The flag is what
+        # licenses that omission (RETURNS declares it), and the handler turns it into a sentence.
+        measured["volume_check_skipped"] = True
     return "", measured
 
 
@@ -330,10 +334,11 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         return error(_common.no_feature_error(design, "Scale"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Scale feature was created but failed to compute: {msg}. Try a factor closer "
-                     "to 1, or a different anchor.")
+                     "to 1, or a different anchor. "
+                     + _common.failed_effect_remedy(design, feature))
 
     if non_uniform:
         nums = [_resolved_factor(literals[n], feature, _AXIS_PARAMS[n]) for n in _AXIS_INPUTS]
@@ -377,6 +382,10 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
         if _inputs.looks_like_expression(factor):
             payload["resolved_factor"] = round(literals["factor"], 6)
     payload.update(measured)
+    if payload.get("volume_check_skipped"):
+        payload["note"] += (" No body offered a before/after volume pair above the floor, so the "
+                            "volume check did NOT run and no volume_ratio is reported - the verdict "
+                            "rests on the bounding box having moved.")
     return ok(payload)
 
 

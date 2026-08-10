@@ -11,19 +11,15 @@ file-landed gate WAITS for the write rather than stat-ing once. WRITES a file.
 
 import os
 
-import adsk.core
-import adsk.drawing
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, set_verified
 from . import _assert
+from . import _drawing_common
 from . import _export
 from . import _inputs
 from . import _outputs
-
-app = adsk.core.Application.get()
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -70,12 +66,6 @@ _LAND_DEADLINE_S = 20.0
 _LAND_POLL_SLEEP = 0.25
 
 
-def _active_drawing_doc():
-    """The active document cast to a DrawingDocument, or None (active doc is not a drawing)."""
-    doc = safe(lambda: app.activeDocument)
-    return safe(lambda: adsk.drawing.DrawingDocument.cast(doc))
-
-
 def _scope_error(fmt, given):
     """The refusal for a format-scoped option supplied alongside a different format. `given` maps an
     input name to its raw value; None or '' means the caller did not supply it."""
@@ -92,11 +82,8 @@ def _scope_error(fmt, given):
 def _dwg_format_member(variant):
     """The DWGFormats member for a dwg_variant key, or None when this Fusion build does not carry
     it (set_verified reports the absence rather than exporting a different flavour)."""
-    formats = safe(lambda: adsk.drawing.DWGFormats)
     member_name = _DWG_MEMBERS.get(variant)
-    if formats is None or not member_name:
-        return None
-    return safe(lambda: getattr(formats, member_name))
+    return _drawing_common.enum_value("DWGFormats", member_name) if member_name else None
 
 
 def _apply_options(fmt, opts, rng, line_weights, variant, splines):
@@ -179,8 +166,7 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
     if not path.lower().endswith(ext):
         path = path + ext
 
-    dd = _active_drawing_doc()
-    dwg = safe(lambda: dd.drawing) if dd is not None else None
+    dwg = _drawing_common.active_drawing()
     if dwg is None:
         return error("No drawing to export: the active document is not a drawing. Open a drawing first "
                      "(drawing_create makes one; open it in the Fusion UI, or doc_open a reviewed "
@@ -256,7 +242,11 @@ tool = (
                            "missing; the directory is created if needed."})
     .add_input_property("sheet_range", {"type": "string",
             "description": "format=pdf only: sheets to export, e.g. '1-3' or '1-2,5'. Omit to "
-                           "export all sheets."})
+                           "export all sheets - prefer omitting it: on Fusion 2705.0.87 a "
+                           "single-sheet sheet_range export twice wedged the Fusion main thread "
+                           "(every later call timed out, and the session did not recover - it "
+                           "needed outside intervention), while the all-sheets export of the same "
+                           "drawing ran clean."})
     .add_input_property("line_weights", {"type": "boolean",
             "description": "format=pdf only: render line weights (default true)."})
     .add_input_property(*_DWG_VARIANT.as_property())

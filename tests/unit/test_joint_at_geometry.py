@@ -10,9 +10,11 @@ without a live design.
 """
 
 import json
+from types import SimpleNamespace
 
 import adsk.core
 import adsk.fusion
+import pytest
 
 from conftest import load_tool
 
@@ -54,9 +56,81 @@ class _RaisingRecorder(_Recorder):
 
 # entity-kind fakes — must pass the isinstance() checks in the handler, so we monkeypatch the
 # adsk.fusion class symbols the handler tests against to these fakes.
+class _Matrix:
+    """A component-to-world placement, as Occurrence.transform2 reads: a rotation applied to the
+    point plus a translation. `rotate` defaults to identity."""
+    def __init__(self, rotate=None, translate=(0.0, 0.0, 0.0)):
+        self.rotate = rotate or (lambda x, y, z: (x, y, z))
+        self.translate = translate
+
+
+def _rot90z(x, y, z):
+    """90 degrees about Z - the rotation the measured nested rig places its parent with."""
+    return (-y, x, z)
+
+
+class _Point:
+    """Point3D: copy() then transformBy(matrix) is how a component-local point is lifted to world."""
+    def __init__(self, xyz):
+        self.x, self.y, self.z = xyz
+
+    def copy(self):
+        return _Point((self.x, self.y, self.z))
+
+    def transformBy(self, m):
+        rx, ry, rz = m.rotate(self.x, self.y, self.z)
+        self.x = rx + m.translate[0]
+        self.y = ry + m.translate[1]
+        self.z = rz + m.translate[2]
+        return True
+
+
+class _OriginRecorder(_Recorder):
+    """createByNonPlanarFace hands back a JointGeometry carrying an ORIGIN - the only signal the
+    torus base-feature trap gives (the call itself reports success). The origin is WORLD-framed,
+    as measured for both a native face and an assembly proxy."""
+    def __init__(self, origin):
+        super().__init__()
+        self._origin = origin
+    def createByNonPlanarFace(self, face, kp):
+        self.calls.append(("nonplanar", kp))
+        return type("JG", (), {"origin": _Point(self._origin)})()
+
+
 class FakeBRepFace:
-    def __init__(self, surface_type):
-        self.geometry = type("G", (), {"surfaceType": surface_type})()
+    """`origin` is the surface geometry's centre in its COMPONENT frame. `context` is the occurrence
+    an assembly proxy carries (None = a native face); `component` is the owning body's component,
+    which decides whether a native face's frame is already world."""
+    def __init__(self, surface_type, origin=None, context=None, component=None):
+        members = {"surfaceType": surface_type}
+        if origin is not None:
+            members["origin"] = _Point(origin)
+        self.geometry = type("G", (), members)()
+        if context is not None:
+            self.assemblyContext = context
+        if component is not None:
+            self.body = SimpleNamespace(parentComponent=component)
+
+
+_ROOT = SimpleNamespace(name="Root")
+
+
+def _placed(matrix):
+    """An assembly proxy's occurrence: transform2 is the composed component-to-world matrix."""
+    return SimpleNamespace(transform2=matrix, transform=_Matrix())
+
+
+@pytest.fixture
+def world_frames(monkeypatch):
+    """Wire the two seams the world-lift reads: the active design's root component (a native ROOT
+    face needs no transform) and the identity matrix factory."""
+    import adsk.core
+    globs = jg._joint_geometry_for.__globals__
+    stub = SimpleNamespace(
+        design=lambda: SimpleNamespace(rootComponent=_ROOT),
+        same_component=lambda a, b: a is b)
+    monkeypatch.setitem(globs, "_common", stub)
+    monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(_Matrix), raising=False)
 
 
 class FakeBRepEdge:
@@ -68,9 +142,32 @@ class FakeBRepVertex:
     geometry = None
 
 
+def _matrix(pos):
+    vec = type("V", (), {"x": pos[0], "y": pos[1], "z": pos[2]})()
+    return type("M", (), {"translation": vec})()
+
+
 class _MovingOcc:
-    """An occurrence whose transform.translation tracks a mutable origin (cm) - lets a test move it
-    across joint creation and assert the reported moved_by delta."""
+    """An occurrence whose WORLD transform2.translation tracks a mutable origin (cm) - lets a test
+    move it across joint creation and assert the reported moved_by delta. `local` holds the separate
+    LOCAL .transform: a nested proxy's local matrix leaves its parent's placement out, so the two
+    disagree the moment an ancestor is not identity."""
+    def __init__(self, name, pos, local=None):
+        self.name = name
+        self._pos = list(pos)
+        self._local = list(local) if local is not None else None
+    def move_to(self, pos):
+        self._pos = list(pos)
+    @property
+    def transform2(self):
+        return _matrix(self._pos)
+    @property
+    def transform(self):
+        return _matrix(self._local if self._local is not None else self._pos)
+
+
+class _LocalOnlyOcc:
+    """An occurrence carrying ONLY .transform - the fallback path for a build without transform2."""
     def __init__(self, name, pos):
         self.name = name
         self._pos = list(pos)
@@ -78,9 +175,7 @@ class _MovingOcc:
         self._pos = list(pos)
     @property
     def transform(self):
-        pos = self._pos
-        vec = type("V", (), {"x": pos[0], "y": pos[1], "z": pos[2]})()
-        return type("M", (), {"translation": vec})()
+        return _matrix(self._pos)
 
 
 def _install(monkeypatch, rec=None):
@@ -138,6 +233,90 @@ class TestJointGeometryRules:
         assert err is None
         assert g[1] == "nonplanar" and g[2] == _KP.CenterKeyPoint
         assert label == "torus_face@center"
+
+    # The measured torus rule, three rigs: a PARAMETRIC torus returns its true centre world-framed,
+    # while a torus inside a BASE FEATURE returns its owning COMPONENT'S ORIGIN world-framed,
+    # whatever the torus centre is. Nothing raises either way, so the returned origin is the only
+    # signal - and the only comparison that separates them is against the torus's own centre lifted
+    # into the SAME world frame.
+
+    def test_root_base_feature_torus_is_refused(self, monkeypatch, world_frames):
+        # Rig 1: root component, torus centred (25, 0, 2), keypoint comes back (0,0,0) = the root
+        # origin. A native ROOT face needs no lift - its frame IS world.
+        _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(25.0, 0.0, 2.0), component=_ROOT)
+        g, label, err = jg._joint_geometry_for(face)
+        assert g is None and label == "torus_face@center"
+        assert "(0.0000, 0.0000, 0.0000) cm in WORLD space" in err
+        assert "(25.0000, 0.0000, 2.0000) cm in WORLD space" in err
+        assert "BASE FEATURE" in err
+
+    def test_placed_base_feature_torus_offset_from_its_component_origin_is_refused(
+            self, monkeypatch, world_frames):
+        # Rig 3 - the one a world-origin signature MISSES: the child sits at world (50,6,0) rotated
+        # 90deg, the torus is centred (2,0,0) locally = (50,8,0) in world, and the keypoint comes
+        # back as the CHILD ORIGIN (50,6,0) - a plausible nonzero point that is still wrong.
+        _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
+        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(2.0, 0.0, 0.0), context=child)
+        g, _label, err = jg._joint_geometry_for(face)
+        assert g is None
+        assert "(50.0000, 6.0000, 0.0000) cm in WORLD space" in err       # the keypoint
+        # the centre is published WORLD-framed - never the component-local (2, 0, 0)
+        assert "(50.0000, 8.0000, 0.0000) cm in WORLD space" in err
+        assert "(2.0000, 0.0000, 0.0000)" not in err
+
+    def test_placed_base_feature_torus_centred_on_its_component_origin_is_accepted(
+            self, monkeypatch, world_frames):
+        # Rig 2: the same base-feature bug, but the torus happens to be centred at the child's own
+        # origin, so the keypoint is accidentally RIGHT. There is nothing wrong to report.
+        _install(monkeypatch, _OriginRecorder((50.0, 6.0, 0.0)))
+        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(0.0, 0.0, 0.0), context=child)
+        g, _label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None
+
+    def test_parametric_torus_under_a_placed_parent_is_accepted(self, monkeypatch, world_frames):
+        # The correct case the naive comparison would destroy: geometry.origin is component-LOCAL
+        # (2, 0, 1) while the keypoint is world (50, 8, 1). Comparing the raw local centre would
+        # false-refuse every placed assembly.
+        _install(monkeypatch, _OriginRecorder((50.0, 8.0, 1.0)))
+        child = _placed(_Matrix(rotate=_rot90z, translate=(50.0, 6.0, 0.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(2.0, 0.0, 1.0), context=child)
+        g, _label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None
+
+    def test_parametric_root_torus_is_accepted(self, monkeypatch, world_frames):
+        _install(monkeypatch, _OriginRecorder((27.0, 0.0, 1.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(27.0, 0.0, 1.0), component=_ROOT)
+        g, _label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None
+
+    def test_a_native_face_in_a_placed_component_makes_no_judgement(self, monkeypatch,
+                                                                    world_frames):
+        # No assemblyContext and not the root component: the world placement cannot be established
+        # without picking among that component's occurrences. No judgement beats a wrong one - a
+        # refusal here would block a perfectly good joint.
+        _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
+        sub = SimpleNamespace(name="Child")
+        face = FakeBRepFace(_ST.TorusSurfaceType, origin=(25.0, 0.0, 2.0), component=sub)
+        g, _label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None
+
+    def test_sphere_keypoint_is_not_cross_checked(self, monkeypatch, world_frames):
+        # Measured: the sphere face is correct in BOTH the parametric and the base-feature case, so
+        # it carries no cross-check - adding one would refuse valid sphere joints.
+        _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
+        face = FakeBRepFace(_ST.SphereSurfaceType, origin=(9.0, 9.0, 9.0), component=_ROOT)
+        g, label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None and label == "sphere_face@center"
+
+    def test_unreadable_torus_centre_makes_no_judgement(self, monkeypatch, world_frames):
+        # Nothing to compare against is not evidence of a bad keypoint - the geometry is returned.
+        _install(monkeypatch, _OriginRecorder((0.0, 0.0, 0.0)))
+        face = FakeBRepFace(_ST.TorusSurfaceType, component=_ROOT)   # geometry carries no origin
+        g, _label, err = jg._joint_geometry_for(face)
+        assert err is None and g is not None
 
     def test_other_nonplanar_face_still_uses_MIDDLE(self, monkeypatch):
         # only sphere/torus move to the centre keypoint - a NURBS face keeps the middle fallback
@@ -202,7 +381,9 @@ class _FakeJoints:
                               "occurrenceTwo": type("O", (), {"name": "Crank:1"})()})()
 
 
-def _install_design(monkeypatch, token_map, joint_health=0, joint_msg="", rec=None):
+def _install_design(monkeypatch, token_map, joint_health=0, joint_msg="", rec=None, snapshots=None):
+    """`snapshots` supplies a Design.snapshots surface (the moved-but-uncaptured position flag the
+    create gates on); omitted, the design exposes none and the flag reads unknown."""
     rec = _install(monkeypatch, rec)
     joints = _FakeJoints(joint_health, joint_msg)
     root = type("R", (), {"joints": joints})()
@@ -211,6 +392,8 @@ def _install_design(monkeypatch, token_map, joint_health=0, joint_msg="", rec=No
         def findEntityByToken(self, h):
             e = token_map.get(h)
             return [e] if e is not None else []
+    if snapshots is not None:
+        FakeDesign.snapshots = snapshots
     d = FakeDesign()
     app = type("A", (), {"activeProduct": d})()
     monkeypatch.setattr(jg, "app", app)
@@ -361,6 +544,37 @@ class TestHandler:
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "moved_by" in out and out["moved_by"]["distance_mm"] == 30.0
         assert "Crank:1" in out["move_warning"]
+
+    def test_move_is_measured_in_world_space_off_transform2(self, monkeypatch):
+        # .transform is the occurrence's LOCAL matrix: under a placed parent it leaves the parent's
+        # rotation/translation out. moved_by is a WORLD distance the caller acts on, so it comes off
+        # .transform2. Here the LOCAL matrix never changes across the joint while the WORLD one moves
+        # 30 mm - read off .transform the reposition would be reported as no move at all.
+        moving = _MovingOcc("Rod:1", (0.0, 0.0, 0.0), local=(1.0, 0.0, 0.0))
+        face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
+        face_b = FakeBRepFace(_ST.PlaneSurfaceType)
+        joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
+        orig_add = joints.add
+        def moving_add(ji):
+            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j   # world moves 3 cm
+        joints.add = moving_add
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert out["moved_by"]["distance_mm"] == 30.0
+
+    def test_transform_is_the_fallback_when_transform2_is_absent(self, monkeypatch):
+        # An occurrence (or a build) carrying no transform2 must still be watched, not silently
+        # dropped to "no move".
+        moving = _LocalOnlyOcc("Rod:1", (0.0, 0.0, 0.0))
+        assert not hasattr(moving, "transform2")
+        face_a = FakeBRepFace(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
+        face_b = FakeBRepFace(_ST.PlaneSurfaceType)
+        joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
+        orig_add = joints.add
+        def moving_add(ji):
+            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j
+        joints.add = moving_add
+        out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
+        assert out["moved_by"]["distance_mm"] == 30.0
 
     def test_no_moved_by_when_part_stays_put(self, monkeypatch):
         # a well-matched pair whose keypoints already coincide does not move -> no moved_by / warning.
@@ -601,3 +815,47 @@ class TestModelParameters:
         j = type("J", (), {"offset": type("P", (), {"name": "d12"})(),
                            "angle": type("P", (), {"name": "d11"})()})()
         assert jg.motion_param_names(j) == {"offset": "d12", "angle": "d11"}
+
+
+class _Snapshots:
+    """Design.snapshots: the moved-but-uncaptured position flag. `blind` makes the read RAISE, which
+    is the flag being UNKNOWN - not a False."""
+    def __init__(self, pending=False, blind=False):
+        self._pending = pending
+        self._blind = blind
+
+    @property
+    def hasPendingSnapshot(self):
+        if self._blind:
+            raise RuntimeError("pending flag unreadable")
+        return self._pending
+
+
+class TestPendingMoveRefusal:
+    """joints.add() recomputes the assembly, and a recompute REVERTS an uncaptured occurrence
+    position - so jointing AT geometry while a move is pending would silently move the parts back and
+    anchor the joint on the reverted pose. Refuse before touching the joint collection."""
+
+    _HANDLES = {"rod": None, "pin": None}
+
+    def _faces(self):
+        return {"rod": FakeBRepFace(_ST.CylinderSurfaceType),
+                "pin": FakeBRepFace(_ST.CylinderSurfaceType)}
+
+    def test_refuses_while_a_move_is_pending(self, monkeypatch):
+        joints = _install_design(monkeypatch, self._faces(), snapshots=_Snapshots(pending=True))
+        res = jg.handler(handle_one="rod", handle_two="pin")
+        assert res["isError"] is True
+        assert "would silently revert" in res["message"]
+        assert "assembly_capture_position(action='capture')" in res["message"]
+        assert joints.last_input is None                 # no joint input was ever built
+
+    def test_joints_normally_with_nothing_pending(self, monkeypatch):
+        _install_design(monkeypatch, self._faces(), snapshots=_Snapshots(pending=False))
+        out = _payload(jg.handler(handle_one="rod", handle_two="pin"))
+        assert out["jointed"] is True
+
+    def test_an_unreadable_flag_does_not_refuse(self, monkeypatch):
+        _install_design(monkeypatch, self._faces(), snapshots=_Snapshots(blind=True))
+        out = _payload(jg.handler(handle_one="rod", handle_two="pin"))
+        assert out["jointed"] is True

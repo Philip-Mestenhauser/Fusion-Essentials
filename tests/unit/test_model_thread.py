@@ -433,6 +433,77 @@ class TestPartialExtentIsReadBack:
         assert res["isError"] is True and "find_geometry" in res["message"]
 
 
+class TestInternalFlagIsReadOffTheCreatedFeature:
+    """The bore/shaft classification's real gate is the PLATFORM: measured, add() validates the
+    ThreadInfo's internal flag against the face and raises "input face's externality is different
+    from what's in the ThreadInfo" on a mismatch, so a wrong classification is a loud failure and
+    never a wrong thread. The read-back below is a cheap second witness over the same fact - these
+    pin that the classification reaches the ThreadInfo, and that the witness still fires."""
+
+    def test_a_cosmetic_bore_thread_reports_the_internal_flag_the_feature_carries(self, monkeypatch):
+        # the default is COSMETIC (no geometry changes), so this flag is the only evidence the
+        # bore classification reached the feature at all
+        feats = FakeThreadFeatures()
+        _wire(monkeypatch, feats, [_bore()])
+        out = payload(mt.handler(faces=["h"], designation="M10x1.5"))
+        assert out["internal"] is True
+        assert out["modeled"] is False
+        assert feats.created_info[0].isInternal is True
+
+    def test_a_feature_reading_back_external_on_a_bore_is_an_error_not_a_silent_pass(
+            self, monkeypatch):
+        # The second witness, forced to fire: a feature answering EXTERNAL on bore faces. Live the
+        # platform refuses that pairing at add() before any feature exists, so this state is not
+        # reachable there - the check costs one read and must stay an error if it ever is.
+        external = FakeThreadInfo(False, "ANSI Metric M Profile", "M10x1.5", "6g")
+        _wire(monkeypatch, FakeThreadFeatures(feature_info=external), [_bore()])
+        res = mt.handler(faces=["h"], designation="M10x1.5")
+        assert res["isError"] is True
+        assert "external" in res["message"] and "bores" in res["message"]
+
+
+class TestPartialExtentFailsClosed:
+    def test_an_unreadable_extent_is_an_error_not_an_assumed_success(self, monkeypatch):
+        # isFullLength unreadable: the partial extent cannot be shown to have taken, so the call
+        # fails CLOSED and names the feature to remove - never an ok() carrying the requested length
+        feats = FakeThreadFeatures()
+        feats.full_length = "unreadable"          # not a bool - what a proxy that stops answering gives
+        _wire(monkeypatch, feats, [_shaft()])
+        res = mt.handler(faces=["h"], designation="M10x1.5", length=12)
+        assert res["isError"] is True
+        assert "no proof it took" in res["message"] and "Thread1" in res["message"]
+
+    def test_an_unreadable_length_parameter_is_an_error(self, monkeypatch):
+        feats = FakeThreadFeatures(length_cm="unreadable")
+        _wire(monkeypatch, feats, [_shaft()])
+        res = mt.handler(faces=["h"], designation="M10x1.5", length=12)
+        assert res["isError"] is True and "no proof it took" in res["message"]
+
+    def test_a_thread_that_landed_at_the_wrong_end_is_an_error(self, monkeypatch):
+        # threadLocation reads back the OTHER end: length and offset both check out, so this gate is
+        # the only thing between a thread on the wrong end of the cylinder and a clean ok()
+        import adsk.fusion
+        feats = FakeThreadFeatures()
+        real_add = feats.add
+
+        def _add(inp):
+            feature = real_add(inp)
+            feature.threadLocation = adsk.fusion.ThreadLocations.LowEndThreadLocation
+            return feature
+
+        feats.add = _add
+        _wire(monkeypatch, feats, [_shaft()])
+        res = mt.handler(faces=["h"], designation="M10x1.5", length=12, location="high")
+        assert res["isError"] is True
+        assert "wrong end" in res["message"] and "high" in res["message"]
+
+    def test_the_requested_end_that_took_is_reported(self, monkeypatch):
+        feats = FakeThreadFeatures()
+        _wire(monkeypatch, feats, [_shaft()])
+        out = payload(mt.handler(faces=["h"], designation="M10x1.5", length=12, location="low"))
+        assert out["location"] == "low"
+
+
 class TestAmbiguousDesignation:
     def test_a_designation_carried_by_several_types_discloses_the_others(self, monkeypatch):
         # the thread namespace is NOT unique, and the measured profiles that share a designation

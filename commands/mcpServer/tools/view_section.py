@@ -79,7 +79,7 @@ def _aim_at_cut(normal, flipped):
 def _context_remedy(design, exc):
     """The remedy sentence for the assembly-context refusal, or '' for any other failure.
 
-    MEASURED (probe_w10.log "W10 P7"): with a SUB-COMPONENT active, an origin alias resolves to THAT
+    MEASURED live: with a SUB-COMPONENT active, an origin alias resolves to THAT
     component's plane (PlaneRef resolves against the active component) and the section refuses it with
     '3 : object is not in the assembly context of this component'; the same call with the root active
     works. The platform text says what is wrong but not what to do, so the remedy is named here.
@@ -107,15 +107,15 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
 
     if action == "list":
         items = []
-        for i in range(safe(lambda: sections.count, 0)):
-            s = sections.item(i)
+        for s in _common.iter_collection(sections):
             items.append({"name": safe(lambda s=s: s.name),
         "visible": safe(lambda s=s: s.isLightBulbOn)})
         return ok({"action": "list", "count": len(items), "sections": items})
 
     if action == "clear":
         removed = []
-        # delete from the end (deleting shifts indices)
+        # delete from the end (deleting shifts indices) - the walk MUTATES the collection it reads,
+        # so it stays positional: iter_collection is a forward generator over a shrinking collection.
         for i in range(safe(lambda: sections.count, 0) - 1, -1, -1):
             s = sections.item(i)
             nm = safe(lambda s=s: s.name)

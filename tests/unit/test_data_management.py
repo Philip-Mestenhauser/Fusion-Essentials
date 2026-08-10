@@ -1026,6 +1026,23 @@ class TestResolveFileReference:
         got, _meta, err = _data_common.resolve_file_reference(
             "notes.txt", project="MCP Test Project", folder="Nope")
         assert got is None and "missing segment 'Nope'" in err
+        assert "could not be READ" not in err            # it looked, and the folder is not there
+
+    def test_a_scope_folder_whose_siblings_will_not_read_says_unknown_not_missing(self, cloud):
+        # the folder list never opened, so 'Nope' may well be there - a bare "missing segment"
+        # states a verdict this walk never reached.
+        root = _folder_with_files("Root", is_root=True)
+        cloud(root, {})
+        monkey = type(root).dataFolders
+        try:
+            type(root).dataFolders = property(lambda self: (_ for _ in ()).throw(
+                RuntimeError("cloud read failed")))
+            got, _meta, err = _data_common.resolve_file_reference(
+                "notes.txt", project="MCP Test Project", folder="Nope")
+        finally:
+            type(root).dataFolders = monkey
+        assert got is None
+        assert "could not be READ" in err and "unknown" in err
 
     def test_an_unknown_project_lists_the_ones_there_are(self, cloud):
         cloud(self._one_deep_tree(), {})
@@ -1056,3 +1073,144 @@ class TestResolveFileReference:
         cloud(self._one_deep_tree(), {})
         got, _meta, err = _data_common.resolve_file_reference("")
         assert got is None and "Provide 'file'" in err
+
+
+class TestIdentifierVsName:
+    """Which ROUTE a reference takes - the URN/URL lookup or the project-scoped name search. The
+    test is a PREFIX test: a file NAME may perfectly well start with 'http' or carry '://', and
+    sending one down the URN route loses the name search it needed (and the names in the miss)."""
+
+    def _tree_with(self, name, urn):
+        docs = _folder_with_files("Docs", files=[_file_stub(name, urn)])
+        return _folder_with_files("Root", subs=[docs], is_root=True)
+
+    def test_a_name_beginning_with_http_is_still_a_name(self, cloud):
+        df = _file_stub("httpd-mount.f3d", "urn:lin:AAA")
+        cloud(self._tree_with("httpd-mount.f3d", "urn:lin:AAA"), {"urn:lin:AAA": df})
+        got, meta, err = _data_common.resolve_file_reference(
+            "httpd-mount.f3d", project="MCP Test Project")
+        assert err is None and got is not None
+        assert meta["matched_by"] == "name"
+
+    def test_a_name_carrying_a_scheme_separator_is_still_a_name(self, cloud):
+        df = _file_stub("rev2://draft.f3d", "urn:lin:BBB")
+        cloud(self._tree_with("rev2://draft.f3d", "urn:lin:BBB"), {"urn:lin:BBB": df})
+        got, meta, err = _data_common.resolve_file_reference(
+            "rev2://draft.f3d", project="MCP Test Project")
+        assert err is None and got is not None and meta["matched_by"] == "name"
+
+    def test_a_name_lookalike_without_a_project_gets_the_name_refusal(self, cloud):
+        # The refusal must be the one that tells the agent to pass 'project' - not the URN miss.
+        cloud(self._tree_with("httpd-mount.f3d", "urn:lin:AAA"), {})
+        got, _meta, err = _data_common.resolve_file_reference("httpd-mount.f3d")
+        assert got is None and "'project'" in err
+
+    def test_a_web_url_still_takes_the_urn_route(self, cloud):
+        cloud(self._tree_with("Vise", "urn:lin:BBB"), {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "https://fusion360.autodesk.com/projects/x/data/urn:lin:MISSING")
+        assert got is None and "No cloud file resolves from" in err
+
+    def test_a_urn_still_takes_the_urn_route(self, cloud):
+        cloud(self._tree_with("Vise", "urn:lin:BBB"), {})
+        got, _meta, err = _data_common.resolve_file_reference("urn:lin:MISSING")
+        assert got is None and "No cloud file resolves from" in err
+
+
+class _DeadFilesFolder(FakeProjFolder):
+    """A folder whose dataFiles enumeration RAISES - a permission-blocked or mid-sync folder. Its
+    SUBFOLDERS still read, so only its own files go missing."""
+
+    @property
+    def dataFiles(self):
+        raise RuntimeError("3 : folder could not be enumerated")
+
+
+class _DeadSubfoldersFolder(FakeProjFolder):
+    """A folder whose dataFolders enumeration raises: the ENTIRE subtree beneath it is unsearched,
+    which is the larger hole of the two."""
+
+    @property
+    def dataFolders(self):
+        raise RuntimeError("3 : subfolders could not be enumerated")
+
+
+class TestResolveFileReferenceWithUnreadableFolders:
+    """A folder that would not enumerate is a HOLE in the search space, not an empty folder. The
+    same walk that lists files is what resolves a name, so a swallowed failure turns "I did not
+    look there" into "it is not there" - and turns an ambiguity into a confident unique match. Every
+    answer built on a partial walk has to say so."""
+
+    def _tree_with_a_dead_folder(self, dead_cls=_DeadFilesFolder):
+        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
+        dead = dead_cls("Archive")
+        return _folder_with_files("Root", subs=[docs, dead], is_root=True)
+
+    def test_a_miss_says_a_folder_went_unsearched(self, cloud):
+        cloud(self._tree_with_a_dead_folder(), {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "ghost.txt", project="MCP Test Project")
+        assert got is None
+        assert "No file named 'ghost.txt'" in err
+        assert "1 folder(s) could not be read and were not searched" in err
+        assert "Archive" in err                       # WHICH hole
+        assert "pass the file's id" in err
+
+    def test_an_ambiguity_refusal_carries_the_same_caveat(self, cloud):
+        # Two hits already refuse; the caveat still matters because a THIRD could be in the hole,
+        # so the candidate list the caller picks from may be incomplete.
+        docs = _folder_with_files("Docs", files=[_file_stub("notes.txt", "urn:lin:AAA")])
+        parts = _folder_with_files("Parts", files=[_file_stub("notes.txt", "urn:lin:BBB")])
+        dead = _DeadFilesFolder("Archive")
+        root = _folder_with_files("Root", subs=[docs, parts, dead], is_root=True)
+        cloud(root, {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "notes.txt", project="MCP Test Project")
+        assert got is None and "names 2 files" in err
+        assert "could not be read and were not searched" in err
+        assert "Archive" in err
+
+    def test_a_unique_match_carries_the_hole_count_in_its_meta(self, cloud):
+        # The dangerous case: exactly one hit, so nothing LOOKS wrong - but the second file of that
+        # name could be sitting in the folder that never opened. The count travels with the result.
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(self._tree_with_a_dead_folder(), {"urn:lin:AAA": df})
+        got, meta, err = _data_common.resolve_file_reference(
+            "probe_note.txt", project="MCP Test Project")
+        assert err is None and got is df
+        assert meta["folders_unreadable"] == 1
+
+    def test_a_fully_readable_project_reports_no_hole(self, cloud):
+        docs = _folder_with_files("Docs", files=[_file_stub("probe_note.txt", "urn:lin:AAA")])
+        root = _folder_with_files("Root", subs=[docs], is_root=True)
+        df = _file_stub("probe_note.txt", "urn:lin:AAA")
+        cloud(root, {"urn:lin:AAA": df})
+        got, meta, err = _data_common.resolve_file_reference(
+            "probe_note.txt", project="MCP Test Project")
+        assert err is None and got is df
+        assert meta["folders_unreadable"] == 0
+
+    def test_an_unreadable_SUBFOLDER_list_is_recorded_too(self, cloud):
+        # The bigger hole: the folder's own files read fine, but its whole SUBTREE is unreachable.
+        # Recording only the dataFiles failure would report this walk as complete.
+        cloud(self._tree_with_a_dead_folder(_DeadSubfoldersFolder), {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "ghost.txt", project="MCP Test Project")
+        assert got is None
+        assert "1 folder(s) could not be read" in err
+        assert "Archive" in err
+
+    def test_the_named_paths_are_capped_while_the_count_stays_complete(self, cloud):
+        # The names are a hint, not a payload: past the cap the walk still COUNTS every hole, so the
+        # caller learns the true size of what was skipped.
+        import mcpServer.tools._data_read as data_read
+        cap = data_read._MAX_UNREAD_NAMED
+        dead = [_DeadFilesFolder("Dead%02d" % i) for i in range(cap + 1)]
+        root = _folder_with_files("Root", subs=dead, is_root=True)
+        cloud(root, {})
+        got, _meta, err = _data_common.resolve_file_reference(
+            "ghost.txt", project="MCP Test Project")
+        assert got is None
+        assert f"{cap + 1} folder(s) could not be read" in err        # the COUNT is complete
+        assert err.count("Dead") == cap                              # the NAMES are capped
+        assert "Dead%02d" % cap not in err

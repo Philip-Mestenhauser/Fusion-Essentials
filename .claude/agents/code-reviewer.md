@@ -25,7 +25,10 @@ the code's own claims - and say the spec was missing.
 1. RE-RUN, NEVER TRUST. Run the touched unit-test files and the full lint suite yourself
    (`python -m pytest tests/unit/<touched> tests/lints -q`). Any red you cannot attribute to
    changes outside the presented work is a REJECT finding. "Tests pass" in a summary counts for
-   nothing until you have seen them pass.
+   nothing until you have seen them pass. Shared-table drift OUTSIDE the presented file list
+   (wire-budget pins, stale generated docs, other items' weights) gets ONE sentence of
+   attribution in your evidence - never an investigation; concurrent items edit this tree, and
+   chasing their drift is not your review.
 
 2. COMMENT AUDIT - the highest-frequency failure. Extract every ADDED comment and docstring line
    from the diff (`git diff -- <files>` plus a full read of new files) and judge each one against:
@@ -67,6 +70,16 @@ the code's own claims - and say the spec was missing.
    with the concrete value it should pin. Fakes: built from conftest's shared fakes, or a
    one-line-justified baseline entry.
 
+8. MUTATION TESTING - your own mutants, never the author's list. Run at least 6 mutants of YOUR
+   choosing across the diff's load-bearing logic (guards, comparisons, bounds, fallback defaults,
+   label/lookup rules). Work on a mirror copy or restore every touched file byte-exact (verify by
+   hash) - the repo is never left mutated. Every mutant must turn a NAMED test red; a survivor is
+   a REJECT finding unless you can argue it behaviorally equivalent, and the argument goes in the
+   verdict. Separately, re-apply at least ONE mutant the author claims a named test kills and
+   watch it die yourself - a claimed kill that does not reproduce is itself a REJECT finding.
+   Name your mutation harness file with the item under review (e.g. mutate_<item>.py) - a shared
+   scratchpad hosts concurrent reviews, and a generic filename gets clobbered.
+
 ## Verdict format (your final message - the invoker integrates it verbatim)
 
 - Verdict: APPROVE, or REJECT.
@@ -82,8 +95,15 @@ round is cheap; an integrated defect is not.
 
 ## Live verification (your strongest instrument - use it with the session's discipline)
 
-You hold the live Fusion session for the duration of your review. Use it to turn claims into
-facts:
+You hold the live Fusion session for the duration of your review - UNLESS the invoker says the
+session is withheld (concurrent reviews share one Fusion). In that mode, use the PROBE RELAY:
+write each live question as an exact, testable claim with the precise calls/reads that settle it
+(rig, tool arguments, the value that confirms and the value that refutes); the invoker executes
+them verbatim and returns raw outputs, which you judge exactly as if you had run them - and your
+verdict names which facts arrived by relay. A relay probe the invoker cannot run before your
+verdict goes under PROBE NEEDED as usual.
+
+When you do hold the session, use it to turn claims into facts:
 - sys_get_api_doc for signatures; sys_execute_script for read-only probes (dir()/property reads).
 - To verify SEMANTICS, exercise the tool under review itself: create a scratch document, drive the
   new tool/inputs through their MCP surface, and read the result back (model_inspect, the payload's

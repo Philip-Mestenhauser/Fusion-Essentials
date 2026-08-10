@@ -42,6 +42,19 @@ def _stubborn_cell(volume):
     return cell
 
 
+def _stale_cell_at(cells, index):
+    """Make cells.item(index) RAISE - a stale BRepCell proxy. It is still one of the cells the
+    compute found (count is unchanged), so the cells after it keep their own indices."""
+    intact = cells.item
+
+    def item(i):
+        if i == index:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return intact(i)
+    cells.item = item
+    return cells
+
+
 def _fill_input(cells, cancel_ok=True, cells_readable=True):
     """A BoundaryFillFeatureInput: bRepCells, a settable isRemoveTools, and a cancel() that answers
     (and records) - the transaction the handler must either commit or abort. cells_readable=False
@@ -180,6 +193,35 @@ class TestCells:
         # the prediction is the sum of the PICKED cells only (1 + 3 cm3 -> 4000 mm3)
         assert out["cells_volume_picked"] == 4000.0
 
+    def test_an_unreadable_cell_holds_its_index_in_the_disclosure(self, monkeypatch):
+        # the index in this listing is what 'cells' takes back. A cell that will not read keeps its
+        # own number and is labelled unreadable - compacting the listing would hand the caller index
+        # 1 for the cell the compute calls 2, and the fill would seal the wrong volume.
+        inp = _fill_input([_cell(1.0), _cell(9.0), _cell(0.5)])
+        _stale_cell_at(inp.bRepCells, 1)
+        fx = _fill_features(inp, feature=_feature())
+        _wire(monkeypatch, fx)
+        msg = error_message(sf.handler(tools=["h"]))
+        assert "computed 3 cells" in msg
+        assert "[0] 1000.0 mm3" in msg and "[1] volume unreadable" in msg
+        assert "[2] 500.0 mm3" in msg
+        assert fx.added == [] and inp.cancels == [True]
+
+    def test_an_unreadable_cell_is_refused_by_its_index_not_skipped(self, monkeypatch):
+        # the selection walk writes every cell by index; one it cannot read means the fill would run
+        # on a different set than the one asked for, so it refuses NAMING the cell rather than
+        # sliding cell 2's request onto whatever sits after the gap.
+        cells = [_cell(1.0), _cell(9.0), _cell(0.5)]
+        inp = _fill_input(cells)
+        _stale_cell_at(inp.bRepCells, 1)
+        fx = _fill_features(inp, feature=_feature(bodies=[BRepBody("Body1", volume=1.5)]))
+        _wire(monkeypatch, fx)
+        msg = error_message(sf.handler(tools=["h"], cells=[0, 2]))
+        assert "Cell 1" in msg and "could not be read back" in msg
+        assert fx.added == [], "a fill must not run on a different cell set than requested"
+        assert inp.cancels == [True]
+        assert cells[2].isSelected is False, "the walk stopped at the gap - it did not select past it"
+
     def test_out_of_range_cell_index_is_refused_not_clamped(self, monkeypatch):
         cells = [_cell(1.0), _cell(2.0)]
         inp = _fill_input(cells)
@@ -187,6 +229,18 @@ class TestCells:
         _wire(monkeypatch, fx)
         msg = error_message(sf.handler(tools=["h"], cells=[5]))
         assert "index 5 does not exist" in msg and "0..1" in msg
+        assert fx.added == [] and inp.cancels == [True]
+        assert [c.isSelected for c in cells] == [False, False], "no cell may be touched on a refusal"
+
+    def test_cell_index_equal_to_the_cell_count_is_refused(self, monkeypatch):
+        # the upper bound is EXCLUSIVE: two cells are 0..1, so 2 is one past the end. An off-by-one
+        # here reaches cells.item(2) after the selection loop has already started writing.
+        cells = [_cell(1.0), _cell(2.0)]
+        inp = _fill_input(cells)
+        fx = _fill_features(inp, feature=_feature())
+        _wire(monkeypatch, fx)
+        msg = error_message(sf.handler(tools=["h"], cells=[2]))
+        assert "index 2 does not exist" in msg and "0..1" in msg
         assert fx.added == [] and inp.cancels == [True]
         assert [c.isSelected for c in cells] == [False, False], "no cell may be touched on a refusal"
 

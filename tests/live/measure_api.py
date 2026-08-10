@@ -54,6 +54,10 @@ TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 # enums, so they carry no members to dump. A family is only counted from a REAL reference, never a
 # comment (a stale name in a comment must not drive a live measurement).
 _ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Directions|Locations|Positions|Alignments?|Sizes|Formats))\b")
+# A family reached only through _drawing_common.enum_value("<Family>", "<member>") never appears as
+# a literal adsk.drawing.<Family> in tool source, so the textual scan above cannot see it - the
+# STRING argument is the real reference. enum_value resolves exclusively against adsk.drawing.
+_ENUM_BY_NAME_RE = re.compile(r"""enum_value\(\s*["']([A-Za-z]+)["']""")
 
 
 def referenced_enum_families():
@@ -66,6 +70,8 @@ def referenced_enum_families():
                 code = line.split("#", 1)[0]   # strip comments - a name in prose is not a reference
                 for ns, cls in _ENUM_FAMILY_RE.findall(code):
                     fams.add(ns + "." + cls)
+                for cls in _ENUM_BY_NAME_RE.findall(code):
+                    fams.add("drawing." + cls)
     return sorted(fams)
 
 
@@ -364,6 +370,82 @@ ROWS = [
 """,
     },
     {
+        "id": "meshbody-volume-open-returns-zero",
+        "claim": "MeshBody.volume on a mesh that is NOT closed RETURNS 0.0 - it does not raise; a null volume in a payload therefore means the field could not be read at all, never 'the mesh is open'",
+        "encoded_in": "mesh_ops.py _mesh_summary/mesh_get note+description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/conftest.py's shared MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_ops.py's own MeshBody",
+        "facts_on_pass": {"behavior.meshbody_volume_open_raises": False},
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        mb = des.rootComponent.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0, 1, 2], [], [])
+        v = mb.volume
+        emit((mb.isClosed is False) and isinstance(v, float) and v == 0.0,
+             "meshbody-volume-open-returns-zero: isClosed=" + str(mb.isClosed)
+             + " volume=" + repr(v))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "shape-dump-mesh-world",
+        "claim": "MeshBody and its PolygonMesh dump non-empty member lists, the latter carrying both nodeCoordinatesAsDouble and normalVectorsAsDouble - the arrays a smooth's coordinate diff and a reverse's normal negation are judged on. displayMesh is a TriangleMesh, dumped alongside so the count fake is swept too. Totals are not pinned: they vary by a member or two across rigs and builds, and the SHAPE lines are the product",
+        "encoded_in": "tests/conftest.py shared MeshBody / _FakePolygonMesh / _FakeTriangleMesh fakes; tests/lints/test_fake_shapes_exist.py sweeps them against these dumps",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        mb = des.rootComponent.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [0, 1, 2], [], [])
+        n_body = dump_shape("MeshBody", mb)
+        n_poly = dump_shape("PolygonMesh", mb.mesh)
+        n_tri = dump_shape("TriangleMesh", mb.displayMesh)
+        arrays = [n for n in dir(mb.mesh) if not n.startswith("_")]
+        emit(n_body > 0 and n_poly > 0 and n_tri > 0
+             and "nodeCoordinatesAsDouble" in arrays and "normalVectorsAsDouble" in arrays,
+             "shape-dump-mesh-world: MeshBody " + str(n_body) + " PolygonMesh " + str(n_poly)
+             + " TriangleMesh " + str(n_tri) + " arrays_present="
+             + str("nodeCoordinatesAsDouble" in arrays and "normalVectorsAsDouble" in arrays))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "mesh-repair-density-default",
+        "claim": "MeshRepairFeatures rebuild with density LEFT UNSET creates a feature whose density reads 128.0 (the wire's '(default 128)' is measured, not assumed), and MeshRepairFeature carries NO 'parameters' collection - density comes back off feat.density, a ModelParameter, or not at all",
+        "encoded_in": "mesh_repair.py's density input description and its off-the-feature read-back; tests/unit/test_mesh_repair.py",
+        "facts_on_pass": {"behavior.mesh_repair_density_default": 128.0,
+                          "behavior.mesh_repair_feature_has_parameters": False},
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = des.rootComponent
+        bf = root.features.baseFeatures.add()
+        bf.startEdit()
+        root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], [], [])
+        bf.finishEdit()
+        mb = root.meshBodies.item(0)
+        feats = root.features.meshRepairFeatures
+        inp = feats.createInput(mb)
+        inp.meshRepairType = adsk.fusion.MeshRepairTypes.RebuildMeshRepairType
+        feat = feats.add(inp)
+        d = feat.density
+        val = d.value if hasattr(d, "value") else d
+        has_params = hasattr(feat, "parameters")
+        emit(abs(float(val) - 128.0) < 1e-9 and not has_params,
+             "mesh-repair-density-default: density=" + repr(val)
+             + " has_parameters=" + str(has_params))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "enum-cam-operation-states",
         "claim": "OperationStates ints: IsValid=0, IsInvalid=1 (surfaced as out_of_date by the CAM layer), Suppressed=2, NoToolpath=3",
         "encoded_in": "tests/unit/test__cam_common.py state-label map; _cam_common.py operationState reads",
@@ -386,6 +468,22 @@ ROWS = [
     dump_enum("cam.SetupStockModes", adsk.cam.SetupStockModes)
     emit(adsk.cam.SetupStockModes.SolidStock == 6,
          "enum-setup-stock-modes: SolidStock=" + str(adsk.cam.SetupStockModes.SolidStock))
+""",
+    },
+    {
+        "id": "enum-cam-machine-template",
+        "claim": "MachineTemplate carries EXACTLY seven int members: GenericLathe=0 (a FALSY member, so a `not member` guard rejects the one valid lathe template), Generic3Axis=1, Generic4Axis=2, Generic5AxisHeadHead=3, Generic5AxisHeadTable=4, Generic5AxisTableTable=5, GenericFFF=6. The automatic enum sweep cannot see this family - its name ends in none of the ...Types/...States/...Modes suffixes the scrape matches - so it is pinned here or nowhere",
+        "encoded_in": "cam_create_machine.py _TEMPLATES (wire value -> member name); tests/unit/test_cam_create_machine.py's MachineTemplate namespace",
+        "body": """
+    T = adsk.cam.MachineTemplate
+    dump_enum("cam.MachineTemplate", T)
+    members = [n for n in dir(T) if not n.startswith("_") and isinstance(getattr(T, n), int)]
+    emit(len(members) == 7 and T.GenericLathe == 0 and T.Generic3Axis == 1
+         and T.Generic4Axis == 2 and T.Generic5AxisHeadHead == 3
+         and T.Generic5AxisHeadTable == 4 and T.Generic5AxisTableTable == 5
+         and T.GenericFFF == 6,
+         "enum-cam-machine-template: " + str(len(members)) + " members lathe="
+         + str(T.GenericLathe) + " fff=" + str(T.GenericFFF))
 """,
     },
     {
@@ -637,6 +735,136 @@ ROWS = [
         0.5, 0.3)))
     emit(len(counts) == 20 and all(c > 0 for c in counts),
          "shape-dump-design-world: " + str(len(counts)) + " types, min attrs " + str(min(counts)))
+""",
+    },
+    {
+        "id": "shape-dump-torus",
+        "claim": "core.Torus - the surface a toroidal BRepFace carries - exposes origin (the torus CENTRE), axis, majorRadius, minorRadius and copy(). origin is the point the torus keypoint gate transforms into world and compares a JointGeometry against, and copy() is what lets it do that without moving the live surface",
+        "encoded_in": "tests/unit/test_joint_at_geometry.py's torus-face fakes (face.geometry.origin); _joints.py's torus keypoint gate; _holder.py's Torus.cast reads",
+        "body": """
+    t = adsk.core.Torus.create(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+        1.0, 0.25)
+    n = dump_shape("Torus", t)
+    names = [x for x in dir(t) if not x.startswith("_")]
+    emit(n > 0 and "origin" in names and "axis" in names and "majorRadius" in names
+         and "minorRadius" in names and "copy" in names,
+         "shape-dump-torus: " + str(n) + " attrs origin="
+         + repr((t.origin.x, t.origin.y, t.origin.z))
+         + " major=" + repr(t.majorRadius) + " minor=" + repr(t.minorRadius))
+""",
+    },
+    {
+        "id": "fillet-tangent-chain-loop-faces",
+        "claim": "A fillet driven from ONE edge of an 8-edge tangent top loop (4 lines + 4 arcs, isTangentChain=True) lands FilletFeature.faces.count == 8 - the chain expands across every tangent neighbour, so the number of edges HANDED IN predicts nothing about what got filleted",
+        "encoded_in": "model_fillet_chamfer.py's tangent-chain wording and its off-the-feature face read-back",
+        "need_box": True,
+        "body": """
+    root = des.rootComponent
+    bname = body.name
+    verticals = adsk.core.ObjectCollection.create()
+    for i in range(body.edges.count):
+        e = body.edges.item(i)
+        g = e.geometry
+        if type(g).__name__ != "Line3D":
+            continue
+        d = g.startPoint.vectorTo(g.endPoint)
+        if abs(d.x) < 1e-9 and abs(d.y) < 1e-9 and abs(d.z) > 1e-9:
+            verticals.add(e)
+    fi = root.features.filletFeatures.createInput()
+    fi.addConstantRadiusEdgeSet(verticals, adsk.core.ValueInput.createByReal(0.2), False)
+    root.features.filletFeatures.add(fi)
+    b = root.bRepBodies.itemByName(bname)
+    top = None
+    for i in range(b.faces.count):
+        f = b.faces.item(i)
+        if type(f.geometry).__name__ == "Plane" and f.geometry.normal.z > 0.9:
+            top = f
+    loop_edges = top.edges.count
+    seed = adsk.core.ObjectCollection.create()
+    seed.add(top.edges.item(0))
+    fi2 = root.features.filletFeatures.createInput()
+    fi2.addConstantRadiusEdgeSet(seed, adsk.core.ValueInput.createByReal(0.1), True)
+    feat = root.features.filletFeatures.add(fi2)
+    emit(loop_edges == 8 and feat.faces.count == 8,
+         "fillet-tangent-chain-loop-faces: verticals=" + str(verticals.count)
+         + " top loop edges=" + str(loop_edges)
+         + " seeded=1 fillet faces=" + str(feat.faces.count))
+""",
+    },
+    {
+        "id": "fillet-feature-has-no-edges",
+        "claim": "FilletFeature exposes NO 'edges' member: it is absent from dir() and reading it raises AttributeError, so the edges a fillet consumed cannot be read back off the feature - only its faces can",
+        "encoded_in": "model_fillet_chamfer.py's face-based read-back (the reason a fillet payload never names the filleted edges)",
+        "need_box": True,
+        "facts_on_pass": {"behavior.fillet_feature_has_edges": False},
+        "body": """
+    root = des.rootComponent
+    seed = adsk.core.ObjectCollection.create()
+    seed.add(body.edges.item(0))
+    fi = root.features.filletFeatures.createInput()
+    fi.addConstantRadiusEdgeSet(seed, adsk.core.ValueInput.createByReal(0.1), False)
+    feat = root.features.filletFeatures.add(fi)
+    listed = "edges" in [n for n in dir(feat) if not n.startswith("_")]
+    try:
+        feat.edges
+        read = "no raise"
+    except AttributeError:
+        read = "AttributeError"
+    except Exception as e:
+        read = type(e).__name__
+    emit((not listed) and read == "AttributeError",
+         "fillet-feature-has-no-edges: in_dir=" + str(listed) + " read=" + read
+         + " faces=" + str(feat.faces.count))
+""",
+    },
+    {
+        "id": "thread-designation-multi-type-identity",
+        "claim": "A thread DESIGNATION carried by several thread types is the SAME thread in each: M5x0.8, M10x1.5 and M6x1 are each carried by three metric types (ANSI Metric M Profile / GB Metric profile / ISO Metric profile) and every geometric scalar - majorDiameter, minorDiameter, pitchDiameter, threadPitch, threadAngle - is equal across the carriers at a shared class, differing only in threadType itself; 1/4-20 UNC has exactly ONE carrier. This is what makes _threads.resolve_thread_info's library-order first pick safe instead of an ambiguity it must refuse",
+        "encoded_in": "_threads.py resolve_thread_info's first-pick comment; model_hole tap / model_thread wire prose; tests/unit/test_model_thread.py's thread-table fakes",
+        "facts_on_pass": {"behavior.thread_same_designation_types_identical": True},
+        "body": """
+    tf = des.rootComponent.features.threadFeatures
+    tdq = tf.threadDataQuery
+
+    def carriers(desig):
+        hits = []
+        for t in tdq.allThreadTypes:
+            for s in tdq.allSizes(t):
+                if desig in tdq.allDesignations(t, s):
+                    hits.append(t)
+                    break
+        return hits
+
+    def scalars(ti):
+        return (round(ti.majorDiameter, 6), round(ti.minorDiameter, 6),
+                round(ti.pitchDiameter, 6), round(ti.threadPitch, 6),
+                round(ti.threadAngle, 6))
+
+    same = True
+    detail = []
+    for desig in ("M5x0.8", "M10x1.5", "M6x1"):
+        hits = carriers(desig)
+        shared = set()
+        for t in hits:
+            cls = set(tdq.allClasses(False, t, desig))
+            shared = cls if not shared else (shared & cls)
+        if len(hits) != 3 or not shared:
+            same = False
+            detail.append(desig + ": " + str(len(hits)) + " types, shared classes "
+                          + str(len(shared)))
+            continue
+        pick = sorted(shared)[0]
+        vals = set()
+        for t in hits:
+            vals.add(scalars(tf.createThreadInfo(False, t, desig, pick)))
+        same = same and len(vals) == 1
+        detail.append(desig + ": 3 types class=" + pick + " distinct scalar sets="
+                      + str(len(vals)))
+    unc = carriers("1/4-20 UNC")
+    emit(same and len(unc) == 1,
+         "thread-designation-multi-type-identity: " + "; ".join(detail)
+         + "; 1/4-20 UNC carriers=" + str(len(unc)))
 """,
     },
     {

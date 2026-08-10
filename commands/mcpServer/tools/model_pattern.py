@@ -86,47 +86,26 @@ def _direction_key(kind, raw):
 
 
 def _in_context(kind, ent, comp, design):
-    """(entity, error) - the direction entity in a form the pattern's component can consume.
+    """(entity, error) - the direction entity in a form the pattern's component can consume. The
+    assembly-context walk (and its ambiguity refusal) is _inputs.single_placement; the leaf op here
+    is the proxy circular/rectangularPatternFeatures.createInput takes.
 
-    LIVE-VERIFIED: a NATIVE entity (assemblyContext None) owned by ANOTHER component is accepted by
-    the input and then raises InternalValidationError at add(); proxied into the occurrence that
-    carries it, the same entity is accepted. An entity that already has an assembly context, or one
-    owned by `comp` itself, passes untouched.
-
-    A component placed SEVERAL times is refused rather than proxied into an arbitrary instance: each
-    instance points its own way, and patternElements.count - the only read-back a pattern has - is
-    identical for a right and a wrong direction, so a bad pick would never surface."""
-    if safe(lambda: ent.assemblyContext) is not None:
+    A component placed SEVERAL times is refused there rather than proxied into an arbitrary
+    instance, which matters most for a pattern: each instance points its own way, and
+    patternElements.count - the only read-back a pattern has - is identical for a right and a wrong
+    direction, so a bad pick would never surface."""
+    occ, err = _inputs.single_placement(f"'{kind.name}': that direction", ent, comp, design)
+    if err:
+        return None, err
+    if occ is None:
         return ent, None
-    owner = _inputs.entity_component(ent)
-    # _common.same_component, never `owner is comp`: component wrappers are measured NEVER
-    # identity-stable (two reads of design.rootComponent are different Python objects sharing one
-    # entityToken), so `is` reads False even for the pattern's OWN component - and control then falls
-    # to allOccurrencesByComponent, which returns 0 for the root and REFUSES a perfectly legal
-    # direction, telling the caller to pass exactly what they just passed.
-    if owner is None or _common.same_component(owner, comp):
-        return ent, None
-    root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrencesByComponent(owner)) if root is not None else None
-    count = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
-    owner_name = safe(lambda: owner.name) or "another component"
-    if count == 1:
-        proxy = safe(lambda: ent.createForAssemblyContext(occs.item(0)))
-        if proxy is None:
-            return None, (f"'{kind.name}': that direction belongs to component '{owner_name}' and "
-                          "could not be brought into the pattern's assembly context. Pass a handle "
-                          "at geometry in the pattern's own component, or a world axis (x/y/z).")
-        return proxy, None
-    if count > 1:
-        paths = ", ".join(str(safe(lambda i=i: occs.item(i).fullPathName)) for i in range(count))
-        return None, (f"'{kind.name}': that direction belongs to component '{owner_name}', which is "
-                      f"placed {count} times ({paths}). Each instance points a different way and a "
-                      "pattern's instance count cannot tell a right direction from a wrong one, so "
-                      "the instance must not be guessed. Pass a handle at geometry in the pattern's "
-                      "own component, or a world axis (x/y/z).")
-    return None, (f"'{kind.name}': that direction belongs to component '{owner_name}', which is not "
-                  "placed in the assembly, so it cannot be brought into the pattern's context. Pass "
-                  "a handle at geometry in the pattern's own component, or a world axis (x/y/z).")
+    proxy = safe(lambda: ent.createForAssemblyContext(occ))
+    if proxy is None:
+        path = safe(lambda: occ.fullPathName) or "its one occurrence"
+        return None, (f"'{kind.name}': that direction could not be brought into the pattern's "
+                      f"assembly context ({path}). Pass a handle at geometry in the pattern's own "
+                      "component, or a world axis (x/y/z).")
+    return proxy, None
 
 
 def _direction_entity(kind, raw, comp, design):
@@ -279,7 +258,13 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
         pin = owner.features.circularPatternFeatures.createInput(coll, ax)
         pin.quantity = adsk.core.ValueInput.createByReal(int(quantity))
         pin.totalAngle = adsk.core.ValueInput.createByString(f"{float(total_angle_deg)} deg")
-        pin.isSymmetric = bool(symmetric)
+        # isSymmetric through the read-back helper, as model_pattern_path sets its own: a bare
+        # assignment to a SWIG proxy can be silently ignored, and the instance-count read-back below
+        # is identical for a symmetric and an asymmetric spread, so nothing else would catch it.
+        symerr = _common.set_verified(pin, "isSymmetric", bool(symmetric), "symmetric",
+                                      "CircularPatternFeatureInput")
+        if symerr:
+            return error(f"{symerr} No pattern was created.")
         feature = owner.features.circularPatternFeatures.add(pin)
     except Exception as e:
         return error(f"Circular pattern failed: {e}")

@@ -178,19 +178,26 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
                      "not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion "
                      "UI if it is not wanted.")
 
+    # The coordinates the factories were handed are in the STANDARD's length unit; sheet_units is
+    # the separate dimension display unit and does not move them.
     units = _drawing_common.sheet_units(dwg)
-    units_said = units if units else "the sheet's own units (mm under ISO, in under ASME)"
+    coordinate_unit = _drawing_common.coordinate_unit(dwg)
+    units_said = (coordinate_unit if coordinate_unit
+                  else "the standard's own length unit (mm under ISO, in under ASME)")
     return ok({
         "created": True,
         "sketch_name": sketch_name,
         "sheet_name": on_sheet,
+        "coordinate_unit": coordinate_unit,
         "sheet_units": units,
         "entities_drawn": len(entries),
         "curves_requested": sum(expected.values()),
         "curves_landed": total_landed,
         "landed": landed,
         "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' carries {total_landed} curves, counted "
-                 f"off its own collections. Coordinates were taken as {units_said}. "
+                 f"off its own collections. Coordinates were taken as {units_said}, which the "
+                 "drawing STANDARD fixes - 'sheet_units' is the dimension display unit and does not "
+                 "move the geometry. "
                  "Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, "
                  "so only the whole sketch can be deleted, in the Fusion UI. A drawing document has no "
                  "viewport to screenshot; drawing_export writes the PDF that shows the result. Drawing "
@@ -202,9 +209,11 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
 TOOL_DESCRIPTION = (
     "Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document. One call adds one "
     "sketch and draws every entity in 'geometry' onto it, reporting curves landed against curves "
-    "asked for. Coordinates are the drawing's own length units, NOT the centimetres the modelling "
-    "tools take. Open the drawing as the active document first (doc_open, or the Fusion UI). Nothing "
-    "drawn can be read back or moved, and Drawing.deleteEntities raises 'not yet implemented' on a "
+    "asked for. Coordinates are in the unit the drawing STANDARD fixes - mm under ISO, in under "
+    "ASME, reported as coordinate_unit - not the modelling tools' centimetres and not the dimension "
+    "display unit. Open the drawing as the active document first (doc_open, or the Fusion UI). "
+    "Nothing drawn can be read back or moved, and Drawing.deleteEntities raises 'not yet "
+    "implemented' on a "
     "drawn curve - only the whole sketch is deletable, in the Fusion UI - so send a sheet's geometry "
     "in one call and check it with drawing_export."
 )

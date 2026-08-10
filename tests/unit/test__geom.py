@@ -7,7 +7,8 @@ owning-body walk and the before/after volume and face-count samples every effect
 
 import math
 
-from conftest import (BRepBody, BRepFace, FakePoint, FakeVector3D, entity_proxy, load_tool)
+from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakePoint, FakeVector3D, entity_proxy,
+                      load_tool)
 
 geom = load_tool("_geom")
 
@@ -237,3 +238,193 @@ class TestVolumeAndFaceSamples:
         body.volume = 118.0
         delta, readable = geom.volume_delta(bodies, before)
         assert readable is True and delta == 18.0     # not 36.0
+
+
+class TestSignedVolume:
+    """The single-read counterpart to volumes(): mesh_shell/mesh_repair judge a hollowing on this
+    number's SIGN, so anything that is not a real number must read as None (unknown), never 0.0."""
+
+    def _body(self, volume):
+        b = BRepBody(name="Mesh1", entity_token="TOK")
+        b.volume = volume
+        return b
+
+    def test_reads_a_positive_volume_through(self):
+        assert geom.signed_volume(self._body(12.5)) == 12.5
+
+    def test_a_negative_volume_keeps_its_sign(self):
+        # A mesh whose normals were reversed reports the same magnitude with the opposite sign -
+        # dropping the sign (abs) is exactly what would make a reversed mesh read as solid.
+        assert geom.signed_volume(self._body(-12.5)) == -12.5
+
+    def test_a_non_numeric_volume_is_unknown_not_zero(self):
+        # adsk mocks (and an unmodeled live property) hand back a truthy object for anything
+        # unmodeled. Letting one through would make `volume < 0` a TypeError, or worse, compare
+        # a Mock as if it were a measurement.
+        from unittest.mock import Mock
+        assert geom.signed_volume(self._body(Mock())) is None
+
+    def test_a_boolean_volume_is_unknown(self):
+        # bool is an int subclass, so a plain isinstance(v, (int, float)) would accept True as 1.0.
+        assert geom.signed_volume(self._body(True)) is None
+
+    def test_an_unreadable_volume_is_none_not_zero(self):
+        class _Body:
+            @property
+            def volume(self):
+                raise RuntimeError("volume unreadable")
+        assert geom.signed_volume(_Body()) is None
+
+    def test_a_genuine_zero_is_still_a_reading(self):
+        # 0.0 is an ANSWER (an empty/degenerate body), distinguishable from the None above.
+        assert geom.signed_volume(self._body(0.0)) == 0.0
+
+
+# ── lump_count: the DISCONNECTED-piece read a join is verified with ──────────────────────────────
+
+class _Lumps:
+    def __init__(self, count):
+        self.count = count
+
+
+class TestLumpCount:
+    def test_reads_the_bodys_lump_count(self):
+        body = BRepBody(name="Weldment")
+        body.lumps = _Lumps(3)
+        assert geom.lump_count(body) == 3
+
+    def test_a_fused_single_piece_body_reads_one(self):
+        # 1 is the ANSWER a real fuse gives - it must not collapse to None/0, or the join warning
+        # could never tell a fused result from an unreadable one.
+        body = BRepBody(name="Bracket")
+        body.lumps = _Lumps(1)
+        assert geom.lump_count(body) == 1
+
+    def test_a_body_without_lumps_is_unknown_not_zero(self):
+        # A MeshBody carries no 'lumps' at all (its API surface has no counterpart to BRepBody.lumps),
+        # so the read is UNKNOWN. Answering 0 or 1 here would let a mesh join claim it verified
+        # something it cannot see.
+        assert geom.lump_count(BRepBody(name="Scan")) is None
+
+    def test_an_unreadable_count_is_none(self):
+        class _Body:
+            @property
+            def lumps(self):
+                raise RuntimeError("lumps unreadable")
+        assert geom.lump_count(_Body()) is None
+
+    def test_a_non_numeric_count_is_none(self):
+        # adsk mocks hand back a truthy child object for anything unmodeled; letting one through
+        # would make `result_lumps > 1` a TypeError at the warning site.
+        from unittest.mock import Mock
+        body = BRepBody(name="Mocked")
+        body.lumps = Mock()
+        assert geom.lump_count(body) is None
+
+    def test_only_the_brep_body_carries_lumps_in_the_api_surface(self):
+        # The split this helper's contract rests on, and the reason mesh_combine reaches for AABBs
+        # instead: BRepBody exposes 'lumps', MeshBody exposes no counterpart. If a Fusion build ever
+        # gives MeshBody a lump/shell count, this goes red and the mesh gap can close.
+        import api_surface
+        assert "lumps" in api_surface.PROPERTIES["fusion.BRepBody"]
+        mesh_members = api_surface.PROPERTIES["fusion.MeshBody"]
+        assert "lumps" not in mesh_members and "shells" not in mesh_members
+
+
+# ── aabb_gap: the not-touching proof for a body kind carrying no lump count ──────────────────────
+
+def _boxed(name, minp, maxp):
+    return BRepBody(name=name, bbox=FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp)))
+
+
+class TestAabbGap:
+    def test_boxes_apart_report_the_gap(self):
+        # 4.4 cm of clear air on x: the two bodies CANNOT touch, whatever else is true of them.
+        a = _boxed("Tensioner", (0, 0, 0), (1, 1, 1))
+        b = _boxed("Stub", (5.4, 0, 0), (6.4, 1, 1))
+        assert round(geom.aabb_gap(a, b), 6) == 4.4
+
+    def test_the_gap_is_symmetric(self):
+        a = _boxed("A", (0, 0, 0), (1, 1, 1))
+        b = _boxed("B", (5.4, 0, 0), (6.4, 1, 1))
+        assert geom.aabb_gap(a, b) == geom.aabb_gap(b, a)
+
+    def test_a_separating_axis_wins_over_overlapping_ones(self):
+        # Fully overlapping in x and z, 2 cm apart in y - one separating axis is enough to prove the
+        # bodies are clear of each other, so the MAX (not the min) over the axes is the answer.
+        a = _boxed("A", (0, 0, 0), (10, 1, 10))
+        b = _boxed("B", (0, 3, 0), (10, 4, 10))
+        assert geom.aabb_gap(a, b) == 2
+
+    def test_overlapping_boxes_report_no_gap(self):
+        # Overlap proves nothing about contact, so the value must be <= 0 and never trigger a
+        # not-touching claim.
+        a = _boxed("A", (0, 0, 0), (2, 2, 2))
+        b = _boxed("B", (1, 1, 1), (3, 3, 3))
+        assert geom.aabb_gap(a, b) == -1
+
+    def test_touching_boxes_report_zero(self):
+        # Face-to-face contact: gap 0, which is NOT a positive gap - a real fuse must not be warned on.
+        a = _boxed("A", (0, 0, 0), (1, 1, 1))
+        b = _boxed("B", (1, 0, 0), (2, 1, 1))
+        assert geom.aabb_gap(a, b) == 0
+
+    def test_an_unreadable_box_is_none(self):
+        a = _boxed("A", (0, 0, 0), (1, 1, 1))
+        assert geom.aabb_gap(a, BRepBody(name="NoBox")) is None
+        assert geom.aabb_gap(BRepBody(name="NoBox"), a) is None
+
+    def test_a_non_numeric_coordinate_is_none(self):
+        from unittest.mock import Mock
+        a = _boxed("A", (0, 0, 0), (1, 1, 1))
+        b = BRepBody(name="B", bbox=FakeBoundingBox3D(FakePoint(Mock(), 0, 0), FakePoint(1, 1, 1)))
+        assert geom.aabb_gap(a, b) is None
+
+
+class TestAabbGapSameSpacePrecondition:
+    """The boxes only subtract if they are expressed in ONE space. An occurrence PROXY's box is in
+    ROOT space while its native's is component-LOCAL, so a cross-wrapper subtraction mints a
+    confident number out of two different frames - under the word PROVES, that is a fabrication."""
+
+    def _in_comp(self, name, comp, minp, maxp):
+        return BRepBody(name=name, parent_component=comp,
+                        bbox=FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp)))
+
+    def test_a_native_and_an_occurrence_proxy_do_not_compare(self):
+        import types
+        from conftest import body_proxy
+        comp = types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame")
+        native = self._in_comp("Native", comp, (0, 0, 0), (1, 1, 1))
+        proxy = body_proxy(native, types.SimpleNamespace(name="Frame:1", fullPathName="Frame:1"))
+        other = self._in_comp("Other", comp, (5, 0, 0), (6, 1, 1))
+        # the proxy really is the hard case: it answers an assemblyContext, the native does not
+        assert proxy.assemblyContext is not None and native.assemblyContext is None
+        assert geom.aabb_gap(proxy, other) is None
+
+    def test_two_bodies_of_the_same_component_compare(self):
+        import types
+        comp = types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame")
+        a = self._in_comp("A", comp, (0, 0, 0), (1, 1, 1))
+        b = self._in_comp("B", comp, (5, 0, 0), (6, 1, 1))
+        assert geom.aabb_gap(a, b) == 4
+
+    def test_two_wrappers_of_one_component_still_compare(self):
+        # Component wrappers are never identity-stable: two reads of one component are different
+        # objects sharing a token. An identity test here would refuse every legitimate pair.
+        import types
+        comp_a = types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame")
+        comp_b = types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame")
+        assert comp_a is not comp_b
+        a = self._in_comp("A", comp_a, (0, 0, 0), (1, 1, 1))
+        b = self._in_comp("B", comp_b, (5, 0, 0), (6, 1, 1))
+        assert geom.aabb_gap(a, b) == 4
+
+    def test_bodies_of_different_components_do_not_compare(self):
+        # Two component-LOCAL boxes from different components are in different frames; subtracting
+        # them reports a gap that describes neither.
+        import types
+        a = self._in_comp("A", types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame"),
+                          (0, 0, 0), (1, 1, 1))
+        b = self._in_comp("B", types.SimpleNamespace(name="Lid", entityToken="CTOK::Lid"),
+                          (5, 0, 0), (6, 1, 1))
+        assert geom.aabb_gap(a, b) is None

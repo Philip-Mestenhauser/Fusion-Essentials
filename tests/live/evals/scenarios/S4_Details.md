@@ -6,8 +6,8 @@ fixture: P3-Gimbal (the S3 artifact - the jointed, motion-linked gyroscope at re
   PINNED first. The agent details the LIVING mechanism and saves AS A NEW document (P4-Gimbal);
   P3-Gimbal's cloud version must remain untouched. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 93
-  max_tokens: 63000
+  max_tool_calls: 105
+  max_tokens: 72000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -41,6 +41,10 @@ GOAL - production details on the living mechanism:
   the rings' swing.
 - Soften the frame's exposed edges with a FILLET, and bevel the central opening's edges with a
   CHAMFER (the part is round - interpret "exposed edges" for the shape you actually have).
+- A TURNED BOSS on the pedestal: a small raised ring COAXIAL with one of the pedestal's
+  existing bores - built as turned geometry (a profile swung about that bore's own axis), so
+  its concentricity is constructional, not coincidental. Report the bore you chose and the
+  read that proves the boss shares its axis.
 - One detail of YOUR choice on the pedestal or rotor that a machinist would thank you for
   (a chamfered post tip, a keyway, spoke lightening holes - your call, named in the report).
 - The MECHANISM MUST STAY ALIVE: joints healthy, motion link intact, and the parts still at rest
@@ -59,6 +63,8 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 
 - the hole set exists as real features: hole count + a volume delta consistent with your stated
   hole geometry (report the arithmetic).
+- the turned boss exists and is coaxial with its bore: a fresh geometry read shows the boss's
+  round face sharing the bore's axis (report both axes or the distance between them).
 - fillet and chamfer features exist on the parts you named, with edge counts read off the
   features; your choice-detail exists and is named.
 - mechanism alive: fresh assembly read - all joints healthy, motion link present, rest pose

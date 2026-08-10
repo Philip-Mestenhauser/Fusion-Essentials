@@ -3,8 +3,8 @@
 
 """Launch CAM toolpath generation asynchronously (cam_generate, returns a handle) and read its
 progress (cam_get_status). Generation runs in the background at its own pace once launched. The
-live GenerateToolpathFuture must stay referenced across calls - see _GENERATIONS - or Fusion
-abandons the in-progress generation."""
+live GenerateToolpathFuture must stay referenced across calls - see _cam_common.register_future -
+or Fusion abandons the in-progress generation."""
 
 import time
 
@@ -23,42 +23,13 @@ RETURNS = [
 ]
 
 
-# Live generations, keyed by a short handle. Each entry holds the Future plus launch metadata.
-# Persists across MCP calls for the life of the add-in session.
-#
-# CRITICAL: holding the GenerateToolpathFuture reference here is not just for polling - if the
-# Future is garbage-collected, Fusion ABANDONS the in-progress generation. So this dict is what
-# keeps the background work alive between the launch call and the poll calls. Do not stop storing
-# the future, and only pop an entry once generation has completed.
-_GENERATIONS = {}
-_HANDLE_SEQ = [0]
-
-
-def register_future(future, target, scope, skip_valid, target_name=""):
-    """Mint a handle and register a live generation Future - the ONE registration path (also used by
-    cam_select_geometry's inline launch). Keeps the Future referenced and records which DOCUMENT the
-    generation belongs to, so a later status read taken while another document is active reports the
-    Future's own progress instead of the wrong document's tallies. Returns (handle, total).
-
-    target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
-    whole-document launch): a status read settles this handle's completion on THAT target's own
-    operations, so a second generation running beside it cannot keep this handle incomplete."""
-    _HANDLE_SEQ[0] += 1
-    handle = f"gen{_HANDLE_SEQ[0]}"
-    total = safe(lambda: future.numberOfOperations, None)
-    doc_name, doc_urn = _active_identity()
-    _GENERATIONS[handle] = {
-        "future": future,
-        "target": target,
-        "scope": scope,
-        "target_name": (target_name or "").strip(),
-        "skip_valid": bool(skip_valid),
-        "started_at": time.time(),
-        "total": total,
-        "doc_name": doc_name,
-        "doc_urn": doc_urn,
-    }
-    return handle, total
+# The live-generation registry and the handle it mints live in _cam_common (register_future) - the
+# ONE registration path every launch goes through, whether that launch is this tool, an inline
+# cam_select_geometry generate, or cam_create_operation(generate=true). These two names are the same
+# objects; a status read below is reading exactly what those launches wrote.
+_GENERATIONS = _cam_common._GENERATIONS
+_HANDLE_SEQ = _cam_common._HANDLE_SEQ
+register_future = _cam_common.register_future
 
 
 def _collect_op_health():
@@ -201,14 +172,12 @@ def _attach_op_health(payload: dict) -> None:
                          "empty_toolpaths": len(health["empty"])}
 
 
-def status_handler(handle: str = "", target: str = "", include_operations: bool = True,
-                   pump_seconds=None) -> dict:
+def status_handler(handle: str = "", target: str = "", include_operations: bool = True) -> dict:
     """Read toolpath generation progress. handle is OPTIONAL: pass the id from cam_generate (or
     'latest') to scope to that launched generation; OR omit it (and pass a setup/operation NAME as
     target, or nothing for the whole document) to read a generation launched inline -
     cam_create_operation(generate=true), cam_select_geometry, or the Fusion UI - with no handle.
-    include_operations: when complete, also report each op's final state + warnings/errors.
-    pump_seconds is accepted-and-ignored: a stale cached client schema may still send it."""
+    include_operations: when complete, also report each op's final state + warnings/errors."""
     key = (handle or "").strip()
     want_target = (target or "").strip()
 

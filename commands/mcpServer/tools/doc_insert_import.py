@@ -92,13 +92,9 @@ def _options(mgr, fmt, path):
 
 
 def _created_objects(collection):
-    n = safe(lambda: collection.count, 0) or 0
-    out = []
-    for i in range(n):
-        obj = safe(lambda i=i: collection.item(i))
-        if obj is not None:
-            out.append(obj)
-    return out
+    """The objects an import returned. Nothing addresses them by position - they are counted and
+    described by name/type - so an unreadable one simply drops out of the list."""
+    return list(_common.iter_collection(collection))
 
 
 def _describe(objects, cap=20):
@@ -343,8 +339,9 @@ TOOL_DESCRIPTION = (
     "DXF as one sketch per 2D layer on a plane, SVG curves into an EXISTING sketch. 'format' comes "
     "from the file extension; an explicit one contradicting it is refused. new_document=true "
     "imports to a fresh unsaved document - solid formats only, since DXF and SVG need a target in "
-    "the open design. For a cloud upload use data_upload_file; for a linked cloud reference use "
-    "doc_insert_occurrence."
+    "the open design. For SVG placed at an (x,y) with a scale use sketch_insert_svg - this tool has "
+    "no offset or scale to pass, on the same 1/96-inch convention. For a cloud upload use "
+    "data_upload_file; for a linked cloud reference use doc_insert_occurrence."
 )
 
 tool = (
@@ -362,8 +359,29 @@ tool = (
     .strict_schema()
 )
 
+class _FeatureHealthyHere(_assert.FeatureHealthy):
+    """FeatureHealthy, declared SKIPPED when the import lands in a NEW document.
+
+    The kind captures the active design's timeline count before the handler and walks the items past
+    it afterwards. With new_document=True the handler activates a DIFFERENT document, so those two
+    reads describe two different timelines: the slice walked is meaningless - it can skip a feature
+    that failed to compute, or gate items this call never added. Nothing can bridge that switch here,
+    so the payload says the health gate did not run instead of running it on the wrong design."""
+
+    input_keys = ("new_document",)
+
+    def verify(self, kwargs, payload, before):
+        if kwargs.get("new_document"):
+            return "", {"feature_health_verified": False,
+                        "feature_health_note": ("The import went to a NEW document, so the timeline "
+                                                "health baseline taken on the previous one does not "
+                                                "describe it - read the new document's timeline with "
+                                                "design_get.")}
+        return super().verify(kwargs, payload, before)
+
+
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_FeatureHealthyHere()])
 
 
 def register_tool():

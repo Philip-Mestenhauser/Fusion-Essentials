@@ -10,7 +10,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import iter_collection, ok, error, safe
 from ._cam_common import get_cam, find_setup, resolve_cam_node
 
 app = adsk.core.Application.get()
@@ -21,8 +21,7 @@ _ACTIONS = ("list", "create", "rename", "move")
 def _do_list(setup):
     folders = safe(lambda: setup.folders)
     out = []
-    for i in range(safe(lambda: folders.count, 0) or 0):
-        f = safe(lambda i=i: folders.item(i))
+    for f in iter_collection(folders):
         out.append({
             "name": safe(lambda f=f: f.name),
             "operations": safe(lambda f=f: f.operations.count, 0),

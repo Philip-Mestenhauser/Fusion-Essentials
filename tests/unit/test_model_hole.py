@@ -25,9 +25,6 @@ _REAL_RESOLVE_CLEARANCE = mh._resolve_clearance
 
 # ── fakes that record the hole-input construction ───────────────────────────
 
-class _ExtentDir:
-    PositiveExtentDirection = "POS"
-    NegativeExtentDirection = "NEG"
 
 
 class FakeHoleInput:
@@ -110,6 +107,15 @@ class _FaceColl:
         return len(self._f)
     def item(self, i):
         return self._f[i]
+
+
+class _UnreadableFaceColl:
+    """A faces collection that COUNTS but hands back nothing - a stale face proxy after a rebuild.
+    The count is real; every item() raises, so the shared walk yields nothing."""
+    def __init__(self, count):
+        self.count = count
+    def item(self, i):
+        raise RuntimeError("face proxy is stale")
 
 
 class FakeHoleFeature:
@@ -307,10 +313,10 @@ def _install():
     # setPositionByPlaneAndOffsets measures from LINEAR edges, so the defaults are straight ones
     mh._resolve_offset_edge_one = lambda d, h: (BRepEdge(Line3D()), None)
     mh._resolve_offset_edge_two = lambda d, h: (BRepEdge(Line3D()), None)
-    # ObjectCollection + ValueInput + ExtentDirections seams
+    # ObjectCollection + ValueInput seams. ExtentDirections stays the MEASURED family the tool
+    # bound at import (conftest seeds it from live_api_facts) - no sentinel override.
     mh._object_collection = _ObjColl.create
     mh._value = lambda s: ("V", s)
-    mh._extent_dirs = _ExtentDir
     # clearance seam: real impl validates vs the live catalog + builds a ClearanceHoleInfo.
     # the fake echoes a recognisable info object for known fasteners, else raises like the catalog would.
     def _fake_clear(comp, fastener, fit):
@@ -381,7 +387,8 @@ class TestSimple:
                             points=[[2, 3, 0]], extent="through"))
         inp = d.rootComponent.features.holeFeatures.added[0]._inp
         # live-verified: THROUGH must use PositiveExtentDirection (Negative fails)
-        assert inp.extent == ("all", "POS")
+        import adsk.fusion
+        assert inp.extent == ("all", adsk.fusion.ExtentDirections.PositiveExtentDirection)
 
     def test_multiple_points_one_feature(self):
         d = _install()
@@ -454,6 +461,27 @@ class TestPerPointVerification:
         out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
                                   points=[[2, 2, 0], [5, 2, 0]], extent="through"))
         assert out["holes"] == 2 and out["holes_verified"] is False
+
+    def test_faces_that_count_but_never_read_is_inconclusive_not_a_verified_zero(self):
+        # The faces collection COUNTS 3 but every item() raises. The shared walk skips an unreadable
+        # item, so the walk yields nothing - which must read as "nothing could be checked", never as
+        # "this feature drilled no holes". A verified zero here deletes a hole that landed.
+        axes, verified = mh._drill_axes(type("F", (), {"faces": _UnreadableFaceColl(3)})())
+        assert axes == [] and verified is False
+
+    def test_unreadable_face_items_never_roll_a_landed_hole_back(self):
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        orig_add = hf.add
+        def add_unreadable_faces(inp):
+            f = orig_add(inp)
+            f.faces = _UnreadableFaceColl(3)     # counts 3, every item() raises
+            return f
+        hf.add = add_unreadable_faces
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[2, 2, 0], [5, 2, 0], [8, 2, 0]], extent="through"))
+        assert out["holes_verified"] is False
+        assert hf.added[0].deleted is False       # the landed feature survives the unreadable check
 
 
 # ── counterbore / countersink ───────────────────────────────────────────────

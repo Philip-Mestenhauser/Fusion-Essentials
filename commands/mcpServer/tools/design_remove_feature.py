@@ -7,9 +7,6 @@ design_delete_occurrence / design_delete_feature which erase the item outright. 
 disappearance is judged by re-scanning the collection it lived in. WRITES.
 """
 
-import adsk.core
-import adsk.fusion
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -17,8 +14,6 @@ from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _assert
-
-app = adsk.core.Application.get()
 
 # Either/or targets - RemoveFeatures.add takes ONE item (a solid/surface body OR an occurrence), so
 # both kinds are singular and neither is schema-required; the handler refuses none and refuses both.
@@ -64,7 +59,7 @@ def _body_census(host, name):
     n = safe(lambda: coll.count) if coll is not None else None
     if n is None:
         return None
-    return sum(1 for i in range(n) if safe(lambda i=i: coll.item(i).name) == name)
+    return sum(1 for b in _common.iter_collection(coll) if safe(lambda b=b: b.name) == name)
 
 
 def _occurrence_census(design, path):

@@ -4,8 +4,17 @@
 """The material/appearance catalog walk behind design_get's 'materials' and 'appearances' slices.
 One MaterialLibrary hosts BOTH .materials and .appearances and a Design hosts those same two
 attribute names for its document-local copies, so the two catalogs are one traversal over two
-projections. Entry names are non-unique - one library's 326 appearances carry 92 distinct names -
-so every row publishes 'id' beside 'name' to tell two same-named entries apart.
+projections. Entry names are non-unique - MEASURED across every loaded library: 530 appearances
+carry 172 distinct names, 92 of which are shared by two or more entries - so every row publishes
+'id' beside 'name'.
+
+An id names the SOURCE ASSET, not one entry: it is stable across fresh reads, two same-named
+LIBRARY entries that are different assets carry distinct ids, and two entries holding one asset
+carry identical ids. So in a library scope the id does tell two same-named rows apart. In the
+DOCUMENT scope it does not on its own - a copy KEEPS its source's id whatever it was copied from
+(MEASURED for both a library asset and a document-local one), so every row minted from one base
+shares an id and they are told apart by name. Name and id together identify a document entry;
+neither does alone.
 """
 
 import adsk.core
@@ -89,7 +98,9 @@ def find_library(name):
 
 def _row(obj, name, scope, with_usage):
     """One catalog row. 'id' rides beside 'name' on every row because names repeat within a single
-    library. Library rows omit is_used - a per-entry read left to the usedBy follow-up."""
+    library; it names the row's SOURCE ASSET, so document rows copied from one base share it and
+    the pair is what identifies an entry. Library rows omit is_used - a per-entry read left to the
+    usedBy follow-up."""
     row = {"name": name, "id": safe(lambda: obj.id), "scope": scope}
     if with_usage:
         row["is_used"] = bool(safe(lambda: obj.isUsed, False))
@@ -162,7 +173,8 @@ def browse(design, kind, library="", name_filter="", max_results=0):
         "Library rows are a census - counts only, no contents.",
         f"Pass library='<name>' for one library's {kind}; name_filter= narrows them and "
         f"max_results= sizes the page (default {DEFAULT_CAP}, cap {MAX_CAP}).",
-        "Names repeat within one library - 'id' tells two same-named entries apart.",
+        "Names repeat, and 'id' names the source asset rather than the entry - document rows "
+        "copied from one base share an id, so name and id together identify an entry.",
         _CONSUMERS[kind],
     ])
     return payload, None

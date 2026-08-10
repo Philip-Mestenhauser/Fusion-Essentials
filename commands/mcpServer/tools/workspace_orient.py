@@ -15,6 +15,8 @@ import re
 import adsk.core
 import adsk.fusion
 
+from itertools import islice
+
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives import registry
@@ -178,8 +180,8 @@ def _selection_echo():
     sels = safe(lambda: ui.activeSelections) if ui is not None else None
     count = safe(lambda: sels.count, 0) if sels is not None else 0
     out = []
-    for i in range(min(count or 0, 10)):
-        ent = safe(lambda i=i: sels.item(i).entity)
+    for s in islice(_common.iter_collection(sels), 10):
+        ent = safe(lambda s=s: s.entity)
         if ent is None:
             continue
         tname = safe(lambda: type(ent).__name__) or "Unknown"
@@ -214,9 +216,9 @@ def _timeline_rollup(design):
     tl = safe(lambda: design.timeline)
     if tl is None:
         return errors, warnings, suppressed, markers, total   # direct-mode designs have no timeline
-    for i in range(safe(lambda: tl.count, 0) or 0):
+    for o in _common.iter_collection(tl):
         total += 1
-        hs = safe(lambda i=i: tl.item(i).healthState)
+        hs = safe(lambda o=o: o.healthState)
         if hs == 2:
             errors += 1
         elif hs == 1:
@@ -246,9 +248,8 @@ def _joint_rollup(design):
 
 def _grounded_count(root):
     grounded = 0
-    occs = safe(lambda: root.occurrences)
-    for i in range(safe(lambda: occs.count, 0) or 0 if occs else 0):
-        if safe(lambda i=i: occs.item(i).isGrounded, False):
+    for o in _common.iter_collection(safe(lambda: root.occurrences)):
+        if safe(lambda o=o: o.isGrounded, False):
             grounded += 1
     return grounded
 
@@ -260,10 +261,7 @@ def _browser_digest(root):
     digest = []
     occs = safe(lambda: root.occurrences)
     count = safe(lambda: occs.count, 0) if occs else 0
-    for i in range(min(count or 0, _DIGEST_LIMIT)):
-        o = safe(lambda i=i: occs.item(i))
-        if o is None:
-            continue
+    for o in islice(_common.iter_collection(occs), _DIGEST_LIMIT):
         digest.append({
         "name": safe(lambda o=o: o.name),
         "component": safe(lambda o=o: o.component.name),
@@ -288,10 +286,7 @@ def _xref_health(doc):
     refs = safe(lambda: doc.documentReferences)
     n = safe(lambda: refs.count, 0) if refs is not None else 0
     ood = []
-    for i in range(n or 0):
-        ref = safe(lambda i=i: refs.item(i))
-        if ref is None:
-            continue
+    for i, ref in enumerate(_common.iter_collection(refs)):
         if bool(safe(lambda ref=ref: ref.isOutOfDate, False)):
             nm = safe(lambda ref=ref: ref.dataFile.name) or safe(lambda ref=ref: ref.name) or f"#{i}"
             ood.append(nm)
@@ -307,15 +302,12 @@ def _cam_summary(doc):
     setups = safe(lambda: cam.setups)
     n_setups = safe(lambda: setups.count, 0) if setups else 0
     total_ops = ungenerated = 0
-    for i in range(n_setups or 0):
-        s = safe(lambda i=i: setups.item(i))
-        ops = safe(lambda s=s: s.allOperations) if s else None
-        n = safe(lambda: ops.count, 0) if ops else 0
-        total_ops += n or 0
-        for k in range(n or 0):
-            op = safe(lambda k=k: ops.item(k))
+    for s in _common.iter_collection(setups):
+        ops = safe(lambda s=s: s.allOperations)
+        total_ops += (safe(lambda: ops.count, 0) if ops else 0) or 0
+        for op in _common.iter_collection(ops):
             # an op with no valid toolpath still needs generating
-            if op is not None and not safe(lambda op=op: op.hasToolpath, False):
+            if not safe(lambda op=op: op.hasToolpath, False):
                 ungenerated += 1
     return True, {"setups": n_setups or 0, "total_operations": total_ops,
     "ungenerated_operations": ungenerated}

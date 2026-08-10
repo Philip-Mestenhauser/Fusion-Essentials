@@ -37,19 +37,19 @@ _COUNTISH = frozenset({"count", "len", "quantity", "numberOfFaces", "triangleCou
 # Sites where a numeric fallback is NOT a fabricated measurement. Each needs a reason naming why
 # the number is defensible - the value must not reach a payload as a measurement. Shrink-only.
 _ALLOWED = {
-    "_inputs.py:1257": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
+    "_inputs.py:1510": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
                       "direction is REFUSED, which is the safe direction",
     "assembly_get.py:173": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
                            "face/sketch-anchored JO reports geometry.origin as-is)",
     "assembly_get.py:174": "offsetY, same contract as offsetX",
     "assembly_get.py:175": "offsetZ, same contract as offsetX",
-    "cam_edit_tools.py:395": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
+    "cam_edit_tools.py:428": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
                              "value for an absent parameter, not the tool's own request",
     "joint_create_edit.py:271": "picking the LARGEST face - an unreadable area sorts last and is "
                                 "never published",
-    "sketch_dimension.py:190": "a text-placement offset, immediately replaced by 1.0 when it is not "
+    "sketch_dimension.py:136": "a text-placement offset, immediately replaced by 1.0 when it is not "
                                "positive; never published",
-    "surface_edit.py:83": "cell areas compared against each other to pick a cell; not published",
+    "surface_edit.py:80": "cell areas compared against each other to pick a cell; not published",
     "surface_untrim.py:46": "an area SUM compared before/after to prove the untrim moved something",
 }
 
@@ -94,6 +94,12 @@ def _offenders_in(path):
                 body = body.body if isinstance(body, ast.Lambda) else body
                 attr = _final_attr(body)
                 default = node.args[1]
+                # -1 parses as UnaryOp(USub, Constant(1)) - unwrap the sign so a negative literal
+                # fallback is the same number-for-a-measurement hit a positive one is.
+                if (isinstance(default, ast.UnaryOp)
+                        and isinstance(default.op, (ast.USub, ast.UAdd))
+                        and isinstance(default.operand, ast.Constant)):
+                    default = default.operand
                 if isinstance(default, ast.Name) and default.id in params:
                     out.append((node.lineno, "request-as-fallback",
                                 f"falls back to the parameter '{default.id}'"))
@@ -135,7 +141,10 @@ class TestNoFabricatedFallbacks:
             + "\n  ".join(stale))
 
     def test_the_gate_inspects_a_real_number_of_safe_calls(self):
-        """A walker that stopped matching safe() would pass this file forever."""
+        """The name `safe` still appears at scale in the fleet - a floor on the raw material the
+        detector works over, NOT proof the detector's own walk works (the allowlist-still-exists
+        test is what goes red when _offenders_in breaks, and the bite test below exercises both
+        offender kinds directly)."""
         seen = 0
         for _name, path in _iter_tool_files():
             with open(path, encoding="utf-8") as fh:
@@ -146,4 +155,16 @@ class TestNoFabricatedFallbacks:
                         getattr(node.func, "id", None)
                     if fname == "safe":
                         seen += 1
-        assert seen >= 500, f"only {seen} safe() calls found - the walker has broken."
+        assert seen >= 500, f"only {seen} safe() calls found - the fleet shape has changed."
+
+    def test_the_detector_bites_on_both_kinds(self, tmp_path):
+        # a request echoed as its own fallback, and a NEGATIVE numeric fallback for a measurement -
+        # the sign unwrap is load-bearing: -1 parses as UnaryOp and slipped the net before.
+        src = tmp_path / "t.py"
+        src.write_text(
+            "def handler(distance):\n"
+            "    a = safe(lambda: feat.distance.value, distance)\n"
+            "    b = safe(lambda: body.volume, -1.0)\n",
+            encoding="utf-8")
+        kinds = sorted(k for _l, k, _d in _offenders_in(str(src)))
+        assert kinds == ["number-for-a-measurement", "request-as-fallback"], kinds

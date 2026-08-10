@@ -25,6 +25,8 @@ app = adsk.core.Application.get()
 _MESH = _inputs.MeshBodyRef("mesh", required=True,
     description="The mesh body to delete (find_geometry handle, preferred, or a mesh name).")
 
+_SPEC = [_MESH]
+
 
 def _count_named_in_component(design, comp_name, name):
     """How many meshes named `name` live in the component named `comp_name`, via the ONE design-wide
@@ -46,12 +48,13 @@ def handler(mesh: str = "") -> dict:
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
 
-    mb, merr = _MESH.resolve(mesh)
-    if merr:
-        return error(merr)
+    vals, verr = _inputs.resolve_inputs(_SPEC, {"mesh": mesh})
+    if verr:
+        return verr
+    mb = vals["mesh"]
 
     name = safe(lambda: mb.name)
-    comp = safe(lambda: mb.parentComponent) or _common.target_component(design)
+    comp = _common.census_host(mb, _common.target_component(design))
     comp_name = safe(lambda: comp.name)
     n_before = _count_named_in_component(design, comp_name, name)
 
@@ -122,12 +125,8 @@ TOOL_DESCRIPTION = (
 "is gone."
 )
 
-tool = (
-    Tool.create_simple(name="mesh_delete", description=TOOL_DESCRIPTION)
-    .add_input_property(_MESH.name, _MESH.schema())
-    .add_required_input(_MESH.name)
-    .strict_schema()
-)
+tool = _inputs.apply_to_tool(
+    Tool.create_simple(name="mesh_delete", description=TOOL_DESCRIPTION), _SPEC).strict_schema()
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True)
 
 

@@ -26,8 +26,6 @@ from . import _assert
 from . import _inputs
 from . import _outputs
 
-# healthState value for a feature that computed with an ERROR (same convention workspace_orient reads).
-_HEALTH_ERROR = 2
 
 # What this tool RETURNS (declared once; drives the PRODUCES: prose + the assert-present contract test).
 RETURNS = [
@@ -92,10 +90,11 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         return error(_common.no_feature_error(design, "Draft"))
 
     # A feature can be ADDED yet fail to compute; report that as failure, not a false ok.
-    if safe(lambda: feature.healthState) == _HEALTH_ERROR:
+    if safe(lambda: feature.healthState) == adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState:
         msg = safe(lambda: feature.errorOrWarningMessage) or "no detail"
         return error(f"Draft feature was created but failed to compute: {msg}. Try a smaller angle, "
-                     "'flip', or a different pull direction.")
+                     "'flip', or a different pull direction. "
+                     + _common.failed_effect_remedy(design, feature))
 
     requested = len(face_list)
     # Read the drafted-face count back off the feature (inputFaces reflects the faces it took, including

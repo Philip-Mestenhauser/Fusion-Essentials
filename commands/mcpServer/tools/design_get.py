@@ -8,6 +8,7 @@ deeper slice at a time via a thin router over _slice_*() helpers. Read-only.
 """
 
 import json
+from itertools import islice
 
 import adsk.core
 import adsk.fusion
@@ -181,10 +182,8 @@ def _root_body_names(root):
     names = []
     try:
         bodies = root.bRepBodies
-        for i in range(min(safe(lambda: bodies.count, 0), _TREE_MAX_NODES)):
-            b = bodies.item(i)
-            if b is not None:
-                names.append(safe(lambda b=b: b.name) or f"Body{i+1}")
+        for i, b in enumerate(islice(_common.iter_collection(bodies), _TREE_MAX_NODES)):
+            names.append(safe(lambda b=b: b.name) or f"Body{i+1}")
     except Exception:
         pass
     return names
@@ -238,11 +237,12 @@ def _slice_timeline(design, include_suppressed, group):
     items, truncated = [], False
     states, exceptions = {}, []                 # exception-first rollup over the timeline
     try:
-        for i in range(timeline.count):
+        total = timeline.count      # a timeline that cannot be counted is a refusal, not an empty read
+        for obj in _common.iter_collection(timeline):
             if len(items) >= _TIMELINE_MAX_ITEMS:
                 truncated = True
                 break
-            summ = _object_summary(timeline.item(i))
+            summ = _object_summary(obj)
             health = summ.get("health", "healthy")
             states[health] = states.get(health, 0) + 1
             # exception = a feature that FAILED (error/warning health) - not just suppressed (intentional).
@@ -264,7 +264,7 @@ def _slice_timeline(design, include_suppressed, group):
     except Exception:
         pass
     payload = {"marker_position": safe(lambda: timeline.markerPosition),
-               "count": safe(lambda: timeline.count), "returned": len(items),
+               "count": total, "returned": len(items),
                "summary": {"states": states, "exceptions": exceptions},
                "groups": groups, "timeline": items}
     if truncated:

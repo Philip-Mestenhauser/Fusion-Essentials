@@ -14,13 +14,14 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _outputs
 # The breakdown classifies from the same reads every other CAM tally uses.
-from ._cam_common import (get_cam, resolve_cam_node, operations_under, walk_operations, setups,
-                          first_error_line, op_state_facts, op_primary_state, validity_basis)
+from ._cam_common import (clamp_rows, get_cam, resolve_cam_node, operations_under, walk_operations,
+                          setups, first_error_line, op_state_facts, op_primary_state, validity_basis)
 
 # What this tool RETURNS: the verdict contract - relation/passed/measured/tolerance_used, enforced.
 RETURNS = [_outputs.ReturnsVerdict(relations=("toolpaths_valid",))]
 
 _ROWS_CAP = 25                                              # default cap on the per-operation rows
+_ROWS_MAX = 200        # the ceiling: every row crosses the wire, so max_results cannot lift it away
 _SCOPE_KINDS = ("setup", "folder", "pattern", "operation")   # what checkToolpath accepts as its target
 # op_primary_state's whole vocabulary: one mutually-exclusive bucket per operation, so the tally and
 # the rows speak one language and sum to the operation total.
@@ -158,7 +159,7 @@ def handler(scope: str = "", max_results: int = _ROWS_CAP) -> dict:
         return error(f"The toolpath validity check returned {type(verdict).__name__} for {label}, "
                      "not a true/false verdict - there is no verdict to report.")
 
-    states, rows, truncated = _classify(ops, max(1, int(max_results or _ROWS_CAP)))
+    states, rows, truncated = _classify(ops, clamp_rows(max_results, _ROWS_CAP, _ROWS_MAX))
     basis = validity_basis()
     return ok({
         "relation": "toolpaths_valid",
@@ -189,7 +190,7 @@ tool = (
     .add_input_property("scope", {"type": "string",
             "description": "Setup/folder/pattern/operation NAME to check; omit for the whole document."})
     .add_input_property("max_results", {"type": "integer",
-            "description": "Cap on the measured.not_valid rows (default 25)."})
+            "description": f"Cap on the measured.not_valid rows (default {_ROWS_CAP}, ceiling {_ROWS_MAX})."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

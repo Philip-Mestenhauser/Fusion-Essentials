@@ -49,10 +49,13 @@ def resolve_thread_info(comp, designation, internal=True, thread_type="", thread
             return None, hits, (f"Thread type '{thread_type}' does not carry '{designation}'. "
                                 f"Types that do: {', '.join(hits)}.")
     else:
-        # Library order, and the caller is told when the pick was not the only one available:
-        # measured, the metric profiles that share a designation return an IDENTICAL ThreadInfo
-        # (same class lists, same designation), so refusing every metric call-out would cost a
-        # round trip without changing the geometry.
+        # Library order. First-pick is safe here because same-designation hits are GEOMETRICALLY
+        # IDENTICAL: for 'M5x0.8' all three types carrying it (ANSI Metric M Profile, GB Metric
+        # profile, ISO Metric profile) build a ThreadInfo whose every scalar member is equal -
+        # majorDiameter 0.4901, minorDiameter 0.4007, pitchDiameter 0.4426, threadPitch 0.08,
+        # angle 60.0, class 4g6g - differing only in threadType itself. Any pick cuts the same
+        # thread, so refusing the ambiguity would cost a round trip without changing the geometry.
+        # The caller is still told which type was picked and what else carried the designation.
         chosen = hits[0]
 
     # The class carries the fit tolerance, so it is not interchangeable the way the standards

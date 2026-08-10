@@ -273,6 +273,25 @@ class TestHonesty:
         assert "volume_delta_cm3" not in out and "face_count_delta" not in out
         assert out["replaced"] is True
 
+    def test_unreadable_signals_with_a_feature_declare_the_check_did_not_run(self, monkeypatch):
+        # The docstring, the description and the note all promise a GEOMETRIC verification. On this
+        # path neither signal could be read, so that check never ran - and a payload that only drops
+        # the deltas leaves the caller to infer the gap from two absent keys.
+        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a")
+        feats = ReplaceFaceFeatures(body, signals_unreadable=True)
+        _wire(monkeypatch, feats, [_face_of(body)])
+        out = payload(rf.handler(faces=["h"], target="Patch1"))
+        assert out["effect_unverified"] is True
+        assert "no geometric proof" in out["note"]
+        assert "model_inspect" in out["note"]
+
+    def test_a_measured_replace_carries_no_unverified_flag(self, monkeypatch):
+        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a")
+        _wire(monkeypatch, ReplaceFaceFeatures(body), [_face_of(body)])
+        out = payload(rf.handler(faces=["h"], target="Patch1"))
+        assert "effect_unverified" not in out
+        assert "measured change on the body" in out["note"]
+
 
 # ── DIRECT mode: a falsy add() with the edit still landing ──────────────────────
 

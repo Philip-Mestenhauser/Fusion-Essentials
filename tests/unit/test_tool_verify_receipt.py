@@ -109,7 +109,7 @@ class TestVerifiedReceipt:
             text = fh.read()
         m = tool_verify._STAMP_RE.search(text)
         assert m and m.groups() == (src_hash, "2704.1.23", "2026-07-11")
-        assert "1 covered / 1 skipped(reason) / 1 pending" in text
+        assert "1 covered / 0 refusals-only / 1 skipped(reason) / 1 pending" in text
         assert "| appearance_set | covered |" in text
         assert "| doc_open | skipped: opens cloud files |" in text
         assert "| model_loft | PENDING (no step yet) |" in text

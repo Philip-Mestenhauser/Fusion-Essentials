@@ -152,6 +152,17 @@ def _corner(curve):
     return (round(curve.boundingBox.minPoint.x, 6), round(curve.boundingBox.minPoint.y, 6))
 
 
+def _stale_item_at(monkeypatch, collection, index):
+    """Make collection.item(index) RAISE - the stale entity proxy that yields no token."""
+    intact = collection.item
+
+    def item(i):
+        if i == index:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return intact(i)
+    monkeypatch.setattr(collection, "item", item)
+
+
 class TestGuards:
     def test_no_active_design_is_a_clean_error(self, mod, sketches):
         assert_no_active_design(mod, mod.move_handler, entities="line:0", dx=10)
@@ -288,7 +299,7 @@ class TestMoveIsJudgedByCoordinates:
 
 
 class TestCopy:
-    def test_copy_returns_the_new_curve_refs_and_the_renumbering_warning(self, mod, sketches):
+    def test_copy_returns_the_new_curve_refs_and_the_append_note(self, mod, sketches):
         plate, _ = sketches
         calls = []
         plate.copy = _copier(calls, plate, made=[_boxed("L2", 9.0, 0.0)], extra_points=2)
@@ -297,7 +308,9 @@ class TestCopy:
         assert out["curve_count_before"] == 2 and out["curve_count_after"] == 3
         # the returned collection carries the copied endpoints too - measured 3 for one line
         assert out["returned_entity_count"] == 3
-        assert "RENUMBERS" in out["note"]
+        # an added curve APPENDS at the end of its kind's collection, so the ids in use keep their
+        # entities; a note claiming a renumber sends the caller re-reading ids that never moved
+        assert "APPENDS" in out["note"] and "RENUMBER" not in out["note"].upper()
 
     def test_a_same_sketch_copy_uses_the_two_argument_form(self, mod, sketches):
         plate, _ = sketches
@@ -401,6 +414,34 @@ class TestCopyRefsCrossTheProxySeam:
         out = payload(mod.copy_handler(entities="line:0", dx=10))
         assert out["new_curves"] == ["line:2"] and out["new_curves_complete"] is False
         assert "2 curve(s) landed" in out["note"] and "only 1 could be identified" in out["note"]
+
+
+class TestCurveRefIndexAlignment:
+    """'<type>:<index>' is the ref the whole tool trades in - _common.resolve_entity_ref reads it
+    back with coll.item(index) - so a curve the map cannot read must burn its index, not renumber
+    the ones after it onto entities they do not name."""
+
+    def test_an_unreadable_curve_leaves_the_later_refs_at_their_own_index(self, mod, sketches,
+                                                                          monkeypatch):
+        plate, _ = sketches
+        tail = _boxed("L2", 9.0, 0.0)
+        _lines(plate)._items.append(tail)
+        plate.sketchCurves._items.append(tail)
+        _stale_item_at(monkeypatch, _lines(plate), 1)
+        refs = mod._curve_ref_by_token(plate)
+        assert refs["L2"] == "line:2"                 # NOT line:1 - index 1 belongs to the bad curve
+        assert refs == {"L0": "line:0", "L2": "line:2"}
+
+    def test_the_copy_payload_names_the_new_curve_by_its_true_index(self, mod, sketches,
+                                                                     monkeypatch):
+        # the ref reaches the wire through copy's new_curves, where a renumbered index sends the
+        # caller's next sketch_move at the wrong line
+        plate, _ = sketches
+        landed = _boxed("L2", 9.0, 0.0)
+        plate.copy = _copier([], plate, made=[landed])
+        _stale_item_at(monkeypatch, _lines(plate), 1)
+        out = payload(mod.copy_handler(entities="line:0", dx=10))
+        assert out["new_curves"] == ["line:2"] and "new_curves_complete" not in out
 
 
 class TestPostconditionWiring:

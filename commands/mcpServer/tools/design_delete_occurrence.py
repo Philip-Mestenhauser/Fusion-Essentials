@@ -28,10 +28,8 @@ def _joint_names(occ):
     """Names of the joints that affect this occurrence (empty if none/unreadable). Deleting the
     occurrence removes these, so we name them in the result rather than dropping them silently."""
     out = []
-    coll = safe(lambda: occ.joints)
-    n = safe(lambda: coll.count, 0) or 0
-    for i in range(n):
-        nm = safe(lambda i=i: coll.item(i).name)
+    for j in _common.iter_collection(safe(lambda: occ.joints)):
+        nm = safe(lambda j=j: j.name)
         if nm:
             out.append(nm)
     return out

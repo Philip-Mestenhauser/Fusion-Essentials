@@ -41,10 +41,9 @@ def _count_reversed(bodies):
     reversed_ct = 0
     for b in bodies:
         faces = safe(lambda b=b: b.faces)
-        n = int(safe(lambda: faces.count, 0) or 0) if faces else 0
-        for i in range(n):
-            total += 1
-            if bool(safe(lambda i=i, faces=faces: faces.item(i).isParamReversed)):
+        total += int(safe(lambda: faces.count, 0) or 0) if faces else 0
+        for f in _common.iter_collection(faces):
+            if bool(safe(lambda f=f: f.isParamReversed)):
                 reversed_ct += 1
     return total, reversed_ct
 

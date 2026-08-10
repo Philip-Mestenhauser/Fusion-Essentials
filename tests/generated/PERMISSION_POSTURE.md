@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 183  |  read: 28  |  write: 138  |  destructive: 16  |  script-hatch: 1
+**Tools:** 183  |  read: 27  |  write: 139  |  destructive: 16  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -21,7 +21,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (28)
+### read - safe to auto-allow (27)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
@@ -48,11 +48,10 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__sys_get_preferences`
 - `mcp__fusion-essentials__sys_get_selection`
 - `mcp__fusion-essentials__view_list_workspaces`
-- `mcp__fusion-essentials__view_screenshot`
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (138)
+### write - ask (139)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -189,6 +188,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__surface_untrim`
 - `mcp__fusion-essentials__sys_reload_addin`
 - `mcp__fusion-essentials__sys_request_selection`
+- `mcp__fusion-essentials__view_screenshot`
 - `mcp__fusion-essentials__view_section`
 - `mcp__fusion-essentials__view_set`
 - `mcp__fusion-essentials__view_switch_workspace`
@@ -249,7 +249,6 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__sys_get_preferences",
       "mcp__fusion-essentials__sys_get_selection",
       "mcp__fusion-essentials__view_list_workspaces",
-      "mcp__fusion-essentials__view_screenshot",
       "mcp__fusion-essentials__view_screenshot_multi",
       "mcp__fusion-essentials__workspace_orient"
     ],
@@ -389,6 +388,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__surface_untrim",
       "mcp__fusion-essentials__sys_reload_addin",
       "mcp__fusion-essentials__sys_request_selection",
+      "mcp__fusion-essentials__view_screenshot",
       "mcp__fusion-essentials__view_section",
       "mcp__fusion-essentials__view_set",
       "mcp__fusion-essentials__view_switch_workspace"
@@ -449,7 +449,6 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__sys_get_preferences",
       "mcp__fusion-essentials__sys_get_selection",
       "mcp__fusion-essentials__view_list_workspaces",
-      "mcp__fusion-essentials__view_screenshot",
       "mcp__fusion-essentials__view_screenshot_multi",
       "mcp__fusion-essentials__workspace_orient",
       "mcp__fusion-essentials__appearance_set",
@@ -569,6 +568,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__surface_untrim",
       "mcp__fusion-essentials__sys_reload_addin",
       "mcp__fusion-essentials__sys_request_selection",
+      "mcp__fusion-essentials__view_screenshot",
       "mcp__fusion-essentials__view_section",
       "mcp__fusion-essentials__view_set",
       "mcp__fusion-essentials__view_switch_workspace"

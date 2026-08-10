@@ -55,9 +55,15 @@ _DRIVER = ("a rendering driver this machine rejects can leave Fusion unrenderabl
            "advertises drivers this machine rejects - the API cannot enumerate the legal subset")
 _TRANSFER = ("it reroutes the cloud upload/download path the whole data_* and doc_* surface runs on")
 
-# Every member measured PRESENT on this install, group by group. A member the census did not see is
-# not published: this table is the read's whole surface AND the write's tier authority, so both
-# tools agree by construction.
+# The app.preferences census behind this table is a dir() walk of every group with each member read
+# once. What its committed record (the live census, in git history) holds is the group list - eleven
+# groups, of which this table addresses ten - plus the three members that RAISE on read and the
+# three that read non-scalar; the full member map stayed in that probe's script output. So the rows
+# below are not backed one-by-one by a committed artifact, and the read does not rely on them being:
+# a member this build does not carry is published as unknown_member (see read_member), never as an
+# unreadable platform member, so a wrong row here can never masquerade as a fact about Fusion. The
+# table is still the read's whole surface AND the write's tier authority, so both tools agree by
+# construction.
 FLAT_GROUPS = (
     ("general", "generalPreferences", (
         Member("isAutomaticVersioningEnabled"),
@@ -103,6 +109,9 @@ FLAT_GROUPS = (
         Member("degreeDisplayFormat", enum=_family("DegreeDisplayFormats")),
         Member("materialDisplayUnit", enum=_family("MaterialDisplayUnits")),
     )),
+    # Measured raising members on this build: autoThrottleEffects, degradedSelectionDisplayStyle and
+    # isLimitEffectsDuringNavigation all raise RuntimeError on READ, which is why every member read
+    # here goes through safe() and reports unreadable rather than a value.
     ("graphics", "graphicsPreferences", (
         Member("graphicsPreset", enum=_family("GraphicsPresets")),
         Member("minimumFramesPerSecond"),
@@ -243,59 +252,109 @@ def enum_member_name(enum_cls, value):
 
 def collection_items(prefs, key):
     """[(item name, item object)] for a COLLECTION group - the ONE walk both tools address an item
-    through (the read publishes every item; the write resolves the one it was given)."""
+    through (the read publishes every item; the write resolves the one it was given).
+
+    The name must be a non-empty STR: it becomes a JSON object KEY in the payload and part of the
+    '<group>.<product>.<member>' address the write resolves, and json.dumps rejects a key that is
+    not a str/int/float/bool/None - one object-valued name would sink the whole read."""
     coll = safe(lambda: getattr(prefs, GROUP_ATTR[key]))
     out = []
     if coll is None:
         return out
     for it in iter_collection(coll):
         name = safe(lambda it=it: it.name)
-        if name:
+        if isinstance(name, str) and name:
             out.append((name, it))
     return out
 
 
+_SCALARS = (bool, int, float, str)
+
+
+def _wire_value(value):
+    """(published value, non_scalar) for one member read. The payload is JSON-encoded whole, so an
+    OBJECT-valued member would raise inside ok() and sink the read of every other member with it: a
+    non-scalar is published by its .name, or by its type name when it reports none."""
+    if value is None or isinstance(value, _SCALARS):
+        return value, False
+    name = safe(lambda: value.name)
+    return (name if isinstance(name, str) and name else type(value).__name__), True
+
+
+def _carries(group_obj, member_name):
+    """True when this build's group object CARRIES the member, False when it does not, None when the
+    question could not be asked.
+
+    Read off dir(): it answers PRESENCE without invoking the getter, so asking costs nothing on a
+    member that raises, and it is the same walk the census behind the table above was taken with -
+    one reader, one notion of 'present'. (safe(hasattr) routes to the same answer on this build for
+    all three cases - present-and-readable, present-and-raising, absent - so this is a choice of
+    reader, not the thing that makes the split work. What makes the split work is that the raw READ
+    already happened above: this is only asked once that read failed.)"""
+    names = safe(lambda: dir(group_obj))
+    if not names:
+        return None
+    return member_name in names
+
+
 def read_member(group_obj, member):
-    """One member as {value, tier}, plus 'enum' (the decoded member name) and 'unreadable' when they
-    apply. An unreadable member reports null - never a guessed False/0, which would publish a
-    measurement the read never took."""
+    """One member as {value, tier}, plus 'enum' (the decoded member name), 'unreadable' /
+    'unknown_member' and 'non_scalar' when they apply. A member that did not read reports null -
+    never a guessed False/0, which would publish a measurement the read never took - and a member
+    this build does not carry is flagged separately, so a typo in the table above is never published
+    as a platform member that happens to raise."""
     raw = safe(lambda: getattr(group_obj, member.name), _UNREAD)
     if raw is _UNREAD:
+        if _carries(group_obj, member.name) is False:
+            return {"value": None, "tier": member.tier, "unknown_member": True}
         return {"value": None, "tier": member.tier, "unreadable": True}
-    value = safe(lambda: raw.name) if (member.by_name and raw is not None) else raw
+    read = raw
+    if member.by_name and raw is not None:
+        # the declared shape: the member holds an object and its .name IS the published value. An
+        # object that reports no name falls through to _wire_value, which flags what it publishes.
+        named = safe(lambda: raw.name)
+        read = named if isinstance(named, str) and named else raw
+    value, non_scalar = _wire_value(read)
     rec = {"value": value, "tier": member.tier}
+    if non_scalar:
+        rec["non_scalar"] = True
     decoded = enum_member_name(member.enum, value)
     if decoded:
         rec["enum"] = decoded
     return rec
 
 
-def _read_into(holder, key, wanted, unreadable, path):
-    """{member: record} for one holder object, appending every unreadable member's full path."""
+def _read_into(holder, key, wanted, unreadable, path, unknown=None):
+    """{member: record} for one holder object, appending every unreadable member's full path - and
+    every member this build does not carry to `unknown`, which is a defect in the table above, not a
+    fact about the platform."""
     out = {}
     for name in wanted:
         rec = read_member(holder, GROUP_MEMBERS[key][name])
-        if rec.get("unreadable"):
+        if rec.get("unknown_member"):
+            if unknown is not None:
+                unknown.append(f"{path}.{name}")
+        elif rec.get("unreadable"):
             unreadable.append(f"{path}.{name}")
         out[name] = rec
     return out
 
 
-def _slice_group(prefs, key, wanted, unreadable):
+def _slice_group(prefs, key, wanted, unreadable, unknown=None):
     """One FLAT group's members as {member: record}."""
     group_obj = safe(lambda: getattr(prefs, GROUP_ATTR[key]))
     if group_obj is None:
         return None
-    return _read_into(group_obj, key, wanted, unreadable, key)
+    return _read_into(group_obj, key, wanted, unreadable, key, unknown)
 
 
-def _slice_collection(prefs, key, wanted, unreadable):
+def _slice_collection(prefs, key, wanted, unreadable, unknown=None):
     """One COLLECTION group as {item name: {member: record}} - one level deeper than a flat group,
     because the item name is part of every member's address."""
     items = collection_items(prefs, key)
     if not items:
         return None
-    return {name: _read_into(obj, key, wanted, unreadable, f"{key}.{name}")
+    return {name: _read_into(obj, key, wanted, unreadable, f"{key}.{name}", unknown)
             for name, obj in items}
 
 
@@ -319,7 +378,7 @@ def handler(include=None) -> dict:
     if bad:
         return error(f"Unknown include {bad}. Valid: {', '.join(GROUP_KEYS)}.")
 
-    unreadable = []
+    unreadable, unknown = [], []
     groups = {}
     for key in GROUP_KEYS:
         wanted = ([m.name for m in GROUP_MEMBERS[key].values()] if key in inc
@@ -327,7 +386,7 @@ def handler(include=None) -> dict:
         if not wanted:
             continue
         slicer = _slice_collection if key in COLLECTION_KEYS else _slice_group
-        payload = slicer(prefs, key, wanted, unreadable)
+        payload = slicer(prefs, key, wanted, unreadable, unknown)
         if payload is not None:
             groups[key] = payload
 
@@ -337,6 +396,10 @@ def handler(include=None) -> dict:
         # to hide. Its value is null above.
         out["unreadable"] = unreadable
         out["unreadable_count"] = len(unreadable)
+    if unknown:
+        # A DIFFERENT thing from unreadable: this build's object does not carry the member at all,
+        # so the row asking for it is wrong. Published apart so it is never read as a platform fact.
+        out["unknown_members"] = unknown
 
     remaining = [k for k in GROUP_KEYS if k not in inc]
     if remaining:
@@ -356,7 +419,8 @@ TOOL_DESCRIPTION = (
     "time (see the 'include' property for the group names); 'products' and 'units_defaults' nest "
     "by product name. Every key carries its tier - 'W' means sys_set_preferences can set it, 'R' "
     "means that tool refuses it and says why. A member whose getter raises on this build reports "
-    "value null with unreadable true, never a guessed 0/false.\n"
+    "value null with unreadable true, never a guessed 0/false; a member this build does not carry "
+    "at all reports unknown_member true instead - a different thing from a member that raises.\n"
     + _outputs.produces_block(RETURNS)
 )
 

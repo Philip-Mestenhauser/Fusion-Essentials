@@ -41,7 +41,9 @@ _EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "
 
 def _resolve_target(design, target):
     """Resolve 'target' (occurrence name/fullPathName, or component name, or body name, or
-    '' = whole design) to a list of (occurrence_or_None, body) to scan.
+    '' = whole design) to (pairs, label, error), where pairs is a list of (occurrence_or_None, body)
+    to scan. `error` is set only for a REFUSAL the caller must see (an ambiguous name and its
+    candidates); a plain miss returns no error, leaving the caller its own target vocabulary.
 
     DELIBERATE AGGREGATION (unlike OccurrenceRef, which refuses an ambiguous name): a 'target' that
     matches MULTIPLE occurrences - e.g. a component name shared by every instance of a pattern, like
@@ -55,7 +57,8 @@ def _resolve_target(design, target):
     its fullPathName, the same key design_get(include=['tree'])/assembly_get emit) plus root-level bodies. This
     keeps find_geometry's reach consistent with the self-heal path (_inputs._refind_by_locator), which
     also scans allOccurrences - otherwise a deep occurrence resolves on re-find but not on the initial
-    query."""
+    query. A BODY name reaches just as far: it resolves through the shared body resolver, which walks
+    every occurrence and every component's meshes, not only the root's bodies."""
     root = design.rootComponent
     name = (target or "").strip()
     all_occs = safe(lambda: list(root.allOccurrences)) or []
@@ -68,7 +71,7 @@ def _resolve_target(design, target):
         for o in all_occs:
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
-        return pairs, "whole design"
+        return pairs, "whole design", None
     # by occurrence fullPathName (unambiguous), name, or component name - recursively.
     matched = [o for o in all_occs
                if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
@@ -90,12 +93,25 @@ def _resolve_target(design, target):
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
     if pairs:
-        return pairs, f"occurrence/component '{name}'"
-    # by body name on root
-    b = safe(lambda: root.bRepBodies.itemByName(name))
-    if b:
-        return [(None, b)], f"body '{name}'"
-    return [], None
+        return pairs, f"occurrence/component '{name}'", None
+    # By BODY name - the shared ambiguity-refusing resolver (_inputs._resolve_any_body, the same one
+    # design_export's target resolves through), so a body inside ANY component resolves, the qualified
+    # '<occurrence-or-component>:<body>' form picks one instance, and a name several components answer
+    # to is REFUSED with those candidates instead of first-matched.
+    body, body_err = _inputs._resolve_any_body("target", name)
+    if body is not None:
+        if _inputs._is_mesh(body):
+            return [], None, (f"Target '{name}' is a MESH body - find_geometry scans BRep "
+                              "faces/edges/vertices, which a mesh has none of. Use mesh_get.")
+        # Label the body that RESOLVED, not the string asked for, in the qualified form that resolves
+        # back: a bare or mis-cased name then reads back as the exact body it reached.
+        return [(None, body)], f"body '{_inputs.qualified_body_name(body)}'", None
+    # Every REFUSAL the resolver raised carries a fix path the caller needs (which candidates to
+    # choose between, what the named scope actually holds) - pass it through. Only its plain miss is
+    # replaced below, by this tool's wider target vocabulary.
+    if body_err and _inputs.BODY_MISS not in body_err:
+        return [], None, body_err
+    return [], None, None
 
 
 def _dist(a, b):
@@ -166,10 +182,13 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     if not design:
         return error("No active design (open or create a document first).")
 
-    pairs, target_label = _resolve_target(design, target)
+    pairs, target_label, resolve_err = _resolve_target(design, target)
     if not pairs:
-        return error(f"Could not resolve target '{target}'. Use an occurrence/component name, a "
-    "body name, or '' for the whole design (see assembly_get / design_get(include=['tree'])).")
+        return error(resolve_err or
+                     f"Could not resolve target '{target}'. Use an occurrence/component name, a body "
+                     "name (bare, or '<occurrence-or-component>:<body>' when several components hold "
+                     "that name), or '' for the whole design (see assembly_get / "
+                     "design_get(include=['tree'])).")
 
     knd = (kind or "").strip().lower()
     want_faces = (not knd) or knd in _FACE_KINDS
@@ -242,7 +261,9 @@ TOOL_DESCRIPTION = (
     "normal, linear-edge direction). 'target' is an "
     "occurrence/component/body name ('' = whole design); a name matching several occurrences (e.g. "
     "every instance of a patterned component) scans all of them and returns candidates from each - by "
-    "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. 'kind' "
+    "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. A body "
+    "inside a component resolves by its own name; a name several components hold is refused naming each "
+    "as '<occurrence-or-component>:<body>', the form that picks one. 'kind' "
     "filters by geometry type; 'radius' keeps matching round geometry; 'nearest_to'=[x,y,z] sorts by "
     "distance. Handles are short-lived - use them in the next call(s); if one is rejected as stale, "
     "re-run find_geometry for a fresh one.\n"

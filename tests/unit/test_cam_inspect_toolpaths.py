@@ -304,6 +304,26 @@ class TestRowCap:
         assert out["measured"]["not_valid_truncated"] is False
         assert "capped at" not in out["note"]
 
+    def test_max_results_cannot_lift_the_ceiling(self, wire):
+        # Every row crosses the wire, so the request is CLAMPED - a caller asking for 10000 rows
+        # still gets at most _ROWS_MAX, and the truncation is flagged rather than silently obeyed.
+        wire(_cam(self._stale_document(mod._ROWS_MAX + 5), verdict=False))
+        out = _payload(mod.handler(max_results=10000))
+        assert len(out["measured"]["not_valid"]) == mod._ROWS_MAX
+        assert out["measured"]["not_valid_truncated"] is True
+        assert out["measured"]["states"]["out_of_date"] == mod._ROWS_MAX + 5   # the tally is whole
+
+    def test_a_non_numeric_max_results_falls_back_to_the_default(self, wire):
+        # max_results arrives off the wire; a bare int() on it RAISES instead of answering.
+        wire(_cam(self._stale_document(30), verdict=False))
+        out = _payload(mod.handler(max_results="lots"))
+        assert len(out["measured"]["not_valid"]) == mod._ROWS_CAP
+
+    def test_a_negative_max_results_still_returns_one_row(self, wire):
+        wire(_cam(self._stale_document(3), verdict=False))
+        out = _payload(mod.handler(max_results=-5))
+        assert len(out["measured"]["not_valid"]) == 1
+
 
 # ── guards ──────────────────────────────────────────────────────────────────────────────────────────
 

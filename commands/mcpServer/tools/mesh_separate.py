@@ -41,8 +41,8 @@ def _mesh_names(comp):
     if n is None:
         return None
     names = []
-    for i in range(n):
-        nm = safe(lambda i=i: coll.item(i).name)
+    for mb in _common.iter_collection(coll):
+        nm = safe(lambda mb=mb: mb.name)
         if nm is not None:
             names.append(nm)
     return names

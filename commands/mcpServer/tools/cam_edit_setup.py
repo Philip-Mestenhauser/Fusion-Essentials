@@ -12,7 +12,10 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, find_setup, expression_error
+# The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
+# so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
+from ._cam_common import (get_cam, find_setup, expression_error, machine_catalog, machine_label,
+                          resolve_machine)
 from . import _inputs
 # Reuse the operation editor's parameter-parsing engine (single source of truth for {name:expr} / string).
 from .cam_edit_operation import _parse_parameters
@@ -47,185 +50,24 @@ _WCS_BINDINGS = {
 _WCS_HANDLE = _inputs.GeometryHandle("wcs_handle", require="any")
 _WCS_JO = _inputs.JointOriginRef("wcs_jo")
 
-# Non-network machine library locations searched for a machine by vendor/model (Fusion360 = the
-# bundled sample machines; Local = the user's saved ones). The cloud/network locations are skipped so
-# a headless assignment never blocks on a fetch.
-_MACHINE_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
-
 
 def _object_collection():
     return adsk.core.ObjectCollection.create()
 
 
-def _machine_label(m):
-    """Readable machine label: .description, else 'vendor model'. adsk.cam.Machine has no .name."""
-    if not m:
-        return None
-    desc = safe(lambda: m.description)
-    if desc:
-        return desc
-    label = ((safe(lambda: m.vendor) or "") + " " + (safe(lambda: m.model) or "")).strip()
-    return label or "(unnamed machine)"
-
-
-def _machine_ident(m):
-    """(label, vendor, model) for a Machine - label is the readable name (description or 'vendor model')."""
-    return _machine_label(m), (safe(lambda: m.vendor) or ""), (safe(lambda: m.model) or "")
-
-
-def _query_machines(lib, vendor, model):
-    """Run the machine-library query for (vendor, model) across the Local + bundled Fusion360 locations,
-    deduped by label. Returns a list of (machine, label, vendor, model); the FIRST location that yields
-    any match wins (Local before Fusion360)."""
-    found, labels = [], set()
-    for loc_name in _MACHINE_LOCATIONS:
-        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
-        if loc is None:
-            continue
-        try:
-            matches = lib.createQuery(loc, vendor, model).execute() or []
-        except Exception:
-            continue
-        for m in matches:
-            label, v, mo = _machine_ident(m)
-            if label in labels:       # dedupe identical machines that appear in more than one location
-                continue
-            labels.add(label)
-            found.append((m, label, v, mo))
-        if found:
-            break                     # prefer the first location that yields any match
-    return found
-
-
-# Machine.capabilities flags -> the 'kind' vocabulary (the bundled library is DOMINATED by
-# additive printers, so an unfiltered read floods - machine_type narrows to the relevant kind).
-_MACHINE_KINDS = {"milling": "isMillingSupported", "turning": "isTurningSupported",
-                  "cutting": "isCuttingSupported", "additive": "isAdditiveSupported"}
-
-
 def read_machines(vendor: str = "", machine_type: str = "", max_results: int = 100):
-    """The machine CATALOG the 'machine' input resolves from: every machine in the Local +
-    Fusion360 locations (the same two _resolve_machine searches), filtered by vendor and/or
-    machine_type. Read-only; cam_get(include=['machines']) is the wire surface."""
-    mt = (machine_type or "").strip().lower()
-    if mt and mt not in _MACHINE_KINDS:
-        return error(f"Unknown machine_type '{machine_type}'. Valid: "
-                     f"{', '.join(sorted(_MACHINE_KINDS))}.")
-    try:
-        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
-    except Exception as e:
-        return error(f"Could not access the machine library: {e}")
-    rows, total = [], 0
-    for loc_name in _MACHINE_LOCATIONS:
-        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
-        if loc is None:
-            continue
-        loc_label = loc_name.replace("LibraryLocation", "").lower()   # 'local' / 'fusion360'
-        try:
-            matches = lib.createQuery(loc, vendor or "", "").execute() or []
-        except Exception:
-            continue
-        for m in matches:
-            caps = safe(lambda m=m: m.capabilities)
-            kinds = [k for k, attr in sorted(_MACHINE_KINDS.items())
-                     if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
-            if mt and mt not in kinds:
-                continue
-            total += 1
-            if len(rows) >= max_results:
-                continue
-            label, v, mo = _machine_ident(m)
-            rows.append({"name": label, "vendor": v, "model": mo, "location": loc_label,
-                         "kind": kinds,
-                         "simulation_ready": bool(safe(lambda m=m: m.hasSimulationModel, False))})
+    """The wire wrapper over _cam_common.machine_catalog: every machine in the Local + Fusion360
+    locations, filtered by vendor and/or machine_type. Read-only; cam_get(include=['machines']) is
+    the wire surface."""
+    rows, truncated, err = machine_catalog(vendor, machine_type, max_results)
+    if err:
+        return error(err)
     return ok({
-        "machines": rows, "count": len(rows), "truncated": total > len(rows),
+        "machines": rows, "count": len(rows), "truncated": truncated,
         "note": ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); "
                  "machine_type='milling' narrows past the additive printers. The API refuses "
                  "assigning any simulation_ready machine - machine_strip_simulation=true "
                  "assigns it without its simulation model (posting/kinematics unaffected).")})
-
-
-def _exact_machine(cands, machine, vendor, model):
-    """Exact-match, MOST-SPECIFIC first: a unique full-LABEL match wins over a unique 'vendor model'
-    match, which wins over a unique model match. Prioritizing the label is what makes same-model
-    variants selectable - a Haas library ships three machines that all report vendor|model 'HAAS|VF-2'
-    and differ ONLY by description ('Haas VF-2', 'Haas VF-2 with TRT100', ...), so matching the model
-    alone can't pick one, but the exact description can. Returns the single candidate at the first
-    priority yielding exactly one hit, else None (still ambiguous)."""
-    ml = (model or "").strip().lower()
-    ven = (vendor or "").strip().lower()
-    full = (machine or "").strip().lower()
-
-    def _unique(pred):
-        hits, seen = [], set()
-        for tup in cands:
-            _m, label, v, mo = tup
-            if pred(label, v, mo):
-                key = (label or "").lower()
-                if key not in seen:
-                    seen.add(key)
-                    hits.append(tup)
-        return hits[0] if len(hits) == 1 else None
-
-    return (_unique(lambda label, v, mo: (label or "").lower() == full)                       # label
-            or _unique(lambda label, v, mo: ((v or "") + " " + (mo or "")).strip().lower() == full)  # vendor model
-            or _unique(lambda label, v, mo: bool(ml) and (mo or "").lower() == ml             # model (+vendor)
-                       and (not ven or (v or "").lower() == ven)))
-
-
-def _resolve_machine(machine):
-    """Resolve a 'machine' string (vendor|model, vendor/model, a bare model, or a full description) to a
-    single Machine. Returns (machine, label, None), or (None, None, error) when nothing matches or the
-    match is ambiguous - it refuses to guess. Exact match (LABEL first) beats a shared prefix."""
-    machine = (machine or "").strip()
-    sep = "|" if "|" in machine else ("/" if "/" in machine else "")
-    if sep:
-        vendor, model = (p.strip() for p in machine.split(sep, 1))
-    else:
-        vendor, model = "", machine
-    try:
-        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
-    except Exception as e:
-        return None, None, f"Could not access the machine library: {e}"
-
-    cands = _query_machines(lib, vendor, model)
-    # WIDEN when the model as given matches nothing: the library query prefix-matches the MODEL field,
-    # but a variant's distinguishing text ('Haas VF-2 with TRT100') lives in its DESCRIPTION, and callers
-    # pass the label they SEE ('Haas VF-2', 'Haas|Haas VF-2'). Recover a (vendor, broad-model-token) to
-    # fetch the candidate POOL, then LABEL-match it below.
-    if not cands:
-        v2, broad = vendor, model
-        if vendor and model.lower().startswith(vendor.lower() + " "):
-            broad = model[len(vendor):].strip()               # 'Haas|Haas VF-2' -> model 'VF-2'
-        elif not vendor and " " in machine:
-            v2, broad = machine.split(" ", 1)                 # bare 'Haas VF-2...' -> vendor 'Haas'
-        broad = broad.split(" ", 1)[0].strip() if broad else broad   # first model token ('VF-2')
-        v2 = v2.strip()
-        if (v2, broad) != (vendor, model) and (v2 or broad):
-            widened = _query_machines(lib, v2, broad)
-            if widened:
-                cands, vendor, model = widened, v2, broad
-
-    if not cands:
-        return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') in the "
-                            "Local or Fusion360 machine libraries. Use the machine name (its description) "
-                            "you see in the Manufacture machine library.")
-    # EXACT match wins BEFORE refusing ambiguity (the house rule).
-    exact = _exact_machine(cands, machine, vendor, model)
-    if exact is not None:
-        return exact[0], exact[1], None
-    if len(cands) > 1:
-        # List the distinct LABELS (descriptions) - the selectable key, since same-model variants share
-        # vendor|model. The agent passes one of these exact names back to pick a specific variant.
-        labels, seen = [], set()
-        for (_m, lab, _v, _mo) in cands:
-            if lab and lab.lower() not in seen:
-                seen.add(lab.lower())
-                labels.append(lab)
-        return None, None, (f"Ambiguous machine '{machine}' - {len(labels)} matches: "
-                            f"{', '.join(labels[:8])}. Pass one of these exact names.")
-    return cands[0][0], cands[0][1], None
 
 
 def _resolve_bodies(names):
@@ -350,7 +192,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
     resolved_machine = None
     if want_machine:
-        m_obj, m_label, m_err = _resolve_machine(want_machine)
+        m_obj, m_label, m_err = resolve_machine(want_machine)
         if m_err:
             return error(m_err)
         resolved_machine = (m_obj, m_label)
@@ -452,7 +294,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                     "machine from cam_get(include=['machines']).")
             return error(f"Could not assign machine '{want_machine}' to setup '{setup}': {e}.{hint}")
         # Read Setup.machine back to CONFIRM the assignment took - a swallowed no-op must not report ok.
-        applied = _machine_label(safe(lambda: target.machine))
+        applied = machine_label(safe(lambda: target.machine))
         if not applied or applied != m_label:
             return error(f"Machine assignment did not take on setup '{setup}': set '{m_label}' but the "
                          f"setup now reports '{applied}'.")

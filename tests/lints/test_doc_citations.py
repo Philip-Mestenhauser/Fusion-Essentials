@@ -33,15 +33,23 @@ _DOCS = [
     REPO / "tests" / "CLAUDE.md",
     REPO / "tests" / "README.md",
 ]
-# a file citation: an optional path prefix then a basename ending in .py or .md.
-_FILE = re.compile(r"[\w./\\-]*[\w-]+\.(?:py|md)\b")
+# a file citation: an optional path prefix then a basename ending in .py, .md, or .log (a probe
+# log is EVIDENCE - a comment citing one that was never committed is an unbacked measurement
+# claim, the exact rot this lint exists for).
+_FILE = re.compile(r"[\w./\\-]*[\w-]+\.(?:py|md|log)\b")
 _INLINE_CODE = re.compile(r"`([^`]+)`")
+
+
+# Log files the RUNNING add-in writes (they exist at runtime, never in the repo) - citing one is
+# a pointer to live output, not to committed evidence.
+_RUNTIME_LOGS = {"futil.log", "app.log"}
 
 
 def _present():
     counts = Counter()
-    for ext in ("*.py", "*.md"):
+    for ext in ("*.py", "*.md", "*.log"):
         counts.update(p.name for p in REPO.rglob(ext))
+    counts.update(_RUNTIME_LOGS)
     return counts
 
 

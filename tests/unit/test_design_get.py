@@ -1,15 +1,11 @@
 """Tests for `design_get` - the first RICH READ (one tool, default slice + include= deeper slices).
 
-CANONICAL EXAMPLE for a rich-read tool (see tests/CLAUDE.md "The canonical pattern"). The pattern,
-and the one rule that makes it leak-free: a `@pytest.fixture` stubs the tool's `_slice_*` seams with
-`monkeypatch.setattr` (pytest undoes every patch after the test - no module state is left poked), then
-each test asserts the ROUTER's composition. The slices DELEGATE to source handlers; that cross-tool
-wiring is proven by live validation, not by re-mocking each handler's internals. New rich reads
-(cam_get, doc_get, ...) copy this shape.
+The rich-read shape tests/CLAUDE.md names as the canonical one to copy.
 
 Pinned: the DEFAULT call returns only the orientation slice (mode summary + health + tree_summary) and
 NONE of the heavy slices; each include= adds exactly its slice; the default note advertises the
-remaining slices; unknown include errors; no-active-design guards.
+remaining slices; unknown include errors; no-active-design guards. What each slice reads out of Fusion
+is proven by live validation, not re-mocked here.
 """
 
 import json
@@ -292,6 +288,22 @@ class TestTimelineSlice:
         out, err = dg._slice_timeline(d, include_suppressed=True, group="")
         assert err is None and out["count"] == 2 and out["marker_position"] == 2
         assert [o["name"] for o in out["timeline"]] == ["A", "B"]
+
+    def test_uncountable_timeline_refuses_instead_of_reading_empty(self):
+        # timeline.count raising means the timeline could not be read AT ALL. Answering with an
+        # empty list + count 0 would read as "this design has no history" - a false answer a caller
+        # gates on. The refusal carries the platform's reason.
+        from types import SimpleNamespace
+        class _Uncountable:
+            markerPosition = 0
+            timelineGroups = []
+            @property
+            def count(self): raise RuntimeError("timeline is mid-recompute")
+            def item(self, i): raise AssertionError("must not be reached")
+        out, err = dg._slice_timeline(SimpleNamespace(timeline=_Uncountable()),
+                                      include_suppressed=True, group="")
+        assert out is None and err["isError"] is True
+        assert "mid-recompute" in err["message"]
 
     def test_slice_include_suppressed_false(self):
         d = self._design_with([self._tlobj(0, "Live"), self._tlobj(1, "Hid", suppressed=True)])

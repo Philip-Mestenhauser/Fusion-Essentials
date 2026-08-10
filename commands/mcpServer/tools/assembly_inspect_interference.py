@@ -109,14 +109,10 @@ def handler(include_coincident_faces: bool = False) -> dict:
         return error(f"Interference analysis failed: {e}")
 
     owners = _native_body_owners(occ_list)
-    count = safe(lambda: results.count, 0) or 0
     items = []
     # Aggregate overlap volume per occurrence pair (a pair can produce several interference bodies).
     pair_vol = {}
-    for i in range(count):
-        r = safe(lambda i=i: results.item(i))
-        if r is None:
-            continue
+    for r in _common.iter_collection(results):
         one = _owning_occurrence_name(safe(lambda r=r: r.entityOne), owners)
         two = _owning_occurrence_name(safe(lambda r=r: r.entityTwo), owners)
         vol = safe(lambda r=r: r.interferenceBody.volume) if safe(lambda r=r: r.interferenceBody) else None

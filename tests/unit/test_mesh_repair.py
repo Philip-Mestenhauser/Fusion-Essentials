@@ -24,7 +24,7 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import BRepBody, load_tool, payload, error_message
+from conftest import BRepBody, MeshBody, load_tool, payload, error_message
 
 mr = load_tool("mesh_repair")
 
@@ -41,50 +41,11 @@ class _ValueInput:
         self.real = real
 
 
-class TriangleMesh:
-    def __init__(self, tri, nodes):
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody. `volume` RAISES when the mesh is not closed - an open
-    mesh encloses no volume - so the tool's volume read has to survive that. `dead` models an
-    invalidated wrapper, which raises on every property read."""
-    def __init__(self, name="Scan1", tri=1000, nodes=502, is_closed=False, volume=0.0, token=None,
-                 parent=None):
-        self.name = name
-        self.dead = False
-        self._display = TriangleMesh(tri, nodes)
-        self._is_closed = is_closed
-        self._volume = volume
-        self.entityToken = token or f"MTOK::{name}"
-        self.parentComponent = parent
-
-    def _live(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-
-    @property
-    def displayMesh(self):
-        self._live()
-        return self._display
-
-    @property
-    def isClosed(self):
-        self._live()
-        return self._is_closed
-
-    @isClosed.setter
-    def isClosed(self, value):
-        self._is_closed = value
-
-    @property
-    def volume(self):
-        self._live()
-        if not self._is_closed:
-            raise RuntimeError("3 : the mesh is not closed and encloses no volume")
-        return self._volume
+def _mesh(name="Scan1", tri=1000, nodes=502, is_closed=False, volume=0.0, **kw):
+    """conftest's shared MeshBody with this file's scan defaults: an OPEN 1000-triangle scan, whose
+    volume therefore reads 0.0 at both ends of a repair that leaves it open and turns positive the
+    moment one closes it."""
+    return MeshBody(name=name, tri=tri, nodes=nodes, is_closed=is_closed, volume=volume, **kw)
 
 
 class _Coll:
@@ -261,7 +222,7 @@ class _Design:
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
     """Wire one mesh + a meshRepairFeatures collection into the tool. Returns (mesh, comp, feats,
     base_feature)."""
-    mesh = mesh if mesh is not None else MeshBody()
+    mesh = mesh if mesh is not None else _mesh()
     comp = _Comp(meshes=[mesh])
     mesh.parentComponent = comp
     feats = _RepairFeatures(on_add=on_add, **feat_kw)
@@ -287,8 +248,10 @@ def _grow(mesh, tri=0, nodes=0, close=None):
 
 @pytest.fixture
 def rig(monkeypatch):
-    """A repair that adds 120 triangles / 60 vertices and closes the mesh - the happy path."""
-    mesh = MeshBody(tri=1000, nodes=502, is_closed=False)
+    """A repair that adds 120 triangles / 60 vertices and closes the mesh - the happy path. The
+    body reads 0.0 while it is open and 8 cm3 once the holes are closed, which is what a real
+    close-holes does to the enclosed volume."""
+    mesh = _mesh(tri=1000, nodes=502, is_closed=False, volume=8.0)
     mesh_, comp, feats, bf = _rig(monkeypatch, mesh=mesh,
                                   on_add=_grow(mesh, tri=120, nodes=60, close=True))
     return types.SimpleNamespace(mesh=mesh, comp=comp, feats=feats, base_feature=bf,
@@ -416,8 +379,8 @@ class TestInputGuards:
 
     def test_an_ambiguous_mesh_name_is_refused_with_candidates(self, monkeypatch):
         # two meshes named 'Scan' in two components: the resolver must refuse, never pick the first.
-        mesh_a = MeshBody(name="Scan", token="MTOK::A")
-        mesh_b = MeshBody(name="Scan", token="MTOK::B")
+        mesh_a = _mesh(name="Scan", token="MTOK::A")
+        mesh_b = _mesh(name="Scan", token="MTOK::B")
         comp_a = _Comp("CompA", meshes=[mesh_a])
         comp_b = _Comp("CompB", meshes=[mesh_b])
         mesh_a.parentComponent, mesh_b.parentComponent = comp_a, comp_b
@@ -471,7 +434,7 @@ class TestModeRouting:
         assert getattr(rig.feats.last_input, "targetBaseFeature", None) is None
 
     def test_direct_opens_no_scope_and_leaves_target_base_feature_unset(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502)
+        mesh = _mesh(tri=1000, nodes=502)
         _m, _c, feats, bf = _rig(monkeypatch, mesh=mesh, design_type=0,
                                  on_add=_grow(mesh, tri=50, nodes=25))
         payload(mr.handler(mesh="H", repair_type="one_touch_fix"))
@@ -481,7 +444,7 @@ class TestModeRouting:
     def test_a_none_feature_return_in_a_parametric_design_still_reports_parametric(self, monkeypatch):
         # the repair verifies itself on the MESH, so a null feature is still success - but it is a
         # fact about the RETURN, never evidence the design is non-parametric (this rig is parametric).
-        mesh = MeshBody(tri=1000, nodes=502)
+        mesh = _mesh(tri=1000, nodes=502)
         _rig(monkeypatch, mesh=mesh, none_feature=True, on_add=_grow(mesh, tri=50, nodes=25))
         out = payload(mr.handler(mesh="H", repair_type="stitch_and_remove"))
         assert out["feature"] is None
@@ -490,7 +453,7 @@ class TestModeRouting:
         assert out["repaired"] is True
 
     def test_a_none_feature_return_in_a_direct_design_reports_direct(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502)
+        mesh = _mesh(tri=1000, nodes=502)
         _rig(monkeypatch, mesh=mesh, design_type=0, none_feature=True,
              on_add=_grow(mesh, tri=50, nodes=25))
         out = payload(mr.handler(mesh="H", repair_type="stitch_and_remove"))
@@ -513,12 +476,12 @@ class TestVerification:
         assert "unchanged" in msg and "1000 triangles" in msg
 
     def test_close_holes_that_leaves_an_open_mesh_untouched_is_an_error(self, monkeypatch):
-        _rig(monkeypatch, mesh=MeshBody(is_closed=False))
+        _rig(monkeypatch, mesh=_mesh(is_closed=False))
         assert "unchanged" in error_message(mr.handler(mesh="H", repair_type="close_holes"))
 
     def test_close_holes_on_an_already_watertight_mesh_is_success_with_nothing_to_close(
             self, monkeypatch):
-        _rig(monkeypatch, mesh=MeshBody(is_closed=True, volume=12.0))
+        _rig(monkeypatch, mesh=_mesh(is_closed=True, volume=12.0))
         out = payload(mr.handler(mesh="H", repair_type="close_holes"))
         assert out["changed"] == []
         assert out["watertight"] is True
@@ -528,19 +491,29 @@ class TestVerification:
         # live-measured: one_touch_fix on a clean closed box moves nothing and is right to. A
         # MeshBody exposes no defect count beyond is_closed, so a repair with nothing of its kind
         # to do is reported as measured rather than convicted.
-        _rig(monkeypatch, mesh=MeshBody(is_closed=True, volume=12.0))
+        _rig(monkeypatch, mesh=_mesh(is_closed=True, volume=12.0))
         out = payload(mr.handler(mesh="H", repair_type="one_touch_fix"))
         assert out["changed"] == [] and "found nothing of its kind to fix" in out["note"]
 
     def test_a_hole_closer_that_left_an_open_mesh_untouched_is_an_error(self, monkeypatch):
         # the one defect state a MeshBody DOES expose: an open mesh handed to a hole-closing
         # repair must change something
-        _rig(monkeypatch, mesh=MeshBody(is_closed=False, volume=12.0))
+        _rig(monkeypatch, mesh=_mesh(is_closed=False, volume=12.0))
         msg = error_message(mr.handler(mesh="H", repair_type="one_touch_fix"))
         assert "STILL not watertight" in msg
 
+    def test_a_stitch_that_moves_nothing_on_an_open_mesh_is_reported_not_failed(self, monkeypatch):
+        # only a HOLE-CLOSING repair can be convicted by an open mesh. stitch_and_remove was never
+        # asked to close anything, so its no-op is reported as measured - which is what the wire
+        # description promises.
+        _rig(monkeypatch, mesh=_mesh(is_closed=False, volume=12.0))
+        out = payload(mr.handler(mesh="H", repair_type="stitch_and_remove"))
+        assert out["changed"] == []
+        assert out["watertight"] is False
+        assert "found nothing of its kind to fix" in out["note"]
+
     def test_close_holes_that_moves_the_mesh_but_leaves_it_open_is_partial(self, monkeypatch):
-        mesh = MeshBody(is_closed=False)
+        mesh = _mesh(is_closed=False)
         _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=40, nodes=20, close=False))
         out = payload(mr.handler(mesh="H", repair_type="close_holes"))
         assert out["watertight"] is False
@@ -553,47 +526,65 @@ class TestVerification:
                                  "mesh_body_count": 1}
         assert out["after"] == {"triangle_count": 1120, "vertex_count": 562, "is_closed": True,
                                 "mesh_body_count": 1}
-        assert out["changed"] == ["triangle_count", "vertex_count", "is_closed"]
+        # the enclosed volume joins the signal: 0.0 while open is a READING, not an unreadable
+        # field, so closing the mesh shows up as a volume change and not merely as a flag flip.
+        assert out["changed"] == ["triangle_count", "vertex_count", "is_closed", "volume"]
+        assert out["volume_change"] == pytest.approx(8000.0)   # 8 cm3 -> mm3
         assert out["watertight"] is True
         assert "PARTIAL" not in out["note"]
 
     def test_a_vertex_only_change_still_counts_as_repaired(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502)
+        mesh = _mesh(tri=1000, nodes=502)
         _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, nodes=-2))
         out = payload(mr.handler(mesh="H", repair_type="stitch_and_remove"))
         assert out["changed"] == ["vertex_count"]
 
     def test_a_new_mesh_body_alone_counts_as_repaired(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502)
+        mesh = _mesh(tri=1000, nodes=502)
         mesh_, comp, feats, _bf = _rig(monkeypatch, mesh=mesh)
-        feats._on_add = lambda: comp.meshBodies._items.append(MeshBody(name="Wrap1"))
+        feats._on_add = lambda: comp.meshBodies._items.append(_mesh(name="Wrap1"))
         out = payload(mr.handler(mesh="H", repair_type="wrap"))
         assert out["changed"] == ["mesh_body_count"]
         assert out["after"]["mesh_body_count"] == 2
 
     def test_a_volume_only_change_is_detected_and_reported_in_the_call_units(self, monkeypatch):
         # counts and flags identical, geometry moved: volume is the only signal left.
-        mesh = MeshBody(tri=1000, nodes=502, is_closed=True, volume=8.0)
+        mesh = _mesh(tri=1000, nodes=502, is_closed=True, volume=8.0)
         _rig(monkeypatch, mesh=mesh)
         mesh.parentComponent.features.meshRepairFeatures._on_add = (
-            lambda: setattr(mesh, "_volume", 9.0))
+            lambda: setattr(mesh, "_volume_cm3", 9.0))
         out = payload(mr.handler(mesh="H", repair_type="one_touch_fix", units="mm"))
         assert out["changed"] == ["volume"]
         assert out["volume_change"] == pytest.approx(1000.0)   # 1 cm3 = 1000 mm3
         assert out["units"] == "mm"
 
-    def test_an_open_mesh_reports_no_volume_change_rather_than_a_wrong_one(self, rig):
-        # MeshBody.volume raises on an open mesh, so the before-read is unreadable and the delta
-        # must come back null - never a fabricated zero.
+    def test_a_mesh_that_stays_open_reports_a_real_zero_volume_change(self, monkeypatch):
+        # MeshBody.volume RETURNS 0.0 on a mesh that is not closed, so both ends read a number: the
+        # delta is a measured zero (the geometry moved, the enclosed volume did not appear), and
+        # 'volume' must NOT be listed as changed.
+        mesh = _mesh(is_closed=False, volume=12.0)
+        _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=40, nodes=20, close=False))
+        out = payload(mr.handler(mesh="H", repair_type="close_holes", units="mm"))
+        assert out["watertight"] is False
+        assert out["volume_change"] == 0.0
+        assert "volume" not in out["changed"]
+
+    def test_volume_change_is_null_only_when_the_field_cannot_be_read(self, monkeypatch):
+        # the OTHER meaning of the field: a volume read that RAISES is unreadable and publishes
+        # null - never the 0.0 an open mesh legitimately reports. The counts still read, so the
+        # repair itself is still verified.
+        mesh = _mesh(is_closed=False, volume_readable=False)
+        _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=40, nodes=20, close=True))
         out = payload(mr.handler(mesh="H", repair_type="close_holes"))
         assert out["volume_change"] is None
+        assert out["changed"] == ["triangle_count", "vertex_count", "is_closed"]
 
     def test_an_unreadable_mesh_is_reported_as_unverified(self, monkeypatch):
-        mesh = MeshBody()
+        mesh = _mesh()
         mesh_, comp, feats, _bf = _rig(monkeypatch, mesh=mesh)
 
         def _wipe():
-            mesh.dead = True
+            mesh._dead = True
             comp.dead = True
         feats._on_add = _wipe
         msg = error_message(mr.handler(mesh="H", repair_type="one_touch_fix"))
@@ -664,14 +655,14 @@ class TestGuardsAndFailurePathsBite:
     def test_density_the_api_did_not_take_is_an_error_not_an_echo(self, monkeypatch):
         # The feature's own ModelParameter is the authority. Publishing the REQUEST would report a
         # rebuild at 128 that Fusion actually ran at 64.
-        mesh = MeshBody(tri=1000, nodes=502, is_closed=False)
+        mesh = _mesh(tri=1000, nodes=502, is_closed=False)
         _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=120, nodes=60, close=True),
              feature_density=64)
         msg = error_message(mr.handler(mesh="H", repair_type="rebuild", density=128))
         assert "created with density = 64.0" in msg and "128.0 was requested" in msg
 
     def test_offset_the_api_did_not_take_is_an_error(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502, is_closed=False)
+        mesh = _mesh(tri=1000, nodes=502, is_closed=False)
         _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=120, nodes=60, close=True),
              feature_offset=0.9)
         msg = error_message(mr.handler(mesh="H", repair_type="rebuild",
@@ -679,7 +670,7 @@ class TestGuardsAndFailurePathsBite:
         assert "created with offset = 0.9" in msg and "requested" in msg
 
     def test_an_unreadable_density_is_reported_as_unverified_not_as_the_request(self, monkeypatch):
-        mesh = MeshBody(tri=1000, nodes=502, is_closed=False)
+        mesh = _mesh(tri=1000, nodes=502, is_closed=False)
         _rig(monkeypatch, mesh=mesh, on_add=_grow(mesh, tri=120, nodes=60, close=True),
              none_feature=True)
         out = payload(mr.handler(mesh="H", repair_type="rebuild", density=128))

@@ -583,6 +583,185 @@ class TestPointCurve:
         res = sc.handler(constraint="coincident", sketch_name="S", entity_one="point:0")
         assert res["isError"] is True and "entity_two" in res["message"]
 
+    def test_coincident_onto_a_curve_says_the_point_lands_on_it(self, install):
+        # the API takes (point, circle) happily and puts the point on the RIM; a caller who meant
+        # "centre it" gets a clean ok and wrong geometry, so the success note has to say so - and
+        # name the ref form that expresses the other intent
+        s = _two_line_sketch(); install(s)
+        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+                                  entity_one="point:1", entity_two="circle:0"))
+        assert "ON that curve" in out["note"]
+        assert "'circle:0:center'" in out["note"]
+
+    def test_the_remedy_the_note_offers_matches_the_operand_kind(self, install):
+        # a LINE has no centre - offering ':center' for one sends the caller at a refusal
+        s = _two_line_sketch(); install(s)
+        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+                                  entity_one="point:1", entity_two="line:0"))
+        assert "'line:0:start'" in out["note"] and "':end'" in out["note"]
+        assert ":center" not in out["note"]
+
+    def test_coincident_between_two_points_carries_no_curve_warning(self, install):
+        s = _two_line_sketch(); install(s)
+        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+                                  entity_one="point:0", entity_two="point:1"))
+        assert "ON that curve" not in out["note"]
+
+
+# ── entity-anchored refs (':start/:end/:mid/:center', the sketch_dimension grammar) ──────────
+
+class _AnchoredCircle(FakeCurve):
+    """A circle carrying its own centre SketchPoint - what 'circle:0:center' resolves to."""
+    def __init__(self, name, center):
+        super().__init__(name, "circle")
+        self.centerSketchPoint = center
+
+
+class _AnchoredLine(FakeCurve):
+    def __init__(self, name, start, end):
+        super().__init__(name, "line")
+        self.startSketchPoint = start
+        self.endSketchPoint = end
+
+
+class _AddablePoints(_Coll):
+    """sketchPoints as the 'mid' anchor uses it - that anchor CREATES a point in the sketch, so what
+    it added (and whether a refused call added anything) is readable here."""
+    def __init__(self, items):
+        super().__init__(items)
+        self.added = []
+
+    def add(self, geometry):
+        self.added.append(geometry)
+        pt = FakeCurve(f"MID{len(self.added)}", "point")
+        self._i.append(pt)
+        return pt
+
+
+def _endpoint(name, x, y):
+    pt = FakeCurve(name, "point")
+    pt.geometry = types.SimpleNamespace(x=x, y=y, z=0.0)
+    return pt
+
+
+def _anchored_sketch():
+    """A sketch whose curves carry the endpoint/centre SketchPoints an anchored ref names, and whose
+    point collection records what a 'mid' anchor creates."""
+    s = FakeSketch(
+        "S",
+        lines=[_AnchoredLine("L0", _endpoint("L0S", 0.0, 0.0), _endpoint("L0E", 4.0, 0.0)),
+               FakeCurve("L1", "line")],
+        circles=[_AnchoredCircle("C0", FakeCurve("C0C", "point"))],
+        points=[FakeCurve("P0", "point"), FakeCurve("P1", "point")])
+    s.sketchPoints = _AddablePoints([FakeCurve("P0", "point"), FakeCurve("P1", "point")])
+    return s
+
+
+class TestEntityAnchors:
+    """sketch_constrain reads the SAME ':start/:end/:mid/:center' anchor forms sketch_dimension
+    does (_common.parse_anchor_ref / anchor_point): a point slot handed 'circle:0:center' gets that
+    circle's own centre point, so centring a circle takes no hunt for the right 'point:N'."""
+
+    def test_a_centre_anchored_circle_reaches_coincident_as_the_centre_point(self, install):
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="coincident", sketch_name="S",
+                            entity_one="point:0", entity_two="circle:0:center"))
+        name, args = s.geometricConstraints.calls[0]
+        assert name == "coincident"
+        assert args[1].name == "C0C"          # the CENTRE point, not the circle
+
+    def test_an_anchored_entity_two_carries_no_on_the_curve_note(self, install):
+        # the anchored ref already resolved to a point, so the on-the-rim trap does not apply
+        s = _anchored_sketch(); install(s)
+        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+                                  entity_one="point:0", entity_two="circle:0:center"))
+        assert "ON that curve" not in out["note"]
+        assert out["entity_two"] == "circle:0:center"      # echoed as given, anchor included
+
+    def test_a_line_endpoint_anchor_reaches_the_api(self, install):
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="coincident", sketch_name="S",
+                            entity_one="line:0:end", entity_two="point:1"))
+        _name, args = s.geometricConstraints.calls[0]
+        assert args[0].name == "L0E"
+
+    def test_both_point_slots_of_horizontal_points_take_anchors(self, install):
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="horizontal_points", sketch_name="S",
+                            entity_one="line:0:start", entity_two="circle:0:center"))
+        name, args = s.geometricConstraints.calls[0]
+        assert name == "horizontal_points"
+        assert [a.name for a in args] == ["L0S", "C0C"]
+
+    def test_a_circular_pattern_centres_on_an_anchored_point(self, install):
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="circular_pattern", sketch_name="S",
+                            entities="line:1", entity_one="circle:0:center", quantity=3))
+        _name, args = s.geometricConstraints.calls[0]
+        assert args[0].centerPoint.name == "C0C"
+
+    def test_an_anchor_on_a_whole_entity_constraint_is_refused_naming_the_ones_that_take_it(self, install):
+        # a point where addParallel wants a SketchLine raises live; refuse it before the call
+        s = _anchored_sketch(); install(s)
+        res = sc.handler(constraint="parallel", sketch_name="S",
+                         entity_one="line:0:end", entity_two="line:1")
+        assert res["isError"] is True
+        assert "':end'" in res["message"] and "coincident" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_an_anchor_on_the_curve_slot_of_midpoint_is_refused(self, install):
+        # midpoint's entity_two is the CURVE the point rides - a point there is the wrong operand
+        s = _anchored_sketch(); install(s)
+        res = sc.handler(constraint="midpoint", sketch_name="S",
+                         entity_one="point:0", entity_two="line:0:end")
+        assert res["isError"] is True and "entity_two" in res["message"]
+
+    def test_an_unknown_anchor_is_refused_naming_the_valid_ones(self, install):
+        s = _anchored_sketch(); install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="point:0", entity_two="circle:0:middle")
+        assert res["isError"] is True and "unknown anchor" in res["message"]
+
+    def test_a_centre_anchor_on_a_line_is_refused_naming_what_it_needs(self, install):
+        s = _anchored_sketch(); install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="point:0", entity_two="line:0:center")
+        assert res["isError"] is True and "circle or arc" in res["message"]
+
+    def test_a_mid_anchor_creates_the_welded_point_and_passes_it(self, install, monkeypatch):
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="coincident", sketch_name="S",
+                            entity_one="line:0:mid", entity_two="point:1"))
+        assert s.sketchPoints.added == [("pt", 2.0, 0.0, 0.0)]
+        name, args = s.geometricConstraints.calls[-1]
+        assert name == "coincident" and args[0].name == "MID1"
+
+    def test_a_refusal_after_a_mid_anchor_would_orphan_it_so_nothing_is_built_first(self, install, monkeypatch):
+        # the 'mid' anchor CREATES a point + midpoint constraint; entity_two resolves BEFORE it, so
+        # an unresolvable entity_two leaves the sketch exactly as it was
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
+        s = _anchored_sketch(); install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="line:0:mid", entity_two="point:99")
+        assert res["isError"] is True and "entity_two" in res["message"]
+        assert s.sketchPoints.added == []                    # no orphan point
+        assert s.geometricConstraints.calls == []            # and no orphan constraint
+
+    def test_the_anchor_forms_are_on_the_wire(self):
+        # the anchor form is only reachable if the schema an agent reads names it
+        props = sc.tool.to_dict()["inputSchema"]["properties"]
+        assert "'circle:0:center'" in props["entity_one"]["description"]
+
+    def test_an_upper_case_ref_keeps_its_anchor(self, install):
+        # entity refs resolve case-insensitively; an anchor that did not would make 'CIRCLE:0:CENTER'
+        # a silent miss on a form the tool accepts in lower case
+        s = _anchored_sketch(); install(s)
+        _payload(sc.handler(constraint="coincident", sketch_name="S",
+                            entity_one="point:0", entity_two="CIRCLE:0:CENTER"))
+        _name, args = s.geometricConstraints.calls[0]
+        assert args[1].name == "C0C"
+
 
 # ── single line ──────────────────────────────────────────────────────────────
 
@@ -633,6 +812,124 @@ class TestSingleLine:
         res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
+
+
+# ── 'text:<i>' - the SketchText anchor, fix/unfix only ───────────────────────
+
+class _RectangleLine:
+    """One of the four definition rectangle lines carrying a SketchText's anchor DOF."""
+    def __init__(self, name, lockable=True):
+        self.name = name
+        self.kind = "line"
+        self._lockable = lockable
+        self.isFixed = False
+
+    def __setattr__(self, attr, value):
+        # a line the platform declines to lock reports back what it still is, never what was asked
+        if attr == "isFixed" and not getattr(self, "_lockable", True):
+            return object.__setattr__(self, "isFixed", False)
+        object.__setattr__(self, attr, value)
+
+
+class _LineVector:
+    """SketchText.definition.rectangleLines: a SketchLineVector, which iterates PLAINLY - it carries
+    no .count/.item, so code that walks it that way reads nothing at all."""
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+class _SketchText:
+    def __init__(self, lines):
+        self.definition = types.SimpleNamespace(rectangleLines=_LineVector(lines))
+
+
+class _TextSketch(FakeSketch):
+    """A sketch holding one SketchText whose anchor lines decide, between them, whether it reads
+    fully constrained - the live relationship this route exists to reach. `always_loose` models the
+    ordinary case where the sketch holds other freedom too."""
+    def __init__(self, n_lines=4, lockable=(True, True, True, True), always_loose=False):
+        super().__init__("S", lines=[FakeCurve("L0", "line")])
+        self.anchor_lines = [_RectangleLine(f"R{i}", lockable[i]) for i in range(n_lines)]
+        self.sketchTexts = _Coll([_SketchText(self.anchor_lines)])
+        self.always_loose = always_loose
+
+    @property
+    def isFullyConstrained(self):
+        if self.always_loose or not self.anchor_lines:
+            return False
+        return all(ln.isFixed for ln in self.anchor_lines)
+
+    @isFullyConstrained.setter
+    def isFullyConstrained(self, value):
+        pass          # FakeSketch seeds a plain False; here the anchor lines are what decide
+
+
+def _text_sketch(n_lines=4, lockable=(True, True, True, True), always_loose=False):
+    return _TextSketch(n_lines=n_lines, lockable=lockable, always_loose=always_loose)
+
+
+class TestSketchTextAnchor:
+    """A SketchText's anchor DOF lives on the four rectangle lines of its definition, which no
+    geometric constraint takes as an operand - fixing them is the only route to a text-bearing
+    sketch reading fully constrained."""
+
+    def test_fixing_a_text_locks_every_anchor_line_and_reads_the_sketch_back(self, install):
+        s = _text_sketch(); install(s)
+        out = _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
+        assert [ln.isFixed for ln in s.anchor_lines] == [True] * 4
+        assert out["anchor_lines_fixed"] == 4
+        assert out["is_fully_constrained"] is True
+        assert "FULLY CONSTRAINED" in out["note"]
+
+    def test_unfix_releases_them_again(self, install):
+        s = _text_sketch(); install(s)
+        _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
+        out = _payload(sc.handler(constraint="unfix", sketch_name="S", entity_one="text:0"))
+        assert [ln.isFixed for ln in s.anchor_lines] == [False] * 4
+        assert out["is_fully_constrained"] is False
+        assert "RELEASED" in out["note"]
+
+    def test_a_lock_that_leaves_the_sketch_loose_says_so(self, install):
+        # the anchor is one DOF among however many the sketch holds - a text lock is not a promise
+        # that the sketch is now constrained, and the payload must not imply it
+        s = _text_sketch(always_loose=True); install(s)
+        out = _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
+        assert [ln.isFixed for ln in s.anchor_lines] == [True] * 4    # the lock still landed
+        assert out["is_fully_constrained"] is False
+        assert "still NOT fully constrained" in out["note"]
+
+    def test_a_line_that_declines_the_lock_is_reported_not_papered_over(self, install):
+        # 3 of 4 taking is a partly-locked anchor - a clean ok here would be a false success
+        s = _text_sketch(lockable=(True, True, True, False)); install(s)
+        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:0")
+        assert res["isError"] is True
+        assert "3 of 4" in res["message"]
+
+    def test_a_definition_handing_back_no_lines_is_refused(self, install):
+        s = _text_sketch(n_lines=0, lockable=()); install(s)
+        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:0")
+        assert res["isError"] is True and "no rectangle lines" in res["message"]
+
+    def test_a_text_ref_on_any_other_constraint_names_the_two_that_take_it(self, install):
+        s = _text_sketch(); install(s)
+        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="text:0")
+        assert res["isError"] is True
+        assert "fix / unfix" in res["message"] and "horizontal" in res["message"]
+
+    def test_an_out_of_range_text_index_names_what_the_sketch_holds(self, install):
+        s = _text_sketch(); install(s)
+        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:3")
+        assert res["isError"] is True and "text:0..text:0" in res["message"]
+
+    def test_a_sketch_qualified_text_ref_is_refused(self, install):
+        # this tool constrains the ONE sketch 'sketch_name' names; honoring half an address silently
+        # would fix a text in a sketch the caller never named here
+        s = _text_sketch(); install(s)
+        res = sc.handler(constraint="fix", sketch_name="S", entity_one="Other/text:0")
+        assert res["isError"] is True and "sketch_name" in res["message"]
 
 
 # ── symmetry (3 entities) ────────────────────────────────────────────────────
@@ -1225,6 +1522,18 @@ class TestAutoConstrain:
         assert out["applied"] == "auto"
         assert out["added_dimensions"] == 2 and out["added_constraints"] == 3
         assert out["is_fully_constrained"] is True and "now fully constrained" in out["note"]
+
+    def test_auto_on_an_already_fully_constrained_sketch_is_a_no_call_no_op(self, install):
+        # Fusion RAISES "AutoConstrain cannot be applied to a fully constrained sketch" (measured
+        # live) - so a sketch with nothing left to constrain answers the no-op truth WITHOUT the
+        # call, and the platform raise can never surface.
+        s = _two_line_sketch(); install(s)
+        s.isFullyConstrained = True
+        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        assert out["added_dimensions"] == 0 and out["added_constraints"] == 0
+        assert out["is_fully_constrained"] is True
+        assert "already fully constrained" in out["note"]
+        assert s.autoConstrainCalls == []          # no call reached the platform
 
     def test_the_requested_option_is_set_on_the_input_and_labeled_requested(self, install):
         s = _two_line_sketch(); install(s)

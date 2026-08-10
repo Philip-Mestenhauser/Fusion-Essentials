@@ -10,7 +10,8 @@ health-error gate, the direct-mode no-feature path, and the ModelParameter depth
 import types
 
 from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, go_stale,
-                      payload, error_message, assert_no_active_design, assert_unknown_units)
+                      payload, error_message, assert_no_active_design, assert_unknown_units,
+                      _NamedCollection)
 
 em = load_tool("model_emboss")
 
@@ -85,7 +86,18 @@ class FakeEmbossFeatures:
         return make_feature(health=self.health, depth_cm=self.feature_depth_cm)
 
 
-def _wire(monkeypatch, feats, faces, design_type=None, profile_comp=None, extra_comps=()):
+def make_text_sketch(comp=None, name="Nameplate", texts=1):
+    """A sketch holding ONLY sketch texts - the nameplate case: it has no closed profile and never
+    will. Each text is tagged '<sketch>#<i>' so a test can tell which one reached createInput. A
+    sketch left unparented is adopted by the component _wire builds."""
+    sketch = types.SimpleNamespace(name=name, parentComponent=comp, profiles=_NamedCollection())
+    sketch.sketchTexts = _NamedCollection(
+        [types.SimpleNamespace(tag=f"{name}#{i}", parentSketch=sketch) for i in range(texts)])
+    return sketch
+
+
+def _wire(monkeypatch, feats, faces, design_type=None, profile_comp=None, extra_comps=(),
+          sketches=(), stub_profiles=True):
     """Install a component carrying `feats` (features.embossFeatures), stub the two typed kinds to
     hand back canned entities (their own resolution is covered by test_inputs), and model the adsk
     ValueInput factory the handler calls.
@@ -95,20 +107,27 @@ def _wire(monkeypatch, feats, faces, design_type=None, profile_comp=None, extra_
     parented to the profile's component unless the test already parented it somewhere else - the
     handler refuses a body and a profile that live in different components.
 
+    `sketches` populates the component's sketch collection; with `stub_profiles` False the handler
+    resolves 'profiles' for real against them (the sketch-text route).
+
     Returns the profile list the handler will receive."""
     import adsk.core
-    comp = MakeComp(name="Comp")
+    comp = MakeComp(name="Comp", sketches=sketches)
     comp.features = types.SimpleNamespace(embossFeatures=feats)
     design = make_design(comp=comp, all_components=[comp, *extra_comps])
     if design_type is not None:
         design.designType = design_type
     install(em, design)
     host = profile_comp if profile_comp is not None else comp
+    for sk in sketches:
+        if getattr(sk, "parentComponent", None) is None:
+            sk.parentComponent = host
     for f in faces:
         if getattr(f, "body", None) is not None and f.body.parentComponent is None:
             f.body.parentComponent = host
     profs = [make_profile(profile_comp if profile_comp is not None else comp)]
-    monkeypatch.setattr(em._PROFILES, "resolve", lambda raw: (profs, None))
+    if stub_profiles:
+        monkeypatch.setattr(em._PROFILES, "resolve", lambda raw: (profs, None))
     monkeypatch.setattr(em._FACES, "resolve", lambda raw: (faces, None))
     adsk.core.ValueInput.createByReal = staticmethod(make_value_input)
     return profs
@@ -183,6 +202,88 @@ class TestEmboss:
         _wire(monkeypatch, feats, [make_face(body)])
         out = payload(em.handler(profiles=["p"], faces=["h"], depth=3, units="mm"))
         assert out["body"] == "Plate"
+
+
+# ── engraving a sketch TEXT (the nameplate route) ──────────────────────────────────────────────
+#
+# createInput's profiles array is documented as "Profile and SketchText objects", so a text needs no
+# Profile of its own - it goes into the profile slot as itself, addressed by the 'text:<i>' id
+# sketch_get publishes.
+
+class TestSketchText:
+    def test_a_text_id_reaches_createinput_as_the_sketch_text(self, monkeypatch):
+        body = make_body(name="Plate", volume=12.0)
+        feats = FakeEmbossFeatures([body], volume_delta=-0.42, feature_depth_cm=-0.05)
+        sketch = make_text_sketch()
+        _wire(monkeypatch, feats, [make_face(body)], sketches=[sketch], stub_profiles=False)
+        out = payload(em.handler(profiles=["text:0"], faces=["h"], depth=-0.5, units="mm"))
+        assert [p.tag for p in feats.last_input.profiles] == ["Nameplate#0"]
+        assert out["mode"] == "engrave"
+        assert out["volume_delta_cm3"] == -0.42
+        assert out["profiles_requested"] == 1
+
+    def test_the_index_picks_that_text(self, monkeypatch):
+        body = make_body(volume=12.0)
+        feats = FakeEmbossFeatures([body], volume_delta=0.4)
+        sketch = make_text_sketch(texts=3)
+        _wire(monkeypatch, feats, [make_face(body)], sketches=[sketch], stub_profiles=False)
+        payload(em.handler(profiles=["text:2"], faces=["h"], depth=0.5, units="mm"))
+        assert [p.tag for p in feats.last_input.profiles] == ["Nameplate#2"]
+
+    def test_several_texts_stamp_in_one_call(self, monkeypatch):
+        body = make_body(volume=12.0)
+        feats = FakeEmbossFeatures([body], volume_delta=-0.8)
+        sketch = make_text_sketch(texts=2)
+        _wire(monkeypatch, feats, [make_face(body)], sketches=[sketch], stub_profiles=False)
+        out = payload(em.handler(profiles=["text:0", "text:1"], faces=["h"], depth=-0.5, units="mm"))
+        assert [p.tag for p in feats.last_input.profiles] == ["Nameplate#0", "Nameplate#1"]
+        assert out["profiles_requested"] == 2
+
+    def test_an_engrave_that_added_material_is_still_refused_for_a_text(self, monkeypatch):
+        # the volume-direction gate is the tool's verdict and does not care what shape was stamped.
+        body = make_body(volume=12.0)
+        feats = FakeEmbossFeatures([body], volume_delta=+0.9)
+        sketch = make_text_sketch()
+        _wire(monkeypatch, feats, [make_face(body)], sketches=[sketch], stub_profiles=False)
+        msg = error_message(em.handler(profiles=["text:0"], faces=["h"], depth=-0.5, units="mm"))
+        assert "wrong way" in msg and "added" in msg
+
+    def test_a_text_only_sketch_no_longer_dead_ends_on_no_closed_profile(self, monkeypatch):
+        # A nameplate sketch never gets a closed region, so "draw one" is a dead end: the refusal
+        # names the address that does reach the text.
+        body = make_body(volume=12.0)
+        feats = FakeEmbossFeatures([body])
+        sketch = make_text_sketch(texts=2)
+        _wire(monkeypatch, feats, [make_face(body)], sketches=[sketch], stub_profiles=False)
+        msg = error_message(em.handler(profiles=[{"sketch": "Nameplate"}], faces=["h"],
+                                       depth=-0.5, units="mm"))
+        assert "'text:0'..'text:1'" in msg and "Draw a closed region" not in msg
+        assert feats.last_input is None      # refused BEFORE any mutation was attempted
+
+    def test_a_sketch_qualified_text_in_a_sub_component_builds_there(self, monkeypatch):
+        # the text lives in a SUB-component's sketch, reached design-wide by '<sketch>/text:<i>';
+        # host resolution runs off the text's parentSketch, exactly as it does for a Profile.
+        body = make_body(volume=12.0)
+        other = MakeComp(name="SubComp")
+        other_feats = FakeEmbossFeatures([body], volume_delta=-0.5)
+        other.features = types.SimpleNamespace(embossFeatures=other_feats)
+        sketch = make_text_sketch(other)
+        other.sketches = _NamedCollection([sketch])
+
+        def _boom(*a, **k):
+            raise AssertionError("the emboss must not be built on the ACTIVE component")
+
+        active_feats = FakeEmbossFeatures([body])
+        active_feats.createInput = _boom
+        _wire(monkeypatch, active_feats, [make_face(body)], profile_comp=other,
+              extra_comps=[other], stub_profiles=False)
+        out = payload(em.handler(profiles=["Nameplate/text:0"], faces=["h"], depth=-0.5, units="mm"))
+        assert out["embossed"] is True
+        assert [p.tag for p in other_feats.last_input.profiles] == ["Nameplate#0"]
+
+    def test_the_tool_advertises_the_text_route(self):
+        assert "text" in em.TOOL_DESCRIPTION.lower()
+        assert "text:<i>" in em.emboss_tool.input_schema["properties"]["profiles"]["description"]
 
 
 # ── the feature is built on the profile's OWNING component (bSet avoidance) ────────────────────

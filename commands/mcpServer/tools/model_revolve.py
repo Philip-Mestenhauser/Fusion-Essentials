@@ -49,37 +49,21 @@ def _in_context(ent, comp, design):
     the correct off-origin axis. An entity that already has an assembly context, or one owned by
     `comp` itself, passes untouched.
 
-    A component placed SEVERAL times is refused rather than proxied into an arbitrary instance: each
-    instance carries that axis at a different place, so a guess makes a healthy-looking body turn
-    about the wrong line."""
-    if safe(lambda: ent.assemblyContext) is not None:
+    The walk itself - and its refusal of a component placed SEVERAL times, which for a revolve means
+    a healthy-looking body turning about the wrong line - is _inputs.single_placement; the leaf op
+    here is the proxy revolveFeatures.createInput takes, worded to complete the caller's "Could not
+    resolve axis '<x>': ..." sentence."""
+    occ, err = _inputs.single_placement("it", ent, comp, design)
+    if err:
+        return None, err
+    if occ is None:
         return ent, None
-    owner = _inputs.entity_component(ent)
-    # _common.same_component, never `owner is comp`: component wrappers are measured NEVER
-    # identity-stable (two reads of one component are different Python objects sharing an
-    # entityToken), so `is` reads False even for the revolve's OWN component.
-    if owner is None or _common.same_component(owner, comp):
-        return ent, None
-    root = safe(lambda: design.rootComponent)
-    occs = safe(lambda: root.allOccurrencesByComponent(owner)) if root is not None else None
-    count = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
-    owner_name = safe(lambda: owner.name) or "another component"
-    if count == 1:
-        proxy = safe(lambda: ent.createForAssemblyContext(occs.item(0)))
-        if proxy is None:
-            return None, (f"it belongs to component '{owner_name}' and could not be brought into the "
-                          "revolve's assembly context. Pass a handle at geometry in the sketch's own "
-                          "component, or a world axis (x/y/z).")
-        return proxy, None
-    if count > 1:
-        paths = ", ".join(str(safe(lambda i=i: occs.item(i).fullPathName)) for i in range(count))
-        return None, (f"it belongs to component '{owner_name}', which is placed {count} times "
-                      f"({paths}). Each instance holds that axis in a different place, so the "
-                      "instance must not be guessed. Pass a handle at geometry in the sketch's own "
-                      "component, or a world axis (x/y/z).")
-    return None, (f"it belongs to component '{owner_name}', which is not placed in the assembly, so "
-                  "it cannot be brought into the revolve's context. Pass a handle at geometry in the "
-                  "sketch's own component, or a world axis (x/y/z).")
+    proxy = safe(lambda: ent.createForAssemblyContext(occ))
+    if proxy is None:
+        path = safe(lambda: occ.fullPathName) or "its one occurrence"
+        return None, (f"it could not be brought into the revolve's assembly context ({path}). Pass "
+                      "a handle at geometry in the sketch's own component, or a world axis (x/y/z).")
+    return proxy, None
 
 
 def _axis_entity(design, comp, sketch, axis):
@@ -186,8 +170,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     try:
         second = float(second_angle_deg or 0.0)
         if second and not symmetric:
-            # asymmetric two-sided revolve: 'ang' one way, 'second' the other. Use
-            # setTwoSideAngleExtent, not setTwoSidesExtent .
+            # asymmetric two-sided revolve: 'ang' one way, 'second' the other.
             second_val = adsk.core.ValueInput.createByReal(math.radians(second))
             if not rev_input.setTwoSideAngleExtent(angle_val, second_val):
                 return error(f"Fusion refused a two-sided revolve extent ({angle_deg} / "
@@ -210,10 +193,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     if not feature:
         return error(_common.no_feature_error(design, "Revolve"))
 
-    body_names = []
-    bodies = safe(lambda: feature.bodies)
-    for i in range(safe(lambda: bodies.count, 0) if bodies else 0):
-        body_names.append(safe(lambda i=i: bodies.item(i).name))
+    body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     return ok({
         "revolved": True,

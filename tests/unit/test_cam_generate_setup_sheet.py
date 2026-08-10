@@ -215,3 +215,13 @@ class TestFileLandedGate:
         rig()
         msg = _message(gs.handler())
         assert "output_folder" in msg
+
+    def test_a_document_with_no_cam_product_is_an_isError_result(self, monkeypatch, tmp_path):
+        # get_cam hands back a bare reason STRING; returning it unwrapped puts a raw string on the
+        # wire with no content block and no isError, so the caller reads a failure as a success.
+        monkeypatch.setattr(gs, "get_cam",
+                            lambda: (None, "This document has no CAM (Manufacture) product yet - "
+                                           "call view_switch_workspace('manufacture') once."))
+        res = gs.handler(output_folder=str(tmp_path))
+        assert res["isError"] is True, res
+        assert "no CAM (Manufacture) product" in res["content"][0]["text"]

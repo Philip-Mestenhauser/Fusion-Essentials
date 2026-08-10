@@ -7,12 +7,14 @@ cam_get and the CAM action/poll tools (cam_get_status, cam_activate_setup, ...) 
 import collections
 import json
 import re
+import time
 
 import adsk.core
 import adsk.cam
 import adsk.fusion
 
 from ._common import CM_TO_UNIT, measured, ok, error, iter_collection, safe
+from ._write_guard import _active_identity   # the one active-document identity read
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + walk_cam_tree / "
@@ -25,7 +27,15 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "CAMParameter evaluation read-back every CAM param editor gates on) + live_readiness "
              "(the one CAM job-health signal) + op_state_facts / op_primary_state / validity_basis "
              "(the shared per-op lifecycle read, its one mutually-exclusive bucket classifier, and "
-             "the Manufacture-workspace trust gate every op-state rollup reads)")
+             "the Manufacture-workspace trust gate every op-state rollup reads) + clamp_rows (the "
+             "ONE 'max_results' clamp - a non-numeric request falls back to the read's default, the "
+             "result is held inside 1..ceiling, so no caller can lift a wire cap) + register_future "
+             "(the ONE async-generation registration - it mints the handle cam_get_status reads and "
+             "keeps the GenerateToolpathFuture referenced, which is what stops Fusion abandoning the "
+             "background work; every launch path registers here) + machine_catalog / resolve_machine "
+             "/ machine_label / machine_ident / query_machines (the ONE machine-library catalog read "
+             "and the ONE by-name machine resolver - exact LABEL match first, ambiguity REFUSED - "
+             "that an assignment and a machine create both run through)")
 
 app = adsk.core.Application.get()
 
@@ -45,6 +55,18 @@ def expression_error(p):
     if "${" in warn:
         warn += " [the ${...} token is an uninterpolated platform template - cosmetic]"
     return (err or None), (warn or None)
+
+
+def clamp_rows(max_results, default: int, ceiling: int) -> int:
+    """The row cap a capped CAM read runs under - the ONE clamp every 'max_results' goes through.
+    `max_results` arrives off the wire, so a value that is not a number falls back to `default`
+    rather than raising, and the result is held inside 1..`ceiling`: a caller cannot lift a cap that
+    exists because every row crosses the wire. Each read keeps its OWN default/ceiling pair."""
+    try:
+        n = int(max_results or default)
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(n, ceiling))
 
 
 def get_cam():
@@ -1028,8 +1050,10 @@ _MISSING = object()
 # row reports its state and this code never converts that into a verdict of its own.
 _OUT_OF_TOLERANCE = ("above_tolerance", "below_tolerance", "unprojected")
 
-# Measured on a CAM document that carries a setup and no probing operations: CAM.inspectionResults
-# reads None - NOT an empty collection - so the absence is published as a state, never raised.
+# A document that has never been probed carries this BOTH ways: CAM.inspectionResults reads None on
+# some documents and an EMPTY collection on others. Both are a real zero-measure answer, so both are
+# published as a state and neither is raised - the None branch takes the note below, the empty
+# collection falls through to the ordinary rollup and reports measure_count 0.
 _INSPECTION_ABSENT_NOTE = (
     "No inspection results on this document: CAM.inspectionResults reads None, so there is no "
     "results folder to read. Results are recorded by a probing cycle on the machine; nothing in "
@@ -1049,10 +1073,11 @@ _INSPECTION_INDEX_NOTE = (
 
 
 def _read_inspection_results(cam) -> tuple:
-    """(collection_or_None, raise_text_or_None). Two DIFFERENT answers have to stay apart: the
-    property reads None on a document that has never been probed (measured), and a gated CAM member
-    can RAISE instead of reading empty (measured on stockMaterialLibrary). safe()'s single default
-    cannot carry both, so the _MISSING sentinel separates them and the platform text is kept."""
+    """(collection_or_None, raise_text_or_None). Two DIFFERENT answers have to stay apart: a
+    never-probed document reads the property as None or as an empty collection (both are a zero
+    answer), and a gated CAM member can RAISE instead of reading empty (measured on
+    stockMaterialLibrary). safe()'s single default cannot carry both, so the _MISSING sentinel
+    separates them and the platform text is kept."""
     reason = {}
 
     def read():
@@ -1192,11 +1217,7 @@ def _parse_measure_scope(raw) -> tuple:
 
 
 def _row_cap(max_results) -> int:
-    try:
-        n = int(max_results or _INSPECTION_ROW_DEFAULT)
-    except (TypeError, ValueError):
-        n = _INSPECTION_ROW_DEFAULT
-    return max(1, min(n, _INSPECTION_ROW_CAP))
+    return clamp_rows(max_results, _INSPECTION_ROW_DEFAULT, _INSPECTION_ROW_CAP)
 
 
 def get_inspection_results_handler(measure: str = "", max_results: int = 0,
@@ -1261,3 +1282,225 @@ def get_inspection_results_handler(measure: str = "", max_results: int = 0,
     if pi is not None:
         out["path"] = pi
     return ok(out)
+
+
+# ---------------------------------------------------------------------------
+# Async generation registry - where every launch path parks its live GenerateToolpathFuture.
+# ---------------------------------------------------------------------------
+
+# Live generations, keyed by a short handle. Each entry holds the Future plus launch metadata.
+# Persists across MCP calls for the life of the add-in session.
+#
+# CRITICAL: holding the GenerateToolpathFuture reference here is not just for polling - if the
+# Future is garbage-collected, Fusion ABANDONS the in-progress generation. So this dict is what
+# keeps the background work alive between the launch call and the poll calls. Do not stop storing
+# the future, and only pop an entry once generation has completed.
+_GENERATIONS = {}
+_HANDLE_SEQ = [0]
+
+
+def register_future(future, target, scope, skip_valid, target_name=""):
+    """Mint a handle and register a live generation Future - the ONE registration path every launch
+    goes through (cam_generate, plus the inline launches in cam_select_geometry and
+    cam_create_operation). Keeps the Future referenced and records which DOCUMENT the generation
+    belongs to, so a later status read taken while another document is active reports the Future's
+    own progress instead of the wrong document's tallies. Returns (handle, total).
+
+    target_name is the RAW setup/folder/operation name a scoped launch resolved to (omit it for a
+    whole-document launch): a status read settles this handle's completion on THAT target's own
+    operations, so a second generation running beside it cannot keep this handle incomplete."""
+    _HANDLE_SEQ[0] += 1
+    handle = f"gen{_HANDLE_SEQ[0]}"
+    total = safe(lambda: future.numberOfOperations, None)
+    doc_name, doc_urn = _active_identity()
+    _GENERATIONS[handle] = {
+        "future": future,
+        "target": target,
+        "scope": scope,
+        "target_name": (target_name or "").strip(),
+        "skip_valid": bool(skip_valid),
+        "started_at": time.time(),
+        "total": total,
+        "doc_name": doc_name,
+        "doc_urn": doc_urn,
+    }
+    return handle, total
+
+
+# ---------------------------------------------------------------------------
+# Machine library - the catalog cam_get publishes and the resolver an assignment runs through.
+# ---------------------------------------------------------------------------
+
+# Non-network machine library locations searched for a machine by vendor/model (Fusion360 = the
+# bundled sample machines; Local = the user's saved ones). The cloud/network locations are skipped so
+# a headless assignment never blocks on a fetch.
+_MACHINE_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
+
+# Machine.capabilities flags -> the 'kind' vocabulary (the bundled library is DOMINATED by
+# additive printers, so an unfiltered read floods - machine_type narrows to the relevant kind).
+_MACHINE_KINDS = {"milling": "isMillingSupported", "turning": "isTurningSupported",
+                  "cutting": "isCuttingSupported", "additive": "isAdditiveSupported"}
+
+
+def machine_label(m):
+    """Readable machine label: .description, else 'vendor model'. adsk.cam.Machine has no .name."""
+    if not m:
+        return None
+    desc = safe(lambda: m.description)
+    if desc:
+        return desc
+    label = ((safe(lambda: m.vendor) or "") + " " + (safe(lambda: m.model) or "")).strip()
+    return label or "(unnamed machine)"
+
+
+def machine_ident(m):
+    """(label, vendor, model) for a Machine - label is the readable name (description or 'vendor model')."""
+    return machine_label(m), (safe(lambda: m.vendor) or ""), (safe(lambda: m.model) or "")
+
+
+def query_machines(lib, vendor, model):
+    """Run the machine-library query for (vendor, model) across the Local + bundled Fusion360
+    locations, deduped by label. Returns a list of (machine, label, vendor, model); the FIRST
+    location that yields any match wins (Local before Fusion360)."""
+    found, labels = [], set()
+    for loc_name in _MACHINE_LOCATIONS:
+        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
+        if loc is None:
+            continue
+        try:
+            matches = lib.createQuery(loc, vendor, model).execute() or []
+        except Exception:
+            continue
+        for m in matches:
+            label, v, mo = machine_ident(m)
+            if label in labels:      # dedupe identical machines that appear in more than one location
+                continue
+            labels.add(label)
+            found.append((m, label, v, mo))
+        if found:
+            break                    # prefer the first location that yields any match
+    return found
+
+
+def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int = 100):
+    """(rows, truncated, error) - the machine CATALOG the 'machine' input resolves from: every
+    machine in the Local + Fusion360 locations (the same two resolve_machine searches), filtered by
+    vendor and/or machine_type. The ONE catalog read: cam_edit_setup.read_machines is its wire
+    wrapper (cam_get(include=['machines'])) and cam_create_machine checks a new name against these
+    rows before creating anything."""
+    mt = (machine_type or "").strip().lower()
+    if mt and mt not in _MACHINE_KINDS:
+        return None, False, (f"Unknown machine_type '{machine_type}'. Valid: "
+                             f"{', '.join(sorted(_MACHINE_KINDS))}.")
+    try:
+        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    except Exception as e:
+        return None, False, f"Could not access the machine library: {e}"
+    rows, total = [], 0
+    for loc_name in _MACHINE_LOCATIONS:
+        loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
+        if loc is None:
+            continue
+        loc_label = loc_name.replace("LibraryLocation", "").lower()   # 'local' / 'fusion360'
+        try:
+            matches = lib.createQuery(loc, vendor or "", "").execute() or []
+        except Exception:
+            continue
+        for m in matches:
+            caps = safe(lambda m=m: m.capabilities)
+            kinds = [k for k, attr in sorted(_MACHINE_KINDS.items())
+                     if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
+            if mt and mt not in kinds:
+                continue
+            total += 1
+            if len(rows) >= max_results:
+                continue
+            label, v, mo = machine_ident(m)
+            rows.append({"name": label, "vendor": v, "model": mo, "location": loc_label,
+                         "kind": kinds,
+                         "simulation_ready": bool(safe(lambda m=m: m.hasSimulationModel, False))})
+    return rows, total > len(rows), None
+
+
+def _exact_machine(cands, machine, vendor, model):
+    """Exact-match, MOST-SPECIFIC first: a unique full-LABEL match wins over a unique 'vendor model'
+    match, which wins over a unique model match. Prioritizing the label is what makes same-model
+    variants selectable - a Haas library ships three machines that all report vendor|model 'HAAS|VF-2'
+    and differ ONLY by description ('Haas VF-2', 'Haas VF-2 with TRT100', ...), so matching the model
+    alone can't pick one, but the exact description can. Returns the single candidate at the first
+    priority yielding exactly one hit, else None (still ambiguous)."""
+    ml = (model or "").strip().lower()
+    ven = (vendor or "").strip().lower()
+    full = (machine or "").strip().lower()
+
+    def _unique(pred):
+        hits, seen = [], set()
+        for tup in cands:
+            _m, label, v, mo = tup
+            if pred(label, v, mo):
+                key = (label or "").lower()
+                if key not in seen:
+                    seen.add(key)
+                    hits.append(tup)
+        return hits[0] if len(hits) == 1 else None
+
+    return (_unique(lambda label, v, mo: (label or "").lower() == full)                       # label
+            or _unique(lambda label, v, mo: ((v or "") + " " + (mo or "")).strip().lower() == full)  # vendor model
+            or _unique(lambda label, v, mo: bool(ml) and (mo or "").lower() == ml             # model (+vendor)
+                       and (not ven or (v or "").lower() == ven)))
+
+
+def resolve_machine(machine):
+    """Resolve a 'machine' string (vendor|model, vendor/model, a bare model, or a full description) to
+    a single Machine. Returns (machine, label, None), or (None, None, error) when nothing matches or
+    the match is ambiguous - it refuses to guess. Exact match (LABEL first) beats a shared prefix.
+    The ONE machine resolver: cam_edit_setup assigns through it, and cam_create_machine gates a new
+    machine's reachability on it."""
+    machine = (machine or "").strip()
+    sep = "|" if "|" in machine else ("/" if "/" in machine else "")
+    if sep:
+        vendor, model = (p.strip() for p in machine.split(sep, 1))
+    else:
+        vendor, model = "", machine
+    try:
+        lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    except Exception as e:
+        return None, None, f"Could not access the machine library: {e}"
+
+    cands = query_machines(lib, vendor, model)
+    # WIDEN when the model as given matches nothing: the library query prefix-matches the MODEL field,
+    # but a variant's distinguishing text ('Haas VF-2 with TRT100') lives in its DESCRIPTION, and callers
+    # pass the label they SEE ('Haas VF-2', 'Haas|Haas VF-2'). Recover a (vendor, broad-model-token) to
+    # fetch the candidate POOL, then LABEL-match it below.
+    if not cands:
+        v2, broad = vendor, model
+        if vendor and model.lower().startswith(vendor.lower() + " "):
+            broad = model[len(vendor):].strip()               # 'Haas|Haas VF-2' -> model 'VF-2'
+        elif not vendor and " " in machine:
+            v2, broad = machine.split(" ", 1)                 # bare 'Haas VF-2...' -> vendor 'Haas'
+        broad = broad.split(" ", 1)[0].strip() if broad else broad   # first model token ('VF-2')
+        v2 = v2.strip()
+        if (v2, broad) != (vendor, model) and (v2 or broad):
+            widened = query_machines(lib, v2, broad)
+            if widened:
+                cands, vendor, model = widened, v2, broad
+
+    if not cands:
+        return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') in the "
+                            "Local or Fusion360 machine libraries. Use the machine name (its description) "
+                            "you see in the Manufacture machine library.")
+    # EXACT match wins BEFORE refusing ambiguity (the house rule).
+    exact = _exact_machine(cands, machine, vendor, model)
+    if exact is not None:
+        return exact[0], exact[1], None
+    if len(cands) > 1:
+        # List the distinct LABELS (descriptions) - the selectable key, since same-model variants share
+        # vendor|model. The agent passes one of these exact names back to pick a specific variant.
+        labels, seen = [], set()
+        for (_m, lab, _v, _mo) in cands:
+            if lab and lab.lower() not in seen:
+                seen.add(lab.lower())
+                labels.append(lab)
+        return None, None, (f"Ambiguous machine '{machine}' - {len(labels)} matches: "
+                            f"{', '.join(labels[:8])}. Pass one of these exact names.")
+    return cands[0][0], cands[0][1], None

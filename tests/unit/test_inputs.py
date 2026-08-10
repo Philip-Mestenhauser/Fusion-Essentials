@@ -13,7 +13,7 @@ import types
 import pytest
 
 from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
-                      FakePoint, FakeVector3D, MakeComp, entity_proxy)
+                      FakePoint, FakeVector3D, MakeComp, body_proxy, entity_proxy)
 
 inp = load_tool("_inputs")
 
@@ -939,6 +939,19 @@ class TestAxisLineOfWorldSpace:
         pair, err = inp.axis_line_of("rotate_axis", axis)
         assert pair is None and "not placed in the assembly" in err
 
+    def test_an_unreadable_root_component_is_refused_naming_the_owner(self, axis_env):
+        # With no root there is no placement to look the datum up in, so where it SITS is unknown.
+        # Falling back to its own .geometry here would hand back a component-LOCAL line as though it
+        # were world - the exact silent wrong-pivot this lift exists to prevent.
+        env = axis_env()
+        wheel = MakeComp(name="Wheel")
+        axis, _ = _datum_in(wheel, (0, 0, 0), world_origin=(5, 0, 0))
+        env.place(wheel, "Wheel:1")
+        env.design.rootComponent = None
+        pair, err = inp.axis_line_of("rotate_axis", axis)
+        assert pair is None
+        assert "Wheel" in err and "root component could not be read" in err
+
     def test_an_edge_keeps_its_worldgeometry_path(self, axis_env):
         # regression: only a ConstructionAxis takes the lift; an edge's world line is read directly,
         # and its direction is DERIVED from the two endpoints.
@@ -1001,8 +1014,8 @@ class TestSharedInputs:
         name, sch = inp.boolean_op(options=("join", "cut", "intersect")).as_property()
         assert name == "operation" and sch["enum"] == ["join", "cut", "intersect"]
 
-    def test_world_axis(self):
-        name, sch = inp.world_axis(default="x").as_property()
+    def test_frame_axis(self):
+        name, sch = inp.frame_axis(default="x").as_property()
         assert name == "axis" and sch["enum"] == ["x", "y", "z"]
         assert "Default x" in sch["description"]
 
@@ -1228,9 +1241,11 @@ class TestBodyKind:
         val, err = inp.MeshBodyRef("body").resolve("ScanData")
         assert err is None and val is m
 
-    def test_mesh_by_name_searches_occurrence_meshBodies(self):
-        # the name path must scan meshBodies on OCCURRENCES too (not just root),
-        # exactly as the bRep search does — so a mesh inside an inserted occurrence resolves by name.
+    def test_a_mesh_in_a_subcomponent_resolves_through_the_component_walk(self):
+        # A mesh in a sub-component must resolve by name even though the OCCURRENCE cannot answer for
+        # it: reading meshBodies off an occurrence RAISES, so the occurrence pass can never see a
+        # mesh. The design-wide component walk is the one path that reaches it - this fake raises on
+        # occ.meshBodies exactly as live does, so a resolver that leaned on the occurrence fails here.
         import adsk.fusion
         adsk.fusion.BRepBody = FakeBRep
         adsk.fusion.MeshBody = FakeMesh
@@ -1242,6 +1257,11 @@ class TestBodyKind:
                 self._d = d
             def itemByName(self, n):
                 return self._d.get(n)
+            @property
+            def count(self):
+                return len(self._d)
+            def item(self, i):
+                return list(self._d.values())[i]
 
         class _MeshColl:
             """meshBodies-style: REALISTIC - no itemByName, only count + item(i)."""
@@ -1253,23 +1273,39 @@ class TestBodyKind:
             def item(self, i):
                 return self._list[i] if 0 <= i < len(self._list) else None
 
-        class _Occ:
+        class _SubComp:
+            """The sub-COMPONENT that owns the mesh (reachable via design.allComponents)."""
+            name = "Scanned"
             bRepBodies = _Coll({})
             meshBodies = _MeshColl({"Occ_Scan": m})
 
+        sub = _SubComp()
+
+        class _Occ:
+            """The occurrence of that component: bRepBodies reads fine, meshBodies RAISES."""
+            bRepBodies = _Coll({})
+            component = sub
+            @property
+            def meshBodies(self):
+                raise AttributeError("MeshBodies is not readable on an Occurrence")
+
         class _RootComp:
+            name = "Root"
             bRepBodies = _Coll({})
             meshBodies = _MeshColl({})
             allOccurrences = [_Occ()]
 
+        root = _RootComp()
+
         class FakeDesign:
-            rootComponent = _RootComp()
+            rootComponent = root
+            allComponents = _NamedCollection([root, sub])
             def findEntityByToken(self, h):
                 return []   # not a handle -> force the name path
 
-        root = _RootComp()
         inp._common.design = lambda: FakeDesign()
-        # target_component is the root (which has NO matching mesh) -> resolution must descend to occ
+        # target_component is the root (which has NO matching mesh) -> resolution must reach the
+        # sub-component through the component walk, not through the occurrence.
         inp._common.target_component = lambda d: root
         val, err = inp.MeshBodyRef("body").resolve("Occ_Scan")
         assert err is None and val is m
@@ -1340,8 +1376,13 @@ def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
     handle_map = handle_map or {}
 
     class _BColl:
+        """bRepBodies: itemByName answering the name AS SPELLED, plus the count/item protocol - so a
+        case-variant match can only come from the iteration pass, never from the named lookup."""
         def __init__(self, m): self._m = m
         def itemByName(self, n): return self._m.get(n)
+        @property
+        def count(self): return len(self._m)
+        def item(self, i): return list(self._m.values())[i]
 
     class _Occ:
         def __init__(self, m): self.bRepBodies = _BColl(m)
@@ -1361,6 +1402,28 @@ def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
     inp._common.design = lambda: FakeDesign()
     inp._common.target_component = lambda d=None: root
     return root
+
+
+def _install_native_and_proxy(comp_bodies=(), occ_bodies=(), comp_name="Probe"):
+    """Wire the design shape a body's TWO reachable wrappers come from: the ACTIVE component owns
+    `comp_bodies` natively, and the root's allOccurrences pass hands back `occ_bodies` - a list of
+    (occurrence fullPathName, [bodies]) pairs, the proxies. The root itself owns no bodies, so the
+    same physical body arrives once per pass and the de-dup key is what decides how many candidates
+    a name has."""
+    import adsk.fusion
+    adsk.fusion.BRepBody = BRepBody
+    adsk.fusion.MeshBody = FakeMesh
+    comp = types.SimpleNamespace(name=comp_name, bRepBodies=_NamedCollection(comp_bodies))
+    for b in comp_bodies:
+        b.parentComponent = comp
+    occs = [types.SimpleNamespace(name=path, fullPathName=path, bRepBodies=_NamedCollection(bodies))
+            for path, bodies in occ_bodies]
+    root = types.SimpleNamespace(name="Root", bRepBodies=_NamedCollection([]), allOccurrences=occs)
+    design = types.SimpleNamespace(rootComponent=root, allComponents=None,
+                                   findEntityByToken=lambda h: [])
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d=None: comp
+    return comp
 
 
 class TestBodyNameAmbiguity:
@@ -1392,6 +1455,205 @@ class TestBodyNameAmbiguity:
         _install_ambiguous_bodies(occ_bodies=[{"Pin": wrap_a}, {"Pin": wrap_b}])
         val, err = inp.BodyRef("body").resolve("Pin")
         assert err is None and val is not None              # ...but the same body -> not ambiguous
+
+    def test_ambiguity_lists_each_candidate_in_the_qualified_form(self):
+        # the refusal must hand back the string that RESOLVES - '<occurrence-or-component>:<body>' -
+        # not just a prose "in Sub-A:1", so the caller can re-issue without a second lookup.
+        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
+        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and "'Sub-A:1:Pin'" in err and "'Sub-B:1:Pin'" in err
+
+    def test_qualified_scope_body_name_picks_one_of_the_candidates(self):
+        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
+        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        val, err = inp.BodyRef("body").resolve("Sub-B:1:Pin")
+        assert err is None and val is pin_b
+
+    def test_one_body_reached_twice_with_an_unreadable_token_is_not_ambiguous(self):
+        # itemByName and item(i) each hand back a FRESH wrapper of the same physical body, and both
+        # lookups run (one answers the spelling, the other the case variants + meshes). De-dup keys on
+        # the entityToken and, when THAT is unreadable, on (name, scope) - never on object identity,
+        # which would refuse ONE body as several candidates all printing the same name.
+        class _Unreadable:
+            name = "Pin"
+            isSolid = True
+            parentComponent = types.SimpleNamespace(name="Frame")
+            assemblyContext = None
+
+            @property
+            def entityToken(self):
+                raise RuntimeError("3 : entityToken is unavailable")
+
+        class _FreshColl:
+            """Every read mints a NEW wrapper of the one body, as the live collection does."""
+            @property
+            def count(self):
+                return 1
+            def item(self, i):
+                return _Unreadable()
+            def itemByName(self, n):
+                return _Unreadable() if n == "Pin" else None
+
+        root = types.SimpleNamespace(name="Frame", bRepBodies=_FreshColl(), allOccurrences=[])
+        design = types.SimpleNamespace(rootComponent=root, activeComponent=root)
+        inp._common.design = lambda: design
+        inp._common.target_component = lambda d=None: root
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert err is None and val is not None and val.name == "Pin"
+
+    def test_a_slash_qualified_label_resolves_like_the_colon_form(self):
+        # model_extrude / model_fillet_chamfer publish their body labels as '<scope>/<body>'; the
+        # resolver accepts that spelling too, so a label a tool printed can be handed straight back.
+        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
+        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
+        val, err = inp.BodyRef("body").resolve("Sub-B:1/Pin")
+        assert err is None and val is pin_b
+
+    def test_a_case_variant_name_resolves(self):
+        # the by-name path matches case-insensitively, so an agent that typed 'pin' is not told the
+        # body does not exist (the named lookup alone answers only the spelling it was given).
+        only = FakeBRep("Pin", is_solid=True)
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": only}])
+        val, err = inp.BodyRef("body").resolve("pin")
+        assert err is None and val is only
+
+    def test_the_exact_spelling_wins_over_a_case_variant(self):
+        # widening to case-insensitive must not manufacture an ambiguity: two bodies differing only
+        # in case, asked for by exact spelling, resolve to the one spelled that way.
+        pin, lower = FakeBRep("Pin", is_solid=True), FakeBRep("pin", is_solid=True)
+        pin.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
+        lower.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        _install_ambiguous_bodies(occ_bodies=[{"Pin": pin}, {"pin": lower}])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert err is None and val is pin
+        val2, err2 = inp.BodyRef("body").resolve("pin")
+        assert err2 is None and val2 is lower
+
+    def test_one_body_reached_natively_and_as_its_ONE_proxy_is_ONE_candidate(self):
+        # The two-token shape: a body and its occurrence PROXY carry DIFFERENT entityTokens, and
+        # _collect_bodies_by_name reaches the SAME physical body twice - natively through the active
+        # component, then as a proxy through the allOccurrences pass. Keyed on each wrapper's own
+        # token that is two candidates and the name is refused as ambiguous, listing the one body
+        # under both contexts. Grouped by the PHYSICAL body it is one candidate: the placement.
+        native = BRepBody("Probe", entity_token="TOK-NATIVE")
+        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        assert proxy.entityToken != native.entityToken     # the measured pair, not a shared token
+        assert proxy.nativeObject is native and native.nativeObject is None
+        _install_native_and_proxy(comp_bodies=[native], occ_bodies=[("Probe:1", [proxy])])
+        val, err = inp.BodyRef("body").resolve("Probe")
+        assert err is None, err
+        assert val is proxy                                # the PLACEMENT, which carries the context
+
+    def test_a_body_reached_ONLY_as_a_proxy_still_resolves_to_that_proxy(self):
+        native = BRepBody("Probe", entity_token="TOK-NATIVE")
+        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        _install_native_and_proxy(comp_bodies=[], occ_bodies=[("Probe:1", [proxy])])
+        val, err = inp.BodyRef("body").resolve("Probe")
+        assert err is None and val is proxy
+
+    def test_an_UNPLACED_bodys_native_is_the_candidate(self):
+        # The native is dropped only when a placement exists to replace it. A body no occurrence
+        # references (a root-level body, or a component nothing instances) has only its native, and
+        # dropping that would refuse a body that is not ambiguous at all.
+        native = BRepBody("Probe", entity_token="TOK-NATIVE")
+        _install_native_and_proxy(comp_bodies=[native], occ_bodies=[])
+        val, err = inp.BodyRef("body").resolve("Probe")
+        assert err is None and val is native
+
+    def test_a_component_placed_TWICE_still_refuses_the_bare_name(self):
+        # Two placements of ONE body are two world positions. The physical body groups to one key, but
+        # each placement is its own candidate, so the bare name is refused with both instance-qualified
+        # spellings - picking either would target a placement the caller never chose.
+        native = BRepBody("Pin", entity_token="TOK-NATIVE")
+        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
+                                  occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and "ambiguous" in err.lower()
+        assert "'Jaw:1:Pin'" in err and "'Jaw:2:Pin'" in err
+        assert "'Jaw:Pin'" not in err          # the dropped native is not offered as a candidate
+
+    def test_two_placements_with_unreadable_paths_still_refuse(self):
+        # Group members are keyed by each wrapper's OWN token, with the printable context only as a
+        # fallback - keyed on the context, two placements whose fullPathName raises read the same
+        # "Jaw" string, silently merge, and the ambiguity degrades to a first-placement pick.
+        class _RaisingPath:
+            def __init__(self, name):
+                self.name = name
+            @property
+            def fullPathName(self):
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+        native = BRepBody("Pin", entity_token="TOK-NATIVE")
+        one = body_proxy(native, _RaisingPath("Jaw:1"))
+        two = body_proxy(native, _RaisingPath("Jaw:2"))
+        _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
+                                  occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and "ambiguous" in err.lower()
+
+    def test_the_COMPONENT_qualified_form_also_refuses_when_placed_twice(self):
+        # 'Jaw:Pin' names the component, which both instances answer to - so it is still ambiguous and
+        # is refused with the instance-qualified spellings that are not.
+        native = BRepBody("Pin", entity_token="TOK-NATIVE")
+        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
+                                  occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
+        val, err = inp.BodyRef("body").resolve("Jaw:Pin")
+        assert val is None and "ambiguous" in err.lower()
+        assert "'Jaw:1:Pin'" in err and "'Jaw:2:Pin'" in err
+
+    def test_one_instance_of_a_twice_placed_component_resolves_by_its_own_name(self):
+        # The way OUT of that refusal: the instance-qualified spelling the refusal listed resolves.
+        native = BRepBody("Pin", entity_token="TOK-NATIVE")
+        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
+                                  occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
+        val, err = inp.BodyRef("body").resolve("Jaw:2:Pin")
+        assert err is None and val is two
+
+    def test_two_DIFFERENT_bodies_sharing_a_name_are_still_refused(self):
+        # The grouping is per PHYSICAL body: two bodies with their own native tokens group apart and
+        # the ambiguity refusal stands, with both contexts listed.
+        a, b = BRepBody("Pin", entity_token="TOK-A"), BRepBody("Pin", entity_token="TOK-B")
+        pa = body_proxy(a, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        pb = body_proxy(b, types.SimpleNamespace(name="Clamp:1", fullPathName="Clamp:1"))
+        _install_native_and_proxy(comp_bodies=[], occ_bodies=[("Jaw:1", [pa]), ("Clamp:1", [pb])])
+        val, err = inp.BodyRef("body").resolve("Pin")
+        assert val is None and "ambiguous" in err.lower()
+        assert "'Jaw:1:Pin'" in err and "'Clamp:1:Pin'" in err
+
+    def test_the_key_of_a_proxy_IS_its_natives_token(self):
+        native = BRepBody("Probe", entity_token="TOK-NATIVE")
+        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        assert inp._body_key(proxy) == inp._body_key(native) == "TOK-NATIVE"
+
+    def test_a_wrapper_that_does_not_answer_nativeObject_keys_on_its_OWN_token(self):
+        # nativeObject is read through safe(): a wrapper kind that does not answer it at all still
+        # has its own token to key on, and must not be dropped to the (name, scope) fallback.
+        b = BRepBody("Probe", entity_token="TOK-ONLY")
+        del b.nativeObject
+        assert inp._body_key(b) == "TOK-ONLY"
+
+    def test_an_unreadable_token_falls_back_to_name_and_scope(self):
+        # With no token at either end the key is (name, scope): two fresh wrappers of one body in one
+        # scope collapse, and a same-named body in ANOTHER scope stays a separate candidate.
+        frame = types.SimpleNamespace(name="Frame")
+        one, again = BRepBody("Pin", parent_component=frame), BRepBody("Pin", parent_component=frame)
+        other = BRepBody("Pin", parent_component=types.SimpleNamespace(name="Lid"))
+        for b in (one, again, other):
+            del b.entityToken
+        assert inp._body_key(one) == inp._body_key(again) == ("Pin", "Frame")
+        assert inp._body_key(other) != inp._body_key(one)
 
     def test_a_handle_is_never_ambiguous_even_when_name_is_duplicated(self):
         # the precise path: two 'Pin' bodies exist by name, but a HANDLE resolves ONE directly
@@ -1495,11 +1757,13 @@ class FakeProfile:
         self.tag = tag
 
 
-def _install_profiles(handle_map=None, sketches=None):
+def _install_profiles(handle_map=None, sketches=None, monkeypatch=None):
     """Wire adsk.fusion.Profile for isinstance, a handle resolver, and a component whose `sketches`
     collection exposes named sketches each owning a `profiles` counted collection.
 
-    `sketches`: ordered list of (name, [FakeProfile, ...]). The LAST is the 'most recent'."""
+    `sketches`: ordered list of (name, [FakeProfile, ...]) or (name, [...], text_count). The LAST is
+    the 'most recent'. `text_count` populates sketchTexts, the 'text:<i>' address space; each text is
+    tagged '<sketch>#<i>' so a test can tell WHICH one resolved."""
     import adsk.fusion
     adsk.fusion.Profile = FakeProfile
     handle_map = handle_map or {}
@@ -1515,11 +1779,13 @@ def _install_profiles(handle_map=None, sketches=None):
             return self._items[i] if 0 <= i < len(self._items) else None
 
     class _Sketch:
-        def __init__(self, name, profs):
+        def __init__(self, name, profs, ntexts=0):
             self.name = name
             self.profiles = _Profiles(profs)
+            self.sketchTexts = _Profiles([types.SimpleNamespace(tag=f"{name}#{i}")
+                                          for i in range(ntexts)])
 
-    sk_objs = [_Sketch(n, p) for n, p in sketches]
+    sk_objs = [_Sketch(*row) for row in sketches]
 
     class _Sketches:
         @property
@@ -1541,8 +1807,13 @@ def _install_profiles(handle_map=None, sketches=None):
             e = handle_map.get(h)
             return [e] if e is not None else []
     comp = FakeComp()
-    inp._common.design = lambda: FakeDesign()
-    inp._common.target_component = lambda d: comp
+    des = FakeDesign()
+    if monkeypatch is not None:
+        monkeypatch.setattr(inp._common, "design", lambda: des)
+        monkeypatch.setattr(inp._common, "target_component", lambda d: comp)
+    else:
+        inp._common.design = lambda: des
+        inp._common.target_component = lambda d: comp
     return comp
 
 
@@ -1711,6 +1982,123 @@ class TestProfileRefList:
         _install_profiles(handle_map={"A": p})
         val, err = inp.ProfileRefList("profiles").resolve(["A", "MISSING"])
         assert val is None and "[1]" in err
+
+
+# ── a sketch TEXT as a profile input (allow_text) ────────────────────────────────────────────────
+#
+# A SketchText carries no Profile of its own, and the emboss/extrude createInput contracts take the
+# text itself in the profile slot while sweep/revolve/loft do not - so the address resolves to the
+# SketchText object, and only where the kind was declared allow_text.
+
+class TestProfileRefSketchText:
+    def test_the_published_text_id_resolves_to_the_sketch_text(self, monkeypatch):
+        _install_profiles(sketches=[("Nameplate", [], 1)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profiles", allow_text=True).resolve("text:0")
+        assert err is None and val.tag == "Nameplate#0"
+
+    def test_the_index_picks_that_text_not_the_first(self, monkeypatch):
+        _install_profiles(sketches=[("Nameplate", [], 3)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("text:2")
+        assert err is None and val.tag == "Nameplate#2"
+
+    def test_a_sketch_qualified_id_targets_that_sketch_not_the_most_recent(self, monkeypatch):
+        # blank-sketch resolution takes the LAST sketch, so an ignored '<sketch>/' prefix stamps the
+        # wrong sketch's text - silently, since both resolve to a SketchText.
+        _install_profiles(sketches=[("Nameplate", [], 1), ("Later", [], 1)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("Nameplate/text:0")
+        assert err is None and val.tag == "Nameplate#0"
+        bare, berr = inp.ProfileRef("p", allow_text=True).resolve("text:0")
+        assert berr is None and bare.tag == "Later#0"
+
+    def test_a_sketch_name_carrying_a_slash_still_addresses_its_text(self, monkeypatch):
+        _install_profiles(sketches=[("Plate/Front", [], 1), ("Later", [], 1)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("Plate/Front/text:0")
+        assert err is None and val.tag == "Plate/Front#0"
+
+    def test_an_out_of_range_text_names_the_count_and_the_legal_span(self, monkeypatch):
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("text:2")
+        assert val is None
+        assert "'text:2'" in err and "2 sketch text(s)" in err and "text:0..text:1" in err
+
+    def test_a_negative_text_index_is_refused_by_the_range_guard(self, monkeypatch):
+        # int('-1') parses, so only the lower bound of the range guard stops it; without that bound
+        # 'text:-1' would index sketchTexts from the END and stamp the LAST text.
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("text:-1")
+        assert val is None
+        assert "'text:-1' is out of range" in err
+        assert "2 sketch text(s)" in err and "(text:0..text:1)" in err
+
+    def test_a_malformed_text_index_is_refused_by_the_grammar_not_the_handle_path(self, monkeypatch):
+        # 'text:abc' opens with the text grammar, so the refusal must talk about texts - falling
+        # through to "did not resolve to a profile handle" is the dead end in miniature.
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        kind = inp.ProfileRef("p", allow_text=True)
+        for raw in ("text:abc", "text:", "text:1.5"):
+            val, err = kind.resolve(raw)
+            assert val is None, raw
+            assert f"'{raw}' carries no whole-number text index" in err
+            assert "2 sketch text(s)" in err and "(text:0..text:1)" in err
+            assert "profile handle" not in err
+
+    def test_a_malformed_text_index_is_still_a_text_where_text_is_not_allowed(self, monkeypatch):
+        # the same string reaches the allow_text refusal, not the handle path.
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profile").resolve("text:abc")
+        assert val is None and "SKETCH TEXT" in err and "model_emboss" in err
+
+    def test_a_sketch_qualified_malformed_index_names_that_sketch(self, monkeypatch):
+        _install_profiles(sketches=[("Nameplate", [], 1), ("Later", [], 3)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("Nameplate/text:x")
+        assert val is None
+        assert "'Nameplate'" in err and "1 sketch text(s)" in err and "(text:0..text:0)" in err
+
+    def test_a_sketch_holding_no_text_is_refused_by_name(self, monkeypatch):
+        _install_profiles(sketches=[("Plain", [FakeProfile("p0")], 0)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("text:0")
+        assert val is None and "'Plain' holds none" in err
+
+    def test_a_text_is_REFUSED_where_the_feature_takes_only_profiles(self, monkeypatch):
+        # none of sweep/revolve/loft names SketchText in its accepted list, so the kind refuses
+        # first rather than handing the API an argument it rejects.
+        _install_profiles(sketches=[("Nameplate", [], 1)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("profile").resolve("text:0")
+        assert val is None
+        assert "'text:0'" in err and "SKETCH TEXT" in err and "model_emboss" in err
+
+    def test_a_non_text_entity_id_is_not_taken_for_a_text(self, monkeypatch):
+        # only 'text:<i>' is a text address; 'line:0' must fall through to the handle path, not
+        # resolve to whatever sits at sketchTexts[0].
+        _install_profiles(sketches=[("Nameplate", [], 1)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRef("p", allow_text=True).resolve("line:0")
+        assert val is None and "did not resolve to a profile handle" in err
+
+    def test_a_text_only_sketch_teaches_the_text_route_instead_of_draw_a_region(self, monkeypatch):
+        # a nameplate sketch has no closed profile and never will, so "draw one" is a dead end.
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRefList("profiles", allow_text=True).resolve([{"sketch": "Nameplate"}])
+        assert val is None
+        assert "2 sketch text(s)" in err and "'text:0'..'text:1'" in err
+        assert "Draw a closed region" not in err
+
+    def test_the_same_dead_end_stays_plain_where_text_is_not_allowed(self, monkeypatch):
+        _install_profiles(sketches=[("Nameplate", [], 2)], monkeypatch=monkeypatch)
+        val, err = inp.ProfileRefList("profiles").resolve([{"sketch": "Nameplate"}])
+        assert val is None and "Draw a closed region first." in err and "sketch text" not in err
+
+    def test_a_list_keeps_order_across_a_profile_and_a_text(self, monkeypatch):
+        prof = FakeProfile("region")
+        _install_profiles(handle_map={"H": prof}, sketches=[("Nameplate", [], 1)],
+                          monkeypatch=monkeypatch)
+        val, err = inp.ProfileRefList("profiles", allow_text=True).resolve(["text:0", "H"])
+        assert err is None
+        assert val[0].tag == "Nameplate#0" and val[1] is prof
+
+    def test_the_text_address_is_advertised_only_where_it_is_accepted(self):
+        assert "text:<i>" in inp.ProfileRefList("profiles", allow_text=True).contract_note()
+        assert "text:<i>" not in inp.ProfileRefList("profiles").contract_note()
+        assert "text:<i>" in inp.ProfileRef("profile", allow_text=True).schema()["description"]
 
 
 # ── OccurrenceRef: fullPathName-preferring, ambiguity-refusing instance resolution ────────────────
@@ -2335,3 +2723,146 @@ class TestJointOriginRef:
         _install_jo(design)
         matches = inp._joints.find_joint_origins_by_name(design, "Deep_Frame")
         assert len(matches) == 1 and matches[0][0] is native and matches[0][1] is sub
+
+
+# ── the shared collection walks: an unreadable member costs its own row, not the census ──
+
+class _WalkColl:
+    """A count/item(i) collection. `broken` indices raise on item(i); a None member is a hole."""
+
+    def __init__(self, items, broken=(), count_raises=False):
+        self._items = list(items)
+        self._broken = set(broken)
+        self._count_raises = count_raises
+
+    @property
+    def count(self):
+        if self._count_raises:
+            raise RuntimeError("count unreadable")
+        return len(self._items)
+
+    def item(self, i):
+        if i in self._broken:
+            raise RuntimeError("item unreadable")
+        return self._items[i]
+
+
+def _tl_obj(name, index):
+    return types.SimpleNamespace(name=name, index=index, isGroup=False, entity=object())
+
+
+class TestTimelineObjectsWalk:
+    """_timeline_objects is what every FeatureRef resolution reads the timeline through."""
+
+    def test_returns_every_object_in_index_order(self):
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Fillet1", 1)]
+        assert inp._timeline_objects(_WalkColl(objs)) == objs
+
+    def test_an_unreadable_object_is_skipped_not_raised(self):
+        # Without the safe() guard this raises straight out of resolve(), so ONE bad timeline row
+        # makes every feature name in the document unresolvable instead of just its own.
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Broken", 1), _tl_obj("Fillet1", 2)]
+        names = [o.name for o in inp._timeline_objects(_WalkColl(objs, broken=(1,)))]
+        assert names == ["Extrude1", "Fillet1"]
+
+    def test_an_unreadable_count_is_an_empty_timeline_not_a_raise(self):
+        assert inp._timeline_objects(_WalkColl([_tl_obj("X", 0)], count_raises=True)) == []
+
+    def test_the_index_form_reads_the_objects_own_index_not_its_position(self):
+        # A skipped row leaves a HOLE, so position 1 holds the object whose own .index is 2. The
+        # '@index' number an agent passes came from a candidate list / design_get, which publish
+        # o.index - addressing by position would resolve a different object than was named.
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Broken", 1), _tl_obj("Fillet1", 2)]
+        walked = inp._timeline_objects(_WalkColl(objs, broken=(1,)))
+        assert [o.name for o in inp._match_timeline_objects(walked, "Fillet1@2")] == ["Fillet1"]
+        assert inp._match_timeline_objects(walked, "Fillet1@1") == []
+
+    def test_two_same_named_features_across_a_hole_resolve_by_their_own_index(self):
+        # THE silent-wrong-target case: two features share the name 'Fillet1' (indices 3 and 4) and
+        # an unreadable row sits before them. The ambiguity refusal offers 'Fillet1@3'/'Fillet1@4';
+        # under a position-based pick '@4' missed and '@3' quietly resolved the OTHER Fillet1.
+        first, second = _tl_obj("Fillet1", 3), _tl_obj("Fillet1", 4)
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Broken", 1), _tl_obj("Chamfer1", 2), first, second]
+        walked = inp._timeline_objects(_WalkColl(objs, broken=(1,)))
+        assert inp._match_timeline_objects(walked, "Fillet1@4") == [second]
+        assert inp._match_timeline_objects(walked, "Fillet1@3") == [first]
+
+    def test_an_index_no_object_carries_is_a_miss(self):
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Fillet1", 1)]
+        assert inp._match_timeline_objects(objs, "Fillet1@7") == []
+
+    def test_the_index_form_still_confirms_the_name(self):
+        # '@index' is a disambiguator, not an override: naming the wrong feature at a real index
+        # must miss rather than resolve whatever sits there.
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Fillet1", 1)]
+        assert inp._match_timeline_objects(objs, "Extrude1@1") == []
+
+
+class TestTimelineNameWhitespace:
+    """Surrounding whitespace is not a distinguishing feature on EITHER side of the comparison.
+
+    Fusion names an occurrence-create timeline object with a leading space (probe_fix_campaign.log
+    [F74]), which no listing shows and no caller retypes. Both sides are stripped here, at the
+    matcher - every tool's own input handling sits above it, so a caller that does not strip its
+    own input still resolves the same object as one that does.
+    """
+
+    def test_the_OBJECT_side_is_stripped(self):
+        objs = [_tl_obj(" InsProbe:1", 0)]
+        assert inp._match_timeline_objects(objs, "InsProbe:1") == objs
+
+    def test_the_WANT_side_is_stripped(self):
+        # the half no tool exercises today: every caller strips its own input first, so only a
+        # direct call reaches this - and the docstring's contract is what a NEW caller relies on.
+        objs = [_tl_obj("Extrude1", 0)]
+        assert inp._match_timeline_objects(objs, "  Extrude1  ") == objs
+        obj, err = inp.resolve_timeline_object(objs, "  Extrude1  ", "'feature'")
+        assert err is None and obj is objs[0]
+
+    def test_both_sides_at_once(self):
+        objs = [_tl_obj(" InsProbe:1 ", 0)]
+        assert inp._match_timeline_objects(objs, "  InsProbe:1  ") == objs
+
+    def test_the_index_form_strips_the_name_half_too(self):
+        objs = [_tl_obj(" Extrude1", 4)]
+        assert inp._match_timeline_objects(objs, " Extrude1 @4") == objs
+
+    def test_whitespace_is_never_a_disambiguator(self):
+        # two objects differing ONLY by padding are one ambiguity, refused - never silently split
+        # into two addressable names an agent cannot tell apart in any listing.
+        objs = [_tl_obj("Extrude1", 0), _tl_obj(" Extrude1", 1)]
+        assert inp._match_timeline_objects(objs, "Extrude1") == objs
+        obj, err = inp.resolve_timeline_object(objs, "Extrude1", "'feature'")
+        assert obj is None and "matches 2 timeline objects" in err
+
+
+class TestSketchOwnersWalk:
+    """_sketch_owners is the census SketchRef/SketchRefList refuse an ambiguous name from."""
+
+    def _design(self, comps):
+        return types.SimpleNamespace(rootComponent=comps[0], activeComponent=comps[0],
+                                     allComponents=_WalkColl(comps))
+
+    def _comp(self, name, sketch_names, **kw):
+        sketches = [types.SimpleNamespace(name=n) for n in sketch_names]
+        return types.SimpleNamespace(name=name, sketches=_WalkColl(sketches, **kw))
+
+    def test_finds_the_name_in_every_component(self):
+        d = self._design([self._comp("Root", ["Profile"]), self._comp("Frame", ["Profile"])])
+        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root", "Frame"]
+
+    def test_match_is_exact_and_case_insensitive(self):
+        d = self._design([self._comp("Root", ["Profile", "ProfileOuter"])])
+        assert [sk.name for _c, sk in inp._sketch_owners(d, "profile")] == ["Profile"]
+
+    def test_an_unreadable_sketch_does_not_hide_the_rest_of_the_census(self):
+        # Losing a component's whole sketch list to one bad row would turn a genuine AMBIGUITY into
+        # a confident single hit - the resolver would then act on the wrong sketch.
+        bad = self._comp("Frame", [types.SimpleNamespace(name="Profile")], broken=(0,))
+        d = self._design([self._comp("Root", ["Profile"]), bad])
+        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root"]
+
+    def test_a_component_with_no_sketch_collection_is_skipped(self):
+        d = self._design([self._comp("Root", ["Profile"]),
+                          types.SimpleNamespace(name="Empty", sketches=None)])
+        assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root"]

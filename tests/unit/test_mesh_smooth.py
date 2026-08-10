@@ -20,7 +20,7 @@ import types
 
 import pytest
 
-from conftest import load_tool, payload, error_message
+from conftest import MeshBody, load_tool, payload, error_message
 
 msm = load_tool("mesh_smooth")
 
@@ -37,61 +37,9 @@ class _ValueInput:
         self.real = real
 
 
-class TriangleMesh:
-    def __init__(self, tri, nodes):
-        self.triangleCount = tri
-        self.nodeCount = nodes
-
-
-class PolygonMesh:
-    """MeshBody.mesh - only the node coordinates matter here."""
-    def __init__(self, coords):
-        self.nodeCoordinatesAsDouble = list(coords)
-
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody. `volume` RAISES when the mesh is not closed; `dead`
-    models an invalidated wrapper. `coords_readable=False` models a PolygonMesh whose coordinate
-    array cannot be read - the case that leaves a smooth unverifiable."""
-    def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0,
-                 coords=None, token=None, parent=None, coords_readable=True):
-        self.name = name
-        self.dead = False
-        self._display = TriangleMesh(tri, nodes)
-        self._is_closed = is_closed
-        self.volume_cm3 = volume
-        self.coords = list(coords if coords is not None else _BOX_COORDS)
-        self.coords_readable = coords_readable
-        self.entityToken = token or f"MTOK::{name}"
-        self.parentComponent = parent
-
-    def _live(self):
-        if self.dead:
-            raise RuntimeError("3 : object is no longer valid")
-
-    @property
-    def displayMesh(self):
-        self._live()
-        return self._display
-
-    @property
-    def mesh(self):
-        self._live()
-        if not self.coords_readable:
-            raise RuntimeError("3 : the polygon mesh is unavailable")
-        return PolygonMesh(self.coords)
-
-    @property
-    def isClosed(self):
-        self._live()
-        return self._is_closed
-
-    @property
-    def volume(self):
-        self._live()
-        if not self._is_closed:
-            raise RuntimeError("3 : the mesh is not closed and encloses no volume")
-        return self.volume_cm3
+def _mesh(name="Scan1", coords=None, **kw):
+    """conftest's shared MeshBody carrying this file's box node coordinates by default."""
+    return MeshBody(name=name, coords=_BOX_COORDS if coords is None else coords, **kw)
 
 
 class _Coll:
@@ -197,7 +145,7 @@ class _Design:
 # ── rig ──────────────────────────────────────────────────────────────────────────────────────────
 
 def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
-    mesh = mesh if mesh is not None else MeshBody()
+    mesh = mesh if mesh is not None else _mesh()
     comp = _Comp(meshes=[mesh])
     mesh.parentComponent = comp
     feats = _SmoothFeatures(on_add=on_add, **feat_kw)
@@ -213,15 +161,15 @@ def _rig(monkeypatch, mesh=None, on_add=None, design_type=1, **feat_kw):
 def _relax(mesh, coords=None, volume=None):
     """The measured smooth: coordinates move, counts and is_closed hold still."""
     def _apply():
-        mesh.coords = list(coords if coords is not None else _SMOOTHED_COORDS)
+        mesh._coords = list(coords if coords is not None else _SMOOTHED_COORDS)
         if volume is not None:
-            mesh.volume_cm3 = volume
+            mesh._volume_cm3 = volume
     return _apply
 
 
 @pytest.fixture
 def rig(monkeypatch):
-    mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+    mesh = _mesh(tri=12, nodes=8, volume=1.0)
     _m, comp, feats = _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh, volume=0.9))
     return types.SimpleNamespace(mesh=mesh, comp=comp, feats=feats, monkeypatch=monkeypatch)
 
@@ -297,10 +245,14 @@ class TestVerification:
         assert out["mesh_nodes"] == 4
         assert "node_count" not in out
 
-    def test_a_partial_move_counts_only_the_nodes_that_moved(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+    # a node moves when ANY of its three coordinates moves - the flat array is x,y,z per node, so
+    # index 3/4/5 are node 1's x, y and z. A diff that only compares one of the three misses the
+    # other two entirely.
+    @pytest.mark.parametrize("component", [3, 4, 5])
+    def test_a_partial_move_counts_only_the_nodes_that_moved(self, monkeypatch, component):
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         after = list(_BOX_COORDS)
-        after[3] = 0.25                       # one component of node 1
+        after[component] = _BOX_COORDS[component] + 0.25    # one component of node 1
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh, coords=after))
         out = payload(msm.handler(mesh="H", smoothness=0.02))
         assert out["nodes_moved"] == 1
@@ -311,7 +263,7 @@ class TestVerification:
         assert "every one of the 4" in msg and "original coordinate" in msg
 
     def test_unreadable_coordinates_are_reported_as_unverified(self, monkeypatch):
-        mesh = MeshBody(coords_readable=False)
+        mesh = _mesh(mesh_readable=False)
         _rig(monkeypatch, mesh=mesh)
         msg = error_message(msm.handler(mesh="H"))
         assert "UNVERIFIED" in msg and "hold still" in msg
@@ -322,15 +274,18 @@ class TestVerification:
         assert "units" not in out
 
     def test_an_open_mesh_reports_no_volume_percentage_rather_than_a_wrong_one(self, monkeypatch):
-        mesh = MeshBody(is_closed=False)
+        # an open mesh READS 0.0 rather than raising, and a percentage off a zero base is
+        # undefined - so the field is null off the value, with no division ever attempted.
+        mesh = _mesh(is_closed=False, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh))
+        assert mesh.volume == 0.0                       # the reading, not a raise
         out = payload(msm.handler(mesh="H"))
         assert out["volume_change_percent"] is None
 
     def test_a_large_volume_drop_adds_advice_and_never_a_verdict(self, monkeypatch):
         # smoothness 0.5 takes a coarse box to a near-point; the note reports the number and
         # advises, it does not diagnose a "collapse"
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh, volume=0.001))
         out = payload(msm.handler(mesh="H", smoothness=0.5))
         assert out["volume_change_percent"] == pytest.approx(-99.9)
@@ -353,20 +308,20 @@ class TestSmoothnessReadBack:
         assert out["smoothness"] == pytest.approx(0.5)
 
     def test_a_smoothness_the_api_did_not_take_is_an_error_not_an_echo(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh), feature_smoothness=0.02)
         msg = error_message(msm.handler(mesh="H", smoothness=0.5))
         assert "created with smoothness = 0.02" in msg and "0.5 was requested" in msg
 
     def test_an_unreadable_smoothness_is_reported_as_unverified_not_as_the_request(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh), design_type=0, none_feature=True)
         out = payload(msm.handler(mesh="H", smoothness=0.5))
         assert out["smoothness"] is None
         assert "smoothness_unverified" in out
 
     def test_an_omitted_smoothness_in_direct_mode_claims_no_default_it_cannot_read(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh), design_type=0, none_feature=True)
         out = payload(msm.handler(mesh="H"))
         assert out["smoothness"] is None
@@ -377,7 +332,7 @@ class TestSmoothnessReadBack:
 
 class TestModeRouting:
     def test_direct_mode_returns_no_feature_yet_the_landed_smooth_is_success(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh), design_type=0, none_feature=True)
         out = payload(msm.handler(mesh="H", smoothness=0.5))
         assert out["smoothed"] is True
@@ -390,7 +345,7 @@ class TestModeRouting:
         assert "original coordinate" in error_message(msm.handler(mesh="H", smoothness=0.5))
 
     def test_parametric_no_feature_return_stays_an_honest_error(self, monkeypatch):
-        mesh = MeshBody(tri=12, nodes=8, volume=1.0)
+        mesh = _mesh(tri=12, nodes=8, volume=1.0)
         _rig(monkeypatch, mesh=mesh, on_add=_relax(mesh), design_type=1, none_feature=True)
         assert "returned no feature" in error_message(msm.handler(mesh="H", smoothness=0.5))
 

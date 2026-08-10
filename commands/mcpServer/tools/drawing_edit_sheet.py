@@ -15,10 +15,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, measured, ok, safe
 from . import _drawing_common
+from ._drawing_common import SHEET_SIZE_MAP
 from . import _inputs
-# The one name -> SheetSizes member map (with each size's standard family), shared with the tool
-# that sets the size at creation time.
-from .drawing_create import _SHEET_SIZE_MAP
 
 app = adsk.core.Application.get()
 
@@ -26,7 +24,7 @@ _ACTIONS = ("add", "copy", "delete", "rename", "set_size", "set_orientation", "t
 
 _ACTION = _inputs.Choice("action", list(_ACTIONS), required=True,
                          description="The sheet operation to perform.")
-_SHEET_SIZE = _inputs.Choice("sheet_size", list(_SHEET_SIZE_MAP),
+_SHEET_SIZE = _inputs.Choice("sheet_size", list(SHEET_SIZE_MAP),
                              description="Preset sheet size (set_size).")
 _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"],
                               description="Sheet orientation (set_orientation).")
@@ -36,10 +34,16 @@ _ORIENTATION_MEMBERS = {"landscape": "LandscapeSheetOrientationType",
 
 
 def _size_label(value):
-    """'a3' for the SheetSizes value a sheet reads back, or None (a custom or unmapped size)."""
+    """'a3' for the SheetSizes value a sheet reads back, or None for a value outside the preset
+    table - CustomSizeSheetSize among them.
+
+    A custom-sized sheet keeps its extents in width/height and nowhere else: Sheet.customSize
+    carries a full docstring but READING it raises AttributeError, and CustomSizeSheetSize cannot
+    be assigned to Sheet.sheetSize, so a custom sheet is a size this tool reports as null and has
+    no route to set."""
     if value is None:
         return None
-    for key, (_standard, member) in _SHEET_SIZE_MAP.items():
+    for key, (_standard, member) in SHEET_SIZE_MAP.items():
         if value == _drawing_common.enum_value("SheetSizes", member):
             return key
     return None
@@ -53,6 +57,18 @@ def _orientation_label(value):
         if value == _drawing_common.enum_value("SheetOrientationTypes", member):
             return key
     return None
+
+
+def _sheet_listing(dwg):
+    """The drawing's sheets in order as [{export_index, name}]. export_index is 1-BASED - the
+    numbering drawing_export's sheet_range takes - and no drawing read tool exists to obtain it, so
+    every action that changes which sheets a drawing holds hands the list back."""
+    # A sheet's INDEX is its address (export_index is exactly what drawing_export's sheet_range
+    # takes), so this stays a positional walk: iter_collection drops an unreadable sheet, which
+    # would slide every later export_index down one and export the WRONG sheets.
+    sheets = safe(lambda: dwg.sheets)
+    return [{"export_index": i + 1, "name": safe(lambda i=i: sheets.item(i).name)}
+            for i in range(safe(lambda: sheets.count, 0) or 0)]
 
 
 def _sheet_facts(sheet):
@@ -106,8 +122,12 @@ def _do_add(dwg, new_name):
         "sheet_count": after,
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
+        "sheets": _sheet_listing(dwg),
         "note": ("Sheet added after the active sheet, inheriting its size and orientation, and it is "
-                 "now the ACTIVE sheet. Set its size with action='set_size' and its shape with "
+                 "now the ACTIVE sheet. It lands DIRECTLY AFTER the active sheet, not at the end, so "
+                 "every sheet below it moves down one and its export index shifts with it - 'sheets' "
+                 "above is the new order, with the 1-based indices drawing_export's sheet_range "
+                 "takes. Set its size with action='set_size' and its shape with "
                  "action='set_orientation'; drawing_export is the only way to see it (a drawing "
                  "document has no viewport)."),
     }
@@ -146,10 +166,12 @@ def _do_copy(dwg, sheet, new_name):
         "sheet_count": after,
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
+        "sheets": _sheet_listing(dwg),
         "note": ("Sheet copied - the facts above are read off the COPY, which carries the SOURCE "
                  "sheet's size, orientation, sketches and tables (not the active sheet's). The copy "
-                 "is the LAST sheet in the drawing and is now the ACTIVE sheet. Rename it with "
-                 "action='rename'."),
+                 "is the LAST sheet in the drawing and is now the ACTIVE sheet, so it takes the "
+                 "LAST export index in 'sheets' above (1-based, the numbering drawing_export's "
+                 "sheet_range takes). Rename it with action='rename'."),
     })
 
 
@@ -176,11 +198,14 @@ def _do_delete(dwg, sheet):
         "sheet": name,
         "sheet_count_before": before,
         "sheet_count_still_reads": reads,
+        "sheets_still_read": _sheet_listing(dwg),
         "note": ("Fusion accepted the delete (deleteMe returned true), which cannot be undone. The "
-                 f"count of {reads} above is what the drawing still reports inside this call - a "
-                 "drawing delete is not visible in the call that makes it, so it is NOT a "
-                 "verification. Re-read the drawing in a later call to see the sheets it holds; "
-                 "drawing state across calls must be re-read, never assumed."),
+                 f"count of {reads} above and 'sheets_still_read' beside it are what the drawing "
+                 "still reports inside this call - a drawing delete is not visible in the call that "
+                 "makes it, so neither is a verification, and the deleted sheet is expected to be "
+                 "listed there. Re-read the drawing in a later call to see the sheets it holds and "
+                 "the 1-based export indices they then carry; drawing state across calls must be "
+                 "re-read, never assumed."),
     })
 
 
@@ -217,7 +242,7 @@ def _do_rename(sheet, new_name):
 
 
 def _do_set_size(dwg, sheet, size_key):
-    size_standard, member = _SHEET_SIZE_MAP[size_key]
+    size_standard, member = SHEET_SIZE_MAP[size_key]
     value = _drawing_common.enum_value("SheetSizes", member)
     if value is None:
         return error(f"This Fusion build has no sheet size '{member}', so '{size_key}' cannot be set.")

@@ -51,6 +51,7 @@ _SHAPE_EXEMPT = {"workspace_orient"}
 _WRITE_VERB_EXEMPT = {
     "view_section": "its clear action deletes user-created section analyses.",
     "sys_request_selection": "it clears the user's current Fusion selection.",
+    "view_screenshot": "file_path writes and silently overwrites a caller-named PNG on local disk.",
 }
 
 

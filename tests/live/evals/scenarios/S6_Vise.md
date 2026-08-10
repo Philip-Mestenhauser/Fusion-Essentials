@@ -5,8 +5,8 @@ fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNE
   "MCP Test Project" verified to EXIST. The vise this scenario builds becomes the FIXTURE X-REF
   SOURCE the template chain consumes. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 164
-  max_tokens: 110000
+  max_tool_calls: 184
+  max_tokens: 125000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -55,6 +55,12 @@ GOAL - a SELF-CENTERING machine VISE as separate parts:
   a model parameter you can drive with an expression (it moves the jointed part along the
   JOINT FRAME'S Z axis) - but the contract is: one param_set, both jaw OCCURRENCES move, gap
   centered on the vise center at every value.
+- The body carries a TEE-SLOT or keyway along the slideway - the machinist's fixture-mounting
+  detail - drawn as real slot geometry in the slideway sketch, not a rectangle pretending.
+- The vise carries its NAME - "{{RUN_FOLDER}} VISE" - as real TEXT on a visible flat of the
+  body, sized to be legible at a glance, in a font you choose and NAME in your report. The text
+  must live in the model (a sketch text read back by a fresh sketch read), not only in a
+  screenshot.
 - Sensible proportions for a small benchtop vise. Mark the opening parameter a favorite.
 
 PROVE the self-centering: set the opening parameter to two different values; after each, read
@@ -82,6 +88,9 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   midpoint math at both values).
 - the jaws do not interfere with the body at either opening (an interference check ran; expected
   slideway contact named).
+- the slideway SLOT exists as slot geometry (a fresh sketch read shows the slot's curves - report
+  what the read lists for it) and the vise NAME reads back as sketch text (a fresh sketch read
+  returns the text string and the font it carries; report both).
 - doc_get -> saved as "P6-Vise", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
@@ -138,9 +147,17 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - This artifact gets EDITED by S7 (the opening-parameter bump proves x-ref staleness AND, with
   the joints in place, the jaws move as occurrences under the update) - version 1 is not
   immutable the way P1-P5 are; note it in the run record.
-- Budget: 164 calls / 110k tokens. A measured run (184 calls / ~140k tokens) spends roughly
+- Budget: 184 calls / 125k tokens. A measured run (184 calls / ~140k tokens) spends roughly
   half its calls discovering the offset-direction rule above when the wire does not teach it;
   with that spend freed and the stepped-jaw + finish work absorbing part of it, the expected run
-  is ~131 calls / ~88k tokens, + 25% margin = 164 / 110k. Re-measure at the next run. An
-  offset-driven slideway follows the joint frame's Z, so a world-Z slideway is the path of
-  least resistance with origin-snapped joints.
+  is ~131 calls / ~88k tokens; the slot + name-text elements add an estimated ~15 calls; + 25%
+  margin = 184 / 125k. Re-measure at the next run. An offset-driven slideway follows the joint
+  frame's Z, so a world-Z slideway is the path of least resistance with origin-snapped joints.
+- THE SLOT + NAME elements nudge the executor onto the
+  slot family (sketch_add_geometry kind=slot and kin) and the text surface (sketch_set_text
+  create + font_name) without naming either tool - the goal names the OUTCOME (a tee-slot's
+  real slot geometry; legible named-font text read back by a fresh sketch read). Grade the
+  slot by the sketch read listing slot-shaped curves (arcs + lines; the platform lands
+  2 solid + 1 construction line + 2 arcs for a plain slot) and the text by the returned
+  string + font. An executor that cannot find the text surface and reports it under
+  SURFACED/CAPABILITY is a valid finding, not an automatic FAIL of the whole run.

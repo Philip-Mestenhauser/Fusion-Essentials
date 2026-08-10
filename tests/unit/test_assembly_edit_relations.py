@@ -57,12 +57,36 @@ class _StickySuppress(_Relation):
         self._suppressed = getattr(self, "_suppressed", False)
 
 
+class _BlindSuppress(_Relation):
+    """A relation whose isSuppressed accepts a write and RAISES on read - a flag that yields no
+    verdict, which bool() would coerce into a confirmed False."""
+
+    @property
+    def isSuppressed(self):
+        raise RuntimeError("3 : An API Object refers to a deleted Object")
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        self._written = value
+
+
+class _IntFlag(_Relation):
+    """A relation whose isSuppressed reads back as an INT rather than a bool - a truthy reading that
+    is not True."""
+
+    @property
+    def isSuppressed(self):
+        return int(self._flag)
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        self._flag = bool(value)
+
+
 class _RigidGroup(_Relation):
-    """setOccurrences RAISES, as measured: on Fusion 2704.1.39 the call fails at every marker
-    position - '3 : Cannot be edited before rolling back' with the marker at the end or just after
-    the group, '3 : Provided input paths or alignments are not valid.' rolled just before it - and
-    a same-membership call raises too. set_calls records any attempt so a test can prove the tool
-    refuses WITHOUT reaching the platform."""
+    """setOccurrences RAISES, as measured on Fusion 2705.0.87: '3 : Cannot be edited before rolling
+    back', with the members reading back unchanged after it. set_calls records any attempt so a test
+    can prove the tool refuses WITHOUT reaching the platform."""
 
     def __init__(self, name, members=(), **kw):
         super().__init__(name, **kw)
@@ -102,6 +126,26 @@ class _MotionLink(_Relation):
         if not self.sticky_reverse:
             self.isReversed = is_reversed
         return True
+
+
+class _BlindReverse(_MotionLink):
+    """A motion link whose isReversed reads until it is WRITTEN and RAISES afterwards - the write
+    lands where no read-back can confirm it."""
+
+    def __init__(self, name, **kw):
+        super().__init__(name, **kw)
+        self._blind = False
+
+    @property
+    def isReversed(self):
+        if self._blind:
+            raise RuntimeError("3 : An API Object refers to a deleted Object")
+        return self._rev
+
+    @isReversed.setter
+    def isReversed(self, value):
+        self._rev = value
+        self._blind = True
 
 
 class _Constraint(_Relation):
@@ -291,6 +335,30 @@ class TestGuards:
         assert "design" in msg.lower()
 
 
+class TestFlagContract:
+    """_flag is the single reader behind all three read-back gates: it answers a real bool, or None
+    when the flag gave no verdict. Both arms are load-bearing - None is what the gates refuse on,
+    and the bool is what reaches the wire."""
+
+    def test_a_flag_that_reads_none_is_no_verdict(self):
+        # a member that READS None never raises, so a raise-only sentinel would call it a False.
+        assert rel._flag(types.SimpleNamespace(isSuppressed=None), "isSuppressed") is None
+
+    def test_a_flag_that_raises_is_no_verdict(self):
+        assert rel._flag(_BlindSuppress("RG1"), "isSuppressed") is None
+
+    def test_a_readable_flag_answers_a_real_bool(self):
+        assert rel._flag(types.SimpleNamespace(isSuppressed=False), "isSuppressed") is False
+
+    def test_a_truthy_non_bool_reading_lands_as_true(self, world):
+        # a flag read back as 1 must publish true, not 1: the payload is the caller's boolean, and
+        # an unnormalized reading also invites a spurious mismatch against the requested value.
+        rg = _IntFlag("RG1", suppressed=True)
+        world(rigid=[rg])
+        out = payload(rel.handler(kind="rigid_group", name="RG1", action="suppress"))
+        assert out["is_suppressed"] is True and out["was_suppressed"] is True
+
+
 class TestSuppress:
     def test_suppress_sets_and_reports_both_states(self, world):
         rg = _RigidGroup("RG1")
@@ -338,6 +406,18 @@ class TestSuppress:
         world(rigid=[rg])
         out = payload(rel.handler(kind="rigid_group", name="RG1", action="suppress"))
         assert out["was_suppressed"] is None and out["is_suppressed"] is True
+
+    def test_an_unreadable_flag_after_unsuppress_is_not_a_confirmed_false(self, world):
+        # unsuppress asks for False, and bool(unreadable) is False too - so a flag that cannot be
+        # read passes a bool() gate and publishes "isSuppressed now reads False" as a measurement.
+        world(rigid=[_BlindSuppress("RG1")])
+        msg = error_message(rel.handler(kind="rigid_group", name="RG1", action="unsuppress"))
+        assert "isSuppressed cannot be read" in msg and "UNCONFIRMED" in msg
+
+    def test_an_unreadable_flag_after_suppress_is_refused_too(self, world):
+        world(constraints=[_BlindSuppress("AC1")])
+        msg = error_message(rel.handler(kind="constraint", name="AC1", action="suppress"))
+        assert "isSuppressed cannot be read" in msg and "UNCONFIRMED" in msg
 
     def test_the_note_is_per_kind_and_claims_only_what_was_observed(self, world):
         # a motion link COUPLES MOTION - it holds no parts - and what suppression does to an
@@ -411,9 +491,9 @@ class TestDelete:
 
 
 class TestSetOccurrencesIsRefused:
-    """setOccurrences is unusable on this Fusion build (measured at every marker position), so the
-    action answers with the measured failures and the path that works - and must reach NEITHER the
-    platform call nor the timeline on its way there."""
+    """setOccurrences is unusable on this Fusion build, so the action answers with the measured
+    failure and the path that works - and must reach NEITHER the platform call nor the timeline on
+    its way there."""
 
     def _group(self):
         return _RigidGroup("RG1", members=[_occ("Frame:1"), _occ("Carrier:1")])
@@ -430,12 +510,17 @@ class TestSetOccurrencesIsRefused:
         assert tl.moved_to_end == 0                      # and no marker restore is needed
         assert [o.fullPathName for o in rg.occurrences] == ["Frame:1", "Carrier:1"]
 
-    def test_the_refusal_quotes_both_measured_failures(self, world):
+    def test_the_refusal_quotes_the_measured_failure_and_pins_it_to_the_build(self, world):
+        # The refusal is a platform fact with a build attached: quoting a raise measured on an older
+        # build as if it were this one's is the provenance defect. The message names the build it was
+        # measured on and the sentence that build actually raises.
         world(rigid=[self._group()], occurrences=[_occ("Frame:1"), _occ("Carrier:1")])
         msg = error_message(rel.handler(kind="rigid_group", name="RG1", action="set_occurrences",
                                         occurrences=["Frame:1", "Carrier:1"]))
         assert "Cannot be edited before rolling back" in msg
-        assert "Provided input paths or alignments are not valid" in msg
+        assert "2705.0.87" in msg
+        assert "2704" not in msg
+        assert "members read back unchanged" in msg
 
     def test_the_refusal_names_the_workaround(self, world):
         world(rigid=[self._group()], occurrences=[_occ("Frame:1"), _occ("Carrier:1")])
@@ -482,6 +567,14 @@ class TestReverse:
         world(links=[ml])
         assert "no direction to flip" in error_message(
             rel.handler(kind="motion_link", name="ML1", action="reverse"))
+
+    def test_an_unreadable_direction_after_the_flip_is_not_a_confirmed_forward(self, world):
+        # flipping a REVERSED link asks for False, and bool(unreadable) is False - so an unreadable
+        # flag agrees with the request and the payload would claim the link now runs forward.
+        ml = _BlindReverse("ML1", reversed_=True)
+        world(links=[ml])
+        msg = error_message(rel.handler(kind="motion_link", name="ML1", action="reverse"))
+        assert "isReversed cannot be read" in msg and "UNCONFIRMED" in msg
 
     def test_a_swallowed_flip_is_an_error(self, world):
         ml = _MotionLink("ML1")
@@ -586,6 +679,21 @@ class TestSetValues:
         world(links=[ml])
         msg = error_message(rel.handler(kind="motion_link", name="ML1", action="set_values", ratio=-2))
         assert "isReversed" in msg and "did not take" in msg
+
+    def test_an_unreadable_direction_after_the_re_value_is_an_error(self, world):
+        # a positive ratio asks for isReversed=False, which bool(unreadable) matches - the ratio
+        # landed, but the direction the sign SETS is unconfirmed and must not be published as False.
+        ml = _MotionLink("ML1")
+
+        def blind_direction(m1, v1, m2, v2, r):
+            ml.valueOne = types.SimpleNamespace(value=1.0)
+            ml.valueTwo = types.SimpleNamespace(value=2.0)
+            del ml.isReversed
+            return True
+        ml.setMotionData = blind_direction
+        world(links=[ml])
+        msg = error_message(rel.handler(kind="motion_link", name="ML1", action="set_values", ratio=2))
+        assert "isReversed cannot be read back" in msg and "UNCONFIRMED" in msg
 
     def test_a_positive_ratio_clears_an_existing_reversal_and_says_so(self, world):
         # the SIGN of ratio SETS the direction, so re-valuing a deliberately reversed link at a

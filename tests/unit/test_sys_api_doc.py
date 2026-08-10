@@ -1,15 +1,11 @@
-"""Unit tests for ``api_doc.py`` — live Fusion-API documentation search.
+"""Unit tests for ``api_doc.py`` - live Fusion-API documentation search.
 
-The tool introspects the real ``adsk.*`` modules at call time via
-``importlib.import_module`` + ``inspect``. To exercise its logic deterministically
-without a live Fusion, the tests below register tiny FAKE ``adsk.*`` modules
-(holding real Python classes with docstrings/signatures) into ``sys.modules`` and
-point the tool's ``_API_MODULES`` at them. That drives the actual collection path
-— class-name vs. member-name vs. docstring matching, the namespace/class filter,
-result caps, and regex/empty-input validation — over known content.
+The tool introspects the real ``adsk.*`` modules at call time (importlib + inspect), so FAKE
+``adsk.*`` modules holding real Python classes stand in for them here.
 
-The pure string helpers (``_class_filter_from``, ``_trim``, ``_signature``,
-``_load_modules`` filtering) are tested directly.
+Pinned: class-name vs member-name vs docstring matching, the namespace/class filter, the result
+caps, regex/empty-input validation, and the pure string helpers (``_class_filter_from``,
+``_trim``, ``_signature``, ``_load_modules`` filtering).
 """
 
 import json

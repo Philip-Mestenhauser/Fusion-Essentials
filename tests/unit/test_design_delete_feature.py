@@ -1,7 +1,8 @@
 """Unit tests for ``design_delete_feature.py`` — delete one timeline feature by name.
 
-The logic pinned here, no live Fusion: name matching (exact first, then substring; ambiguity REFUSED
-with candidates), the GROUP guard (a timeline group has no deletable entity), the no-entity guard,
+The logic pinned here, no live Fusion: name matching through the shared timeline resolver (EXACT,
+case- and surrounding-whitespace-insensitive, never a substring; a repeated name REFUSED with the
+'name@index' candidates), the GROUP guard (a timeline group has no deletable entity), the no-entity guard,
 the actual ``entity.deleteMe()`` call (captured so a wrong method name regresses here), the
 deleteMe-returns-false path, the before/after timeline-health guard (a delete that breaks a
 downstream feature is reported, the deletion still standing), and the occurrence-remove reroute (a
@@ -101,30 +102,81 @@ class TestHealthHelper:
 
 
 class TestFindByName:
-    def test_exact_match_preferred_over_substring(self):
+    def test_a_longer_name_sharing_the_prefix_is_not_a_match(self):
         tl = FakeTimeline([FakeTLObject("Fillet1", 0), FakeTLObject("Fillet10", 1)])
-        hits = df._find_objects_by_name(tl, "Fillet1")
-        assert [o.name for o in hits] == ["Fillet1"]      # exact only, not Fillet10
+        obj, err = df._find_object(tl, "Fillet1")
+        assert err is None and obj.name == "Fillet1"      # exact only, not Fillet10
+
+    def test_a_substring_resolves_nothing_on_a_destructive_tool(self):
+        # 'Fillet' names no timeline object. Deleting Fillet12 because it CONTAINS the typed text
+        # is a silent wrong-target delete - the shared resolver refuses and lists what is there.
+        tl = FakeTimeline([FakeTLObject("Fillet12", 0)])
+        obj, err = df._find_object(tl, "Fillet")
+        assert obj is None
+        assert "no timeline feature named 'Fillet'" in err and "Fillet12" in err
+
+    def test_surrounding_whitespace_is_not_a_distinguishing_feature(self):
+        # Fusion names an occurrence-create timeline object with a LEADING SPACE (measured); no
+        # caller retypes that, and no listing shows it.
+        tl = FakeTimeline([FakeTLObject(" InsProbe:1", 0)])
+        obj, err = df._find_object(tl, "InsProbe:1")
+        assert err is None and obj.index == 0
 
 
 class TestAtIndexForm:
     """'name@index' - the disambiguation target the ambiguity error advertises (e.g. 'Extrude1@9') -
-    parses and resolves to the object at that exact timeline index (index == list position, live)."""
+    resolves to the object whose OWN .index is that number, confirmed by name."""
 
     def test_at_index_targets_that_timeline_index(self):
         tl = FakeTimeline([FakeTLObject("Extrude1", 0), FakeTLObject("Sketch1", 1),
                            FakeTLObject("Extrude1", 2)])
-        hits = df._find_objects_by_name(tl, "Extrude1@2")
-        assert len(hits) == 1 and hits[0].index == 2      # the SECOND Extrude1, not the first
+        obj, err = df._find_object(tl, "Extrude1@2")
+        assert err is None and obj.index == 2             # the SECOND Extrude1, not the first
 
     def test_at_index_out_of_range_refused(self):
         tl = FakeTimeline([FakeTLObject("Extrude1", 0)])
-        assert df._find_objects_by_name(tl, "Extrude1@5") == []
+        obj, err = df._find_object(tl, "Extrude1@5")
+        assert obj is None and "Extrude1@5" in err
 
     def test_at_index_name_mismatch_refused(self):
         # index 0 is Sketch1, not Extrude1 - a stale pairing is refused, never widened to a name match
         tl = FakeTimeline([FakeTLObject("Sketch1", 0), FakeTLObject("Extrude1", 1)])
-        assert df._find_objects_by_name(tl, "Extrude1@0") == []
+        obj, err = df._find_object(tl, "Extrude1@0")
+        assert obj is None and "Extrude1@0" in err
+
+    def test_at_index_reads_the_objects_own_index_not_its_position(self):
+        # A timeline whose .index does NOT equal list position - what design_get publishes and what
+        # the ambiguity error prints is o.index, so '@4' must mean the object carrying index 4.
+        tl = FakeTimeline([FakeTLObject("Joint1", 4), FakeTLObject("Joint1", 7)])
+        obj, err = df._find_object(tl, "Joint1@7")
+        assert err is None and obj.index == 7
+        # position 1, but no object holds .index 1
+        assert df._find_object(tl, "Joint1@1")[0] is None
+
+    def test_the_candidates_the_refusal_prints_resolve_back(self):
+        # the ambiguity error advertises 'name@index' pairs; every one it prints must be a string
+        # this same tool can resolve, or the refusal names a target the user cannot act on
+        _install([FakeTLObject("Joint1", 4), FakeTLObject("Joint1", 7)])
+        msg = df.handler(feature="Joint1")["message"]
+        for cand in ("Joint1@4", "Joint1@7"):
+            assert cand in msg
+            _, tl = _install([FakeTLObject("Joint1", 4), FakeTLObject("Joint1", 7)])
+            obj, err = df._find_object(tl, cand)
+            assert err is None and f"Joint1@{obj.index}" == cand
+
+    def test_resolves_through_the_shared_matcher_not_a_local_copy(self):
+        # design_delete_feature, design_edit_timeline and _inputs.FeatureRef answer the SAME wire
+        # forms; a local re-roll is how one tool targets a different feature than the others.
+        inputs = load_tool("_inputs")
+        objs = [FakeTLObject("Extrude1", 4), FakeTLObject("Extrude1", 9)]
+        tl = FakeTimeline(objs)
+        for want in ("Extrude1@4", "Extrude1@9", "Extrude1@0", "Extrude1@1", "Extrude1", "Extru"):
+            theirs = inputs._match_timeline_objects(objs, want)
+            obj, err = df._find_object(tl, want)
+            if len(theirs) == 1:
+                assert err is None and obj is theirs[0], want
+            else:
+                assert obj is None, want                  # 0 or >1 hits is always a refusal
 
     def test_handler_deletes_the_indexed_duplicate(self):
         # end-to-end: two features share a name; the @index form deletes exactly the RIGHT one
@@ -149,11 +201,19 @@ class TestDelete:
         assert out["entity_type"] == "RectangularPatternFeature"
         assert _obj(tl, "Rectangular Pattern1").entity._deleted is True   # deleteMe actually called
 
-    def test_substring_match(self):
+    def test_a_name_matches_case_insensitively(self):
         _, tl = _install([FakeTLObject("Mirror1", 3, entity_type="MirrorFeature")])
-        out = _payload(df.handler(feature="mirror"))
+        out = _payload(df.handler(feature="mirror1"))
         assert out["feature"] == "Mirror1"
         assert tl._items[0].entity._deleted is True
+
+    def test_a_substring_deletes_nothing(self):
+        # the corrected contract: 'mirror' is not 'Mirror1'. A destructive tool never widens a name
+        # it was given - the refusal lists what IS there and 'name@index' targets one of them.
+        _, tl = _install([FakeTLObject("Mirror1", 3, entity_type="MirrorFeature")])
+        res = df.handler(feature="mirror")
+        assert res["isError"] is True and "Mirror1" in res["message"]
+        assert tl._items[0].entity._deleted is False
 
 
 # ── guards ───────────────────────────────────────────────────────────────────
@@ -177,15 +237,16 @@ class TestGuards:
     def test_missing_feature_errors(self):
         _install([FakeTLObject("Extrude1", 0)])
         res = df.handler(feature="Ghost")
-        assert res["isError"] is True and "no timeline feature matching" in res["message"].lower()
+        assert res["isError"] is True and "no timeline feature named" in res["message"].lower()
+        assert "Extrude1" in res["message"]                 # what IS there
 
-    def test_ambiguous_name_refused(self):
-        # two timeline objects share the substring — refuse, listing candidates with indices
-        _install([FakeTLObject("Joint1", 4), FakeTLObject("Joint2", 7)])
-        res = df.handler(feature="Joint")
+    def test_a_repeated_name_is_refused_with_the_indexed_candidates(self):
+        # two timeline objects carry the name - refuse, listing the 'name@index' form that picks one
+        _install([FakeTLObject("Joint1", 4), FakeTLObject("Joint1", 7)])
+        res = df.handler(feature="Joint1")
         assert res["isError"] is True
-        assert "ambiguous" in res["message"].lower()
-        assert "Joint1@4" in res["message"] and "Joint2@7" in res["message"]
+        assert "matches 2 timeline objects" in res["message"]
+        assert "Joint1@4" in res["message"] and "Joint1@7" in res["message"]
 
     def test_group_refused(self):
         _, tl = _install([FakeTLObject("Group1", 2, is_group=True)])

@@ -36,8 +36,6 @@ _SECTION_TYPES = {
     "triangular": "TriangularPipeSectionType",
 }
 
-# A volume this small is a zero: a "created" body with no material is a silent no-op, not a pipe.
-_VOLUME_EPS = 1e-9
 # A wall this thin (cm) is the platform's zero - see _hollow_verdict for what a zero wall means.
 _WALL_EPS = 1e-9
 
@@ -248,6 +246,11 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
             return error(f"Could not set {label}: {e}")
 
     if participants is not None:
+        # The scope is ASSIGNED but UNVERIFIABLE. MEASURED: participantBodies is write-only - the
+        # assignment succeeds and reading the property back raises AttributeError - so no read-back
+        # of any kind (set_verified, token comparison) is possible. Nor does the volume gate below
+        # stand in for one: it sums ONE total delta over the whole watched set, and a scope the
+        # platform dropped moves that total MORE, not less. 'scoped_to' is what was requested.
         try:
             pin.participantBodies = list(participants)  # a Python list, not an ObjectCollection
             scoped_to = [safe(lambda b=b: b.name) for b in participants]
@@ -284,7 +287,7 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         else:
             vols = [v for v in _geom.volumes(result).values() if isinstance(v, (int, float))]
             volume_new = sum(vols) if vols else None
-        if volume_new is not None and volume_new <= _VOLUME_EPS:
+        if volume_new is not None and volume_new <= _common.NO_VOLUME_CHANGE_CM3:
             return error("Pipe created a body with no volume, so nothing usable was built. "
                          + _common.failed_effect_remedy(design, feature))
     else:
@@ -295,7 +298,7 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
                              f"body's volume could be read back - so whether the {op_key} changed "
                              "anything is UNVERIFIED. Re-read the bodies with model_inspect.")
             delta_total = None
-        elif abs(delta_total) < _VOLUME_EPS:
+        elif abs(delta_total) < _common.NO_VOLUME_CHANGE_CM3:
             return error(f"Pipe reported success but no body's volume changed, so the {op_key} "
                          "affected nothing. " + _common.failed_effect_remedy(design, feature))
 
@@ -313,6 +316,10 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         "scoped_to_bodies": scoped_to,
         "note": "Pipe built along the path. Pair with view_screenshot (iso) to view it.",
     }
+    if scoped_to:
+        payload["note"] += (" 'scoped_to_bodies' is what was REQUESTED: participantBodies is a "
+                            "write-only property, so which bodies the pipe actually acted on cannot "
+                            "be read back - check the affected bodies with model_inspect.")
     if frac_one is not None:
         payload["path_fraction"] = frac_one
     if frac_two is not None:
@@ -333,11 +340,11 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         if is_hollow:
             payload["wall_thickness"] = round(thickness_cm * inv, 6)
         payload["section_size_measured"] = _common.measured(lambda: feature.sectionSize.value, inv)
-        # startFaces/endFaces read null when an end is not capped, so cap presence is reported from
-        # them rather than assumed from hollow/solid.
-        payload["capped_ends"] = sum(1 for faces in (safe(lambda: feature.startFaces),
-                                                     safe(lambda: feature.endFaces))
-                                     if (safe(lambda f=faces: f.count, 0) or 0) > 0)
+        # No cap read-back is published. MEASURED on a freshly added hollow solid pipe:
+        # startFaces, endFaces AND sideFaces all read as an EMPTY BRepFaces collection (count 0) -
+        # never None, and never populated - so on this Fusion build those collections cannot tell a
+        # capped end from an uncapped one, and any capped/uncapped number derived from them would be
+        # a fabricated reading. Section the body with view_section to see the ends.
     else:
         # Direct mode: path/distanceOne/distanceTwo/sectionThickness all read null off a
         # non-parametric feature, so the hollow wall genuinely cannot be verified here.
@@ -362,7 +369,7 @@ TOOL_DESCRIPTION = (
 pipe_tool = (
     Tool.create_simple(name="model_pipe", description=TOOL_DESCRIPTION)
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve to follow: a find_geometry edge 'handle' (auto-chains connected edges), a JSON list of edge handles (used exactly - they must connect into one path), OR 'sketch:<name>' for a path sketch."})
+            "description": "The curve to follow: a find_geometry edge 'handle' (a single handle chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly - they must connect into one path), OR 'sketch:<name>' for a path sketch."})
     .add_input_property(*_SECTION_SIZE.as_property())
     .add_input_property(*_SECTION_TYPE.as_property())
     .add_input_property(*_OPERATION.as_property())

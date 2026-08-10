@@ -490,6 +490,30 @@ class TestGetHandler:
         assert {p["name"] for p in out["user_parameters"]} == {"PartX", "PartY"}
         assert "model_parameters" not in out
 
+    def test_the_user_parameter_walk_is_clamped_at_max_params(self, monkeypatch):
+        # the listing is bounded so a pathological design cannot flood the wire; the clamp is read
+        # off the collection's own count, so it holds no matter how many items the walk yields
+        monkeypatch.setattr(params, "_MAX_PARAMS", 3)
+        ups = _GetUserParams([_GetParam("P%d" % i) for i in range(10)])
+        monkeypatch.setattr(params._common, "design", lambda: _GetDesign(ups, []))
+        out = _payload(params.handler())
+        assert out["user_parameter_count"] == 3
+        assert [p["name"] for p in out["user_parameters"]] == ["P0", "P1", "P2"]
+
+    def test_an_uncountable_collection_refuses_instead_of_reporting_zero(self, monkeypatch):
+        # userParameters.count raising means the parameters could not be read AT ALL. Reporting
+        # "user_parameter_count: 0" would read as "this design has no parameters" - a false answer.
+        class _Uncountable(_GetUserParams):
+            @property
+            def count(self):
+                raise RuntimeError("parameter table is locked")
+        monkeypatch.setattr(params._common, "design",
+                            lambda: _GetDesign(_Uncountable([_GetParam("PartX")]), []))
+        res = params.handler()
+        assert res["isError"] is True
+        assert "could not read user parameters" in res["message"].lower()
+        assert "locked" in res["message"]
+
     def test_include_model_parameters_dedups_user_names(self, monkeypatch):
         u1 = _GetParam("PartX")
         model_only = _GetParam("d1")

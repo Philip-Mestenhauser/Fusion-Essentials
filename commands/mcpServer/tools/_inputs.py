@@ -26,7 +26,11 @@ MAP_BLURB = ("the typed reference kinds - see the kinds table above; resolve_inp
              "axis_line_of (the ONE numeric axis read behind an AxisRef ('edge', entity) value - a "
              "bounded edge/sketch line derives its direction from worldGeometry's endpoints, a "
              "construction axis carries origin/direction and gets lifted into WORLD space, since its "
-             "own .geometry is component-LOCAL) + entity_component (the ONE owner read for an "
+             "own .geometry is component-LOCAL) + single_placement (the ONE assembly-context "
+             "placement walk every consumer of a possibly-foreign entity runs - nothing to lift, or "
+             "the ONE occurrence to proxy into, or a refusal naming every fullPathName when the "
+             "owner is placed several times or not at all; each caller keeps its own leaf op and "
+             "noun) + entity_component (the ONE owner read for an "
              "axis/direction entity: an edge's body's parent, a sketch line's sketch's parent, or a "
              "datum's .component - never .parent, which is a BASE FEATURE for a non-parametric datum) "
              "+ resolve_surface/surface_ref_label (the plane-then-face two-pass every *_to_surface "
@@ -537,35 +541,6 @@ def _body_kind_label(b) -> str:
     return type(b).__name__
 
 
-def _mesh_by_name(coll, name):
-    """Find a MeshBody by name by ITERATING the collection - the live adsk.fusion.MeshBodies has NO
-    itemByName (only count + item(i)), unlike BRepBodies. Iterating is the only name lookup that works
-    for meshes. MeshBody.name exists (confirmed live). Returns the body or None."""
-    if coll is None:
-        return None
-    n = _common.safe(lambda: coll.count)
-    if not n:
-        return None
-    for i in range(n):
-        b = _common.safe(lambda i=i: coll.item(i))
-        if b is not None and (_common.safe(lambda b=b: b.name) == name):
-            return b
-    return None
-
-
-def _bodies_named_in(comp, name):
-    """Every body named `name` in ONE component/occurrence scope (brep AND mesh), as a list - brep via
-    itemByName (it has it), mesh via iteration (meshBodies does NOT have itemByName)."""
-    out = []
-    brep = _common.safe(lambda: getattr(comp, "bRepBodies").itemByName(name))
-    if brep is not None:
-        out.append(brep)
-    mesh = _mesh_by_name(_common.safe(lambda: getattr(comp, "meshBodies")), name)
-    if mesh is not None:
-        out.append(mesh)
-    return out
-
-
 def _body_context(b):
     """A human 'where this body lives' string for an ambiguity candidate list: its occurrence
     fullPathName (an assembly proxy) or its owning component's name."""
@@ -577,26 +552,130 @@ def _body_context(b):
     return _common.safe(lambda: b.parentComponent.name) or "?"
 
 
+def _body_key(b):
+    """The PHYSICAL-body key: ``_common.native_token`` (one value for a body and every proxy of it),
+    else the (name, scope) pair - a body name is unique inside its own component, so that fallback can
+    only merge wrappers of ONE body.
+
+    This groups the wrappers of one body; it does NOT pick which of them is a candidate - the wrapper's
+    CONTEXT does, in ``_collect_bodies_by_name``. Keyed on the wrapper's own entityToken instead, a body
+    reached both natively (the active-component scope) and as a proxy (the occurrence pass) reads as two
+    bodies - a spurious ambiguity listing the one body under two contexts.
+
+    The (name, scope) fallback cannot re-open that split for a native/proxy pair: both wrappers' keys
+    come from the SAME read (``native_token`` resolves the proxy to its native before reading), a
+    component-owned BRepBody's token is measured non-empty even in an unsaved document, and a MeshBody
+    never appears as a proxy in this walk at all (reading meshBodies off an occurrence raises). An
+    empty-STRING token also falls through the ``or`` to the fallback - same reasoning, and if some
+    future wrapper kind ever hit it, the degraded direction is a spurious REFUSAL naming both
+    spellings, never a silently wrong body.
+
+    Identity is never the key. Every collection read mints a FRESH wrapper of the same physical body,
+    so ``is``/``id()`` keys one body's wrappers apart and would report a single body as several
+    candidates - an ambiguity refusal with the same name listed twice, and no way out of it."""
+    return (_common.native_token(b)
+            or (_common.safe(lambda: b.name), _body_context(b)))
+
+
+def _bodies_named_in(comp, name):
+    """Every DISTINCT body named `name` in ONE component/occurrence scope (brep AND mesh), as a list.
+
+    The match is case-insensitive EXACT, which takes both lookups: ``itemByName`` answers the name as
+    spelled (and is the ONLY lookup a collection without count/item has), while the iteration pass
+    over both collections is what adds a case variant and is the only mesh lookup at all
+    (``meshBodies`` has no itemByName). The two therefore overlap, and ``_body_key`` collapses the
+    overlap. Reading ``meshBodies`` off an OCCURRENCE raises, so every collection read is guarded:
+    that scope contributes BReps only, and ``_collect_bodies_by_name`` reaches meshes through the
+    components."""
+    out, seen = [], set()
+
+    def add(b):
+        key = _body_key(b)
+        if key not in seen:
+            seen.add(key)
+            out.append(b)
+
+    exact = _common.safe(lambda: getattr(comp, "bRepBodies").itemByName(name))
+    if exact is not None:
+        add(exact)
+    want = (name or "").strip().lower()
+    for coll_name in ("bRepBodies", "meshBodies"):
+        for b in _common.iter_collection(_common.safe(lambda: getattr(comp, coll_name))):
+            if (_common.safe(lambda b=b: b.name) or "").lower() == want:
+                add(b)
+    return out
+
+
+def _body_scope_keys(b, ctx):
+    """The scope prefixes a qualified '<scope>:<body>' reference may use for body `b`, lowercased: its
+    context (the occurrence fullPathName, or the owning component's name when the body has no assembly
+    context), the occurrence's own name ('Frame:1'), and the owning component's name ('Frame')."""
+    keys = {ctx, _common.safe(lambda: b.parentComponent.name)}
+    occ = _common.safe(lambda: b.assemblyContext)
+    if occ is not None:
+        keys.add(_common.safe(lambda: occ.name))
+    return {k.strip().lower() for k in keys if isinstance(k, str) and k.strip()}
+
+
+def qualified_body_name(b, ctx=None):
+    """One body as '<occurrence-or-component>:<body>' - the single spelling of a body reference that
+    an ambiguity refusal lists, ``_qualified_body`` resolves, and a payload echoes back, so a label a
+    tool publishes is a string the caller can hand straight back."""
+    return f"{ctx if ctx is not None else _body_context(b)}:{_common.safe(lambda: b.name) or '?'}"
+
+
+def _qualified_body_names(matches):
+    """Each (body, context) pair from ``_collect_bodies_by_name`` in the qualified form."""
+    return [qualified_body_name(b, ctx) for b, ctx in matches]
+
+
+def _candidates_of_one_body(members):
+    """The candidates ONE physical body offers, from its {context: wrapper} members: its PLACEMENTS
+    when it has any, else the body itself. Returned as (body, context) pairs.
+
+    A placed body's proxies are the candidates and the native is dropped: each proxy carries the
+    assembly context - the world placement, and the '<occurrence>:<body>' spelling that resolves back
+    to that instance - which the native cannot, and a find_geometry handle for a body in a placed
+    component resolves to a proxy too, so the two surfaces name the same things. Keeping the native
+    alongside them would make every placed body ambiguous with itself.
+
+    A component placed TWICE therefore still offers TWO candidates, and the caller refuses the bare
+    name with both instance-qualified spellings: two placements of one body are two world positions,
+    and picking either one for the caller would target a placement they did not choose. A body with no
+    placement at all (a root-level body, or one in a component no occurrence references) has only its
+    native, which is then the answer.
+
+    `members` is keyed by each wrapper's own token (context only as a fallback), so the display
+    context is read off the wrapper here, not off the key."""
+    wrappers = list(members.values())
+    placed = [(b, _body_context(b)) for b in wrappers
+              if _common.safe(lambda b=b: b.assemblyContext) is not None]
+    return placed or [(b, _body_context(b)) for b in wrappers]
+
+
 def _collect_bodies_by_name(des, comp, name):
-    """Every DISTINCT body named `name` across the design (active component, root, each occurrence's
-    proxies, PLUS every component's meshBodies directly), de-duplicated by entityToken, as
-    (body, context) pairs. A body name is only LOCALLY unique (like an occurrence's), so the caller can
-    refuse an ambiguous name with its candidate list instead of grabbing the first - mirroring
+    """Every DISTINCT body whose name matches `name` (case-insensitive exact) across the design (active
+    component, root, each occurrence's proxies, PLUS every component's meshBodies directly),
+    as (body, context) pairs. A body name is only LOCALLY unique (like an occurrence's), so the caller
+    can refuse an ambiguous name with its candidate list instead of grabbing the first - mirroring
     _resolve_occurrence's house pattern.
 
-    De-dup is by entityToken, NOT Python identity: one physical body is reachable through several
-    collection paths (active component, root, an occurrence proxy) and the API hands back a FRESH
-    wrapper object each time, so id()-based de-dup would count the same body once per path and report a
-    spurious ambiguity. The token is stable across wrappers of the same entity."""
-    seen, out = set(), []
+    One physical body is reachable through several collection paths (active component, root, an
+    occurrence proxy) and each read hands back a fresh wrapper, so the walk GROUPS by ``_body_key``
+    (the physical body) and then picks each group's candidates by CONTEXT - see
+    ``_candidates_of_one_body``. Identity is never involved."""
+    groups = {}
 
     def add(b):
         if b is None:
             return
-        key = _common.safe(lambda: b.entityToken) or id(b)   # token is stable; id() a last resort
-        if key not in seen:
-            seen.add(key)
-            out.append((b, _body_context(b)))
+        # Two members of one group iff they are the same WRAPPER KIND of the same placement, keyed
+        # by the wrapper's OWN token ([F75]: stable per wrapper across re-fetches, distinct between
+        # a native and each proxy). The printable context is only the fallback key - keying members
+        # on it would MERGE two placements whose fullPathName will not read, turning a real
+        # ambiguity into a silent first-placement pick.
+        member_key = _common.safe(lambda b=b: b.entityToken) or _body_context(b)
+        groups.setdefault(_body_key(b), {}).setdefault(member_key, b)
 
     root = _common.safe(lambda: des.rootComponent) if des else None
     for scope in (comp, root):
@@ -607,15 +686,88 @@ def _collect_bodies_by_name(des, comp, name):
         for o in (_common.safe(lambda: root.allOccurrences) or []):
             for b in _bodies_named_in(o, name):
                 add(b)
-    # LIVE-VERIFIED: an Occurrence proxy exposes bRepBodies but NOT meshBodies, so the occurrence walk
-    # above can miss a mesh living outside the active/root component. _common.all_meshes is the ONE
-    # design-wide mesh traversal (walks every component's meshBodies directly, not via occurrences) -
-    # the same one mesh_delete's survivor check builds on - so mesh name resolution is design-wide too.
+    # Reading meshBodies off an Occurrence proxy RAISES (measured; dir(occ) lists the member but the
+    # read raises AttributeError, while occ.bRepBodies reads fine), so the occurrence pass above
+    # contributes BReps only and can never find a mesh. _common.all_meshes is the ONE design-wide
+    # mesh traversal - every component's meshBodies, reached through the components - and the same
+    # one mesh_delete's survivor check builds on, so mesh name resolution covers every component.
+    # Grouping by _body_key (native entityToken, else (name, scope)) keeps a mesh already added
+    # by the comp/root scope passes from counting twice.
     if des is not None:
+        want = (name or "").strip().lower()
         for _comp, m in _common.all_meshes(des):
-            if _common.safe(lambda m=m: m.name) == name:
+            if (_common.safe(lambda m=m: m.name) or "").lower() == want:
                 add(m)
+    out = []
+    for members in groups.values():
+        out.extend(_candidates_of_one_body(members))
     return out
+
+
+# The stem of _resolve_any_body's MISS refusal (nothing of that name exists anywhere). A caller whose
+# target vocabulary is WIDER than a body - find_geometry also takes an occurrence/component name and
+# '' - matches on this to tell a plain miss (replace it with that wider message) from a real REFUSAL
+# (an ambiguous name, a scope holding no such body, a multi-body component) it must pass through.
+BODY_MISS = "no body or component named"
+
+
+def _named_scope(des, key):
+    """The scope `key` names - an occurrence (name or fullPathName) or a component - or None when it
+    names neither. Those two are the vocabularies a qualified reference's prefix is built from."""
+    occ, _err = _resolve_occurrence("scope", key)
+    if occ is not None:
+        return occ
+    return _common.safe(lambda: _component_by_name(des, key))
+
+
+def _qualified_body(label, des, spec):
+    """Resolve a qualified '<occurrence-or-component>:<body name>' reference to that ONE body. '/'
+    separates as well as ':', so a label published in either spelling resolves.
+
+    Returns (body, err). (None, None) means "not a qualified body reference" - `spec` names a SCOPE,
+    its prefix names no scope at all, or the suffix is an instance NUMBER ('Frame:1' is an occurrence,
+    and that vocabulary resolves to the component's single body further down) - so bare-name and
+    component resolution still run. A prefix that DOES name a scope holding no such body is a REFUSAL
+    listing what the scope holds: without it a mistyped body name ('Frame:Pinn') falls through to the
+    component's single-body path and silently returns a body the caller never named."""
+    if not isinstance(spec, str):
+        return None, None
+    cut = max(spec.rfind(":"), spec.rfind("/"))
+    if cut <= 0:
+        return None, None
+    head, tail = spec[:cut].strip(), spec[cut + 1:].strip()
+    if not head or not tail:
+        return None, None
+    if _named_scope(des, spec) is not None:
+        return None, None            # the whole spec IS a scope name, not '<scope>:<body>'
+    # Per-INSTANCE first: filter the design-wide candidates by the prefix, so one component instanced
+    # twice refuses ('Jaw:Pin' names both instances' bodies) instead of collapsing to the native one.
+    want = head.lower()
+    hits = [(b, ctx) for b, ctx in _collect_bodies_by_name(des, None, tail)
+            if want in _body_scope_keys(b, ctx)]
+    if len(hits) == 1:
+        return hits[0][0], None
+    if len(hits) > 1:
+        cands = ", ".join(f"'{q}'" for q in _qualified_body_names(hits)[:8])
+        return None, (f"'{label}': '{spec}' is ambiguous - it still names {len(hits)} bodies "
+                      f"({cands}). Pass one of those, or a find_geometry 'handle'.")
+    scope = _named_scope(des, head)
+    if scope is None:
+        return None, None            # no such scope - leave the remaining paths their turn
+    # The prefix names a real scope: ask IT for the body (this reaches a component the design-wide
+    # walk cannot - one with no occurrence anywhere), and refuse when it holds no such name.
+    named = _bodies_named_in(scope, tail)
+    if len(named) == 1:
+        return named[0], None
+    if len(named) > 1:
+        cands = ", ".join(f"'{qualified_body_name(b)}'" for b in named[:8])
+        return None, (f"'{label}': '{spec}' is ambiguous - it names {len(named)} bodies ({cands}).")
+    if tail.isdigit():
+        return None, None            # 'Frame:1' - an instance SUFFIX, not a body name
+    held = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}'"
+                     for b in _component_bodies(scope)[:8])
+    return None, (f"'{label}': '{head}' holds no body named '{tail}'"
+                  + (f" - it holds {held}." if held else " - it holds no bodies."))
 
 
 def _component_bodies(comp):
@@ -654,16 +806,30 @@ def _resolve_any_body(name, raw):
         if owner is not None and (_is_brep(owner) or _is_mesh(owner)):
             return owner, None
         return None, f"'{name}': handle points at a {type(ent).__name__}, not a body."
-    # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the candidate list rather
-    # than grabbing the first - a find_geometry handle disambiguates. One match resolves as before.
+    # Name path: refuse an AMBIGUOUS name (2+ distinct bodies share it) with the QUALIFIED candidate
+    # list rather than grabbing the first - one of those qualified names, or a find_geometry handle,
+    # picks the exact one. A single match resolves.
     matches = _collect_bodies_by_name(des, _common.target_component(des), s)
+    if len(matches) > 1:
+        # Case-insensitive matching WIDENS the hit list, and a widened list must not manufacture an
+        # ambiguity: when exactly one hit also matches the spelling asked for, that one is the answer.
+        cased = [m for m in matches if _common.safe(lambda b=m[0]: b.name) == s]
+        if len(cased) == 1:
+            matches = cased
     if len(matches) == 1:
         return matches[0][0], None
     if len(matches) > 1:
-        cands = ", ".join(f"'{_common.safe(lambda b=b: b.name) or '?'}' in {ctx}"
-                          for b, ctx in matches[:8])
+        cands = ", ".join(f"'{q}'" for q in _qualified_body_names(matches)[:8])
         return None, (f"'{name}': '{s}' is ambiguous - it names {len(matches)} bodies ({cands}). "
-                      "Pass a find_geometry 'handle' to pick the exact one.")
+                      "Pass one of those qualified '<occurrence-or-component>:<body>' names, or a "
+                      "find_geometry 'handle'.")
+    # A qualified '<occurrence-or-component>:<body name>' - the form the refusal above lists - picks
+    # one body out of a name several components share.
+    qbody, qerr = _qualified_body(name, des, s)
+    if qbody is not None:
+        return qbody, None
+    if qerr:
+        return None, qerr
     # A COMPONENT (or occurrence 'Name:1') resolves to ITS body when that is unambiguous - agents
     # pass 'Frame' / 'Frame:1' meaning "that part's body", and find_geometry already accepts those
     # targets, so the reference vocabulary stays consistent across the surface. Body names win over
@@ -681,14 +847,19 @@ def _resolve_any_body(name, raw):
             return None, (f"'{name}': '{s}' is a component holding {len(bodies)} bodies ({cands}) - "
                           "name one of them, or pass a find_geometry handle.")
         return None, f"'{name}': component '{s}' holds no bodies to act on."
-    return None, (f"'{name}': no body or component named '{s}'. Pass a body handle from "
-                  "find_geometry, a body name, or a single-body component/occurrence name "
+    return None, (f"'{name}': {BODY_MISS} '{s}'. Pass a body handle from "
+                  "find_geometry, a body name (bare, or '<occurrence-or-component>:<body>'), or a "
+                  "single-body component/occurrence name "
                   "(see design_get(include=['tree']) / model_extrude output).")
 
 
 class BodyRef(InputKind):
     """A reference to a BODY, by a 'handle' from find_geometry (precise - bodies are auto-named
     Body1/Body2... so names are fragile) OR by name. Resolves against BOTH bRepBodies AND meshBodies.
+
+    A name matches case-insensitively in ANY component, bare when it is unique design-wide, else in the
+    qualified '<occurrence-or-component>:<body>' form; a bare name several components answer to is
+    refused with those qualified candidates listed.
 
     The `kind` axis (solid | surface | mesh | any) is validated at resolve time, and a WRONG kind
     returns a REDIRECTING error ('that's a MESH - use the mesh_* tools') rather than a silent miss or
@@ -791,25 +962,73 @@ def MeshBodyRef(name, **kw):
 # objects is REFUSED with the 'name@index' candidates rather than resolved to the first hit.
 
 def _timeline_objects(timeline):
-    """Every timeline object, in index order - live, item(i).index == i, which is what makes the
-    'name@index' disambiguation form addressable."""
-    n = int(_common.safe(lambda: timeline.count, 0) or 0)
-    return [timeline.item(i) for i in range(n)]
+    """Every timeline object the timeline can hand back. Walked through _common.iter_collection, so
+    an object that cannot be read is SKIPPED rather than raising out of every FeatureRef resolution.
+    A skip leaves a HOLE: this list's positions are not the objects' own .index values, which is why
+    _match_timeline_objects addresses '@index' by reading each object's .index."""
+    return list(_common.iter_collection(timeline))
 
 
 def _match_timeline_objects(objs, want):
-    """Every timeline object `want` names: the exact 'name@index' pair (the object at that index,
-    confirmed by name), else an EXACT case-insensitive name match. Never a substring - two features
-    can carry the same name, so the caller refuses anything but a single hit rather than guessing
-    which one was meant."""
+    """Every timeline object `want` names: the 'name@index' pair - the object whose OWN .index is
+    that number, confirmed by name - else an EXACT case-insensitive name match. Never a substring:
+    two features can carry the same name, so the caller refuses anything but a single hit rather
+    than guessing which one was meant.
+
+    '@index' reads each object's .index instead of indexing this list. The candidate list a refusal
+    prints and design_get(include=['timeline']) both publish o.index, so addressing by POSITION
+    resolves a different feature than the candidates named the moment the two diverge (a skipped
+    unreadable object leaves a hole) - and between two same-named features that lands on the wrong
+    one silently.
+
+    Both sides are STRIPPED before comparing: Fusion names an occurrence-create timeline object with
+    a LEADING SPACE (' InsProbe:1', measured live), and that space is invisible in
+    every listing an agent reads, so the name it CAN type is the stripped one. Surrounding whitespace
+    is therefore not a distinguishing feature - two objects differing only by it are one ambiguity,
+    which the caller refuses."""
     base, at, idx = want.rpartition("@")
     if at and base.strip() and idx.strip().isdigit():
         i = int(idx.strip())
-        if 0 <= i < len(objs) and (_common.safe(lambda o=objs[i]: o.name) or "").lower() == base.strip().lower():
-            return [objs[i]]
-        return []
-    low = want.lower()
-    return [o for o in objs if (_common.safe(lambda o=o: o.name) or "").lower() == low]
+        low = base.strip().lower()
+        return [o for o in objs
+                if _common.safe(lambda o=o: o.index) == i and _name_key(o) == low]
+    low = want.strip().lower()
+    return [o for o in objs if _name_key(o) == low]
+
+
+def _name_key(obj):
+    """A timeline object's name, stripped and lower-cased - the one form both sides of every
+    timeline name comparison are reduced to."""
+    return (_common.safe(lambda: obj.name) or "").strip().lower()
+
+
+def resolve_timeline_object(objs, want, label, miss_hint=None):
+    """(timeline object, error) - the ONE object `want` names out of `objs`, in the ONE timeline
+    by-name refusal vocabulary: a miss lists a sample of what IS there, a name several objects carry
+    is refused with the 'name@index' candidates. Every by-name timeline target resolves here, so the
+    same input never gets two different answers.
+
+    `label` is the caller's own noun for what it was resolving - an input name ("'feature'") or the
+    role the object plays in the call ("the first item of the group") - and prefixes the refusal.
+    `miss_hint(want)` is consulted on a MISS only: a caller that can explain the absence (a collapsed
+    timeline group hides its members from the walk) returns that text and it stands in for the
+    generic miss.
+    """
+    hits = _match_timeline_objects(objs, want)
+    if not hits:
+        hinted = miss_hint(want) if miss_hint is not None else None
+        if hinted:
+            return None, f"{label}: {hinted}"
+        sample = ", ".join(n for n in (_common.safe(lambda o=o: o.name) for o in objs[:12]) if n)
+        return None, (f"{label}: no timeline feature named '{want}'. Available (sample): "
+                      f"{sample or '(none)'}. Use design_get(include=['timeline']) for the full "
+                      "list.")
+    if len(hits) > 1:
+        cands = ", ".join(f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
+                          for o in hits[:8])
+        return None, (f"{label}: '{want}' matches {len(hits)} timeline objects ({cands}) - name "
+                      "one with the 'name@index' form.")
+    return hits[0], None
 
 
 class FeatureRef(InputKind):
@@ -839,18 +1058,7 @@ class FeatureRef(InputKind):
 
     def _find_one(self, objs, want, label):
         """(timeline object, error) - the ONE object `want` names, or a refusal."""
-        hits = _match_timeline_objects(objs, want)
-        if not hits:
-            sample = ", ".join(n for n in (_common.safe(lambda o=o: o.name) for o in objs[:12]) if n)
-            return None, (f"{label}: no timeline feature named '{want}'. Available (sample): "
-                          f"{sample or '(none)'}. Use design_get(include=['timeline']) for the full "
-                          "list.")
-        if len(hits) > 1:
-            cands = ", ".join(f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
-                              for o in hits[:8])
-            return None, (f"{label}: '{want}' matches {len(hits)} timeline objects ({cands}) - name "
-                          "one with the 'name@index' form.")
-        return hits[0], None
+        return resolve_timeline_object(objs, want, label)
 
     def _entity_of(self, obj, want, label):
         """((entity, timeline name), error) for one resolved timeline object."""
@@ -1196,42 +1404,87 @@ def entity_component(ent):
             or _common.safe(lambda: ent.parent))
 
 
+def single_placement(label, ent, comp, design):
+    """(the ONE occurrence that places `ent`'s owning component, error) - the assembly-context walk
+    every consumer of a possibly-foreign entity runs before it can use that entity.
+
+    Three answers, all through the (occurrence, error) pair:
+      (None, None)  nothing to lift: `ent` already carries an assemblyContext, or its owner IS
+                    `comp`. The caller uses the entity exactly as it stands.
+      (occ,  None)  the owner is placed EXACTLY ONCE - the caller applies its own leaf op
+                    (createForAssemblyContext, and whatever it reads off the proxy) against `occ`.
+      (None, err)   refused, naming every fullPathName.
+
+    MEASURED: a NATIVE entity (assemblyContext None) owned by ANOTHER component is accepted by a
+    feature input and then fails at add(); the same entity proxied into the occurrence that carries
+    it is accepted. A component placed SEVERAL times is REFUSED rather than proxied into an
+    arbitrary instance - each instance holds that geometry somewhere different, and no feature
+    read-back distinguishes a right instance from a wrong one.
+
+    `label` opens the refusal sentence, so each caller keeps its own noun ("'direction_one': that
+    direction", "it", "'axis': that construction axis").
+
+    _common.same_component, never `owner is comp`: component wrappers are measured NEVER
+    identity-stable (two reads of one component are different Python objects sharing an
+    entityToken), so `is` reads False even for the caller's OWN component and control would fall to
+    allOccurrencesByComponent, which returns 0 for the root and refuses a perfectly legal
+    reference."""
+    if _common.safe(lambda: ent.assemblyContext) is not None:
+        return None, None
+    # entity_component covers an edge/sketch-line/datum; a BODY answers its own parentComponent and
+    # nothing else in that chain, and a body is what a move feature's host walk carries here.
+    owner = entity_component(ent) or _common.safe(lambda: ent.parentComponent)
+    if owner is None or (comp is not None and _common.same_component(owner, comp)):
+        return None, None
+    owner_name = _common.safe(lambda: owner.name) or "another component"
+    root = _common.safe(lambda: design.rootComponent) if design is not None else None
+    if root is None:
+        return None, (f"{label} belongs to component '{owner_name}' and this design's root component "
+                      "could not be read, so where that component sits in the assembly is unknown.")
+    occs = _common.safe(lambda: root.allOccurrencesByComponent(owner))
+    count = (_common.safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+    if count == 1:
+        occ = _common.safe(lambda: occs.item(0))
+        if occ is None:
+            return None, (f"{label} belongs to component '{owner_name}', whose single placement "
+                          "could not be read, so it cannot be brought into the assembly's space.")
+        return occ, None
+    if count > 1:
+        paths = ", ".join(str(_common.safe(lambda i=i: occs.item(i).fullPathName))
+                          for i in range(count))
+        return None, (f"{label} belongs to component '{owner_name}', which is placed {count} times "
+                      f"({paths}). Each instance holds it somewhere different, so the instance must "
+                      "not be guessed. Pass a handle at geometry in the instance you mean, or a "
+                      "world axis (x/y/z).")
+    return None, (f"{label} belongs to component '{owner_name}', which is not placed in the "
+                  "assembly, so it cannot be brought into the assembly's space. Pass a handle at "
+                  "geometry in the instance you mean, or a world axis (x/y/z).")
+
+
 def _datum_world_line(name, ent):
     """(the datum axis's line in WORLD space, error) for a ConstructionAxis.
 
     MEASURED: a ConstructionAxis has NO worldGeometry, and its `.geometry` is "defined in the
     AssemblyContext of this ConstructionAxis" - COMPONENT-LOCAL for a native datum, so it is off by
     the owning component's placement and a caller that treats it as world turns about the wrong line.
-    A native datum owned by a placed sub-component is therefore lifted through
-    createForAssemblyContext, and an ambiguous placement is REFUSED rather than resolved to an
-    arbitrary instance - each instance puts the same axis somewhere different."""
-    if _common.safe(lambda: ent.assemblyContext) is not None:
-        return _common.safe(lambda: ent.geometry), None    # already a proxy - it reads WORLD
+    The lift and its ambiguity refusal are single_placement's; the leaf op here is reading .geometry
+    off the proxy."""
     des = _common.design()
     root = _common.safe(lambda: des.rootComponent) if des else None
-    owner = entity_component(ent)
-    if owner is None or root is None or _common.same_component(owner, root):
-        return _common.safe(lambda: ent.geometry), None    # root-owned: local IS world
-    occs = _common.safe(lambda: root.allOccurrencesByComponent(owner))
-    count = (_common.safe(lambda: occs.count, 0) or 0) if occs is not None else 0
-    owner_name = _common.safe(lambda: owner.name) or "another component"
-    if count == 1:
-        proxy = _common.safe(lambda: ent.createForAssemblyContext(occs.item(0)))
-        g = _common.safe(lambda: proxy.geometry) if proxy is not None else None
-        if g is None:
-            return None, (f"'{name}': that construction axis belongs to component '{owner_name}' and "
-                          "could not be read in the assembly's space, so where it sits in the model "
-                          "is unknown. Pass a world axis (x/y/z) or a handle at a straight edge.")
-        return g, None
-    if count > 1:
-        paths = ", ".join(str(_common.safe(lambda i=i: occs.item(i).fullPathName))
-                          for i in range(count))
-        return None, (f"'{name}': that construction axis belongs to component '{owner_name}', which "
-                      f"is placed {count} times ({paths}). Each instance puts the axis somewhere "
-                      "different, so the instance must not be guessed. Pass a handle at geometry in "
-                      "the instance you mean, or a world axis (x/y/z).")
-    return None, (f"'{name}': that construction axis belongs to component '{owner_name}', which is "
-                  "not placed in the assembly, so it has no position in the model to turn about.")
+    occ, err = single_placement(f"'{name}': that construction axis", ent, root, des)
+    if err:
+        return None, err
+    if occ is None:
+        # already a proxy (it reads WORLD), or root-owned (local IS world)
+        return _common.safe(lambda: ent.geometry), None
+    proxy = _common.safe(lambda: ent.createForAssemblyContext(occ))
+    g = _common.safe(lambda: proxy.geometry) if proxy is not None else None
+    if g is None:
+        path = _common.safe(lambda: occ.fullPathName) or "its one occurrence"
+        return None, (f"'{name}': that construction axis could not be read in the assembly's space "
+                      f"({path}), so where it sits in the model is unknown. Pass a world axis "
+                      "(x/y/z) or a handle at a straight edge.")
+    return g, None
 
 
 def axis_line_of(name, ent):
@@ -1990,25 +2243,48 @@ class TargetRefList(InputKind):
 # fallback so existing model_extrude-style callers keep working. ProfileRefList PRESERVES ORDER (no
 # sort/dedupe) - loft order is load-bearing, unlike fillet's edge set.
 
-def _resolve_profile_legacy(name, sketch_name, profile_index):
-    """Resolve a {sketch, profile_index} selector. A named sketch resolves DESIGN-WIDE (active
-    component first) via resolve_sketch; blank keeps model_extrude's most-recent-in-active-component
-    behavior. Bounds-checked index. Returns (profile, error)."""
+def _profile_sketch(name, sketch_name):
+    """The sketch a profile selector addresses: a NAME resolves DESIGN-WIDE (active component first)
+    via resolve_or_recent_sketch, blank means the most recent sketch in the active component. Returns
+    (sketch, error) - the one sketch lookup both the profile-index and the sketch-text address use."""
     des = _common.design()
     if not des:
         return None, "No active design to resolve the profile against."
     sketch, sk_name = _common.resolve_or_recent_sketch(des, sketch_name)
-    if not sketch:
-        if sk_name:
-            names = _common.all_sketch_names(des)
-            return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
-                          + (", ".join(n for n in names if n) or "(none)") + ".")
-        return None, f"'{name}': no sketch to take a profile from. Create one with a closed region."
+    if sketch:
+        return sketch, None
+    if sk_name:
+        names = _common.all_sketch_names(des)
+        return None, (f"'{name}': no sketch named '{sk_name}'. Available: "
+                      + (", ".join(n for n in names if n) or "(none)") + ".")
+    return None, f"'{name}': no sketch to take a profile from. Create one with a closed region."
+
+
+def _text_count(sketch):
+    """How many SketchTexts the sketch holds - the 'text:<i>' address space."""
+    texts = _common.safe(lambda: sketch.sketchTexts)
+    return _common.safe(lambda: texts.count, 0) if texts is not None else 0
+
+
+def _resolve_profile_legacy(name, sketch_name, profile_index, allow_text=False):
+    """Resolve a {sketch, profile_index} selector. A named sketch resolves DESIGN-WIDE (active
+    component first) via resolve_sketch; blank keeps model_extrude's most-recent-in-active-component
+    behavior. Bounds-checked index. Returns (profile, error)."""
+    sketch, serr = _profile_sketch(name, sketch_name)
+    if serr:
+        return None, serr
     profiles = _common.safe(lambda: sketch.profiles)
     pcount = _common.safe(lambda: profiles.count, 0) if profiles else 0
     if pcount == 0:
-        return None, (f"'{name}': sketch '{_common.safe(lambda: sketch.name)}' has no closed profile. "
-                      "Draw a closed region first.")
+        msg = f"'{name}': sketch '{_common.safe(lambda: sketch.name)}' has no closed profile. "
+        # A text-only sketch is the nameplate case: the region is never drawn, so "draw one" is a
+        # dead end. Where this input takes a text, name the address that reaches it instead.
+        ntext = _text_count(sketch) if allow_text else 0
+        if ntext:
+            addr = "'text:0'" if ntext == 1 else f"'text:0'..'text:{ntext - 1}'"
+            return None, (msg + f"It holds {ntext} sketch text(s) - pass {addr} to stamp the text "
+                          "itself.")
+        return None, msg + "Draw a closed region first."
     try:
         idx = int(profile_index)
     except Exception:
@@ -2017,6 +2293,73 @@ def _resolve_profile_legacy(name, sketch_name, profile_index):
         return None, (f"'{name}': profile_index {idx} out of range - sketch has {pcount} profile(s) "
                       f"(0..{pcount-1}).")
     return profiles.item(idx), None
+
+
+# ── sketch TEXT as a profile input ───────────────────────────────────────────────────────────────
+#
+# A SketchText carries no Profile of its own - the bindings give it asCurves/boundaryLines/explode,
+# curves rather than regions - so nothing converts one. It does not need to: the two feature inputs
+# that engrave text take the SketchText itself in the profile slot.
+# EmbossFeatures.createInput(profiles, faces, depth): "The profile argument can be Profile and
+# SketchText objects. When multiple objects are used, all profiles and sketch texts must be
+# co-planar." ExtrudeFeatures.createInput(profile, operation): "a single Profile, a single planar
+# face, a single SketchText object, or an ObjectCollection consisting of multiple profiles, planar
+# faces, and sketch texts."
+# SweepFeatures.createInput, RevolveFeatures.createInput and LoftSections.add each name their own
+# accepted list, and none of the three names SketchText - so a text is REFUSED for those, which is
+# what allow_text gates.
+_TEXT_PREFIX = "text:"
+
+
+def _split_text_ref(s):
+    """How `s` reads as a SKETCH TEXT address: ('<sketch name or blank>', <index>) when it parses,
+    ('<sketch name or blank>', None) when it opens with the 'text:' grammar but carries no
+    whole-number index, and None when it is not a text address at all.
+
+    The address is the id sketch_get publishes for a text - 'text:<i>', the same index
+    sketch_set_text edits by and sketch_delete_entity deletes by - optionally qualified by the
+    owning sketch as '<sketch>/text:<i>'. Split on the LAST '/', so a sketch whose own name carries
+    one ('Plate/Front/text:0') still addresses correctly.
+
+    The malformed case gets its own answer rather than None: falling through to the handle path
+    would answer 'text:abc' with a message that never mentions text, which is the dead end this
+    address exists to remove."""
+    if not isinstance(s, str):
+        return None
+    body = s.strip()
+    sketch = ""
+    if "/" in body:
+        sketch, _, body = body.rpartition("/")
+    if body[:len(_TEXT_PREFIX)].lower() != _TEXT_PREFIX:
+        return None
+    try:
+        idx = int(body[len(_TEXT_PREFIX):].strip())
+    except ValueError:
+        idx = None
+    return sketch.strip(), idx
+
+
+def _resolve_sketch_text(name, sketch_name, index, raw):
+    """The SketchText at 'text:<index>' in the addressed sketch - handed to a feature's profile slot
+    as itself. `index` None means the address carried no whole-number index. Returns (text, error)."""
+    sketch, serr = _profile_sketch(name, sketch_name)
+    if serr:
+        return None, serr
+    sname = _common.safe(lambda: sketch.name)
+    n = _text_count(sketch)
+    if not n:
+        return None, (f"'{name}': '{raw}' addresses a sketch text, but sketch '{sname}' holds none. "
+                      "Create one with sketch_set_text, or pass a closed profile.")
+    if index is None:
+        return None, (f"'{name}': '{raw}' carries no whole-number text index - sketch '{sname}' "
+                      f"holds {n} sketch text(s) (text:0..text:{n - 1}).")
+    if index < 0 or index >= n:
+        return None, (f"'{name}': '{raw}' is out of range - sketch '{sname}' holds {n} sketch "
+                      f"text(s) (text:0..text:{n - 1}).")
+    text = _common.safe(lambda: sketch.sketchTexts.item(index))
+    if text is None:
+        return None, f"'{name}': sketch '{sname}' would not hand back '{raw}'."
+    return text, None
 
 
 def profile_host_component(profile, sketch, fallback):
@@ -2029,15 +2372,22 @@ def profile_host_component(profile, sketch, fallback):
     return _common.safe(lambda: (sk or sketch).parentComponent) or fallback
 
 
-def _resolve_one_profile(name, raw):
-    """Resolve a single profile from EITHER a stable handle (string entityToken) OR a legacy selector
-    dict {sketch, profile_index} / {sketch_name, profile_index}. Handle-first. Returns (profile, err)."""
+def _resolve_one_profile(name, raw, allow_text=False):
+    """Resolve a single profile from EITHER a stable handle (string entityToken), a 'text:<i>' sketch
+    text address (only where allow_text), OR a legacy selector dict {sketch, profile_index} /
+    {sketch_name, profile_index}. Handle-first. Returns (profile, err)."""
     if isinstance(raw, dict):
         sk = raw.get("sketch", raw.get("sketch_name", ""))
-        return _resolve_profile_legacy(name, sk, raw.get("profile_index", 0))
+        return _resolve_profile_legacy(name, sk, raw.get("profile_index", 0), allow_text)
     s = (raw or "").strip() if isinstance(raw, str) else raw
     if not s:
         return None, f"'{name}' is required (a profile handle or a {{sketch, profile_index}} selector)."
+    text_ref = _split_text_ref(s)
+    if text_ref is not None:
+        if not allow_text:
+            return None, (f"'{name}': '{s}' addresses a SKETCH TEXT, which this input does not take. "
+                          "Stamp text onto a face with model_emboss.")
+        return _resolve_sketch_text(name, text_ref[0], text_ref[1], s)
     des = _common.design()
     if not des:
         return None, "No active design to resolve the profile against."
@@ -2058,16 +2408,29 @@ class ProfileRef(InputKind):
 
     MAP_HINT = "a sketch profile by stable handle, not sketch_name+profile_index"
 
+    # allow_text: this input's feature takes a SketchText in its profile slot (emboss/extrude do;
+    # sweep/revolve/loft do not - see the createInput contracts above _split_text_ref). Off by
+    # default, so a text address is REFUSED rather than handed to a feature that cannot use it.
+    def __init__(self, name, allow_text=False, **kw):
+        super().__init__(name, **kw)
+        self.allow_text = bool(allow_text)
+
+    def _text_note(self) -> str:
+        if not self.allow_text:
+            return ""
+        return " A sketch TEXT: 'text:<i>' (sketch_get's id), or '<sketch>/text:<i>'."
+
     def contract_note(self) -> str:
         return ("A profile - a stable 'handle' (entityToken; prefer this, it survives rebuilds) OR a "
-                "legacy {sketch, profile_index} selector (a blind, order-unstable index).")
+                "legacy {sketch, profile_index} selector (a blind, order-unstable index)."
+                + self._text_note())
 
     def resolve(self, raw):
         if raw in (None, "", []):
             if self.required:
                 return None, f"'{self.name}' is required (a profile handle or {{sketch, profile_index}})."
             return self.default, None
-        return _resolve_one_profile(self.name, raw)
+        return _resolve_one_profile(self.name, raw, self.allow_text)
 
 
 class ProfileRefList(ProfileRef):
@@ -2083,7 +2446,8 @@ class ProfileRefList(ProfileRef):
 
     def contract_note(self) -> str:
         return ("An ORDERED list of profiles, used in the order given (no sort, no dedupe). Each a "
-                "stable 'handle' (entityToken) or a {sketch, profile_index} selector.")
+                "stable 'handle' (entityToken) or a {sketch, profile_index} selector."
+                + self._text_note())
 
     def resolve(self, raw):
         if raw in (None, "", []):
@@ -2093,7 +2457,7 @@ class ProfileRefList(ProfileRef):
         items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
         out = []
         for i, item in enumerate(items):
-            p, err = _resolve_one_profile(self.name, item)
+            p, err = _resolve_one_profile(self.name, item, self.allow_text)
             if err:
                 return None, f"'{self.name}'[{i}]: {err}"
             out.append(p)          # append in order - NO sort/dedupe (loft order is load-bearing)
@@ -2115,10 +2479,7 @@ def _sketch_owners(d, name):
     want = (name or "").strip().lower()
     owners = []
     for comp in _common.all_components(d):
-        coll = _common.safe(lambda c=comp: c.sketches)
-        n = _common.safe(lambda cl=coll: cl.count, 0) if coll is not None else 0
-        for i in range(n or 0):
-            sk = _common.safe(lambda i=i, cl=coll: cl.item(i))
+        for sk in _common.iter_collection(_common.safe(lambda c=comp: c.sketches)):
             nm = _common.safe(lambda s=sk: s.name)
             if nm and nm.strip().lower() == want:
                 owners.append((_common.safe(lambda c=comp: c.name) or "(unnamed)", sk))
@@ -2232,7 +2593,7 @@ def contract_block(spec, header="INPUTS") -> str:
 # These replace prose enums hand-copied across many tools. A tool wires one with
 # `.add_input_property(*_inputs.UNITS.as_property())` - one line, schema carries the validated `enum`,
 # and the option list lives in exactly one place (so it can't drift the way the prose did). Per-tool
-# factories (units_for / boolean_op / world_axis) let a tool tweak the default or description while
+# factories (units_for / boolean_op / frame_axis) let a tool tweak the default or description while
 # still sharing the option set.
 
 def units_property(description="Length units.", default="mm"):
@@ -2252,8 +2613,10 @@ def boolean_op(name="operation", options=("new", "join", "cut", "intersect"), de
     return Choice(name, list(options), default=default, description=description)
 
 
-def world_axis(name="axis", default="z", description="World axis."):
-    """A Choice for an x|y|z world axis."""
+def frame_axis(name="axis", default="z", description="Axis: x, y, or z."):
+    """A Choice for an x|y|z axis. WHICH frame that axis is read in is the calling tool's
+    contract - world for some, the component/joint frame for others - so each tool passes the
+    description that says so."""
     return Choice(name, ["x", "y", "z"], default=default, description=description)
 
 

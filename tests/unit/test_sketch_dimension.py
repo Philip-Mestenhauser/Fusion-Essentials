@@ -264,8 +264,7 @@ class TestDispatch:
         assert p2 == "sp"
 
     def test_distance_to_an_ellipse_anchors_at_its_center(self, monkeypatch):
-        # P0.1: 'ellipse:<index>' is now a resolvable ref - it completes to its center point exactly
-        # like a circle.
+        # 'ellipse:<index>' resolves to its center point exactly like a circle.
         s = _install(monkeypatch)
         _payload(sd.handler(dim_type="distance", entity_one="ellipse:0", entity_two="line:0"))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
@@ -274,8 +273,8 @@ class TestDispatch:
         assert p2 == "sp"
 
     def test_lone_fitted_spline_dimensions_its_own_length(self, monkeypatch):
-        # P0.1: 'spline:<index>' is now resolvable - an open fitted spline has start/end sketch
-        # points like a line, so a lone spline dimensions its own length the same way a lone line does.
+        # 'spline:<index>' resolves - an open fitted spline has start/end sketch points like a
+        # line, so a lone spline dimensions its own length the same way a lone line does.
         s = _install(monkeypatch)
         out = _payload(sd.handler(dim_type="distance", entity_one="spline:0"))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
@@ -361,95 +360,9 @@ class TestPointOf:
 
 
 # ── entity-anchored POSITION references (append ':start'/':end'/':mid'/':center' to a ref) ──────────
-
-class TestParseAnchorRef:
-    def test_no_anchor(self):
-        assert sd._parse_anchor_ref("line:0") == ("line:0", None, None)
-
-    def test_valid_line_anchor(self):
-        assert sd._parse_anchor_ref("line:0:end") == ("line:0", "end", None)
-
-    def test_center_anchor(self):
-        assert sd._parse_anchor_ref("circle:2:center") == ("circle:2", "center", None)
-
-    def test_unknown_anchor_errors(self):
-        base, anchor, err = sd._parse_anchor_ref("line:0:bogus")
-        assert base is None and anchor is None and "unknown anchor" in err
-
-
-class _GP:
-    def __init__(self, x, y, z=0.0):
-        self.x, self.y, self.z = x, y, z
-
-
-class _RichPoint:
-    def __init__(self, tag, x=0.0, y=0.0, z=0.0):
-        self.tag = tag
-        self.geometry = _GP(x, y, z)
-
-
-class _RichLine:
-    def __init__(self):
-        self.startSketchPoint = _RichPoint("start", 0.0, 0.0, 0.0)
-        self.endSketchPoint = _RichPoint("end", 4.0, 0.0, 0.0)
-
-
-class _RichCircle:
-    def __init__(self):
-        self.centerSketchPoint = _RichPoint("center", 1.0, 1.0, 0.0)
-
-
-class _RichArc:
-    def __init__(self):
-        self.startSketchPoint = _RichPoint("astart")
-        self.endSketchPoint = _RichPoint("aend")
-        self.centerSketchPoint = _RichPoint("acenter")
-
-
-class _MidSketch:
-    """Records the midpoint SketchPoint + constraint the mid anchor creates."""
-    def __init__(self):
-        self.added = []
-        self.midpoints = []
-        self.sketchPoints = self
-        self.geometricConstraints = self
-    def add(self, p):
-        self.added.append(p); return _RichPoint("midpoint")
-    def addMidPoint(self, pt, line):
-        self.midpoints.append((pt, line)); return True
-
-
-class TestPointAtAnchor:
-    def setup_method(self):
-        import adsk.core
-        adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
-
-    def test_line_end_and_start(self):
-        assert sd._point_at_anchor(None, _RichLine(), "end")[0].tag == "end"
-        assert sd._point_at_anchor(None, _RichLine(), "start")[0].tag == "start"
-
-    def test_circle_center(self):
-        assert sd._point_at_anchor(None, _RichCircle(), "center")[0].tag == "center"
-
-    def test_circle_start_rejected(self):
-        pt, err = sd._point_at_anchor(None, _RichCircle(), "start")
-        assert pt is None and "line or arc" in err
-
-    def test_line_center_rejected(self):
-        pt, err = sd._point_at_anchor(None, _RichLine(), "center")
-        assert pt is None and "circle or arc" in err
-
-    def test_mid_on_line_creates_constrained_point(self):
-        sk = _MidSketch()
-        pt, err = sd._point_at_anchor(sk, _RichLine(), "mid")
-        assert err is None and pt.tag == "midpoint"
-        assert len(sk.midpoints) == 1              # welded parametrically with a midpoint constraint
-
-    def test_mid_on_arc_rejected(self):
-        # an arc has a center, so 'mid' (a line-only addMidPoint target) is refused, not mis-applied
-        pt, err = sd._point_at_anchor(None, _RichArc(), "mid")
-        assert pt is None and "LINE" in err
-
+# The anchor grammar itself lives in _common (parse_anchor_ref / anchor_point, shared with
+# sketch_constrain) and is pinned in test_common.py; what this file pins is the DIM's own routing:
+# which dim_types accept an anchor, and which point reaches the API.
 
 class TestAnchorHandler:
     def test_end_anchor_uses_end_point(self, monkeypatch):
@@ -473,6 +386,202 @@ class TestAnchorHandler:
         _install(monkeypatch)
         res = sd.handler(dim_type="distance", entity_one="line:0:bogus", entity_two="line:1")
         assert res["isError"] is True and "unknown anchor" in res["message"].lower()
+
+
+# ── the post-solve read-back ('solved' + the teleport warning) ───────────────
+
+class _Geo:
+    def __init__(self, x, y, z=0.0):
+        self.x, self.y, self.z = x, y, z
+
+
+class _MovablePoint:
+    """A SketchPoint whose coordinates the fake solver can change, as the live one's do."""
+    def __init__(self, x, y):
+        self.geometry = _Geo(x, y)
+
+
+class _RichLine:
+    """A line whose endpoints read back real cm coordinates - what the post-solve read measures."""
+    def __init__(self, x1, y1, x2, y2):
+        self.startSketchPoint = _MovablePoint(x1, y1)
+        self.endSketchPoint = _MovablePoint(x2, y2)
+
+    def translate(self, dx, dy):
+        for p in (self.startSketchPoint, self.endSketchPoint):
+            p.geometry = _Geo(p.geometry.x + dx, p.geometry.y + dy)
+
+
+class _RichCircle:
+    def __init__(self, x, y, r):
+        self.centerSketchPoint = _MovablePoint(x, y)
+        self.geometry = _FakeCurveGeo(_FakeCenter(x, y), r)
+
+
+class _RichArc(_RichCircle):
+    """An arc reads back like a circle (centre + radius) AND carries endpoints - the centre wins."""
+    def __init__(self, x, y, r):
+        super().__init__(x, y, r)
+        self.startSketchPoint = _MovablePoint(x + r, y)
+        self.endSketchPoint = _MovablePoint(x, y + r)
+
+
+class TestSolvedReadBack:
+    """A distance dimension is UNSIGNED: the solver may satisfy it by moving EITHER referenced
+    entity, and the value alone does not say which one it picked. The payload reads the referenced
+    entities back after the solve and states how far each one travelled.
+
+    The warning's discriminator is the CHANGE the dimension demanded - |gap measured before - value|
+    - not the value itself: a 0 mm dimension pulling two edges 30 mm apart together demands 30 mm of
+    movement and is ordinary, while a dimension that demanded almost nothing yet slid an entity
+    38 mm moved something it was never asked to."""
+
+    def _rich(self, monkeypatch, moves=(), value_cm=2.5):
+        """A sketch of two rich lines, a circle and an arc; `moves` are (index, dx, dy) translations
+        the fake SOLVER applies to the lines when the dimension is added (cm). The two lines sit
+        3 cm apart, so a distance dimension between them measures a 30 mm gap before it solves."""
+        s = _install(monkeypatch)
+        lines = [_RichLine(0.0, 0.0, 4.0, 0.0), _RichLine(0.0, 3.0, 4.0, 3.0)]
+        circle = _RichCircle(1.0, 1.0, 0.5)
+        arc = _RichArc(2.0, 5.0, 0.8)
+        s.sketchCurves = type("C", (), {"sketchLines": FakeColl(lines),
+                                        "sketchArcs": FakeColl([arc]),
+                                        "sketchCircles": FakeColl([circle]),
+                                        "sketchEllipses": FakeColl([]),
+                                        "sketchFittedSplines": FakeColl([]),
+                                        "sketchControlPointSplines": FakeColl([]),
+                                        "sketchFixedSplines": FakeColl([])})()
+        dim = FakeDim("distance")
+        dim.parameter.value = value_cm
+
+        def _add(p1, p2, orient, tp, isDriving=True):
+            for idx, dx, dy in moves:
+                lines[idx].translate(dx, dy)
+            return dim
+        s.sketchDimensions.addDistanceDimension = _add
+        return s
+
+    def _rows(self, out):
+        return {row["ref"]: row for row in out["solved"]}
+
+    def test_a_line_reports_its_span_midpoint_and_length(self, monkeypatch):
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1"))
+        row = self._rows(out)["line:0"]
+        assert row["start_mm"] == [0.0, 0.0, 0.0] and row["end_mm"] == [40.0, 0.0, 0.0]
+        assert row["mid_mm"] == [20.0, 0.0, 0.0] and row["length_mm"] == 40.0
+
+    def test_a_circle_reports_its_centre_and_radius(self, monkeypatch):
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="circle:0", entity_two="line:0"))
+        row = self._rows(out)["circle:0"]
+        assert row["center_mm"] == [10.0, 10.0, 0.0] and row["radius_mm"] == 5.0
+
+    def test_a_move_far_beyond_the_demanded_change_warns_with_the_jump(self, monkeypatch):
+        # the teleport signature: a 30 mm gap driven to 25 mm demands 5 mm of change, and the solve
+        # slid the far line 38 mm
+        self._rich(monkeypatch, moves=[(1, 3.8, 0.0)], value_cm=2.5)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
+                                  value="25 mm"))
+        warn = out["solver_moved_warning"]
+        assert "line:1 by 38.0 mm" in warn
+        assert "demanded only 5.0 mm of change" in warn and "30.0 mm measured" in warn
+        assert "line:0" not in warn                       # the entity that stayed put is not blamed
+        assert self._rows(out)["line:1"]["moved_mm"] == 38.0
+        assert self._rows(out)["line:0"]["moved_mm"] == 0.0
+
+    def test_a_move_in_step_with_the_demanded_change_is_published_but_not_warned(self, monkeypatch):
+        # a 30 mm gap driven to 15 mm demands 15 mm of change; a 12 mm shift is an ordinary solve
+        self._rich(monkeypatch, moves=[(1, 1.2, 0.0)], value_cm=1.5)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
+                                  value="15 mm"))
+        assert "solver_moved_warning" not in out
+        assert self._rows(out)["line:1"]["moved_mm"] == 12.0
+
+    def test_a_zero_value_dimension_pulling_two_edges_together_is_silent(self, monkeypatch):
+        # driving a 30 mm gap to 0 demands 30 mm of movement - the whole point of the dimension.
+        # A threshold read off the VALUE (0) would scream at every pull-together.
+        self._rich(monkeypatch, moves=[(1, 0.0, -3.0)], value_cm=0.0)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
+                                  value="0 mm"))
+        assert "solver_moved_warning" not in out
+        assert self._rows(out)["line:1"]["moved_mm"] == 30.0
+
+    def test_a_dimension_that_demanded_nothing_screams_when_geometry_slid_anyway(self, monkeypatch):
+        # the P12 shape: the dimension's value already matched the measured gap, so it demanded no
+        # change at all - and the solver still slid an entity 44 mm, which is the whole defect
+        self._rich(monkeypatch, moves=[(1, 4.4, 0.0)], value_cm=3.0)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
+                                  value="30 mm"))
+        assert "line:1 by 44.0 mm" in out["solver_moved_warning"]
+        assert "demanded only 0.0 mm of change" in out["solver_moved_warning"]
+
+    def test_a_rounding_nudge_under_a_demand_of_nothing_is_not_a_jump(self, monkeypatch):
+        # same demanded-nothing dimension, but the entity moved 0.05 mm - solver rounding, not a jump
+        self._rich(monkeypatch, moves=[(1, 0.005, 0.0)], value_cm=3.0)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
+                                  value="30 mm"))
+        assert "solver_moved_warning" not in out
+        assert self._rows(out)["line:1"]["moved_mm"] == 0.05
+
+    def test_an_angular_dimension_never_carries_the_length_warning(self, monkeypatch):
+        # a parameter's value is in DATABASE units: an angle reads RADIANS, so no length threshold
+        # applies to it and no millimetre sentence may be built from it
+        s = self._rich(monkeypatch)
+        ang = FakeDim("angle")
+        ang.parameter.value = 1.5708                 # 90 deg in radians, as the parameter holds it
+        lines = [s.sketchCurves.sketchLines.item(0), s.sketchCurves.sketchLines.item(1)]
+
+        def _add(l1, l2, tp, isDriving=True):
+            lines[1].translate(9.9, 0.0)             # a big move, in a dimension with no length gap
+            return ang
+        s.sketchDimensions.addAngularDimension = _add
+        out = _payload(sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1",
+                                  value="90 deg"))
+        assert "solver_moved_warning" not in out
+        assert self._rows(out)["line:1"]["moved_mm"] == 99.0    # the move is still published
+
+    def test_a_horizontal_dimension_measures_its_gap_on_its_own_axis(self, monkeypatch):
+        # horizontal_distance measures X only: line:0 start (0,0) to line:1 start (0,3) is a 0 mm
+        # horizontal gap, so driving it to 40 mm demands 40 mm and a 38 mm slide is in step
+        self._rich(monkeypatch, moves=[(1, 3.8, 0.0)], value_cm=4.0)
+        out = _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0",
+                                  entity_two="line:1", value="40 mm"))
+        assert "solver_moved_warning" not in out
+
+    def test_two_refs_into_one_entity_publish_one_row(self, monkeypatch):
+        # 'line:0:start' and 'line:0:end' name the SAME line - two rows would be one entity's
+        # geometry published twice under one key
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0:start",
+                                  entity_two="line:0:end"))
+        assert [row["ref"] for row in out["solved"]] == ["line:0"]
+
+    def test_an_arc_reports_its_centre_and_radius(self, monkeypatch):
+        # an arc carries endpoints AND a centre; the centre+radius shape is the one that describes it
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="arc:0", entity_two="line:0"))
+        row = self._rows(out)["arc:0"]
+        assert row["center_mm"] == [20.0, 50.0, 0.0] and row["radius_mm"] == 8.0
+        assert "start_mm" not in row
+
+    def test_a_lone_line_dimension_reads_that_one_line_back(self, monkeypatch):
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0"))
+        assert list(self._rows(out)) == ["line:0"]
+
+    def test_an_anchored_ref_reads_back_under_its_bare_entity_ref(self, monkeypatch):
+        # 'circle:0:center' dimensions the circle - the row names the entity, not the anchor form
+        self._rich(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="circle:0:center",
+                                  entity_two="line:0"))
+        assert set(self._rows(out)) == {"circle:0", "line:0"}
+
+    def test_geometry_that_does_not_read_publishes_no_solved_block(self, monkeypatch):
+        # the honest empty: nothing measured twice means nothing claimed about a move
+        _install(monkeypatch)
+        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1"))
+        assert "solved" not in out and "solver_moved_warning" not in out
 
 
 class TestNegativeDistance:

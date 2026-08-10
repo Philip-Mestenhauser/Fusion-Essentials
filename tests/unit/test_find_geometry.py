@@ -9,7 +9,7 @@ nearest_to sort, that every match carries a handle, and the omit-when-default vi
 
 import json
 
-from conftest import load_tool
+from conftest import MeshBody, load_tool, _NamedCollection
 
 fg = load_tool("find_geometry")
 
@@ -71,12 +71,19 @@ class FakeFace:
 
 
 class FakeBody:
-    def __init__(self, faces=(), edges=(), vertices=(), visible=True):
+    """A BRep body. `name`/`token` matter to the by-name target path (the shared body resolver walks
+    every occurrence's bRepBodies by name and de-duplicates on entityToken); `parentComponent` and
+    `assemblyContext` are what a candidate's '<occurrence-or-component>:<body>' label is built from."""
+    def __init__(self, faces=(), edges=(), vertices=(), visible=True, name="Body1", token=None):
         self.faces = list(faces)
         self.edges = list(edges)
         self.vertices = list(vertices)
         # BRepBody.isVisible is the EFFECTIVE state (own bulb AND ancestor occurrence bulbs rolled up).
         self.isVisible = visible
+        self.name = name
+        self.entityToken = token or f"BTOK::{name}::{id(self)}"
+        self.parentComponent = None
+        self.assemblyContext = None
 
 
 class FakeOcc:
@@ -85,45 +92,32 @@ class FakeOcc:
         # fullPathName is the unambiguous key; defaults to name for flat (single-level) assemblies.
         self.fullPathName = full_path or name
         self.component = type("C", (), {"name": comp})()
-        self.bRepBodies = list(bodies)
-
-
-class _OccColl:
-    def __init__(self, occs):
-        self._o = list(occs)
-    @property
-    def count(self):
-        return len(self._o)
-    def item(self, i):
-        return self._o[i]
-
-
-class _RootBodies:
-    """Root-level bodies: iterable (for the whole-design scan) AND itemByName (for the body-name path)."""
-    def __init__(self, bodies=()):
-        self._b = list(bodies)
-    def __iter__(self):
-        return iter(self._b)
-    def itemByName(self, n):
-        for b in self._b:
-            if getattr(b, "name", None) == n:
-                return b
-        return None
+        # Counted+named collection (the live protocol): find_geometry iterates it, the by-name body
+        # resolver reads count/item/itemByName off the same object.
+        self.bRepBodies = _NamedCollection(bodies)
+        for b in bodies:
+            b.parentComponent = self.component
+            b.assemblyContext = self
 
 
 class FakeRoot:
-    def __init__(self, occs, root_bodies=(), all_occs=None):
+    def __init__(self, occs, root_bodies=(), all_occs=None, meshes=()):
         # `occurrences` is the TOP-LEVEL collection; `allOccurrences` is the FLATTENED, recursive list.
         # For a flat assembly they're equal; nested tests pass all_occs ⊋ occs so a top-level-only scan
         # genuinely can't reach the nested occurrence (that's what makes the recursion test bite).
-        self.occurrences = _OccColl(occs)
+        self.name = "Root"
+        self.occurrences = _NamedCollection(occs)
         self.allOccurrences = list(all_occs) if all_occs is not None else list(occs)
-        self.bRepBodies = _RootBodies(root_bodies)
+        self.bRepBodies = _NamedCollection(root_bodies)
+        # Meshes are reached through the COMPONENTS (reading meshBodies off an occurrence raises).
+        self.meshBodies = _NamedCollection(meshes)
+        for b in root_bodies:
+            b.parentComponent = self
 
 
 class FakeDesign:
-    def __init__(self, occs, root_bodies=(), all_occs=None):
-        self.rootComponent = FakeRoot(occs, root_bodies, all_occs)
+    def __init__(self, occs, root_bodies=(), all_occs=None, meshes=()):
+        self.rootComponent = FakeRoot(occs, root_bodies, all_occs, meshes)
 
 
 import pytest
@@ -146,12 +140,17 @@ def _enum_sentinels(monkeypatch):
     monkeypatch.setattr(ct, "Arc3DCurveType", "ARC", raising=False)
 
 
-def _install(occs, root_bodies=(), all_occs=None):
-    design = FakeDesign(occs, root_bodies, all_occs)
+def _install(occs, root_bodies=(), all_occs=None, meshes=()):
+    design = FakeDesign(occs, root_bodies, all_occs, meshes)
     fg.app = type("A", (), {"activeProduct": design})()
     fg._common.app = fg.app
     import adsk.fusion
     adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
+    # The by-name body path resolves through _inputs, which reads the design off the SAME _common
+    # module object - and discriminates mesh from BRep by isinstance, so both types are modelled.
+    adsk.fusion.BRepBody = FakeBody
+    adsk.fusion.MeshBody = MeshBody
+    return design
 
 
 def _payload(result):
@@ -312,6 +311,97 @@ class TestNestedAssembly:
         out = _payload(fg.handler())
         handles = {m["handle"].split("|@")[0] for m in out["matches"]}
         assert "ROOT_FACE" in handles and "NESTED" in handles
+
+
+# ── BODY-NAME targets: a body inside ANY component, ambiguity refused, qualified form accepted ──
+# 'target' takes a BODY name, and a body almost never lives at the root: the by-name path walks every
+# occurrence's bodies, so 'Pin' inside Frame:1 resolves. A body name is only LOCALLY unique, so a name
+# two components answer to is REFUSED with each candidate written as '<occurrence-or-component>:<body>'
+# - the form that then picks exactly one.
+
+def _named_body(name, token, face_token):
+    return FakeBody(faces=[_cyl(face_token, 0.8, (0, 0, 0))], name=name, token=token)
+
+
+class TestBodyNameTargets:
+    def test_body_inside_a_component_resolves_by_name(self):
+        pin = _named_body("Pin", "TOK_A", "PIN_FACE")
+        _install([FakeOcc("Frame:1", "Frame", [pin])])
+        out = _payload(fg.handler(target="Pin"))
+        assert out["returned"] == 1
+        assert out["matches"][0]["handle"].startswith("PIN_FACE|@")
+        # the label names the body that RESOLVED, in the form that resolves back - not the raw input
+        assert out["target"] == "body 'Frame:1:Pin'"
+
+    def test_the_label_echoes_the_resolved_body_not_the_raw_input(self):
+        # a mis-cased bare name and the qualified form both report the ONE body they reached
+        pin = _named_body("Pin", "TOK_A", "PIN_FACE")
+        _install([FakeOcc("Frame:1", "Frame", [pin])])
+        assert _payload(fg.handler(target="pin"))["target"] == "body 'Frame:1:Pin'"
+        assert _payload(fg.handler(target="Frame:Pin"))["target"] == "body 'Frame:1:Pin'"
+
+    def test_root_level_body_still_resolves_by_name(self):
+        base = _named_body("Base", "TOK_ROOT", "BASE_FACE")
+        _install([], root_bodies=[base])
+        out = _payload(fg.handler(target="Base"))
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("BASE_FACE|@")
+
+    def test_body_name_is_matched_case_insensitively(self):
+        pin = _named_body("Pin", "TOK_A", "PIN_FACE")
+        _install([FakeOcc("Frame:1", "Frame", [pin])])
+        out = _payload(fg.handler(target="pin"))
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("PIN_FACE|@")
+
+    def test_name_in_several_components_is_refused_naming_each(self):
+        a = _named_body("Pin", "TOK_A", "A_FACE")
+        b = _named_body("Pin", "TOK_B", "B_FACE")
+        _install([FakeOcc("A:1", "A", [a]), FakeOcc("B:1", "B", [b])])
+        res = fg.handler(target="Pin")
+        assert res["isError"] is True
+        assert "ambiguous" in res["message"].lower()
+        assert "A:1:Pin" in res["message"] and "B:1:Pin" in res["message"]
+
+    def test_qualified_occurrence_body_form_picks_one(self):
+        a = _named_body("Pin", "TOK_A", "A_FACE")
+        b = _named_body("Pin", "TOK_B", "B_FACE")
+        _install([FakeOcc("A:1", "A", [a]), FakeOcc("B:1", "B", [b])])
+        out = _payload(fg.handler(target="B:1:Pin"))
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("B_FACE|@")
+
+    def test_qualified_component_body_form_picks_one(self):
+        # the component-name prefix (no instance suffix) is accepted too, when it picks exactly one
+        a = _named_body("Pin", "TOK_A", "A_FACE")
+        b = _named_body("Pin", "TOK_B", "B_FACE")
+        _install([FakeOcc("A:1", "A", [a]), FakeOcc("B:1", "B", [b])])
+        out = _payload(fg.handler(target="A:Pin"))
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("A_FACE|@")
+
+    def test_qualified_form_still_matching_two_instances_is_refused(self):
+        # one component instanced twice: '<component>:<body>' names BOTH instances' bodies - refuse,
+        # listing the per-instance forms that separate them.
+        a = _named_body("Pin", "TOK_A", "A_FACE")
+        b = _named_body("Pin", "TOK_B", "B_FACE")
+        _install([FakeOcc("Jaw:1", "Jaw", [a]), FakeOcc("Jaw:2", "Jaw", [b])])
+        res = fg.handler(target="Jaw:Pin")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "Jaw:1:Pin" in res["message"] and "Jaw:2:Pin" in res["message"]
+
+    def test_a_mistyped_body_in_a_real_scope_is_refused_naming_what_it_holds(self):
+        # A typo in the qualified form must not fall through to "that component's single body" - the
+        # caller would silently get a body they never named. The scope resolved, so say what it holds.
+        pin = _named_body("Pin", "TOK_A", "PIN_FACE")
+        _install([FakeOcc("Frame:1", "Frame", [pin])])
+        res = fg.handler(target="Frame:Pinn")
+        assert res["isError"] is True
+        assert "holds no body named 'Pinn'" in res["message"] and "'Pin'" in res["message"]
+
+    def test_a_mesh_body_name_is_refused_with_a_pointer(self):
+        # a MeshBody has no BRep faces/edges/vertices to hand back - say so instead of reporting an
+        # empty scan. Meshes are reached through the components (an occurrence's meshBodies raises).
+        _install([], meshes=[MeshBody(name="Scan1")])
+        res = fg.handler(target="Scan1")
+        assert res["isError"] is True
+        assert "MESH" in res["message"] and "mesh_get" in res["message"]
 
 
 # ── PERCEPTION FIELDS: face outward normal + linear-edge direction ──────────────────────────────

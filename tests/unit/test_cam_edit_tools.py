@@ -856,6 +856,42 @@ class TestParameters:
         assert out["tool"] == 0 and out["parameter_count"] >= 1
 
 
+# ── the REAL _Target's tool list: an index IS the address ───────────────────
+
+class TestTargetToolIndexAlignment:
+    """Every action addresses a tool by its INDEX in the library, so the real _Target.tools must be
+    a positional walk. A walk that skips an unreadable tool slides every later tool onto the wrong
+    index (the caller edits a tool it never named) AND shortens the list below the library's own
+    count, which the add/remove persist gate reads as a persist that did not land."""
+
+    def _library_with_an_unreadable_tool(self):
+        class _OneToolUnreadable(_SrcLib):
+            def item(self, i):
+                if i == 1:
+                    raise RuntimeError("tool read failed")
+                return self._t[i]
+
+        return _OneToolUnreadable([_Tool("First"), _Tool("Ghost"),
+                                   _Tool("Third", tool_numberOfFlutes="5")])
+
+    def test_a_later_tool_keeps_its_index_when_an_earlier_one_cannot_be_read(self, monkeypatch):
+        lib = self._library_with_an_unreadable_tool()
+        target = ct._Target(lib, is_document=True)
+        monkeypatch.setattr(ct, "_resolve_target", lambda scope, library: (target, None))
+        out = _payload(ct.handler(action="parameters", scope="document", tool=2))
+        rows = {r["name"]: r for r in out["parameters"]}
+        assert out["tool"] == 2                                    # 'Third' is still index 2...
+        assert rows["tool_numberOfFlutes"]["expression"] == "5"    # ...and it IS 'Third'
+        assert target.tools[1] is None                             # the unreadable one holds its slot
+
+    def test_the_tool_list_stays_as_long_as_the_library_count(self, monkeypatch):
+        # the persist gate compares the re-read library's count with len(target.tools); a short
+        # list turns a landed persist into "the persist did not land".
+        lib = self._library_with_an_unreadable_tool()
+        target = ct._Target(lib, is_document=True)
+        assert len(target.tools) == lib.count == 3
+
+
 # ── create_library (folded from cam_create_tool_library) ────────────────────
 
 class _NewLib:
@@ -1152,6 +1188,110 @@ class TestSampleTypeMap:
         _install_samples(monkeypatch, _SAMPLE_ASSETS)
         src, serr = ct._sample_for_type("banana mill")
         assert src is None and "turning general" in serr
+
+
+class TestLibraryCache:
+    """The cache holds LIVE ToolLibrary objects for the life of the process, so it is bounded, and a
+    library that has just been written to is dropped from it - handing the next call a pre-write copy
+    would answer out of a library that no longer matches storage."""
+
+    def test_the_cache_is_bounded_and_evicts_the_oldest(self, monkeypatch):
+        monkeypatch.setattr(ct, "_library_cache", {})
+        for i in range(ct._LIBRARY_CACHE_MAX + 3):
+            ct._cache_library(f"lib{i}", object())
+        assert len(ct._library_cache) == ct._LIBRARY_CACHE_MAX
+        assert "lib0" not in ct._library_cache          # the oldest went first
+        assert f"lib{ct._LIBRARY_CACHE_MAX + 2}" in ct._library_cache
+
+    def test_a_persist_drops_the_written_library_from_the_cache(self, monkeypatch):
+        # _resolve_target's persist writes THIS library; any cached copy of it is now stale.
+        from types import SimpleNamespace
+        monkeypatch.setattr(ct, "_library_cache", {})
+        asset = _AssetURL("L")
+        key = asset.toString()
+        ct._cache_library(key, object())            # a copy fetched BEFORE the write
+        updated = []
+        libs = SimpleNamespace(
+            urlByLocation=lambda loc: _AssetURL("root"),
+            childAssetURLs=lambda url: [asset],
+            childFolderURLs=lambda url: [],
+            toolLibraryAtURL=lambda url: _SrcLib([_Tool("A")]),
+            updateToolLibrary=lambda url, lib: updated.append(url.toString()))
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: libs)
+        target, err = ct._resolve_target("cloud", "L")
+        assert err is None
+        target.persist()
+        assert updated == [key]                     # the write happened...
+        assert key not in ct._library_cache         # ...and the pre-write copy is gone
+
+    def test_a_cached_library_is_not_re_fetched(self, monkeypatch):
+        # the reason the cache exists: a fetch is a cloud round-trip (seconds, measured)
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        ct._build_type_map("flat end mill")
+        before = list(assets.fetched)
+        src, err = ct._source_tool("systemlibraryroot://Samples/Milling Tools (Metric)", 0)
+        assert err is None and src is not None
+        assert assets.fetched == before             # served from the cache, no second round-trip
+
+
+class TestSampleFetchFailureIsRetried:
+    """A cloud fetch that comes back with nothing is transient. Recording it as scanned would
+    truncate the type vocabulary for the whole process life - and the full-walk fallback, which is
+    what makes a miss list every type, would short out on the same record."""
+
+    def _flaky(self, monkeypatch, failing_leaf):
+        """The sample assets with one library that fails its FIRST fetch and succeeds after."""
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        real = assets.toolLibraryAtURL
+        failed = []
+
+        def _fetch(url):
+            if url.leafName == failing_leaf and not failed:
+                failed.append(url.leafName)
+                assets.fetched.append(url.leafName)
+                return None                      # the cloud round-trip came back empty
+            return real(url)
+
+        monkeypatch.setattr(assets, "toolLibraryAtURL", _fetch)
+        return assets
+
+    def test_a_failed_fetch_is_retried_and_its_types_come_back(self, monkeypatch):
+        self._flaky(monkeypatch, "Turning Tools (Metric)")
+        assert "turning general" not in ct._build_type_map()   # the failed fetch contributed nothing
+        assert "turning general" in ct._build_type_map()       # ...and the next call retries it
+
+    def test_a_type_behind_a_failed_fetch_is_still_cloneable(self, monkeypatch):
+        # The user-visible consequence: from_type='turning general' must not be refused because one
+        # cloud read blipped. _sample_for_type's own full-walk fallback re-reads the failed library
+        # in the SAME call, so the clone lands.
+        self._flaky(monkeypatch, "Turning Tools (Metric)")
+        src, serr = ct._sample_for_type("turning general")
+        assert serr is None and src.desc == "turning general"
+
+    def test_an_empty_asset_listing_does_not_retire_the_whole_vocabulary(self, monkeypatch):
+        # The worst case of the same bug: the ROOT read blips and no sample library is found at all.
+        # Marking all five scanned would leave the type vocabulary permanently empty.
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        blipped = []
+
+        def _children(url):
+            if not blipped:
+                blipped.append(True)
+                return []
+            return [_AssetURL(leaf) for leaf in _SAMPLE_ASSETS]
+
+        monkeypatch.setattr(assets, "childAssetURLs", _children)
+        assert ct._build_type_map() == {}
+        assert "flat end mill" in ct._build_type_map()
+
+    def test_a_successful_library_is_still_scanned_only_once(self, monkeypatch):
+        # The retry must not cost a re-fetch of the libraries that DID come back.
+        assets = self._flaky(monkeypatch, "Turning Tools (Metric)")
+        ct._build_type_map()
+        before = list(assets.fetched)
+        ct._build_type_map()
+        added = assets.fetched[len(before):]
+        assert added == ["Turning Tools (Metric)"]      # only the one that failed is re-read
 
 
 # ── presets on an EXISTING tool: add_preset / remove_preset ─────────────────────────────────────
@@ -1472,6 +1612,53 @@ class TestRemovePreset:
         out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
                                   preset={"name": "Alu*"}))
         assert out["removed_index"] == 1 and _preset_names(tool) == ["Alu 6061"]
+
+    def test_an_unreadable_preset_holds_its_slot_so_the_indices_stay_aligned(self, monkeypatch):
+        # The published 'presets' list is read against preset_count AND against the index the
+        # removal reports, so a preset whose read fails must come back as a null in place. Dropping
+        # it would shorten the list and slide every later name onto the wrong index.
+        class _OneUnreadable(_Presets):
+            def item(self, i):
+                if i == 1:
+                    raise RuntimeError("preset read failed")
+                return self._p[i]
+
+        tool = _tool_with_presets("EM", ["Steel", "Ghost", "Brass"])
+        tool.presets = _OneUnreadable(["Steel", "Ghost", "Brass"])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        tgt._fresh = lambda: None            # no library re-read: the in-memory names are published
+        out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                                  preset={"name": "Brass"}))
+        assert out["removed_index"] == 2                    # Brass is still addressed at 2
+        assert out["presets"] == ["Steel", None]            # the survivors, slot for slot
+
+    def test_a_name_is_matched_WHOLE_never_as_a_substring(self, monkeypatch):
+        # 'Rough' and 'Roughing' are two different presets with two different feeds. A substring
+        # match would remove whichever came first - deleting cutting data the caller never named.
+        tool = _tool_with_presets("EM", ["Roughing", "Rough"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="remove_preset", scope="document", tool=0,
+                                  preset={"name": "Rough"}))
+        assert out["removed_index"] == 1 and _preset_names(tool) == ["Roughing"]
+
+    def test_a_longer_existing_name_is_not_the_named_preset(self, monkeypatch):
+        # The other direction: 'Rough' alone on the tool is NOT the preset called 'Roughing', so the
+        # removal must refuse and list what is there rather than take the near miss.
+        tool = _tool_with_presets("EM", ["Rough"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="remove_preset", scope="document", tool=0,
+                         preset={"name": "Roughing"})
+        assert res["isError"] is True and "Rough" in res["message"]
+        assert _preset_names(tool) == ["Rough"]          # nothing removed
+
+    def test_add_preset_does_not_read_a_longer_name_as_a_duplicate(self, monkeypatch):
+        # The duplicate gate runs through the same matcher: 'Rough' must still be addable to a tool
+        # that already carries 'Roughing'.
+        tool = _tool_with_presets("EM", ["Roughing"])
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="add_preset", scope="document", tool=0,
+                                  preset={"name": "Rough"}))
+        assert out["preset_index"] == 1 and _preset_names(tool) == ["Roughing", "Rough"]
 
     def test_ambiguous_name_refused_with_candidates(self, monkeypatch):
         tool = _tool_with_presets("EM", ["Alu", "Steel", "alu"])

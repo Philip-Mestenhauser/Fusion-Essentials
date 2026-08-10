@@ -18,6 +18,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, target_component
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 from . import _threads
@@ -213,21 +214,16 @@ def _drill_axes(feature):
     if faces is None:
         return [], False
     axes = []
-    for i in range(int(safe(lambda: faces.count, 0) or 0)):
-        geo = safe(lambda i=i: faces.item(i).geometry)
+    for f in _common.iter_collection(faces):
+        geo = safe(lambda f=f: f.geometry)
         o = safe(lambda: geo.origin) if geo is not None else None
-        a = safe(lambda: geo.axis) if geo is not None else None
-        if o is None or a is None:
+        unit = _geom.unit_vector(safe(lambda: geo.axis) if geo is not None else None)
+        if o is None or unit is None:
             continue                       # planar/spherical face - carries no drill axis
-        try:
-            ox, oy, oz = float(o.x), float(o.y), float(o.z)
-            ax, ay, az = float(a.x), float(a.y), float(a.z)
-        except Exception:
+        origin = [safe(lambda c=c: float(getattr(o, c))) for c in ("x", "y", "z")]
+        if not all(isinstance(c, float) for c in origin):
             continue
-        mag = (ax * ax + ay * ay + az * az) ** 0.5
-        if mag <= 1e-9:
-            continue
-        cand = (ox, oy, oz, ax / mag, ay / mag, az / mag)
+        cand = tuple(origin) + tuple(unit)
         # same LINE as an already-seen axis (parallel + origin on it, either direction) -> one hole
         dup = False
         for ex in axes:
@@ -237,6 +233,10 @@ def _drill_axes(feature):
                 break
         if not dup:
             axes.append(cand)
+    # The EMPTY verdict is gated on the collection's own count, never on how many items the walk
+    # yielded: iter_collection skips an unreadable face, so a walk that yielded nothing over a
+    # count of 3 means "nothing could be read", not "this feature drilled no holes". Calling that
+    # verified deletes a hole that landed and reports it as never cut.
     if axes or int(safe(lambda: faces.count, 0) or 0) == 0:
         return axes, True
     # faces exist but none exposes a readable axis - inconclusive, never a guessed shortfall

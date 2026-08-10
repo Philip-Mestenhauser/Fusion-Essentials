@@ -81,6 +81,18 @@ class FakeTrimInput:
         self.cancelled = True
 
 
+def _stale_cell_at(cells, index):
+    """Make cells.item(index) RAISE - a stale BRepCell proxy, which safe() reads as no cell at all
+    while the cells after it keep their own indices."""
+    intact = cells.item
+
+    def item(i):
+        if i == index:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return intact(i)
+    cells.item = item
+
+
 class FakeTrimFeatures:
     """createInput partial-computes and populates input.bRepCells (all isSelected=False). add()
     REPRODUCES the live contract: it RAISES "No cells are selected" when no cell isSelected — so a
@@ -384,6 +396,27 @@ class TestSurfaceTrim:
         out = _payload(se.trim_handler(surface="S", trim_tool="T", keep="garbage"))
         assert out["cells_kept"] == [1]                   # fell back to largest
 
+    def test_an_unreadable_cell_leaves_the_area_of_every_later_cell_at_its_own_index(self):
+        # 'keep' takes a cell INDEX and the kept indices are published, so the areas list is indexed
+        # by cell number. A cell that cannot be read measures 0 in ITS slot: compacting the list
+        # instead would make the third cell the second, and 'keep larger' would select the stale one.
+        inp = FakeTrimInput(FakeFace(), (3.0, 9.0, 5.0))
+        _stale_cell_at(inp.bRepCells, 1)
+        kept, kept_area, total, err = se._select_cells(inp, None)
+        assert err is None and total == 3
+        assert kept == [2] and kept_area == 5.0      # the largest READABLE cell, at its true index
+
+    def test_an_unreadable_cell_does_not_shift_which_cells_are_selected(self):
+        # the selection walk writes isSelected per index: cell 2 was asked for, so cell 2 is the one
+        # left unselected (KEPT for a trim) and cell 0 is the one selected for removal
+        inp = FakeTrimInput(FakeFace(), (3.0, 9.0, 5.0))
+        first, third = inp.bRepCells.item(0), inp.bRepCells.item(2)
+        _stale_cell_at(inp.bRepCells, 1)
+        kept, _area, total, err = se._select_cells(inp, 2)
+        assert err is None and kept == [2] and total == 3
+        assert third.isSelected is False             # kept: the cell the caller named
+        assert first.isSelected is True              # removed
+
     def test_phantom_cell_kept_area_exceeds_input_aborts(self):
         # A coincident/overlapping surface injects a cell LARGER than the target's own area (the compute
         # spans every visible surface the tool crosses). 'keep larger' would latch onto it: kept_area >
@@ -514,10 +547,23 @@ class TestSurfaceExtend:
         comp = FakeComp(FakeFeatures(extend=xf))
         _wire(comp, handle_map={"E1": e1})
         out = _payload(se.extend_handler(edges=["E1"], distance=4, extend_alignment="align_edges"))
-        # the member name is BARE (AlignEdges), not suffixed like the neighbouring extend
-        # types - bindings-sourced until the enum sweep measures the family
+        # the member name is BARE (AlignEdges), not suffixed like the neighbouring extend types
         assert xf.last_input.extendAlignment is adsk.fusion.SurfaceExtendAlignment.AlignEdges
         assert out["extend_alignment"] == "align_edges"
+
+    def test_free_edges_alignment_resolves_its_own_member(self):
+        # free_edges must land on FreeEdges, not on the other member of the pair: both names
+        # resolve, so set_verified's read-back cannot tell them apart - only this can.
+        import adsk.fusion
+        body = object()
+        e1 = FakeEdge(body=body)
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": e1})
+        out = _payload(se.extend_handler(edges=["E1"], distance=4, extend_alignment="free_edges"))
+        assert xf.last_input.extendAlignment is adsk.fusion.SurfaceExtendAlignment.FreeEdges
+        assert xf.last_input.extendAlignment is not adsk.fusion.SurfaceExtendAlignment.AlignEdges
+        assert out["extend_alignment"] == "free_edges"
 
     def test_extend_alignment_omitted_writes_nothing_and_reports_nothing(self):
         # a fresh input's extendAlignment reads 0 (measured), so an unwritten one keeps that;

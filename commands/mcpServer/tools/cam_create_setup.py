@@ -33,12 +33,11 @@ _MODELS = _inputs.TargetRefList("models", required=False,
 def _all_root_bodies(design):
     """Every BRep body in the root component - solid AND surface - the default machining set.
 
-    Deliberately UNFILTERED: Setup.models is typed to BRepBody, not to solids, so an isSolid filter
-    here would silently drop bodies from the default set instead of letting the setup take them."""
+    Deliberately UNFILTERED: Setup.models is typed to BRepBody, not to solids, and a design whose
+    only body is a SURFACE (isSolid false) creates a setup that carries that body in models - so an
+    isSolid filter here would silently drop bodies the setup does take."""
     root = safe(lambda: design.rootComponent)
-    bodies = safe(lambda: root.bRepBodies) if root else None
-    n = safe(lambda: bodies.count, 0) if bodies else 0
-    return [bodies.item(i) for i in range(n)]
+    return list(_common.iter_collection(safe(lambda: root.bRepBodies) if root else None))
 
 
 def handler(operation_type: str = "milling", models=None, name: str = "") -> dict:
@@ -81,8 +80,8 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
         return error("Setup creation returned nothing.")
     new_name = safe(lambda: setup.name)
     if new_name:
-        landed = any(safe(lambda i=i: cam.setups.item(i).name) == new_name
-                     for i in range(safe(lambda: cam.setups.count, 0) or 0))
+        landed = any(safe(lambda s=s: s.name) == new_name
+                     for s in _common.iter_collection(safe(lambda: cam.setups)))
         if not landed:
             return error(f"setups.add returned '{new_name}' but it does not appear when the setups "
                          "are re-listed - the setup did not land.")

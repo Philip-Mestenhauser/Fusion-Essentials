@@ -37,15 +37,6 @@ _MODE_GUARD = _inputs.ModeGuard(
 _ERROR_HEALTH = 2  # adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState (see _common.timeline_health)
 
 
-def _items(coll):
-    """Yield items from a Fusion count/item collection (source components/occurrences/bodies)."""
-    n = (safe(lambda: coll.count, 0) or 0) if coll is not None else 0
-    for i in range(n):
-        it = safe(lambda i=i: coll.item(i))
-        if it is not None:
-            yield it
-
-
 def _as_names(raw):
     """A clean list of names from a JSON array or a comma-separated string; [] when empty."""
     if raw in (None, "", []):
@@ -66,11 +57,8 @@ def _find_open_document(data_file):
     target_id = safe(lambda: data_file.id)
     if not target_id:
         return None
-    docs = safe(lambda: app.documents)
-    n = safe(lambda: docs.count, 0) if docs else 0
-    for i in range(n):
-        d = safe(lambda i=i: docs.item(i))
-        df = safe(lambda d=d: d.dataFile) if d is not None else None
+    for d in _common.iter_collection(safe(lambda: app.documents)):
+        df = safe(lambda d=d: d.dataFile)
         if df is not None and safe(lambda df=df: df.id) == target_id:
             return d
     return None
@@ -81,14 +69,14 @@ def _find_open_document(data_file):
 
 def _source_components(source_design):
     """Every component in the SOURCE design (root + sub-components), as a list."""
-    return list(_items(safe(lambda: source_design.allComponents)))
+    return list(_common.iter_collection(safe(lambda: source_design.allComponents)))
 
 
 def _owned_bodies(comp):
     """Every body (BRep + mesh) directly owned by a source component."""
     out = []
     for coll_name in ("bRepBodies", "meshBodies"):
-        out.extend(_items(safe(lambda: getattr(comp, coll_name, None))))
+        out.extend(_common.iter_collection(safe(lambda: getattr(comp, coll_name, None))))
     return out
 
 
@@ -145,7 +133,7 @@ def _resolve_source_bodies(source_design, specs):
 def _component_occurrences(source_root, comp):
     """Every occurrence (at any assembly level) of `comp` in the source - the browser-selection analog
     of picking that part for the derive. Occurrence is a first-class sourceEntity (live-verified)."""
-    return list(_items(safe(lambda: source_root.allOccurrencesByComponent(comp))))
+    return list(_common.iter_collection(safe(lambda: source_root.allOccurrencesByComponent(comp))))
 
 
 def _collect_source_entities(source_design, component_names, body_names):
@@ -185,7 +173,7 @@ def _occurrence_tokens(comp):
     """entityToken of every occurrence directly in `comp` right now - a before/after snapshot so a
     NEW derived occurrence can be told apart from one that was already there."""
     tokens = set()
-    for o in _items(safe(lambda: comp.occurrences)):
+    for o in _common.iter_collection(safe(lambda: comp.occurrences)):
         tok = safe(lambda o=o: o.entityToken)
         if tok:
             tokens.add(tok)
@@ -197,7 +185,7 @@ def _subtree_body_count(occ):
     a whole-design derive lands ONE top occurrence whose bodies live in nested sub-components, so a
     top-level count reads 0 while 10 bodies are really there (live-verified)."""
     total = safe(lambda: occ.bRepBodies.count, 0) or 0
-    for ch in _items(safe(lambda: occ.childOccurrences)):
+    for ch in _common.iter_collection(safe(lambda: occ.childOccurrences)):
         total += _subtree_body_count(ch)
     return total
 
@@ -206,7 +194,7 @@ def _new_derived_occurrences(comp, before_tokens):
     """[{name, body_count}] for occurrences now directly in `comp` that (a) were not there before
     add() and (b) report isDerived=true - the occurrence-side of the landing, with real body counts."""
     out = []
-    for o in _items(safe(lambda: comp.occurrences)):
+    for o in _common.iter_collection(safe(lambda: comp.occurrences)):
         tok = safe(lambda o=o: o.entityToken)
         if tok and tok in before_tokens:
             continue

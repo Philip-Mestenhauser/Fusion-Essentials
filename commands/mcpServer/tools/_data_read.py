@@ -15,10 +15,18 @@ import time
 import adsk.core
 
 from ._common import ok, error, safe
-from ._data_common import (_find_project, _child_folder_by_name, _folder_path_string,
+from ._data_common import (_find_project, _folder_path_string, navigate_folder_path,
                            resolve_file_reference)
 
 app = adsk.core.Application.get()
+
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = ("the three cloud READ cores data_get delegates to - list_projects_handler (the active "
+             "hub's projects), list_project_files_handler (one project's files, optionally scoped to "
+             "a folder path) and file_facts_handler (ONE file's metadata + link state) - plus "
+             "_walk_folder, the ONE capped/deadlined folder recursion every cloud listing and the "
+             "by-name file resolver share (it records a folder whose enumeration RAISED, so a hole "
+             "in the search space is never reported as an empty folder)")
 
 # Guard rails for enumeration of large/cloud-backed projects. Every DataFile property read and every
 # dataFolders/dataFiles enumeration is a synchronous cloud round-trip on Fusion's MAIN thread, so a
@@ -114,22 +122,18 @@ def list_project_files_handler(project: str = "", project_id: str = "",
     start_path = ""
     want_folder = (folder or "").strip().strip("/")
     if want_folder:
-        cur = root
-        cur_path = ""
-        for seg in want_folder.split("/"):
-            nxt = _child_folder_by_name(cur, seg)
-            if not nxt:
-                opts = []
-                try:
-                    opts = [sf.name for sf in cur.dataFolders.asArray()]
-                except Exception:
-                    pass
-                where = cur_path or "(project root)"
-                return error(f"Folder '{folder}' not found: no subfolder '{seg}' in '{where}'. "
-                              f"Subfolders there: {', '.join(n for n in opts if n) or '(none)'}.")
-            cur = nxt
-            cur_path = (cur_path + "/" + seg) if cur_path else seg
-        start_folder, start_path = cur, cur_path
+        start_folder, start_path, miss = navigate_folder_path(root, want_folder)
+        if miss:
+            if miss["available"] is None:
+                # The sibling list did not enumerate: '(none)' here would report an unread folder
+                # as an empty one, and 'not found' would be a verdict this walk never reached.
+                return error(f"Folder '{folder}' could not be resolved: the subfolders of "
+                             f"'{miss['at']}' could not be read, so whether '{miss['segment']}' is "
+                             "there is unknown - nothing was listed. Retry, or scope with a folder "
+                             "path that opens.")
+            return error(f"Folder '{folder}' not found: no subfolder '{miss['segment']}' in "
+                         f"'{miss['at']}'. Subfolders there: "
+                         f"{', '.join(miss['available']) or '(none)'}.")
 
     try:
         if want_folder and not recursive:
@@ -162,7 +166,26 @@ def list_project_files_handler(project: str = "", project_id: str = "",
     }
     if truncated.get("time_truncated"):
         payload["time_truncated_at"] = truncated.get("time_truncated_at")
+    if truncated.get("unread_count"):
+        # Folders that would not enumerate: the listing is INCOMPLETE in a way the caps do not
+        # describe, so 'files' is not evidence a file is absent from this project.
+        payload["folders_unreadable"] = truncated["unread_count"]
+        payload["folders_unreadable_at"] = truncated.get("unread", [])
     return ok(payload)
+
+
+# How many unreadable folder paths the walk names before it just counts them - the flag and the
+# count carry the rest.
+_MAX_UNREAD_NAMED = 10
+
+
+def _note_unread(truncated, folder_path):
+    """Record a folder whose enumeration raised. The COUNT is complete; the named paths are capped."""
+    truncated["unread_count"] = truncated.get("unread_count", 0) + 1
+    named = truncated.setdefault("unread", [])
+    path = folder_path or "(project root)"
+    if path not in named and len(named) < _MAX_UNREAD_NAMED:
+        named.append(path)
 
 
 def _walk_folder(folder, files: list, truncated: dict, depth: int, folder_path: str, deadline=None):
@@ -178,6 +201,11 @@ def _walk_folder(folder, files: list, truncated: dict, depth: int, folder_path: 
     call can't be interrupted. The deadline cut is flagged separately as truncated['time_truncated']
     (a SIBLING of truncated['value'], never a replacement) plus truncated['time_truncated_at'] naming
     the folder the walk was in when it stopped. The visit counter rides in `truncated['visits']`.
+
+    A folder whose dataFiles/dataFolders enumeration RAISES is recorded in `truncated['unread']`
+    (its path) rather than silently skipped: the listing this walk feeds is also what resolves a
+    file BY NAME, and a folder that never opened could hold a second file of that name - so a
+    swallowed failure turns an ambiguity into a confident unique match.
     """
     if depth > _MAX_FOLDER_DEPTH or len(files) >= _MAX_FILES:
         truncated["value"] = True
@@ -207,7 +235,7 @@ def _walk_folder(folder, files: list, truncated: dict, depth: int, folder_path: 
                 return
             files.append(_file_summary(f, folder_path))
     except Exception:
-        pass
+        _note_unread(truncated, folder_path)
 
     # Subfolders.
     try:
@@ -228,7 +256,7 @@ def _walk_folder(folder, files: list, truncated: dict, depth: int, folder_path: 
             sub_path = (folder_path + "/" + sub_name) if (folder_path and sub_name) else (sub_name or folder_path)
             _walk_folder(sub, files, truncated, depth + 1, sub_path, deadline=deadline)
     except Exception:
-        pass
+        _note_unread(truncated, folder_path)
 
 
 def _file_summary(f, folder_path: str = "") -> dict:

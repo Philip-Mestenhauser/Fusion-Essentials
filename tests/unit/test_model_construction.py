@@ -976,6 +976,18 @@ def _measurable_path(*entity_lengths_cm):
                              "item": lambda _s, i, _c=curves: _c[i]})()
 
 
+def _path_with_one_unreadable_entity(*entity_lengths_cm, unreadable_at=1):
+    """A measurable path where ONE entity's item() raises - a stale entity proxy. The other
+    segments still measure, so a walk that skips the bad one produces a plausible but SHORT total."""
+    full = _measurable_path(*entity_lengths_cm)
+
+    def item(_s, i):
+        if i == unreadable_at:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return full.item(i)
+    return type("Path", (), {"count": len(entity_lengths_cm), "item": item})()
+
+
 def _path_defn(distance, **offset):
     """A ConstructionPlanePathDefinition / ConstructionPointPathDefinition. Pass offset=... for the
     plane definition's offset member (None unless the plane was built to an object); OMIT it for a
@@ -1201,6 +1213,37 @@ class TestOnPathAbsolute:
         out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=0.5))
         assert "path_length" not in out and "beyond_path" not in out
         assert "not clamped" not in out["note"]
+
+    def test_one_unreadable_entity_withdraws_the_length_instead_of_summing_the_rest(self):
+        # every segment must measure or there IS no path length. Skipping the unreadable entity
+        # would sum 4+6 = 10 cm and publish it as the length of a 4+5+6 = 15 cm path - a wrong
+        # number a placement is then judged against, which is worse than no number at all.
+        assert cn._path_length_cm(_measurable_path(4.0, 5.0, 6.0)) == 15.0
+        assert cn._path_length_cm(_path_with_one_unreadable_entity(4.0, 5.0, 6.0)) is None
+
+    def test_an_entity_whose_extents_do_not_answer_withdraws_the_whole_length(self, monkeypatch):
+        # the sibling of the unreadable-entity case: the entity IS readable, but getParameterExtents
+        # answers a failure flag, so its span is unknown. Carrying on to the next entity would sum
+        # 4 + 6 and publish 10 cm as the length of a 15 cm path.
+        path = _measurable_path(4.0, 5.0, 6.0)
+        path.item(1).curve.evaluator.getParameterExtents = lambda: (False, 0.0, 0.0)
+        assert cn._path_length_cm(path) is None
+
+        comp = _install()
+        _stub_path(monkeypatch, path=path)
+        comp.constructionPlanes.result_definition = _path_defn(_param("d7", "120 mm", value=12.0))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=120,
+                                  distance_type="absolute"))
+        assert "path_length" not in out and "beyond_path" not in out
+
+    def test_an_unreadable_entity_never_puts_a_short_path_length_on_the_wire(self, monkeypatch):
+        comp = _install()
+        _stub_path(monkeypatch, path=_path_with_one_unreadable_entity(4.0, 5.0, 6.0))
+        comp.constructionPlanes.result_definition = _path_defn(_param("d7", "120 mm", value=12.0))
+        out = _payload(cn.handler(kind="plane", mode="on_path", path="<h>", at=120,
+                                  distance_type="absolute"))
+        assert "path_length" not in out            # no number is invented from the readable parts
+        assert "not clamped at either end" in out["note"]
 
     def test_absolute_warns_generically_when_the_path_length_cannot_be_measured(self, monkeypatch):
         comp = _install()
@@ -1662,3 +1705,16 @@ class TestCreatedDatumHandle:
         out = _payload(cn.handler(kind="axis", axis="x"))
         assert out["handle"] is None
         assert "handle" not in out["note"]
+
+
+def test_the_path_description_states_the_tangent_continuity_rule():
+    # measured: one seed chains by TANGENT CONTINUITY - a sharp corner stops it, open vs closed
+    # decides nothing (a tangent-continuous closed loop chained all 8 edges from one seed). So the
+    # wire may not promise chaining unconditionally, nor claim a closed loop refuses to chain; what
+    # a seed actually reached is only knowable from the reported count.
+    desc = cn.construction_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
+    assert "TANGENT connections" in desc
+    assert "sharp corner stops the chain" in desc
+    assert "'path' count is the truth" in desc
+    assert "auto-chain" not in desc.lower()
+    assert "closed loop" not in desc.lower() and "seed edge alone" not in desc

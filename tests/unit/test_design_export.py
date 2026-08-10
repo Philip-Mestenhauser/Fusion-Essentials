@@ -572,6 +572,73 @@ class TestDxfExport:
         assert out["file_path"].lower().endswith(".dxf")
 
 
+class TestDxfWriterGuards:
+    """Every read _write_dxf needs before it can write is guarded and NAMED - an absent
+    exportManager, a build without the DXF factory, and a factory that raises."""
+
+    def _sketch_export(self, tmp_path, monkeypatch, sketch=None):
+        design, em, _ = _install(monkeypatch)
+        monkeypatch.setattr(dx._common, "resolve_sketch",
+                            lambda d, name: sketch or FakeSketch(lines=1))
+        return design, em
+
+    def test_a_design_with_no_export_manager_is_named(self, tmp_path, monkeypatch):
+        design, _em = self._sketch_export(tmp_path, monkeypatch)
+        design.exportManager = None
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "exposes no exportManager" in res["message"]
+
+    def test_a_build_without_the_dxf_factory_is_named(self, tmp_path, monkeypatch):
+        _design, em = self._sketch_export(tmp_path, monkeypatch)
+        # absent, as on a build that never had it - not None-valued
+        monkeypatch.delattr(FakeExportManager, "createDXFSketchExportOptions")
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "no createDXFSketchExportOptions" in res["message"]
+        assert em.executed is None
+
+    def test_a_factory_that_raises_reports_its_reason(self, tmp_path, monkeypatch):
+        _design, em = self._sketch_export(tmp_path, monkeypatch)
+
+        def boom(path, sketch):
+            raise RuntimeError("the sketch is not exportable")
+
+        em.createDXFSketchExportOptions = boom
+        res = dx.handler(format="dxf", dxf_sketch="Profile1", file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "Could not create DXF export options" in res["message"]
+        assert "not exportable" in res["message"]
+
+    def test_a_failed_write_whose_scratch_sketch_also_survives_names_both(self, tmp_path,
+                                                                         monkeypatch):
+        # the compensating delete is best-effort: if BOTH the write and the cleanup fail, the
+        # caller is told the sketch is still in their design, not just that the export failed.
+        _design, em, _ = _install(monkeypatch)
+        sk = FakeSketch(name="Scratch7", lines=0, project_adds=2)
+        sk.deleteMe = lambda: False
+        face = FakeFace(FakeFaceComp(sk))
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        em.execute = lambda opts: False
+        res = dx.handler(format="dxf", dxf_face="H" * 40, file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "nothing was written" in res["message"].lower()
+        assert "Scratch7" in res["message"] and "delete it manually" in res["message"]
+
+    def test_a_written_dxf_whose_scratch_sketch_survives_says_so_in_the_note(self, tmp_path,
+                                                                            monkeypatch):
+        _install(monkeypatch)
+        sk = FakeSketch(name="Scratch7", lines=0, project_adds=2)
+        sk.deleteMe = lambda: False
+        face = FakeFace(FakeFaceComp(sk))
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert "Scratch7" in out["note"] and "could not be removed" in out["note"]
+        assert "the design is unchanged" not in out["note"]
+
+
 # ── split_by_component (one file per top-level occurrence) ─────────────────────
 
 class TestSplitByComponent:
@@ -584,6 +651,39 @@ class TestSplitByComponent:
         # each occurrence was the geometry handed to the exporter (one execute per part)
         geoms = [c["geom"].name for c in em.calls]
         assert set(geoms) == {"Body:1", "Cab:1", "Wheels:1"}
+
+    def test_split_publishes_the_option_knobs_the_files_landed(self, tmp_path, monkeypatch):
+        # The split path configures its own options object PER FILE. Dropping the read-back would
+        # let it report a clean export while the caller's opt-in option was never applied - the
+        # single-file path discloses exactly this, and the split path must not be quieter.
+        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        _, _em, _ = _install(monkeypatch, occurrences=occs)
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
+                                  stl_binary=True))
+        assert out["file_count"] == 2
+        assert out["options_applied"]["stl_binary"] is True
+        assert "options_refused" not in out
+
+    def test_split_names_an_option_fusion_refused_on_any_file(self, tmp_path, monkeypatch):
+        # One refusal anywhere in the batch is a refusal the caller must see - an export that
+        # silently wrote ASCII while 'stl_binary' was asked for is the false success this catches.
+        occs = [FakeOcc("Body:1"), FakeOcc("Cab:1")]
+        _, em, _ = _install(monkeypatch, occurrences=occs)
+
+        class Stubborn(FakeOptions):
+            @property
+            def isBinaryFormat(self):
+                return True
+            @isBinaryFormat.setter
+            def isBinaryFormat(self, value):
+                pass
+
+        em.options_class = Stubborn
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True,
+                                  stl_binary=False))
+        assert out["options_refused"] == ["stl_binary"]
+        assert "did not take these options" in out["note"]
+        assert out.get("options_applied", {}).get("stl_binary") is None
 
     def test_filenames_sanitized_and_extensioned(self, tmp_path, monkeypatch):
         _, _, _ = _install(monkeypatch, occurrences=[FakeOcc("Loader Arm:1")])

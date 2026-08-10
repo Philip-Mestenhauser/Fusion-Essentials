@@ -35,6 +35,12 @@ def _folder(name, subs=(), is_root=False, parent=None):
     return f
 
 
+def _raises():
+    """A dataFolders.asArray() that fails the way a cloud read can - the walk must not read the
+    refusal it produces as 'that folder is empty'."""
+    raise RuntimeError("cloud read failed")
+
+
 def _project(root):
     return _ns(name="MCP Test Project", id="proj-1", rootFolder=root)
 
@@ -92,6 +98,19 @@ class TestDestinationGuard:
         assert "Fixtures" in msg                     # what DOES exist at the failure point
         assert "data_create_folder" in msg           # this tool creates nothing
 
+    def test_a_destination_whose_folder_list_will_not_read_is_unknown_not_absent(self, wired):
+        # An unreadable dataFolders enumeration is a HOLE, not an absence: "does not exist" would
+        # send the caller to data_create_folder to make a folder that may already be there.
+        root, docs, _p, _f = _tree()
+        root.dataFolders = _ns(asArray=_raises)
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        msg = error_message(dmv.handler(file="urn:lin:AAA", target_folder="Parts"))
+        assert "could not be read" in msg and "is unknown" in msg
+        assert "does not exist" not in msg
+        assert "data_create_folder" not in msg      # the wrong next step for an unread listing
+        assert df.moves == []                       # and nothing was moved
+
     def test_nested_path_resolves(self, wired):
         root, docs, _p, fixtures = _tree()
         df = _cloud_file(docs, _project(root))
@@ -132,6 +151,42 @@ class TestMoveVerification:
         wired(_cloud_file(docs, _project(root), lands_in="elsewhere"))
         assert "Somewhere Else" in error_message(
             dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+
+    def test_the_verification_reads_a_FRESH_file_not_the_handle_move_was_called_on(self, wired,
+                                                                                     monkeypatch):
+        # The re-resolve IS the verification. The handle move() was called on can keep reporting the
+        # folder it was resolved from, so a handler that trusts it would confirm a move that never
+        # happened. Here the stale handle still says 'Docs' while a fresh fetch shows the landing.
+        root, docs, _p, fixtures = _tree()
+        stale = _cloud_file(docs, _project(root), lands_in="nowhere")
+        fresh = _cloud_file(fixtures, _project(root))
+        monkeypatch.setattr(dmv, "resolve_file_reference",
+                            lambda *a, **kw: (stale, {"matched_by": "urn", "urn": "urn:lin:AAA"},
+                                              None))
+        monkeypatch.setattr(dmv, "_resolve_data_file", lambda raw: (fresh, raw, [raw]))
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert out["moved"] is True
+        assert out["parent_folder_after"] == "Fixtures"
+
+    def test_an_id_match_is_published_as_an_id_match(self, wired):
+        root, docs, _p, _f = _tree()
+        wired(_cloud_file(docs, _project(root)))
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert out["verified_by"] == "id"
+        assert "by folder NAME" not in out["note"]
+
+    def test_a_name_only_match_is_not_published_with_id_confidence(self, wired):
+        # Two sibling folders can share a name, so a NAME match confirms the file is in a folder
+        # CALLED that - not the one that was targeted. Publishing it as the same verdict an id match
+        # gives hands the caller confidence the read does not support.
+        root, docs, _p, fixtures = _tree()
+        fixtures.id = None                              # the target's id will not read
+        df = _cloud_file(docs, _project(root))
+        wired(df)
+        out = _payload(dmv.handler(file="urn:lin:AAA", target_folder="Parts/Fixtures"))
+        assert out["moved"] is True
+        assert out["verified_by"] == "name"
+        assert "by folder NAME, not" in out["note"]
 
     def test_a_false_return_is_an_error_and_nothing_is_claimed(self, wired):
         root, docs, _p, _f = _tree()

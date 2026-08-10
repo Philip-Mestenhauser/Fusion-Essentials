@@ -104,13 +104,7 @@ def untrim_handler(faces=None, loop_type="all", extension=None, units="mm") -> d
     # Read the RESULT faces back. The untrimmed face is a NEW, larger face, so total created-face area
     # vs the input area is the honest signal the extent actually grew (removing an internal hole fills
     # it; removing an external loop extends to the natural boundary - both increase area).
-    created = []
-    ff = safe(lambda: feature.faces)
-    n = int(safe(lambda: ff.count, 0) or 0) if ff else 0
-    for i in range(n):
-        fc = safe(lambda i=i: ff.item(i))
-        if fc is not None:
-            created.append(fc)
+    created = list(_common.iter_collection(safe(lambda: feature.faces)))
     area_after = _sum_area(created)
 
     result_bodies = [safe(lambda b=b: b.name) for b in _common.result_bodies(feature)]

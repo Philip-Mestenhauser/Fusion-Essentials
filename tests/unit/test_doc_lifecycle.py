@@ -751,14 +751,19 @@ class _CloseableDoc:
 
 
 class _CloseableDocs:
-    def __init__(self, docs):
+    """item_raises_at models the stale collection slot whose item(i) itself raises - the collection
+    still counts it, so the address space keeps its width."""
+    def __init__(self, docs, item_raises_at=None):
         self._docs = list(docs)
+        self._raises_at = item_raises_at
 
     @property
     def count(self):
         return len(self._docs)
 
     def item(self, i):
+        if i == self._raises_at:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
         return self._docs[i]
 
 
@@ -905,9 +910,18 @@ class TestFolderResolveEventual:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _NamedDoc:
-    def __init__(self, name, urn=None):
-        self.name = name
+    """An open document. name_raises models the stale proxy whose display name cannot be read - it
+    is still an OPEN document holding its place in app.documents."""
+    def __init__(self, name, urn=None, name_raises=False):
+        self._name = name
+        self._name_raises = name_raises
         self._urn = urn
+
+    @property
+    def name(self):
+        if self._name_raises:
+            raise RuntimeError("4 : An API Object refers to a deleted Object")
+        return self._name
 
     @property
     def dataFile(self):
@@ -938,11 +952,37 @@ class TestOpenIndexAddressing:
         d, names, ambiguous = _doc_lifecycle._find_open_document("open:abc")
         assert d is None and ambiguous is False
 
+    def test_a_doc_with_an_unreadable_name_holds_its_open_index(self):
+        # open:N indexes app.documents, and doc_get publishes the same number. A document whose NAME
+        # will not read is still open at its own index - dropping it would slide every later document
+        # down one, so open:2 would activate/close the document the caller did not ask for.
+        first, broken = _NamedDoc("Untitled"), _NamedDoc("Ghost", name_raises=True)
+        third = _NamedDoc("Untitled")
+        _install_open([first, broken, third])
+        d, names, ambiguous = _doc_lifecycle._find_open_document("open:2")
+        assert d is third and ambiguous is False
+        assert names == ["Untitled", "", "Untitled"]   # the unreadable name holds its slot
+        assert _doc_lifecycle._find_open_document("open:1")[0] is broken
+
     def test_shared_name_without_index_is_still_refused(self):
         # two unsaved 'Untitled' (no URN) -> a bare name is ambiguous; open:N is the only handle.
         _install_open([_NamedDoc("Untitled"), _NamedDoc("Untitled")])
         d, names, ambiguous = _doc_lifecycle._find_open_document("Untitled")
         assert d is None and ambiguous is True
+
+    def test_a_doc_whose_item_read_raises_burns_its_slot(self):
+        # The stale-proxy shape one step earlier: documents.item(i) itself raises (a deleted
+        # object), before .name is ever reachable. The slot is burned - open:2 still reaches the
+        # third document, and open:1 is a clean miss, not a propagated exception.
+        first, third = _NamedDoc("Untitled"), _NamedDoc("Untitled")
+        class _App:
+            documents = _CloseableDocs([first, _NamedDoc("dead"), third], item_raises_at=1)
+            activeDocument = first
+        _doc_lifecycle.app = _App()
+        d, names, ambiguous = _doc_lifecycle._find_open_document("open:2")
+        assert d is third and ambiguous is False
+        assert names == ["Untitled", "", "Untitled"]
+        assert _doc_lifecycle._find_open_document("open:1") == (None, names, False)
 
 
 class TestCloseAllSkipsDeadProxies:

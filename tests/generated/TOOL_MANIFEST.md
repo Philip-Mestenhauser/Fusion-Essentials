@@ -46,7 +46,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_construction` | Add a construction point, axis, or plane in the active component |
 | ✎ | `model_create_component` | Create a new EMPTY component occurrence in the active design - the prerequisite for building an assembly of separate, independently jointable/groundable parts (... |
 | ✎ | `model_draft` | Taper (draft) faces relative to a pull direction - the Draft feature every molded or cast part needs so it releases from its tooling |
-| ✎ | `model_emboss` | Stamp sketch profile(s) onto solid face(s): part marking, logos, ribs |
+| ✎ | `model_emboss` | Stamp sketch profile(s) or sketch text(s) onto solid face(s): nameplates, part marking, logos, ribs |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a 3D solid (via sketch_create / sketch_add_geometry) |
 | ✎ | `model_fillet` | Round (fillet) edges - for edges where a RADIUS is the design intent (the standard machined edge break is model_chamfer) |
 | ✎ | `model_hole` | Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries hole/thread metadata |
@@ -268,7 +268,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | | Tool | Summary |
 |---|---|---|
 | · | `view_list_workspaces` | List the Fusion workspaces the user can switch to (e.g |
-| · | `view_screenshot` | Capture a screenshot of the current Fusion viewport and return it as an image so you can visually inspect the model and verify your work |
+| ✎ | `view_screenshot` | Capture a screenshot of the current Fusion viewport and return it as an image so you can visually inspect the model and verify your work |
 | · | `view_screenshot_multi` | Capture SEVERAL views of the model in ONE call - front/top/right/iso etc |
 | ✎ | `view_section` | Cut the active model with a live Section Analysis so you can SEE INSIDE - cavities, wall thickness, how a part nests in a fixture, where a void sits - that a so... |
 | ✎ | `view_set` | View-state verbs to inspect the model from different angles, then restore - no geometry changes |

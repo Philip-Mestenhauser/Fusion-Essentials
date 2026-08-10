@@ -13,8 +13,19 @@ import adsk.fusion
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names
 from . import _common
 from . import _inputs
+# SketchText.text and .height are RETIRED properties; the live handles are textParameter (whose
+# expression holds the string QUOTED) and heightParameter. _unquote reads that expression and
+# _font_read_back turns SketchText.fontName into a name-or-None - both are sketch_set_text's own
+# readers for the entities it writes, imported rather than re-rolled (sketch_delete_entity imports
+# _unquote from the same home).
+from .sketch_set_text import _unquote, _font_read_back
 
 app = adsk.core.Application.get()
+
+# One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
+MAP_BLURB = ("the ONE-sketch X-ray behind sketch_get(sketch_name=...): entities, construction "
+             "geometry, constraints, dimensions and profiles + curve_id (the '<type>:<index>' entity "
+             "id every sketch reference is written in, which _common.resolve_entity_ref reads back)")
 
 # Constraint class name -> friendly type + the attribute names that hold its referenced entities.
 _CONSTRAINT_REFS = {
@@ -109,6 +120,37 @@ def _line_geo(ln, f):
     return {"start": _xy(s, f), "end": _xy(e, f)}
 
 
+def _texts(sketch, f):
+    """Every SketchText as an entity record, in sketchTexts creation order.
+
+    The id is 'text:<index>' - the SAME address sketch_delete_entity(target='text:<i>') deletes by
+    and sketch_set_text(index=<i>) edits by - so this stays a positional walk: dropping an
+    unreadable text would slide every later one onto the wrong address, and a slot that will not
+    read holds its index with its fields None.
+
+    The string comes from textParameter.expression (quoted - _unquote strips it) and the height from
+    heightParameter.value, because SketchText.text/.height are retired properties. 'font' is
+    SketchText.fontName, the same read sketch_set_text confirms a written font with. 'bounding_box'
+    is SketchText.boundingBox, which the bindings define as the box in SKETCH space - the same frame
+    as every other x/y in this listing - so it locates the text without exploding its construction
+    rectangle into loose lines. SketchText carries no construction flag (the same gap SketchPoint
+    has), so 'construction' is reported false alongside the other entity kinds."""
+    out = []
+    texts = safe(lambda: sketch.sketchTexts)
+    for i in range(safe(lambda: texts.count, 0) if texts else 0):
+        st = safe(lambda i=i: texts.item(i))
+        rec = {"id": f"text:{i}", "type": "text", "construction": False,
+               "text": _unquote(safe(lambda st=st: st.textParameter.expression)),
+               "height": _round(safe(lambda st=st: st.heightParameter.value), f),
+               "font": _font_read_back(st)}
+        bb = safe(lambda st=st: st.boundingBox)
+        if bb is not None:
+            rec["bounding_box"] = {"min": _xy(safe(lambda: bb.minPoint), f),
+                                   "max": _xy(safe(lambda: bb.maxPoint), f)}
+        out.append(rec)
+    return out
+
+
 def _entities(sketch, f):
     """List every entity with id, type, isConstruction, and key geometry, in display units (f = cm ->
     display-unit factor)."""
@@ -198,6 +240,7 @@ def _entities(sketch, f):
             rec["origin"] = True
         out.append(rec)
 
+    out.extend(_texts(sketch, f))
     return out, construction
 
 
@@ -372,6 +415,9 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     "splines": safe(lambda: sketch.sketchCurves.sketchFittedSplines.count, 0),
     "cv_splines": safe(lambda: sketch.sketchCurves.sketchControlPointSplines.count, 0),
     "fixed_splines": safe(lambda: sketch.sketchCurves.sketchFixedSplines.count, 0),
+    # sketchTexts is not a sketchCurves sub-collection, so without its own count a sketch whose only
+    # content is a label reads as empty here and the X-ray is never asked for.
+    "texts": safe(lambda: sketch.sketchTexts.count, 0),
     }
     fully = safe(lambda: sketch.isFullyConstrained)
     constraint_count = safe(lambda: sketch.geometricConstraints.count, 0)
@@ -404,7 +450,10 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
                  "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
                  "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "
                  "is the sketch ORIGIN (anchor origin-pinned constraints to it). is_fully_constrained=false "
-                 "means free DOF remain; a dimension driving=true locks geometry, driving=false only measures.")
+                 "means free DOF remain; a dimension driving=true locks geometry, driving=false only measures. "
+                 "A 'text:<i>' entity carries the sketch text's string, height, font and sketch-space "
+                 "bounding_box; that same id is what sketch_set_text(index=<i>) edits and "
+                 "sketch_delete_entity(target='text:<i>') removes.")
     if truncated:
         note += (f" entities/constraints/dimensions each capped at {_XRAY_CAP}; counts above "
                  "(constraint_count/dimension_count/counts) are the full, uncapped totals.")

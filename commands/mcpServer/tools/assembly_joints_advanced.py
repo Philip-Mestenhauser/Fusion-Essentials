@@ -26,14 +26,12 @@ from . import _assert
 # slide-axis rules rather than keeping a second copy of the seven motion names.
 from .joint_create_edit import (_JOINT_TYPES, _MOTIONS, _parse_snap, _resolve_input,
                                 _resolve_snap_entity, _slide_index, _slide_name)
+from . import _joints
 from ._joints import (AXES as _AXES, apply_motion as _apply_motion,
-                      current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin)
+                      current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin,
+                      pending_move_guard as _pending_move_guard)
 
 app = adsk.core.Application.get()
-
-# The read declined to answer - distinct from a read that answered False. Publishing bool() of a
-# failed read would fabricate a measurement the tool never took.
-_UNREADABLE = object()
 
 _CAPTURE_ACTIONS = ("capture", "revert", "status", "delete", "discard_pending")
 _CAPTURE_ACTION = _inputs.Choice(
@@ -53,27 +51,21 @@ def _find_one(design, name):
 
 # ------------------------------------------------------------- assembly_capture_position
 
-def _capture_markers(snaps, count):
+def _capture_markers(snaps):
     """[{name, timeline_index}] for every captured position - bounded by nature (snapshot counts
     stay small), so no truncation is needed. timeline_index is safe-guarded: a marker's
     timelineObject.index is read defensively since the property can raise on a stale reference."""
-    out = []
-    for i in range(count):
-        s = safe(lambda i=i: snaps.item(i))
-        if s is None:
-            continue
-        out.append({"name": safe(lambda s=s: s.name),
-                    "timeline_index": safe(lambda s=s: s.timelineObject.index)})
-    return out
+    return [{"name": safe(lambda s=s: s.name),
+             "timeline_index": safe(lambda s=s: s.timelineObject.index)}
+            for s in _common.iter_collection(snaps)]
 
 
-def _find_captured(snaps, count, want):
+def _find_captured(snaps, want):
     """Every captured marker whose name matches 'want' case-insensitively (exact, not substring) -
     a list so the caller can refuse an unexpected duplicate instead of grabbing the first hit."""
     hits = []
-    for i in range(count):
-        s = safe(lambda i=i: snaps.item(i))
-        nm = safe(lambda s=s: s.name) if s is not None else None
+    for s in _common.iter_collection(snaps):
+        nm = safe(lambda s=s: s.name)
         if nm and nm.lower() == want.lower():
             hits.append((s, nm))
     return hits
@@ -91,15 +83,25 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
     if snaps is None:
         return error("This design does not expose snapshots (capture position).")
 
-    pending = bool(safe(lambda: snaps.hasPendingSnapshot, False))
+    # The shared flag read - the same one every joint CREATE gates on, so the tool that clears the
+    # pending move and the tools that refuse to run through it can never disagree about it. It is
+    # TRI-state: None means the flag could not be read, which is published as-is rather than
+    # coerced into a confident false. Only a real True satisfies the act preconditions below.
+    pending_flag = _joints.pending_position(design)
+    pending = pending_flag is True
     count = safe(lambda: snaps.count, 0)
 
     if act == "status":
-        return ok({"has_pending": pending, "snapshot_count": count,
-        "markers": _capture_markers(snaps, count),
-        "note": "has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it "
-        "the same way a free move does). Use capture to record it into the timeline, revert to "
-        "drop the latest capture, or delete a specific marker by name."})
+        note = ("has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it "
+                "the same way a free move does; a design_add_instance placement does NOT). Use "
+                "capture to record it into the timeline, revert to drop the latest capture, or "
+                "delete a specific marker by name.")
+        if pending_flag is None:
+            note = ("has_pending is null - the pending-position flag could not be read, so whether "
+                    "a moved-but-uncaptured position exists is UNKNOWN here (it is not a 'no'). "
+                    "The captured markers below were still read. " + note)
+        return ok({"has_pending": pending_flag, "snapshot_count": count,
+        "markers": _capture_markers(snaps), "note": note})
 
     if act == "capture":
         # Live-verified: with no pending position change snapshots.add() RAISES
@@ -134,8 +136,8 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if not did:
             return error("Fusion declined to discard the pending position change "
                          "(revertPendingSnapshot returned false) - the move still stands.")
-        still_pending = safe(lambda: snaps.hasPendingSnapshot, _UNREADABLE)
-        if still_pending is _UNREADABLE or still_pending is None:
+        still_pending = _common.read_flag(lambda: snaps.hasPendingSnapshot)
+        if still_pending is None:
             return error("Discard ran, but the pending-position flag could not be re-read - the "
                          "confirming read could not be taken, so the move may or may not have been "
                          "thrown away. Call action='status' before acting on this result.")
@@ -158,9 +160,9 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
                          "action='status').")
         if count < 1:
             return error("Nothing to delete - there are no captured positions.")
-        hits = _find_captured(snaps, count, want)
+        hits = _find_captured(snaps, want)
         if not hits:
-            names = sorted(m["name"] for m in _capture_markers(snaps, count) if m["name"])
+            names = sorted(m["name"] for m in _capture_markers(snaps) if m["name"])
             return error(f"No captured position named '{marker}'. Captured: "
                          f"{', '.join(names) or 'none'}.")
         if len(hits) > 1:
@@ -174,7 +176,7 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         if not did:
             return error(f"Fusion declined to delete captured position '{found_name}'.")
         count_after = safe(lambda: snaps.count, 0) or 0
-        survivors = _find_captured(snaps, count_after, want)
+        survivors = _find_captured(snaps, want)
         if survivors:
             return error(f"Delete reported success but '{found_name}' is still present in the "
                          "snapshot collection.")
@@ -223,7 +225,7 @@ _POSE_HINT_OTHER = ("joint_drive does not drive this motion type (only revolute/
 
 def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = "",
                            joint_type: str = "rigid", axis: str = "z",
-                           slide_axis: str = "") -> dict:
+                           slide_axis: str = "", name: str = "") -> dict:
     """See _ASBUILT_DESC."""
     jtype = (joint_type or "rigid").strip().lower()
     if jtype not in _JOINT_TYPES:
@@ -240,6 +242,11 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
     design = _common.design()
     if not design:
         return error("No active design with components.")
+
+    pending = _pending_move_guard(design)
+    if pending:
+        return pending
+
     o1, e1 = _find_one(design, occurrence_one)
     if not o1:
         return error(e1)
@@ -315,6 +322,30 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
         return error(f"The as-built joint was created but its motion could not be read back, so "
                      f"'{jtype}' is unconfirmed. Check it with assembly_get before relying on the "
                      "degree of freedom.")
+
+    # AsBuiltJoints.createInput/add take no name, so the name is applied AFTER the joint exists, via
+    # the AsBuiltJoint.name setter, and confirmed by reading it back - a name the platform refuses
+    # (or silently keeps) is a refusal here rather than a payload echoing a name the browser does
+    # not show. The joint already exists at this point, so the refusal says so and names the joint
+    # Fusion gave it.
+    # The set-then-read-back is stated locally rather than through set_verified: its message tail
+    # ("the operation would run on its default settings") describes a pre-add input object, and this
+    # is a POST-creation rename - the joint is already in the design either way.
+    want_name = (name or "").strip()
+    if want_name:
+        try:
+            joint.name = want_name
+        except Exception as e:
+            return error(f"The as-built joint WAS created (Fusion named it "
+                         f"'{safe(lambda: joint.name)}') but renaming it to '{want_name}' raised: "
+                         f"{e}. Rename it in the browser, or remove it with design_delete_feature "
+                         "and retry with a different name.")
+        landed_name = safe(lambda: joint.name)
+        if landed_name != want_name:
+            return error(f"The as-built joint WAS created but renaming it to '{want_name}' did not "
+                         f"take - AsBuiltJoint.name still reads '{landed_name}'. Rename it in the "
+                         "browser, or remove it with design_delete_feature and retry with a "
+                         "different name.")
 
     # Publish the fullPathName (id1/id2 above), not the leaf .name: a nested child reads 'Inner:1'
     # while the caller addressed it as 'Outer:1+Inner:1', and only the full path names it uniquely.
@@ -493,7 +524,9 @@ _ASBUILT_DESC = (
                                      "the occurrence names. joint_type defaults to rigid; EVERY other motion ALSO needs "
                                      "'geometry' - the anchor it runs on - because Fusion refuses a non-rigid as-built joint "
                                      "without one. 'axis' is the frame axis the motion runs on, for the types that use one "
-                                     "(ball uses none). Pose a revolute/slider/cylindrical result with joint_drive, any other "
+                                     "(ball uses none). An as-built joint exposes NO offset/angle ModelParameter, so its "
+                                     "position cannot be driven by a parameter - use joint_create when it must be "
+                                     "parametric. Pose a revolute/slider/cylindrical result with joint_drive, any other "
                                      "with assembly_move."
 )
 asbuilt_tool = (
@@ -503,10 +536,12 @@ asbuilt_tool = (
     .add_input_property("geometry", {"type": "string", "description": "Where a non-rigid motion anchors: a find_geometry handle, or '<occurrence>:<snap>' (snap = origin/center/top/bottom/left/right/front/back/cylinder). Omit for rigid."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
             description="Motion type; anything but rigid requires 'geometry'.").as_property())
-    .add_input_property(*_inputs.world_axis("axis", default="z",
+    .add_input_property(*_inputs.frame_axis("axis", default="z",
             description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())
-    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+    .add_input_property(*_inputs.frame_axis("slide_axis", default="",
             description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
+    .add_input_property("name", {"type": "string",
+            "description": "Optional name, applied after creation and read back."})
     .strict_schema()
 )
 asbuilt_item = Item.create_tool_item(tool=asbuilt_tool, write="write", handler=as_built_joint_handler,

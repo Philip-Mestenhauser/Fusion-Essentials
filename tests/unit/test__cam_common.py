@@ -660,8 +660,9 @@ _UNPROJECTED = adsk.cam.InspectionPointState.Unprojected
 
 class TestInspectionEmptyState:
     def test_none_collection_publishes_an_empty_state_not_an_error(self, install):
-        # MEASURED: CAM.inspectionResults reads None (not an empty collection) on a CAM document
-        # with a setup and no probing operations.
+        # A never-probed document reads inspectionResults as None on some documents and as an empty
+        # collection on others; this is the None side (the empty side is two tests down). Both are a
+        # zero answer, so neither may come back as a failure.
         install(_inspection_cam(None))
         out = _payload(cc.get_inspection_results_handler())
         assert out["available"] is False and out["readable"] is True
@@ -832,6 +833,20 @@ class TestInspectionGuards:
         res = cc.get_inspection_results_handler(measure="5")
         assert res["isError"] is True
         assert "5" in res["message"] and "2 measure(s)" in res["message"]
+
+    def test_a_three_part_scope_is_refused_naming_how_many_parts_it_has(self, install):
+        # 'measure' addresses at most <measure>/<path>. A third part is a caller who means something
+        # the scope cannot express; parsing it as measure 0 and dropping the rest would answer a
+        # DIFFERENT question than the one asked, and report success doing it.
+        install(_inspection_cam([_InspMeasure([_InspPath([])])]))
+        res = cc.get_inspection_results_handler(measure="0/1/2")
+        assert res["isError"] is True
+        assert "'0/1/2'" in res["message"] and "3 parts" in res["message"]
+
+    def test_the_two_legal_scope_shapes_still_parse(self, install):
+        # The refusal above must not swallow the shapes that ARE addressable.
+        assert cc._parse_measure_scope("1") == (1, None, None)
+        assert cc._parse_measure_scope("1/2") == (1, 2, None)
 
     def test_path_index_out_of_range_names_the_path_count(self, install):
         install(_inspection_cam([_InspMeasure([_InspPath([])])]))

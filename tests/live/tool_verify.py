@@ -32,7 +32,9 @@ Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the 
 
 Steps are DATA (see STEPS): each row is (tool, args, expect) where args may be a dict or a
 callable(ctx) reading what earlier steps stored, and expect is "ok", "refused" (a deliberate
-guard check whose error must name the offense), or a callable(payload) -> bool - a VALUE
+guard check whose error must name the offense), ``_refused("fragment", ...)`` - the same
+deliberate refusal, with each fragment required IN the error text (a guard that starts refusing
+for a different reason is a FAIL, not a silent pass) - or a callable(payload) -> bool - a VALUE
 PREDICATE run on an ok result (falsy = FAIL); that is how grip contact and machine assignment
 are asserted, not just call success. Extend coverage by adding rows, not code.
 """
@@ -59,6 +61,13 @@ DOC_PREFIX = "EVAL_sweep"
 # leaves one 'SweepMach3Axis <stamp>' (vendor SweepCo) machine behind, and that residue is the price
 # of the beat.
 MACHINE_NAME = "SweepMach3Axis " + time.strftime("%Y%m%d-%H%M%S")
+
+# How much of a failing step's payload the ledger keeps. A FAIL row is read to DIAGNOSE, and the
+# keys that carry the diagnosis (a measured extent, a change list) sit late in a payload - at 160
+# characters they were cut off, which costs a whole live re-run to recover. A passing refusal is
+# read only as confirmation, so its note stays short.
+NOTE_MAX = 480
+REFUSAL_NOTE_MAX = 80
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
@@ -118,6 +127,25 @@ def _ctx_get(ctx, key, what):
     return ctx[key]
 
 
+class _Refusal:
+    """expect=_refused("...", ...) - a deliberate refusal whose MESSAGE must carry every fragment.
+
+    A bare "refused" passes on ANY error, so a guard that starts refusing for a different reason
+    (or a call that fails upstream of the guard) still reads green. Where the refusal's own words
+    are the measured fact - the build the platform refuses on, the offending value it names - the
+    fragments are what make the row assert it. Substring match, ASCII as it crosses the wire."""
+
+    def __init__(self, fragments):
+        self.fragments = fragments
+
+    def missing(self, text):
+        return [f for f in self.fragments if f not in text]
+
+
+def _refused(*fragments):
+    return _Refusal(fragments)
+
+
 # A portable scratch dir for the export-to-disk tools (design_export/mesh_export/cam_post) so the
 # sweep writes NC/CAD/mesh files somewhere writable on any machine, not a session-specific path.
 EXPORT_DIR = os.path.join(tempfile.gettempdir(), "eval_sweep_exports").replace("\\", "/")
@@ -132,6 +160,18 @@ with open(SVG_PATH, "w", encoding="utf-8") as _svg_fixture:
     _svg_fixture.write('<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="20mm" '
                        'viewBox="0 0 40 20"><rect x="2" y="2" width="36" height="16"/></svg>')
 
+# The SK-5 closure fixture: a 96-user-unit square at the SVG origin. At 1/96 inch per user unit and
+# scale=1 that is exactly one inch, and the art lands y-DOWN from the sketch origin - so the sketch's
+# measured min y is -25.4 mm and nothing else can produce that number. ([F30]/[F51c] measured the raw
+# entry point; this fixture carries the same landing through the TOOL.)
+# NO width/height/viewBox: the probe those facts came from carried none, and a square that exactly
+# FILLS a viewBox is the one shape that cannot tell a top-left anchor from a bottom-left one - so
+# stating them here would make the fixture disagree with the measurement it exists to close.
+SVG96_PATH = EXPORT_DIR + "/eval_square96.svg"
+with open(SVG96_PATH, "w", encoding="utf-8") as _svg96_fixture:
+    _svg96_fixture.write('<svg xmlns="http://www.w3.org/2000/svg">'
+                         '<rect x="0" y="0" width="96" height="96"/></svg>')
+
 
 # save-extractors: pull a handle/profile off a step's payload into ctx for a later args-callable.
 def _fg(key):
@@ -144,6 +184,60 @@ def _fgn(key):
 
 def _prof(key):
     return (key, lambda p: p["profiles"][0]["handle"])          # sketch_get -> first profile handle
+
+
+# build_path's published label - "N edge(s) from 1 seed handle" / "N edge(s) from K handles, used
+# exactly". N is read off the BUILT adsk Path, so it is the only witness to what was actually swept.
+_PATH_LABEL = re.compile(r"^(\d+) edge\(s\) from (\d+) (?:seed handle|handles, used exactly)$")
+
+
+def _path_count(label, seeds):
+    """The built edge count off a path label, or -1 when the label is not that shape or names a
+    different seed count - so a beat asserting the number also asserts the wording it came out of."""
+    m = _PATH_LABEL.match(str(label or ""))
+    if not m or int(m.group(2)) != seeds:
+        return -1
+    return int(m.group(1))
+
+
+# A predicate that RAISES names the numbers it read, and run_steps puts that short sentence in the
+# ledger instead of the payload - which truncates at 160 characters, well before a measured extent
+# or a change list. Use this shape where a miss has to be diagnosable from the ledger alone.
+def _measured(label, got, ok_):
+    if not ok_:
+        raise AssertionError(f"{label}: measured {got}")
+    return True
+
+
+# The band the one-inch square is measured against. The nominal is exactly 25.4 mm, but the sketch's
+# bounding box spans the imported PAINT, so it carries half the rect's stroke on each side plus the
+# importer's own rounding - measured live at min.y -25.41 / height 25.42, a hundredth or two over.
+# The band is wide enough to absorb that and far too narrow to admit any other unit reading.
+_SVG96_MM = 25.4
+_SVG96_TOL = 0.05
+
+
+def _svg96_extent(p):
+    """The 96-user-unit square at scale 1: one inch square, landing Y-DOWN from the sketch origin
+    ([F30]/[F51c] measured the raw entry point at y [-2.54 cm, 0]; the live sweep confirms the sign
+    and the size through the tool)."""
+    e = p.get("sketch_extent") or {}
+    got = {"min": e.get("min"), "width": e.get("width"), "height": e.get("height"),
+           "units": e.get("units")}
+    y = (e.get("min") or {}).get("y")
+    return _measured(f"svg96 extent (want min.y {-_SVG96_MM}, height {_SVG96_MM} mm "
+                     f"+/-{_SVG96_TOL})", got,
+                     y is not None and abs(y + _SVG96_MM) < _SVG96_TOL
+                     and e.get("height") is not None
+                     and abs(e["height"] - _SVG96_MM) < _SVG96_TOL)
+
+
+def _repair_no_op(p):
+    """A repair that found nothing of its kind: 'changed' empty AND the note saying so."""
+    return _measured("stitch_and_remove was expected to be a no-op the second time",
+                     {"changed": p.get("changed"), "note": (p.get("note") or "")[:60]},
+                     p.get("repaired") is True and p.get("changed") == []
+                     and "found nothing of its kind to fix" in (p.get("note") or ""))
 
 
 def _box(name, ox=0, oy=0):
@@ -188,7 +282,11 @@ _OVERTURE = [
     ("doc_new", {}, "ok", None),
     ("workspace_orient", {}, "ok", ("fusion_version", lambda p: p["fusion_version"])),
     ("sys_capability_map", {}, "ok", None),
-    ("sys_find_tool", {"query": "revolve"}, "ok", None),
+    # the read stamp is for DOCUMENT reads: a tool that answers off the registry rather than the
+    # active design carries no 'active_document' key at all (design_get's own beat in the FINALE is
+    # the other half of this pair).
+    ("sys_find_tool", {"query": "revolve"},
+     lambda p: "active_document" not in p and p.get("tool_count", 0) > 0, None),
     ("sys_get_api_doc", {"searchPattern": "RevolveFeatures", "max_results": 3}, "ok", None),
     ("view_list_workspaces", {}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
@@ -224,10 +322,15 @@ _OVERTURE = [
      lambda p: p["preferences"]["compatibility"]["recoverSaveScanFrequency"]["value"] > 0,
      ("pref_scan",
       lambda p: p["preferences"]["compatibility"]["recoverSaveScanFrequency"]["value"])),
-    # the members that RAISE on read are published as null + named in 'unreadable', never dropped.
+    # the members that RAISE on read are published as null + named in 'unreadable', never dropped -
+    # all THREE of the raising members the [F21] census found on this build, and none of them
+    # miscategorised as a member the build does not carry ('unknown_members' must be absent).
     ("sys_get_preferences", {"include": ["graphics"]},
      lambda p: ("graphicsPreset" in p["preferences"]["graphics"]
-                and "graphics.autoThrottleEffects" in (p.get("unreadable") or [])), None),
+                and set(p.get("unreadable") or []) >= {"graphics.autoThrottleEffects",
+                                                       "graphics.degradedSelectionDisplayStyle",
+                                                       "graphics.isLimitEffectsDuringNavigation"}
+                and "unknown_members" not in p), None),
     ("sys_set_preferences", lambda c: {"member": "compatibility.recoverSaveScanFrequency",
                                        "value": _ctx_get(c, "pref_scan", "the scan frequency") + 1},
      lambda p: p["now"] == p["previous"] + 1, None),
@@ -267,8 +370,11 @@ _SKELETON = [
     # the SHARED SKELETON on the root: two in-plane axes (construction) + the yaw axis as a 3D line.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "Skeleton"}, "ok", None),
+    # 'curves_added' is the LINE collection's own delta, so a single line reads 1 - the floor the
+    # composite kinds (rectangle 4, polygon 6, slot 3) are counted against.
     ("sketch_add_geometry", {"kind": "line", "x1": -70, "y1": 0, "x2": 70, "y2": 0,
-                             "sketch_name": "Skeleton", "is_construction": True}, "ok", None),
+                             "sketch_name": "Skeleton", "is_construction": True},
+     lambda p: p.get("curves_added") == 1, None),
     ("sketch_add_geometry", {"kind": "line", "x1": 0, "y1": -70, "x2": 0, "y2": 70,
                              "sketch_name": "Skeleton", "is_construction": True}, "ok", None),
     ("sketch_add_3d_line", {"x1": 0, "y1": 0, "z1": -70, "x2": 0, "y2": 0, "z2": 70,
@@ -317,7 +423,9 @@ _SKELETON = [
     ("design_activate_component", {"occurrence": "Carrier:1"}, "ok", None),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": -32, "name": "CarrierPlane"}, "ok", None),
     ("sketch_create", {"plane": "CarrierPlane", "name": "CarrierSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -8, "x2": 50, "y2": 8, "sketch_name": "CarrierSketch"}, "ok", None),
+    # a rectangle is built BY a SketchLines factory, so its four sides are the delta counted.
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": -50, "y1": -8, "x2": 50, "y2": 8, "sketch_name": "CarrierSketch"},
+     lambda p: p.get("curves_added") == 4, None),
     ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 14, "sketch_name": "CarrierSketch"}, "ok", None),
     # the pedestal base + a smaller top profile on an offset plane, for a base-to-post LOFT -
     # entirely BELOW the carrier (top at z=-32 meets the carrier's underside).
@@ -415,6 +523,10 @@ _SOLIDS = [
     ("find_geometry", {"target": "Carrier", "kind": "cylinder_face", "radius": 1.5, "max_results": 1}, "ok", _fg("carrier_bore")),
     ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "carrier_bore", "carrier bolt-circle bore")]}, "refused", None),
     ("pmi_get", {"include": ["segments", "detail"]}, "ok", None),
+    # an over-cap 'max_results' is CLAMPED, not refused - pmi_get's own contract, since every record
+    # it returns crosses the wire whole. The answer still comes back with its census keys.
+    ("pmi_get", {"max_results": 99999},
+     lambda p: isinstance(p.get("annotations"), list) and "total" in p, None),
     ("pmi_edit", {"action": "set_text", "annotation": "PmiFlat", "text": "{perpendicularity}0.03"}, "refused", None),
     # the blank name is its own guard, ahead of any lookup.
     ("pmi_edit", {"action": "hide", "annotation": ""}, "refused", None),
@@ -683,6 +795,37 @@ _MOTION = [
      lambda p: p.get("jointed") is True and p.get("axis") is None
      and "FRAME's" not in (p.get("note") or "")
      and "derived the motion axis" not in (p.get("note") or ""), None),
+    # NEW-1: the TORUS keypoint gate. createByNonPlanarFace(torus, CenterKeyPoint) is measured
+    # correct on a PARAMETRIC torus and silently WRONG inside a base feature (it hands back the
+    # owning component's origin with no error), so the tool compares the keypoint against the
+    # torus's own centre in the same world frame. This beat is the parametric side: the joint lands
+    # and the payload names the key point it resolved to. (The two base-feature halves need a torus
+    # built INSIDE a base feature; no tool on this surface builds one unattended - see STORY.)
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "TorusRing", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xz", "name": "TorusProf"}, "ok", None),
+    # on an xz sketch +Y maps to world -Z: this circle sits at world (40, 0, 400) and revolving it
+    # about z sweeps a torus of major radius 40 centred on the z axis at z=400, alone up there.
+    ("sketch_add_geometry", {"kind": "circle", "cx": 40, "cy": -400, "radius": 6,
+                             "sketch_name": "TorusProf"}, "ok", None),
+    ("model_revolve", {"sketch_name": "TorusProf", "profile_index": 0, "axis": "z",
+                       "angle_deg": 360}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "TorusPost", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "TorusPostS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1700, "cy": 180, "radius": 5,
+                             "sketch_name": "TorusPostS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "TorusPostS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("find_geometry", {"target": "TorusRing", "kind": "torus_face", "max_results": 1}, "ok",
+     _fg("torus_face")),
+    ("find_geometry", {"target": "TorusPost", "kind": "cylinder_face", "max_results": 1}, "ok",
+     _fg("torus_post_cyl")),
+    ("joint_at_geometry", lambda c: {"handle_one": _ctx_get(c, "torus_face", "the torus face"),
+                                     "handle_two": _ctx_get(c, "torus_post_cyl",
+                                                            "the torus post wall"),
+                                     "motion": "rigid", "name": "TorusSeat"},
+     lambda p: p.get("jointed") is True and p.get("geometry_one") == "torus_face@center", None),
     # A NON-RIGID as-built joint, on its own far-grid pair: an as-built joint moves nothing, so the
     # plate is built already seated on the pin's top face (z=20) and jointed where it stands. The
     # anchor is that shared face, reached by the pin's 'top' snap.
@@ -701,9 +844,13 @@ _MOTION = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     _watch("AsbPlate:1"),
     # the motion is read back off the CREATED joint, and the resolved anchor is named in the payload.
+    # 'name' rides the same create: AsBuiltJoints.createInput/add take no name, so it is applied
+    # post-create and READ BACK - 'joint' is what the browser shows, never an echo.
     ("joint_create_as_built", {"occurrence_one": "AsbPin:1", "occurrence_two": "AsbPlate:1",
-                               "geometry": "AsbPin:1:top", "joint_type": "revolute", "axis": "z"},
-     lambda p: p.get("joint_type") == "revolute" and bool(p.get("geometry")),
+                               "geometry": "AsbPin:1:top", "joint_type": "revolute", "axis": "z",
+                               "name": "AsbNamed"},
+     lambda p: p.get("joint_type") == "revolute" and bool(p.get("geometry"))
+     and p.get("joint") == "AsbNamed",
      ("asb_joint", lambda p: p["joint"])),
     # an INDEPENDENT read of the same joint: the tool's own read-back is not the only witness.
     ("assembly_get", {},
@@ -724,6 +871,17 @@ _MOTION = [
     # accepted and dropped.
     ("joint_create_as_built", {"occurrence_one": "AsbPin:1", "occurrence_two": "AsbPlate:1",
                                "joint_type": "rigid", "geometry": "AsbPin:1:top"}, "refused", None),
+    # an AsBuiltJoint exposes NO offset/angle ModelParameter for ANY motion - both parametric-drive
+    # refusals name AS-BUILT and route to joint_create instead of the dead-end generic wording.
+    ("joint_edit", lambda c: {"joint_name": _ctx_get(c, "asb_joint", "the as-built revolute"),
+                              "offset": 5}, _refused("AS-BUILT", "joint_create"), None),
+    ("joint_edit", lambda c: {"joint_name": _ctx_get(c, "asb_joint", "the as-built revolute"),
+                              "angle": 30}, _refused("AS-BUILT", "joint_create"), None),
+    # a SECOND as-built joint on an already-jointed pair is refused by the platform at add()
+    # ("System will be over constrained") - measured; the tool surfaces it, never a false ok.
+    ("joint_create_as_built", {"occurrence_one": "AsbPin:1", "occurrence_two": "AsbPlate:1",
+                               "joint_type": "rigid"},
+     _refused("over constrained"), None),
     # COUPLE the crank to the rotor spin at ratio 2 - the DOF-fix step - across independent chains.
     ("joint_motion_link", {"joint_one": "CrankAxis", "joint_two": "Spin", "ratio": 2}, "ok", None),
     ("assembly_get", {}, "ok", None),
@@ -744,7 +902,15 @@ _MOTION = [
     ("assembly_edit_relations", lambda c: {"kind": "motion_link", "name": _ctx_get(c, "rel_names", "relation names")["ml"], "action": "set_values", "ratio": 3},
      lambda p: p.get("ratio") == 3.0 and "was_reversed" in p, None),
     ("assembly_edit_relations", lambda c: {"kind": "motion_link", "name": _ctx_get(c, "rel_names", "relation names")["ml"], "action": "set_values", "ratio": 2}, "ok", None),
-    ("assembly_edit_relations", lambda c: {"kind": "rigid_group", "name": _ctx_get(c, "rel_names", "relation names")["rg"], "action": "set_occurrences", "occurrences": ["Frame:1"]}, "refused", None),
+    # the measured set_occurrences refusal, asserted in the WORDS that make it a fact: the build it
+    # was measured on and the platform sentence it would raise. Nothing is written, so the group
+    # still holds the two members assembly_rigid_group gave it - read back on the next row.
+    ("assembly_edit_relations", lambda c: {"kind": "rigid_group", "name": _ctx_get(c, "rel_names", "relation names")["rg"], "action": "set_occurrences", "occurrences": ["Frame:1"]},
+     _refused("2705.0.87", "Cannot be edited before rolling back"), None),
+    # the same group the refusal named (rel_names read it from this same first row) still counts the
+    # two occurrences assembly_rigid_group built it from - the refusal wrote nothing.
+    ("assembly_get", {"include": ["relations"]},
+     lambda p: p["relations"]["rigid_groups"][0]["occurrence_count"] == 2, None),
     ("assembly_edit_relations", {"kind": "rigid_group", "name": "NoSuchGroup", "action": "delete"}, "refused", None),
     # contact sets: the design-level lifecycle on a scratch set built from the story's own parts -
     # create (>=2 distinct members), the single-member refusal, re-member, rename reading the LANDED
@@ -1069,9 +1235,11 @@ _DETAILS = [
                                      "distance": 2}, "ok", None),
     ("param_add", {"name": "ShrinkProbe", "expression": "0.5", "unit": ""}, "ok", None),
     ("param_add", {"name": "TiltProbe", "expression": "30 deg", "unit": "deg"}, "ok", None),
+    # a solid body's volume IS readable, so the verdict is the measured ratio and the skip flag is
+    # absent - its presence would mean the check fell back to "the geometry moved".
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": 2},
      lambda p: p.get("scale_check") == "volume_ratio"
-     and abs(p.get("volume_ratio", 0) - 8.0) < 1e-6, None),
+     and abs(p.get("volume_ratio", 0) - 8.0) < 1e-6 and "volume_check_skipped" not in p, None),
     ("model_scale", {"bodies": ["ScaleBlock"], "x_factor": 3, "y_factor": 2, "z_factor": 1},
      lambda p: abs(p.get("expected_volume_ratio", 0) - 6.0) < 1e-6, None),
     ("model_scale", {"bodies": ["ScaleBlock"], "factor": "NoSuchParamXyz * 2"}, "refused", None),
@@ -1098,6 +1266,41 @@ _DETAILS = [
     ("model_move", lambda c: {"bodies": ["ScaleBlock"],
                               "faces": [_ctx_get(c, "scale_top", "block top")], "dx": 5},
      "refused", None),
+    # SINGLE vs DOUBLE placement: the along_entity beats above moved a body in a component placed
+    # ONCE (the axis is proxied into that one occurrence). The same call on a component placed TWICE
+    # must refuse naming BOTH paths - each instance holds that body somewhere else, and the
+    # displacement read-back cannot tell a right instance from a wrong one.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "TwicePlaced", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "TwicePlacedS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 1900, "y1": 200, "x2": 1920, "y2": 220,
+                             "sketch_name": "TwicePlacedS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "TwicePlacedS", "profile_index": 0, "distance": 10},
+     "ok", None),
+    # [F75]/NEW-16: name the body uniquely, then resolve it BARE while the component is still the
+    # ACTIVE component and placed ONCE - the walk reaches it both natively (active-comp scope) and
+    # as the occurrence proxy, whose entityTokens DIFFER; grouping by native token collapses the
+    # pair to ONE candidate (a bare-token key refused this as 'names 2 bodies').
+    ("find_geometry", {"target": "TwicePlaced", "kind": "planar_face",
+                       "nearest_to": [1910, 210, 10], "max_results": 1}, "ok",
+     _fg("twice_face")),
+    ("design_set_name", lambda c: {"target": _ctx_get(c, "twice_face", "the TwicePlaced body"),
+                                   "new_name": "TwiceBody"},
+     lambda p: p.get("name") == "TwiceBody", None),
+    ("model_inspect", {"target": "TwiceBody"}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("design_add_instance", {"component": "TwicePlaced", "x": 1960, "y": 200, "units": "mm"},
+     lambda p: p.get("created") is True, ("twice_b", lambda p: p["full_path"])),
+    ("model_move", {"mode": "along_entity", "bodies": ["TwicePlaced"], "axis": "y", "distance": 5},
+     _refused("placed 2 times", "TwicePlaced:1"), None),
+    # placed TWICE the same bare name is two world placements - the refusal lists BOTH
+    # instance-qualified forms (the dropped native spelling is not offered), and the qualified
+    # form is the way out.
+    ("model_inspect", {"target": "TwiceBody"},
+     _refused("TwicePlaced:1", "TwicePlaced:2"), None),
+    ("model_inspect", {"target": "TwicePlaced:2:TwiceBody"}, "ok", None),
+    # back to the component that was active before this cameo, so the ones after it nest as before.
+    ("design_activate_component", {"occurrence": "ScaleBlock:1"}, "ok", None),
     # point_to_point: the tool refuses a travel that does not equal the two vertices' own
     # separation, so a plain ok here IS the distance check
     ("find_geometry", {"target": "ScaleBlock", "kind": "vertex", "max_results": 8}, "ok",
@@ -1142,6 +1345,35 @@ _DETAILS = [
     ("model_thread", lambda c: {"faces": [_ctx_get(c, "post2_wall", "second post wall")],
                                 "designation": "M10x1.5", "modeled": True},
      lambda p: p.get("modeled") is True and p.get("volume_delta_cm3", 0) < 0, None),
+    # the INTERNAL side of the same tool, on a real bore: 'internal' is derived from the face's own
+    # out-of-material normal (never echoed), and the ThreadInfo it built is checked against the face
+    # at add() - so an 'internal' that disagreed with the geometry would have raised. Then a PARTIAL
+    # thread measured from the LOW end, with the end it was measured from read back off the feature.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "ThreadBore", "activate": True}, "ok", None),
+    # the bore is CUT, not left as the inner loop of a two-circle profile: which region a
+    # multi-profile sketch calls its last one is the platform's to decide, and picking the disc
+    # there builds a plain rod whose radius-4 wall is EXTERNAL - the thread then lands external and
+    # the beat asserts nothing about bores. A solid rod plus a through cut is unambiguous.
+    ("sketch_create", {"plane": "xy", "name": "ThreadBoreS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 610, "cy": 10, "radius": 12,
+                             "sketch_name": "ThreadBoreS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadBoreS", "profile_index": 0, "distance": 25},
+     "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "ThreadBoreCut"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 610, "cy": 10, "radius": 4,
+                             "sketch_name": "ThreadBoreCut"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ThreadBoreCut", "profile_index": 0, "distance": 25,
+                       "operation": "cut"}, "ok", None),
+    ("find_geometry", {"target": "ThreadBore", "kind": "cylinder_face", "radius": 4,
+                       "max_results": 1}, "ok", _fg("bore_wall")),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "bore_wall", "the bore wall")],
+                                "designation": "M8x1.25"},
+     lambda p: p.get("internal") is True and p.get("designation") == "M8x1.25", None),
+    ("model_thread", lambda c: {"faces": [_ctx_get(c, "bore_wall", "the bore wall")],
+                                "designation": "M8x1.25", "length": 10, "location": "low"},
+     lambda p: p.get("internal") is True and p.get("location") == "low"
+     and p.get("length") == 10, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # sketch_edit_curve: one sketch per action, so no edit can perturb the next.
     ("sketch_create", {"plane": "xy", "name": "EditTrim"}, "ok", None),
@@ -1235,10 +1467,14 @@ _DETAILS = [
      lambda p: p.get("moved_entities") == ["line:0"], None),
     # a cross-sketch copy lands in the TARGET, whose count rises from zero.
     ("sketch_create", {"plane": "xy", "name": "XformDst"}, "ok", None),
+    # ONE curve across into an empty target - and the note states the id rule that holds for a COPY:
+    # an added curve APPENDS, so the ids already in use keep their entities. Removing a curve is what
+    # RENUMBERS (sketch_edit_curve's rule), and saying so here would be wrong for this call.
     ("sketch_copy", {"sketch_name": "XformSrc", "target_sketch": "XformDst",
                      "entities": "line:1", "dx": 0, "dy": -60},
      lambda p: p.get("target_sketch") == "XformDst" and p.get("curve_count_before") == 0
-     and p.get("curve_count_after") == 1, None),
+     and p.get("curve_count_after") == 1
+     and "APPENDS" in (p.get("note") or "") and "RENUMBER" not in (p.get("note") or ""), None),
     # a mirror asked for as a negative scale, and a transform that asks for nothing: neither runs.
     ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0", "scale_factor": -1},
      "refused", None),
@@ -1338,6 +1574,12 @@ _DETAILS = [
     ("sketch_insert_svg", {"file_path": SVG_PATH, "sketch_name": "SvgTarget", "scale": 3.7795},
      lambda p: p.get("curves_added", 0) > 0 and p.get("sketch") == "SvgTarget"
      and 30 < (p.get("sketch_extent") or {}).get("width", 0) < 42, None),
+    # SK-5's closure, through the TOOL: the 96-user-unit square at scale 1 is exactly one inch, and
+    # the art lands Y-DOWN from the sketch origin - so this empty-before sketch measures 25.4 mm
+    # square with its min y at -25.4. A y-up landing (or any scale drift) moves that number.
+    ("sketch_create", {"plane": "xy", "name": "Svg96"}, "ok", None),
+    ("sketch_insert_svg", {"file_path": SVG96_PATH, "sketch_name": "Svg96", "scale": 1},
+     _svg96_extent, None),
     # importSVG RAISES on a path that is not a file and that raise rolls back the whole surrounding
     # transaction, so the miss is named before Fusion is touched.
     ("sketch_insert_svg", {"file_path": EXPORT_DIR + "/no_such_logo.svg",
@@ -1442,6 +1684,22 @@ _DETAILS = [
     ("sketch_constrain", lambda c: {"constraint": "line_on_surface", "entity_one": "line:0",
                                     "surface": _ctx_get(c, "post_wall", "thread post wall"),
                                     "sketch_name": "W3Pt"}, "refused", None),
+    # the coincident TRAP, on the success path where the caller who meant "centre this here" is:
+    # addCoincident(point, circle) succeeds and lands the point ON the rim, so the note has to say
+    # so - and it must NOT say so when the operand was a POINT, where the point really is centred.
+    ("sketch_create", {"plane": "xy", "name": "CoincTrap"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "circle", "cx": 1500, "cy": 0, "radius": 20,
+                             "sketch_name": "CoincTrap"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 0, "sketch_name": "CoincTrap"},
+     "ok", None),
+    ("sketch_add_geometry", {"kind": "point", "cx": 1560, "cy": 30, "sketch_name": "CoincTrap"},
+     "ok", None),
+    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:2",
+                          "entity_two": "circle:0", "sketch_name": "CoincTrap"},
+     lambda p: "ON that curve" in (p.get("note") or ""), None),
+    ("sketch_constrain", {"constraint": "coincident", "entity_one": "point:3",
+                          "entity_two": "point:1", "sketch_name": "CoincTrap"},
+     lambda p: "ON that curve" not in (p.get("note") or ""), None),
     # sketch_set_text's PATH layouts: one scratch sketch holding a line and a closed circle, then
     # text laid ALONG each and FITTED to the line. 'definition_type' is the created text's own
     # objectType and 'mode_verified' says whether it matches the mode asked for, so a text that
@@ -1534,11 +1792,36 @@ _DETAILS = [
     ("sketch_create", {"plane": "xy", "name": "TextDel"}, "ok", None),
     ("sketch_set_text", {"text": "SCRAP", "sketch_name": "TextDel", "create": True,
                          "x": 1200, "y": 100, "height": 5}, "ok", None),
+    # SketchTexts.add APPENDS, so the SECOND text is 'text:1' - and deleting that index has to take
+    # the second one, never the first. The deleted STRING is what separates the two.
+    ("sketch_set_text", {"text": "SCRAP2", "sketch_name": "TextDel", "create": True,
+                         "x": 1200, "y": 80, "height": 5}, "ok", None),
+    ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:1"},
+     lambda p: p.get("text") == "SCRAP2" and p.get("texts_before") == 2
+     and p.get("texts_after") == 1, None),
     ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"},
      lambda p: p.get("text") == "SCRAP" and p.get("texts_before") == 1
      and p.get("texts_after") == 0, None),
     # the emptied sketch has no text at that index any more - the refusal names the index and count.
     ("sketch_delete_entity", {"sketch_name": "TextDel", "target": "text:0"}, "refused", None),
+    # THE TEXT READ-BACK (the S6 gap): sketch_get's X-ray lists each SketchText at its text:<i>
+    # address with the string, the FONT (fontName is API-readable), the height in display units,
+    # and a sketch-space bounding box. FontProbe's final state pins all three record shapes at
+    # once: text:0 was edited to FONT4 (its Arial ride-along from the FONT2 edit stays), text:1 is
+    # the along-path ALONGFONT, text:2 was created with NO font and reads font None.
+    ("sketch_get", {"sketch_name": "FontProbe"},
+     lambda p: (p.get("counts") or {}).get("texts") == 3 and "entities" not in p, None),
+    # text:2 was created with NO font_name and still reads a real font (measured: the platform
+    # gives every text the app default) - so 'font' is a non-empty string on all three records.
+    ("sketch_get", {"sketch_name": "FontProbe", "include_entities": True},
+     lambda p: (lambda t: [r["id"] for r in t] == ["text:0", "text:1", "text:2"]
+                and t[0].get("text") == "FONT4" and t[0].get("font") == "Arial"
+                and isinstance(t[0].get("height"), (int, float)) and t[0]["height"] > 0
+                and t[1].get("text") == "ALONGFONT"
+                and t[2].get("text") == "NOFONTKEY"
+                and isinstance(t[2].get("font"), str) and t[2]["font"]
+                and "min" in (t[0].get("bounding_box") or {}))
+     ([e for e in p.get("entities", []) if e.get("type") == "text"]), None),
     # THE SLOT FAMILY, one scratch sketch per shape in a clear band so every count is absolute.
     # 'radius' is the HALF width throughout (the label carries the full width), each tailed
     # constructor takes its tail POSITIONALLY, and the ladders differ per kind - which is what the
@@ -1646,8 +1929,26 @@ _DETAILS = [
     ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
                              "radius": 4, "slot_length": 40, "sketch_name": "SlotH"},
      "refused", None),
+    # the legacy form's own census: addCenterToCenterSlot lands 5 curves - 2 solid lines, 1
+    # CONSTRUCTION line (the centre-to-centre one) and 2 arc caps - and 'curves_added' counts the
+    # LINE collection's delta, so it reads 3. The note has to say which 5, because the number alone
+    # reads like a 3-curve slot.
     ("sketch_add_geometry", {"kind": "slot", "x1": 1700, "y1": 1600, "x2": 1760, "y2": 1600,
-                             "radius": 4, "sketch_name": "SlotH"}, "ok", None),
+                             "radius": 4, "sketch_name": "SlotH"},
+     lambda p: p.get("curves_added") == 3
+     and "2 solid SketchLines" in (p.get("note") or "")
+     and "1 CONSTRUCTION SketchLine" in (p.get("note") or "")
+     and "2 SketchArc end caps" in (p.get("note") or ""), None),
+    # the independent read: three lines of which EXACTLY ONE is construction, plus the two arc caps.
+    ("sketch_get", {"sketch_name": "SlotH", "include_entities": True},
+     lambda p: len([e for e in p["entities"] if e["type"] == "line"]) == 3
+     and len([e for e in p["entities"] if e["type"] == "line" and e.get("construction")]) == 1
+     and len([e for e in p["entities"] if e["type"] == "arc"]) == 2, None),
+    # a POLYGON is built by the same SketchLines factory, so its side count is the delta.
+    ("sketch_create", {"plane": "xy", "name": "PolyHex"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "polygon", "cx": 1700, "cy": 1700, "radius": 20, "sides": 6,
+                             "sketch_name": "PolyHex"},
+     lambda p: p.get("curves_added") == 6, None),
     # design_remove_feature: cast a scratch body, remove it (the census is the verdict), then
     # delete the Remove feature - the body comes back, which is the reversibility the note claims.
     ("model_create_component", {"name": "RmScratch", "activate": True}, "ok", None),
@@ -1750,9 +2051,12 @@ _DETAILS = [
     ("design_activate_component", {"occurrence": "ReplBlock:1"}, "ok", None),
     ("find_geometry", {"target": "ReplBlock", "kind": "planar_face", "nearest_to": [675, 15, 20],
                        "max_results": 1}, "ok", _fg("repl_top")),
+    # a clean parametric replace has a feature to read AND a measured volume move, so the payload
+    # carries no 'effect_unverified' hedge - that key appears only when neither could be read.
     ("model_replace_face", lambda c: {"faces": [_ctx_get(c, "repl_top", "block top")],
                                       "target": _ctx_get(c, "repl_sheet", "the open roof sheet")},
-     lambda p: p.get("replaced") is True and p.get("volume_delta_cm3") not in (None, 0), None),
+     lambda p: p.get("replaced") is True and p.get("volume_delta_cm3") not in (None, 0)
+     and "effect_unverified" not in p, None),
     # a SOLID face as the replacement target is refused: the target must be a surface face or body.
     ("find_geometry", {"target": "ReplBlock", "kind": "planar_face", "nearest_to": [675, 15, 0],
                        "max_results": 1}, "ok", _fg("repl_bottom")),
@@ -1770,8 +2074,12 @@ _DETAILS = [
     ("sketch_create", {"plane": "xz", "name": "PipeRunPath"}, "ok", None),
     ("sketch_add_geometry", {"kind": "line", "x1": 720, "y1": 0, "x2": 720, "y2": 40,
                              "sketch_name": "PipeRunPath"}, "ok", None),
+    # PipeFeature.startFaces/endFaces/sideFaces all read EMPTY on a freshly added hollow pipe, so
+    # nothing on this build can say whether the ends are capped - and the payload publishes no
+    # 'capped_ends' key rather than a guess dressed as a read.
     ("model_pipe", {"path": "sketch:PipeRunPath", "section_size": 10, "wall_thickness": 1.5},
-     lambda p: p.get("hollow") is True and abs((p.get("wall_thickness") or 0) - 1.5) < 1e-6, None),
+     lambda p: p.get("hollow") is True and abs((p.get("wall_thickness") or 0) - 1.5) < 1e-6
+     and "capped_ends" not in p, None),
     _watch("PipeRun:1"),
     ("model_create_component", {"name": "PipeHalf", "activate": True}, "ok", None),
     ("sketch_create", {"plane": "xz", "name": "PipeHalfPath"}, "ok", None),
@@ -1783,6 +2091,97 @@ _DETAILS = [
     ("model_inspect", {"target": "PipeHalf:1"}, lambda p: abs(p.get("z", 0) - 20.0) < 1.0, None),
     ("model_pipe", {"path": "sketch:PipeRunPath", "section_size": 6, "path_fraction": 0.5,
                     "path_fraction_reverse": 0.4}, "refused", None),
+    # a CUT scoped to named bodies: participantBodies is write-only on the created feature, so the
+    # scope cannot be read back - the note says the list is what was REQUESTED rather than dressing
+    # an echo up as a read-back. The block is built around the path so the cut has material to take.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PipeCut", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "PipeCutS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 800, "y1": -20, "x2": 840, "y2": 20,
+                             "sketch_name": "PipeCutS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PipeCutS", "profile_index": 0, "distance": 20}, "ok", None),
+    ("sketch_create", {"plane": "xz", "name": "PipeCutPath"}, "ok", None),
+    # on an xz sketch +Y maps to world -Z, so this line runs through the block at world z=10, y=0,
+    # entering and leaving it - a cut that removes real material.
+    ("sketch_add_geometry", {"kind": "line", "x1": 790, "y1": -10, "x2": 850, "y2": -10,
+                             "sketch_name": "PipeCutPath"}, "ok", None),
+    ("model_pipe", {"path": "sketch:PipeCutPath", "section_size": 8, "operation": "cut",
+                    "target_bodies": ["PipeCut"]},
+     lambda p: "REQUESTED" in (p.get("note") or "") and p.get("scoped_to_bodies"), None),
+    # BUILD_PATH's measured chaining rule, on two fixtures of its own. ONE seed handle is not one
+    # edge: chaining follows TANGENT CONTINUITY and stops where that continuity breaks - a sharp
+    # corner ends an open run, while a genuinely tangent loop chains the whole way round ([F52a],
+    # and [F68] which corrected [F52b]: the earlier no-chaining reading came from a rig whose
+    # junctions ran through fillet corner PATCHES, not from the loop being closed). Neither open
+    # nor closed predicts the number, so the label's count is read off the BUILT path - these two
+    # beats are what keep the wording honest for every consumer of the shared resolver (sweep /
+    # pipe / path pattern / on-path datum).
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "TangentRun", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "TangentRunS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 1900, "y1": 0, "x2": 1960, "y2": 60,
+                             "sketch_name": "TangentRunS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "TangentRunS", "profile_index": 0, "distance": 20},
+     "ok", None),
+    # ONE vertical edge rounded: the top rim reads line - arc - line, bounded by sharp corners.
+    ("find_geometry", {"target": "TangentRun", "kind": "line_edge", "nearest_to": [1900, 0, 10],
+                       "max_results": 1}, "ok", _fg("tr_corner")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "tr_corner", "the box corner edge")],
+                                "radius": 8}, "ok", None),
+    # a fillet's rim is an ARC (Arc3D), not a full circle - find_geometry keys its edge kinds off
+    # the curve type, so 'circular_edge' does not match it and 'arc_edge' is the pick.
+    ("find_geometry", {"target": "TangentRun", "kind": "arc_edge", "nearest_to": [1900, 0, 20],
+                       "max_results": 1}, "ok", _fg("tr_arc")),
+    ("find_geometry", {"target": "TangentRun", "kind": "line_edge", "nearest_to": [1940, 0, 20],
+                       "max_results": 1}, "ok", _fg("tr_line")),
+    # TWO handles are used EXACTLY - no chaining at all - and the label says which of the two rules
+    # ran, so a list quietly chained into more edges could not report this.
+    ("find_geometry", {"target": "TangentRun", "kind": "planar_face", "nearest_to": [1930, 30, 20],
+                       "max_results": 1}, "ok", _fg("tr_body")),
+    ("model_pattern_path", lambda c: {"bodies": [_ctx_get(c, "tr_body", "the tangent-run body")],
+                                      "path": [_ctx_get(c, "tr_arc", "the fillet arc"),
+                                               _ctx_get(c, "tr_line", "the tangent-adjacent line")],
+                                      "quantity": 2, "distance": 6, "distance_type": "spacing"},
+     lambda p: p.get("path") == "2 edge(s) from 2 handles, used exactly", None),
+    # ONE seed on the OPEN run: the arc chains across both tangent connections, so the built path
+    # holds MORE than the seed.
+    ("model_pipe", lambda c: {"path": _ctx_get(c, "tr_arc", "the fillet arc"), "section_size": 3},
+     lambda p: _path_count(p.get("path"), 1) > 1, None),
+    # the CLOSED tangent loop: all four verticals rounded, so the top rim is 4 lines + 4 arcs, every
+    # junction tangent. One seed chains the WHOLE loop - all 8 edges - and the built path reports
+    # itself closed. Rounding the VERTICALS is what makes the junctions tangent: rounding the top
+    # edges instead puts a corner patch at each junction and the chain stops there ([F68]).
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "TangentLoop", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "TangentLoopS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 2000, "y1": 0, "x2": 2060, "y2": 60,
+                             "sketch_name": "TangentLoopS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "TangentLoopS", "profile_index": 0, "distance": 20},
+     "ok", None),
+    # each vertical edge is the nearest line edge to its own corner at mid-height (10 mm away from
+    # the two horizontals meeting there), so the four picks are unambiguous.
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2000, 0, 10],
+                       "max_results": 1}, "ok", _fg("tl_e1")),
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2060, 0, 10],
+                       "max_results": 1}, "ok", _fg("tl_e2")),
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2060, 60, 10],
+                       "max_results": 1}, "ok", _fg("tl_e3")),
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2000, 60, 10],
+                       "max_results": 1}, "ok", _fg("tl_e4")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "tl_e1", "loop corner 1"),
+                                          _ctx_get(c, "tl_e2", "loop corner 2"),
+                                          _ctx_get(c, "tl_e3", "loop corner 3"),
+                                          _ctx_get(c, "tl_e4", "loop corner 4")],
+                                "radius": 8}, "ok", None),
+    ("find_geometry", {"target": "TangentLoop", "kind": "arc_edge",
+                       "nearest_to": [2000, 0, 20], "max_results": 1}, "ok", _fg("tl_arc")),
+    ("model_pipe", lambda c: {"path": _ctx_get(c, "tl_arc", "one arc of the closed tangent loop"),
+                              "section_size": 3},
+     lambda p: _measured("closed tangent loop: want 8 edges from 1 seed, closed",
+                         {"path": p.get("path"), "path_closed": p.get("path_closed")},
+                         _path_count(p.get("path"), 1) == 8
+                         and p.get("path_closed") is True), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # Section view: cut through the gimbal center, then clear.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None),
@@ -1790,6 +2189,21 @@ _DETAILS = [
     ("view_screenshot", {"view": "front", "width": 500, "height": 400}, "ok", None),
     ("view_section", {"action": "clear"}, "ok", None),
     ("view_screenshot_multi", {"views": ["front", "top"], "width": 400, "height": 300}, "ok", None),
+    # THE RASTER WRITER (NEW-13): file_path also writes the rendered PNG to disk - the extension is
+    # appended, the landed file is verified non-zero, and path + size are published beside the
+    # inline image. The fleet's only raster writer, which is what feeds drawing_insert_image.
+    ("view_screenshot", {"view": "iso-top-right", "width": 400, "height": 300,
+                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
+     lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
+    # a second write to the SAME path lands without a refusal - the overwrite behaviour that makes
+    # this tool write-kind (and puts it behind the write guard below).
+    ("view_screenshot", {"view": "iso-top-right", "width": 200, "height": 150,
+                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
+     lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
+    ("view_screenshot", {"width": 200, "height": 150,
+                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot",
+                         "expect_document": "ZzNoSuchDocument"},
+     _refused("active_document_changed"), None),
 ]
 
 # --- ACT 6: THE RESIZE - the parametric resize check (mirrors scenario S6) ---------------------
@@ -1856,6 +2270,33 @@ _RESIZE = [
     ("design_edit_timeline", {"action": "delete_attribute", "feature": "CarrierHubPlane",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note"},
      "refused", None),
+    # THE 'name@index' FORM, the one a FeatureRef refusal hands back when a name is ambiguous. It is
+    # resolved by reading each timeline object's OWN .index - the same number design_get publishes -
+    # never by position in a list, so the index taken from this read is the index that must resolve.
+    # the slice is a DICT (marker_position / count / summary / groups / timeline) and the ordered
+    # rows sit under its own 'timeline' key - each a terse {index, name, type}.
+    ("design_get", {"include": ["timeline"]},
+     lambda p: any(r.get("name") == "CarrierHubPlane" for r in p["timeline"]["timeline"]),
+     ("hub_index", lambda p: next(r["index"] for r in p["timeline"]["timeline"]
+                                  if r["name"] == "CarrierHubPlane"))),
+    ("design_edit_timeline", lambda c: {
+        "action": "set_attribute",
+        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index", "the hub plane's index")),
+        "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "by-index"},
+     lambda p: p.get("value") == "by-index" and p.get("feature") == "CarrierHubPlane", None),
+    ("design_edit_timeline", lambda c: {
+        "action": "delete_attribute",
+        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index", "the hub plane's index")),
+        "attribute_group": "sweep_w1d", "attribute_name": "at"},
+     lambda p: p.get("attribute_deleted") is True, None),
+    # the NEIGHBOURING index carries the same name and misses: the pair must agree, so an off-by-one
+    # is a refusal naming the miss rather than the feature next door.
+    ("design_edit_timeline", lambda c: {
+        "action": "set_attribute",
+        "feature": "CarrierHubPlane@{0}".format(_ctx_get(c, "hub_index",
+                                                         "the hub plane's index") + 1),
+        "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "x"},
+     _refused("no timeline feature named"), None),
 ]
 
 # --- FINALE: back to the design, beauty shots, then DISCARD the document on camera --------------
@@ -1895,6 +2336,37 @@ _FINALE = [
     # an OCCURRENCE target renames the COMPONENT behind it, and the instance name follows.
     ("design_set_name", {"target": "TwinCameo:1", "new_name": "TwinAssy"},
      lambda p: p.get("kind") == "component" and p.get("occurrence_name") == "TwinAssy:1", None),
+    # THE OCCURRENCE FAN-OUT, in the two-step shape that discriminates ([F64]): colour ONE body
+    # directly (colour A), then write the OCCURRENCE in a different colour (colour B). The
+    # occurrence's own read-back agrees with the write whether or not a body took it, so the bodies
+    # are re-read: the body holding its own override kept colour A and must come back under
+    # 'bodies_not_reached' - NOT under applied_to. Both colours are minted from one base asset, so
+    # they share an Appearance.id and differ only by NAME - an id-only comparison lists the
+    # overridden body as reached, which is exactly the defect this beat stands on.
+    ("appearance_set", {"target": "TwinPlate", "color": "#C2185B"},
+     lambda p: p.get("kind") == "body" and p.get("applied_to") == ["TwinPlate"], None),
+    ("appearance_set", {"target": "TwinAssy:1", "color": "#00897B"},
+     lambda p: any(o.get("body") == "TwinPlate" for o in (p.get("bodies_not_reached") or []))
+     and "TwinPlate" not in (p.get("applied_to") or [])
+     and "TwinPlate (1)" in (p.get("applied_to") or []), None),
+    # the same shape where the overridden body is the occurrence's ONLY one: nothing was reached, so
+    # the call is a refusal naming the body to colour directly - never an ok on the occurrence's own
+    # agreeable read-back.
+    ("model_create_component", {"name": "SoloColor", "activate": True}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "SoloS"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "rectangle", "x1": 1500, "y1": 200, "x2": 1530, "y2": 230,
+                             "sketch_name": "SoloS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "SoloS", "profile_index": 0, "distance": 10}, "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("find_geometry", {"target": "SoloColor", "kind": "planar_face", "nearest_to": [1515, 215, 10],
+                       "max_results": 1}, "ok", _fg("solo_face")),
+    ("design_set_name", lambda c: {"target": _ctx_get(c, "solo_face", "the solo body"),
+                                   "new_name": "SoloBody"},
+     lambda p: p.get("kind") == "body" and p.get("name") == "SoloBody", None),
+    ("appearance_set", {"target": "SoloBody", "color": "#C2185B"},
+     lambda p: p.get("kind") == "body", None),
+    ("appearance_set", {"target": "SoloColor:1", "color": "#00897B"},
+     _refused("reached NONE", "SoloBody"), None),
     # the machined part, then re-found through the name that landed - the rename reaches the browser
     # name every other tool addresses it by. The STEP round-trip of the deliverables act leaves a
     # SECOND Carrier component in the tree ('Carrier (1)'), so the bare name is ambiguous by now and
@@ -1912,7 +2384,11 @@ _FINALE = [
     ("design_get", {"include": ["tree"]}, "ok", ("root_name", lambda p: p["tree"]["root"])),
     ("design_set_name", lambda c: {"target": _ctx_get(c, "root_name", "the root component name"),
                                    "new_name": "RootRename"}, "refused", None),
-    ("design_get", {}, "ok", None),
+    # every DOCUMENT read is stamped with the document it read from, so two tallies taken in two
+    # documents are distinguishable. (sys_find_tool, the registry read in the overture, carries no
+    # such key - it never touched the design.)
+    ("design_get", {},
+     lambda p: bool((p.get("active_document") or {}).get("name")), None),
     # the assignable catalog, at both zoom levels: the document's own entries plus a count-only
     # census of every loaded library, then ONE library paged by name_filter/max_results. A library
     # name that is not loaded is refused with the loaded names listed.
@@ -2085,6 +2561,12 @@ _MACHINING = [
     ("sketch_add_geometry", {"kind": "arc", "cx": 0, "cy": 150, "x1": 0, "y1": 156,
                              "sweep_deg": 180, "sketch_name": "FillProf"}, "ok", None),
     ("surface_revolve", {"sketch_name": "FillProf", "axis": "z", "angle_deg": 360}, "ok", None),
+    # the closed sphere sheet encloses exactly ONE cell, so index 1 is one past the end: refused
+    # NAMING the index and the range that exists, never clamped onto a neighbouring cell. The parse
+    # happens before any cell is kept, so the sheet is untouched and the fill below is still its
+    # first feature.
+    ("surface_fill", {"tools": ["FillDemo"], "operation": "new", "cells": [1]},
+     _refused("does not exist", "0..0"), None),
     ("surface_fill", {"tools": ["FillDemo"], "operation": "new"},
      lambda p: p.get("filled") is True and p.get("all_solid") is True
      and abs(p.get("result_volume", 0) - 904.78) < 10
@@ -2338,14 +2820,35 @@ _MESH = [
                      "density": 32},
      lambda p: p.get("density") == 32.0 and "density_unverified" not in p, None),
     ("mesh_repair", {"mesh": "MFIX", "repair_type": "close_holes", "density": 32}, "refused", None),
+    # A repair that finds nothing of its kind is an honest success, and the payload has to say so
+    # rather than claim a repair - 'changed' empty is that statement. A mesh straight out of
+    # save_as_mesh is NOT that fixture: the first stitch_and_remove on it measurably moves the
+    # counts (it has duplicate vertices to weld), so the no-op case is the SECOND call, once the
+    # first has done the welding. That also makes the beat an idempotence check.
+    ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MSTITCH",
+                                "quality": "low"}, "ok", None),
+    ("mesh_repair", {"mesh": "MSTITCH", "repair_type": "stitch_and_remove"},
+     lambda p: p.get("repaired") is True, None),
+    ("mesh_repair", {"mesh": "MSTITCH", "repair_type": "stitch_and_remove"}, _repair_no_op, None),
     # mesh_shell hollows the SAME body in place and re-triangulates it: the payload's before/after
     # counts and the volume DROP are the verdict, and the thickness is read off the feature.
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MSHL",
                                 "quality": "low"}, "ok", None),
+    # 'hollowed' needs BOTH a volume drop and a body that still reads watertight - a shell that lost
+    # the closure reports the same drop for the opposite reason, so the flag pair is the verdict.
     ("mesh_shell", {"mesh": "MSHL", "thickness": 2, "units": "mm"},
      lambda p: p.get("hollowed") is True and abs(p.get("thickness", 0) - 2.0) < 1e-6
+     and p.get("watertight") is True
      and p.get("volume_change", 0) < 0 and "volume" in (p.get("changed") or []), None),
     ("mesh_shell", {"mesh": "MSHL", "thickness": -2}, "refused", None),
+    # a thickness thicker than half the thinnest wall does NOT quietly cut through: the platform
+    # refuses the shell outright ([F50] - measured on a closed cube), and the tool hands that
+    # compute failure on by name instead of reporting a hollow that never happened. The box is
+    # 10 mm through its thinnest axis, so 6 mm is past the half-wall.
+    ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MSHL2",
+                                "quality": "low"}, "ok", None),
+    ("mesh_shell", {"mesh": "MSHL2", "thickness": 6, "units": "mm"},
+     _refused("MESH_FAILED_HOLLOW"), None),
     # mesh_smooth: the node coordinates move. nodes_moved > 0 is the gate - the counts holding
     # still is measured on a 12-triangle box only, so it is NOT asserted here.
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MSMO",
@@ -2368,6 +2871,13 @@ _MESH = [
     ("mesh_reverse_normal", {"mesh": "MREV"},
      lambda p: p.get("reversed") is True
      and (p.get("volume_sign_flipped") is True or p.get("normals_negated") is True), None),
+    # MeshBody.name IS settable ([F37]): the rename lands on the mesh kind, and a FRESH fetch of the
+    # component's meshes - not the wrapper the write held - is what proves it stuck.
+    ("design_set_name", {"target": "MREV", "new_name": "MeshRenamed"},
+     lambda p: p.get("kind") == "mesh" and p.get("name") == "MeshRenamed"
+     and p.get("previous_name") == "MREV", None),
+    ("mesh_get", {"target": "Msh", "max_results": 100},
+     lambda p: any(m.get("name") == "MeshRenamed" for m in (p.get("meshes") or [])), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
@@ -2415,7 +2925,7 @@ def spatial_phase(name, checks, rows):
             rows.append((f"{name}:{label}", "pass" if passed else "FAIL",
                          "" if passed else "spatial check returned false"))
     except Exception as e:
-        rows.append((name, "FAIL", str(e)[:160]))
+        rows.append((name, "FAIL", str(e)[:NOTE_MAX]))
     finally:
         try:
             sock.close()
@@ -2636,8 +3146,12 @@ _CAM_STORY = [
                         "parameters": {"tool_number": "2"}}, "ok", None),
     # preset beats: the from_type vocabulary spans all five sample libraries (center drill lives
     # only in Hole Making Tools (Inch)); presets round-trip with read-back, unit, and refusal gates.
+    # the vocabulary comes from the sample libraries themselves, so the census is a read: the whole
+    # spread is offered (well past ten kinds), the everyday mill is in it, and so are the two that
+    # live in only one library each.
     ("cam_edit_tools", {"action": "list_types", "scope": "document"},
-     lambda p: "center drill" in p["types"] and "turning general" in p["types"], None),
+     lambda p: p.get("type_count", 0) >= 10 and "flat end mill" in p["types"]
+     and "center drill" in p["types"] and "turning general" in p["types"], None),
     ("cam_edit_tools", {"action": "add", "scope": "document",
                         "add_tools": [{"from_type": "turning general"},
                                       {"from_type": "center drill"}]}, "ok", None),
@@ -2797,6 +3311,10 @@ _CAM_STORY = [
      lambda p: p["passed"] is False and len(p["measured"]["not_valid"]) > 0, None),
     ("cam_inspect_toolpaths", {"scope": "DemoSetup"}, lambda p: p["passed"] is False, None),
     ("cam_inspect_toolpaths", {"scope": "NoSuchScopeXyz"}, "refused", None),
+    # max_results cannot lift the tool's own ceiling: every not_valid row crosses the wire, so an
+    # over-cap request is CLAMPED to it (200) rather than answered with a flood.
+    ("cam_inspect_toolpaths", {"max_results": 10000},
+     lambda p: len(p["measured"]["not_valid"]) <= 200, None),
     ("cam_generate", {"target": "DemoSetup", "skip_valid": False}, "ok", None),
     # generation completion is gated by the bounded poll run() performs after this act (an
     # errored op or an EMPTY toolpath - a 'valid' op that cuts nothing - fails the run).
@@ -2828,6 +3346,13 @@ _CAM_DELIVER = [
      "ok", None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/gyro_export",
                        "target": "Carrier"}, "ok", None),
+    # the SPLIT path writes one file per top-level occurrence, each through its OWN options object -
+    # so the format knob has to be read back per file and published, not dropped because the export
+    # took a different branch. 'options_applied' is the value that LANDED on the first file.
+    ("design_export", {"format": "stl", "file_path": EXPORT_DIR + "/gyro_split",
+                       "split_by_component": True, "stl_binary": True},
+     lambda p: p.get("exported") is True and p.get("split_by_component") is True
+     and p.get("options_applied", {}).get("stl_binary") is True, None),
     ("doc_insert_import", {"file_path": EXPORT_DIR + "/gyro_export.step"}, "ok", None),
 ]
 
@@ -2842,7 +3367,7 @@ def poll_generation(rows, notes, setup, max_polls=40):
             time.sleep(5)
         is_error, payload = call("cam_get_status", {"target": setup})
         if is_error:
-            rows.append(("cam_get_status", "FAIL", str(payload)[:160]))
+            rows.append(("cam_get_status", "FAIL", str(payload)[:NOTE_MAX]))
             return
         states = payload.get("live_states", {})
         if states.get("errored"):
@@ -2973,14 +3498,20 @@ STORY = {
     "doc_new": "open the one document the whole gyroscope lives in",
     "workspace_orient": "orient: read the empty design before building",
     "sys_capability_map": "survey the server's tool families at cold start",
-    "sys_find_tool": "search the surface for the revolve verb",
+    "sys_find_tool": ("search the surface for the revolve verb - a registry read, so it carries no "
+                      "'active_document' stamp (design_get's final read is the other half)"),
     "sys_get_api_doc": "read the RevolveFeatures API doc",
     "view_list_workspaces": "list the workspaces available",
-    "view_set": "orient the camera to the iso hero angle",
+    "view_set": ("orient the camera to the iso hero angle, with the perspective angle carried "
+                 "through to the camera and read back. SKIPPED(rig): the snapshot/restore "
+                 "truncation beats (truncated + occurrence_cap) need an assembly with more "
+                 "occurrences than the cap, and the story document stays well under it"),
     "sys_get_selection": "expected refusal: nothing is selected yet",
     "sys_get_preferences": ("read the application's own configuration - the default projection, two "
-                            "decoded enum families, the compatibility group and the members that "
-                            "raise on read"),
+                            "decoded enum families, the compatibility group, and all three members "
+                            "the census found RAISING on this build, each published null and named "
+                            "in 'unreadable' with none of them miscategorised as a member the build "
+                            "does not carry"),
     "sys_set_preferences": ("round-trip one invisible preference and restore it in the same act; "
                             "the below-minimum value and a tier-R member refused"),
     "param_add": "add GimbalDia and the derived ring/rotor radii",
@@ -2998,7 +3529,11 @@ STORY = {
                             "the centre-point slot's HALF length landing a cap on its second point, "
                             "and the legacy centre-to-centre form; the angle with no length, the "
                             "angle FLAG on a straight slot, each cross-kind input pointed at the "
-                            "kind that carries it, and a tail on the legacy form all refused"),
+                            "kind that carries it, and a tail on the legacy form all refused - the "
+                            "legacy form's own census read twice over (its note names the 2 solid "
+                            "lines, the 1 construction line and the 2 arc caps behind a "
+                            "'curves_added' of 3, and sketch_get finds exactly that); plus the "
+                            "line/rectangle/polygon floors the composite counts are read against"),
     "sketch_add_3d_line": "draw the yaw axis as the skeleton's 3D line",
     "sketch_constrain": ("constrain the skeleton's X axis horizontal; then autoConstrain a loose "
                          "rectangle to fully constrained and re-run it as a no-op, lay a "
@@ -3015,7 +3550,10 @@ STORY = {
                     "and again inside a COMPONENT sketch where the refs cross the occurrence-proxy "
                     "seam"),
     "sketch_insert_svg": ("import the logo art into a fresh sketch, its landed width measured "
-                          "against the 1/96-inch-per-user-unit convention; the missing file refused"),
+                          "against the 1/96-inch-per-user-unit convention, then a 96-user-unit "
+                          "square at scale 1 whose measured extent pins BOTH halves of that "
+                          "landing - one inch square, and Y-DOWN from the sketch origin (min y "
+                          "-25.4 mm); the missing file refused"),
     "sketch_dimension": "drive ring/rotor radii by parameter expression",
     "sketch_get": "read the skeleton and ring profiles back",
     "sketch_delete_entity": ("delete a helper constraint; count drops - then a sketch text by its "
@@ -3049,22 +3587,38 @@ STORY = {
     "model_replace_face": ("replace a scratch block's top face with an open sheet above it, the "
                            "measured volume move pinning the effect; a solid face as the target "
                            "refused"),
-    "model_pipe": ("run a hollow pipe along its path with the wall read back off the feature, then "
-                   "a half-path pipe whose bounding box proves the extent is a FRACTION; the "
-                   "reverse extent refused on an open path"),
+    "model_pipe": ("run a hollow pipe along its path with the wall read back off the feature (and "
+                   "NO capped_ends claim - the face collections that would answer that read empty "
+                   "on this build), then a half-path pipe whose bounding box proves the extent is a "
+                   "FRACTION, a CUT scoped to a named body where the note says the scope is what "
+                   "was REQUESTED because participantBodies cannot be read back, and the two "
+                   "chaining fixtures: ONE seed handle chains across TANGENT junctions and stops "
+                   "where that continuity breaks - several edges on an open run bounded by sharp "
+                   "corners, and all eight of a closed tangent loop (which reports itself closed) "
+                   "- so what a seed produces is the BUILT path's own count and nothing about the "
+                   "request predicts it; the reverse extent refused on an open path"),
     "model_pattern_rectangular": "rectangular-pattern a cameo body",
     "model_pattern_circular": ("circular-pattern a cameo body about a world axis, then about a "
                                "construction axis by handle and by name with the resolved label "
                                "read back, then about the bore FACE itself; the datum name reached "
                                "from the root refused"),
-    "model_pattern_path": "pattern the feature cameo along its own edge with the count read back",
-    "assembly_edit_relations": ("suppress/unsuppress the frame lock, re-value the crank link with was_reversed disclosed, and meet the measured set_occurrences refusal"),
+    "model_pattern_path": ("pattern the feature cameo along its own edge with the count read back "
+                           "off the feature's own patternElements, then along TWO connected edge "
+                           "handles - a list is used EXACTLY, with no chaining, and the label says "
+                           "which of the two path rules ran"),
+    "assembly_edit_relations": ("suppress/unsuppress the frame lock, re-value the crank link with was_reversed disclosed, and meet the measured set_occurrences refusal in the words that make it a fact - the build it was measured on and the platform sentence it would raise - with the group's members re-read unchanged afterwards"),
     "assembly_edit_contacts": ("build a contact set from two story parts, meet the single-member refusal, re-member it, rename it reading the landed name back, suppress round-trip, switch contact analysis on and back off, then delete it"),
     "model_hole": ("drill a cameo mounting hole, then the three additive placements - centred on "
                    "its rim, on an edge at middle and at start, and by plane offsets; a circular "
                    "offset edge refused"),
     "model_combine": "join two overlapping cameo pads",
-    "appearance_set": "give each gyroscope part its own color",
+    "appearance_set": ("give each gyroscope part its own color; then the occurrence FAN-OUT in the "
+                       "shape that discriminates - one body coloured directly, then the occurrence "
+                       "written in a DIFFERENT colour, so the body holding its own override comes "
+                       "back under 'bodies_not_reached' and not under applied_to (both colours are "
+                       "minted from one base asset and share an Appearance.id, so only comparing "
+                       "the id AND the name separates reached from kept); and the same shape where "
+                       "that body is the occurrence's only one, refused naming it"),
     "model_set_material": "assign the rotor a physical steel material",
     "find_geometry": "acquire the face/edge/body handles the build consumes",
     "model_measure_between": "measure the outer-ring-to-inner-ring gap",
@@ -3072,9 +3626,15 @@ STORY = {
     "model_inspect": "read the rotor's volume back",
     "pmi_create": ("aim a flatness note at the frame plate and a hole note at a carrier bore, and "
                    "meet the extension gate PMI authoring sits behind on this build"),
-    "pmi_get": "read the PMI back with segments and detail",
+    "pmi_get": ("read the PMI back with segments and detail, and again with an over-cap "
+                "max_results - pmi_get's own contract CLAMPS it rather than refusing, since every "
+                "record it returns crosses the wire whole. SKIPPED(rig): the imported-row beats "
+                "(no 'text' key on an imported annotation, no 'is_hole' when isHoleAnnotation will "
+                "not read) need a PMI-BEARING import; the STEP this sweep round-trips carries none"),
     "pmi_edit": ("meet the name lookup on a design holding no PMI - it lists what exists instead of "
-                 "editing something else - and the blank-name guard"),
+                 "editing something else - and the blank-name guard. SKIPPED(gate): the "
+                 "ambiguous-name unsuppress refusal needs AUTHORED PMI, which is extension-gated on "
+                 "this build (pmi_create's own beats are that gate)"),
     "pmi_delete": "meet the same lookup refusal for the delete",
     "assembly_ground": "ground the frame so the mechanism has a base",
     "assembly_rigid_group": "rigid-group the frame and carrier base",
@@ -3085,7 +3645,12 @@ STORY = {
                           "named in the payload, no axis and no axis sentence), a revolute on an "
                           "explicit axis whose note says frame, NOT world, and points at the tool "
                           "that sets a true world axis, and a rigid pair with the same axis-free "
-                          "report; an axis outside the Choice refused"),
+                          "report; an axis outside the Choice refused. A TORUS face joints at its "
+                          "own centre on a PARAMETRIC body, which is the case the keypoint guard "
+                          "must let through. SKIPPED(rig): the two base-feature halves of that "
+                          "guard (a torus inside a base feature hands back its component origin "
+                          "with no error) need a torus built INSIDE a base feature, and no tool on "
+                          "this surface builds one unattended"),
     "joint_create_as_built": ("seat the rotor shaft in the inner ring as-built; then a REVOLUTE "
                               "as-built pair anchored on their shared face, read back through "
                               "assembly_get and driven to prove the DOF, with the missing-anchor "
@@ -3105,16 +3670,21 @@ STORY = {
                                "self-nesting target refused"),
     "assembly_inspect_interference": "check interference at rest and driven",
     "design_recompute": "recompute the assembly after motion",
-    "model_fillet": "fillet the outer ring edge",
+    "model_fillet": ("fillet the outer ring edge; then the two path fixtures - one box corner "
+                     "rounded into an OPEN tangent run, and all four rounded into a CLOSED tangent "
+                     "loop - that the chaining beats read their edge counts off"),
     "model_chamfer": ("chamfer the frame edge, then a second one by distance-and-angle with a "
                       "miter corner, both read back off the created feature"),
     "model_shell": "shell a scratch cap cameo",
     "model_offset_face": "push a scratch block's top face outward",
     "model_thread": ("thread a scratch post M10x1.5 over part of its length with the extent read "
                      "back, an explicit thread standard with its alternatives disclosed, and a "
-                     "modeled thread on a second post proving it cut material; an unknown "
-                     "call-out, an offset with no length, and a modeled call-out too big for the "
-                     "cylinder all refused"),
+                     "modeled thread on a second post proving it cut material; then the INTERNAL "
+                     "side on a real bore - 'internal' derived from the face's own out-of-material "
+                     "normal and checked against the face by the API at add() - and a partial "
+                     "thread measured from the LOW end, reading that end back off the feature; an "
+                     "unknown call-out, an offset with no length, and a modeled call-out too big "
+                     "for the cylinder all refused"),
     "sketch_edit_curve": ("trim, extend, split, fillet, chamfer and offset on one scratch sketch "
                           "per action, with length read-backs; split's two halves must carry "
                           "distinct ids; a chamfer across an offset pair refused"),
@@ -3122,8 +3692,11 @@ STORY = {
                     "length, and angle expressions refused; a bare unitless parameter accepted; "
                     "a vertex-anchored scale"),
     "model_move": ("translate, along-axis, rotate and point-to-point move features on a scratch "
-                   "block, each checked against the distance it was asked for; a face as the axis "
-                   "and any faces selection refused"),
+                   "block in a SINGLY placed component, each checked against the distance it was "
+                   "asked for; the same along-axis move on a component placed TWICE refused naming "
+                   "the count and both paths (each instance holds that body somewhere else, and no "
+                   "read-back tells a right instance from a wrong one); a face as the axis and any "
+                   "faces selection refused"),
     "design_delete_feature": "add a wart feature then delete it; health diff",
     "design_remove_feature": "remove a scratch body and its occurrence; deleting each Remove brings them back",
     "design_delete_occurrence": "delete a scratch occurrence",
@@ -3134,7 +3707,9 @@ STORY = {
                         "sphere"),
     "surface_fill": ("seal a closed revolved sphere surface into a solid, the volume measured "
                      "off the result and every tool accounted for; and seal the joint cameo's "
-                     "sphere the same way, so the ball beat has a real sphere face to joint at"),
+                     "sphere the same way, so the ball beat has a real sphere face to joint at; a "
+                     "cell index one past the end refused NAMING the range that exists, with the "
+                     "computing input cancelled and nothing created"),
     "surface_thicken": ("thicken the prep sheet, then a four-walled sheet with 'rounded' corners "
                         "read back off the input"),
     "surface_extrude": "extrude prep sheets",
@@ -3172,8 +3747,16 @@ STORY = {
     "mesh_export": "export a mesh to STL",
     "mesh_insert": "re-import the STL mesh",
     "mesh_repair": ("one-touch-fix a healthy mesh (an honest no-op, not a failure), rebuild it with "
-                    "the density read back off the feature, and refuse density on a non-rebuild"),
-    "mesh_shell": "hollow a scratch mesh - the volume DROPS and the thickness is read back off the feature, never echoed",
+                    "the density read back off the feature, stitch-and-remove a fresh mesh TWICE - "
+                    "the first welds its duplicate vertices, the second finds nothing of its kind "
+                    "to fix and the note has to say so rather than claim a repair - and refuse "
+                    "density on a non-rebuild. SKIPPED(rig): the close_holes refusal on a mesh that "
+                    "stays open needs an UNFIXABLE open mesh, which nothing in this document can "
+                    "build - every mesh here is watertight by construction"),
+    "mesh_shell": ("hollow a scratch mesh - the volume DROPS, the body still reads watertight and "
+                   "the thickness is read back off the feature, never echoed - then meet the "
+                   "platform's own MESH_FAILED_HOLLOW refusal at a thickness past the half-wall "
+                   "(measured: an over-thick shell does not quietly cut through, it fails)"),
     "mesh_smooth": "smooth a scan-quality mesh: the triangle count HOLDS STILL and the node coordinates move, which is why a count census cannot judge it",
     "mesh_separate": "split a two-shell mesh into its lumps - the pieces are the auto-named bodies read back from the component",
     "mesh_reverse_normal": "flip an inside-out mesh - confirmed by the signed volume changing sign, not by is_closed",
@@ -3181,7 +3764,12 @@ STORY = {
                              "the confirmation, refuse an unknown feature and a bad group range, "
                              "and tag a feature with an attribute then delete it - the value and "
                              "the design-wide count are read back both ways, and a second delete is "
-                             "refused"),
+                             "refused; then the 'name@index' form a FeatureRef refusal hands back, "
+                             "resolved against each object's OWN .index (the index design_get "
+                             "publishes), with the neighbouring index refused as a miss. "
+                             "SKIPPED(rig): the AMBIGUOUS-name refusal itself needs two same-named "
+                             "timeline features, and no tool on this surface renames a feature, so "
+                             "the sweep cannot mint the pair"),
     "param_set": "bump GimbalDia +33%, then restore it",
     "param_delete": "delete a scratch parameter",
     "view_switch_workspace": "switch to Manufacture, then back to Design",
@@ -3193,10 +3781,13 @@ STORY = {
     "cam_create_setup": "create the milling setup on the Carrier in the vise",
     "cam_create_operation": "create the face, adaptive, silhouette, and drill operations",
     "cam_select_geometry": ("select the stock-top face, both silhouette branches (setup models and "
-                            "named bodies), a whole scratch sketch, the bolt-circle holes, and "
-                            "recognized pockets whose filter is read back in CM; refusals for a knob "
-                            "on the wrong kind, geometry through the wrong input, and an edge where "
-                            "a face belongs"),
+                            "named bodies), a whole scratch sketch and the bolt-circle holes; "
+                            "refusals for a knob on the wrong kind, geometry through the wrong "
+                            "input, and an edge where a face belongs. The pocket-recognition "
+                            "selection is NOT driven unattended (running it coincides with the "
+                            "Fusion process terminating); its 'pocket_filter_applied' publishes the "
+                            "diameter/depth bounds in the CALLER'S own units, with "
+                            "'pocket_filter_units' naming them beside the numbers"),
     "cam_edit_operation": "edit the face operation's feed",
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name"),
@@ -3206,9 +3797,13 @@ STORY = {
     "cam_activate_setup": "activate the setup",
     "cam_compare_operations": "compare the two operations",
     "cam_show_toolpath": "leave the toolpath visible on camera",
-    "cam_generate": "generate the toolpaths against the real part in the real fixture",
+    "cam_generate": ("generate the toolpaths against the real part in the real fixture. The tool "
+                     "takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while "
+                     "a generation runs, so completion is certified by the bounded cam_get_status "
+                     "poll after this act, never by a sleep inside the call"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
-                              "bogus-scope refusal, verdict true after generation"),
+                              "bogus-scope refusal, an over-cap max_results clamped to the tool's "
+                              "own row ceiling, verdict true after generation"),
     "cam_get_status": "poll the generation to completion (empty toolpaths fail)",
     "cam_post": "post the NC program to disk",
     "cam_generate_setup_sheet": "write the machinist setup sheet with the file-landed gate",
@@ -3216,15 +3811,22 @@ STORY = {
     "cam_save_template": "save the setup as a local CAM template",
     "cam_apply_template": "apply the template to a second setup",
     "cam_delete": "delete a scratch operation; count diff",
-    "design_export": "export the machined part to STEP",
+    "design_export": ("export the machined part to STEP, then the whole design SPLIT per component "
+                      "to STL with stl_binary read back off the options object the split path "
+                      "created for each file - the branch that would otherwise report a clean "
+                      "export while dropping the format knob"),
     "doc_insert_import": "re-import that STEP from disk into the live design",
     "design_set_name": ("rename the machined part and re-find it by the name that landed, rename a "
-                        "cameo occurrence with its instance name following, and give a twin body "
-                        "the name its sibling holds so the deduped '(1)' is what gets published; "
-                        "the empty target and the root component refused"),
-    "design_get": ("final design read: the whole cast, plus the material/appearance catalog at both "
-                   "zoom levels - the library census and one paged library; an unloaded library "
-                   "name refused"),
+                        "cameo occurrence with its instance name following, give a twin body the "
+                        "name its sibling holds so the deduped '(1)' is what gets published, and "
+                        "rename a MESH body - the kind reads 'mesh' and a fresh read of the "
+                        "component's meshes carries the new name; the empty target and the root "
+                        "component refused"),
+    "design_get": ("final design read: the whole cast, stamped with the DOCUMENT it was read from "
+                   "(sys_find_tool, which never touches the design, carries no such stamp), the "
+                   "timeline slice the 'name@index' feature form is addressed from, plus the "
+                   "material/appearance catalog at both zoom levels - the library census and one "
+                   "paged library; an unloaded library name refused"),
     "drawing_create": ("meet every guard the drawing generator sits behind, each settled before the "
                        "tool reaches for a cloud source: the shaded style with no member to set, "
                        "the two centre annotations with no enum family on this build, a tangent-edge "
@@ -3240,7 +3842,11 @@ STORY = {
 # the policy-excluded bucket; PENDING (below) is the separate "not scripted yet" bucket - the ledger
 # keeps that distinction honest.
 EXCLUDED = {
-    "sys_execute_script": "gated off by design; the sweep proves the typed surface suffices",
+    "sys_execute_script": ("gated off by design; the sweep proves the typed surface suffices - and "
+                           "with it the beat for its DRAWING-document error tail (a raise inside a "
+                           "drawing ends with 'Re-read the sheets before assuming this call changed "
+                           "nothing.', a design one does not), which would need this tool driven "
+                           "against two document kinds"),
     "sys_reload_addin": "restarts the server mid-sweep",
     "sys_request_selection": "waits on a human pick (user-present tier)",
     "drawing_update": "user-present tier (drawing docs)",
@@ -3262,7 +3868,9 @@ EXCLUDED = {
     "data_delete_file": "cloud destructive (opt-in tier)",
     "data_delete_folder": "cloud destructive (opt-in tier)",
     "data_switch_hub": "changes the active hub, closes docs (opt-in tier)",
-    "doc_save_milestone": "cloud write; needs a saved MODIFIED doc (opt-in tier)",
+    "doc_save_milestone": ("cloud write; needs a saved MODIFIED doc (opt-in tier) - the beat for "
+                           "its two INDEPENDENT read-backs (cloud_tip_advanced beside "
+                           "version_confirmed) rides that tier with it"),
     "doc_save": "versions to the cloud; needs a saved doc (opt-in tier)",
     "doc_save_as": "cloud write (opt-in tier)",
     "doc_copy": "cloud write (opt-in tier)",
@@ -3282,20 +3890,28 @@ PENDING = frozenset()
 
 
 def source_hash(root=None):
-    """SHA-256 over every .py under commands/mcpServer/ - the receipt key binding a green run
-    to the exact tool source it exercised. Relative paths are normalized to '/' and CRLF to LF
-    so the digest is identical across OS and git line-ending config; __pycache__ is skipped."""
+    """SHA-256 over every .py under commands/mcpServer/ PLUS this harness and its siblings under
+    tests/live/ - the receipt key binding a green run to the exact tool source AND the exact
+    predicates/exclusions it was judged by (a weakened predicate or a tool quietly moved into
+    EXCLUDED must invalidate the receipt, not ride under it). Relative paths are normalized to
+    '/' and CRLF to LF so the digest is identical across OS and git line-ending config;
+    __pycache__ is skipped."""
     root = root or SRC_ROOT
-    rels = []
+    entries = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         for fn in filenames:
             if fn.endswith(".py"):
-                rel = os.path.relpath(os.path.join(dirpath, fn), root)
-                rels.append(rel.replace(os.sep, "/"))
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root).replace(os.sep, "/")
+                entries.append((rel, full))
+    if root == SRC_ROOT:      # a custom root (the offline tests') hashes only itself
+        for fn in sorted(os.listdir(_HERE)):
+            if fn.endswith(".py"):
+                entries.append(("tests_live/" + fn, os.path.join(_HERE, fn)))
     hasher = hashlib.sha256()
-    for rel in sorted(rels):
-        with open(os.path.join(root, rel.replace("/", os.sep)), "rb") as fh:
+    for rel, full in sorted(entries):
+        with open(full, "rb") as fh:
             content = fh.read().replace(b"\r\n", b"\n")
         hasher.update(rel.encode("utf-8") + b"\0" + content + b"\0")
     return hasher.hexdigest()
@@ -3305,35 +3921,49 @@ _STAMP_RE = re.compile(r"^Stamp: source ([0-9a-f]{64}) \| Fusion (\S+) \| verifi
                        re.MULTILINE)
 
 
-def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, notes=None):
-    """Write the tracked receipt. Called only on a run with zero FAIL/blocked steps. 'notes' maps a
-    covered tool to its shot-list step text (the ledger doubles as the demo's shot list) - a third
-    column, empty when absent so the two-column stamp/count contract is unchanged."""
+def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, notes=None,
+                   act_modes=None):
+    """Write the tracked receipt. Called only on a run with zero FAIL/blocked/pass* steps. 'notes'
+    maps a covered tool to its shot-list step text (the ledger doubles as the demo's shot list) - a
+    third column, empty when absent so the two-column stamp/count contract is unchanged.
+    'act_modes' lists (act, narrative|fallback) - a machine-readable column, so a fallback-heavy
+    run is visible without reading prose."""
     notes = notes or {}
     n_cov = sum(1 for _, s in ledger if s == "covered")
     n_pend = sum(1 for _, s in ledger if s.startswith("PENDING"))
-    n_skip = len(ledger) - n_cov - n_pend
+    n_ref = sum(1 for _, s in ledger if s.startswith("refusals-only"))
+    n_skip = len(ledger) - n_cov - n_pend - n_ref
     lines = [
         "# Live tool verification (generated by tool_verify.py - do not edit)",
         "",
-        "This is a THREE-BUCKET ledger, not a clean bill of health. It does NOT claim every tool",
+        "This is a FOUR-BUCKET ledger, not a clean bill of health. It does NOT claim every tool",
         "is verified - the count line below is authoritative, and the per-tool table says which",
         "bucket each tool is in:",
         "",
         "- covered: a live step drove the tool this run and its effect was read back.",
+        "- refusals-only: every step that ran was a deliberate guard refusal - the guards are",
+        "  proven, but NO effect was produced or read back. Not covered; the create/act path",
+        "  still needs a real step or a recorded gate reason.",
         "- skipped(reason): deliberately NOT driven unattended (cloud / interactive / irreversible",
         "  tier), each row naming why. Not verified - excused.",
         "- pending: no step drives it yet. UNVERIFIED, not known-good - it has never run in this",
         "  sweep. Shrinking this bucket means scripting a real step, not relabelling it.",
         "",
-        "The stamp's source hash binds this run to the exact `commands/mcpServer/` tree it",
-        "exercised: `--check` recomputes the hash and fails on any difference, so a green suite",
-        "cannot ride on a live run that never saw the current code. Only a run with zero",
-        "FAIL/blocked steps rewrites this file.",
+        "The stamp's source hash binds this run to the exact `commands/mcpServer/` tree AND the",
+        "tests/live/ harness (steps, predicates, exclusions) it was judged by: `--check`",
+        "recomputes the hash and fails on any difference, so a green suite cannot ride on a live",
+        "run that never saw the current code or a weakened predicate. Only a run with zero",
+        "FAIL/blocked/pass* steps rewrites this file.",
         "",
         "Stamp: source {0} | Fusion {1} | verified {2}".format(src_hash, fusion_version, stamp_date),
         "",
-        "{0} covered / {1} skipped(reason) / {2} pending".format(n_cov, n_skip, n_pend),
+        "{0} covered / {1} refusals-only / {2} skipped(reason) / {3} pending".format(
+            n_cov, n_ref, n_skip, n_pend),
+    ]
+    if act_modes:
+        lines += ["", "| act | mode |", "|---|---|"]
+        lines += ["| {0} | {1} |".format(a, m) for a, m in act_modes]
+    lines += [
         "",
         "| tool | status | step (the demo's shot list) |",
         "|---|---|---|",
@@ -3370,6 +4000,69 @@ def check(root=None, verified_path=None):
     return 0
 
 
+def run_steps(steps, ctx, trace=False, sleep_s=0.1, on_result=None):
+    """The ONE (tool, args, expect, save) step engine - every live harness judges its steps here,
+    so the status vocabulary cannot fork: pass / pass* / expected-refusal / FAIL / blocked.
+    'pass*' means a passing step whose saved-value extraction failed - a payload-shape mismatch
+    that BLOCKS a green receipt/run in every consumer, never a quiet pass. A failing step keeps
+    NOTE_MAX characters of its payload (the keys that diagnose it sit late), a passing refusal
+    REFUSAL_NOTE_MAX. Yields nothing early:
+    returns the full row list; 'on_result' (tool, status, note) fires per step for a consumer
+    that prints as it goes."""
+    rows = []
+    for tool, args, expect, save in steps:
+        try:
+            arguments = args(ctx) if callable(args) else dict(args)
+        except KeyError as e:
+            rows.append((tool, "blocked", str(e)))
+            if on_result:
+                on_result(*rows[-1])
+            continue
+        if trace:
+            # flushed per step so a hard Fusion crash still names its killer in the log
+            print(f"    -> {tool} {json.dumps(arguments)[:120]}", flush=True)
+        is_error, payload = call(tool, arguments)
+        if isinstance(expect, _Refusal):
+            # a refusal whose WORDS are the assertion: the error must carry every fragment, so a
+            # guard refusing for another reason fails the row instead of passing as "refused".
+            if not is_error:
+                status, note = "FAIL", f"expected a refusal, got ok: {str(payload)[:NOTE_MAX]}"
+            else:
+                absent = expect.missing(str(payload))
+                if absent:
+                    status, note = "FAIL", f"refusal missing {absent}: {str(payload)[:NOTE_MAX]}"
+                else:
+                    status, note = "expected-refusal", str(payload)[:REFUSAL_NOTE_MAX]
+        elif callable(expect):
+            # a VALUE PREDICATE on an ok result: call success is not enough - the payload
+            # must satisfy the check (grip contact, machine assignment, rest-pose honesty).
+            if is_error:
+                status, note = "FAIL", str(payload)[:NOTE_MAX]
+            else:
+                try:
+                    good = bool(expect(payload))
+                except Exception as e:
+                    good, payload = False, f"predicate raised: {e}"
+                status, note = ("pass", "") if good else ("FAIL", str(payload)[:NOTE_MAX])
+        elif expect == "ok" and not is_error:
+            status, note = "pass", ""
+        elif expect == "refused" and is_error:
+            status, note = "expected-refusal", str(payload)[:REFUSAL_NOTE_MAX]
+        else:
+            status, note = "FAIL", str(payload)[:NOTE_MAX]
+        if status == "pass" and save is not None and not is_error:
+            key, extract = save
+            try:
+                ctx[key] = extract(payload)
+            except Exception as e:
+                status, note = "pass*", f"saved-value extraction failed: {e}"
+        rows.append((tool, status, note))
+        if on_result:
+            on_result(*rows[-1])
+        time.sleep(sleep_s)
+    return rows
+
+
 def _precondition_holds(pre):
     """Run an act's precondition READ; True when it returns without error (the geometry the act's
     narrative consumes exists). A False routes the act to its scratch fallback."""
@@ -3392,44 +4085,11 @@ def run(write_json, keep_open=False, trace=False):
         print(f"\n-- {name} [{mode}] --")
         if keep_open and name == "FINALE":
             steps = [s for s in steps if s[0] != "doc_close"]
-        for tool, args, expect, save in steps:
-            try:
-                arguments = args(ctx) if callable(args) else dict(args)
-            except KeyError as e:
-                rows.append((tool, "blocked", str(e)))
-                continue
-            if trace:
-                # flushed per step so a hard Fusion crash still names its killer in the log
-                print(f"    -> {tool} {json.dumps(arguments)[:120]}", flush=True)
-            is_error, payload = call(tool, arguments)
-            if callable(expect):
-                # a VALUE PREDICATE on an ok result: call success is not enough - the payload
-                # must satisfy the check (grip contact, machine assignment, rest-pose honesty).
-                if is_error:
-                    status, note = "FAIL", str(payload)[:160]
-                else:
-                    try:
-                        good = bool(expect(payload))
-                    except Exception as e:
-                        good, payload = False, f"predicate raised: {e}"
-                    status, note = ("pass", "") if good else ("FAIL", str(payload)[:160])
-            elif expect == "ok" and not is_error:
-                status, note = "pass", ""
-            elif expect == "refused" and is_error:
-                status, note = "expected-refusal", str(payload)[:80]
-            else:
-                status, note = "FAIL", str(payload)[:160]
-            if status == "pass" and save is not None and not is_error:
-                key, extract = save
-                try:
-                    ctx[key] = extract(payload)
-                except Exception as e:
-                    status, note = "pass*", f"saved-value extraction failed: {e}"
+        for tool, status, note in run_steps(steps, ctx, trace=trace):
             rows.append((tool, status, note))
             if status in ("pass", "pass*", "expected-refusal"):
                 story = STORY.get(tool, "")
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
-            time.sleep(0.1)
         if name in POLL_AFTER:
             poll_generation(rows, notes, POLL_AFTER[name][mode])
         if mode == "narrative" and name in SPATIAL_AFTER:
@@ -3438,11 +4098,18 @@ def run(write_json, keep_open=False, trace=False):
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 
-    covered = {t for t, s, _ in rows if s in ("pass", "pass*", "expected-refusal")}
+    # covered demands at least one step that PRODUCED something (pass/pass*): a tool whose every
+    # step is an expected-refusal exercised only its guards - no effect existed to read back, so
+    # calling that "covered" would let the legend lie. Those rows get their own bucket.
+    passed = {t for t, s, _ in rows if s in ("pass", "pass*")}
+    refused_only = {t for t, s, _ in rows if s == "expected-refusal"} - passed
     ledger = []
     for tool in all_tools:
-        if tool in covered:
+        if tool in passed:
             ledger.append((tool, "covered"))
+        elif tool in refused_only:
+            ledger.append((tool, "refusals-only: every step is a guard refusal - no effect was "
+                                 "produced or read back this run"))
         elif tool in EXCLUDED:
             ledger.append((tool, f"skipped: {EXCLUDED[tool]}"))
         else:
@@ -3453,8 +4120,10 @@ def run(write_json, keep_open=False, trace=False):
         print(f"  {status:18} {tool:28} {note}")
     n_cov = sum(1 for _, s in ledger if s == "covered")
     n_pend = sum(1 for _, s in ledger if s.startswith("PENDING"))
-    n_skip = len(ledger) - n_cov - n_pend
-    print(f"\n== ledger: {n_cov}/{len(ledger)} covered, {n_skip} skipped(reason), {n_pend} pending")
+    n_ref = sum(1 for _, s in ledger if s.startswith("refusals-only"))
+    n_skip = len(ledger) - n_cov - n_pend - n_ref
+    print(f"\n== ledger: {n_cov}/{len(ledger)} covered, {n_ref} refusals-only, "
+          f"{n_skip} skipped(reason), {n_pend} pending")
     for tool, s in ledger:
         if s != "covered":
             print(f"  {tool:32} {s}")
@@ -3465,15 +4134,18 @@ def run(write_json, keep_open=False, trace=False):
     for nm, m in act_modes:
         print(f"  {m:10} {nm}")
 
-    fails = [r for r in rows if r[1] in ("FAIL", "blocked")]
+    # pass* blocks the receipt: the payload did not carry a key the step contract expected - a
+    # payload-shape mismatch is a real signal, not a pass.
+    fails = [r for r in rows if r[1] in ("FAIL", "blocked", "pass*")]
     if fails:
-        print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked steps first.")
+        print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
     else:
         src_hash = source_hash()
         stamp_date = time.strftime("%Y-%m-%d")
         fusion_version = ctx.get("fusion_version", "?")
         print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3})".format(
-            write_verified(ledger, fusion_version, stamp_date, src_hash, notes=notes),
+            write_verified(ledger, fusion_version, stamp_date, src_hash, notes=notes,
+                           act_modes=act_modes),
             src_hash[:12], fusion_version, stamp_date))
     if write_json:
         results_dir = os.path.join(_HERE, "results")

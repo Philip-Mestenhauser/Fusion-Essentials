@@ -114,6 +114,43 @@ class TestBodyAabb:
         assert out["x"] == 10.0 and out["y"] == 20.0 and out["z"] == 30.0
 
 
+class TestBodyLumpCount:
+    """A body row discloses its DISCONNECTED-piece count. A multi-lump body is usually a shipped
+    defect (a join that fused nothing) and no bbox or mass read can show it - the number has to come
+    from the one read that can, _geom.lump_count."""
+
+    def _resolve_body(self, monkeypatch, body, kind="body"):
+        monkeypatch.setattr(mi._common, "design", lambda: object())
+        monkeypatch.setattr(mi._TARGET, "resolve", lambda raw: ((body, kind), None))
+
+    def test_a_body_target_publishes_its_lump_count(self, monkeypatch, stub_slices):
+        from conftest import BRepBody
+        body = BRepBody(name="Tensioner")
+        body.lumps = type("L", (), {"count": 2})()
+        self._resolve_body(monkeypatch, body)
+        out = _payload(mi.handler(target="Tensioner"))
+        assert out["lump_count"] == 2
+
+    def test_a_single_piece_body_reads_one(self, monkeypatch, stub_slices):
+        from conftest import BRepBody
+        body = BRepBody(name="Bracket")
+        body.lumps = type("L", (), {"count": 1})()
+        self._resolve_body(monkeypatch, body)
+        assert _payload(mi.handler(target="Bracket"))["lump_count"] == 1
+
+    def test_an_unreadable_lump_count_is_published_as_unknown(self, monkeypatch, stub_slices):
+        # None (not 0, not 1) - the caller can tell "one solid piece" from "nobody knows".
+        from conftest import BRepBody
+        self._resolve_body(monkeypatch, BRepBody(name="Plain"))
+        assert _payload(mi.handler(target="Plain"))["lump_count"] is None
+
+    def test_a_non_body_target_does_not_carry_a_lump_count(self, monkeypatch, stub_slices):
+        # An occurrence/component/design spans many bodies, so a single lump count would describe
+        # nothing - the key belongs to a BODY row only.
+        _resolve_to(monkeypatch, "occurrence")
+        assert "lump_count" not in _payload(mi.handler(target="Occ:1"))
+
+
 class TestNormalizeInclude:
     def test_comma_string(self):
         assert mi._normalize_include("mass") == ["mass"]
@@ -226,6 +263,45 @@ class TestBboxFramePath:
     def test_unknown_units_errors(self):
         res = mi._bbox(None, object(), "x", "", "furlong")
         assert res["isError"] and "furlong" in error_message(res)
+
+
+class TestWorldAlignedExtentsAreMeasurements:
+    """The world-aligned branch publishes x/y/z/center under the SAME keys as the oriented branch,
+    so it holds the SAME contract: an unreadable corner is null, never a confident 0. A 0 extent is
+    an answer ("this plate is flat in Z") and a 0 centre is an answer ("it sits on the origin")."""
+
+    class _BlindPoint:
+        """A Point3D whose coordinate reads RAISE - a proxy that stopped answering."""
+        def __getattr__(self, name):
+            if name in ("x", "y", "z"):
+                raise RuntimeError("point unavailable")
+            raise AttributeError(name)
+
+    def _entity(self, monkeypatch, box):
+        monkeypatch.setattr(mi._geom, "body_aabb", lambda ent: box)
+        return object()
+
+    def test_readable_corners_give_the_extents_and_the_centre(self, monkeypatch):
+        box = FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(1, 2, 3))
+        ent = self._entity(monkeypatch, box)
+        out = _payload(mi._bbox(None, ent, "body 'Plate'", "", "mm"))
+        assert (out["x"], out["y"], out["z"]) == (10.0, 20.0, 30.0)
+        assert out["center"] == {"x": 5.0, "y": 10.0, "z": 15.0}
+        assert out["oriented"] is False
+
+    def test_an_unreadable_corner_reads_null_not_zero(self, monkeypatch):
+        box = FakeBoundingBox3D(FakePoint(0, 0, 0), self._BlindPoint())
+        ent = self._entity(monkeypatch, box)
+        out = _payload(mi._bbox(None, ent, "body 'Plate'", "", "mm"))
+        assert (out["x"], out["y"], out["z"]) == (None, None, None)
+        assert out["center"] == {"x": None, "y": None, "z": None}
+
+    def test_a_genuinely_flat_axis_still_reports_zero(self, monkeypatch):
+        # the null must mean UNREADABLE and nothing else: a real zero extent is still a 0
+        box = FakeBoundingBox3D(FakePoint(0, 0, 5), FakePoint(1, 2, 5))
+        ent = self._entity(monkeypatch, box)
+        out = _payload(mi._bbox(None, ent, "body 'Shim'", "", "mm"))
+        assert out["z"] == 0.0 and out["center"]["z"] == 50.0
 
 
 # ── _full_props / _physical_properties: unit scaling + guards + per-occurrence breakdown ───────────

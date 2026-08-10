@@ -49,8 +49,7 @@ def _curve_count(sketch) -> int:
 
 def _collection_items(coll):
     """The members of an ObjectCollection, as a list."""
-    n = safe(lambda: coll.count, 0) or 0
-    return [c for c in (safe(lambda i=i: coll.item(i)) for i in range(n)) if c is not None]
+    return list(_common.iter_collection(coll))
 
 
 def _curve_records(sketch, curves, f):

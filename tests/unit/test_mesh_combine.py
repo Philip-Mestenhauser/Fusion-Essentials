@@ -19,8 +19,9 @@ Pinned (the DoD):
 """
 
 import json
+import types
 
-from conftest import go_stale, load_tool
+from conftest import body_proxy, go_stale, load_tool
 
 mc = load_tool("mesh_combine")
 
@@ -34,11 +35,16 @@ inp = mc._inputs
 # ── fakes (named to match the Fusion type names the kind discrimination reads) ──────────────────
 
 class MeshBody:
-    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody)."""
-    def __init__(self, name="Mesh1", token=None, parent=None):
+    """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody).
+
+    `bbox` is the body's world AABB - the only reach signal a mesh body carries, since MeshBody has
+    no lump/shell count. Left unset, the body stands for one whose box cannot be read."""
+    def __init__(self, name="Mesh1", token=None, parent=None, bbox=None):
         self.name = name
         self.entityToken = token or f"MTOK::{name}"
         self.parentComponent = parent
+        if bbox is not None:
+            self.boundingBox = bbox
 
 
 class BRepBody:
@@ -77,6 +83,73 @@ class _CombineInput:
         self.algorithmType = None
 
 
+class _CoercedAlgorithmInput(_CombineInput):
+    """The coercion the API documents: algorithmType "is only effective in non-parametric mode - in
+    parametric mode the algorithm type is always LegacyMeshCombineAlgorithmType". The assignment is
+    accepted and the property reads back Legacy whatever was asked for."""
+
+    @property
+    def algorithmType(self):
+        return _AT.LegacyMeshCombineAlgorithmType
+
+    @algorithmType.setter
+    def algorithmType(self, value):
+        self.asked = value
+
+
+class _SwallowedAlgorithmInput(_CombineInput):
+    """A SWIG proxy accepting an assignment to a name it does not really define: the value lands
+    nowhere and the property keeps what the API already held - here Enhanced. The set-and-read-back
+    fails for a reason that is NOT the parametric coercion, so nothing ran legacy."""
+
+    @property
+    def algorithmType(self):
+        return _AT.EnhancedMeshCombineAlgorithmType
+
+    @algorithmType.setter
+    def algorithmType(self, value):
+        pass
+
+
+class _UnreadableAlgorithmInput(_CombineInput):
+    """An input whose algorithmType cannot be read at all - there is nothing to map back, so which
+    algorithm ran is genuinely unknown."""
+
+    @property
+    def algorithmType(self):
+        raise RuntimeError("3 : algorithmType is unavailable")
+
+    @algorithmType.setter
+    def algorithmType(self, value):
+        pass
+
+
+class _NoneAlgorithmInput(_CombineInput):
+    """An input whose algorithmType READS successfully and hands back None. A read that returned a
+    value is not a read that failed, so the two must not collapse onto the same sentence."""
+
+    @property
+    def algorithmType(self):
+        return None
+
+    @algorithmType.setter
+    def algorithmType(self, value):
+        pass
+
+
+class _StrangeAlgorithmInput(_CombineInput):
+    """An input whose algorithmType reads a value belonging to no member of the family - a read
+    that succeeded and still decodes to nothing, which is a different fact from a read that failed."""
+
+    @property
+    def algorithmType(self):
+        return 99
+
+    @algorithmType.setter
+    def algorithmType(self, value):
+        pass
+
+
 class _FeatureResult:
     def __init__(self, name, bodies):
         self.name = name
@@ -85,23 +158,32 @@ class _FeatureResult:
 
 class _MeshCombineFeatures:
     """comp.features.meshCombineFeatures — createInput(target, list) then add(input) -> feature whose
-    .bodies hold the result. raise_on_add forces a mutation failure (must surface, not be swallowed)."""
-    def __init__(self, result_bodies, feat_name="MeshCombine1", raise_on_add=False, none_feature=False):
+    .bodies hold the result. raise_on_add forces a mutation failure (must surface, not be swallowed).
+    input_factory swaps in an input whose algorithmType behaves like one of the measured proxy
+    shapes (coerced / swallowed / unreadable)."""
+    def __init__(self, result_bodies, feat_name="MeshCombine1", raise_on_add=False, none_feature=False,
+                 input_factory=_CombineInput):
         self._result_bodies = result_bodies
         self._feat_name = feat_name
         self.raise_on_add = raise_on_add
         self.none_feature = none_feature
+        self._input_factory = input_factory
         self.last_input = None
         self.create_args = None
 
     def createInput(self, target, tools):
         self.create_args = (target, tools)
-        self.last_input = _CombineInput(target, tools)
+        self.last_input = self._input_factory(target, tools)
         return self.last_input
 
     def add(self, inp):
         if self.raise_on_add:
             raise RuntimeError("combine failed")
+        # A real combine CONSUMES the tool bodies, so their wrappers stop answering the GEOMETRY
+        # reads a reach comparison needs. Anything the payload says about where the inputs sat must
+        # therefore be measured BEFORE the add - run afterwards it reads no box at all and the
+        # warning silently disappears. (The identity reads are staled by the test that covers them.)
+        go_stale(inp.target, *inp.tools, attrs=("parentComponent", "boundingBox"))
         if self.none_feature:
             return None
         return _FeatureResult(self._feat_name, self._result_bodies)
@@ -189,12 +271,13 @@ def _install(design, handle_map=None):
 
 
 def _build(design_type=0, raise_on_add=False, none_feature=False, result_name="Result",
-           mesh_bodies=None):
+           mesh_bodies=None, input_factory=_CombineInput):
     """A target mesh + two tool meshes in a component with a wired mesh-combine feature collection.
     Returns (design, feats, target, tool_a, tool_b)."""
     _wire_adsk()
     result = MeshBody(result_name)
-    feats = _MeshCombineFeatures([result], raise_on_add=raise_on_add, none_feature=none_feature)
+    feats = _MeshCombineFeatures([result], raise_on_add=raise_on_add, none_feature=none_feature,
+                                 input_factory=input_factory)
     bf = _BaseFeature()
     comp = FakeComp("Comp", features=_Features(mesh_combine=feats, base_features=_BaseFeatures(made=bf)),
                     mesh_bodies=mesh_bodies)
@@ -269,6 +352,68 @@ class TestAlgorithm:
         assert out["algorithm"] == "legacy"
         assert feats.last_input.algorithmType == _AT.LegacyMeshCombineAlgorithmType
 
+    def test_the_documented_coercion_is_reported_from_the_read_back(self):
+        # parametric mode forces Legacy whatever was asked. That is not a failure to report - but
+        # 'legacy' has to come from reading algorithmType, never from assuming the doc applies.
+        des, feats, *_ = _build(input_factory=_CoercedAlgorithmInput)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="enhanced"))
+        assert out["algorithm"] == "legacy"
+        assert "algorithm_unverified" not in out
+
+    def test_a_swallowed_write_publishes_what_the_input_holds_not_legacy(self):
+        # the set-and-read-back can fail for reasons that are NOT the coercion - a proxy that
+        # accepts an assignment to a name it does not define keeps the API's own Enhanced. Naming
+        # 'legacy' here would publish a fact about the toolpath that nothing measured.
+        des, feats, *_ = _build(input_factory=_SwallowedAlgorithmInput)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
+        assert out["algorithm"] == "enhanced"
+        assert out["algorithm"] != "legacy"
+        assert "algorithm_unverified" not in out
+
+    # The three ways the algorithm comes back unknown are DIFFERENT facts, and one shared sentence
+    # would state the wrong one twice: the family being absent means nothing was ever assigned, a
+    # read that raised means the property is unreachable, and a value matching no member means the
+    # read SUCCEEDED and still decoded to nothing.
+    def test_an_unreadable_algorithm_is_null_and_says_the_read_failed(self):
+        des, feats, *_ = _build(input_factory=_UnreadableAlgorithmInput)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
+        assert out["algorithm"] is None
+        assert "algorithmType could not be read back" in out["algorithm_unverified"]
+        assert "not available on this Fusion version, so the algorithm was never set" not in \
+            out["algorithm_unverified"]
+
+    def test_a_build_without_the_algorithm_family_says_nothing_was_ever_set(self, monkeypatch):
+        # no MeshCombineAlgorithmTypes at all: there is no member to set and none to map back, so
+        # the algorithm is unknown - claiming legacy would invent a fact about a missing enum, and
+        # blaming a failed read-back would blame a read that was never attempted.
+        des, feats, *_ = _build()
+        monkeypatch.delattr(mc.adsk.fusion, "MeshCombineAlgorithmTypes", raising=False)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
+        assert out["algorithm"] is None
+        assert "the algorithm was never set and cannot be decoded" in out["algorithm_unverified"]
+        assert "could not be read back" not in out["algorithm_unverified"]
+
+    def test_a_value_matching_no_member_says_the_read_decoded_to_nothing(self):
+        des, feats, *_ = _build(input_factory=_StrangeAlgorithmInput)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
+        assert out["algorithm"] is None
+        assert "matching no member of MeshCombineAlgorithmTypes" in out["algorithm_unverified"]
+        assert "could not be read back" not in out["algorithm_unverified"]
+
+    def test_a_property_that_reads_none_is_a_read_that_worked_not_one_that_failed(self):
+        # None is a VALUE the property handed back, so the reason names the decode, not the read -
+        # testing the read's result against None instead of a sentinel merges the two.
+        des, feats, *_ = _build(input_factory=_NoneAlgorithmInput)
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="legacy"))
+        assert out["algorithm"] is None
+        assert "matching no member of MeshCombineAlgorithmTypes" in out["algorithm_unverified"]
+        assert "could not be read back" not in out["algorithm_unverified"]
+
+    def test_a_clean_set_reports_no_unverified_marker(self):
+        des, feats, *_ = _build()
+        out = _payload(mc.handler(target="T", tools=["A"], algorithm="enhanced"))
+        assert out["algorithm"] == "enhanced" and "algorithm_unverified" not in out
+
 
 # ── the no-op gate: unchanged body count + unchanged target triangles = error ────────────────────
 
@@ -339,6 +484,29 @@ class TestSameBodyGuard:
         assert twin is not target and twin.entityToken == target.entityToken
         _install(des, handle_map={"T": target, "T2": twin})
         res = mc.handler(target="T", tools=["T2"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert feats.create_args is None
+
+    def test_rejected_when_the_tool_is_an_occurrence_PROXY_of_the_target(self):
+        # The pair a wrapper's OWN token cannot see: a body and its occurrence proxy carry DIFFERENT
+        # entityTokens (measured), so a bare-token guard reads one body as two and combines it into
+        # itself. The guard reads the NATIVE token, which both wrappers answer with.
+        des, feats, target, *_ = _build()
+        proxy = body_proxy(target, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        assert proxy.entityToken != target.entityToken and proxy.nativeObject is target
+        _install(des, handle_map={"T": target, "P": proxy})
+        res = mc.handler(target="T", tools=["P"])
+        assert res["isError"] is True and "same as the target" in res["message"]
+        assert feats.create_args is None
+
+    def test_rejected_when_the_TARGET_is_the_proxy_and_the_tool_the_native(self):
+        # the REVERSED arrangement: the proxy on the target side, the native on the tool side. The
+        # guard must read the native token on BOTH sides - a bare-token read on the target side
+        # alone misses this pair.
+        des, feats, target, *_ = _build()
+        proxy = body_proxy(target, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
+        _install(des, handle_map={"P": proxy, "T": target})
+        res = mc.handler(target="P", tools=["T"])
         assert res["isError"] is True and "same as the target" in res["message"]
         assert feats.create_args is None
 
@@ -543,3 +711,99 @@ class TestResult:
         adsk.fusion.Design.cast = lambda x: None
         res = mc.handler(target="T", tools=["A"])
         assert res["isError"] is True and "No active design" in res["message"]
+
+
+# ── a mesh join of bodies that do not touch ─────────────────────────────────────────────────────
+#
+# The result is ONE body still holding both shells, which the triangle/body census reads as a clean
+# combine. MeshBody carries no lump or shell count to check that with (BRepBody.lumps has no mesh
+# counterpart), so the tool uses the one signal a mesh body does expose: AABBs that do not overlap
+# PROVE the two cannot touch.
+
+def _boxed_mesh(name, minp, maxp, parent=None):
+    from conftest import FakeBoundingBox3D, FakePoint
+    return MeshBody(name, parent=parent,
+                    bbox=FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp)))
+
+
+def _build_boxed(target_box, tool_boxes, design_type=0):
+    """The _build rig with AABBs on the target and each tool. Returns (design, feats)."""
+    _wire_adsk()
+    feats = _MeshCombineFeatures([MeshBody("Result")])
+    bf = _BaseFeature()
+    comp = FakeComp("Comp", features=_Features(mesh_combine=feats,
+                                               base_features=_BaseFeatures(made=bf)))
+    target = _boxed_mesh("Target", *target_box, parent=comp)
+    handles = {"T": target}
+    for key, name, box in tool_boxes:
+        handles[key] = (_boxed_mesh(name, *box, parent=comp) if box is not None
+                        else MeshBody(name, parent=comp))
+    des = FakeDesign(comp, design_type=design_type)
+    _install(des, handle_map=handles)
+    return des, feats
+
+
+class TestMeshJoinThatCannotFuse:
+    def test_a_tool_clear_of_the_target_is_named_with_its_gap(self):
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "Tensioner", ((5.4, 0, 0), (6.4, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
+        assert out["disjoint_tools"] == [{"tool": "Tensioner", "gap_cm": 4.4}]
+        # a box separation is a LOWER BOUND on the clearance, not the distance to move - the wire
+        # must not read as a measured clearance right before a move-the-piece remedy
+        assert "'Tensioner' is at least 4.4 cm clear of the target" in out["note"]
+        assert "LOWER BOUND" in out["note"]
+
+    def test_the_warning_claims_nothing_about_the_result_body(self):
+        # What was measured is that the tool cannot touch the TARGET. What the result body ends up
+        # holding is NOT measured (see the chain case below), so no shell/lump claim may appear.
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "Far", ((9, 0, 0), (10, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
+        assert "shell" not in out["note"].lower()
+
+    def test_a_tool_that_fused_through_another_tool_is_still_only_reported_as_clear_of_the_target(self):
+        # The chain case: A touches the target, B touches A but is clear of the target. B DID fuse
+        # into the result through A, so a "B is a separate shell" claim would be false; the honest
+        # statement is exactly the one that was measured - B cannot touch the TARGET.
+        _build_boxed(((0, 0, 0), (1, 1, 1)),
+                     [("A", "Middle", ((1, 0, 0), (2, 1, 1))),
+                      ("B", "Outer", ((2, 0, 0), (3, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A", "B"], operation="join"))
+        assert [d["tool"] for d in out["disjoint_tools"]] == ["Outer"]
+        assert "'Outer' is at least 1 cm clear of the target" in out["note"]
+        assert "shell" not in out["note"].lower()
+        assert "nothing of the target fused with those directly" in out["note"]
+
+    def test_the_gap_is_measured_before_the_combine_consumes_the_tools(self):
+        # The add() consumes its inputs (identity AND geometry reads stop answering). Running the
+        # comparison after the mutation reads no box at all and the warning silently disappears.
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "Far", ((9, 0, 0), (10, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
+        assert out["disjoint_tools"] == [{"tool": "Far", "gap_cm": 8.0}]
+
+    def test_touching_bodies_are_not_warned_about(self):
+        # Boxes sharing a face: gap 0, which proves nothing against contact - a real fuse must come
+        # back clean or the warning is noise on every good join.
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "ToolA", ((1, 0, 0), (2, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
+        assert "disjoint_tools" not in out and "WARNING" not in out["note"]
+
+    def test_only_the_tools_that_cannot_reach_are_named(self):
+        _build_boxed(((0, 0, 0), (1, 1, 1)),
+                     [("A", "Near", ((0.5, 0, 0), (1.5, 1, 1))),
+                      ("B", "Far", ((9, 0, 0), (10, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A", "B"], operation="join"))
+        assert [d["tool"] for d in out["disjoint_tools"]] == ["Far"]
+        assert "'Near'" not in out["note"]
+
+    def test_an_unreadable_box_claims_nothing(self):
+        # No AABB on the tool -> the test cannot run; silence, never a "they touch" verdict.
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "NoBox", None)])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
+        assert "disjoint_tools" not in out
+
+    def test_a_cut_is_not_warned_about(self):
+        # A cut/intersect of meshes that do not overlap leaves the target unchanged, which the
+        # triangle/body census already refuses - this warning is about a JOIN fusing nothing.
+        _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "Far", ((9, 0, 0), (10, 1, 1)))])
+        out = _payload(mc.handler(target="T", tools=["A"], operation="cut"))
+        assert "disjoint_tools" not in out

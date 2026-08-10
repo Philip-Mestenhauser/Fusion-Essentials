@@ -12,8 +12,6 @@ import math
 import adsk.core
 import adsk.fusion
 
-app = adsk.core.Application.get()
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -29,8 +27,10 @@ from ._joints import (
     build_joint_geometry as _jg_from_entity,
     current_joint_type as _current_joint_type,
     find_joint as _find_joint,
+    is_as_built_joint as _is_as_built_joint,
     is_joint_origin as _is_joint_origin,
     motion_param_names as _motion_param_names,
+    pending_move_guard as _pending_move_guard,
 )
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
@@ -366,6 +366,10 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     if not design:
         return error("No active design (open a document with assembly geometry).")
 
+    pending = _pending_move_guard(design)
+    if pending:
+        return pending
+
     jtype = (joint_type or "rigid").strip().lower()
     if jtype not in _JOINT_TYPES:
         return error(f"Unknown joint_type '{joint_type}'. Valid: {', '.join(_JOINT_TYPES)}.")
@@ -611,6 +615,16 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         if want_offset:
             op = safe(lambda: joint.offset)
             if op is None:
+                if _is_as_built_joint(joint):
+                    # An AsBuiltJoint carries no offset/angle ModelParameter of any kind, whatever
+                    # its motion - so no expression can position it and rest_mm only sets a motion
+                    # -study equilibrium (see the note below). The parametric path is a real Joint.
+                    return error(
+                        f"'{joint_name}' is an AS-BUILT joint, which exposes no offset parameter "
+                        "for ANY motion type - its position cannot be driven by a parameter or an "
+                        "expression. Delete it (design_delete_feature) and build the pair with "
+                        "joint_create instead: that joint's offset is a ModelParameter, moving "
+                        "along the joint frame's Z axis.")
                 return error("This joint has no offset parameter (rigid/inferred or already 0-DOF).")
             u = (units or "mm").strip().lower()
             u = "in" if u == "inch" else u
@@ -623,6 +637,11 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         if want_angle:
             ap = safe(lambda: joint.angle)
             if ap is None:
+                if _is_as_built_joint(joint):
+                    return error(
+                        f"'{joint_name}' is an AS-BUILT joint, which exposes no offset/angle "
+                        "ModelParameter for ANY motion type - no expression can drive it. Delete "
+                        "it (design_delete_feature) and build the pair with joint_create instead.")
                 return error("This joint has no angle parameter.")
             ap.expression = f"{_fmt_num(angle)} deg"
             changed["angle"] = float(angle)
@@ -703,8 +722,10 @@ TOOL_DESCRIPTION = (
     "aligns its FULL local frame (un-rotating a pre-rotated part) - use a handle for a real offset. "
     "Creating a joint MOVES the free (ungrounded) part so its snap/JO point lands on the other "
     "input's location - do not pre-place it. 'joint_type' = rigid (default)/revolute/slider/"
-    "cylindrical/planar/ball/pin_slot; 'axis' selects the motion axis for types needing one (for "
-    "pin_slot it is the rotation axis, and 'slide_axis' sets the perpendicular slide direction). "
+    "cylindrical/planar/ball/pin_slot; 'axis' is FRAME-relative - an axis of the joint geometry's "
+    "frame, not a world one - so re-point a joint that pivots the wrong way with "
+    "joint_edit(world_axis=...). For pin_slot it is the rotation axis, with 'slide_axis' the "
+    "perpendicular slide. "
     "Optional 'offset' ('units'=mm/cm/in), 'angle' (deg), 'flip'."
 )
 
@@ -718,9 +739,9 @@ tool = (
     .add_input_property("occurrence_two", {"type": "string",
             "description": "Second input: same forms as occurrence_one."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
-    .add_input_property(*_inputs.world_axis("axis", default="z",
-            description="Motion axis for types that need one (for pin_slot: the rotation axis).").as_property())
-    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+    .add_input_property(*_inputs.frame_axis("axis", default="z",
+            description="Motion axis for types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+    .add_input_property(*_inputs.frame_axis("slide_axis", default="",
             description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
     .add_input_property("offset", {"type": "number", "description": "Offset distance (in 'units'; default 0)."})
     .add_input_property("angle", {"type": "number", "description": "Angle in degrees (default 0)."})
@@ -757,11 +778,11 @@ edit_tool = (
     .add_input_property("input_two", {"type": "string",
             "description": "New second input: Joint Origin name OR '<occurrence>:<snap>'."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS, description="Redefine the joint motion type.").as_property())
-    .add_input_property(*_inputs.world_axis("axis", default="z",
+    .add_input_property(*_inputs.frame_axis("axis", default="z",
             description="Motion axis for types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
-    .add_input_property(*_inputs.world_axis("slide_axis", default="",
+    .add_input_property(*_inputs.frame_axis("slide_axis", default="",
             description="pin_slot only: the perpendicular SLIDE direction (default = the next frame axis; must differ from 'axis').").as_property())
-    .add_input_property(*_inputs.world_axis("world_axis", default="",
+    .add_input_property(*_inputs.frame_axis("world_axis", default="",
             description="Re-point the motion to a TRUE WORLD axis via a construction axis - fixes a joint that pivots about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type if joint_type is omitted.").as_property())
     .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})
     .add_input_property("offset", {"type": "number", "description": "Set the joint ANCHOR offset (the offset ModelParameter, in 'units') - along the joint FRAME'S Z axis; NOT a slider's slide value (joint_drive poses that)."})

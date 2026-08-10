@@ -101,6 +101,8 @@ class TestFileGuard:
         step.write_text("x", encoding="utf-8")
         msg = error_message(mod.handler(file_path=str(step)))
         assert "not an .svg file" in msg and "doc_insert_import" in msg
+        # the other entry point lands art the same way this one does - it has no scale of its own
+        assert "no offset or scale to pass" in msg and "its own scale" not in msg
 
     def test_an_uppercase_extension_is_accepted(self, mod, sketch, tmp_path):
         _wire(sketch, _importer([]))
@@ -262,6 +264,16 @@ class TestMeasuredExtent:
         # the one fact a caller cannot recover after the call: the file's own size is ignored.
         assert "IGNORED" in mod.TOOL_DESCRIPTION
         assert "1/96 inch" in mod.TOOL_DESCRIPTION and "3.7795" in mod.TOOL_DESCRIPTION
+
+    def test_the_description_states_where_the_art_lands(self, mod):
+        # the other half of the same convention: SVG y points DOWN, so art anchored at y=0 hangs
+        # into NEGATIVE sketch y. A caller who does not know reads the negative extent as a bug.
+        assert "NEGATIVE sketch y" in mod.TOOL_DESCRIPTION
+        assert "-height" in mod.TOOL_DESCRIPTION
+
+    def test_the_description_names_the_other_svg_entry_point(self, mod):
+        # two tools import SVG; this one is the one with an offset and a scale to pass
+        assert "doc_insert_import imports svg as well" in mod.TOOL_DESCRIPTION
 
     def test_every_declared_output_is_in_the_payload(self, mod, sketch, svg):
         _wire(sketch, _importer([], bbox=_LANDED))

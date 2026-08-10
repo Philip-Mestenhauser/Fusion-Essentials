@@ -352,3 +352,18 @@ class TestListClear:
         out = _payload(sv.handler(action="clear"))
         assert out["removed_count"] == 2
         assert s1._deleted and s2._deleted
+
+    def test_clear_removes_every_section_from_a_collection_that_shrinks_as_it_deletes(self):
+        # deleteMe() takes the section OUT of sectionAnalyses, so the indices shift under the walk.
+        # A forward walk visits 0,1,2 over a list that is 3,2,1 long and leaves half the sections
+        # cut - the model stays sectioned while the payload reports them all removed.
+        secs = _install(existing_sections=[])
+        made = [FakeSection("Section%d" % i) for i in (1, 2, 3, 4)]
+        for s in made:
+            s.deleteMe = (lambda s=s: (secs._items.remove(s), setattr(s, "_deleted", True), True)[-1])
+        secs._items.extend(made)
+        out = _payload(sv.handler(action="clear"))
+        assert out["removed_count"] == 4
+        assert sorted(out["removed"]) == ["Section1", "Section2", "Section3", "Section4"]
+        assert all(s._deleted for s in made)
+        assert secs._items == []          # nothing left cutting the model

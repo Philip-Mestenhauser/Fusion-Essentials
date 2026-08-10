@@ -480,9 +480,56 @@ class TestWrapEdges:
 
 
 class TestIntegrationThroughItem:
+    """Item.create_tool_item is where the wrapping is DECIDED. Without these, the whole fleet can
+    lose the stamp (or gain one on an off-thread handler) with every other test still green."""
+
+    def _read_item(self, run_on_main_thread):
+        from mcpServer.mcp_primitives.item import Item
+        from mcpServer.mcp_primitives.tool import Tool
+        tool = Tool.create_simple(name="probe_get", description="A read that pins the wrapping.")
+        return Item.create_tool_item(tool=tool, write="read",
+                                     handler=lambda **kw: _ok({"bodies": 3}),
+                                     run_on_main_thread=run_on_main_thread)
+
     def test_write_tool_gains_expect_document_read_does_not(self):
         # create_tool_item wraps write handlers + adds the arg; read tools are untouched.
         ex = load_tool("model_extrude")
         assert "expect_document" in ex.extrude_tool.to_dict()["inputSchema"]["properties"]
         dg = load_tool("design_get")
         assert "expect_document" not in dg.tool.to_dict()["inputSchema"]["properties"]
+
+    def test_main_thread_read_is_stamped_at_registration(self):
+        # The stamp is wired ONCE here, not per tool - unwire it and every read in the fleet stops
+        # reporting which document it came from.
+        _set_active("Bracket", "urn:lineage:abc")
+        out = _decode(self._read_item(True).handler())
+        assert out["bodies"] == 3
+        assert out["active_document"] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+
+    def test_off_main_thread_read_is_not_wrapped(self):
+        # The carve-out: the identity read touches adsk, so a pure-Python off-thread handler must
+        # not be wrapped with it. Stamping one anyway is the crash this condition exists to prevent.
+        _set_active("Bracket", "urn:lineage:abc")
+        out = _decode(self._read_item(False).handler())
+        assert out["bodies"] == 3 and "active_document" not in out
+
+    def test_a_read_is_not_given_the_write_guard(self):
+        # wrap_read only - a read must never consume expect_document or stamp acted_on.
+        _set_active("Bracket", "urn:lineage:abc")
+        out = _decode(self._read_item(True).handler())
+        assert "acted_on" not in out
+
+    def test_design_get_is_registered_wrapped_and_sys_find_tool_is_not(self):
+        # The two real ends of the carve-out: design_get runs on the main thread (wrapped),
+        # sys_find_tool is pure Python and registers run_on_main_thread=False (not wrapped).
+        dg = load_tool("design_get")
+        assert dg.item.run_on_main_thread is True
+        assert getattr(dg.item.handler, "__wrapped__", None) is dg.handler
+        sft = load_tool("sys_find_tool")
+        assert sft.item.run_on_main_thread is False
+        assert sft.item.handler is sft.handler
+
+    def test_off_thread_read_result_carries_no_stamp_end_to_end(self):
+        _set_active("Bracket", "urn:lineage:abc")
+        sft = load_tool("sys_find_tool")
+        assert "active_document" not in _decode(sft.item.handler(query="extrude"))

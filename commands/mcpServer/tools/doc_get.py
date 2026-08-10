@@ -8,14 +8,13 @@ which reads the CLOUD data model. include=['versions'] and include=['xref_tree']
 slices (version history / referenced-component freshness rollup).
 """
 
-import time
-
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse, design, all_components
+from . import _data_read
 from . import _outputs
 
 app = adsk.core.Application.get()
@@ -47,8 +46,14 @@ def _doc_save_facts(doc):
     return df, is_modified, is_saved
 
 
-def _active_identity():
-    """The active document's name, save state, and data-model identity (URN/version/web URL)."""
+def _active_document_facts():
+    """The active document's name, save state, and data-model identity (URN/version/web URL).
+
+    A RECORD, not the (name, urn) pair `_write_guard._active_identity` hands the write guard: the
+    version/web-URL fields need the DataFile OBJECT, which this fetches exactly once and reuses -
+    calling that pair-read as well would fetch it a second time (each fetch is a main-thread cloud
+    round-trip). Both read the same active document, so the two never disagree on which one it is.
+    """
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None
@@ -111,7 +116,13 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
     total = safe(lambda: docs.count, 0)
     cap = max(1, int(max_results))
     for i in range(total):
-        d = docs.item(i)
+        # item(i) guarded: a stale document proxy holds its open_index slot as a null row (the
+        # 'open:N' address space must not slide), and states nothing about its save state.
+        d = safe(lambda i=i: docs.item(i))
+        if d is None:
+            if i < cap:
+                rows.append({"name": None, "open_index": i})
+            continue
         name = safe(lambda d=d: d.name)
         # never-saved / modified / saved all come from the DataFile, not doc.isSaved (which can read
         # False on a doc that has a real URN) - so a row's is_saved and its exception status agree.
@@ -154,19 +165,15 @@ def _classify_ext(ext):
     return _EXT_TYPE.get((ext or "").lower().lstrip("."), "other")
 
 
-def _iso(epoch):
-    """UNIX epoch seconds -> an ISO-8601 UTC string, or None if it can't be read."""
-    return safe(lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)))
-
-
 def _milestone_names(df, max_walk):
     """version number -> milestone NAME, from the DataFile's Milestones collection.
 
     The NAME lives only in that collection (a version's own isMilestone flag carries none), and the
-    join key is real: Milestone.version.versionNumber reads the milestoned version's own number
-    (measured, plans/probe_w6.log "P2.26 REVIEW PROBES 1+4": milestone 'ProbeMilestone2' ->
-    .version.versionNumber = 2). Each entry's .version hop is a cloud read of unmeasured cost, so the
-    walk is BOUNDED by max_walk - the same cap that bounds the published rows.
+    join key is real: Milestone.version.versionNumber reads the milestoned version's own number, so
+    the join needs no ordering assumption. A Milestone itself exposes ONLY isValid/name/version -
+    its own versionNumber/description/id RAISE (measured live), which is why the hop
+    through .version is not avoidable. Each hop is a cloud read of unmeasured cost, so the walk is
+    BOUNDED by max_walk - the same cap that bounds the published rows.
 
     Returns (map, readable, walked_all): readable is False when the collection could not be read at
     all, which must never be published as 'this document has no milestones'."""
@@ -211,9 +218,8 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         if n is None or n in seen:
             return
         epoch = safe(lambda v=v: v.dateCreated)
-        # After doc_save_milestone a version's own isMilestone flag reads FALSE (not null) for
-        # roughly 15-20s (measured twice: 15.7s, 19.9s). In both measured runs the Milestones
-        # collection arrived on the SAME poll as the flag, so neither source is known to lead. The
+        # After doc_save_milestone a version's own isMilestone flag reads FALSE (not null) for a
+        # while, and neither this flag nor the Milestones collection is known to lead the other. The
         # precedence here is therefore a DEFENSIVE RULE, not a measured window: where the collection
         # lists a version, the row reports it a milestone and publishes flag_lagging, so a
         # disagreement is visible rather than silently resolved.
@@ -223,7 +229,7 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
             "version_number": n,
             "version_id": safe(lambda v=v: v.versionId),
             "date_created": epoch,
-            "date_utc": _iso(epoch),
+            "date_utc": _data_read._epoch_iso(epoch),
             "description": safe(lambda v=v: v.description),
             "is_latest": (n == latest) if latest is not None else None,
             "is_open_in_session": (n == open_vnum) if open_vnum is not None else None,
@@ -254,16 +260,14 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         "milestone_walk_truncated": not walked_all,
         "versions": rows[:cap],
         "truncated": truncated,
-        "note": ("Version metadata can LAG a just-completed save by a few seconds "
-                 "(latest_version_number/is_latest may briefly read stale) - re-read before "
-                 "comparing versions right after a save. After doc_save_milestone a new milestone "
-                 "takes roughly 15-20s to become readable (measured 15.7s and 19.9s); until then the "
-                 "version's own flag reads FALSE, not null. Where the Milestones collection lists a "
-                 "version whose flag still reads false, the collection wins - that row reports "
-                 "is_milestone=true with flag_lagging=true. is_milestone null means the flag could "
-                 "not be read at all, milestone_names_readable=false means the collection could not "
-                 "be read, and milestone_walk_truncated=true means more milestones exist than the "
-                 "cap walked - none of the three is evidence that a version is not a milestone."),
+        "note": ("Version metadata LAGS a just-completed save: measured, a fresh read shows the new "
+                 "tip at 2.9-4.4s, and after doc_save_milestone the milestone flag and the "
+                 "Milestones collection arrive TOGETHER at 15.7-19.9s (three timed runs) - so "
+                 "re-read after that window rather than concluding from one read. A row the "
+                 "Milestones collection lists while its flag still reads false is published "
+                 "is_milestone=true with flag_lagging=true. is_milestone null, "
+                 "milestone_names_readable=false and milestone_walk_truncated=true each mean the "
+                 "answer is UNKNOWN - none is evidence a version is not a milestone."),
     }
 
 
@@ -493,7 +497,7 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
 def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int = _VERSIONS_CAP,
             xref_max: int = _XREF_CAP, max_depth=None, used_in_max: int = _USED_IN_CAP) -> dict:
     """See TOOL_DESCRIPTION."""
-    active = _active_identity()
+    active = _active_document_facts()
     if active is None:
         return error("No active document. Open or create one first (doc_open / doc_new).")
     rows, summary, truncated = _open_documents(max_results)

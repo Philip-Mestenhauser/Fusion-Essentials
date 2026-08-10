@@ -322,17 +322,14 @@ class TestStatusHandler:
         out = _payload(gen.status_handler(handle="gen1"))
         assert out["completed"] is True
 
-    def test_stale_pump_seconds_kwarg_tolerated(self, monkeypatch):
-        # A cached client schema may still send pump_seconds; the handler accepts and ignores it,
-        # and the payload no longer reports pumped_seconds (nothing pumps - generation runs on its own).
-        gen._GENERATIONS["gen1"] = self._completed_entry()
-        gen._HANDLE_SEQ[0] = 1
-        monkeypatch.setattr(gen._cam_common, "live_readiness", self._readiness(readiness="ready to post."))
-        monkeypatch.setattr(gen, "_collect_op_health",
-                            lambda: {"warnings": [], "errors": [], "empty": []})
-        out = _payload(gen.status_handler(handle="gen1", pump_seconds=9999))
-        assert out["completed"] is True
-        assert "pumped_seconds" not in out
+    def test_status_handler_accepts_exactly_its_wire_schema(self):
+        # The schema is strict, and the kernel rejects an unknown argument BEFORE dispatch unless the
+        # tool is listed in _SCHEMA_OMITTED_ARGS - so a handler kwarg with no schema property of its
+        # own is unreachable over the wire and can only mislead a reader of the signature.
+        import inspect
+        props = set(gen.status_tool.to_dict()["inputSchema"]["properties"])
+        params = set(inspect.signature(gen.status_handler).parameters)
+        assert params == props, f"signature {sorted(params)} vs schema {sorted(props)}"
 
     # ── completion settles on the HANDLE'S OWN scope, not the document-wide generating count ────
     # A handle launched against ONE setup/folder/operation must not be starved by a SECOND

@@ -48,7 +48,9 @@ class TestSketchGetRouting:
                 seen["units"] = units
                 return {"isError": False, "content": [{"type": "text", "text": "{}"}]}
 
-        # the handler imports `from . import _sketch_detail` lazily; install a stub module
+        # The handler resolves the engine by NAME in the module table on every call, so installing
+        # the stub there routes it - whatever else has already imported the real engine. Binding the
+        # engine through the package attribute instead makes this test pass or fail on load order.
         import sys
         monkeypatch.setitem(sys.modules, "mcpServer.tools._sketch_detail", FakeDetail)
 

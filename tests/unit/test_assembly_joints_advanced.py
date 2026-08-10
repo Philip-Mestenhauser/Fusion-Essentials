@@ -156,13 +156,17 @@ class FakeAsBuiltJoints:
     motion the input carries, unless motion_class forces another (the platform-lies case: '' models a
     joint whose motion cannot be read at all)."""
 
-    def __init__(self, motion_class=None, geometry_readback="ANCHOR", add_returns=True):
+    def __init__(self, motion_class=None, geometry_readback="ANCHOR", add_returns=True,
+                 name_sticks=True):
         self.last = None
         self.last_input = None
         self.added = 0
         self._motion_class = motion_class
         self._geometry_readback = geometry_readback
         self._add_returns = add_returns
+        # name_sticks=False models the SWIG accept-and-ignore: the assignment does not raise, the
+        # joint keeps the name Fusion gave it, and only a read-back notices.
+        self._name_sticks = name_sticks
 
     def createInput(self, o1, o2, geometry):
         self.last = (o1, o2, geometry)
@@ -177,8 +181,11 @@ class FakeAsBuiltJoints:
         if cls is None:
             cls = type(inp.jointMotion).__name__ if inp.jointMotion is not None else "RigidJointMotion"
         motion = type(cls, (), {})() if cls else None
-        return type("J", (), {"name": "AsBuilt1", "jointMotion": motion,
-                              "geometry": self._geometry_readback})()
+        attrs = {"name": "AsBuilt1", "jointMotion": motion,
+                 "geometry": self._geometry_readback}
+        if not self._name_sticks:
+            attrs["name"] = property(lambda self: "AsBuilt1", lambda self, value: None)
+        return type("J", (), attrs)()
 
 
 class FakeGeoRels:
@@ -391,11 +398,11 @@ def as_built(monkeypatch):
     """Factory: install a design with two occurrences plus a configurable asBuiltJoints collection,
     and stub the shared '<occ>:<snap>'/handle resolver so 'geometry' yields an opaque JointGeometry
     (a real one needs a live session). Returns the asBuiltJoints fake."""
-    def _make(occ_specs=(("A:1", "A:1"), ("B:1", "B:1")), **abj_kwargs):
+    def _make(occ_specs=(("A:1", "A:1"), ("B:1", "B:1")), pending=False, **abj_kwargs):
         import adsk.fusion
         abj = FakeAsBuiltJoints(**abj_kwargs)
         design = FakeDesign([FakeOcc(n, full_path=fp) for n, fp in occ_specs],
-                            FakeSnapshots(), abj, FakeAssemblyConstraints())
+                            FakeSnapshots(pending=pending), abj, FakeAssemblyConstraints())
         fake_app = type("A", (), {"activeProduct": design})()
         monkeypatch.setattr(ja, "app", fake_app)
         monkeypatch.setattr(ja._common, "app", fake_app)
@@ -635,6 +642,49 @@ class TestAsBuiltResultNote:
         assert out["note"] == "Occurrences rigidly joined where they already are."
 
 
+class TestAsBuiltName:
+    """AsBuiltJoints.createInput/add take no name, so a requested name is applied to the CREATED
+    joint through AsBuiltJoint.name and confirmed by reading it back."""
+
+    def test_name_is_applied_after_creation_and_published(self, as_built):
+        as_built()
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1",
+                                                 name="Slider_R"))
+        assert out["joint"] == "Slider_R"
+
+    def test_no_name_leaves_the_joint_named_by_fusion(self, as_built):
+        as_built()
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert out["joint"] == "AsBuilt1"
+
+    def test_blank_name_is_not_a_rename_attempt(self, as_built):
+        # "   " is no name at all; treating it as one would rename the joint to whitespace
+        as_built(name_sticks=False)
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1",
+                                                 name="   "))
+        assert out["joint"] == "AsBuilt1"
+
+    def test_a_name_that_does_not_take_is_refused_and_says_the_joint_exists(self, as_built):
+        # the SWIG accept-and-ignore: nothing raises, so only the read-back catches it. Reporting
+        # created:true with the requested name would publish a name the browser does not show.
+        as_built(name_sticks=False)
+        res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1", name="Slider_R")
+        assert res["isError"] is True
+        assert "Slider_R" in res["message"] and "AsBuilt1" in res["message"]
+        assert "WAS created" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+
+class TestAsBuiltDescription:
+    def test_description_states_the_no_parameter_fact_and_the_parametric_path(self):
+        # fusion.AsBuiltJoint carries no offset/angle ModelParameter at all, so an as-built joint's
+        # position can never be driven by an expression - the agent has to know that BEFORE it
+        # builds the mechanism, not after joint_edit refuses.
+        desc = ja._ASBUILT_DESC
+        assert "NO offset/angle ModelParameter" in desc
+        assert "use joint_create when it must be parametric" in desc
+
+
 # ── assembly_constrain ──────────────────────────────────────────────────────
 
 class TestAssemblyConstraint:
@@ -810,3 +860,94 @@ class TestConstraintValueEncoding:
         ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top", offset=0)
         value = ac.last_input.geometricRelationships.added[0][3]
         assert value == ("real", 0.0)
+
+
+class TestAsBuiltPendingMoveRefusal:
+    """An as-built joint says "joint them where they are" - but its creation recomputes the assembly,
+    and a recompute REVERTS an uncaptured occurrence position, so "where they are" becomes the
+    reverted pose. The create refuses while the pending flag is set, naming the same remedy
+    assembly_capture_position offers, and the flag comes from the ONE shared read."""
+
+    def test_refuses_the_as_built_create_while_a_move_is_pending(self, as_built):
+        abj = as_built(pending=True)
+        res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1")
+        assert res["isError"] is True
+        assert "would silently revert" in res["message"]
+        assert abj.added == 0                       # refused before asBuiltJoints.add
+
+    def test_the_refusal_names_capture_and_discard(self, as_built):
+        as_built(pending=True)
+        msg = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1")["message"]
+        assert "assembly_capture_position(action='capture')" in msg
+        assert "action='discard_pending'" in msg
+
+    def test_creates_normally_with_nothing_pending(self, as_built):
+        abj = as_built(pending=False)
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert out["created"] is True and abj.added == 1
+
+    def test_an_unreadable_pending_flag_does_not_refuse(self, as_built):
+        # The flag RAISES - unknown, not pending. An unreadable flag is no evidence of a move, so it
+        # must not block a create the way a real True does.
+        abj = as_built(pending=False)
+        design = ja._common.app.activeProduct
+        design.snapshots._blind = True
+        out = _payload(ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert out["created"] is True and abj.added == 1
+
+    def test_capture_status_consumes_the_shared_read(self, as_built, monkeypatch):
+        # The bite for the ONE-home claim: stub the shared read alone. An inlined
+        # snaps.hasPendingSnapshot re-roll in the status handler would ignore this and answer False.
+        as_built(pending=False)
+        monkeypatch.setattr(ja._joints, "pending_position", lambda design: True)
+        out = _payload(ja.capture_position_handler(action="status"))
+        assert out["has_pending"] is True
+
+    def test_the_create_guard_consumes_the_same_shared_read(self, as_built, monkeypatch):
+        as_built(pending=False)
+        monkeypatch.setattr(ja._joints, "pending_position", lambda design: True)
+        res = ja.as_built_joint_handler(occurrence_one="A:1", occurrence_two="B:1")
+        assert res["isError"] is True and "would silently revert" in res["message"]
+
+
+class TestStatusPublishesTheFlagTriState:
+    """has_pending is the flag itself, not a coerced boolean: True, False, or null when it could not
+    be read. Publishing an unreadable flag as false would tell a caller "nothing is pending" on the
+    one reading that supports no answer at all - and that caller then creates a joint through it."""
+
+    def test_a_readable_true_publishes_true(self, as_built):
+        as_built(pending=True)
+        assert _payload(ja.capture_position_handler(action="status"))["has_pending"] is True
+
+    def test_a_readable_false_publishes_false(self, as_built):
+        as_built(pending=False)
+        assert _payload(ja.capture_position_handler(action="status"))["has_pending"] is False
+
+    def test_an_unreadable_flag_publishes_null_not_false(self, as_built):
+        as_built(pending=False)
+        ja._common.app.activeProduct.snapshots._blind = True
+        out = _payload(ja.capture_position_handler(action="status"))
+        assert out["has_pending"] is None
+        assert "UNKNOWN" in out["note"] and "not a 'no'" in out["note"]
+
+    def test_the_markers_still_come_back_when_the_flag_is_unreadable(self, as_built):
+        # the flag and the marker list are independent reads - losing one must not blank the other
+        as_built(pending=False)
+        design = ja._common.app.activeProduct
+        design.snapshots._items = [FakeSnapshot("Position1", timeline_index=3)]
+        design.snapshots._blind = True
+        out = _payload(ja.capture_position_handler(action="status"))
+        assert out["markers"] == [{"name": "Position1", "timeline_index": 3}]
+
+    def test_an_unreadable_flag_still_refuses_a_capture(self, as_built):
+        # tri-state on the wire does not loosen the act precondition: only a real True may capture
+        as_built(pending=False)
+        ja._common.app.activeProduct.snapshots._blind = True
+        res = ja.capture_position_handler(action="capture")
+        assert res["isError"] is True and "no pending" in res["message"].lower()
+
+    def test_the_status_note_names_the_placement_exception(self, as_built):
+        # a placement does NOT set this flag - a caller told otherwise chases a capture that refuses
+        as_built(pending=True)
+        note = _payload(ja.capture_position_handler(action="status"))["note"]
+        assert "design_add_instance placement does NOT" in note

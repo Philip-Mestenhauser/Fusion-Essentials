@@ -167,6 +167,22 @@ class TestProgramTargeting:
         assert "Ghost" in res["message"]
         assert "P1" in res["message"] and "P2" in res["message"]
 
+    def test_a_program_whose_name_cannot_be_read_reaches_available_as_none(self, monkeypatch):
+        # the available list is what the user picks their next 'program' from, so a program that
+        # exists but whose name is unreadable must show up as an unnamed slot - dropping it would
+        # claim the document holds fewer programs than it does
+        class _UnnamedNCP(FakeNCP):
+            @property
+            def name(self):
+                raise RuntimeError("name is locked")
+            @name.setter
+            def name(self, _v):
+                pass
+        _install(monkeypatch, [FakeNCP("P1"), _UnnamedNCP("P2")])
+        res = nc.handler(comment="X", program="Ghost")
+        assert res["isError"] is True
+        assert "P1" in res["message"] and "None" in res["message"]
+
     def test_no_nc_programs_errors(self, monkeypatch):
         _install(monkeypatch, [])
         res = nc.handler(comment="X")

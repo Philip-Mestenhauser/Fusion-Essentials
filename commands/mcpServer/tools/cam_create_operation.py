@@ -11,8 +11,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, find_setup
-from . import cam_generate
+from ._cam_common import get_cam, find_setup, register_future
 
 app = adsk.core.Application.get()
 
@@ -131,8 +130,8 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
 
     if generate:
         # The Future MUST be registered, not discarded: if it is garbage-collected Fusion ABANDONS
-        # the in-progress generation (see cam_generate._GENERATIONS). register_future is the one
-        # registration path, and its handle is what cam_get_status polls.
+        # the in-progress generation. _cam_common.register_future is the one registration path, and
+        # its handle is what cam_get_status polls.
         gerr, handle = None, None
         try:
             fut = cam.generateToolpath(op)
@@ -140,7 +139,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
                 gerr = "generateToolpath returned no future, so no generation is running."
             else:
                 op_name = safe(lambda: op.name)
-                handle, _total = cam_generate.register_future(
+                handle, _total = register_future(
                     fut, f"operation '{op_name}'", "operation", False,
                     target_name=op_name or "")
         except Exception as e:

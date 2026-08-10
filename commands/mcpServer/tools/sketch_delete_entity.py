@@ -12,9 +12,10 @@ bad constraint can be surgically removed WITHOUT deleting and rebuilding the who
       sketch_set_text edits by). The delete is verified by reading the collection count back - a
       delete that removed nothing is reported as a failure, never a false ok. WRITES.
 
-The recovery tool for the coincident-vs-point-on-curve trap sketch_constrain documents: apply a wrong
-constraint, delete just THAT constraint here, re-constrain - instead of design_delete_feature on the
-entire sketch.
+The recovery tool for a constraint that landed on the wrong geometry - a coincident onto a curve
+puts the point ON it rather than at its centre, and sketch_constrain says so on its own success
+path: apply a wrong constraint, delete just THAT constraint here, re-constrain - instead of
+design_delete_feature on the entire sketch.
 """
 
 import adsk.core

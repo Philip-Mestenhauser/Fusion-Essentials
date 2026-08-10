@@ -20,7 +20,7 @@ TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path
 # A collection attribute reads `<lowerCamel>Features`/`<lowerCamel>s`; its class is the same name
 # with an initial capital. Only fusion/cam collections are resolved - a core factory is reached the
 # same way and falls through to the same lookup.
-_MODULES = ("fusion", "cam", "core")
+_MODULES = ("fusion", "cam", "core", "drawing")
 
 
 # 'module.Collection' for every collection that declares a factory returning a FeatureInput.

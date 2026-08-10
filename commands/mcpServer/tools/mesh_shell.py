@@ -38,6 +38,16 @@ def _counts(mb) -> dict:
     return {"triangle_count": _tri_count(mb), "vertex_count": _node_count(mb)}
 
 
+def _closed(mb):
+    """Whether `mb` is watertight NOW - True / False / None when the flag cannot be read.
+
+    Sampled at both ends because MeshBody.volume returns 0.0 on a body that is not closed
+    (measured): a body that stops reading watertight reports a full-magnitude negative delta, so the
+    flag is the only thing separating 'the material came out' from 'the body stopped enclosing
+    anything'. The sibling read is mesh_repair._facts."""
+    return safe(lambda: bool(mb.isClosed))
+
+
 def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
@@ -59,6 +69,7 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
     # Captured BEFORE the mutation: the name a payload publishes and the counts the verdict rests on.
     mesh_name = safe(lambda: mb.name)
     before = _counts(mb)
+    before_closed = _closed(mb)
     before_volume = _geom.volumes([mb])
 
     try:
@@ -90,6 +101,7 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
         return error(_common.no_feature_error(design, "Mesh shell"))
 
     after = _counts(mb)
+    after_closed = _closed(mb)
     volume_delta_cm3, volume_readable = _geom.volume_delta([mb], before_volume)
     comparable = [k for k in _COUNT_KEYS if before[k] is not None and after[k] is not None]
     moved = [k for k in comparable if before[k] != after[k]]
@@ -116,15 +128,19 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
 
     units_key = (vals["units"] or "mm").strip().lower()
     inv_scale = _common.CM_TO_UNIT[units_key]
-    # A hollow is a volume DROP. Re-triangulation alone proves the body changed, not that material
-    # came out of it, so the flag tracks the volume and the note says which of the two happened.
-    hollowed = bool(volume_readable and volume_delta_cm3 < 0.0)
+    # A hollow is a volume DROP on a body that is STILL closed. A body that stops reading
+    # watertight reports the same drop for the opposite reason - it encloses nothing, so its
+    # volume reads 0.0 - and calling that a hollow would report the worst outcome as the best one.
+    # An unreadable closure flag cannot clear the body either: the flag has to SAY closed.
+    closure_lost = before_closed is True and after_closed is False
+    hollowed = bool(volume_readable and volume_delta_cm3 < 0.0 and after_closed is True)
     payload = {
         "hollowed": hollowed,
         "mesh": mesh_name,
         "handle": safe(lambda: mb.entityToken),
         "before": before,
         "after": after,
+        "watertight": after_closed,
         "changed": moved,
         "volume_change": (round(volume_delta_cm3 * inv_scale ** 3, 6) if volume_readable else None),
         "units": units_key,
@@ -146,6 +162,25 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
 
     if hollowed:
         note = "Mesh hollowed in place - the same body, re-triangulated. Re-read it with mesh_get."
+    elif closure_lost:
+        # Both halves report what was READ. The volume clause is gated on the volume actually
+        # being readable and quotes the measured change, because a body whose volume could not be
+        # read at both ends has no number to explain - and no mechanism is named for the lost
+        # closure, only the flags.
+        note = ("The shell left '" + str(mesh_name) + "' NO LONGER watertight (is_closed went true "
+                "-> false), so this is a loss of closure, NOT a hollow. ")
+        if volume_readable:
+            note += (f"A body that reads open encloses nothing, so the volume change of "
+                     f"{payload['volume_change']} {units_key}3 measures the closure going away "
+                     "rather than material coming out. ")
+        else:
+            note += "Its volume could not be read at both ends, so there is no change to report. "
+        note += ("Undo in Fusion, or repair the body with "
+                 "mesh_repair(repair_type='close_holes').")
+    elif after_closed is not True:
+        note = ("The body does not report itself watertight after the shell, so a volume drop "
+                "cannot be read as material coming out - the hollow is NOT confirmed. Check the "
+                "body with mesh_get.")
     elif volume_readable:
         note = (f"The mesh changed but its enclosed volume did not drop (volume_change "
                 f"{payload['volume_change']}), so the hollow is NOT confirmed by volume - check "
@@ -166,8 +201,10 @@ TOOL_DESCRIPTION = (
     "Hollow a MESH body with the MeshShell feature (the BRep model_shell cannot reach a mesh). The "
     "shell rewrites the SAME body in place - the name survives and it is re-triangulated - so there "
     "are no new bodies to name. The effect is read back off the body (triangle and vertex counts "
-    "plus the enclosed volume) and a shell that moved none of them is an error; the thickness that "
-    "actually landed is read back off the feature, never echoed."
+    "plus the enclosed volume) and a shell that moved none of them is an error; 'hollowed' needs "
+    "BOTH a volume drop and a still-watertight body, because a body that stops reading watertight "
+    "reports volume 0.0, so a volume drop alone is not a hollow; the thickness that actually "
+    "landed is read back off the feature, never echoed."
 )
 
 tool = _inputs.apply_to_tool(

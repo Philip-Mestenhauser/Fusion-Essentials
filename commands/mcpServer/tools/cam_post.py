@@ -402,11 +402,20 @@ def _expand_ops(items):
     return out
 
 
-def _op_token_set(ops):
-    """Stable per-operation identity for a stored-vs-requested comparison: entityToken, falling back
-    to id() (the entityToken-or-id() convention used across the tool surface, e.g. model_extrude,
-    surface_edit) for objects that expose no entityToken."""
-    return {(safe(lambda o=o: o.entityToken) or id(o)) for o in (ops or [])}
+def _op_id_set(ops):
+    """(ids, unreadable): the per-operation identity for a stored-vs-requested comparison.
+    Operation/Setup/CAMFolder carry operationId; Operation has no entityToken. An operation whose id
+    cannot be read is COUNTED, never stood in for by id(): two independent fetches of the same
+    operation are different Python objects, so an id() stand-in makes every legitimate re-post look
+    like a different set and fires the overwrite guard on it."""
+    ids, unreadable = set(), 0
+    for o in (ops or []):
+        oid = safe(lambda o=o: o.operationId)
+        if oid is None:
+            unreadable += 1
+        else:
+            ids.add(oid)
+    return ids, unreadable
 
 
 def handler(scope: str = "", post: str = "", post_scope: str = "local", output_folder: str = "",
@@ -466,10 +475,21 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
     # operations differ from the REQUESTED scope would silently clobber a program that may be
     # machinist-curated. A program with no stored operations yet has nothing to protect. Identical sets
     # (the common re-post case) proceed with no friction.
-    if reused and not as_is:
-        requested_ops = _expand_ops(_operations_collection(cam, target))
-        stored_tokens = _op_token_set(_expand_ops(safe(lambda: list(existing.operations)) or []))
-        if stored_tokens and stored_tokens != _op_token_set(requested_ops) and not overwrite:
+    if reused and not as_is and not overwrite:
+        stored_ops = _expand_ops(safe(lambda: list(existing.operations)) or [])
+        stored_ids, stored_unreadable = _op_id_set(stored_ops)
+        requested_ids, requested_unreadable = _op_id_set(_expand_ops(_operations_collection(cam, target)))
+        if stored_ops and (stored_unreadable or requested_unreadable):
+            # No identity, no comparison: whether this reconfigure clobbers curated work is unknown,
+            # and an unknown answer must not be published as "they match".
+            return error(
+                f"NC Program '{prog_name}' already exists, but its stored operations cannot be "
+                f"compared with what 'scope' resolves to: {stored_unreadable} stored and "
+                f"{requested_unreadable} requested operation(s) have no readable operationId, so "
+                "whether reconfiguring would overwrite a machinist-curated program is unknown. Omit "
+                "'scope', 'post', and 'output_folder' to post it exactly as stored, or pass "
+                "overwrite=true to reconfigure it anyway.")
+        if stored_ids and stored_ids != requested_ids:
             return error(
                 f"NC Program '{prog_name}' already exists and its stored operations differ from what "
                 "'scope' resolves to - reconfiguring would overwrite a program that may be machinist-"

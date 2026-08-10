@@ -20,22 +20,12 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import go_stale, load_tool, payload, error_message
+from conftest import MeshBody, go_stale, load_tool, payload, error_message
 
 msp = load_tool("mesh_separate")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
-
-class MeshBody:
-    """Stands in for adsk.fusion.MeshBody. isValid stays True after the separate consumes the body
-    - the measured lie - while go_stale drops the IDENTITY reads a handler must have taken first."""
-    def __init__(self, name="Scan1", token=None, parent=None):
-        self.name = name
-        self.entityToken = token or f"MTOK::{name}"
-        self.parentComponent = parent
-        self.isValid = True
-
 
 class _Coll:
     def __init__(self, items=()):

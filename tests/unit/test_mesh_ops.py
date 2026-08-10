@@ -60,8 +60,10 @@ class MeshBody:
     """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody).
 
     area/volume default to UNSET (the attribute is not set at all), so a plain access raises
-    AttributeError - the same shape as a live non-closed mesh raising on .volume. Pass explicit cm
-    values to model a real reading."""
+    AttributeError - a field that cannot be READ, which the record must publish as null. It is NOT
+    the open-mesh shape: MeshBody.volume on a mesh that is not closed RETURNS 0.0 (measured on a
+    single-triangle STL reading is_closed false), so an open-mesh fake passes volume=0.0 and the
+    record publishes 0.0. Pass explicit cm values to model a real reading."""
     def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, is_oriented=True,
                  token=None, bbox=None, parent=None, area=_UNSET, volume=_UNSET):
         self.name = name
@@ -420,19 +422,41 @@ class TestMeshGet:
         assert abs(rec["volume"] - 2.0) < 1e-6
         assert out["units"] == "cm"
 
-    def test_volume_is_null_when_read_raises_not_sunk(self):
-        # a non-closed mesh can RAISE on .volume (MeshBody.volume is undefined without a closed
-        # volume) - the record reports null for that field, the call is never sunk, and area (which
-        # DOES read cleanly) is still reported.
+    def test_an_open_mesh_publishes_volume_zero_not_null(self):
+        # MeshBody.volume on a mesh that is not closed RETURNS 0.0 - it does not raise - so 0.0 is
+        # the API's answer for a body that encloses nothing and the record publishes it as a number.
         _wire_adsk()
-        m = MeshBody("OpenScan", is_closed=False, area=4.0)   # volume left UNSET -> raises on access
+        m = MeshBody("OpenScan", is_closed=False, area=4.0, volume=0.0)
         comp = FakeComp("Comp", meshes=[m])
         _install(FakeDesign(comp))
         out = _payload(mo.mesh_get_handler(target=""))
         rec = out["meshes"][0]
         assert rec["is_closed"] is False
+        assert rec["volume"] == 0.0
+        assert rec["volume"] is not None
+        assert abs(rec["area"] - 400.0) < 1e-6   # 4 cm^2 -> 400 mm^2
+
+    def test_volume_is_null_only_when_the_field_cannot_be_read(self):
+        # the OTHER meaning of the field: a read that raises is published as null and never sinks
+        # the record - area (which DOES read cleanly) is still reported.
+        _wire_adsk()
+        m = MeshBody("DeadScan", is_closed=True, area=4.0)    # volume left UNSET -> raises on access
+        comp = FakeComp("Comp", meshes=[m])
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target=""))
+        rec = out["meshes"][0]
         assert rec["volume"] is None
-        assert abs(rec["area"] - 400.0) < 1e-6   # 4 cm^2 -> 400 mm^2, unaffected by the volume failure
+        assert abs(rec["area"] - 400.0) < 1e-6   # unaffected by the volume failure
+
+    def test_the_note_tells_a_zero_volume_apart_from_a_null_one(self):
+        # the wire note is the only place a reader learns which of the two a number/null means.
+        _wire_adsk()
+        comp = FakeComp("Comp", meshes=[MeshBody("Scan")])
+        _install(FakeDesign(comp))
+        note = _payload(mo.mesh_get_handler(target=""))["note"]
+        assert "reads 0.0" in note and "is_closed=false" in note
+        assert "could not be read" in note
+        assert "is null for a mesh that is not watertight" not in note
 
     def test_unknown_units_rejected(self):
         _wire_adsk()
@@ -468,9 +492,18 @@ class TestMeshMeasure:
         assert abs(out["area"] - 1000.0) < 1e-6      # 10 cm^2 -> 1000 mm^2
         assert abs(out["volume"] - 5000.0) < 1e-6    # 5 cm^3 -> 5000 mm^3
 
-    def test_measure_volume_null_when_not_closed(self):
+    def test_measure_of_an_open_mesh_reports_volume_zero_and_says_why(self):
+        # 0.0 is the measured open-mesh reading, so the note has to say the body is not empty - it
+        # encloses nothing - or a caller reads the number as a vanished body.
         _wire_adsk()
-        m = MeshBody("Open", is_closed=False)   # area/volume UNSET -> both raise -> both null
+        m = MeshBody("Open", is_closed=False, area=4.0, volume=0.0)
+        out = _payload(mo.mesh_measure_of_body(m))
+        assert out["volume"] == 0.0
+        assert "reads 0.0" in out["note"] and "nothing enclosed" in out["note"]
+
+    def test_measure_volume_null_when_the_field_cannot_be_read(self):
+        _wire_adsk()
+        m = MeshBody("Dead")   # area/volume UNSET -> both raise -> both null
         out = _payload(mo.mesh_measure_of_body(m))
         assert out["volume"] is None
         assert out["area"] is None
@@ -1118,3 +1151,15 @@ class TestMeshToBrep:
         out = _payload(mo.mesh_to_brep_handler(mesh="H", method="faceted"))
         assert out["method"] == "faceted"
         assert getattr(feats.last_input, "meshConvertMethodType", None) == _CONV.FacetedMeshConvertMethodType
+
+
+# ── the tool description a connected agent reads before it ever calls ───────────────────────────
+
+class TestMeshGetDescription:
+    def test_the_description_states_the_measured_open_mesh_volume(self):
+        # the description is the only thing an agent knows about the field before the first call,
+        # so it carries the same 0.0-vs-null split the payload note does.
+        desc = mo.mesh_get_tool.to_dict()["description"]
+        assert "reads 0.0 on a mesh that is not watertight" in desc
+        assert "null only when the field could not be read" in desc
+        assert "'volume' is null for a mesh that is not watertight" not in desc
