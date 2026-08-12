@@ -16,6 +16,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
+from ._cam_common import clamp_rows
 from . import _common
 from ._common import target_component as _target_component
 from . import _inputs
@@ -192,7 +193,7 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
             meshes.append(_mesh_summary(mb, inv_scale=inv_scale))
 
     total = len(meshes)
-    cap = max(1, int(max_results))
+    cap = clamp_rows(max_results, 50, 200)   # every row crosses the wire; the cap cannot be lifted past 200
     meshes_out = meshes[:cap]
     truncated = total > len(meshes_out)
 
@@ -317,13 +318,13 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     # raw beside units='mm' UNDERSTATES the body by 100x in area and 1000x in volume.
     inv_scale = 1.0 / unit_cm
     bodies = []
-    rename = (name or "").strip()
+    rename_warning = None
     for mb in _common.iter_collection(mesh_list):
-        if rename and count == 1:
-            safe(lambda: setattr(mb, "name", rename))
+        if (name or "").strip() and count == 1:
+            _final, rename_warning = _common.apply_rename(mb, name)
         bodies.append(_mesh_summary(mb, inv_scale=inv_scale))
 
-    return ok({
+    payload = {
         "imported": True,
         "bodies": bodies,
         "component": safe(lambda: comp.name),
@@ -334,7 +335,10 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
             "Wrapped in BaseFeature '%s' (parametric design requires it)." % bf_name if bf_name
             else "Direct design - no base-feature scope needed.") +
             " Convert to BRep with mesh_to_brep to use find_geometry / fillet / CAM on it."),
-    })
+    }
+    if rename_warning:
+        payload["rename_warning"] = rename_warning
+    return ok(payload)
 
 
 # ── mesh_reduce ──────────────────────────────────────────────────────────────────────────────
@@ -526,15 +530,27 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
         if inp is None:
             return error("meshRemeshFeatures.createInput returned nothing.")
 
-        # density is an OPTIONAL relative knob; the exact MeshRemeshFeatureInput field names should be
-        # confirmed live via sys_get_api_doc adsk.fusion.MeshRemeshFeatureInput. We set it best-effort
-        # and never fail the op just because the field is absent on this build.
+        # density set-then-read-back (measured: a safe(setattr) here SILENTLY dropped it - 0.05 vs
+        # 20 produced byte-identical results with the value never echoed). The field takes a
+        # ValueInput, not a raw float (live-verified 2705.0.87: a float raises in the SWIG layer;
+        # createByReal lands and reads back as a ValueInput whose realValue echoes the set). A
+        # build that refuses the set gets a REFUSAL, never the silent default remesh.
         try:
             d = float(density)
         except Exception:
             d = 0.0
+        density_applied = None
         if d > 0:
-            safe(lambda: setattr(inp, "density", d))
+            try:
+                inp.density = adsk.core.ValueInput.createByReal(d)
+            except Exception as e:
+                return error(f"'density' did not take on this build: {e}. Re-run without "
+                             "'density' for the default remesh.")
+            echoed = safe(lambda: inp.density.realValue)
+            if echoed is None or abs(echoed - d) > 1e-9:
+                return error(f"'density' did not land: set {d}, read back {echoed}. Re-run "
+                             "without 'density' for the default remesh.")
+            density_applied = d
 
         # Mutation - direct call. A falsy return is non-parametric SUCCESS (direct design OR base-feature
         # scope), not a failure. Remesh modifies the mesh IN PLACE: SUCCESS is the mesh's updated counts.
@@ -544,7 +560,7 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
             return error(f"Mesh remesh failed (meshRemeshFeatures.add raised): {e}")
         # The open BaseFeature can never be re-found once the scope closes, so its name is captured
         # HERE - it is what explains a null feature to the caller.
-        return {"feat": feat,
+        return {"feat": feat, "density_applied": density_applied,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
     result, scope_err = run_in_base_feature(design, comp, inner_op)
@@ -568,6 +584,8 @@ def mesh_remesh_handler(mesh: str = "", density: float = 0.0) -> dict:
     "design_mode": design_mode,
     "base_feature": bf_name,
     }
+    if result.get("density_applied") is not None:
+        out["density_applied"] = result["density_applied"]
     if out["changed"] is False:
         out["note"] = (f"Triangle count is unchanged ({before_tri}) - an identical retriangulation "
                        "is unlikely; verify the mesh with model_inspect before trusting the remesh.")
@@ -777,7 +795,7 @@ mesh_get_tool = (
             "nothing) and null only when the field could not be read. 'meshes' is "
             "capped (max_results, default 50); 'truncated' flags when the cap was hit."))
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50)."})
+    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'meshes' array returned (default 50, max 200)."})
     .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
     .strict_schema()
 )
@@ -825,7 +843,7 @@ mesh_remesh_tool = (
                      "fire-and-poll is advisable."))
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
-    .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Field names vary by build; set best-effort."})
+    .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Read back after the set; refused if this build does not take it."})
     .strict_schema()
 )
 mesh_remesh_item = Item.create_tool_item(tool=mesh_remesh_tool, write="write", handler=mesh_remesh_handler, run_on_main_thread=True)

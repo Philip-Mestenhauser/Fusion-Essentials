@@ -23,7 +23,9 @@ class FakeMatrix:
         self.translation = None
         self.rotation = None
     def setToRotation(self, angle, axis, origin):
+        # the live API answers a bool; the handler gates on it (a false = no rotation landed)
         self.rotation = (angle, axis, origin)
+        return True
 
 
 class FakeOccurrences:
@@ -282,6 +284,55 @@ class TestRemoveExisting:
         res = io.handler(document_id="urn:x", remove_existing="Wheel")
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
         assert a.deleted is False and b.deleted is False
+
+    def test_an_insert_failure_after_the_removal_discloses_the_part_is_gone(self, monkeypatch):
+        # remove_existing DELETES before addByInsert runs: a failure after that point must say the
+        # old occurrence is already gone, or the caller retries into an assembly missing a part it
+        # believes is still there.
+        old = FakeOcc("OldPart:1", component=FakeComp("OldPart"))
+        design, root_comp = _install(monkeypatch, occurrences=[old])
+        root_comp.occurrences.insert_result = None       # addByInsert returns nothing
+        res = io.handler(document_id="urn:x", remove_existing="OldPart:1")
+        assert res["isError"] is True
+        assert old.deleted is True
+        assert "OldPart:1" in res["message"] and "ALREADY REMOVED" in res["message"]
+
+    def test_a_clean_failure_before_any_removal_makes_no_removed_claim(self, monkeypatch):
+        design, root_comp = _install(monkeypatch)
+        root_comp.occurrences.insert_result = None
+        res = io.handler(document_id="urn:x")
+        assert res["isError"] is True
+        assert "ALREADY REMOVED" not in res["message"]
+
+    def test_bad_placement_inputs_refuse_before_the_removal_deletes_anything(self, monkeypatch):
+        # placement validation runs BEFORE the destructive removal - a typo in units/axis must not
+        # cost the caller a part.
+        old = FakeOcc("OldPart:1", component=FakeComp("OldPart"))
+        _install(monkeypatch, occurrences=[old])
+        res = io.handler(document_id="urn:x", remove_existing="OldPart:1",
+                         x=5, units="furlongs")
+        assert res["isError"] is True
+        assert old.deleted is False
+        res = io.handler(document_id="urn:x", remove_existing="OldPart:1",
+                         rotate_deg=45, rotate_axis="w")
+        assert res["isError"] is True
+        assert old.deleted is False
+
+    def test_a_refused_setToRotation_bool_is_an_error_not_an_unrotated_insert(self, monkeypatch):
+        # the live API answers a bool: a false means the rotation never landed on the matrix, so
+        # the occurrence would insert UNROTATED while the payload echoed rotate_deg
+        design, root_comp = _install(monkeypatch)
+
+        class RefusingMatrix(FakeMatrix):
+            def setToRotation(self, angle, axis, origin):
+                return False
+
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(RefusingMatrix))
+        res = io.handler(document_id="urn:x", rotate_deg=90, rotate_axis="y")
+        assert res["isError"] is True
+        assert "setToRotation" in res["message"]
+        assert root_comp.occurrences.last_transform is None   # nothing was inserted
 
 
 # ── handler error gates that don't reach placement ────────────────────────────

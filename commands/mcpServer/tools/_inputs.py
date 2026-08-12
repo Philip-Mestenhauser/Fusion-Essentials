@@ -2159,8 +2159,12 @@ class TargetRef(InputKind):
             return self._check(body, "mesh" if _is_mesh(body) else "body")
         if body_err and "ambiguous" in body_err.lower():
             return None, body_err
+        # The ''-means-whole-design hint only where this kind ACCEPTS it (measured: design_set_name
+        # excludes 'design' from allow=, yet its miss error still advertised the '' form - an
+        # unreachable suggestion).
+        empty_hint = ", or '' (whole design)" if "design" in self.allow else ""
         return None, (f"'{self.name}': '{s}' did not resolve to a body handle, an occurrence/component/"
-                      "body name, or '' (whole design). See design_get(include=['tree']) / find_geometry.")
+                      f"body name{empty_hint}. See design_get(include=['tree']) / find_geometry.")
 
 
 class TargetRefList(InputKind):

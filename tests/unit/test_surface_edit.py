@@ -799,3 +799,38 @@ class TestOffsetThickenKind:
         out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
         assert out["operation"] == "join"
         assert tf.last_input.op == "JoinFeatureOperation"
+
+
+class TestOffsetZeroGuard:
+    def test_zero_distance_refused(self):
+        # distance=0 creates a surface exactly coincident with the source (measured) - refused,
+        # matching every sibling's zero guard in this file.
+        res = se.offset_handler(faces=["F1"], distance=0)
+        assert res["isError"] is True and "non-zero" in res["message"]
+
+
+class TestThickenJoinDisclosure:
+    def test_join_that_fused_nothing_is_disclosed(self):
+        # operation='join' with a sheet touching no solid mints a NEW free-floating body while
+        # publishing operation:'join' (measured) - the token diff discloses it.
+        f1 = FakeFace()
+        wall = FakeBody("Wall1", is_solid=True)
+        tf = FakeThickenFeatures(result_bodies=[wall], created_faces=[_face_on(wall)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
+        assert out["fused"] is False and out["disjoint_join"] is True
+        assert "fused NOTHING" in out["note"]
+
+    def test_join_into_an_existing_solid_is_not_flagged(self, monkeypatch):
+        # The created faces land on a body whose token stood in the pre-add census - a real fuse.
+        import types as _t
+        f1 = FakeFace()
+        target = FakeBody("Target", is_solid=True)
+        target.entityToken = "tok-target"
+        tf = FakeThickenFeatures(result_bodies=[target], created_faces=[_face_on(target)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        comp.bRepBodies = _t.SimpleNamespace(count=1, item=lambda i: target)
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, operation="join"))
+        assert "fused" not in out and "disjoint_join" not in out

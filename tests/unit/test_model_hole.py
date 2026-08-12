@@ -931,3 +931,25 @@ class TestPlacementRefusalIsRead:
                          offset_edge_one="e1", offset_one="4 mm")
         assert res["isError"] is True and "refused the plane-and-offsets" in res["message"]
         assert d.rootComponent.features.holeFeatures.added == []
+
+
+class TestBlindDepthGuard:
+    def test_zero_depth_refused_with_the_cause_named(self):
+        # depth='0 mm' reached the API bare and came back as a non-diagnostic passthrough - the
+        # guard names the cause and the two ways out.
+        res = mh.handler(face="F", points=[[0, 0, 0]], diameter="8 mm", extent="blind", depth="0 mm")
+        assert res["isError"] is True
+        assert "POSITIVE depth" in res["message"] and "through" in res["message"]
+
+    def test_negative_depth_refused(self):
+        res = mh.handler(face="F", points=[[0, 0, 0]], diameter="8 mm", extent="blind", depth="-3 mm")
+        assert res["isError"] is True and "POSITIVE depth" in res["message"]
+
+    def test_expression_depth_passes_the_guard(self, monkeypatch):
+        # A parameter expression is the API's to evaluate - the guard must not float-parse it away.
+        # The absent-design error AFTER the guard is the proof it let the expression through.
+        monkeypatch.setattr(mh._common, "design", lambda: None)
+        res = mh.handler(face="F", points=[[0, 0, 0]], diameter="8 mm", extent="blind",
+                         depth="hole_depth")
+        assert "POSITIVE depth" not in res.get("message", "")
+        assert "No active design" in res["message"]

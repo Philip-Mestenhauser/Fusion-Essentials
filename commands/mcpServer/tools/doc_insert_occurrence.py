@@ -59,19 +59,8 @@ def handler(document_id: str = "", into_component: str = "",
         comp = design.rootComponent
         comp_desc = "root component"
 
-    # Optionally remove a named existing occurrence first (its joints are removed with it).
-    removed = None
-    if (remove_existing or "").strip():
-        existing, existing_err = _REMOVE_EXISTING.resolve(remove_existing)
-        if existing_err:
-            return error(existing_err)
-        removed = safe(lambda: existing.name)
-        did = safe(lambda: existing.deleteMe(), False)
-        if not did:
-            return error(f"Failed to remove existing occurrence '{removed}' (deleteMe returned "
-    "false). It may be referenced/locked.")
-
-    # Build the placement transform (default identity; position/orient if requested).
+    # Build the placement transform BEFORE any removal - a bad units/axis value (or a refused
+    # rotation) must refuse while the assembly is still intact, not after a part is already gone.
     k = _common.scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -84,28 +73,53 @@ def handler(document_id: str = "", into_component: str = "",
         # Rotate about the world origin; the translation set below places the occurrence. (Rotating
         # about the placement point would only bake a pivot correction into the translation column
         # that the next line overwrites anyway - net result is identical, so keep it explicit.)
-        transform.setToRotation(math.radians(float(rotate_deg)),
-                                adsk.core.Vector3D.create(*axis_vec), adsk.core.Point3D.create(0, 0, 0))
+        # setToRotation answers a bool; a false is a rotation that never landed on the matrix, so
+        # the occurrence would insert UNROTATED while the payload echoed the request.
+        did_rot = safe(lambda: transform.setToRotation(
+            math.radians(float(rotate_deg)),
+            adsk.core.Vector3D.create(*axis_vec), adsk.core.Point3D.create(0, 0, 0)), False)
+        if not did_rot:
+            return error(f"setToRotation({rotate_deg} deg about {rotate_axis}) was refused - the "
+                         "placement rotation could not be built, so nothing was inserted or removed.")
     if x or y or z:
         transform.translation = adsk.core.Vector3D.create(float(x) * k, float(y) * k, float(z) * k)
+
+    # Optionally remove a named existing occurrence first (its joints are removed with it).
+    removed = None
+    if (remove_existing or "").strip():
+        existing, existing_err = _REMOVE_EXISTING.resolve(remove_existing)
+        if existing_err:
+            return error(existing_err)
+        removed = safe(lambda: existing.name)
+        did = safe(lambda: existing.deleteMe(), False)
+        if not did:
+            return error(f"Failed to remove existing occurrence '{removed}' (deleteMe returned "
+    "false). It may be referenced/locked.")
+
+    # PARTIAL-SUCCESS DISCLOSURE: 'remove_existing' has already DELETED an occurrence by the time
+    # any failure below can happen. A clean-looking failure would let the caller retry into an
+    # assembly missing a part it believes is still there - every post-removal exit carries this.
+    gone = (f" NOTE: occurrence '{removed}' was ALREADY REMOVED before this failure (its joints "
+            "went with it) - the assembly no longer holds it." if removed else "")
 
     try:
         new_occ = comp.occurrences.addByInsert(data_file, transform, True)
     except Exception as e:
         return error(f"Insert failed: {e}. (An external reference requires the source and host in "
-    "the SAME PROJECT - save the host into the source's project, then retry.)")
+                     f"the SAME PROJECT - save the host into the source's project, then retry.){gone}")
     if not new_occ:
-        return error("addByInsert returned nothing (the insert did not produce an occurrence).")
+        return error("addByInsert returned nothing (the insert did not produce an occurrence)."
+                     + gone)
     if safe(lambda: new_occ.isValid) is False:
         return error("addByInsert returned an occurrence but it reads isValid=false - the insert "
-                     "did not land.")
+                     "did not land." + gone)
     # Verify the associative link actually formed - this tool only ever inserts a live reference,
     # so an occurrence that came in embedded (isReferencedComponent=false) is a silent failure.
     is_ref = safe(lambda: new_occ.isReferencedComponent)
     if is_ref is False:
         return error("Insert landed but the occurrence is NOT an external reference "
                      "(isReferencedComponent=false) - the associative link did not form. Confirm "
-                     "the source and host share a project, then retry.")
+                     "the source and host share a project, then retry." + gone)
 
     return ok({
         "inserted": True,
@@ -152,6 +166,7 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("rotate_deg", {"type": "number", "description": "Orient: rotate this many degrees about 'rotate_axis' (default 0)."})
     .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for orientation.").as_property())
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

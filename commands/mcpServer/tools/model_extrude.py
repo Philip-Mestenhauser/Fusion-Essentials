@@ -254,6 +254,85 @@ def _affected_bodies(snap):
     return out
 
 
+def _solid_count(design) -> int:
+    """The design-wide SOLID body count - the census a cut/intersect is judged against beside the
+    volume diff: it RISES when the cut disconnects the target into pieces and FALLS when a body is
+    consumed whole, so an unmoved census PLUS no volume drop is what proves nothing happened."""
+    n = 0
+    for comp in _common.all_components(design):
+        for b in _common.iter_collection(safe(lambda c=comp: c.bRepBodies)):
+            if safe(lambda b=b: b.isSolid):
+                n += 1
+    return n
+
+
+def _failed_compute(feature):
+    """(state_label, message) when the created feature carries a FAILED compute state, else None.
+
+    BOTH WarningFeatureHealthState and ErrorFeatureHealthState count as failed. Measured: a cut
+    scoped with 'target_bodies' whose profile reaches none of them leaves a timeline item in the
+    WARNING state carrying 'No target body!Compute Failed', so gating on the error state alone
+    passes a feature that computed nothing; the design-wide rollups (_common.timeline_health,
+    assembly_get._health) already classify warning and error alike as a compute failure. The STATE
+    is what is read - never the message text. The ExtrudeFeature and its TimelineObject each carry
+    healthState, and the measured failure was read off the TIMELINE ITEM, so BOTH are asked: the
+    feature first, and its timeline item whenever the feature's own state is not itself a failure
+    (a HEALTHY feature state does not end the check - the timeline item is where the failure showed).
+    A state neither of them reports as a failure yields NO verdict, so a health read that misbehaves
+    cannot sink an extrude that landed."""
+    states = adsk.fusion.FeatureHealthStates
+    for get_obj in (lambda: feature, lambda: feature.timelineObject):
+        obj = safe(get_obj)
+        hs = safe(lambda: obj.healthState) if obj is not None else None
+        if hs is None:
+            continue
+        if hs == safe(lambda: states.ErrorFeatureHealthState):
+            label = "error"
+        elif hs == safe(lambda: states.WarningFeatureHealthState):
+            label = "warning"
+        else:
+            continue
+        return label, (safe(lambda: obj.errorOrWarningMessage) or "").strip()
+    return None
+
+
+def _effect_rows(affected) -> str:
+    """ASCII 'what actually changed' phrase over the affected-bodies rows - what a refusal states
+    before it decides whether the feature may be removed at all."""
+    rows = []
+    for name, cname, removed in affected:
+        where = f" in {cname}" if cname else ""
+        rows.append(f"{name or '?'}{where}"
+                    + (" (consumed)" if removed is None else f" (-{removed} cm3)"))
+    return ", ".join(rows)
+
+
+def _roll_back(design, feature, fname) -> str:
+    """Remove a just-created extrude that failed or changed nothing, and return the ASCII sentence a
+    RE-READ backs - deleteMe's own answer is not proof, the timeline count is. A rollback that did
+    not take names what REMAINS, so the caller is never told the design is clean while it is not."""
+    def _count(tl):
+        c = safe(lambda: tl.count) if tl is not None else None
+        return c if isinstance(c, int) and not isinstance(c, bool) else None
+
+    tl = safe(lambda: design.timeline)
+    before = _count(tl)
+    try:
+        did = feature.deleteMe()
+    except Exception as e:
+        return (f" '{fname}' could NOT be rolled back ({e}) - it REMAINS in the timeline; remove it "
+                "with design_delete_feature.")
+    after = _count(tl)
+    if before is not None and after is not None:
+        if after < before:
+            return (f" The feature has been rolled back - the timeline re-reads {after} item(s), "
+                    f"down from {before}.")
+        return (f" '{fname}' REMAINS in the timeline ({after} item(s) after the rollback, deleteMe "
+                f"returned {bool(did)}) - remove it with design_delete_feature.")
+    return (f" A rollback of '{fname}' ran (deleteMe returned {bool(did)}) but the timeline could "
+            "not be re-read to confirm it - check with design_get.")
+
+
 def _distance_missing(distance) -> bool:
     """True when 'distance' supplies no extrude depth: None, blank, or a literal 0. A non-numeric string
     is an EXPRESSION (a real depth), and any non-zero number is a real depth."""
@@ -527,9 +606,17 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         if _inputs.looks_like_expression(distance):
             hint = f" The distance expression '{distance.strip()}' may be unresolvable - check param_get."
         elif ext_key == "through_all" and "body not found" in str(e).lower():
+            # The hint points the OTHER way from the distance that just failed - a fixed "pass a
+            # negative" told a caller whose distance was already negative to do it again (measured).
+            already_negative = False
+            try:
+                already_negative = float(distance) < 0
+            except Exception:
+                pass
+            flip_to = "POSITIVE" if already_negative else "NEGATIVE"
             hint = (" extent=through_all follows the sketch-plane normal; a sketch ON a body's face "
-                    "points AWAY from the material, so the default (and symmetric=true) direction hits "
-                    "only air. Pass a NEGATIVE 'distance' to cut into the body.")
+                    "points AWAY from the material, so this direction hits only air. Pass a "
+                    f"{flip_to} 'distance' to cut the other way into the body.")
         else:
             hint = " (A 'cut'/'intersect' needs existing geometry to act on.)"
         return error(f"Extrude failed: {e}.{hint}")
@@ -552,6 +639,59 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                              "follows the sketch-plane normal, which on an on-face sketch points away "
                              "from the body: pass the opposite 'distance' sign to cut into it.")
 
+    # cut/intersect EFFECT evidence, read BEFORE any rollback below: which bodies lost material, and
+    # whether the solid census moved at all. Both are needed to claim nothing happened - a consumed
+    # body reports no volume drop, and a split adds a body.
+    affected = _affected_bodies(solid_snap) if solid_snap else []
+    solid_delta = (_solid_count(design) - len(solid_snap)) if solid_snap else 0
+    nothing_changed = bool(solid_snap) and not affected and solid_delta == 0
+    scoped_names = ", ".join(n for n in (scoped_to or []) if n)
+
+    # A feature Fusion marks as a FAILED compute is never an ok: add() hands back a truthy feature
+    # object for it, so the health state is the only signal at this point. It is removed ONLY where
+    # the evidence above shows nothing landed - a rollback with geometry measurably changed would
+    # delete a real effect, so that case names the effect and leaves the feature to be judged.
+    failed = _failed_compute(feature)
+    if failed:
+        state_label, detail = failed
+        fname = safe(lambda: feature.name) or "the new extrude feature"
+        parts = [f"Extrude built '{fname}' but Fusion reports it as a FAILED compute (health state: "
+                 f"{state_label})" + (f": {detail}" if detail else " (it reports no message)") + "."]
+        if nothing_changed:
+            parts.append(f" No solid body lost material and none was consumed, so this {op_key} "
+                         "removed nothing.")
+        elif affected:
+            parts.append(f" Material DID change: {_effect_rows(affected)}.")
+        elif solid_delta:
+            parts.append(f" The design-wide solid body count changed by {solid_delta:+d}.")
+        else:
+            parts.append(f" Whether anything landed is NOT read for a '{op_key}' extrude, so it is "
+                         "not claimed either way.")
+        if scoped_names:
+            parts.append(f" Scoping to 'target_bodies' ({scoped_names}) makes Fusion build this "
+                         "failed feature instead of refusing a profile that reaches none of them, so "
+                         "check the profile overlaps those bodies in the extrude direction (a "
+                         "negative 'distance' reverses it).")
+        if nothing_changed:
+            parts.append(_roll_back(design, feature, fname))
+        else:
+            parts.append(f" '{fname}' is LEFT in the timeline - nothing is rolled back while an "
+                         "effect is unruled-out. Inspect it with design_get and remove it with "
+                         "design_delete_feature if it is unwanted.")
+        return error("".join(parts))
+
+    # A SCOPED cut/intersect that changed nothing: the feature computed, but no body named in
+    # 'target_bodies' lost material and the solid census is unmoved. Only named bodies can be
+    # affected, so this is a no-op reported as success.
+    if scoped_to and op_key in ("cut", "intersect") and nothing_changed:
+        fname = safe(lambda: feature.name) or "the new extrude feature"
+        return error(f"Extrude reported success but this {op_key} changed nothing: no solid body "
+                     "lost material and none was consumed, so the scoped bodies "
+                     f"({scoped_names}) are untouched. A cut/intersect can only affect bodies named "
+                     "in 'target_bodies' - check the profile overlaps them in the extrude direction "
+                     "(a negative 'distance' reverses it)."
+                     + _roll_back(design, feature, fname))
+
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     # body-split: a cut/intersect that DISCONNECTS the target leaves it in several pieces. The
@@ -559,19 +699,11 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # split-off pieces (a plain multi-body cut adds none). Live-verified: a full-width slot cut takes
     # a bar's solid count 1 -> 2. Counting solids (not feature.bodies, which for a cut reports only
     # the own-component result) also catches a split in a co-located component.
-    split_count = 0
-    if op_key in ("cut", "intersect") and solid_snap:
-        post_solids = 0
-        for _c in _common.all_components(design):
-            for _b in _common.iter_collection(safe(lambda c=_c: c.bRepBodies)):
-                if safe(lambda b=_b: b.isSolid):
-                    post_solids += 1
-        split_count = post_solids - len(solid_snap)
+    split_count = solid_delta if op_key in ("cut", "intersect") else 0
 
-    # cut/intersect: the bodies (and owning components) that ACTUALLY lost material, from the pre-op
-    # volume snapshot. 'component' then names where the cut landed - not merely where the sketch lives -
-    # and an unscoped cut that reached a co-located component is flagged (the footgun).
-    affected = _affected_bodies(solid_snap) if solid_snap else []
+    # 'component' names where the cut landed - not merely where the sketch lives - from the same
+    # affected-bodies read, and an unscoped cut that reached a co-located component is flagged
+    # (the footgun).
     sketch_owner = safe(lambda: sketch.parentComponent.name)
     affected_comps = []
     for _n, _cn, _rem in affected:

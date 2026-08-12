@@ -9,6 +9,7 @@ passed in, without a real design.
 """
 
 import json
+import types
 
 from conftest import BRepBody, load_tool, _NamedCollection
 
@@ -1312,6 +1313,250 @@ class TestBodySplitDisconnection:
         root.bRepBodies = _NamedCollection([BRepBody("Bar", volume=100.0)])
         out = _payload(ex.handler(sketch_name="S", distance=5))   # operation defaults 'new'
         assert "body_split" not in out
+
+
+# ── the compute-failed feature and the scoped-cut no-op (the false-ok pair) ─────────────────────────
+# add() hands back a truthy feature object for a compute Fusion FAILED, and a cut scoped with
+# 'target_bodies' whose profile reaches none of them is exactly that case: measured live, the failure
+# read the WARNING health state carrying "No target body!Compute Failed" while no volume moved. Both
+# the health state and the design-wide effect evidence gate the result, and the inert feature is
+# rolled back with the timeline re-read as the proof.
+
+
+def _fail_feature(state="warning", message="No target body!Compute Failed", name="Extrude3",
+                  timeline=None, delete_ok=True):
+    """The feature object a FAILED compute hands back: healthState set to the warning/error member,
+    the message beside it, and a deleteMe whose success shows up as a SHRINKING timeline count (what
+    the rollback sentence is read back from) - or a decline that leaves the count where it was."""
+    import adsk.fusion
+    states = adsk.fusion.FeatureHealthStates
+    f = FakeFeature(name=name)
+    f.healthState = (states.WarningFeatureHealthState if state == "warning"
+                     else states.ErrorFeatureHealthState)
+    f.errorOrWarningMessage = message
+
+    def _delete():
+        if delete_ok and timeline is not None:
+            timeline.count -= 1
+        return delete_ok
+    f.deleteMe = _delete
+    return f
+
+
+def _install_scoped_cut(volume_after=48.0, feature=None, timeline_count=None):
+    """A two-component design (the sketch's CompA holds BodyA, CompB holds BodyB) whose cut leaves
+    BodyA at `volume_after`, with an optional replacement feature and timeline. Returns bodyA."""
+    bodyA, _bodyB = _install_multi(bodyA_after=volume_after, bodyB_after=48.0)
+    design = ex.app.activeProduct
+    if timeline_count is not None:
+        design.timeline = types.SimpleNamespace(count=timeline_count)
+    if feature is not None:
+        ef = design.activeComponent.features.extrudeFeatures
+        prior = ef.add
+
+        def _add(inp):
+            prior(inp)                      # keep the canned volume effect
+            return feature
+        ef.add = _add
+    return bodyA
+
+
+class TestComputeFailedFeature:
+    def test_a_compute_failed_extrude_is_an_error_not_an_ok_with_a_warning(self):
+        tl = types.SimpleNamespace(count=4)
+        _install_scoped_cut(feature=_fail_feature(timeline=tl), timeline_count=4)
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "Extrude3" in msg and "FAILED compute" in msg
+        assert "No target body!Compute Failed" in msg
+        assert "health state: warning" in msg          # the STATE, read - not the message text
+        assert "removed nothing" in msg                # backed by the volume/census evidence
+        assert "BodyA" in msg                          # the scoped body that was not reached
+        assert "rolled back" in msg and tl.count == 3  # the re-read, not deleteMe's own answer
+
+    def test_the_error_health_state_is_caught_too(self):
+        tl = types.SimpleNamespace(count=2)
+        _install_scoped_cut(feature=_fail_feature(state="error", message="", timeline=tl))
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "health state: error" in res["message"]
+        assert "it reports no message" in res["message"]   # never a fabricated cause
+
+    def test_a_rollback_that_did_not_take_names_what_remains(self):
+        tl = types.SimpleNamespace(count=5)
+        _install_scoped_cut(feature=_fail_feature(timeline=tl, delete_ok=False))
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "REMAINS in the timeline" in res["message"]
+        assert "design_delete_feature" in res["message"]
+        assert tl.count == 5
+
+    def test_an_unreadable_timeline_never_claims_the_rollback_was_confirmed(self):
+        # No timeline to re-read (a direct-modelling design): the sentence says the rollback could
+        # not be confirmed instead of asserting the design is clean.
+        _install_scoped_cut(feature=_fail_feature())
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "could not be re-read to confirm" in res["message"]
+        assert "rolled back -" not in res["message"]
+
+    def test_a_failed_compute_that_DID_change_geometry_is_never_rolled_back(self):
+        # The rollback is only for a feature the evidence shows landed nothing. With material
+        # measurably gone, deleting the feature would delete a real effect - so the error states the
+        # effect and leaves the feature standing.
+        tl = types.SimpleNamespace(count=4)
+        _install_scoped_cut(volume_after=45.6, feature=_fail_feature(timeline=tl))
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "Material DID change: BodyA in CompA (-2.4 cm3)" in msg
+        assert "LEFT in the timeline" in msg and "design_delete_feature" in msg
+        assert "rolled back -" not in msg and "removed nothing" not in msg
+        assert tl.count == 4                      # the feature is still there
+
+    def test_a_failed_compute_whose_only_evidence_is_the_census_keeps_the_feature(self):
+        # A body gone from the design while its held wrapper still reads the pre-cut volume: no
+        # affected row, but the census moved - an effect that is not ruled out, so no rollback.
+        tl = types.SimpleNamespace(count=4)
+        bodyA = _install_scoped_cut(feature=_fail_feature(timeline=tl))
+        ex.app.activeProduct.timeline = tl
+        compA = ex.app.activeProduct.activeComponent
+        ef = compA.features.extrudeFeatures
+        prior = ef.add
+
+        def _add(inp):
+            f = prior(inp)
+            compA.bRepBodies._items.remove(bodyA)
+            return f
+        ef.add = _add
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "solid body count changed by -1" in res["message"]
+        assert "LEFT in the timeline" in res["message"]
+        assert tl.count == 4
+
+    def test_a_failed_new_extrude_claims_no_effect_verdict_and_keeps_the_feature(self):
+        # operation='new' takes no volume snapshot, so nothing here can say whether a body landed:
+        # the refusal must neither claim a no-op nor delete work it did not measure.
+        tl = types.SimpleNamespace(count=2)
+        _install_scoped_cut(feature=_fail_feature(timeline=tl))
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=20, operation="new")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "Extrude3" in msg and "FAILED compute" in msg
+        assert "NOT read for a 'new' extrude" in msg
+        assert "LEFT in the timeline" in msg
+        assert "removed nothing" not in msg and "rolled back -" not in msg
+        assert tl.count == 2
+
+    def test_the_timeline_items_state_is_read_past_a_healthy_feature(self):
+        # The failure was MEASURED on the timeline item, so a feature answering HEALTHY (or nothing)
+        # for itself must not turn that into a clean success.
+        import adsk.fusion
+        tl = types.SimpleNamespace(count=4)
+        item = _fail_feature(timeline=tl)
+        f = FakeFeature(name="Extrude3")
+        f.healthState = adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
+        f.timelineObject = item
+        f.deleteMe = item.deleteMe
+        _install_scoped_cut(feature=f)
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "health state: warning" in res["message"]
+        assert "No target body!Compute Failed" in res["message"]
+
+    def test_a_healthy_feature_passes_the_health_gate(self):
+        import adsk.fusion
+        f = FakeFeature()
+        f.healthState = adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
+        _install_scoped_cut(volume_after=45.6, feature=f)
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut",
+                                  target_bodies="BodyA"))
+        assert out["extruded"] is True and out["component"] == "CompA"
+
+    def test_the_postcondition_never_counts_a_compute_failed_feature(self):
+        # features_verified comes from the FeatureHealthy postcondition, which runs only on an ok
+        # result - so the handler's own refusal is what keeps a failed feature out of the count.
+        tl = types.SimpleNamespace(count=4)
+        _install_scoped_cut(feature=_fail_feature(timeline=tl))
+        ex.app.activeProduct.timeline = tl
+        asserted = ex._assert.wrap(ex.handler, [ex._assert.FeatureHealthy()])
+        res = asserted(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "features_verified" not in json.dumps(res)
+        assert "feature_warnings" not in json.dumps(res)
+
+
+class TestScopedCutNoOp:
+    def test_a_scoped_cut_that_changed_nothing_is_an_error_naming_the_bodies(self):
+        tl = types.SimpleNamespace(count=3)
+        _install_scoped_cut()                       # BodyA keeps its 48.0 - nothing was removed
+        ex.app.activeProduct.timeline = tl
+        res = ex.handler(sketch_name="S", distance=-20, operation="cut", target_bodies="BodyA")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"] and "BodyA" in res["message"]
+        assert "target_bodies" in res["message"]
+
+    def test_a_scoped_cut_that_removed_material_is_ok(self):
+        _install_scoped_cut(volume_after=45.6)
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut",
+                                  target_bodies="BodyA"))
+        assert out["scoped_to_bodies"] == ["BodyA"] and out["component"] == "CompA"
+
+    def test_a_scoped_cut_that_consumed_the_body_whole_is_not_flagged(self):
+        # A consumed body reports no volume DROP (its volume stops reading at all), so the gate must
+        # judge on the consumed row too, not on the volume delta alone.
+        bodyA = _install_scoped_cut()
+        ef = ex.app.activeProduct.activeComponent.features.extrudeFeatures
+        prior = ef.add
+
+        def _add(inp):
+            f = prior(inp)
+            del bodyA.volume            # the cut consumed it whole
+            return f
+        ef.add = _add
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut",
+                                  target_bodies="BodyA"))
+        assert out["extruded"] is True
+
+    def test_a_consumed_body_whose_wrapper_still_answers_is_seen_by_the_census(self):
+        # A held body wrapper can keep answering its pre-cut volume after the body itself is gone, so
+        # the volume diff alone would read a whole-body consumption as 'nothing happened'. The
+        # design-wide solid census still sees the body leave, which is why both back the no-op claim.
+        bodyA = _install_scoped_cut()
+        compA = ex.app.activeProduct.activeComponent
+        ef = compA.features.extrudeFeatures
+        prior = ef.add
+
+        def _add(inp):
+            f = prior(inp)
+            compA.bRepBodies._items.remove(bodyA)    # gone, while the wrapper still reads 48.0
+            return f
+        ef.add = _add
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut",
+                                  target_bodies="BodyA"))
+        assert out["extruded"] is True
+
+    def test_an_unscoped_cut_that_changed_nothing_stays_ok(self):
+        # Unscoped, Fusion refuses a miss itself ("No target body found to cut or intersect!") and
+        # that refusal surfaces through the add() handler - so this gate stays scoped to target_bodies.
+        _install_scoped_cut()
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut"))
+        assert out["extruded"] is True
+
+    def test_a_scoped_join_is_not_gated_on_removed_material(self):
+        # 'join' ADDS material - no body is expected to lose any, so the cut/intersect gate is off.
+        _install_scoped_cut()
+        out = _payload(ex.handler(sketch_name="S", distance=-20, operation="join",
+                                  target_bodies="BodyA"))
+        assert out["extruded"] is True
 
 
 class TestThroughAllDirectionTeaching:

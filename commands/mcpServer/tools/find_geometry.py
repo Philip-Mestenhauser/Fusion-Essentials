@@ -16,6 +16,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
+from ._cam_common import clamp_rows
 from . import _common
 from . import _geom
 from . import _inputs
@@ -31,6 +32,8 @@ RETURNS = [
 ]
 
 app = adsk.core.Application.get()
+
+_MAX_RESULTS_CEILING = 100   # hard cap on returned match rows (each crosses the wire)
 
 # friendly 'kind' -> what it matches. Faces by surfaceType, edges by curveType, plus vertex.
 _FACE_KINDS = {"cylinder_face": "Cylinder", "planar_face": "Plane",
@@ -238,7 +241,9 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         matches.sort(key=lambda m: _dist(m["position"], npt))
 
     total = len(matches)
-    matches = matches[:max(1, int(max_results))]
+    # clamp_rows holds the cap inside 1.._MAX_RESULTS_CEILING: every match row crosses the wire,
+    # so a caller cannot lift the cap past the ceiling (the fleet's "Bound it" read rule).
+    matches = matches[:clamp_rows(max_results, 20, _MAX_RESULTS_CEILING)]
 
     return ok({
         "target": target_label,
@@ -280,7 +285,7 @@ find_tool = (
     .add_input_property("radius", {"type": "number", "description": "Keep only cylinder faces / circular edges with this radius (in 'units', 5% tol)."})
     .add_input_property("nearest_to", {"type": "array", "items": {"type": "number"}, "description": "[x,y,z] world point (in 'units') to sort matches by distance to."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on matches returned (default 20)."})
+    .add_input_property("max_results", {"type": "integer", "description": "Cap on matches returned (default 20, max 100)."})
     .strict_schema()
 )
 find_item = Item.create_tool_item(tool=find_tool, write="read", handler=handler, run_on_main_thread=True)

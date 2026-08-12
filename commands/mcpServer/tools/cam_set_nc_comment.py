@@ -145,6 +145,7 @@ tool = (
             "description": "Name of one NC program to edit (omit = all programs)."})
     .add_input_property("set_name", {"type": "string",
             "description": "Optional: also set each program's Name field to this."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

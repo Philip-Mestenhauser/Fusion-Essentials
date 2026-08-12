@@ -140,9 +140,12 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
     try:
         feature = root.features.loftFeatures.add(loft_input)
     except Exception as e:
-        return error(f"Loft failed: profiles are not compatible (mix of open/closed, or a "
-                     f"self-intersecting path). Profiles must be the same kind and orderable into a "
-                     f"single sweep. ({e})")
+        # Lead with the API's OWN message - a cut through air says "No target body" and blaming
+        # the profiles buried it (measured); the compatibility explanation is the fallback cause.
+        return error(f"Loft failed: {e}. Common causes: a cut/intersect with no body in the loft's "
+                     "path (the API says 'No target body' for that), or incompatible profiles (a "
+                     "mix of open/closed, or a self-intersecting path - profiles must be the same "
+                     "kind and orderable into a single sweep).")
     if not feature:
         return error(_common.no_feature_error(design, "Loft"))
 
@@ -278,6 +281,19 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
         input_desc = safe(lambda: body.name)
 
     root = target_component(design)
+    # Census BEFORE the add: an unstitch of an ALREADY-LOOSE surface is an IDENTITY op the API
+    # reports as success (measured: same bbox/area, body-count delta 0, the body merely
+    # re-serialized under a new name) - the count diff below is the gate.
+    hosts = ([safe(lambda f=f: f.body.parentComponent) for f in face_ents] if has_faces
+             else [safe(lambda: body.parentComponent)])
+    census_hosts = []
+    for h in hosts:
+        # identity de-dupe, not a set: component wrappers are not reliably hashable/equal-stable.
+        if h is not None and all(h is not g for g in census_hosts):
+            census_hosts.append(h)
+    if not census_hosts:
+        census_hosts = [root]
+    before_count = sum(_common.body_count(h) or 0 for h in census_hosts)
     try:
         feature = root.features.unstitchFeatures.add(coll, bool(chain))
     except Exception as e:
@@ -289,6 +305,14 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
                                               "faces are not unstitchable."))
 
     body_names, _flags = _result_body_report(feature)
+    after_count = sum(_common.body_count(h) or 0 for h in census_hosts)
+    if before_count and after_count == before_count and len(body_names) <= 1:
+        rolled = bool(safe(lambda: feature.deleteMe(), False))
+        return error(f"Unstitch divided NOTHING - '{input_desc}' produced the same body count "
+                     f"({before_count}) and a single result body: the input was already a loose "
+                     "surface, so this was an identity operation. "
+                     + ("The feature was rolled back." if rolled
+                        else "Remove the empty feature with design_delete_feature."))
     return ok({
         "unstitched": True,
         "feature": safe(lambda: feature.name),
@@ -296,6 +320,8 @@ def unstitch_handler(target="", faces=None, chain=True) -> dict:
         "chain": bool(chain),
         "result_bodies": body_names,
         "surface_body_count": len(body_names),
+        "bodies_before": before_count,
+        "bodies_after": after_count,
         "note": ("Exploded into %d surface body(ies) - each is now an open surface. Edit a face, then "
             "model_stitch to re-close." % len(body_names)),
     })

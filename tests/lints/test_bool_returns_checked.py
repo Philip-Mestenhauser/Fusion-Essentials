@@ -30,8 +30,6 @@ _ALLOWED = {
     "assembly_transform.py:216": "as above",
     "assembly_transform.py:217": "as above",
     "assembly_transform.py:228": "as above",
-    "doc_insert_occurrence.py:87": "Matrix3D math on a local matrix, before it is handed to "
-                                   "addExistingComponent; the placed occurrence is read back",
     "model_create_component.py:79": "Matrix3D math on a local matrix that places a new "
                                     "occurrence, whose creation is verified by re-listing",
 }

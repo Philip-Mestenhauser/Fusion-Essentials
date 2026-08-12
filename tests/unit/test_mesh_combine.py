@@ -801,9 +801,12 @@ class TestMeshJoinThatCannotFuse:
         out = _payload(mc.handler(target="T", tools=["A"], operation="join"))
         assert "disjoint_tools" not in out
 
-    def test_a_cut_is_not_warned_about(self):
-        # A cut/intersect of meshes that do not overlap leaves the target unchanged, which the
-        # triangle/body census already refuses - this warning is about a JOIN fusing nothing.
+    def test_a_cut_with_an_apart_tool_is_refused_before_the_add(self):
+        # A cut/intersect consumes its tool unconditionally, so a tool whose AABB proves it cannot
+        # touch the target is REFUSED up front - nothing combined, no body consumed - instead of
+        # the measured silent no-op (success reported, cutter destroyed, target untouched).
         _build_boxed(((0, 0, 0), (1, 1, 1)), [("A", "Far", ((9, 0, 0), (10, 1, 1)))])
-        out = _payload(mc.handler(target="T", tools=["A"], operation="cut"))
-        assert "disjoint_tools" not in out
+        res = mc.handler(target="T", tools=["A"], operation="cut")
+        assert res["isError"] is True
+        assert "REFUSED before combining" in res["message"] and "Far" in res["message"]
+        assert "no body was consumed" in res["message"]

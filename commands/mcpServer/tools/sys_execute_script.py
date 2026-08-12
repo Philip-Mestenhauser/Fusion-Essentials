@@ -39,8 +39,12 @@ def handler(script: str) -> dict:
     transaction_started = False
     transacted_doc = None
     try:
-        # Python.Run executes the file but does not call run(); append the call.
-        script += "\nrun(None)"
+        # Python.Run executes the file but does not call run(); append the call. The SENTINEL print
+        # is prepended as the first executed statement: Python.Run's return text embeds the
+        # TextCommands console ACCUMULATED since the last run (measured: an earlier timed-out
+        # handler's error banner arrived inside a later script's result), and everything before the
+        # sentinel belongs to earlier calls - cut, not shipped. Costs one line of traceback offset.
+        script = f'print("{_RUN_SENTINEL}")\n' + script + "\nrun(None)"
 
         with tempfile.NamedTemporaryFile(mode='w', prefix='fe_mcp_script', suffix='.py',
                                          delete=False, encoding='utf-8') as f:
@@ -81,8 +85,12 @@ def handler(script: str) -> dict:
         result = {"isError": False, "message": "Script executed successfully"}
         if res:
             # Python.Run's return text embeds the accumulated TextCommands console log (the same
-            # noise _extract_script_error strips on the failure path) - strip it here too, or every
-            # success payload carries one "MCP calling tool: ..." line per call since the last run.
+            # noise _extract_script_error strips on the failure path). Cut at THIS run's sentinel
+            # first - everything before it accumulated during earlier calls (stale error banners
+            # included) - then strip the per-call log lines.
+            cut = res.rfind(_RUN_SENTINEL)
+            if cut != -1:
+                res = res[cut + len(_RUN_SENTINEL):]
             cleaned = re.sub(r"\n{3,}", "\n\n", _CONSOLE_NOISE.sub("", res)).strip()
             if cleaned:
                 result["content"] = [{"type": "text", "text": cleaned}]
@@ -115,6 +123,8 @@ def handler(script: str) -> dict:
 # accumulated console text, so these show up INSIDE the script-failure traceback as noise.
 _CONSOLE_NOISE = re.compile(r"^MCP calling tool: .*$", re.MULTILINE)
 _TB_MARKER = "Traceback (most recent call last):"
+# Printed as the script's FIRST statement; console text before it accumulated during EARLIER calls.
+_RUN_SENTINEL = "<<FE-SCRIPT-OUTPUT>>"
 
 
 def _extract_script_error(tb: str) -> str:
@@ -126,6 +136,9 @@ def _extract_script_error(tb: str) -> str:
     noise say nothing about the script bug, so return just the LAST traceback block - the
     script's - with the noise lines stripped. A single-traceback text (an error outside
     Python.Run) is returned whole. The full text still goes to app.log for deep debugging."""
+    cut = tb.rfind(_RUN_SENTINEL)
+    if cut != -1:
+        tb = tb[cut + len(_RUN_SENTINEL):]
     cleaned = _CONSOLE_NOISE.sub("", tb)
     first = cleaned.find(_TB_MARKER)
     last = cleaned.rfind(_TB_MARKER)
@@ -181,7 +194,7 @@ tool = Tool.create_with_string_input(
     description=TOOL_DESCRIPTION,
     input_param_name="script",
     input_param_description="Fusion API Python source code to execute. Must define def run(context):",
-)
+).strict_schema()
 
 # enforce_timeout=False: a long script cannot be interrupted mid-run and would still COMMIT, so
 # the server's 30s task timeout would only report a false failure for a change that applied. Let it

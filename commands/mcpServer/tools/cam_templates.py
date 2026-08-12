@@ -535,6 +535,7 @@ _apply_tool = (
     .add_input_property("template_name", {"type": "string", "description": "Template name (searched under location)."})
     .add_input_property(*_LOCATION.as_property())
     .add_input_property(*_GEN.as_property())
+    .strict_schema()
 )
 apply_template_to_setup_item = Item.create_tool_item(
     tool=_apply_tool, write="write", handler=apply_template_to_setup_handler, run_on_main_thread=True
@@ -558,6 +559,7 @@ _save_tool = (
     .add_input_property(*_LOCATION.as_property())
     .add_input_property("folder", {"type": "string", "description": "Top-level destination folder name (created if missing)."})
     .add_input_property("description", {"type": "string", "description": "Optional template description."})
+    .strict_schema()
 )
 save_operations_as_template_item = Item.create_tool_item(
     tool=_save_tool, write="write", handler=save_operations_as_template_handler, run_on_main_thread=True

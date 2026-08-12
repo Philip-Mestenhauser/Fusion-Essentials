@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 183  |  **description breadcrumbs:** 668  |  **note/error breadcrumbs:** 387
+**Tools:** 183  |  **description breadcrumbs:** 672  |  **note/error breadcrumbs:** 393
   |  **guidance smells flagged:** 6
 ## Blindspots to engineer
 
@@ -35,15 +35,15 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_new`  <- 91  (desc 10, note 81)
 - `find_geometry`  <- 82  (desc 61, note 21)
 - `view_screenshot`  <- 50  (desc 21, note 29)
+- `design_delete_feature`  <- 35  (desc 20, note 15)
 - `data_get`  <- 33  (desc 19, note 14)
 - `design_get`  <- 33  (desc 13, note 20)
 - `sketch_create`  <- 32  (desc 19, note 13)
-- `design_delete_feature`  <- 31  (desc 18, note 13)
 - `cam_get`  <- 30  (desc 20, note 10)
 - `sketch_get`  <- 28  (desc 14, note 14)
 - `doc_open`  <- 23  (desc 6, note 17)
 - `model_extrude`  <- 22  (desc 21, note 1)
-- `doc_get`  <- 19  (desc 13, note 6)
+- `assembly_get`  <- 19  (desc 12, note 7)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -99,12 +99,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Captured position removed from the timeline; later captured positions (if any) survive a recompute unchanged.
 
 ### `assembly_constrain`
+- Components constrained with the relationship set (type inferred from geometry).
 - No active design with components.
 - '. Valid: mm, cm, in.
 - Assembly constraint creation returned nothing.
-- It remains in the design - relax or remove one of its relationships.
-- ' was created but FAILED to solve.
-- Components constrained with the relationship set (type inferred from geometry).
+- ' was created but its healthState cannot be read, so whether it SOLVED is UNCONFIRMED - nothing here says the parts are located. Read it back with assembly_get(include=['relations']).
+- Relax or remove one of its relationships.
+- ' solved, but adding it left
+- existing timeline feature(s) unhealthy:
+- Deleting it does not restore them automatically - check them with assembly_get afterwards.
 - 'relationships' must be a list of {snap_one, snap_two, flip?, offset?}.
 - No relationships to constrain. Provide 'relationships' or snap_one/snap_two.
 - Assembly constraint failed:
@@ -749,9 +752,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
 - Inserted at the requested placement. This is the source's last SAVED cloud version - unsaved in-session edits in the source are NOT reflected here (save the source, then doc_update_xref). Refine wi...
 - ' has no component to insert into.
+- Unknown rotate_axis '
+- ) was refused - the placement rotation could not be built, so nothing was inserted or removed.
 - Failed to remove existing occurrence '
 - ' (deleteMe returned false). It may be referenced/locked.
-- Unknown rotate_axis '
 - . (An external reference requires the source and host in the SAME PROJECT - save the host into the source's project, then retry.)
 
 ### `doc_new`
@@ -1074,9 +1078,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `mesh_combine`
 - Mesh bodies combined. 'enhanced' produces fewer triangles than 'legacy'. Inspect the result with model_inspect (mesh target), or convert with mesh_to_brep. Pair with view_screenshot to view it.
 - No active design. Create or open a document first (see doc_new).
+- REFUSED before combining: a
+- needs the tool to OVERLAP the target, and
+- ' (bounding boxes are separated; the gap is a lower bound). The API would report success while consuming the tool and changing nothing. Move the tool into the target (model_move) and combine again....
 - This design has no meshCombineFeatures collection (mesh combine unavailable here).
 - Combine reported success but the target mesh is unchanged (
 - mesh bodies before and after) - the tool meshes may not overlap the target.
+- reported success but the target mesh '
+- triangles before and after) - the tool did not overlap it. The tool mesh was CONSUMED by the operation and could not be restored (mesh combine keeps no tools). The AABB pre-check cannot see overlap...
 - A tool body is the same as the target - pick distinct mesh bodies (the target is combined INTO, the tools are combined FROM).
 - meshCombineFeatures.createInput returned nothing.
 - Could not create the mesh-combine input:
@@ -1132,6 +1141,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. List the tree with design_get(include=['tree']), or pass target='' to scan the whole design.
 
 ### `mesh_insert`
+- Convert to BRep with mesh_to_brep to use find_geometry / fillet / CAM on it.
+- Imported as MESH body(ies).
+- Direct design - no base-feature scope needed.
+- Wrapped in BaseFeature '%s' (parametric design requires it).
 - file_path is required - a full path to a .stl / .obj / .3mf file.
 - Unsupported mesh file '
 - '. Import needs one of:
@@ -1139,19 +1152,23 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Open or create a document first (see doc_new).
 - ' for mesh import. Use mm, cm, m, in, or ft.
 - Mesh import returned no bodies (the file may be empty or unreadable as a mesh).
-- Convert to BRep with mesh_to_brep to use find_geometry / fillet / CAM on it.
-- Imported as MESH body(ies).
-- Direct design - no base-feature scope needed.
-- Wrapped in BaseFeature '%s' (parametric design requires it).
 - ' to import into. Omit target_component to use the active component, or list components with design_get(include=['tree']).
 
 ### `mesh_plane_cut`
 - Mesh cut by the plane. 'trim' keeps one side, 'split_body' makes two mesh bodies, 'split_faces' cuts the triangulation in place. fill controls the new opening (none / minimal / uniform). Use flip=t...
 - No active design. Open or create a document first (see doc_new).
 - This design has no meshPlaneCutFeatures collection (mesh plane cut unavailable here).
+- Refusing before any cut: '
+- . The plane does not straddle the mesh, and
+- . Move the plane so it passes THROUGH the mesh (mesh_get reports the mesh's bounding box in display units; any clearance quoted here is in cm), then retry.
 - 'plane': could not read the plane geometry off that face handle.
 - meshPlaneCutFeatures.createInput returned nothing.
 - adsk.fusion.MeshPlaneCutTypes is unavailable on this Fusion version.
+- cut ANNIHILATED mesh '
+- triangles were removed and the mesh body now reads 0 triangles, so no geometry of it is left.
+- cut changed nothing: mesh '
+- triangles, unchanged.
+- Move the plane into the mesh (mesh_get reports its bounding box), then retry.
 - Could not create the mesh-plane-cut input:
 - adsk.fusion.MeshPlaneCutFillTypes is unavailable on this Fusion version.
 - Mesh plane cut failed (meshPlaneCutFeatures.add raised):
@@ -1177,7 +1194,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This design has no meshRemeshFeatures collection (mesh remesh unavailable here).
 - meshRemeshFeatures.createInput returned nothing.
 - Could not create the mesh-remesh input:
+- 'density' did not land: set
+- . Re-run without 'density' for the default remesh.
 - Mesh remesh failed (meshRemeshFeatures.add raised):
+- 'density' did not take on this build:
 
 ### `mesh_repair`
 - Mesh repaired. Re-read the body with mesh_get.
@@ -1270,6 +1290,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . A common cause is a non-watertight or very dense mesh.
 
 ### `model_arrange`
+- Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest.
 - '. Use mm, cm, or in.
 - Unknown solver '%s'. Use 'true_shape' or 'rectangular'.
 - No active design. Create or open a document first (see doc_new).
@@ -1278,7 +1299,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'shapes' - the occurrence name(s) to arrange (comma-separated).
 - Provide 'shapes' - at least one occurrence to arrange.
 - This design does not expose Arrange features.
-- Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest.
+- Check the boundary profile holds the shapes at this spacing.
+- Arrange reported success but NOTHING happened - no input occurrence moved and no occurrence was added.
+- The empty arrange feature was rolled back.
+- The empty arrange feature could not be rolled back - remove it with design_delete_feature.
 - Could not create the arrange input (solver may be unavailable).
 - Could not set the boundary envelope from the sketch profile.
 - ) appears to need a Fusion extension on this account:
@@ -1306,6 +1330,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' body count nor the target's volume could be read back - so whether the bodies were combined is UNVERIFIED. Check with design_get(include=['tree']) / model_inspect.
 - . For cut/intersect the bodies must overlap; confirm with design_get(include=['tree']) / model_inspect.
 - Combine reported no error but nothing it could measure changed -
+- ' measures the same volume (
+- cm3) after the combine, which is what a tool that does not overlap the target produces. Tools:
+- . Move the tool into the target (model_move) and combine again.
 - Nothing was combined.
 
 ### `model_compute_holder`
@@ -1372,6 +1399,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use: new, join, cut, intersect.
 - No active design. Create or open a document first (see doc_new).
 - No sketch to extrude. Create one and draw a closed profile first.
+- Extrude reported success but this
+- changed nothing: no solid body lost material and none was consumed, so the scoped bodies (
+- ) are untouched. A cut/intersect can only affect bodies named in 'target_bodies' - check the profile overlaps them in the extrude direction (a negative 'distance' reverses it).
 - extent='two_side' needs non-zero 'distance' and 'distance2' (one per side).
 - extent='two_side' does not use 'symmetric' - pass equal 'distance' and 'distance2' for a symmetric two-sided extrude, or use extent='distance' with symmetric=true.
 - Use sketch_get or sketch_create.
@@ -1412,6 +1442,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use mm, cm, or in.
 - hole point(s) cut NOTHING - the feature created
 - Provide 'points' - a list of [x, y, z] positions on the face to drill at.
+- ' is not a drillable hole - a blind hole needs a POSITIVE depth (e.g. '10 mm'), or use extent='through'.
 - Could not resolve 'edge' to an edge. Pass a find_geometry edge handle.
 - Could not create a placement sketch on the face (sketches.add returned nothing).
 - The hole was drilled but carries no tap, so '
@@ -1422,9 +1453,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - placement='center' needs 'edge' - a find_geometry handle at the circular/elliptical edge to center the hole on.
 - Could not resolve 'offset_edge_one' to an edge.
 - Could not create a placement sketch on the face:
-- Could not add a sketch point at
 - Fusion refused to centre the hole on that edge, so nothing was placed. Check that 'edge' is a circular/elliptical edge ON 'face'.
-- Could not set tip_angle '
 - A modeled thread was requested, but the hole's thread feature could not be read back, so there is no proof the helix was cut. Remove '
 - The tap was requested
 - placement='on_edge' needs 'edge' - a find_geometry handle at the edge to position the hole along.
@@ -1433,14 +1462,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - placement='plane_offsets' needs 'offset_edge_one' and 'offset_one'.
 - placement='plane_offsets': 'offset_edge_two' and 'offset_two' must be given together.
 - Could not resolve 'offset_edge_two' to an edge.
-- ; expected [x, y, z] in '
 - Could not position the hole at the edge's center:
 - is not available on this Fusion version.
 - Fusion refused to place the hole at the '
 - ' of that edge, so nothing was placed. Check that 'edge' borders 'face'.
 - Fusion refused the plane-and-offsets placement, so nothing was placed. Check that both offset edges border 'face' and the offsets reach a point on it.
-- Could not set the tapped hole to a MODELED (helical) thread:
 - Could not position the hole on the edge:
+- ; expected [x, y, z] in '
 - Could not position the hole by plane and offsets:
 
 ### `model_inspect`
@@ -1458,7 +1486,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not start loft:
 - Could not add loft sections:
 - Could not set loft centerline/rails:
-- Loft failed: profiles are not compatible (mix of open/closed, or a self-intersecting path). Profiles must be the same kind and orderable into a single sweep. (
+- . Common causes: a cut/intersect with no body in the loft's path (the API says 'No target body' for that), or incompatible profiles (a mix of open/closed, or a self-intersecting path - profiles mus...
 - Could not set loft solid/surface mode:
 
 ### `model_measure_between`
@@ -1526,7 +1554,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - quantity must be >= 2 for a circular pattern.
 - No active design. Open or create a document with components first.
 - were requested. The feature is left in the timeline for inspection - design_delete_feature removes it.
-- Occurrences patterned around the axis. Pair with view_screenshot to view.
+- patterned around the axis. Pair with view_screenshot to view.
 - No pattern was created.
 - Circular pattern failed:
 
@@ -1544,9 +1572,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `model_pattern_rectangular`
 - '. Use mm, cm, or in.
 - quantity_one must be >= 1.
+- spacing_one=0 would stack every instance exactly on the seed (coincident duplicates). Provide a non-zero spacing_one.
+- spacing_two=0 would stack the second-direction instances exactly on the first row (coincident duplicates). Provide a non-zero spacing_two.
 - No active design. Open or create a document with components first.
 - ). The feature is left in the timeline for inspection - design_delete_feature removes it.
-- Occurrences patterned in a grid. Pair with view_screenshot to view.
+- patterned in a grid. Pair with view_screenshot to view.
 - Fusion refused the second pattern direction (setDirectionTwo returned false), so no pattern was created.
 - Rectangular pattern failed:
 
@@ -1705,6 +1735,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Unstitch needs a 'target' body (to fully explode) or 'faces' (to peel off).
 - Pass EITHER 'target' (a whole body) OR 'faces' (specific faces), not both.
 - The target may already be loose surfaces, or the faces are not unstitchable.
+- Unstitch divided NOTHING - '
+- ' produced the same body count (
+- ) and a single result body: the input was already a loose surface, so this was an identity operation.
+- The feature was rolled back.
+- Remove the empty feature with design_delete_feature.
 - Exploded into %d surface body(ies) - each is now an open surface. Edit a face, then model_stitch to re-close.
 - . (Target may already be loose surfaces, or the faces aren't unstitchable.)
 
@@ -1777,6 +1812,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Unknown include slice(s)
 
 ### `save_as_mesh`
+- Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or export it with mesh_export.
+- Tessellated the BRep body into a persistent MESH body.
+- Wrapped in a BaseFeature edit scope (parametric design requires it for a mesh write).
+- Direct design - no base-feature scope needed.
 - No active design. Open or create a document first (see doc_new).
 - 'body' is already a MESH body - save_as_mesh tessellates a BRep solid/surface. To re-triangulate an existing mesh use mesh_remesh; to copy/export it use mesh_export.
 - Could not resolve a component to add the mesh body into.
@@ -1784,10 +1823,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - meshBodies.addByTriangleMeshData returned nothing - no mesh body was created.
 - addByTriangleMeshData returned a mesh body but the component's mesh body count did not increase (
 - after) - the mesh body did not actually land.
-- Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or export it with mesh_export.
-- Tessellated the BRep body into a persistent MESH body.
-- Wrapped in a BaseFeature edit scope (parametric design requires it for a mesh write).
-- Direct design - no base-feature scope needed.
 
 ### `sketch_add_3d_line`
 - Line drawn in 3D. The end point's non-zero z places it off the sketch's x-y plane. View it from an iso angle with view_screenshot (a top view hides the out-of-plane component).
@@ -1872,9 +1907,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' for 'target_sketch'. Available:
 
 ### `sketch_create`
+- Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world - ...
 - No active design. Create or open a document first (see doc_new).
 - Sketch creation returned nothing on
-- Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world - ...
 - Could not resolve plane '
 - '. Use one of: xy, xz, yz (origin planes; aliases top/front/right), or the name of a construction plane, or pass 'on_face' = a planar-face handle from find_geometry.
 - Failed to create sketch on
@@ -2055,6 +2090,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `surface_offset`
 - Faces offset into a new surface (isSolid=false).
 - '. Use mm, cm, or in.
+- Provide a non-zero 'distance' to offset - distance=0 would create a surface exactly coincident with the source face.
 - '. Offset supports: new, new_component.
 - No active design. Create or open a document first (see doc_new).
 - Offset reported success but created no faces - nothing was offset. The feature remains in the timeline; remove it with design_delete_feature.

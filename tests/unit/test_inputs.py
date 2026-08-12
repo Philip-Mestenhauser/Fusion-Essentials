@@ -2866,3 +2866,15 @@ class TestSketchOwnersWalk:
         d = self._design([self._comp("Root", ["Profile"]),
                           types.SimpleNamespace(name="Empty", sketches=None)])
         assert [c for c, _sk in inp._sketch_owners(d, "Profile")] == ["Root"]
+
+
+class TestTargetRefMissHint:
+    def test_miss_error_advertises_empty_form_only_when_design_is_allowed(self):
+        # design_set_name excludes 'design' from allow= yet the miss error advertised the '' form
+        # (measured) - an unreachable suggestion. The hint follows the kind's own allow set.
+        _install_target()
+        _, err_with = inp.TargetRef("target").resolve("Nope")
+        assert "'' (whole design)" in err_with
+        _, err_without = inp.TargetRef(
+            "target", allow=("body", "mesh", "occurrence", "component")).resolve("Nope")
+        assert "whole design" not in err_without

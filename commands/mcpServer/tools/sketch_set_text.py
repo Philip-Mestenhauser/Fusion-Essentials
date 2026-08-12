@@ -604,6 +604,7 @@ tool = (
     .add_input_property("flip_v", {"type": "boolean", "description": "Mirror new text vertically."})
     .add_input_property("font_name", {"type": "string",
             "description": "Font to use, when creating AND when editing. Case-sensitive: 'Arial' works, 'arial' is refused. Omit to keep the current font."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

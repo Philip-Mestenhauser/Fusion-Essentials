@@ -8,13 +8,19 @@ codec, and the light record every pmi_* tool reports through.
 No pmi_* tool reads Design.pmiSettings: the getter raises InternalValidationError when no settings
 object exists, so the substrate never touches it and nothing depends on which designs carry one.
 
-EXTENSION GATE: PMI authoring on Fusion 2705.0.87 raises "3 : Manufacturing or Design Extension is
-required", so probes P0-P5 - can pmi_create succeed at all, is the leader-extension floor a
-constant or derived from the annotation size, does a below-floor extension brick every later
-assignment, does the annotation plane reject an off-plane text point, can two annotations in one
-component share a name, does markUpToDate() return a bool and clear isOutOfDate - cannot run on
-this build. Every platform fact those probes would settle is UNMEASURED here, and the code below
-says so at each point of use: what the tools claim is what their own gates read back."""
+EXTENSION GATE: PMI CONTENT writes on Fusion 2705.0.87 raise "3 : Manufacturing or Design
+Extension is required" - the 2704.1.39 -> 2705 update gated the API, NOT the seat's license
+(authoring was live-verified on 2704.1.39 on this same seat: 12-annotation round-trip). The
+measured 2705 boundary: READS are free (the full pmi_get walk), NON-CONTENT writes are free
+(hide/show toggled and read back), CONTENT writes gate (leaderNotes.add and holeThreadNotes.add
+with plain text or GD&T, and set_text on an EXISTING annotation - reproduced across documents,
+geometry contexts, and sessions). So probes P0-P5 - can pmi_create succeed at all, is the
+leader-extension floor a constant or derived from the annotation size, does a below-floor
+extension brick every later assignment, does the annotation plane reject an off-plane text point,
+can two annotations in one component share a name, does markUpToDate() return a bool and clear
+isOutOfDate - cannot run on this build; re-run them the day a build or entitlement restores
+content writes. Every platform fact those probes would settle is UNMEASURED here, and the code
+below says so at each point of use: what the tools claim is what their own gates read back."""
 
 import re
 

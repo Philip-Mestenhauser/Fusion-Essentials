@@ -416,14 +416,12 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
                      f"count did not increase ({before_mb_count} before, {after_mb_count} after) - "
                      "the mesh body did not actually land.")
 
-    rename = (name or "").strip()
-    if rename:
-        safe(lambda: setattr(mb, "name", rename))
+    final_name, rename_warning = _common.apply_rename(mb, name)
 
     mode = _inputs.current_design_type(design)
-    return ok({
+    payload = {
         "saved_as_mesh": True,
-        "name": safe(lambda: mb.name),
+        "name": final_name,
         "handle": safe(lambda: mb.entityToken),
         "source_body": safe(lambda: src.name),
         "component": safe(lambda: comp.name),
@@ -436,7 +434,10 @@ def save_as_mesh_handler(body: str = "", quality: str = "normal", name: str = ""
             "Direct design - no base-feature scope needed.") +
             " Inspect it with model_inspect (mesh target), edit with mesh_reduce / mesh_remesh, or "
             "export it with mesh_export."),
-    })
+    }
+    if rename_warning:
+        payload["rename_warning"] = rename_warning
+    return ok(payload)
 
 
 # ── tool registration ────────────────────────────────────────────────────────────────────────

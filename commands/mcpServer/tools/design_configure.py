@@ -48,16 +48,11 @@ _ACTIONS = ("create", "activate", "add_configuration", "rename_configuration", "
 
 # ── resolvers (patched in tests; real lookups here) ─────────────────────────
 
-def _resolve_feature(design, name):
-    """A timeline feature (or any timeline-listed object) by name - for suppress columns."""
-    tl = safe(lambda: design.timeline)
-    if not tl:
-        return None
-    for i in range(safe(lambda: tl.count, 0) or 0):
-        obj = safe(lambda i=i: tl.item(i).entity)
-        if obj is not None and (safe(lambda o=obj: o.name) == name):
-            return obj
-    return None
+# The suppress column's target resolves through the typed FeatureRef kind: timeline entity names
+# are NOT design-wide unique (two components can each hold an 'Extrude1'), so a first-exact-match
+# walk can suppress the WRONG same-named feature - the kind refuses the ambiguity with the
+# 'name@index' candidates instead.
+_FEATURE = _inputs.FeatureRef("feature")
 
 
 def _resolve_appearance(design, name):
@@ -296,9 +291,10 @@ def _do_add_parameter(design, table, parameter, values):
 def _do_add_suppress(design, table, feature, suppressed_in):
     if not feature:
         return error("Provide 'feature' - the timeline feature name to suppress per configuration.")
-    feat = _resolve_feature(design, feature)
-    if not feat:
-        return error(f"No timeline feature named '{feature}'.")
+    resolved, ferr = _FEATURE.resolve(feature)
+    if ferr:
+        return error(ferr)
+    feat, feature = resolved            # publish the TIMELINE name that resolved, not the raw input
     suppressed_in = suppressed_in or []
     unknown = [r for r in suppressed_in if r not in set(_row_names(table))]
     if unknown:
@@ -743,7 +739,7 @@ tool = (
     .add_input_property("name", {"type": "string", "description": "Configuration name (add_configuration; the existing one for rename_configuration)."})
     .add_input_property("new_name", {"type": "string", "description": "New name for rename_configuration."})
     .add_input_property("parameter", {"type": "string", "description": "Model parameter name (add_parameter)."})
-    .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress)."})
+    .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress); a name several features share is refused - pick one with 'name@index'."})
     .add_input_property(*_BODY.as_property())
     .add_input_property("values", {"type": "object", "description": "{config_name: expression} (add_parameter)."})
     .add_input_property("suppressed_in", {"type": "array", "items": {"type": "string"},

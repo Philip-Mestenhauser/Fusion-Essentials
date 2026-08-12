@@ -58,7 +58,9 @@ _REL = _inputs.Choice("relation", list(_RELATIONS), required=True, description=(
     "touching: minimum distance <= 'tolerance' (a 0 distance is touching OR overlapping - see note). "
     "concentric: two CIRCULAR entities (a circular/arc edge, or a cylindrical face) whose CENTER POINTS "
     "coincide within 'tolerance'. Unlike coaxial (which compares the infinite axis LINES), two circles "
-    "offset ALONG a shared axis are coaxial but NOT concentric."))
+    "offset ALONG a shared axis are coaxial but NOT concentric. A cylindrical FACE's center is where "
+    "its PROFILE plane crosses the axis (measured) - faces from different sketch planes read offset "
+    "centers; compare circular EDGES, or coaxial for axis agreement."))
 _TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False, description=(
     "Linear tolerance for the offset/gap part (coaxial/flush offset, clearance/touching distance). "
     "Omit for a per-relation default of 0.1 mm."))
@@ -169,7 +171,14 @@ def _axis(ent, kind):
 def _circle_center(ent, kind):
     """(center_cm, label) for a CIRCULAR entity - a circular/arc edge (its center) or a cylindrical/
     conical face (its axis base point) - else (None, None). Reads Circle3D/Arc3D.center +
-    Cylinder/Cone.origin."""
+    Cylinder/Cone.origin.
+
+    LIVE-MEASURED: Cylinder.origin is where the face's PROFILE plane crosses the axis, not an
+    extent point - a symmetric extrude spanning z -1..+1 cm read origin z=0 (the sketch plane),
+    and two stacked coaxial faces each read their own profile plane (z=0 and z=2). So two faces
+    from ONE sketch (a washer's bore and rim) compare concentric correctly, while coaxial faces
+    built from different planes read offset centers - which the wire contract states, steering
+    those callers to circular EDGES or 'coaxial'."""
     if kind == "edge":
         g = safe(lambda: ent.geometry)
         ct = safe(lambda: g.curveType)

@@ -593,17 +593,38 @@ class _FakeFeature:
 
 
 class TestSuppressVisibility:
+    def _stub_feature(self, monkeypatch, d):
+        """Stub the typed FeatureRef seam ((entity, timeline name), error) - resolution itself
+        (exact match, name@index, the ambiguity refusal) is pinned once in test_inputs."""
+        monkeypatch.setattr(dc._FEATURE, "resolve",
+                            lambda raw: ((d._features[raw], raw), None) if raw in d._features
+                            else (None, f"'feature': no timeline feature named '{raw}'."))
+
     def test_suppress_sets_is_suppressed(self, monkeypatch):
         feat = _FakeFeature("Fillet1")
         d = _install(monkeypatch, _Design(configured=True, features={"Fillet1": feat}))
-        # patch the resolver seam the tool uses to find a timeline feature by name
-        monkeypatch.setattr(dc, "_resolve_feature", lambda design, name: d._features.get(name))
+        self._stub_feature(monkeypatch, d)
         dc.handler(action="add_configuration", name="Small")
         out = _payload(dc.handler(action="add_suppress", feature="Fillet1",
                                   suppressed_in=["Small"]))
         col = d.configurationTopTable.columns.added[0]
         assert col.getCellByRowName("Small").isSuppressed is True
         assert out["feature"] == "Fillet1"
+
+    def test_an_ambiguous_feature_name_is_refused_before_any_column_lands(self, monkeypatch):
+        # timeline names are NOT design-wide unique (two components can each hold an 'Extrude1');
+        # the typed kind refuses with the name@index candidates instead of suppressing whichever
+        # same-named feature a walk finds first - and the refusal must land BEFORE the mutation.
+        d = _install(monkeypatch, _Design(configured=True, features={}))
+        monkeypatch.setattr(dc._FEATURE, "resolve",
+                            lambda raw: (None, "'feature': 'Extrude1' matches 2 timeline objects "
+                                              "(Extrude1@3, Extrude1@7) - name one with the "
+                                              "'name@index' form."))
+        dc.handler(action="add_configuration", name="Small")
+        res = dc.handler(action="add_suppress", feature="Extrude1", suppressed_in=["Small"])
+        assert res["isError"] is True
+        assert "name@index" in res["message"] and "Extrude1@3" in res["message"]
+        assert d.configurationTopTable.columns.added == []   # nothing mutated on a refusal
 
     def test_visibility_sets_is_visible(self, monkeypatch):
         body = _FakeFeature("Body1")

@@ -18,7 +18,7 @@ app = adsk.core.Application.get()
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, resolve_sketch
+from ._common import apply_rename, error, ok, safe, resolve_sketch
 from . import _common
 from . import _inputs
 from . import _joints
@@ -330,12 +330,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     if not joint_origin:
         return error("jointOrigins.add returned nothing.")
 
-    new_name = (name or "").strip()
-    if new_name:
-        try:
-            joint_origin.name = new_name
-        except Exception:
-            pass
+    jo_name_final, rename_warning = apply_rename(joint_origin, name)
 
     # anchor='coordinates': prove the parametric offsets took by reading them BACK off the created JO -
     # a value that didn't stick (or a 0 where a coordinate was asked) is a mislocated origin, not
@@ -395,7 +390,7 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
     payload = {
     "created": True,
-    "joint_origin_name": safe(lambda: joint_origin.name),
+    "joint_origin_name": jo_name_final,
     "anchor": anchor,
     "anchored_on": desc,
     "frame_axes": axes,
@@ -425,6 +420,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         payload["computed_anchor"] = computed
         if readback is not None:
             payload["origin_readback"] = readback
+    if rename_warning:
+        payload["rename_warning"] = rename_warning
     return ok(payload)
 
 

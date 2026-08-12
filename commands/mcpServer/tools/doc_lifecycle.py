@@ -873,6 +873,7 @@ _copy_document_tool = (
         "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
     .add_input_property("create_path", {"type": "boolean",
         "description": "Create missing destination folders (default false)."})
+    .strict_schema()
 )
 copy_document_item = Item.create_tool_item(
     tool=_copy_document_tool, write="write", handler=copy_document_handler, run_on_main_thread=True
@@ -896,6 +897,7 @@ _delete_document_tool = (
         "description": "Exact current name of the file, case-sensitive (safety confirmation; must match)."})
     .add_input_property("force", {"type": "boolean",
         "description": "Delete even if referenced by other files (default false). Use with care."})
+    .strict_schema()
 )
 delete_document_item = Item.create_tool_item(
     tool=_delete_document_tool, write="destructive", handler=delete_document_handler, run_on_main_thread=True
@@ -929,6 +931,7 @@ _save_document_as_tool = (
         "description": "Optional version description for the save."})
     .add_input_property("allow_duplicate_name", {"type": "boolean",
         "description": "Permit a same-name fork in the target folder (default false = refuse)."})
+    .strict_schema()
 )
 save_document_as_item = Item.create_tool_item(
     tool=_save_document_as_tool, write="write", handler=save_document_as_handler, run_on_main_thread=True

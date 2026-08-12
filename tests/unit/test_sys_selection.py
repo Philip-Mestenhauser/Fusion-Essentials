@@ -193,6 +193,15 @@ class TestSelectionCap:
         # the full count is still honest, even though the array is capped
         assert out["selection_count"] == 60
 
+    def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self, monkeypatch):
+        # every record crosses the wire: max_results is clamped into 1..200, so an oversized
+        # request is held at the ceiling, not honoured.
+        entities = [BRepFace(Plane(FakeVector3D(0, 0, 1))) for _ in range(210)]
+        monkeypatch.setattr(sel, "_ui", lambda: self._fake_ui_with(entities))
+        out = _payload(sel.get_user_selection_handler(max_results=999999))
+        assert len(out["selections"]) == 200
+        assert out["truncated"] is True and out["selection_count"] == 210
+
     def test_a_selection_that_will_not_read_is_refused_not_quietly_dropped(self, monkeypatch):
         # the user picked three entities. Skipping the one that will not read publishes two records
         # under a count of three and calls the shortfall 'truncated' - the caller then acts on a

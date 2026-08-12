@@ -162,6 +162,25 @@ class TestPartialSuccess:
         assert res["isError"] is True
         assert "Could not assign" in res["message"]
 
+    def test_a_silently_swallowed_assignment_lands_in_failed_not_applied(self, wired):
+        # the honesty core: the assignment raises nothing but the body still reads its OLD
+        # material - the read-back must route it to 'failed', never report it applied
+        class _StuckBody(_Body):
+            @property
+            def material(self):
+                return _material("OldPaint")
+
+            @material.setter
+            def material(self, m):
+                pass                                  # accepted and ignored
+
+        wired([_StuckBody("Stuck"), _Body("Good", density=0.00785)],
+              libraries=[_Lib("Lib", [_material("Steel")])])
+        out = _payload(mm.handler(target="", material="Steel"))
+        assert [a["body"] for a in out["applied_to"]] == ["Good"]
+        assert out["failed"][0]["body"] == "Stuck"
+        assert "OldPaint" in out["failed"][0]["error"]
+
 
 class TestDesignGuard:
     def test_no_active_design(self, monkeypatch):

@@ -445,3 +445,31 @@ class TestPerception:
         _install([FakeOcc("X:1", "X", [FakeBody(edges=[edge])])])
         out = _payload(fg.handler(target="X:1", kind="line_edge"))
         assert out["matches"][0]["direction"] == [0.6, 0.8, 0.0]
+
+
+# ── BOUNDED READS: 'matches' is capped (CLAUDE.md "Bound it") ────────────────────────────────────
+
+class TestCaps:
+    def _many_faces(self, n):
+        faces = [FakeFace(f"F{i:04d}", _PlaneGeo(), (i, 0, 0)) for i in range(n)]
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=faces)])])
+
+    def test_default_cap_truncates_and_reports_the_true_count(self):
+        self._many_faces(25)
+        out = _payload(fg.handler(target="X:1", kind="planar_face"))
+        assert out["returned"] == 20                    # the default cap
+        assert out["match_count"] == 25                 # the full count is still honest
+
+    def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self):
+        # every match row crosses the wire: max_results is clamped into 1.._MAX_RESULTS_CEILING,
+        # so an oversized request is held at the ceiling, not honoured.
+        self._many_faces(fg._MAX_RESULTS_CEILING + 10)
+        out = _payload(fg.handler(target="X:1", kind="planar_face", max_results=999999))
+        assert out["returned"] == fg._MAX_RESULTS_CEILING
+        assert out["match_count"] == fg._MAX_RESULTS_CEILING + 10
+
+    def test_a_non_numeric_max_results_falls_back_to_the_default(self):
+        # the wire types it integer, but the clamp must not raise on a junk value either
+        self._many_faces(25)
+        out = _payload(fg.handler(target="X:1", kind="planar_face", max_results="lots"))
+        assert out["returned"] == 20

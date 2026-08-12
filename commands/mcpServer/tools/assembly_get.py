@@ -96,6 +96,23 @@ def _health(obj):
     return False, (msg[:240] if msg else "compute failed / warning")
 
 
+def _limit_facts(lims, to_out):
+    """The ENABLED bounds of one JointLimits as {min/max/rest}, converted by to_out; {} when none
+    are enabled or the limits object is absent. Limits were WRITE-ONLY on this surface (measured:
+    settable by joint_create/joint_edit, readable by no tool) - this is the read."""
+    if lims is None:
+        return {}
+    out = {}
+    for flag, member, key in (("isMinimumValueEnabled", "minimumValue", "min"),
+                              ("isMaximumValueEnabled", "maximumValue", "max"),
+                              ("isRestValueEnabled", "restValue", "rest")):
+        if _common.read_flag(lambda m=flag: getattr(lims, m)):
+            v = _common.measured(lambda m=member: getattr(lims, m))
+            if v is not None:
+                out[key] = round(to_out(v), 4)
+    return out
+
+
 def _joint_record(j):
     mt = safe(lambda: j.jointMotion.jointType)
     friendly, dof = _MOTION.get(mt, ("?", None))
@@ -110,6 +127,21 @@ def _joint_record(j):
     }
     if not healthy:
         rec["error"] = msg
+    # Suppression is DISCLOSED, not folded into healthy (a suppressed joint is inert, not broken;
+    # measured: it positioned nothing while every field read plain-healthy). BOTH flags OR'd
+    # (live-verified: Joint.isSuppressed keeps reading False when the suppression was set on the
+    # TIMELINE item). read_flag - two unreadable flags stay unstated rather than asserting active.
+    sup = (_common.read_flag(lambda: j.isSuppressed) or
+           _common.read_flag(lambda: j.timelineObject.isSuppressed))
+    if sup:
+        rec["is_suppressed"] = True
+    import math as _m
+    rot = _limit_facts(safe(lambda: j.jointMotion.rotationLimits), _m.degrees)
+    sld = _limit_facts(safe(lambda: j.jointMotion.slideLimits), lambda cm: cm * 10.0)
+    if rot:
+        rec["rotation_limits_deg"] = rot
+    if sld:
+        rec["slide_limits_mm"] = sld
     return rec
 
 
@@ -415,6 +447,18 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # here so the probe doesn't report a broken assembly as fine. Also walk the timeline for any
     # errored/warning feature (not just joints).
     broken_joints = [j["name"] for j in joints if not j.get("healthy", True)]
+    suppressed_joints = [j["name"] for j in joints if j.get("is_suppressed")]
+    # Relation health is folded into the HEADLINE flag, not just the opt-in relations slice -
+    # measured: a FAILED assembly constraint (healthy:false under include=['relations']) left
+    # is_healthy:true / broken_joints:[] / timeline_problems:[], so the tool's own "check
+    # is_healthy first" guidance missed it. The walk is the shared one; only unhealthy rows land.
+    broken_relations = []
+    for kind in ("rigid_group", "motion_link", "constraint"):
+        for rel, _owner in _relations.all_relations(design, kind):
+            r_ok, r_msg = _health(rel)
+            if not r_ok:
+                broken_relations.append({"kind": kind, "name": safe(lambda rel=rel: rel.name),
+                                         "error": r_msg})
     timeline_problems = []
     for o in _common.iter_collection(safe(lambda: design.timeline)):
         healthy, msg = _health(o)
@@ -427,7 +471,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
 
-    is_healthy = not broken_joints and not timeline_problems and not rolled_back
+    is_healthy = (not broken_joints and not timeline_problems and not rolled_back
+                  and not broken_relations)
 
     # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place edit
     # (joint_edit/param change) that hasn't been recomputed - so broken_joints can disagree with the
@@ -439,6 +484,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "units": units,
     "is_healthy": is_healthy,
     "broken_joints": broken_joints,
+    "broken_relations": broken_relations,
+    "suppressed_joints": suppressed_joints,
     "timeline_problems": timeline_problems,
     "timeline_rolled_back": rolled_back,
     "occurrence_count": occ_total,

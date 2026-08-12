@@ -8,10 +8,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam, find_operation
+from ._cam_common import clamp_rows, get_cam, find_operation
 
 
 _DIFFERENCES_CAP = 200   # two operations can differ across hundreds of CAM parameters; bound the rows
+_DIFFERENCES_CEILING = 400   # every row crosses the wire; a caller cannot lift the cap past this
 
 
 def compare_operations_handler(operation_a: str = "", operation_b: str = "",
@@ -48,7 +49,7 @@ def compare_operations_handler(operation_a: str = "", operation_b: str = "",
         "operation_b": b if k in params_b else "(not present)"})
 
     total = len(differences)
-    cap = max(1, int(max_results))
+    cap = clamp_rows(max_results, _DIFFERENCES_CAP, _DIFFERENCES_CEILING)
     differences_out = differences[:cap]
     truncated = total > len(differences_out)
 
@@ -120,7 +121,8 @@ _compare_tool = (
         input_param_description="Name of the first operation.",
     )
     .add_input_property("operation_b", {"type": "string", "description": "Name of the second operation."})
-    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'differences' array returned (default 200)."})
+    .add_input_property("max_results", {"type": "integer", "description": "Cap on the 'differences' array returned (default 200, max 400)."})
+    .strict_schema()
 )
 compare_operations_item = Item.create_tool_item(
     tool=_compare_tool, write="read", handler=compare_operations_handler, run_on_main_thread=True

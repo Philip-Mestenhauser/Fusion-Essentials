@@ -218,6 +218,8 @@ class FakeChamferFeatures:
         self.corner_override = None       # (value,) - what the FEATURE reports instead
         self.definition_override = None   # (distance_cm, angle_rad) - ditto, or False for absent
         self.chamfer_type_override = None
+        # applied when a feature is added, so a test can model the geometry actually moving
+        self.on_add = None
     def createInput(self, edges, tangent):
         self.last = FakeChamferInput(edges, tangent)
         self.last.refuse = self.refuse
@@ -225,6 +227,8 @@ class FakeChamferFeatures:
     def add(self, inp):
         import adsk.fusion
         self.added += 1
+        if self.on_add:
+            self.on_add()
         if self.result is None:
             return self.result
         if self.corner_override is not False:      # False = the feature does not answer cornerType
@@ -1030,12 +1034,23 @@ class TestVolumeReadBack:
         out = _payload(fl._fillet_handler(body_name="B", radius=1, edge_filter="all"))
         assert out["filleted"] is True and "volume_delta_cm3" not in out
 
-    def test_chamfer_is_not_volume_gated(self):
+    def test_chamfer_with_unchanged_volume_errors_and_rolls_back(self):
+        # A chamfer that moved no material must not read chamfered:true - the same volume gate as
+        # its fillet sibling (a bevel always removes or adds material).
         body = FakeBody("B", [True], volume=10.0)
         _, cf = _install([body])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        res = fl._chamfer_handler(body_name="B", distance=1, edge_filter="all")
+        assert res["isError"] is True and "moved no material" in res["message"]
+        assert cf.result.deleted is True
+
+    def test_chamfer_reports_volume_delta_like_its_sibling(self):
+        body = FakeBody("B", [True], volume=10.0)
+        _, cf = _install([body])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.on_add = lambda: setattr(body, "volume", 9.75)
         out = _payload(fl._chamfer_handler(body_name="B", distance=1, edge_filter="all"))
-        assert out["chamfered"] is True and "volume_delta_cm3" not in out
+        assert out["chamfered"] is True and out["volume_delta_cm3"] == -0.25
 
 
 class TestRuleFilletReadsBackWhatItApplied:

@@ -13,7 +13,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import apply_rename, ok, error, safe
 from . import _common
 from . import _inputs
 from . import _outputs
@@ -238,9 +238,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     if not joint:
         return error("Joint creation returned nothing.")
 
-    nm = (name or "").strip()
-    if nm:
-        safe(lambda: setattr(joint, "name", nm))
+    joint_name_final, rename_warning = apply_rename(joint, name)
 
     # report the joint's resulting occurrences so the caller can verify the wiring
     o1 = safe(lambda: joint.occurrenceOne.name)
@@ -251,7 +249,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     healthy = (hs is None) or (hs == 0)
     out = {
     "jointed": True,
-    "joint_name": safe(lambda: joint.name),
+    "joint_name": joint_name_final,
     "motion": mot,
     "axis": None if mot in _NO_AXIS_MOTIONS else ("auto(geometry)" if use_custom else ax_name),
     "healthy": healthy,
@@ -263,6 +261,8 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     "note": "Joint created AT the geometry." + _axis_note(mot, ax_name, use_custom)
     + " Verify with assembly_get (is_healthy + positions).",
     }
+    if rename_warning:
+        out["rename_warning"] = rename_warning
     mp = motion_param_names(joint)
     if mp:
         out["model_parameters"] = mp

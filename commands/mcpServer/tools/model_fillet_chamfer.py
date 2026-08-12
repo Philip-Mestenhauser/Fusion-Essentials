@@ -344,7 +344,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             edges.add(e)
         edge_src = f"{edges.count} handle(s)"
         body_label = _qualified_body_name(safe(lambda: ents[0].body))
-        verify_bodies = _geom.owning_bodies(ents) if kind == "fillet" else []
+        verify_bodies = _geom.owning_bodies(ents)
     else:
         # The edge SCOPE must be stated - an omitted scope must not silently mean the whole body
         # (blanket rounding was every executor's default design language while 'all' was implicit;
@@ -367,7 +367,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             return error(f"No matching edges on '{safe(lambda: body.name)}' "
                           f"(filter '{flt}', body has {total} edges).")
         body_label = _qualified_body_name(body)
-        verify_bodies = [body] if kind == "fillet" else []
+        verify_bodies = [body]
         blanket_note = (f" BLANKET call: {edges.count} of the body's {total} edges swept by "
                         f"filter '{flt}' - pass edges=[...] handles to target a specific set.")
 
@@ -487,17 +487,19 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             return error(rerr + (" The feature has been rolled back."
                                  if removed else " (The feature could not be auto-removed.)"))
 
-    # A fillet either cuts a convex corner away or fills a concave one, so an unchanged volume
-    # means nothing was rounded however healthy the feature looks.
+    # A fillet or chamfer either cuts a corner away or fills a concave one, so an unchanged volume
+    # means nothing was rounded/beveled however healthy the feature looks. (Chamfer publishes the
+    # same volume_delta_cm3 as its sibling now - it was fillet-only, an asymmetry with no reason.)
     vol_delta, vol_readable = _geom.volume_delta(verify_bodies, vol_before)
     if vol_readable and abs(vol_delta) < _common.NO_VOLUME_CHANGE_CM3:
         removed = safe(lambda: feature.deleteMe())
+        size_desc = f"{vtype} fillet" if kind == "fillet" else "chamfer"
         return error(
-            "Fillet reported success but moved no material - the filleted body's measured volume "
-            f"is unchanged after the {vtype} fillet. The feature has been rolled back; check that "
-            "the requested edges really are corners at this radius, and re-run find_geometry for "
-            "fresh handles."
-            + ("" if removed else " (The inert fillet feature could not be auto-removed.)"))
+            f"{kind.capitalize()} reported success but moved no material - the body's measured "
+            f"volume is unchanged after the {size_desc}. The feature has been rolled back; check "
+            "that the requested edges really are corners at this size, and re-run find_geometry "
+            "for fresh handles."
+            + ("" if removed else f" (The inert {kind} feature could not be auto-removed.)"))
 
     measured_note = ("" if faces_created is None
                      else " faces_created is read from the created feature"

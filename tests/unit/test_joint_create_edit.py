@@ -270,6 +270,20 @@ class TestApplyLimits:
         changed, err = joint._apply_limits(m, max_mm=100)
         assert err is not None and ("slide" in err.lower() or "linear" in err.lower())
 
+    def test_inverted_rotation_pair_is_refused_before_any_write(self):
+        # min > max is an EMPTY feasible range that silently makes the joint undrivable while every
+        # health field reads healthy - refused, and nothing is enabled on the motion.
+        m = _RevMotion()
+        changed, err = joint._apply_limits(m, min_deg=60, max_deg=-60)
+        assert err is not None and "INVERTED" in err
+        assert changed == {} and m.rotationLimits.isMinimumValueEnabled is False
+
+    def test_inverted_slide_pair_is_refused_before_any_write(self):
+        m = _SlideMotion()
+        changed, err = joint._apply_limits(m, min_mm=50, max_mm=10, cm_scale=0.1)
+        assert err is not None and "INVERTED" in err
+        assert changed == {} and m.slideLimits.isMaximumValueEnabled is False
+
 
 # ── _resolve_input: the geometry-as-values HANDLE path ──────────
 #
@@ -835,3 +849,26 @@ class TestSlideValueHasNoParameter:
                                       joint_type="slider"))
         assert out["model_parameters"] == {"offset": "d12", "angle": "d13"}
         assert "co-driving the geometry" in out["note"]
+
+
+class TestSuppressedEditDisclosure:
+    def _rig(self, monkeypatch, suppressed):
+        j = SimpleNamespace(name="J", isFlipped=False, isSuppressed=suppressed,
+                            motionLinks=[], jointMotion=None, timelineObject=None)
+        design = SimpleNamespace(computeAll=lambda: None, timeline=None)
+        monkeypatch.setattr(joint._common, "design", lambda: design)
+        monkeypatch.setattr(joint, "_find_joint", lambda d, n: j)
+        return j
+
+    def test_suppressed_joint_edit_is_disclosed_as_inert(self, monkeypatch):
+        # The edit is real (the write lands) but a suppressed joint positions nothing (measured:
+        # the part sat 47mm from its jointed placement with no mention) - disclosed, not silent.
+        j = self._rig(monkeypatch, suppressed=True)
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert j.isFlipped is True                       # the write itself landed
+        assert out["suppressed"] is True and "INERT" in out["note"]
+
+    def test_active_joint_edit_carries_no_suppression_note(self, monkeypatch):
+        self._rig(monkeypatch, suppressed=False)
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert "suppressed" not in out and "INERT" not in out["note"]

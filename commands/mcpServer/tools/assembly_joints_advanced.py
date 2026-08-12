@@ -15,7 +15,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe
+from ._common import error, ok, safe, timeline_health
 from . import _common
 from . import _inputs
 from . import _assert
@@ -26,6 +26,11 @@ from . import _assert
 # slide-axis rules rather than keeping a second copy of the seven motion names.
 from .joint_create_edit import (_JOINT_TYPES, _MOTIONS, _parse_snap, _resolve_input,
                                 _resolve_snap_entity, _slide_index, _slide_name)
+# The same before/after occurrence-position reader joint_at_geometry publishes its 'moved_by' from:
+# _occ_origin reads the WORLD translation (transform2, with the local-matrix fallback) and _move_delta
+# turns a pair of those into a distance/direction above one shared solver-noise tolerance. A constraint
+# locates parts, so it reports the reposition through that same reader rather than a second one.
+from .joint_at_geometry import _MOVE_TOL_CM, _move_delta, _occ_origin
 from . import _joints
 from ._joints import (AXES as _AXES, apply_motion as _apply_motion,
                       current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin,
@@ -381,6 +386,98 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
 
 # ------------------------------------------------------------ assembly_constrain
 
+# healthState on an assembly constraint: 2 = error, 1 = warning - the same pair assembly_get's
+# relations slice publishes as healthy:false (_health there), so a caller re-reading the constraint
+# sees the state this refusal named. The two DIVERGE on an UNREADABLE state: the READS treat it as
+# healthy (assembly_get._health, joint_at_geometry) because a read must describe a design it did not
+# change, while a CREATE that cannot confirm its own effect has nothing to stand on - so this refuses.
+# The create-side rule is the canonical one for a write: an unconfirmable mutation is an error.
+_HS_ERROR, _HS_WARNING = 2, 1
+
+
+def _occ_axes(occ):
+    """The occurrence's world basis axes as three unit tuples, or None when unreadable - the
+    ROTATION half of the moved verdict (a flip=true relationship can rotate a part 180 deg while
+    translating it barely at all; a translation-only row implied a placement that was not what
+    happened - measured)."""
+    cs = safe(lambda: occ.transform2.getAsCoordinateSystem())
+    if not cs:
+        return None
+    axes = []
+    for v in cs[1:4]:
+        t = (safe(lambda v=v: v.x), safe(lambda v=v: v.y), safe(lambda v=v: v.z))
+        if any(c is None for c in t):
+            return None
+        axes.append(t)
+    return tuple(axes)
+
+
+def _axes_rotation_deg(a, b):
+    """The largest angle (deg) any basis axis swung between two _occ_axes reads; None if either is
+    absent."""
+    if not a or not b:
+        return None
+    import math as _m
+    worst = 0.0
+    for (ax, ay, az), (bx, by, bz) in zip(a, b):
+        dot = max(-1.0, min(1.0, ax * bx + ay * by + az * bz))
+        worst = max(worst, _m.degrees(_m.acos(dot)))
+    return worst
+
+
+def _constraint_positions(targets):
+    """{label: ((x, y, z) cm, axes-or-None)} - the WORLD translation and basis of every target
+    occurrence that reads one. An occurrence whose transform cannot be read is ABSENT from the map,
+    never a zero: the moved verdict is only computed where both sides were actually sampled."""
+    out = {}
+    for label, occ in targets.items():
+        if occ is None:
+            continue
+        pos = _occ_origin(occ)
+        if pos is not None:
+            out[label] = (pos, _occ_axes(occ))
+    return out
+
+
+def _constraint_moves(before, targets):
+    """([{occurrence, distance_mm, direction, rotation_deg?}], measured) for the constrained
+    occurrences.
+
+    'measured' is False when no target could be sampled on BOTH sides of the add - then the verdict is
+    UNKNOWN and must not be published as "nothing moved"."""
+    rows, measured = [], False
+    for label, occ in targets.items():
+        if occ is None or label not in before:
+            continue
+        after = _occ_origin(occ)
+        if after is None:
+            continue
+        measured = True
+        was_pos, was_axes = before[label]
+        delta = _move_delta(was_pos, after)
+        rot = _axes_rotation_deg(was_axes, _occ_axes(occ))
+        if delta or (rot is not None and rot > 0.1):
+            row = dict(occurrence=label, **(delta or {"distance_mm": 0.0, "direction": None}))
+            if rot is not None and rot > 0.1:
+                row["rotation_deg"] = round(rot, 2)
+            rows.append(row)
+    return rows, measured
+
+
+def _newly_unhealthy(before_errors, before_warnings, before_total, design):
+    """Timeline features that went unhealthy since the capture - adding a constraint recomputes the
+    assembly and can break an EXISTING joint or motion link. Measured: that damage reads as a compute
+    WARNING as readily as an error, so both deltas count.
+
+    The walk is bounded to `before_total` - the item count from the pre-add reading - because the
+    constraint's own fresh timeline entry is a POISON READ: its healthState RAISES '1 : Unknown
+    exception' right after the add (measured, Fusion 2705.0.87), and the same caught error inside a
+    script context rolled the whole transaction back. Nothing here wants that entry anyway."""
+    errors, warnings, _total = timeline_health(design, limit=before_total)
+    return ([n for n in errors if n not in before_errors]
+            + [n for n in warnings if n not in before_warnings])
+
+
 def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = "",
                                 snap_one: str = "", snap_two: str = "", relationships=None,
                                 offset: float = 0.0, angle_deg: float = 0.0,
@@ -428,6 +525,13 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
         cin = design.rootComponent.assemblyConstraints.createInput()
         rels = cin.geometricRelationships
         names = set()
+        # label -> occurrence for the parts this constraint locates, so the payload can report which
+        # of them the solve actually moved. A label whose occurrence could not be re-resolved maps to
+        # None and is reported as unmeasured rather than as "did not move". ONE labelling scheme feeds
+        # both 'occurrences' and the moved rows: the fullPathName (the unique key - a nested child's
+        # leaf .name is shared by every instance of its component), falling back to the caller's own
+        # string only when nothing resolved.
+        targets, labels = {}, {}
 
         if specs:
             # Autonomous snap path - resolve every pair and add it to the SAME constraint input.
@@ -452,7 +556,19 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
                 else:
                     val = adsk.core.ValueInput.createByReal(sp["offset"] * k)
                 rels.add(e1, e2, sp["flip"], val)
-                names.add(occ1); names.add(occ2)
+                # _resolve_snap_entity hands back the ENTITY only, so the occurrence whose position is
+                # sampled is resolved through the same shared refuse-ambiguity resolver it used
+                # internally (_inputs._resolve_occurrence) - not a second matcher.
+                for nm in (occ1, occ2):
+                    if nm in labels:
+                        continue
+                    occ = _find_one(design, nm)[0]
+                    lbl = nm
+                    if occ is not None:
+                        lbl = safe(lambda occ=occ: occ.fullPathName) or safe(lambda occ=occ: occ.name) or nm
+                    labels[nm] = lbl
+                    names.add(lbl)
+                    targets[lbl] = occ
         else:
             # Selection path (no snaps): geometry from the user's current Fusion selection.
             o1, e1 = _find_one(design, occurrence_one)
@@ -473,27 +589,85 @@ def assembly_constraint_handler(occurrence_one: str = "", occurrence_two: str = 
             val = (adsk.core.ValueInput.createByString(f"{float(angle_deg)} deg") if angle_deg
                    else adsk.core.ValueInput.createByReal(float(offset or 0.0) * k))
             rels.add(e1, e2, bool(flipped), val)
-            names.add(safe(lambda: o1.name)); names.add(safe(lambda: o2.name))
+            for o in (o1, o2):
+                lbl = safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name)
+                names.add(lbl)
+                targets[lbl] = o
 
         if rels.count == 0:
             return error("No relationships to constrain. Provide 'relationships' or snap_one/snap_two.")
+        # Sampled BEFORE the add: the add recomputes the assembly, which is both how a part gets
+        # located (the point of the tool) and how an EXISTING joint/motion link can break - neither is
+        # reportable without a pre-mutation reading of positions and timeline health.
+        before_pos = _constraint_positions(targets)
+        errors_before, warnings_before, total_before = timeline_health(design)
         constraint = design.rootComponent.assemblyConstraints.add(cin)
     except Exception as e:
         return error(f"Assembly constraint failed: {e}")
     if not constraint:
         return error("Assembly constraint creation returned nothing.")
-    # A constraint can be ADDED yet fail to SOLVE (over-constrained/unsatisfiable) - the same
-    # platform behavior joint_at_geometry guards. healthState 2 = error (suppressed counts healthy).
+    name_read = safe(lambda: constraint.name)
+    cname = name_read or "the created constraint"
+    # The undo names the constraint only when its name was actually read - quoting a placeholder as
+    # the 'name' argument would hand the caller a call that resolves nothing.
+    undo = ("It REMAINS in the design - remove it with assembly_edit_relations(kind='constraint', "
+            + (f"name='{name_read}', action='delete')." if name_read else
+               "action='delete') once assembly_get(include=['relations']) names it."))
+
+    # A constraint can be ADDED yet fail to SOLVE (over-constrained/unsatisfiable) - the same platform
+    # behavior joint_at_geometry guards.
     hs = safe(lambda: constraint.healthState)
-    if hs == 2:
+    if hs is None:
+        return error(f"Constraint '{cname}' was created but its healthState cannot be read, so "
+                     "whether it SOLVED is UNCONFIRMED - nothing here says the parts are located. "
+                     f"Read it back with assembly_get(include=['relations']). {undo}")
+    if hs in (_HS_ERROR, _HS_WARNING):
         msg = safe(lambda: constraint.errorOrWarningMessage) or ""
-        return error((f"Constraint '{safe(lambda: constraint.name)}' was created but FAILED to "
-                      "solve. " + msg).strip() + " It remains in the design - relax or remove one "
-                      "of its relationships.")
-    return ok({"created": True, "constraint": safe(lambda: constraint.name),
-        "relationship_count": safe(lambda: constraint.geometricRelationships.count, len(specs) or 1),
+        state = "FAILED to solve" if hs == _HS_ERROR else "reports a compute WARNING"
+        return error((f"Constraint '{cname}' was created but {state}. " + msg).strip()
+                     + f" {undo} Relax or remove one of its relationships.")
+
+    # The add solved - but it can still have broken what the parts already carried. The damaged
+    # relations are named here rather than left for a later read to discover. The constraint's OWN
+    # timeline entry carries its name (measured: 'Constraint 1' for constraint.name 'Constraint 1'), so
+    # the name is filtered as well as the index bounded - the index bound assumes the entry landed
+    # after the ones counted before the add, and a name match is what catches it wherever it landed.
+    damaged = [n for n in _newly_unhealthy(errors_before, warnings_before, total_before, design)
+               if n != name_read]
+    if damaged:
+        return error(f"Constraint '{cname}' solved, but adding it left {len(damaged)} existing "
+                     f"timeline feature(s) unhealthy: {', '.join(damaged)}. "
+                     f"{undo} Deleting it does not restore them automatically - check them with "
+                     "assembly_get afterwards.")
+
+    # The COUNT the constraint reports, never the request: an unreadable count publishes null (with
+    # the submitted number beside it), so no caller reads the ask back as a measurement.
+    count = _common.counted(lambda: constraint.geometricRelationships.count)
+    submitted = len(specs) or 1
+    moves, measured = _constraint_moves(before_pos, targets)
+    note = "Components constrained with the relationship set (type inferred from geometry)."
+    if moves:
+        note += (" Repositioned: "
+                 + "; ".join(f"{m['occurrence']} by {m['distance_mm']} mm" for m in moves) + ".")
+    elif measured:
+        note += (f" NO target occurrence moved - every sampled world transform reads within "
+                 f"{round(_MOVE_TOL_CM * 10.0, 3)} mm of its pre-add position, so the constraint "
+                 "solved without repositioning a part.")
+    else:
+        note += (" 'moved' is null - no target occurrence's transform could be read on both sides of "
+                 "the add, so whether any part moved is UNKNOWN here (it is not a 'no'). Read the "
+                 "positions with assembly_get.")
+    if count is None:
+        note += (f" 'relationship_count' is null - it could not be read off the constraint; "
+                 f"{submitted} relationship(s) were submitted.")
+    elif count != submitted:
+        note += f" 'relationship_count' reads {count} for the {submitted} relationship(s) submitted."
+    return ok({"created": True, "constraint": name_read,
+        "relationship_count": count,
+        "relationships_submitted": submitted,
         "occurrences": sorted(n for n in names if n),
-        "note": "Components constrained with the relationship set (type inferred from geometry)."})
+        "moved": moves if measured else None,
+        "note": note})
 
 
 # ----------------------------------------------------------------------- tools
@@ -556,7 +730,10 @@ _CONSTRAINT_DESC = (
                                      "back/cylinder/origin) all added to ONE constraint - e.g. a part's bottom flush onto another's "
                                      "top + two side faces flush to fully fix it. Mating faces 'rest on' each other with flip=true. "
                                      "Shorthand: pass 'snap_one'/'snap_two' for a single relationship. Or selection mode: omit snaps, "
-                                     "pass 'occurrence_one'/'occurrence_two', select one entity on each in Fusion first."
+                                     "pass 'occurrence_one'/'occurrence_two', select one entity on each in Fusion first. "
+                                     "REFUSES (naming the delete path) when the constraint does not solve, its state "
+                                     "cannot be read, or the add leaves other features unhealthy; 'moved' names each "
+                                     "part it repositioned."
 )
 constraint_tool = (
     Tool.create_simple(name="assembly_constrain", description=_CONSTRAINT_DESC)

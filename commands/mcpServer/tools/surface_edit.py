@@ -318,6 +318,11 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
+    # distance=0 produces a surface exactly COINCIDENT with the source (measured: published as a
+    # success, space_measure distance 0) - the same zero-refusal every sibling in this file holds.
+    if distance == 0:
+        return error("Provide a non-zero 'distance' to offset - distance=0 would create a surface "
+                     "exactly coincident with the source face.")
     op_key = (operation or "new").strip().lower()
     if op_key not in _OFFSET_OPS:
         return error(f"Unknown operation '{operation}'. Offset supports: new, new_component.")
@@ -404,6 +409,14 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
 
     thick_val = adsk.core.ValueInput.createByReal(float(thickness) * k)
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
+    # For operation='join': the solids standing BEFORE the add, by native token. A join that fused
+    # lands its created faces on one of THESE bodies; a join whose sheet touches no solid silently
+    # mints a NEW free-floating body instead (measured) - the token diff below discloses that.
+    join_host = (_common.census_host(safe(lambda: face_ents[0].body), comp)
+                 if op_key == "join" and face_ents else None)
+    before_tokens = ({t for t in (_common.native_token(b) for b in
+                                  _common.iter_collection(safe(lambda: join_host.bRepBodies)))
+                      if t} if join_host is not None else set())
     try:
         thk_input = comp.features.thickenFeatures.createInput(coll, thick_val, bool(symmetric),
                                                               op, bool(chaining))
@@ -447,6 +460,20 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
     }
     if tt_key:
         payload["thicken_type"] = tt_key
+    # join no-fuse disclosure: a created body whose token was NOT among the pre-add solids is a NEW
+    # free-floating body - operation='join' merged nothing (the cut path refuses on its own;
+    # measured, the join path published operation:'join' with modified:[] and no disclosure).
+    if op_key == "join" and readable and created:
+        loose = [safe(lambda b=b: b.name) for b in created
+                 if (_common.native_token(b) or "") not in before_tokens]
+        if loose:
+            payload["fused"] = False
+            payload["disjoint_join"] = True
+            payload["note"] += (" WARNING: operation='join' fused NOTHING - the wall landed as a "
+                                f"NEW free-floating body ({', '.join(n for n in loose if n)}) "
+                                "because the sheet touches no existing solid. Move it into contact "
+                                "(model_move) and thicken again, or pass operation='new' when a "
+                                "separate body is intended.")
     return ok(payload)
 
 

@@ -111,9 +111,11 @@ class _Coll:
 class _FakeValueInput:
     """What ValueInput.createByReal returns in the harness — a marker carrying the real value. The
     live MeshReduceFeatureInput setters require a Ptr<ValueInput>, so a bare float/int must be
-    REJECTED; this is the only type the realistic input below accepts."""
+    REJECTED; this is the only type the realistic input below accepts. realValue mirrors the live
+    ValueInput property (the remesh density read-back reads it)."""
     def __init__(self, real):
         self.real = real
+        self.realValue = real
 
 
 def _make_value_input(v):
@@ -397,6 +399,17 @@ class TestMeshGet:
         assert len(out["meshes"]) == 50
         # the full count is still honest, even though the array is capped
         assert out["count"] == 60
+
+    def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self):
+        # every row crosses the wire: max_results is clamped into 1..200, so an oversized
+        # request is held at the ceiling, not honoured.
+        _wire_adsk()
+        meshes = [MeshBody(f"Scan{i}", token=f"T{i}") for i in range(210)]
+        comp = FakeComp("Comp", meshes=meshes)
+        _install(FakeDesign(comp))
+        out = _payload(mo.mesh_get_handler(target="", max_results=999999))
+        assert len(out["meshes"]) == 200
+        assert out["truncated"] is True and out["count"] == 210
 
     def test_reports_area_and_volume_scaled_to_units(self):
         # MeshBody.area/volume are cm^2/cm^3 (Fusion's internal units) - default units=mm scales by
@@ -1163,3 +1176,52 @@ class TestMeshGetDescription:
         assert "reads 0.0 on a mesh that is not watertight" in desc
         assert "null only when the field could not be read" in desc
         assert "'volume' is null for a mesh that is not watertight" not in desc
+
+
+class TestRemeshDensityReadBack:
+    def test_density_that_lands_is_echoed(self):
+        # density takes a ValueInput (live-verified; a raw float raises in the SWIG layer) and the
+        # set is read back off realValue; a landed density is published, never silently assumed.
+        _wire_adsk()
+        import adsk.core
+        adsk.core.ValueInput.createByReal = staticmethod(_make_value_input)
+        src = MeshBody("Scan", tri=2000)
+        feats = _MeshFeatures([MeshBody("Scan", tri=900)])
+        comp = FakeComp("Comp", features=_Features(remesh=feats))
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        out = _payload(mo.mesh_remesh_handler(mesh="H", density=12))
+        assert out["density_applied"] == 12.0
+        assert feats.last_input.density.realValue == 12.0
+
+    def test_density_the_build_drops_is_refused(self):
+        # Measured: a silent setattr drop ran the default remesh while implying the density took -
+        # a set whose read-back does not echo refuses the input instead.
+        _wire_adsk()
+        import adsk.core
+        adsk.core.ValueInput.createByReal = staticmethod(_make_value_input)
+
+        class _DropsDensity:
+            def __setattr__(self, name, value):
+                if name == "density":
+                    return                      # the SWIG-proxy silent drop
+                object.__setattr__(self, name, value)
+
+        src = MeshBody("Scan", tri=2000)
+        feats = _MeshFeatures([MeshBody("Scan", tri=900)],
+                              input_factory=lambda: _DropsDensity())
+        comp = FakeComp("Comp", features=_Features(remesh=feats))
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        res = mo.mesh_remesh_handler(mesh="H", density=12)
+        assert res["isError"] is True and "did not land" in res["message"]
+
+    def test_no_density_asks_for_no_read_back(self):
+        _wire_adsk()
+        src = MeshBody("Scan", tri=2000)
+        feats = _MeshFeatures([MeshBody("Scan", tri=900)])
+        comp = FakeComp("Comp", features=_Features(remesh=feats))
+        src.parentComponent = comp
+        _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
+        out = _payload(mo.mesh_remesh_handler(mesh="H"))
+        assert "density_applied" not in out

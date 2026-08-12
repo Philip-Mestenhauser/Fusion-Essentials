@@ -32,10 +32,14 @@ _DENYLIST = {
     "op_state_facts": ("_cam_common", "def"),
     "op_primary_state": ("_cam_common", "def"),
     "validity_basis": ("_cam_common", "def"),
-    # The ONE 'max_results' clamp every capped CAM read runs under: one home so the not-a-number
-    # fallback and the 1..ceiling hold cannot be right in one read and stale in the next (each read
-    # still passes its OWN default/ceiling pair).
+    # The ONE 'max_results' clamp every capped read runs under (CAM and non-CAM alike): one home so
+    # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the
+    # next (each read still passes its OWN default/ceiling pair).
     "clamp_rows": ("_cam_common", "def"),
+    # The ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns
+    # (final_name, warning-or-None). A per-tool try/except-pass copy is the swallowed-rename defect
+    # this helper replaced - the payload must disclose a rename that declined or landed deduped.
+    "apply_rename": ("_common", "def"),
     # The ONE CAM tree traversal + refusal resolver (setups/ops/folders/patterns; a duplicated name
     # is refused with each hit's setup path) - every cam_* tool resolves names through these.
     "walk_cam_tree": ("_cam_common", "def"),

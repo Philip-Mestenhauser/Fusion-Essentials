@@ -221,6 +221,33 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         result["limit_warnings"] = warnings
         result["note"] += (" NOTE: the commanded value exceeds an ENABLED joint limit - Fusion may have "
                            "clamped it (see value_now vs applied).")
+    # value_now vs applied gate: a drive the mechanism silently ignored reads back its pre-drive
+    # value (measured: driven:true with value_now 0.0 vs applied 25 while an auto-grounded first
+    # component froze the whole chain - isFirstComponentGroundToParent sets that lock without any
+    # user action). A limit warning already explains a clamp, so this fires only unexplained
+    # mismatches.
+    if not warnings:
+        mismatched = []
+        if ("angle_deg" in applied and "angle_deg" in read_back
+                and abs(read_back["angle_deg"] - applied["angle_deg"]) > 1e-3):
+            mismatched.append(f"angle {read_back['angle_deg']} deg vs applied {applied['angle_deg']}")
+        if ("distance" in applied and "distance_mm" in read_back
+                and abs(read_back["distance_mm"] - float(applied["distance"]) * k * 10.0) > 1e-3):
+            mismatched.append(f"slide {read_back['distance_mm']} mm vs applied "
+                              f"{round(float(applied['distance']) * k * 10.0, 4)} mm")
+        if mismatched:
+            result["drive_took"] = False
+            locked = [safe(lambda o=o: o.name) for o in
+                      _common.iter_collection(safe(lambda: design.rootComponent.occurrences))
+                      if safe(lambda o=o: o.isGroundToParent)]
+            locked = [n for n in locked if n]
+            result["note"] += (
+                " WARNING: the drive DID NOT TAKE - value_now reads " + "; ".join(mismatched) +
+                " with no enabled limit to explain it. A parent-locked member freezes the whole "
+                "chain" + (f": ground_to_parent is SET on {', '.join(locked)} - release it with "
+                           "assembly_ground(ground_to_parent=false) and re-drive."
+                           if locked else " - check per-occurrence ground_to_parent with "
+                           "assembly_get."))
     if partner:
         result["motion_link_partner"] = partner
         result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' - the link "

@@ -28,6 +28,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import (ok, error, safe, iter_collection, measured, design as _active_design,
                       design_wide_counts)
+from ._cam_common import clamp_rows
 from . import _geom
 from . import _inputs
 from . import _outputs
@@ -577,7 +578,7 @@ def get_user_selection_handler(require: str = "", max_results: int = _SELECTION_
         return error("Nothing is selected in Fusion. Ask the user to click an entity, then "
     "call sys_get_selection again (or re-run sys_request_selection).")
 
-    cap = max(1, int(max_results))
+    cap = clamp_rows(max_results, _SELECTION_CAP, 200)   # bounded: every record crosses the wire
     selections = []
     # The except turns an unreadable selection into an honest refusal, so this stays a positional
     # walk: iter_collection would skip it, publishing a short list and labelling it 'truncated'.
@@ -636,8 +637,11 @@ request_tool = (
             "description": "Clear the existing selection first (default true)."})
     .add_input_property("wait_seconds", {"type": "number",
             "description": f"Hold the call until a pick or this many seconds elapse (default "
-            f"{_DEFAULT_WAIT_SECONDS:g}, max {_MAX_WAIT_SECONDS:g}). 0 = legacy fire-and-return "
-            "(returns immediately; poll with sys_get_selection)."})
+            f"{_DEFAULT_WAIT_SECONDS:g}, max {_MAX_WAIT_SECONDS:g}). Keep it UNDER your MCP "
+            "client's own per-call timeout (~60s is common): a longer hold makes the client error "
+            "while the server keeps waiting, and the one-pending guard then refuses re-fires until "
+            "it expires. 0 = legacy fire-and-return (returns immediately; poll with "
+            "sys_get_selection)."})
     .writes()
     # Bypasses Item.create_tool_item's automatic write="write" guard wrap on purpose: that wrap
     # touches adsk.* (app.activeDocument) unconditionally, which is only safe on the main thread -
@@ -671,7 +675,7 @@ get_tool = (
     .add_input_property(*_inputs.Choice("require", list(_REQUIRE_KINDS),
             description="Optional expected kind to validate the selection against.").as_property())
     .add_input_property("max_results", {"type": "integer",
-            "description": "Cap on the 'selections' array returned (default 50)."})
+            "description": "Cap on the 'selections' array returned (default 50, max 200)."})
     .strict_schema()
 )
 get_item = Item.create_tool_item(tool=get_tool, write="read", handler=get_user_selection_handler,

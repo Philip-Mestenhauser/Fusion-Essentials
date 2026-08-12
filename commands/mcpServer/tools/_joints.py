@@ -410,9 +410,19 @@ def all_joints(design):
                 j = safe(lambda i=i: jc.item(i))
                 if j is None:
                     continue
-                # entityToken is stable across the two root proxies; id() falls back for fakes.
+                # entityToken is stable across the two root proxies. A SUPPRESSED joint's token can
+                # read None (it degrades toward a bare feature), and an id() fallback then splits
+                # the two root proxies into two records (measured: joint_count 2 for ONE suppressed
+                # joint) - so the fallback key is (name, objectType, owning component), which the
+                # two proxies of one joint share; id() remains only for a joint with no readable name.
                 token = safe(lambda j=j: j.entityToken)
-                key = token if token is not None else id(j)
+                if token is not None:
+                    key = ("tok", token)
+                else:
+                    nm = safe(lambda j=j: j.name)
+                    key = (("nm", nm, safe(lambda j=j: j.objectType),
+                            safe(lambda j=j: j.parentComponent.name))
+                           if nm else ("id", id(j)))
                 if key in seen:
                     continue
                 seen.add(key)

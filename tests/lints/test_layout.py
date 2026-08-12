@@ -29,6 +29,7 @@ _LINT_TESTS = frozenset({
     "test_no_duplicate_defs", "test_no_fabricated_fallbacks",
     "test_input_property_names",
     "test_no_first_match_resolvers", "test_no_hand_cast_product", "test_no_hand_seeded_enums",
+    "test_strict_schema",
     "test_occurrence_ref_lint",
     "test_operations_shared",
     "test_output_contracts",

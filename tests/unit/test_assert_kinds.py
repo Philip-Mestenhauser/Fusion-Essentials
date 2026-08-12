@@ -486,3 +486,41 @@ class TestFileLanded:
         res = kernel.wrap(lambda **kw: _ok({"other": 1}), [kernel.FileLanded("file_path")])()
         assert res["isError"] is True
         assert "file_path" in res["message"]
+
+
+class _PoisonHealthyItem:
+    """A HEALTHY item whose errorOrWarningMessage getter RAISES - measured on a fresh
+    AssemblyConstraint (and a caught adsk error has rollback risk in some contexts), which is
+    why the walk reads the message only inside the unhealthy branches."""
+    def __init__(self, name):
+        self.name = name
+        self.healthState = 0
+    @property
+    def errorOrWarningMessage(self):
+        raise RuntimeError("InternalValidationError on a healthy item")
+
+
+class TestPoisonGetterOnHealthyItems:
+    def test_healthy_walk_never_reads_the_message_getter(self, monkeypatch):
+        tl = _FakeTimeline([_PoisonHealthyItem("Constraint1")])
+        p = kernel.FeatureHealthy()
+        monkeypatch.setattr(p, "_timeline", lambda: tl)
+
+        def handler(**kw):
+            tl.items.append(_PoisonHealthyItem("Constraint2"))
+            return _ok({"done": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["features_verified"] == 1        # a raise here would have failed the wrap
+
+    def test_unhealthy_item_still_gets_its_message_read(self, monkeypatch):
+        tl = _FakeTimeline()
+        p = kernel.FeatureHealthy()
+        monkeypatch.setattr(p, "_timeline", lambda: tl)
+
+        def handler(**kw):
+            tl.items.append(_FakeTimelineItem("Broken1", 2, "No target body"))
+            return _ok({"done": True})
+
+        res = kernel.wrap(handler, [p])()
+        assert res["isError"] is True and "No target body" in res["message"]

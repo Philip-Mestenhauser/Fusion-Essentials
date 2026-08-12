@@ -16,7 +16,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale, target_component
+from ._common import apply_rename, error, ok, safe, scale, target_component
 from . import _common
 from . import _inputs
 
@@ -181,21 +181,16 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
     if not sketch:
         return error(f"Sketch creation returned nothing on {desc}.")
 
-    new_name = (name or "").strip()
-    if new_name:
-        try:
-            sketch.name = new_name
-        except Exception:
-            pass  # naming is best-effort; don't fail the create over it
+    final_name, rename_warning = apply_rename(sketch, name)
 
     # Encode the sketch's world FRAME so the caller can place geometry on the first try instead of
     # guess-and-screenshot. On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its
     # axes may not line up with world - report where sketch (0,0) is in world and where +X/+Y point.
     frame = _sketch_world_frame(sketch)
 
-    return ok({
+    payload = {
         "created": True,
-        "sketch_name": safe(lambda: sketch.name),
+        "sketch_name": final_name,
         "on": desc,
         "plane": _plane_name(sketch),
         "frame": frame,
@@ -204,7 +199,10 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
             "frame.x_world, +Y along frame.y_world - place geometry from those, not by eye. On the "
             "xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z "
             "(read frame.y_world for the exact per-plane axis directions)."),
-    })
+    }
+    if rename_warning:
+        payload["rename_warning"] = rename_warning
+    return ok(payload)
 
 
 # ------------------------------------------------------------ sketch_add_geometry
@@ -1016,6 +1014,7 @@ add_geometry_tool = (
     .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius (needs both values)."})
     .add_input_property("create_angle_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension angle_deg (needs both values)."})
     .add_input_property("is_construction", {"type": "boolean", "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
+    .strict_schema()
 )
 add_geometry_item = Item.create_tool_item(tool=add_geometry_tool, write="write", handler=add_sketch_geometry_handler,
                                           run_on_main_thread=True)

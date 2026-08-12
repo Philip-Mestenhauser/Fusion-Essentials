@@ -11,6 +11,14 @@ Pinned (the DoD):
     in PARAMETRIC it opens a base-feature scope (startEdit/finishEdit on the captured BaseFeature),
     in DIRECT it does NOT (no scope object touched, base_feature arg to inner_op is None).
   • mesh_plane_cut: each cut_type + each fill resolves the right enum onto the input; reports bodies.
+  • mesh_plane_cut refuses a plane the mesh's bounding box does not straddle BEFORE creating the
+    feature (worded per cut type), and skips that guard - never refuses on it - when the plane
+    geometry, the box, or the shared coordinate frame cannot be read.
+  • mesh_plane_cut trim/split_faces are gated on the target's triangle count: unchanged (the plane cut
+    nothing) and dropped to zero (the whole mesh consumed) are both errors, worded per cut type, each
+    attempting a rollback claimed only on a TIMELINE re-read (a raising deleteMe is not a decline); a
+    zero/unreadable count on either side skips the gate as UNVERIFIED, and a real cut publishes
+    triangles_before/after.
   • MeshBodyRef rejects a BRep handle with the redirect message (both tools).
   • PlaneRef resolves an origin alias (xy) to the component's origin construction plane.
   • mesh_to_brep's prismatic error path now mentions mesh_generate_face_groups.
@@ -20,7 +28,8 @@ Pinned (the DoD):
 
 import json
 
-from conftest import load_tool
+from conftest import FakeBoundingBox3D, FakePoint, FakeVector3D, load_tool
+from conftest import Plane as PlaneGeom
 
 me = load_tool("mesh_edit")
 
@@ -50,12 +59,14 @@ class _FaceGroups:
 class MeshBody:
     """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody)."""
     def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, token=None, parent=None,
-                 face_groups=0):
+                 face_groups=0, bbox=None):
         self.name = name
         self.displayMesh = TriangleMesh(tri, nodes)
         self.isClosed = is_closed
         self.entityToken = token or f"MTOK::{name}"
         self.parentComponent = parent
+        # boundingBox - what the pre-flight plane/box test reads (None = unreadable, guard skips)
+        self.boundingBox = bbox
         # faceGroups.count — observable proof that generate-face-groups applied (non-parametric path).
         self.faceGroups = _FaceGroups(face_groups)
 
@@ -69,9 +80,13 @@ class BRepBody:
 
 
 class ConstructionPlane:
-    """Stands in for adsk.fusion.ConstructionPlane — a valid cut plane, passed through verbatim."""
-    def __init__(self, name="Plane1"):
+    """Stands in for adsk.fusion.ConstructionPlane — a valid cut plane, passed through verbatim.
+    `geometry` (a conftest Plane: origin + normal) and `component` are what the pre-flight guard reads;
+    leaving either unset is the unreadable case the guard must skip on."""
+    def __init__(self, name="Plane1", geometry=None, component=None):
         self.name = name
+        self.geometry = geometry
+        self.component = component
 
 
 class BRepFace:
@@ -94,10 +109,34 @@ class _Coll:
 
 # ── mesh-feature fakes (createInput -> input ; add -> feature with .bodies) ──────────────────────
 
+class _Timeline:
+    """design.timeline - only .count matters here: a rollback is proven by this number DROPPING, which
+    is the one read that discriminates on the unchanged-count refusal (where the triangle count
+    equals its pre-cut value whether the rollback took or not)."""
+    def __init__(self, count=3):
+        self.count = count
+
+
 class _FeatureResult:
-    def __init__(self, name, bodies):
+    """A mesh feature: .bodies, plus the deleteMe() the cut's refusal paths roll back through.
+    `deletable` is what deleteMe() returns, `raises` makes it throw (a raise is a different answer
+    from a decline), and `on_delete` fires the model-side effects of a real rollback (the timeline
+    shrinking, the triangle count coming back) so honest and dishonest wordings can be told apart."""
+    def __init__(self, name, bodies, deletable=True, raises=False, on_delete=None):
         self.name = name
         self.bodies = _Coll(bodies)
+        self.deletable = deletable
+        self.raises = raises
+        self.delete_called = False
+        self._on_delete = on_delete
+
+    def deleteMe(self):
+        self.delete_called = True
+        if self.raises:
+            raise RuntimeError("deleteMe blew up")
+        if self._on_delete is not None:
+            self._on_delete()
+        return self.deletable
 
 
 class _FaceGroupsFeatures:
@@ -123,7 +162,9 @@ class _FaceGroupsFeatures:
 
 class _PlaneCutFeatures:
     def __init__(self, result_bodies=None, feat_name="PlaneCut1", raise_on_add=False,
-                 none_feature=False, on_add=None):
+                 none_feature=False, on_add=None, tri_after=600, deletable=True,
+                 restore_on_delete=False, delete_raises=False, timeline_drops=True,
+                 blind_after=False):
         self._result_bodies = result_bodies if result_bodies is not None else []
         self._feat_name = feat_name
         self.raise_on_add = raise_on_add
@@ -131,20 +172,58 @@ class _PlaneCutFeatures:
         self.last_input = None
         self.create_args = None
         self._on_add = on_add        # side effect to fire when the cut applies (e.g. grow body count)
+        # The triangle count the cut leaves on the mesh it re-triangulates - the effect the tool reads
+        # back. None models a cut that touches no triangle; 0 models the whole mesh being consumed.
+        self.tri_after = tri_after
+        self.cut_mesh = None         # the in-place target, wired by the setups once the mesh exists
+        self.timeline = None         # design.timeline, wired by the setups; deleteMe shrinks it
+        self.deletable = deletable
+        self.restore_on_delete = restore_on_delete
+        self.delete_raises = delete_raises
+        self.timeline_drops = timeline_drops
+        self.blind_after = blind_after
+        self.last_feature = None
+        self._add_called = False
 
     def createInput(self, mesh, cut_plane):
         self.create_args = (mesh, cut_plane)
         self.last_input = type("Inp", (), {})()
         return self.last_input
 
+    @property
+    def add_called(self):
+        """Did the MUTATION run? A pre-flight refusal must leave this False."""
+        return self._add_called
+
+    def _cut_bodies(self):
+        return [m for m in [self.cut_mesh] + list(self._result_bodies) if m is not None]
+
     def add(self, inp):
+        self._add_called = True
         if self.raise_on_add:
             raise RuntimeError("plane cut failed")
         if self._on_add is not None:
             self._on_add()
+        before = self.cut_mesh.displayMesh.triangleCount if self.cut_mesh is not None else None
+        if self.tri_after is not None:
+            for m in self._cut_bodies():
+                m.displayMesh.triangleCount = self.tri_after
+        if self.blind_after:
+            for m in self._cut_bodies():
+                m.displayMesh = None          # the after-count can no longer be read at all
         if self.none_feature:
             return None
-        return _FeatureResult(self._feat_name, self._result_bodies)
+
+        def on_delete():
+            if self.timeline is not None and self.timeline_drops:
+                self.timeline.count -= 1
+            if self.restore_on_delete and self.cut_mesh is not None:
+                self.cut_mesh.displayMesh = TriangleMesh(before, 502)
+
+        self.last_feature = _FeatureResult(self._feat_name, self._result_bodies,
+                                           deletable=self.deletable, raises=self.delete_raises,
+                                           on_delete=on_delete)
+        return self.last_feature
 
 
 class _GrowingMeshBodies:
@@ -206,12 +285,14 @@ class FakeComp:
 
 
 class FakeDesign:
-    def __init__(self, comp, design_type=0, edit_object=None, all_comps=None):
+    def __init__(self, comp, design_type=0, edit_object=None, all_comps=None, timeline=None):
         self.activeComponent = comp
         self.rootComponent = comp
         self.designType = design_type           # 0 direct, 1 parametric
         self.activeEditObject = edit_object
         self._all = all_comps if all_comps is not None else [comp]
+        # design.timeline - the rollback's proof read (its .count dropping)
+        self.timeline = timeline if timeline is not None else _Timeline()
 
     @property
     def allComponents(self):
@@ -408,19 +489,25 @@ class TestFaceGroups:
 
 class TestPlaneCut:
     def _setup(self, result_bodies=None, raise_on_add=False, origin_plane=None, parametric=False,
-               base_feature=None, none_feature=False, mesh_bodies=None):
+               base_feature=None, none_feature=False, mesh_bodies=None, tri_before=1000,
+               tri_after=600, deletable=True, restore_on_delete=False, delete_raises=False,
+               timeline_drops=True, blind_after=False, bbox=None):
         _wire_adsk()
         pc = _PlaneCutFeatures(result_bodies=result_bodies, raise_on_add=raise_on_add,
-                               none_feature=none_feature)
+                               none_feature=none_feature, tri_after=tri_after, deletable=deletable,
+                               restore_on_delete=restore_on_delete, delete_raises=delete_raises,
+                               timeline_drops=timeline_drops, blind_after=blind_after)
         bf = base_feature
         feats = _Features(plane_cut=pc, base_features=_BaseFeatures(made=bf) if bf else None)
         # origin plane 'xy' -> attribute 'xYConstructionPlane'
         op = {"xYConstructionPlane": origin_plane} if origin_plane is not None else {}
         comp = FakeComp("Comp", features=feats, origin_planes=op, mesh_bodies=mesh_bodies)
-        src = MeshBody("Scan")
+        src = MeshBody("Scan", tri=tri_before, bbox=bbox)
         src.parentComponent = comp
+        pc.cut_mesh = src               # the body whose triangle count the cut re-writes
         edit_obj = bf if parametric else None
         des = FakeDesign(comp, design_type=1 if parametric else 0, edit_object=edit_obj)
+        pc.timeline = des.timeline      # what deleteMe shrinks, and the rollback's proof read
         _install(me, des, handle_map={"H": src})
         return src, pc, comp
 
@@ -445,6 +532,7 @@ class TestPlaneCut:
     def _install_plane_handle(self, plane, src, pc):
         # re-install with both the mesh handle 'H' and a plane handle 'P' resolvable
         des = FakeDesign(src.parentComponent, design_type=0)
+        pc.timeline = des.timeline      # the handler reads the rollback proof off THIS design
         _install(me, des, handle_map={"H": src, "P": plane})
 
     def test_each_cut_type_resolves_enum(self):
@@ -486,17 +574,20 @@ class TestPlaneCut:
         assert out["result_body_count"] == 2
 
     def _setup_with_count(self, start, end, cut_type_grows=True, none_feature=False,
-                          is_closed=True):
+                          is_closed=True, tri_after=600):
         """Wire a plane cut whose meshBodies count goes start -> end on add (models split outcome)."""
         _wire_adsk()
         coll = _GrowingMeshBodies(start, end)
         on_add = coll.grew if cut_type_grows else None
-        pc = _PlaneCutFeatures(result_bodies=[MeshBody("R")], none_feature=none_feature, on_add=on_add)
+        pc = _PlaneCutFeatures(result_bodies=[MeshBody("R")], none_feature=none_feature, on_add=on_add,
+                               tri_after=tri_after)
         feats = _Features(plane_cut=pc)
         comp = FakeComp("Comp", features=feats, mesh_bodies=coll)
         src = MeshBody("Scan", is_closed=is_closed)
         src.parentComponent = comp
+        pc.cut_mesh = src
         des = FakeDesign(comp, design_type=0)
+        pc.timeline = des.timeline
         plane = ConstructionPlane("CP")
         _install(me, des, handle_map={"H": src, "P": plane})
         return src, pc
@@ -544,6 +635,377 @@ class TestPlaneCut:
         out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_faces"))
         assert "became_split" not in out
         assert "did not separate" not in out["note"]
+
+    # ── the pre-flight plane/bounding-box guard (refuses BEFORE any mutation) ───────────────────
+
+    # A 20 mm cube mesh sits in 0..2 cm on every axis; the guard works in Fusion's internal cm.
+    _CUBE = staticmethod(lambda: FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(2, 2, 2)))
+
+    def _setup_with_box(self, z_cm, cut_plane_name="FarPlane", normal=(0, 0, 1), bbox=None,
+                        geometry=True, **kw):
+        """A cube-mesh design plus a construction plane at z=z_cm whose geometry the guard can read
+        (geometry=False models a plane whose geometry is unreadable)."""
+        box = self._CUBE() if bbox is None else bbox
+        src, pc, comp = self._setup(result_bodies=[MeshBody("R")], bbox=box, **kw)
+        geom = PlaneGeom(FakeVector3D(*normal), FakePoint(0, 0, z_cm)) if geometry else None
+        plane = ConstructionPlane(cut_plane_name, geometry=geom, component=comp)
+        self._install_plane_handle(plane, src, pc)
+        return src, pc, plane
+
+    def test_a_plane_clear_of_the_bounding_box_refuses_before_any_mutation(self):
+        # The destructive case, made impossible: the plane sits 18 cm past the cube's near corner, so
+        # every box corner is on one side. The feature must NEVER be created - no add, no createInput.
+        src, pc, _ = self._setup_with_box(z_cm=20)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "Refusing before any cut" in msg
+        assert "'FarPlane' does not reach mesh 'Scan'" in msg
+        assert "18.0 cm clear" in msg                  # the nearest corner's distance to the plane
+        assert "DESTROYS the whole mesh" in msg        # the trim-specific consequence
+        assert pc.add_called is False                  # THE point: no mutation happened
+        assert pc.create_args is None                  # not even the input was built
+
+    def test_the_pre_flight_refusal_words_the_consequence_per_cut_type(self):
+        for ct, phrase in (("split_faces", "would split no facet"),
+                           ("split_body", "would leave one body")):
+            src, pc, _ = self._setup_with_box(z_cm=20)
+            res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type=ct)
+            assert res["isError"] is True, ct
+            assert phrase in res["message"], ct
+            assert "DESTROYS" not in res["message"], ct
+            assert pc.add_called is False, ct
+
+    def test_a_plane_through_the_bounding_box_proceeds_to_the_cut(self):
+        # The guard may only refuse a plane that MISSES: one crossing the box runs the cut normally.
+        src, pc, _ = self._setup_with_box(z_cm=1)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["cut"] is True
+        assert pc.add_called is True
+        assert out["triangles_after"] == 600
+
+    def test_a_plane_tangent_to_the_bounding_box_refuses_as_touching(self):
+        # Tangency destroys: a plane exactly on the cube's top face took a trim from 20 triangles to 0.
+        # If no box corner is strictly on one side, no facet is either, so the discarded side holds
+        # everything or nothing - refusing tangency cannot false-refuse a real cut. The wording says
+        # TOUCHES rather than quoting a 0.0 cm gap, which would read as a measured clearance.
+        src, pc, _ = self._setup_with_box(z_cm=2)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "only TOUCHES mesh 'Scan'" in msg
+        assert "0.0 cm clear" not in msg
+        assert "cm clear at the nearest" not in msg
+        assert pc.add_called is False               # the mesh is never put at risk
+
+    def test_a_plane_flush_with_the_bottom_of_the_mesh_also_refuses(self):
+        # The mirror case, and the realistic one: a mesh sitting on z=0 cut by plane='xy'. The box is
+        # entirely on the POSITIVE side with its nearest corners on the plane - flip=true on this is
+        # what destroys such a mesh.
+        src, pc, _ = self._setup_with_box(z_cm=0)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim", flip=True)
+        assert res["isError"] is True
+        assert "only TOUCHES mesh 'Scan'" in res["message"]
+        assert pc.add_called is False
+
+    def test_unreadable_plane_geometry_skips_the_guard_and_the_post_gate_still_fires(self):
+        # A guard may never refuse on an input it did not read. With no readable plane geometry the
+        # call proceeds - and the post-cut triangle gate is what catches the annihilation.
+        src, pc, _ = self._setup_with_box(z_cm=20, geometry=False, tri_after=0)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert "ANNIHILATED" in res["message"]         # defense in depth caught it instead
+        assert pc.add_called is True
+
+    def test_a_degenerate_plane_normal_skips_the_guard_instead_of_raising(self):
+        # A readable origin with a ZERO-length normal is the one case where the plane's numbers exist
+        # but no side can be computed: the guard must decline (and never index a null direction).
+        src, pc, _ = self._setup_with_box(z_cm=20, normal=(0, 0, 0), tri_after=0)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert "ANNIHILATED" in res["message"]
+        assert pc.add_called is True
+
+    def test_an_unreadable_bounding_box_skips_the_guard(self):
+        src, pc, _ = self._setup_with_box(z_cm=20, tri_after=0)
+        src.boundingBox = None                          # the box read fails, the plane's does not
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert "ANNIHILATED" in res["message"]
+        assert pc.add_called is True
+
+    def test_a_mesh_in_another_coordinate_frame_skips_the_guard(self):
+        # An occurrence proxy's box is root-space while a construction plane's geometry is component
+        # LOCAL, so the two numbers are not comparable - the guard must decline to answer.
+        src, pc, _ = self._setup_with_box(z_cm=20, tri_after=0)
+        src.assemblyContext = object()                  # a proxy: root-space box, local-space plane
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert pc.add_called is True
+
+    def test_a_plane_proxy_skips_the_guard(self):
+        # A PROXY plane passes the same-component test (a proxy's .component is the underlying
+        # component) while its geometry is expressed in ROOT space - so the proxy check is the only
+        # thing stopping a root-space origin from being compared against a component-local box.
+        src, pc, plane = self._setup_with_box(z_cm=20, tri_after=0)
+        plane.assemblyContext = object()                # placed through an occurrence: root-space
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert "ANNIHILATED" in res["message"]          # the post-gate caught it instead
+        assert pc.add_called is True
+
+    def test_a_plane_in_another_component_skips_the_guard(self):
+        src, pc, plane = self._setup_with_box(z_cm=20, tri_after=0)
+        plane.component = FakeComp("Elsewhere")         # not the mesh's own component
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "Refusing before any cut" not in res["message"]
+        assert pc.add_called is True
+
+    # ── the triangle-count gate on the in-place cuts (trim / split_faces) ───────────────────────
+
+    def test_trim_refuses_when_the_triangle_count_is_unchanged(self):
+        # A plane that does not pass through the mesh cuts no triangle off it. The count is the only
+        # signal that says so, and an unchanged count must be an ERROR, not cut:true.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=None)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "changed nothing" in msg
+        assert "1000 triangles" in msg          # the count that did not move
+        assert "'CP'" in msg                    # the plane that cut nothing, named
+        assert "Scan" in msg                    # the mesh, named
+
+    def test_split_faces_is_gated_by_the_same_unchanged_count(self):
+        # split_faces re-triangulates in place exactly as trim does, so it shares the gate - gating
+        # only 'trim' would leave the same silent no-op reachable through the other in-place type.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=None)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_faces")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"]
+
+    def test_split_faces_unchanged_message_describes_splitting_not_removal(self):
+        # split_faces ADDS triangles where the plane crosses the facets; it removes none. Trim's
+        # "cut no triangles off it" would misdescribe the mechanism on this shared path.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=None)
+        self._install_plane_handle(plane, src, pc)
+        msg = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_faces")["message"]
+        assert "ADDS triangles" in msg
+        assert "does not cross the mesh" in msg
+        assert "cut no triangles off it" not in msg
+
+    def test_trim_refuses_when_the_whole_mesh_is_annihilated(self):
+        # A trim whose kept side is the EMPTY one removes every triangle: the body survives as a
+        # 0-triangle husk. That is destruction, never a cut - it must be an error naming flip.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim", flip=False)
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "ANNIHILATED" in msg
+        assert "all 1000 triangles" in msg      # how much was removed
+        assert "0 triangles" in msg             # what is left
+        assert "flip=true" in msg               # the remedy for the wrong kept side
+        assert "Scan" in msg
+
+    def test_split_faces_annihilation_never_blames_a_kept_side_or_flip(self):
+        # A split_faces that reaches zero is not a side-keeping outcome: the operation only ADDS
+        # triangles, so trim's flip/kept-side remedy would send the caller after a wrong cause.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_faces")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "ANNIHILATED" in msg
+        assert "never removes triangles" in msg
+        assert "flip=" not in msg
+        assert "ONE side" not in msg
+
+    def test_annihilation_under_flip_true_points_back_at_flip_false(self):
+        # The remedy names the OTHER side of the plane, so the suggested flip inverts with the request.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim", flip=True)
+        assert res["isError"] is True
+        assert "flip=false" in res["message"]
+        assert "flip=true" not in res["message"]
+
+    def test_trim_publishes_triangle_counts_before_and_after(self):
+        # The honest success: a real trim moved the count, and BOTH numbers are published so the
+        # caller can see WHICH side survived by magnitude.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=250)
+        self._install_plane_handle(plane, src, pc)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["cut"] is True
+        assert out["triangles_before"] == 1000
+        assert out["triangles_after"] == 250
+        assert out["result_body_count"] == 1        # the existing fields survive
+        assert "UNVERIFIED" not in out["note"]
+
+    def test_refusal_proves_the_rollback_with_the_timeline_and_reports_the_mesh_it_reads(self):
+        # The rollback is attempted through the feature handle, and its PROOF is the timeline count
+        # dropping - reported beside a plain read of what the mesh holds now (still 0 triangles here,
+        # which the message states rather than dressing up as a restoration).
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert pc.last_feature.delete_called is True
+        assert "rolled back - the timeline re-reads 2 item(s), down from 3" in res["message"]
+        assert "the mesh now reads 0 triangles" in res["message"]
+
+    def test_the_unchanged_refusal_does_not_claim_a_rollback_the_timeline_denies(self):
+        # The vacuous-proof case: on the UNCHANGED-count branch the mesh's triangle count equals its
+        # pre-cut value whether the rollback took or not, so a count-based proof would claim success
+        # for a deleteMe() that returned true and removed nothing. The timeline count is what decides.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=None, timeline_drops=False)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "REMAINS in the model" in msg
+        assert "still re-reads 3 item(s)" in msg
+        assert "rolled back" not in msg
+        assert "design_delete_feature" in msg          # the remedy for what is still there
+
+    def test_refusal_reports_a_verified_rollback_when_the_mesh_comes_back(self):
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0, restore_on_delete=True)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "rolled back" in res["message"]
+        assert "the mesh now reads 1000 triangles" in res["message"]
+
+    def test_refusal_reports_a_declined_rollback_as_still_in_the_model(self):
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0, deletable=False,
+                                 timeline_drops=False)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "REMAINS in the model" in res["message"]
+        assert "deleteMe returned False" in res["message"]
+
+    def test_a_raising_deleteme_is_reported_as_a_raise_not_a_decline(self):
+        # deleteMe() throwing and deleteMe() returning false are different answers: swallowing the
+        # exception into "declined" hides the API's own explanation of why the rollback failed.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0, delete_raises=True)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "deleteMe raised: deleteMe blew up" in msg
+        assert "returned False" not in msg
+        assert "rolled back - the timeline" not in msg
+
+    def test_an_unreadable_timeline_leaves_the_rollback_unconfirmed(self):
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], tri_after=0)
+        des = FakeDesign(src.parentComponent, design_type=0)
+        des.timeline = None                    # no timeline to count - the proof cannot be taken
+        pc.timeline = None
+        _install(me, des, handle_map={"H": src, "P": plane})
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "could not be re-read to confirm it" in res["message"]
+        assert "rolled back" not in res["message"]
+
+    def test_refusal_without_a_feature_claims_no_rollback_at_all(self):
+        # add() returned nothing, so there is no handle to delete - the error must say the cut is
+        # still in the model instead of claiming a rollback it never performed.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(none_feature=True, tri_after=0,
+                                 mesh_bodies=_Coll([MeshBody("A")]))
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "no feature handle to roll back" in res["message"]
+        assert "was rolled back" not in res["message"]
+
+    def test_an_emptied_mesh_is_never_offered_design_delete_feature_as_recovery(self):
+        # Removing the timeline entry does NOT bring mesh data back, so the disposition for an emptied
+        # mesh must point at the document's history instead of a tool call that cannot restore it.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(none_feature=True, tri_after=0,
+                                 mesh_bodies=_Coll([MeshBody("A")]))
+        self._install_plane_handle(plane, src, pc)
+        msg = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")["message"]
+        assert "design_delete_feature on the wrapping base feature returned deleted:true" in msg
+        assert "doc_restore_version" in msg
+        assert "remove it with design_delete_feature" not in msg     # the remedy that does not work
+
+    def test_the_unchanged_refusal_still_offers_the_timeline_remedy(self):
+        # The mesh is intact there, so the inert timeline entry IS the thing to remove - the
+        # no-recovery wording belongs only to a mesh that reads 0 triangles.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(none_feature=True, tri_after=None,
+                                 mesh_bodies=_Coll([MeshBody("A")]))
+        self._install_plane_handle(plane, src, pc)
+        msg = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")["message"]
+        assert "the mesh reads 1000 triangles" in msg
+        assert "doc_restore_version" not in msg
+
+    def test_a_zero_before_count_skips_the_gate_and_reports_it_unverified(self):
+        # The gate needs a NONZERO before-count to mean anything: on a mesh already reading 0
+        # triangles, "unchanged" and "annihilated" are the same observation and neither can be
+        # asserted. The call must not claim the mesh was annihilated - it must say UNVERIFIED.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R", tri=0)], tri_before=0, tri_after=0)
+        self._install_plane_handle(plane, src, pc)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["triangles_before"] == 0 and out["triangles_after"] == 0
+        assert "UNVERIFIED" in out["note"]
+        assert "before=0, after=0" in out["note"]
+        assert pc.last_feature.delete_called is False    # nothing was rolled back on a skipped gate
+
+    def test_an_unreadable_after_count_reports_it_unverified(self):
+        # The other half of the same guard: with no readable after-count the cut's effect is unknown,
+        # so the payload publishes null and says so instead of gating on a missing number.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(result_bodies=[MeshBody("R")], blind_after=True)
+        self._install_plane_handle(plane, src, pc)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["triangles_before"] == 1000
+        assert out["triangles_after"] is None
+        assert "UNVERIFIED" in out["note"]
+        assert "after=None" in out["note"]
+
+    def test_split_body_is_not_gated_by_the_triangle_count(self):
+        # split_body's effect is a NEW body, not a re-triangulation: an unchanged triangle count on
+        # the first piece is normal there, so the count gate must not fire and must not be published.
+        self._setup_with_count(1, 2, cut_type_grows=True, tri_after=None)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="split_body"))
+        assert out["became_split"] is True
+        assert "triangles_before" not in out and "triangles_after" not in out
+
+    def test_result_body_count_is_null_when_no_feature_came_back(self):
+        # result_body_count counts the FEATURE's bodies; with no feature it is UNKNOWN, and a zero
+        # there reads as "the cut produced nothing" - the misdirection that hid an annihilated mesh.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(none_feature=True, mesh_bodies=_Coll([MeshBody("A")]))
+        self._install_plane_handle(plane, src, pc)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["result_body_count"] is None
+        assert out["result_bodies"] == []
+        assert "'result_body_count' is null" in out["note"]
 
     def test_flip_sets_is_flipped(self):
         plane = ConstructionPlane("CP")

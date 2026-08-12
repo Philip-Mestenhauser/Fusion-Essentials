@@ -542,6 +542,7 @@ tool = (
     .add_input_property("is_driving", {"type": "boolean", "description": "false makes a DRIVEN (reference) dimension the geometry controls - it cannot take a 'value'. Default true."})
     .add_input_property("tangent_side_one", {"type": "boolean", "description": "tangent_distance: true = the tangent side of entity_one nearer entity_two; ignored when entity_one is a line or point. Default true."})
     .add_input_property("tangent_side_two", {"type": "boolean", "description": "tangent_distance: true = the tangent side of entity_two nearer entity_one. Default true."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

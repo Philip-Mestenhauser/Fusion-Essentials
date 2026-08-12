@@ -139,6 +139,10 @@ def handler(target: str = "", tools=None, operation: str = "join",
     target_name = safe(lambda: tgt.name)
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     host_name = safe(lambda: host.name)
+    # Per-tool AABB gap, captured BEFORE the mutation (a cut/intersect CONSUMES its tools, so this
+    # evidence is unreadable afterwards). Only the no-effect refusal below reads it: a positive gap
+    # PROVES that tool never touched the target.
+    tool_gaps = [_geom.aabb_gap(tgt, b) for b in tool_bodies]
 
     try:
         ci = comp.features.combineFeatures.createInput(tgt, coll)
@@ -192,6 +196,30 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # as "no disconnection was found" rather than "the check could not run" (the note says which).
     result_objs = [] if direct_no_feature else _common.result_bodies(feature)
     result_bodies = [f["name"] for f in _common.body_facts(result_objs)]
+    # split_pieces: the result set the DISCONNECT warning judges. With keep_tools the feature's
+    # result bodies INCLUDE the kept tool copies (measured: a kept disjoint tool was counted as a
+    # split piece of the target), so kept tool NAMES are excluded before the >1 verdict.
+    split_pieces = ([n for n in result_bodies if n not in set(filter(None, tool_names))]
+                    if keep_tools else result_bodies)
+
+    # cut/intersect no-effect gate, BOTH modes: a boolean that left the target's volume unmoved
+    # removed/kept nothing - the API reports success on a DISJOINT tool (measured: combined:true,
+    # volume unchanged, tool consumed). A split target can't be a no-op, so the gate only runs on a
+    # single-piece result; an unreadable volume skips it (cannot verify is not "verified same").
+    if op_key in ("cut", "intersect") and len(split_pieces) <= 1:
+        after_volume_now = _common.measured(lambda: tgt.volume)
+        if (before_volume is not None and after_volume_now is not None
+                and abs(after_volume_now - before_volume) <= _common.NO_VOLUME_CHANGE_CM3):
+            clear = [f"'{n}' ({g:.1f} cm clear of the target)" if g is not None and g > 0 else f"'{n}'"
+                     for n, g in zip(tool_names, tool_gaps)]
+            rolled_back = False if feature is None else bool(safe(lambda: feature.deleteMe(), False))
+            fate = ("the combine feature was rolled back, restoring the tool bodies" if rolled_back
+                    else ("the tool bodies were CONSUMED and could not be restored"
+                          if not keep_tools else "the tool bodies were kept"))
+            return error(f"This {op_key} changed NOTHING - '{target_name}' measures the same volume "
+                         f"({before_volume} cm3) after the combine, which is what a tool that does "
+                         f"not overlap the target produces. Tools: {', '.join(clear)}; {fate}. "
+                         "Move the tool into the target (model_move) and combine again.")
 
     # The body a JOIN landed in: the feature's single result body, or - in direct mode, where there is
     # no feature to read - the target the join was built on. Its lump count is read back FRESH off
@@ -228,10 +256,10 @@ def handler(target: str = "", tools=None, operation: str = "join",
         if warning:
             payload["note"] += (" " + warning + " " + _common.failed_effect_remedy(design, feature)
                                 + " Move the pieces into contact (model_move) and join again.")
-    if op_key in ("cut", "intersect") and len(result_bodies) > 1:
-        payload["body_split"] = result_bodies
-        payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(result_bodies)} "
-                            f"separate bodies ({', '.join(n for n in result_bodies if n)}) - reference "
+    if op_key in ("cut", "intersect") and len(split_pieces) > 1:
+        payload["body_split"] = split_pieces
+        payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(split_pieces)} "
+                            f"separate bodies ({', '.join(n for n in split_pieces if n)}) - reference "
                             "each piece by name; a later op assuming one body may hit the wrong piece.")
     return ok(payload)
 

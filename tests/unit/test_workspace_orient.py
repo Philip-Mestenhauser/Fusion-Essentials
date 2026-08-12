@@ -693,3 +693,27 @@ class TestSelectionEcho:
         rec = _payload(wo.handler())["selection"]["selected"][0]
         assert rec["kind"] == "face" and rec["body"] == "Plate"
         assert rec["occurrence"] == "Sub:1+Plate:1"
+
+
+class TestRelationHealthInFirstCall:
+    def _design_with_constraint(self, health):
+        occs = [FakeOcc("A:1")]
+        root = FakeRoot(top_occs=occs, joints=[])
+        con = type("C", (), {"name": "Constraint 1", "healthState": health})()
+        root.assemblyConstraints = _Coll([con])
+        return FakeDesign(root, timeline=[FakeTL(0)])
+
+    def test_failed_constraint_drops_the_first_call_health(self):
+        # Measured: a failed assembly constraint left this read healthy while only a deeper
+        # include=['relations'] slice named it - the orientation read folds relation health in.
+        des = self._design_with_constraint(health=2)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["is_healthy"] is False
+        assert h["broken_relations"] == ["Constraint 1"]
+
+    def test_healthy_constraint_leaves_the_rollup_alone(self):
+        des = self._design_with_constraint(health=0)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        h = _payload(wo.handler())["health"]
+        assert h["is_healthy"] is True and h["broken_relations"] == []

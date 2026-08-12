@@ -218,12 +218,16 @@ class FeatureHealthy(Postcondition):
                 continue
             hs = safe(lambda: item.healthState)
             nm = safe(lambda: item.name) or "the created feature"
-            msg = safe(lambda: item.errorOrWarningMessage) or ""
+            # errorOrWarningMessage is read ONLY inside the unhealthy branches: the getter RAISES
+            # on some HEALTHY items (measured on a fresh AssemblyConstraint), and a caught adsk
+            # error has measured rollback risk in some contexts - so a healthy walk never asks.
             if hs == self._ERROR:
+                msg = safe(lambda: item.errorOrWarningMessage) or ""
                 return ((f"'{nm}' was created but FAILED to compute. " + msg).strip()[:300]
                         + " It remains in the timeline - fix its inputs or remove it with "
                           "design_delete_feature."), {}
             if hs == self._WARNING:
+                msg = safe(lambda: item.errorOrWarningMessage) or ""
                 warnings.append((nm + ": " + msg).strip().rstrip(":")[:160])
         evidence = {"features_verified": count - before}
         if warnings:

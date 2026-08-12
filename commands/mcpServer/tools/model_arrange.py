@@ -83,6 +83,16 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if af is None:
         return error("This design does not expose Arrange features.")
 
+    # Effect evidence, captured BEFORE the add: each input occurrence's translation, and the
+    # design-wide occurrence-path census. MEASURED: the solver can leave the named occurrences
+    # WHOLLY UNMOVED and mint envelope COPIES inside the boundary instead (a second identical run
+    # then stacks another coincident set) - without these reads that ships as a clean success.
+    def _translation(o):
+        t = safe(lambda: o.transform2.translation)
+        return (safe(lambda: t.x), safe(lambda: t.y), safe(lambda: t.z)) if t is not None else None
+    before_pos = {nm: _translation(o) for nm, o in zip(resolved, occs)}
+    before_paths = set(_common.occurrence_paths(design))
+
     try:
         ST = adsk.fusion.ArrangeSolverTypes
         inp = af.createInput(getattr(ST, _SOLVERS[solver_key]))
@@ -105,17 +115,49 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if not feature:
         return error(_common.no_feature_error(design, "Arrange"))
 
-    return ok({
+    # Read the effect back: which inputs actually MOVED, and which occurrence paths the feature
+    # ADDED (the solver restructures parts under Envelope occurrences and can mint copies).
+    moved = []
+    for nm, o in zip(resolved, occs):
+        now = _translation(o)
+        was = before_pos.get(nm)
+        if now is not None and was is not None and any(
+                a is not None and b is not None and abs(a - b) > 1e-6 for a, b in zip(now, was)):
+            moved.append(nm)
+    new_paths = sorted(set(_common.occurrence_paths(design)) - before_paths)
+    if not moved and not new_paths:
+        rolled = bool(safe(lambda: feature.deleteMe(), False))
+        return error("Arrange reported success but NOTHING happened - no input occurrence moved "
+                     "and no occurrence was added. "
+                     + ("The empty arrange feature was rolled back." if rolled
+                        else "The empty arrange feature could not be rolled back - remove it with "
+                             "design_delete_feature.")
+                     + " Check the boundary profile holds the shapes at this spacing.")
+
+    note = "Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest."
+    if new_paths and not moved:
+        note += (" NOTE: the solver placed COPIES under new Envelope occurrences - the named "
+                 "input occurrences did NOT move (positions read back unchanged). Re-running an "
+                 "identical arrange STACKS another coincident copy set; delete the originals or "
+                 "the envelope (design_delete_feature on this feature) if copies were not intended.")
+    elif new_paths:
+        note += " The solver restructured the arranged parts under new Envelope occurrences."
+    payload = {
         "arranged": True,
         "feature": safe(lambda: feature.name),
         "solver": "true_shape" if "TrueShape" in _SOLVERS[solver_key] else "rectangular",
         "boundary_sketch": safe(lambda: sketch.name),
         "arranged_count": len(resolved),
         "shapes": resolved,
+        "moved": moved,
         "spacing": round(float(spacing), 6) if spacing else 0.0,
         "units": units,
-        "note": "Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest.",
-    })
+        "note": note,
+    }
+    if new_paths:
+        payload["new_occurrences"] = new_paths[:12]
+        payload["new_occurrence_count"] = len(new_paths)
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (

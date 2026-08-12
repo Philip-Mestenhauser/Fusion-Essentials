@@ -316,6 +316,17 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if extent == "blind" and not depth:
         return error("A blind hole needs 'depth' (e.g. '10 mm'). For a hole through the body use "
                      "extent='through'.")
+    if extent == "blind":
+        # A zero/negative literal reached the API bare and came back as a non-diagnostic
+        # passthrough (measured with depth='0 mm') - refuse it with the cause named. An
+        # expression falls through for the API to evaluate.
+        try:
+            num = float(str(depth).strip().split()[0])
+        except (ValueError, IndexError):
+            num = None
+        if num is not None and num <= 0:
+            return error(f"depth='{depth}' is not a drillable hole - a blind hole needs a "
+                         "POSITIVE depth (e.g. '10 mm'), or use extent='through'.")
 
     design = _common.design()
     if not design:
@@ -393,6 +404,14 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     sketch = None
     sketch_pts = []
     scaled_pts = []            # the raw scaled (cm) coords, for best-effort naming of failed points
+
+    def _abandon(msg):
+        """Error exit AFTER the placement sketch exists: roll the sketch back first, so a refused
+        or failed hole never leaves an orphaned placement sketch on the face."""
+        if sketch is not None:
+            safe(lambda: sketch.deleteMe())
+        return error(msg)
+
     if placement == "sketch_points":
         try:
             sketch = comp.sketches.add(face_ent)
@@ -405,10 +424,10 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
                 p = adsk.core.Point3D.create(float(xyz[0]) * factor, float(xyz[1]) * factor,
                                              float(xyz[2]) * factor)
             except Exception:
-                return error(f"Bad point {xyz!r}; expected [x, y, z] in '{units}'.")
+                return _abandon(f"Bad point {xyz!r}; expected [x, y, z] in '{units}'.")
             sp = safe(lambda p=p: sketch.sketchPoints.add(p))
             if not sp:
-                return error(f"Could not add a sketch point at {xyz!r}.")
+                return _abandon(f"Could not add a sketch point at {xyz!r}.")
             sketch_pts.append(sp)
             scaled_pts.append((float(xyz[0]) * factor, float(xyz[1]) * factor, float(xyz[2]) * factor))
         if len(sketch_pts) == 1:
@@ -470,7 +489,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         try:
             hin.tipAngle = _value(tip_angle)
         except Exception as e:
-            return error(f"Could not set tip_angle '{tip_angle}': {e}")
+            return _abandon(f"Could not set tip_angle '{tip_angle}': {e}")
 
     # Tap (after placement/extent; size comes from the designation).
     if thread_info is not None:
@@ -480,16 +499,20 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             hin.isModeled = bool(modeled)
         except Exception as e:
             if modeled:
-                return error(f"Could not set the tapped hole to a MODELED (helical) thread: {e}")
+                return _abandon(f"Could not set the tapped hole to a MODELED (helical) thread: {e}")
 
     # Clearance fastener TAG: records the fastener spec on the feature (the diameter was already set from
     # the table into the base input). setToClearanceHole does NOT resize the geometry on this version.
     if clearance_info is not None:
         hin.setToClearanceHole(clearance_info)
 
-    feature = holes.add(hin)             # MUTATION - raises (and aborts) if anything is inconsistent
+    try:
+        feature = holes.add(hin)         # MUTATION - raises (and aborts) if anything is inconsistent
+    except Exception as e:
+        # the aborted add leaves no feature - but the placement sketch is real and would orphan
+        return _abandon(f"Hole creation failed: {e}")
     if not feature:
-        return error(_common.no_feature_error(design, "Hole"))
+        return _abandon(_common.no_feature_error(design, "Hole"))
 
     # READ THE EFFECT BACK: a point that misses the body cuts nothing while add() still 'succeeds'
     # (only a warning on the feature). Count the DISTINCT drill axes the feature created - one per

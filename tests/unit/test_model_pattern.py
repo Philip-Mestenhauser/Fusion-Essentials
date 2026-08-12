@@ -796,3 +796,25 @@ class TestCircularAxisFromGeometry:
         _place(pt.app.activeProduct.rootComponent, rail, "Assy:1+Rail:1")
         _payload(pt.circular_handler(occurrences="Spoke:1", quantity=4, axis="CA"))
         assert cf.last_input.axis is proxy      # the PROXY reaches createInput, not the native
+
+
+class TestZeroSpacingGuards:
+    def test_rect_zero_spacing_one_refused(self):
+        # spacing_one=0 with quantity>1 stacks every instance on the seed (coincident duplicates
+        # reported as a clean pattern) - refused before any feature transaction opens.
+        res = pt.rectangular_handler(bodies="B", quantity_one=3, spacing_one=0)
+        assert res["isError"] is True and "spacing_one=0" in res["message"]
+
+    def test_rect_zero_spacing_two_refused(self):
+        res = pt.rectangular_handler(bodies="B", quantity_one=2, spacing_one=5,
+                                     quantity_two=2, spacing_two=0)
+        assert res["isError"] is True and "spacing_two=0" in res["message"]
+
+    def test_single_row_zero_spacing_two_is_fine_to_pass_the_guard(self, monkeypatch):
+        # quantity_two=1 never uses spacing_two - the guard must not refuse it. The absent-design
+        # error AFTER the guard is the proof the guard let the call through.
+        monkeypatch.setattr(pt._common, "design", lambda: None)
+        res = pt.rectangular_handler(bodies="B", quantity_one=2, spacing_one=5,
+                                     quantity_two=1, spacing_two=0)
+        assert "spacing_two" not in res.get("message", "")
+        assert "No active design" in res["message"]

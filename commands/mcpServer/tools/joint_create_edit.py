@@ -15,7 +15,7 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe
+from ._common import apply_rename, error, ok, safe
 from . import _common
 from . import _inputs
 from . import _assert
@@ -295,6 +295,16 @@ def _apply_limits(motion, *, min_deg=None, max_deg=None, rest_deg=None,
     import math as _m
     changed = {}
 
+    # Inverted-pair guard (the ONE home - joint_create and joint_edit both apply limits here): a
+    # min above its max creates an EMPTY feasible range that silently makes the joint undrivable
+    # while every health field keeps reading healthy (measured) - refuse it instead.
+    if min_deg is not None and max_deg is not None and float(min_deg) > float(max_deg):
+        return changed, (f"Rotation limits are INVERTED: min_deg ({min_deg}) > max_deg ({max_deg}) "
+                         "- an empty feasible range silently makes the joint undrivable. Swap them.")
+    if min_mm is not None and max_mm is not None and float(min_mm) > float(max_mm):
+        return changed, (f"Slide limits are INVERTED: min_mm ({min_mm}) > max_mm ({max_mm}) - an "
+                         "empty feasible range silently makes the joint undrivable. Swap them.")
+
     want_rot = any(v is not None for v in (min_deg, max_deg, rest_deg))
     want_lin = any(v is not None for v in (min_mm, max_mm, rest_mm))
 
@@ -440,12 +450,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     if not joint:
         return error("joints.add returned nothing.")
 
-    new_name = (name or "").strip()
-    if new_name:
-        try:
-            joint.name = new_name
-        except Exception:
-            pass
+    joint_name_final, rename_warning = apply_rename(joint, name)
 
     # Optional limits (rotation and/or linear) - applied after the joint exists so its jointMotion
     # is established. Same routing as joint_edit.
@@ -464,7 +469,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
 
     payload = {
         "created": True,
-        "joint_name": safe(lambda: joint.name),
+        "joint_name": joint_name_final,
         "joint_type": jtype,
         "input_one": label1,
         "input_two": label2,
@@ -476,6 +481,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         **limits_out,
         "note": "Joint created as a timeline feature. View it with view_screenshot.",
     }
+    if rename_warning:
+        payload["rename_warning"] = rename_warning
     if any(k in limits_out for k in ("rest_mm", "rest_deg")):
         payload["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
@@ -709,6 +716,19 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if mp:
         out["model_parameters"] = mp
         out["note"] += _OFFSET_PARAM_NOTE
+    # Suppressed-joint disclosure: the edit is REAL (a limits write lands) but the joint is
+    # INERT while suppressed - measured, an edited suppressed joint left its part 47mm from the
+    # jointed placement with no mention. BOTH flags are consulted and OR'd (live-verified on
+    # 2705.0.87: Joint.isSuppressed keeps reading False when the suppression was set on the
+    # TIMELINE item, so the entity flag alone under-reports). read_flag, not a coerced False: two
+    # unreadable flags stay undisclosed rather than asserting active.
+    sup = (_common.read_flag(lambda: joint.isSuppressed) or
+           _common.read_flag(lambda: joint.timelineObject.isSuppressed))
+    if sup:
+        out["suppressed"] = True
+        out["note"] += (" WARNING: this joint is SUPPRESSED - the edit landed on the definition but "
+                        "the joint is INERT and positions nothing until it is unsuppressed "
+                        "(design_edit_timeline action='suppress', suppressed=false).")
     return ok(out)
 
 
@@ -754,6 +774,7 @@ tool = (
     .add_input_property("min_mm", {"type": "number", "description": "Linear/slide limit min (in 'units') - slider/cylindrical."})
     .add_input_property("max_mm", {"type": "number", "description": "Linear/slide limit max (in 'units') - slider/cylindrical."})
     .add_input_property("rest_mm", {"type": "number", "description": "Linear/slide rest value (in 'units') - slider/cylindrical."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

@@ -466,3 +466,55 @@ class TestXrefScopingAndTokens:
         self._install(monkeypatch, [l, r])
         assert _payload(jd.handler(joint_name="L", distance=16))["driven"] is True
         assert jd.handler(joint_name="R", distance=-16)["isError"] is True
+
+
+# ── the value_now vs applied gate ────────────────────────────────────────────
+
+def _frozen_revolute():
+    """A revolute motion whose rotationValue setter lands nowhere - the read-back stays at the
+    pre-drive value, the way a chain frozen by a parent-locked member behaves (measured: an
+    auto-grounded first component made every drive a silent no-op)."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+        @property
+        def rotationValue(self):
+            return 0.0
+        @rotationValue.setter
+        def rotationValue(self, v):
+            pass
+    return RevoluteJointMotion()
+
+
+class TestDriveTookGate:
+    def test_silently_ignored_drive_warns_and_names_the_locked_member(self, monkeypatch):
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
+        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
+        out = _payload(jd.handler(joint_name="J", angle_deg=25))
+        assert out["drive_took"] is False
+        assert "DID NOT TAKE" in out["note"] and "Rotor:1" in out["note"]
+
+    def test_gate_falls_back_to_pointer_when_no_member_is_locked(self, monkeypatch):
+        j = FakeJoint("J", _frozen_revolute())
+        design = _install(monkeypatch, j)
+        free = types.SimpleNamespace(name="Rotor:1", isGroundToParent=False)
+        design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: free)
+        out = _payload(jd.handler(joint_name="J", angle_deg=25))
+        assert out["drive_took"] is False
+        assert "ground_to_parent" in out["note"]
+
+    def test_limit_warning_suppresses_the_gate(self, monkeypatch):
+        # A clamped drive is already explained by limit_warnings; the gate stays quiet there.
+        j = FakeJoint("J", _frozen_revolute())
+        j.jointMotion.rotationLimits = FakeLimits(max_on=True, maxv=math.radians(10))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="J", angle_deg=45))
+        assert "limit_warnings" in out and "drive_took" not in out
+
+    def test_a_drive_that_took_is_not_flagged(self, monkeypatch):
+        j = FakeJoint("J", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="J", angle_deg=25))
+        assert "drive_took" not in out and abs(out["value_now"]["angle_deg"] - 25.0) < 1e-4

@@ -8,6 +8,7 @@ Envelope -> add each component -> add feature). The actual solve is a live side-
 """
 
 import json
+from types import SimpleNamespace
 
 import adsk.fusion
 
@@ -53,9 +54,15 @@ class FakeSketches:
         return None
 
 
+def _vec(x=0.0, y=0.0, z=0.0):
+    return SimpleNamespace(x=x, y=y, z=z)
+
+
 class FakeOcc:
     def __init__(self, name):
         self.name = name
+        self.fullPathName = name
+        self.transform2 = SimpleNamespace(translation=_vec())
 
 
 class FakeArrangeComponents:
@@ -83,15 +90,23 @@ class FakeArrangeInput:
 
 
 class FakeArrangeFeatures:
+    """add() imitates the measured solver behavior: the named occurrences stay where they are and
+    envelope COPIES land as new occurrences - the effect read the handler verifies against."""
     def __init__(self):
         self.last_input = None
         self.added = False
+        self.design = None
     def createInput(self, solver):
         self.last_input = FakeArrangeInput(solver)
         return self.last_input
     def add(self, inp):
         self.added = True
-        return type("F", (), {"name": "Arrange1"})()
+        if self.design is not None:
+            for shape in inp.arrangeComponents.added:
+                nm = getattr(shape, "name", "X")
+                self.design.rootComponent.allOccurrences.append(
+                    FakeOcc(f"Arrange1:1+Envelope1(Qty: 1):1+{nm}"))
+        return type("F", (), {"name": "Arrange1", "deleteMe": lambda self: True})()
 
 
 class FakeRoot:
@@ -109,6 +124,7 @@ class FakeDesign:
 def _install(sketches=(), occ_names=()):
     af = FakeArrangeFeatures()
     design = FakeDesign(list(sketches), [FakeOcc(n) for n in occ_names], af)
+    af.design = design
     ar.app = type("A", (), {"activeProduct": design})()
     ar._common.app = ar.app
     import adsk.fusion, adsk.core
@@ -281,3 +297,37 @@ class TestHonesty:
     def test_no_active_design(self):
         _install([FakeSketch("B")], ["A:1"])
         assert_no_active_design(ar, ar.handler, boundary_sketch="B", shapes="A:1")
+
+    def test_copies_without_movement_are_disclosed(self):
+        # The solver leaves the inputs unmoved and mints envelope copies - the payload must say so
+        # instead of implying the named occurrences were packed.
+        _install([FakeSketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert out["moved"] == []
+        assert out["new_occurrence_count"] == 1
+        assert "Arrange1:1+Envelope1(Qty: 1):1+A:1" in out["new_occurrences"]
+        assert "COPIES" in out["note"] and "did NOT move" in out["note"]
+
+    def test_nothing_happened_is_an_error_and_rolls_back(self):
+        # No input moved AND no occurrence appeared = the arrange did nothing; success would be a lie.
+        _, af = _install([FakeSketch("B")], ["A:1"])
+        deleted = []
+        def _inert_add(inp):
+            af.added = True
+            return type("F", (), {"name": "Arrange1",
+                                  "deleteMe": lambda self: deleted.append(True) or True})()
+        af.add = _inert_add
+        res = ar.handler(boundary_sketch="B", shapes="A:1")
+        assert res["isError"] is True and "NOTHING happened" in res["message"]
+        assert deleted == [True]
+
+    def test_a_moved_input_is_named_in_moved(self):
+        # A solver that really repositions the input reports it in 'moved'.
+        design, af = _install([FakeSketch("B")], ["A:1"])
+        real_add = af.add
+        def _moving_add(inp):
+            design.rootComponent.allOccurrences[0].transform2.translation = _vec(5.0, 0.0, 0.0)
+            return real_add(inp)
+        af.add = _moving_add
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert out["moved"] == ["A:1"]

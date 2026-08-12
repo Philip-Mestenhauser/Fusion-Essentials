@@ -465,6 +465,7 @@ tool = (
             "description": "Import the source's FAVORITE user parameters (isIncludeFavoriteParameters). Default true."})
     .add_input_property("place_at_origin", {"type": "boolean",
             "description": "Place all derived objects at the destination component's origin (isPlaceObjectsAtOrigin). Default true."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

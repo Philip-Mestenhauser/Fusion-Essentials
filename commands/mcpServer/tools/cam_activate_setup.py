@@ -55,7 +55,7 @@ _activate_tool = Tool.create_with_string_input(
     ),
     input_param_name="setup",
     input_param_description="The setup name to activate.",
-)
+).strict_schema()
 activate_setup_item = Item.create_tool_item(
     tool=_activate_tool, write="write", handler=activate_setup_handler, run_on_main_thread=True
 )

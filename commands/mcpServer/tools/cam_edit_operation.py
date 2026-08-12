@@ -136,6 +136,7 @@ tool = (
     )
     .add_input_property("parameters", {"type": "object",
             "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string). e.g. {'tool_feedCutting': '3000', 'maximumStepdown': '1.5'}."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

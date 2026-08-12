@@ -439,20 +439,6 @@ def _operation_type_name(op_type) -> str:
     return mapping.get(op_type, str(op_type))
 
 
-def _machine_name(machine):
-    """Readable machine name. adsk.cam.Machine has NO .name - the human label is .description (e.g.
-    'Haas with A-axis'), with .vendor/.model as the fallback ('HAAS A-axis')."""
-    if not machine:
-        return None
-    desc = safe(lambda: machine.description)
-    if desc:
-        return desc
-    vendor = safe(lambda: machine.vendor) or ""
-    model = safe(lambda: machine.model) or ""
-    label = (vendor + " " + model).strip()
-    return label or None
-
-
 def _model_names(collection) -> tuple:
     """(names, truncated) - readable names of an ObjectCollection of models (Occurrence/BRepBody/
     MeshBody), capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
@@ -489,7 +475,7 @@ def get_cam_setups_handler() -> dict:
         "name": safe(lambda: s.name),
         "operation_type": _operation_type_name(safe(lambda: s.operationType)),
         "is_active": safe(lambda: s.isActive),
-        "machine": _machine_name(safe(lambda: s.machine)),
+        "machine": machine_label(safe(lambda: s.machine)),
             "selected_models": models,
             "fixtures": fixtures,
             "stock_solids": stock,
@@ -506,7 +492,7 @@ def get_cam_setups_handler() -> dict:
             _attach_setup_invalidation(setups[-1], s)
             # Setup-level prerequisite: a setup with no machine can't be posted. Verified
             # state, present-and-empty.
-            setups[-1]["blocked_by"] = ([] if _machine_name(safe(lambda: s.machine))
+            setups[-1]["blocked_by"] = ([] if machine_label(safe(lambda: s.machine))
                                         else ["no_machine_selected"])
     except Exception as e:
         return error(f"Could not read setups: {e}")
@@ -1006,7 +992,7 @@ def get_nc_programs_handler() -> dict:
             entry = {
             "name": safe(lambda: nc.name),
             "operation_count": None,
-            "machine": _machine_name(safe(lambda: nc.machine)),
+            "machine": machine_label(safe(lambda: nc.machine)),
             "post": safe(lambda: nc.postConfiguration.description) if safe(lambda: nc.postConfiguration) else None,
             "post_parameters": [],
             }

@@ -503,3 +503,38 @@ class TestUnstitch:
         res = so.unstitch_handler(target="Solid1")
         assert res["isError"] is True
         assert "loose surfaces" in res["message"] or "unstitchable" in res["message"]
+
+
+class TestUnstitchIdentityGate:
+    def test_identity_unstitch_on_a_loose_surface_is_refused(self):
+        # An unstitch of an ALREADY-LOOSE surface is an identity op the API reports as success
+        # (measured: same census, the body re-serialized under a new name) - the count gate refuses.
+        import types as _t
+        body = _FakeBRepBody("Loose1", is_solid=False)
+        body.parentComponent = _t.SimpleNamespace(
+            bRepBodies=_t.SimpleNamespace(count=3, item=lambda i: None))
+        uf = _FakeUnstitchFeatures([_FakeBRepBody("Loose1 (1)", False)])
+        _install(_FakeFeatures(unstitch=uf), bodies_by_name={"Loose1": body})
+        res = so.unstitch_handler(target="Loose1")
+        assert res["isError"] is True and "identity operation" in res["message"]
+
+    def test_a_real_explode_reports_the_census(self):
+        # A genuine unstitch grows the host's body count; the payload carries both sides.
+        import types as _t
+
+        counts = [1, 3]
+
+        class _CountingBodies:
+            @property
+            def count(self):
+                return counts.pop(0)
+            def item(self, i):
+                return None
+
+        body = _FakeBRepBody("Solid1", is_solid=True)
+        body.parentComponent = _t.SimpleNamespace(bRepBodies=_CountingBodies())
+        uf = _FakeUnstitchFeatures([_FakeBRepBody("S1", False), _FakeBRepBody("S2", False),
+                                    _FakeBRepBody("S3", False)])
+        _install(_FakeFeatures(unstitch=uf), bodies_by_name={"Solid1": body})
+        out = _payload(so.unstitch_handler(target="Solid1"))
+        assert out["bodies_before"] == 1 and out["bodies_after"] == 3

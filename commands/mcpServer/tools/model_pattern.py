@@ -162,6 +162,15 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
     if int(quantity_one) < 1:
         return error("quantity_one must be >= 1.")
+    # Zero spacing stacks every instance on the seed (measured: spacing_one=0 produced coincident
+    # duplicates reported as a clean pattern) - the same refusal pattern_circular holds for angle=0
+    # and pattern_path types with Distance(allow_zero=False).
+    if int(quantity_one) > 1 and float(spacing_one) == 0:
+        return error("spacing_one=0 would stack every instance exactly on the seed (coincident "
+                     "duplicates). Provide a non-zero spacing_one.")
+    if int(quantity_two) > 1 and float(spacing_two) == 0:
+        return error("spacing_two=0 would stack the second-direction instances exactly on the "
+                     "first row (coincident duplicates). Provide a non-zero spacing_two.")
     design = _common.design()
     if not design:
         return error("No active design. Open or create a document with components first.")
@@ -227,7 +236,8 @@ def rectangular_handler(occurrences: str = "", bodies=None, quantity_one: int = 
         "units": units,
         # the read-back count when available (the verified value); the computed request otherwise
         "total_instances": int(real_total) if real_total is not None else requested_total,
-        "note": "Occurrences patterned in a grid. Pair with view_screenshot to view.",
+        "note": ("Bodies" if bodies not in (None, "", []) else "Occurrences")
+                + " patterned in a grid. Pair with view_screenshot to view.",
     })
 
 
@@ -288,7 +298,8 @@ def circular_handler(occurrences: str = "", bodies=None, quantity: int = 4, tota
         "quantity": int(real_total) if real_total is not None else int(quantity),
         "total_angle_deg": float(total_angle_deg),
         "symmetric": bool(symmetric),
-        "note": "Occurrences patterned around the axis. Pair with view_screenshot to view.",
+        "note": ("Bodies" if bodies not in (None, "", []) else "Occurrences")
+                + " patterned around the axis. Pair with view_screenshot to view.",
     })
 
 

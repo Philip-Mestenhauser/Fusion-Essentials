@@ -18,6 +18,7 @@ The nuances pinned, no live Fusion:
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -105,9 +106,27 @@ class FakeSnapshots:
 
 
 class FakeOcc:
-    def __init__(self, name, full_path=None):
+    """An occurrence. 'pos' is its WORLD translation in cm, read through transform2 the way
+    _occ_origin reads it; pos=None models an occurrence whose transform cannot be read at all."""
+
+    def __init__(self, name, full_path=None, pos=None):
         self.name = name
         self.fullPathName = full_path or name
+        self.pos = pos
+
+    def _matrix(self):
+        if self.pos is None:
+            raise RuntimeError("transform unreadable")
+        x, y, z = self.pos
+        return SimpleNamespace(translation=SimpleNamespace(x=x, y=y, z=z))
+
+    @property
+    def transform2(self):
+        return self._matrix()
+
+    @property
+    def transform(self):
+        return self._matrix()
 
 
 class FakeAsBuiltInput:
@@ -189,12 +208,21 @@ class FakeAsBuiltJoints:
 
 
 class FakeGeoRels:
-    def __init__(self):
+    """geometricRelationships, on the constraint INPUT (where rels are added) and on the CREATED
+    constraint (where the count is read back). 'fixed' pins the count to something other than what was
+    added; 'blind' makes the count unreadable - the case where publishing the REQUEST as the count
+    would invent a measurement."""
+
+    def __init__(self, fixed=None, blind=False):
         self.added = []
+        self._fixed = fixed
+        self._blind = blind
 
     @property
     def count(self):
-        return len(self.added)
+        if self._blind:
+            raise RuntimeError("relationship count unreadable")
+        return len(self.added) if self._fixed is None else self._fixed
 
     def add(self, *args):
         self.added.append(args)
@@ -206,19 +234,71 @@ class FakeConstraintInput:
         self.geometricRelationships = FakeGeoRels()
 
 
+def created_constraint(health=0, message="", count=0, blind_health=False, blind_count=False):
+    """The AssemblyConstraint add() hands back. healthState 0 = healthy, 1 = warning, 2 = error (the
+    pair assembly_get publishes as healthy:false); blind_health models a state that cannot be READ at
+    all, which needs a raising property rather than an attribute."""
+    def _health(self):
+        if blind_health:
+            raise RuntimeError("healthState unreadable")
+        return health
+    return type("C", (), {
+        "name": "Constraint1", "errorOrWarningMessage": message,
+        "geometricRelationships": FakeGeoRels(fixed=count, blind=blind_count),
+        "healthState": property(_health)})()
+
+
 class FakeAssemblyConstraints:
-    def __init__(self):
+    """assemblyConstraints: createInput() + add(input). The created constraint carries the health the
+    test asks for and the relationship count the input actually received; on_add runs the assembly
+    recompute the add triggers - what moves a part or breaks an existing joint."""
+
+    def __init__(self, health=0, message="", blind_health=False, blind_count=False, count=None,
+                 on_add=None):
         self.last_input = None
+        self.added = 0
+        self._health = health
+        self._message = message
+        self._blind_health = blind_health
+        self._blind_count = blind_count
+        self._count = count
+        self.on_add = on_add
 
     def createInput(self):
         self.last_input = FakeConstraintInput()
         return self.last_input
 
     def add(self, inp):
-        # the created constraint reflects however many relationships the input got
-        n = inp.geometricRelationships.count
-        return type("C", (), {"name": "Constraint1",
-                              "geometricRelationships": type("R", (), {"count": n})()})()
+        self.added += 1
+        n = inp.geometricRelationships.count if self._count is None else self._count
+        if self.on_add is not None:
+            self.on_add()
+        return created_constraint(health=self._health, message=self._message, count=n,
+                                  blind_health=self._blind_health, blind_count=self._blind_count)
+
+
+def timeline_item(name, health=0):
+    """One parametric-timeline item as _common.timeline_health reads it: a name plus a healthState
+    (0 healthy / 1 warning / 2 error) a test can flip to model the recompute breaking it."""
+    return SimpleNamespace(name=name, healthState=health)
+
+
+def fake_timeline(items):
+    """A count/item(i) timeline over 'items' - the collection protocol timeline_health walks."""
+    return SimpleNamespace(count=len(items), item=lambda i: items[i])
+
+
+def poison_timeline_item(name):
+    """Returns (item, reads): a timeline entry whose healthState RAISES, appending to 'reads' first.
+    This is a freshly added assembly constraint's own entry - measured raising '1 : Unknown exception'
+    right after the add, and the same caught error inside a script context rolled the whole
+    transaction back, so the assertion worth making is that nothing read it at all."""
+    reads = []
+
+    def _health(self):
+        reads.append(name)
+        raise RuntimeError("1 : Unknown exception")
+    return type("T", (), {"name": name, "healthState": property(_health)})(), reads
 
 
 class FakeRoot:
@@ -229,9 +309,11 @@ class FakeRoot:
 
 
 class FakeDesign:
-    def __init__(self, occurrences, snapshots, abj, ac):
+    def __init__(self, occurrences, snapshots, abj, ac, timeline=None):
         self.rootComponent = FakeRoot(occurrences, abj, ac)
         self.snapshots = snapshots
+        # None = a design whose timeline cannot be read (what _common.timeline_health sees as empty)
+        self.timeline = timeline
 
 
 def _install(occ_names, pending=False, snapshot_items=(), **snapshot_kwargs):
@@ -723,18 +805,6 @@ class TestAssemblyConstraintSnaps:
         assert e1 == "ENT[TrussMast:1:top]" and e2 == "ENT[Boom:1:bottom]"
         assert out["created"] is True
 
-    def test_compute_failed_constraint_bites(self, monkeypatch):
-        # the constraint is ADDED but reads healthState 2 (failed to solve) -> error, not ok
-        design, ac = self._install_with_snaps(monkeypatch)
-        ac.add = lambda inp: type("C", (), {
-            "name": "Constraint1", "healthState": 2,
-            "errorOrWarningMessage": "over-constrained",
-            "geometricRelationships": type("R", (), {"count": 1})()})()
-        res = ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:bottom")
-        assert res["isError"] is True
-        assert "FAILED to solve" in res["message"]
-        assert "over-constrained" in res["message"]
-
     def test_flip_defaults_false(self, monkeypatch):
         design, ac = self._install_with_snaps(monkeypatch)
         ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top",
@@ -860,6 +930,233 @@ class TestConstraintValueEncoding:
         ja.assembly_constraint_handler(snap_one="A:1:top", snap_two="B:1:top", offset=0)
         value = ac.last_input.geometricRelationships.added[0][3]
         assert value == ("real", 0.0)
+
+
+# ── what the create VERIFIES: the constraint solved, it broke nothing else, and who moved ───────
+# A constraint that is ADDED is not a constraint that WORKS: the platform hands back a constraint
+# object whose healthState can read warning/error, the recompute the add triggers can leave EXISTING
+# joints unhealthy, and the parts it is supposed to locate may not have moved at all.
+
+@pytest.fixture
+def constrain(monkeypatch):
+    """Factory: install a design for assembly_constrain - occurrences with readable world positions, a
+    configurable assemblyConstraints collection, and an optional timeline whose items the add can
+    break. Stubs the shared snap resolver so a '<occ>:<snap>' pair yields an opaque entity (a real
+    BRep proxy needs a live session). Returns (design, assemblyConstraints)."""
+    def _make(occ_specs=(("A:1", (0.0, 0.0, 0.0)), ("B:1", (0.0, 0.0, 0.0))), timeline_items=None,
+              **ac_kwargs):
+        import adsk.fusion
+        ac = FakeAssemblyConstraints(**ac_kwargs)
+        timeline = fake_timeline(timeline_items) if timeline_items is not None else None
+        # a spec is (name, pos) or (name, pos, fullPathName) - the third form is a NESTED occurrence,
+        # whose leaf name differs from the path that names it uniquely
+        occs = [FakeOcc(s[0], full_path=(s[2] if len(s) > 2 else None), pos=s[1]) for s in occ_specs]
+        design = FakeDesign(occs, FakeSnapshots(), FakeAsBuiltJoints(), ac, timeline=timeline)
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ja, "app", fake_app)
+        monkeypatch.setattr(ja._common, "app", fake_app)
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        monkeypatch.setattr(ja, "_resolve_snap_entity",
+                            lambda d, occ, snap: (f"ENT[{occ}:{snap}]", "planar", None))
+        return design, ac
+    return _make
+
+
+def _constrain_pair(**kw):
+    args = {"snap_one": "A:1:top", "snap_two": "B:1:bottom"}
+    args.update(kw)
+    return ja.assembly_constraint_handler(**args)
+
+
+class TestConstraintSolveState:
+    """healthState on the created constraint: 2 = error, 1 = warning - the pair assembly_get's
+    relations slice publishes as healthy:false. Either one means the constraint is not locating the
+    parts, and an UNREADABLE state means nothing here says it is."""
+
+    def test_failed_solve_is_refused_naming_the_delete_path(self, constrain):
+        constrain(health=2, message="over-constrained")
+        res = _constrain_pair()
+        assert res["isError"] is True
+        assert "FAILED to solve" in res["message"]
+        assert "over-constrained" in res["message"]
+        # the constraint is still in the design, so the refusal has to name how to get rid of it
+        assert "assembly_edit_relations" in res["message"]
+        assert "name='Constraint1'" in res["message"] and "action='delete'" in res["message"]
+
+    def test_compute_warning_is_refused_too(self, constrain):
+        # a warning state is what assembly_get reports as healthy:false - reporting created:true here
+        # would claim the parts are located on the one reading that says they are not
+        constrain(health=1)
+        res = _constrain_pair()
+        assert res["isError"] is True
+        assert "compute WARNING" in res["message"]
+        assert "action='delete'" in res["message"]
+
+    def test_unreadable_health_state_is_refused_as_unconfirmed(self, constrain):
+        # healthState RAISES: publishing created:true would report a solve nobody read
+        constrain(blind_health=True)
+        res = _constrain_pair()
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+        assert "Constraint1" in res["message"] and "assembly_get" in res["message"]
+        assert "action='delete'" in res["message"]
+
+    def test_a_healthy_constraint_is_reported_created(self, constrain):
+        constrain(health=0)
+        out = _payload(_constrain_pair())
+        assert out["created"] is True and out["constraint"] == "Constraint1"
+
+
+class TestConstraintCollateralDamage:
+    """The add recomputes the assembly, and that recompute can break joints/motion links the parts
+    already carried. Those go unhealthy under their OWN names, so only a before/after delta separates
+    the damage this call did from what was already broken."""
+
+    def test_relations_broken_by_the_add_are_named(self, constrain):
+        rev1, rev2, link = (timeline_item("Rev1"), timeline_item("Rev2"),
+                            timeline_item("Link1"))
+        _design, ac = constrain(timeline_items=[rev1, rev2, link])
+        # the recompute leaves two joints in warning and the motion link in error
+        def _break():
+            rev1.healthState, rev2.healthState, link.healthState = 1, 1, 2
+        ac.on_add = _break
+        res = _constrain_pair()
+        assert res["isError"] is True
+        for name in ("Rev1", "Rev2", "Link1"):
+            assert name in res["message"], name
+        assert "3 existing" in res["message"]
+        assert "action='delete'" in res["message"]
+
+    def test_a_warning_only_break_is_not_swallowed(self, constrain):
+        # the measured damage reads as a compute WARNING, not an error - an errors-only delta would
+        # report this add as a clean success
+        rev1 = timeline_item("Rev1")
+        _design, ac = constrain(timeline_items=[rev1])
+        ac.on_add = lambda: setattr(rev1, "healthState", 1)
+        res = _constrain_pair()
+        assert res["isError"] is True and "Rev1" in res["message"]
+
+    def test_a_feature_already_unhealthy_is_not_blamed_on_this_add(self, constrain):
+        # it was broken BEFORE the add - refusing here would make the tool unusable on a design that
+        # already carries a warning
+        constrain(timeline_items=[timeline_item("Rev1", health=1),
+                                  timeline_item("Rev2", health=2)])
+        out = _payload(_constrain_pair())
+        assert out["created"] is True
+
+    def test_a_clean_timeline_reports_created(self, constrain):
+        constrain(timeline_items=[timeline_item("Rev1"), timeline_item("Rev2")])
+        out = _payload(_constrain_pair())
+        assert out["created"] is True
+
+    def test_the_constraint_does_not_blame_itself(self, constrain):
+        # the constraint's own timeline entry carries its name, so an unhealthy entry named like the
+        # constraint is the constraint - counting it would make a healthy add refuse itself
+        own = timeline_item("Constraint1")
+        _design, ac = constrain(timeline_items=[own])
+        ac.on_add = lambda: setattr(own, "healthState", 2)
+        out = _payload(_constrain_pair())
+        assert out["created"] is True
+
+    def test_the_fresh_timeline_entry_is_never_read(self, constrain):
+        # its healthState is a POISON READ (raises, and the caught error rolled back the whole
+        # transaction inside a script context), so the walk stops at the pre-add item count
+        rev1 = timeline_item("Rev1")
+        design, ac = constrain(timeline_items=[rev1])
+        poison, reads = poison_timeline_item("Constraint1")
+
+        def _add_entry():
+            design.timeline = fake_timeline([rev1, poison])
+        ac.on_add = _add_entry
+        out = _payload(_constrain_pair())
+        assert out["created"] is True
+        assert reads == []                     # the new entry was never touched, not merely survived
+
+
+class TestConstraintRelationshipCount:
+    """relationship_count is a READ off the created constraint or it is null - never the request. A
+    request echoed as a count reports the ask back as a measurement."""
+
+    def test_the_count_is_read_off_the_constraint(self, constrain):
+        constrain()
+        out = _payload(ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"}]))
+        assert out["relationship_count"] == 2
+        assert out["relationships_submitted"] == 2
+
+    def test_an_unreadable_count_publishes_null_not_the_request(self, constrain):
+        constrain(blind_count=True)
+        out = _payload(ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"}]))
+        assert out["relationship_count"] is None
+        assert out["relationships_submitted"] == 2
+        assert "'relationship_count' is null" in out["note"]
+
+    def test_a_count_short_of_the_request_is_disclosed(self, constrain):
+        # the constraint holds ONE relationship where three were submitted - published as read, and
+        # the mismatch said out loud rather than smoothed over
+        constrain(count=1)
+        out = _payload(ja.assembly_constraint_handler(relationships=[
+            {"snap_one": "A:1:bottom", "snap_two": "B:1:top"},
+            {"snap_one": "A:1:left", "snap_two": "B:1:left"},
+            {"snap_one": "A:1:back", "snap_two": "B:1:back"}]))
+        assert out["relationship_count"] == 1
+        assert out["relationships_submitted"] == 3
+        assert "reads 1 for the 3" in out["note"]
+
+
+class TestConstraintMovedVerdict:
+    """The tool's job is LOCATING parts, so the payload says whether a part moved: a distance per
+    repositioned occurrence, an empty list when nothing moved, null when no position could be sampled
+    (an unread transform is not a 'no')."""
+
+    def test_a_repositioned_part_is_published_with_its_distance(self, constrain):
+        design, ac = constrain()
+        moving = design.rootComponent.allOccurrences[1]
+        ac.on_add = lambda: setattr(moving, "pos", (5.0, 0.0, 0.0))   # 5 cm = 50 mm
+        out = _payload(_constrain_pair())
+        assert out["moved"] == [{"occurrence": "B:1", "distance_mm": 50.0,
+                                 "direction": [1.0, 0.0, 0.0]}]
+        assert "B:1 by 50.0 mm" in out["note"]
+
+    def test_nothing_moved_publishes_an_empty_list_and_says_so(self, constrain):
+        constrain()
+        out = _payload(_constrain_pair())
+        assert out["moved"] == []
+        assert "NO target occurrence moved" in out["note"]
+
+    def test_unreadable_positions_publish_null_not_an_empty_list(self, constrain):
+        # both transforms RAISE: "nothing moved" would be a claim about a reading nobody took
+        constrain(occ_specs=(("A:1", None), ("B:1", None)))
+        out = _payload(_constrain_pair())
+        assert out["moved"] is None
+        assert "UNKNOWN" in out["note"] and "not a 'no'" in out["note"]
+
+    def test_both_fields_label_a_nested_part_by_its_full_path(self, constrain):
+        # 'occurrences' and the moved rows are ONE labelling scheme, or a caller cannot correlate them:
+        # the snap string carries the leaf name, the payload publishes the unique path
+        design, ac = constrain(occ_specs=(("Base:1", (0.0, 0.0, 0.0)),
+                                          ("Inner:1", (0.0, 0.0, 0.0), "Outer:1+Inner:1")))
+        nested = design.rootComponent.allOccurrences[1]
+        ac.on_add = lambda: setattr(nested, "pos", (0.0, 0.0, 1.0))
+        out = _payload(ja.assembly_constraint_handler(snap_one="Base:1:top",
+                                                      snap_two="Inner:1:bottom"))
+        assert out["occurrences"] == ["Base:1", "Outer:1+Inner:1"]
+        assert [m["occurrence"] for m in out["moved"]] == ["Outer:1+Inner:1"]
+
+    def test_both_constrained_parts_are_sampled(self, constrain):
+        design, ac = constrain()
+        a, b = design.rootComponent.allOccurrences
+        def _both():
+            a.pos = (0.0, 1.0, 0.0)
+            b.pos = (0.0, 0.0, 2.0)
+        ac.on_add = _both
+        out = _payload(_constrain_pair())
+        assert sorted(m["occurrence"] for m in out["moved"]) == ["A:1", "B:1"]
+        assert {m["distance_mm"] for m in out["moved"]} == {10.0, 20.0}
 
 
 class TestAsBuiltPendingMoveRefusal:

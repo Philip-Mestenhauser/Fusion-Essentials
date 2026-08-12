@@ -982,3 +982,68 @@ class TestContactsSlice:
         out = _payload(ap.handler(include=["contacts", "relations"]))
         assert out["contact_count"] == 1
         assert out["relation_counts"] == {"rigid_groups": 0, "motion_links": 0, "constraints": 0}
+
+
+class TestSuppressedJointDisclosure:
+    def test_suppressed_joint_counted_once_and_disclosed(self):
+        # A suppressed joint is inert, not broken: healthy stays true, the record carries
+        # is_suppressed, and the rollup names it in suppressed_joints (measured defects:
+        # a plain-healthy read, and a dead token double-counting one joint).
+        j = FakeJoint("Hinge", 1, "A:1", "B:1", health_state=3)
+        j.isSuppressed = True
+        _install([], [j])
+        out = _payload(ap.handler())
+        assert out["joint_count"] == 1
+        assert out["suppressed_joints"] == ["Hinge"]
+        rec = out["joints"][0]
+        assert rec["is_suppressed"] is True and rec["healthy"] is True
+        assert out["is_healthy"] is True
+
+    def test_active_joint_carries_no_suppression_field(self):
+        j = FakeJoint("Hinge", 1, "A:1", "B:1")
+        j.isSuppressed = False
+        _install([], [j])
+        rec = _payload(ap.handler())["joints"][0]
+        assert "is_suppressed" not in rec
+
+
+class TestBrokenRelationInHeadline:
+    def test_failed_constraint_drops_is_healthy_without_the_relations_slice(self):
+        # Measured: a failed assembly constraint left is_healthy true and showed only under
+        # include=['relations'] - the headline flag now folds relation health in.
+        con = type("C", (), {"name": "Constraint 1", "healthState": 2,
+                             "errorOrWarningMessage": "conflicts with a joint"})()
+        _install([], [])
+        ap.app.activeProduct.rootComponent.assemblyConstraints = _Coll([con])
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is False
+        assert out["broken_relations"] == [
+            {"kind": "constraint", "name": "Constraint 1", "error": "conflicts with a joint"}]
+
+    def test_healthy_relations_leave_the_headline_alone(self):
+        con = type("C", (), {"name": "Constraint 1", "healthState": 0})()
+        _install([], [])
+        ap.app.activeProduct.rootComponent.assemblyConstraints = _Coll([con])
+        out = _payload(ap.handler())
+        assert out["is_healthy"] is True and out["broken_relations"] == []
+
+
+class TestJointLimitsRead:
+    def test_enabled_limits_are_published_in_the_record(self):
+        # Limits were WRITE-ONLY on this surface (measured) - the record now reads them back.
+        import math, types as _t
+        j = FakeJoint("Swing", 1, "A:1", "B:1")
+        j.jointMotion.rotationLimits = _t.SimpleNamespace(
+            isMinimumValueEnabled=True, minimumValue=math.radians(-60),
+            isMaximumValueEnabled=True, maximumValue=math.radians(60),
+            isRestValueEnabled=False, restValue=None)
+        _install([], [j])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["rotation_limits_deg"] == {"min": -60.0, "max": 60.0}
+        assert "slide_limits_mm" not in rec
+
+    def test_disabled_limits_stay_off_the_wire(self):
+        j = FakeJoint("Swing", 1, "A:1", "B:1")
+        _install([], [j])
+        rec = _payload(ap.handler())["joints"][0]
+        assert "rotation_limits_deg" not in rec and "slide_limits_mm" not in rec

@@ -631,3 +631,53 @@ class TestFlagsThatDoNotTake:
         assert cf.last_input.isKeepToolBodies is True
         assert cf.last_input.isNewComponent is True
         assert cf.add_calls == 1
+
+
+class TestCutNoEffectGate:
+    def _target(self, cf, name="T"):
+        return next(b for b in cf.comp.bRepBodies._b if b.name == name)
+
+    def test_disjoint_cut_with_unchanged_volume_is_refused_and_rolled_back(self):
+        # A cut whose target volume never moved removed nothing - the API reports success on a
+        # disjoint tool while CONSUMING it (measured) - so the gate errors and rolls the feature
+        # back, restoring the tools.
+        cf = _install(["T", "Far"])
+        self._target(cf).volume = 8.0
+        deleted = []
+        feat = _feature_with_bodies(["T"])
+        feat.deleteMe = lambda: deleted.append(True) or True
+        cf.add = lambda inp: feat
+        res = cb.handler(target="T", tools=["Far"], operation="cut")
+        assert res["isError"] is True and "changed NOTHING" in res["message"]
+        assert deleted == [True] and "restoring the tool bodies" in res["message"]
+
+    def test_cut_that_removed_material_is_not_flagged(self):
+        cf = _install(["T", "Tool"])
+        tb = self._target(cf)
+        tb.volume = 8.0
+        def _add(inp):
+            tb.volume = 6.5
+            return _feature_with_bodies(["T"])
+        cf.add = _add
+        out = _payload(cb.handler(target="T", tools=["Tool"], operation="cut"))
+        assert out["combined"] is True
+
+    def test_unreadable_volume_skips_the_gate(self):
+        # No volume attr -> the gate cannot verify; it must not refuse a possibly-good cut.
+        cf = _install(["T", "Tool"])
+        cf.add = lambda inp: _feature_with_bodies(["T"])
+        out = _payload(cb.handler(target="T", tools=["Tool"], operation="cut"))
+        assert out["combined"] is True
+
+    def test_kept_tool_is_not_reported_as_a_split_piece(self):
+        # With keep_tools the feature's result bodies include the kept tool copies (measured: a
+        # kept disjoint tool was counted as a split piece) - excluded before the >1 verdict.
+        cf = _install(["T", "Tool"])
+        tb = self._target(cf)
+        tb.volume = 8.0
+        def _add(inp):
+            tb.volume = 6.5
+            return _feature_with_bodies(["T", "Tool"])
+        cf.add = _add
+        out = _payload(cb.handler(target="T", tools=["Tool"], operation="cut", keep_tools=True))
+        assert "body_split" not in out

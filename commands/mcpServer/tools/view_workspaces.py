@@ -143,7 +143,7 @@ _switch_tool = Tool.create_with_string_input(
     ),
     input_param_name="workspace",
     input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",
-)
+).strict_schema()
 switch_workspace_item = Item.create_tool_item(
     tool=_switch_tool, write="write", handler=switch_workspace_handler, run_on_main_thread=True
 )

@@ -60,6 +60,7 @@ tool = (
         input_param_name="entity",
         input_param_description="The CAM entity name to delete (setup / operation / folder / pattern).",
     )
+    .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="destructive", handler=handler, run_on_main_thread=True)
 

@@ -25,6 +25,7 @@ from . import _common
 from . import _cam_common
 from . import _inputs
 from . import _joints
+from . import _relations
 
 app = adsk.core.Application.get()
 
@@ -374,6 +375,15 @@ def handler() -> dict:
     marker_pos, marker_count = _common.timeline_marker(design)
     rolled_back = bool(marker_pos is not None and marker_count and marker_pos < marker_count)
     joint_count, broken_joints = _joint_rollup(design)
+    # Relation health folded into the FIRST-CALL rollup (measured: a failed assembly constraint
+    # left this read healthy while only a deeper include=['relations'] slice named it - the
+    # orientation read must not under-report health a deeper read exposes).
+    broken_relations = []
+    for kind in ("rigid_group", "motion_link", "constraint"):
+        for rel, _owner in _relations.all_relations(design, kind):
+            hs = safe(lambda rel=rel: rel.healthState)
+            if hs in (1, 2):
+                broken_relations.append(safe(lambda rel=rel: rel.name) or f"({kind})")
     grounded = _grounded_count(root)
     digest, top_level = _browser_digest(root)
     has_cam, cam = _cam_summary(doc)
@@ -402,6 +412,7 @@ def handler() -> dict:
     "timeline_markers": markers,
         "joint_count": joint_count,
         "broken_joints": broken_joints,
+        "broken_relations": broken_relations,
         "grounded_occurrences": grounded,
         # A rolled-back marker means features after it are NOT in the current model (they revert to
         # home) - the state a non-restoring in-place edit leaves behind; a health problem, surfaced.
@@ -409,7 +420,8 @@ def handler() -> dict:
         # Out-of-date references are a HEALTH problem - a template with stale parts shows the wrong
         # geometry - so they count against is_healthy, alongside timeline errors and broken joints.
         "out_of_date_references": out_of_date,
-        "is_healthy": (errors == 0 and not broken_joints and not out_of_date and not rolled_back),
+        "is_healthy": (errors == 0 and not broken_joints and not broken_relations
+                       and not out_of_date and not rolled_back),
     }
     out["references"] = {"count": xref_count, "out_of_date": out_of_date}
     out["has_cam"] = has_cam

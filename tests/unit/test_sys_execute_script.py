@@ -125,3 +125,22 @@ class TestDrawingFailureAdvice:
         assert "DESIGN documents" in doc
         assert "DRAWING document" in doc
         assert "not guaranteed" in doc.lower()
+
+
+class TestRunSentinelCut:
+    def test_console_text_before_the_sentinel_is_cut_from_a_failure(self):
+        # Python.Run's message embeds console text ACCUMULATED since the last run - an earlier
+        # call's error banner included (measured: a timed-out cam_create_machine traceback arrived
+        # inside a later script's result). Text before THIS run's sentinel never ships.
+        stale = ("===== Error =====\nMCP tool 'cam_create_machine'\n"
+                 "Traceback (most recent call last):\n  File \"old\", line 1\nException: timeout\n")
+        fresh = ("Traceback (most recent call last):\n  File \"script\", line 3, in run\n"
+                 "NameError: name 'x' is not defined")
+        tb = stale + ses._RUN_SENTINEL + "\n" + fresh
+        out = ses._extract_script_error(tb)
+        assert "cam_create_machine" not in out
+        assert "NameError" in out
+
+    def test_a_traceback_without_a_sentinel_is_handled_whole(self):
+        tb = "Traceback (most recent call last):\n  File \"s\", line 1\nValueError: boom"
+        assert "ValueError: boom" in ses._extract_script_error(tb)

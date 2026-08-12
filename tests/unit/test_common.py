@@ -732,3 +732,69 @@ class TestBuildPathLabel:
         assert "count is the truth" in blurb
         assert "auto-chain" not in blurb.lower()
         assert "closed loop" not in blurb.lower() and "seed edge alone" not in blurb
+
+
+class TestApplyRename:
+    """apply_rename - the ONE create-flow rename-with-disclosure: a declined or deduped rename is
+    returned as a warning beside the ACTUAL name, never swallowed and never an error."""
+
+    def test_a_clean_rename_returns_the_new_name_and_no_warning(self):
+        ent = SimpleNamespace(name="Sketch1")
+        final, warning = common.apply_rename(ent, "Pocket Outline")
+        assert final == "Pocket Outline" and warning is None
+        assert ent.name == "Pocket Outline"
+
+    def test_an_empty_request_renames_nothing_and_warns_nothing(self):
+        ent = SimpleNamespace(name="Joint1")
+        for req in ("", "   ", None):
+            final, warning = common.apply_rename(ent, req)
+            assert final == "Joint1" and warning is None
+
+    def test_a_raising_rename_is_disclosed_with_the_kept_name(self):
+        class Stubborn:
+            @property
+            def name(self):
+                return "Joint1"
+
+            @name.setter
+            def name(self, v):
+                raise RuntimeError("3 : name is read-only here")
+
+        final, warning = common.apply_rename(Stubborn(), "Hinge")
+        assert final == "Joint1"
+        assert "Hinge" in warning and "Joint1" in warning and "failed" in warning
+
+    def test_a_silently_swallowed_rename_is_disclosed_not_reported_as_taken(self):
+        # the FR-13 shape: entity.name = x raises nothing and changes nothing - only the
+        # read-back catches it, and the warning names both the request and what the entity holds
+        class Swallowing:
+            @property
+            def name(self):
+                return "Sketch1"
+
+            @name.setter
+            def name(self, v):
+                pass
+
+        final, warning = common.apply_rename(Swallowing(), "Outline")
+        assert final == "Sketch1"
+        assert "Outline" in warning and "did not take" in warning
+
+    def test_a_deduped_landing_reports_the_variant_that_landed(self):
+        # the platform dedupes a colliding name ('Foo' -> 'Foo(1)'): the payload's name is the
+        # read-back, and the warning says the requested name is not what it holds
+        class Deduping:
+            def __init__(self):
+                self._n = "Body1"
+
+            @property
+            def name(self):
+                return self._n
+
+            @name.setter
+            def name(self, v):
+                self._n = v + "(1)"
+
+        final, warning = common.apply_rename(Deduping(), "Bracket")
+        assert final == "Bracket(1)"
+        assert "Bracket" in warning and "Bracket(1)" in warning

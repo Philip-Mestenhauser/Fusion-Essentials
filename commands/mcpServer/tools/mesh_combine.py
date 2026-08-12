@@ -123,16 +123,26 @@ def handler(target: str = "", tools=None, operation: str = "join",
     tool_names = [safe(lambda b=b: b.name) for b in tool_bodies]
     tgt_name = safe(lambda: tgt.name)
 
-    # A JOIN of meshes that do not touch lands ONE body still holding both shells - a result the
-    # triangle/body census below reads as a clean combine. A MeshBody carries no lump or shell count
-    # to check it with (BRepBody.lumps has no mesh counterpart), but its AABB is readable: boxes that
-    # do not overlap PROVE the two cannot touch. Measured here, BEFORE the add consumes the tools.
+    # Meshes that do not touch make every operation here a lie waiting to happen: a JOIN lands one
+    # body still holding both shells, and a CUT/INTERSECT reports success while consuming the tool
+    # and changing nothing (measured). A MeshBody carries no lump or shell count to check with
+    # (BRepBody.lumps has no mesh counterpart), but its AABB is readable: boxes that do not overlap
+    # PROVE the two cannot touch. Measured here, BEFORE the add consumes the tools - for
+    # cut/intersect that makes it a REFUSAL (the cutter is consumed unconditionally, there is no
+    # keep_tools to soften a post-hoc error), for join a warning (an apart tool may still fuse
+    # through another tool).
     apart = []
-    if op_key == "join":
-        for b, nm in zip(tool_bodies, tool_names):
-            gap = _geom.aabb_gap(tgt, b)
-            if gap is not None and gap > 0:
-                apart.append({"tool": nm, "gap_cm": round(gap, 4)})
+    for b, nm in zip(tool_bodies, tool_names):
+        gap = _geom.aabb_gap(tgt, b)
+        if gap is not None and gap > 0:
+            apart.append({"tool": nm, "gap_cm": round(gap, 4)})
+    if apart and op_key in ("cut", "intersect"):
+        named = ", ".join(f"'{a['tool']}' (at least {a['gap_cm']} cm clear)" for a in apart)
+        return error(f"REFUSED before combining: a {op_key} needs the tool to OVERLAP the target, "
+                     f"and {named} cannot touch '{tgt_name}' (bounding boxes are separated; the gap "
+                     "is a lower bound). The API would report success while consuming the tool and "
+                     "changing nothing. Move the tool into the target (model_move) and combine "
+                     "again. Nothing was combined and no body was consumed.")
 
     # The design's OWN mode, read before any scope opens: designType reads DIRECT while a
     # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
@@ -219,7 +229,9 @@ def handler(target: str = "", tools=None, operation: str = "join",
     after_mesh_count = result["after_mesh_count"]
 
     # No-op catch: body count AND the target's triangle count both unchanged = nothing was combined,
-    # whatever the API returned.
+    # whatever the API returned. For cut/intersect the target's triangle count ALONE decides: the
+    # consumed tool DROPS the body count (measured on a disjoint cut - count moved, target untouched),
+    # so requiring both signals there lets the silent no-op through with the cutter destroyed.
     before_tri = result["before_tri"]
     after_tri = _tri_count(_result_mesh_of(feature, tgt) if feature else tgt)
     if (after_mesh_count is not None and after_mesh_count == result["before_mesh_count"]
@@ -227,6 +239,12 @@ def handler(target: str = "", tools=None, operation: str = "join",
         return error(f"Combine reported success but the target mesh is unchanged ({before_tri} "
                      f"triangles, {after_mesh_count} mesh bodies before and after) - the tool "
                      "meshes may not overlap the target.")
+    if op_key in ("cut", "intersect") and before_tri and after_tri == before_tri:
+        return error(f"This {op_key} reported success but the target mesh '{tgt_name}' is UNCHANGED "
+                     f"({before_tri} triangles before and after) - the tool did not overlap it. The "
+                     "tool mesh was CONSUMED by the operation and could not be restored (mesh combine "
+                     "keeps no tools). The AABB pre-check cannot see overlap-without-contact shapes; "
+                     "this read-back catches them.")
 
     # The feature carries the result .bodies when one came back (result_bodies() handles a None
     # feature); with no feature the combine landed in the TARGET mesh in place - report it from the

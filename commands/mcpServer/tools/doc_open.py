@@ -146,6 +146,7 @@ tool = (
             "description": "Declare a NORMAL document: open it via the API (resolve + openUsingContext). REQUIRED for a normal open - without it (and without is_cam_template) the tool refuses, so a forgotten flag can't silently take the crash-prone API path. Default false."})
     .add_input_property("is_cam_template", {"type": "boolean",
             "description": "Declare this is a freshly-copied multi-reference CAM template. The tool then REFUSES the API open (which crashes Fusion for these docs) and instructs a manual UI open. Wins over force_api_open. Default false."})
+    .strict_schema()
 )
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True)

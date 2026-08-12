@@ -1193,6 +1193,36 @@ class TestCreateFrameNote:
         assert "frame.y_world" in out["note"]
 
 
+class TestCreateRenameDisclosure:
+    def test_a_swallowed_rename_is_disclosed_beside_the_actual_name(self, monkeypatch):
+        # the platform can accept the name assignment and keep its existing name: the payload's
+        # sketch_name is the read-back, and the declined rename is DISCLOSED - never swallowed.
+        class StubbornSketch(FakeSketch):
+            @property
+            def name(self):
+                return "Sketch1"
+
+            @name.setter
+            def name(self, v):
+                pass
+
+        s = StubbornSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(sk, "_resolve_plane",
+                            lambda design, p: (SimpleNamespace(tag="xY"), "xY origin plane"))
+        out = _payload(sk.create_sketch_handler(plane="xy", name="Pocket Outline"))
+        assert out["sketch_name"] == "Sketch1"
+        assert "Pocket Outline" in out["rename_warning"]
+        assert "did not take" in out["rename_warning"]
+
+    def test_a_clean_rename_carries_no_warning(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(sk, "_resolve_plane",
+                            lambda design, p: (SimpleNamespace(tag="xY"), "xY origin plane"))
+        out = _payload(sk.create_sketch_handler(plane="xy", name="Pocket Outline"))
+        assert out["sketch_name"] == "Pocket Outline"
+        assert "rename_warning" not in out
+
+
 # ── draw_3d_line_handler: off-plane scaling + readback ──────────────────────
 
 class TestDraw3dLine:

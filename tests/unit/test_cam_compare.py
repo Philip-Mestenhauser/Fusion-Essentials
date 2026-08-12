@@ -183,3 +183,24 @@ class TestCaps:
         assert len(out["differences"]) == cc._DIFFERENCES_CAP
         # the full count is still honest, even though the array is capped
         assert out["difference_count"] == n
+
+    def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self, install):
+        # every row crosses the wire, so max_results is clamped into 1.._DIFFERENCES_CEILING -
+        # an oversized request is held at the ceiling, not honoured.
+        n = cc._DIFFERENCES_CEILING + 25
+        params_a = {f"p{i:04d}": "a" for i in range(n)}
+        params_b = {f"p{i:04d}": "b" for i in range(n)}
+        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B",
+                                                     max_results=999999))
+        assert len(out["differences"]) == cc._DIFFERENCES_CEILING
+        assert out["truncated"] is True and out["difference_count"] == n
+
+    def test_a_non_numeric_max_results_falls_back_to_the_default(self, install):
+        # the wire types it integer, but the clamp must not raise on a junk value either
+        params_a = {f"p{i}": "a" for i in range(3)}
+        params_b = {f"p{i}": "b" for i in range(3)}
+        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        out = _payload(cc.compare_operations_handler(operation_a="A", operation_b="B",
+                                                     max_results="lots"))
+        assert len(out["differences"]) == 3 and out["truncated"] is False

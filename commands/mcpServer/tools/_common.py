@@ -15,7 +15,7 @@ import adsk.core
 import adsk.fusion
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
-MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token (the ONE physical-body identity read - (nativeObject or self).entityToken, safe at both steps - the key that collapses a native body and its occurrence proxies to one body; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
+MAP_BLURB = "ok/error/safe, measured (a scaled number or None - the honest counterpart to safe(read, 0.0) for anything a caller treats as a MEASUREMENT, where 0 is an answer) + read_flag (the same honesty for a BOOLEAN: True/False/None, never a coerced False - the ONE unreadable-flag read every set-then-read-back gate and every published flag goes through) + counted (the same honesty for an INTEGER COUNT: the int or None, never a coerced 0/1 - for a count an absent read does NOT make zero, like a body's lumps or a built path's entities; safe(read, 0) stays right for a TALLY over a collection that may be absent), design/target_component, resolve_sketch + resolve_or_recent_sketch (the name-or-most-recent sketch contract), resolve_entity_ref + resolve_entity_refs (the ONE '<type>:<index>' sketch-entity resolver and the comma-separated list parser over it), SKETCH_ANCHORS + parse_anchor_ref + anchor_point (the ONE entity-anchored position grammar - a ref's optional third segment ':start/:end/:mid/:center' naming WHICH point of the entity is meant, and the resolve to that SketchPoint; sketch_dimension and sketch_constrain read the same forms through it, and 'mid' CREATES a midpoint-constrained point where the others only read one), most_recent_body + resolve_body_or_recent (the ONE 'that body, or the most recent one' resolution every whole-body edit runs: a given handle/name goes through the caller's own BodyRef, empty falls back to most_recent_body, and the caller words the no-body error), NO_VOLUME_CHANGE_CM3 (the ONE band a before/after volume difference counts as no change at all - every material-changing feature judges its silent no-op against it), result_bodies + body_facts (the feature-result walk and the per-body {name, is_solid} projection it is published with), open_profile_from_sketch, scale, timeline_health (the shared before/after edit guard), set_verified (the set-then-read-back every FeatureInput property assignment needs - a SWIG proxy accepts an unknown name silently), apply_rename (the ONE create-flow rename-with-disclosure: sets entity.name, reads it back, returns (final_name, warning-or-None) - a declined or deduped rename is DISCLOSED in the payload, never swallowed and never an error on a create that succeeded), cancel_input (the ONE abort for a partial-computing createInput transaction - trim/boundary fill - that reports a refused cancel instead of swallowing it), direct_feature_absence + no_feature_error + failed_effect_remedy + DIRECT_FEATURE_NOTE (the one mode gate for a Features.*.add() that returns nothing: measured per-class in DIRECT designs while the edit LANDS, so a site with a feature-independent effect check falls through to it, a site without one refuses honestly, and a wrong-effect error ends with the remedy that actually exists in that mode) + null_feature_note (the ONE sentence a payload appends for a null feature - DIRECT mode, or the base-feature edit scope that suppressed it - so no site re-rolls the branch or infers a design mode from the missing object), census_host + body_count (the resolve-the-collection-ONCE-before-the-mutation body census a feature-free effect check counts on - measured: the pieces land in the TARGET's parentComponent, not the active component), same_component (the ONE same-component test - component wrappers are measured NEVER identity-stable, so `a is b` between two component references is always False and must never carry the comparison), iter_collection (the ONE count/item(i) walk over a Fusion collection - every present item, empty when the collection is absent), native_token (the ONE physical-body identity read - (nativeObject or self).entityToken, safe at both steps - the key that collapses a native body and its occurrence proxies to one body; a local safe(lambda: b.entityToken) re-roll is how a de-dup counts one body twice), all_occurrences + occurrence_paths + component_contains (the ONE assembly-context occurrence walk - root.allOccurrences, the only source of true fullPathNames - plus the path census a structural edit diffs to read its effect back, and the cycle test a re-parent/instance refuses on), build_path (the ONE feature-path resolver every sweep/pipe/path-pattern/on-path datum builds its adsk.fusion.Path with: 'sketch:<name>' chains a path sketch's curves, ONE find_geometry edge handle chains from that seed across TANGENT connections - a sharp corner stops the chain, so the built Path's count is the truth - and a JSON list of edge handles is used exactly and must connect) - the response+resolve substrate"
 
 app = adsk.core.Application.get()
 
@@ -334,11 +334,19 @@ def resolve_sketch(d, name):
     nm = (name or "").strip()
     if not nm:
         return None
-    # Active component first, then root, then the rest - de-duplicated, order-preserving.
-    ordered = []
+    # Active component first, then root, then the rest - de-duplicated by entityToken (component
+    # wrappers are NEVER identity-stable - see same_component - so `c not in ordered` can never
+    # dedupe; a component whose token will not read is walked again, which only costs a re-read).
+    ordered, seen = [], set()
     for c in [target_component(d), safe(lambda: d.rootComponent)] + all_components(d):
-        if c is not None and c not in ordered:
-            ordered.append(c)
+        if c is None:
+            continue
+        tok = safe(lambda c=c: c.entityToken)
+        if tok is not None and tok in seen:
+            continue
+        if tok is not None:
+            seen.add(tok)
+        ordered.append(c)
     for comp in ordered:
         sk = safe(lambda c=comp: c.sketches.itemByName(nm))
         if sk:
@@ -420,6 +428,30 @@ def set_verified(obj, prop, value, label, owner_name):
         return (f"Setting {label} did not take - {owner_name}.{prop} reads back unchanged, so the "
                 "operation would run on its default settings.")
     return ""
+
+
+def apply_rename(entity, new_name):
+    """Apply a requested rename to a just-CREATED entity and read it back - the ONE
+    rename-with-disclosure every create-flow 'name' option runs through. Returns
+    (final_name, warning_or_None).
+
+    The create itself succeeded, so a declined rename is a DISCLOSURE, never an error (contrast
+    design_set_name, the dedicated rename tool, where a miss IS the failure). The platform can
+    decline silently (a swallowed setattr) or land a DEDUPED variant ('Foo' -> 'Foo(1)'), so the
+    read-back is what the payload publishes, and the warning names what the entity actually holds.
+    An empty/omitted request renames nothing and warns nothing."""
+    want = (new_name or "").strip()
+    if not want:
+        return safe(lambda: entity.name), None
+    try:
+        entity.name = want
+    except Exception as e:
+        got = safe(lambda: entity.name)
+        return got, f"created, but the rename to '{want}' failed: {e} (the name is '{got}')."
+    got = safe(lambda: entity.name)
+    if got != want:
+        return got, f"created, but the requested name '{want}' did not take - it is named '{got}'."
+    return got, None
 
 
 def cancel_input(inp, what):
@@ -544,16 +576,25 @@ def no_feature_error(design, what, hint="") -> str:
     return text
 
 
-def timeline_health(design):
+def timeline_health(design, limit=None):
     """(error_names, warning_names, total) over the parametric timeline by healthState (2=error,
     1=warning) - the shared before/after guard for edits that can break downstream features, so a
     change that corrupts the model is reported instead of swallowed. A direct-modelling design
-    (no timeline) yields empty lists."""
+    (no timeline) yields empty lists.
+
+    ``limit`` bounds the walk to the FIRST n items: a CREATE that only wants the damage it did to
+    PRE-EXISTING features passes the total this returned before its mutation, which keeps the walk off
+    the entry it just added. That matters beyond tidiness - a freshly added assembly constraint's own
+    TimelineObject.healthState RAISES '1 : Unknown exception' (measured, Fusion 2705.0.87), and the
+    same caught error inside a Python.Run script context rolled the whole transaction back."""
     errors, warnings, total = [], [], 0
     tl = safe(lambda: design.timeline)
     if tl is None:
         return errors, warnings, total
-    for i in range(safe(lambda: tl.count, 0) or 0):
+    count = safe(lambda: tl.count, 0) or 0
+    if limit is not None:
+        count = min(count, max(int(limit), 0))
+    for i in range(count):
         it = tl.item(i)
         total += 1
         hs = safe(lambda it=it: it.healthState)
@@ -740,7 +781,16 @@ def _midpoint_sketch_point(sketch, line):
     pt = sketch.sketchPoints.add(mid)               # MUTATION - let a failure raise into the handler
     if pt is None:
         return None, "could not create a midpoint anchor point."
-    safe(lambda: sketch.geometricConstraints.addMidPoint(pt, line))  # best-effort parametric weld
+    # The weld is what makes 'mid' PARAMETRIC - an unwelded point sits at today's midpoint and
+    # silently stops tracking the line on the next edit. A failed weld rolls the point back and
+    # errors, rather than handing back an anchor that looks right and drifts.
+    welded = safe(lambda: sketch.geometricConstraints.addMidPoint(pt, line), _UNREADABLE)
+    if welded is _UNREADABLE or welded is None:
+        rolled = bool(safe(lambda: pt.deleteMe()))
+        return None, ("the midpoint weld (addMidPoint) failed, so the anchor would NOT track the "
+                      "line - " + ("the anchor point was rolled back." if rolled else
+                                   "and the anchor point could not be removed; delete it in the "
+                                   "sketch.") + " Anchor to 'start'/'end' instead.")
     return pt, None
 
 

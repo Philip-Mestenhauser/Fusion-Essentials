@@ -367,6 +367,7 @@ set_tool = (
             "description": "If the parameter doesn't exist, create it as a USER parameter (create-or-update). Default false."})
     .add_input_property("unit", {"type": "string",
             "description": "Unit for a created parameter (mm default; '' for unitless). Only used with create=true."})
+    .strict_schema()
 )
 
 set_item = Item.create_tool_item(tool=set_tool, write="write", handler=set_handler, run_on_main_thread=True)

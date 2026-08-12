@@ -493,6 +493,7 @@ _create_project_tool = (
     )
     .add_input_property("purpose", {"type": "string",
         "description": "Optional project description/purpose."})
+    .strict_schema()
 )
 create_project_item = Item.create_tool_item(
     tool=_create_project_tool, write="write", handler=create_project_handler, run_on_main_thread=True
@@ -515,6 +516,7 @@ _create_folder_tool = (
     .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
     .add_input_property("parent_folder", {"type": "string",
         "description": "Optional parent path (e.g. 'Fixtures/Vises'); missing folders are created."})
+    .strict_schema()
 )
 create_folder_item = Item.create_tool_item(
     tool=_create_folder_tool, write="write", handler=create_folder_handler, run_on_main_thread=True
@@ -543,6 +545,7 @@ _upload_tool = (
         "description": "Optional destination folder path (e.g. 'Imports/STEP')."})
     .add_input_property("create_path", {"type": "boolean",
         "description": "Create missing folders in the destination path (default false)."})
+    .strict_schema()
 )
 upload_file_item = Item.create_tool_item(
     tool=_upload_tool, write="write", handler=upload_file_handler, run_on_main_thread=True
@@ -572,6 +575,7 @@ _delete_folder_tool = (
         "description": "Allow deleting a non-empty folder (default false). Still requires recursive_confirm for the recursive wipe."})
     .add_input_property("recursive_confirm", {"type": "string",
         "description": "For a non-empty folder: set to the folder's name to acknowledge the recursive subtree delete. Required (with force) to actually delete; omit to get a preview."})
+    .strict_schema()
 )
 delete_folder_item = Item.create_tool_item(
     tool=_delete_folder_tool, write="destructive", handler=delete_folder_handler, run_on_main_thread=True
