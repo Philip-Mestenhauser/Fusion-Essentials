@@ -94,7 +94,9 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     info = {
     "opened": True,
     "document_name": safe(lambda: doc.name),
-    "is_active": safe(lambda: app.activeDocument is doc),
+    # EQUALITY, never identity: Document wrappers are not identity-stable (measured live -
+    # `is` reads False for the active document itself); `==` compares the underlying handle.
+    "is_active": bool(safe(lambda: app.activeDocument == doc, False)),
     "is_configured_design": is_configured,
     "open_method": method,
     "resolved_id": resolved,

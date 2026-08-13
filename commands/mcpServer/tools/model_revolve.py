@@ -21,6 +21,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component, root_body_advisory
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 
@@ -64,6 +65,16 @@ def _in_context(ent, comp, design):
         return None, (f"it could not be brought into the revolve's assembly context ({path}). Pass "
                       "a handle at geometry in the sketch's own component, or a world axis (x/y/z).")
     return proxy, None
+
+
+def _cut_check_bodies(comp):
+    """The solid bodies a cut/intersect revolve can act on: every solid directly in the feature's
+    host component. A revolve takes no participant-body scoping, so there is no narrower sample.
+
+    Resolved ONCE, before the mutation, and the same objects re-read afterwards - that is the id()
+    keying precondition _geom.volumes documents."""
+    return [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
+            if safe(lambda b=b: b.isSolid)]
 
 
 def _axis_entity(design, comp, sketch, axis):
@@ -182,6 +193,12 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     except Exception as e:
         return error(f"Could not set revolve angle: {e}")
 
+    # cut/intersect MATERIAL evidence: the volumes the operation must move, sampled BEFORE the add.
+    # A revolve reports a healthy feature for a profile that sweeps through empty air, so the feature
+    # object alone cannot say material changed - only this before/after pair can.
+    check_bodies = _cut_check_bodies(host) if op_key in ("cut", "intersect") else []
+    vol_before = _geom.volumes(check_bodies)
+
     try:
         feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
@@ -193,9 +210,27 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     if not feature:
         return error(_common.no_feature_error(design, "Revolve"))
 
+    volume_delta_cm3 = None
+    if check_bodies:
+        delta, readable = _geom.volume_delta(check_bodies, vol_before)
+        # A body whose volume read BEFORE and reads unreadable now was consumed whole - a real effect
+        # that contributes no delta, so it must not be counted as "nothing moved".
+        consumed = [b for b in check_bodies
+                    if vol_before.get(id(b)) is not None and _geom.signed_volume(b) is None]
+        if readable:
+            volume_delta_cm3 = round(delta, 6)
+        if readable and not consumed and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
+            where = safe(lambda: host.name) or "the host component"
+            return error(f"Revolve reported success but this {op_key} changed nothing - every solid "
+                         f"body in '{where}' measures the volume it had before and none was "
+                         "consumed, so the revolved shape does not overlap any of them. Check that "
+                         "the profile and axis put the swept solid inside the target body (an "
+                         "'intersect' whose target lies entirely INSIDE the swept solid also reads "
+                         "this way). " + _common.failed_effect_remedy(design, feature))
+
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
-    return ok({
+    payload = {
         "revolved": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -209,7 +244,12 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "result_bodies": body_names,
         "note": ("Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
                  + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, host))) else "")),
-    })
+    }
+    # Published only where the before/after pair was READABLE: a null here would read as "no material
+    # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
+    if volume_delta_cm3 is not None:
+        payload["volume_delta_cm3"] = volume_delta_cm3
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (

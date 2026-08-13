@@ -64,7 +64,8 @@ def _body_census(host, name):
 
 def _occurrence_census(design, path):
     """How many occurrences currently carry `path` as their fullPathName, or None when the walk
-    cannot be read. fullPathName is the unique key (a bare name repeats across sub-assemblies)."""
+    cannot be read. A COUNT, not a lookup: a bare name repeats across sub-assemblies and two siblings
+    can even wear one path, so what the before/after diff needs is how many carry it."""
     root = safe(lambda: design.rootComponent)
     occs = safe(lambda: root.allOccurrences) if root is not None else None
     if occs is None:
@@ -94,7 +95,7 @@ def handler(body: str = "", occurrence: str = "") -> dict:
                      "feature takes one item. Call the tool twice to remove two things.")
     if not b_raw and not o_raw:
         return error("Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a "
-                     "fullPathName from design_get(include=['tree'])) - the item to remove.")
+                     "handle or fullPathName from design_get(include=['tree'])) - the item to remove.")
 
     if b_raw:
         target, terr = _BODY.resolve(b_raw)

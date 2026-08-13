@@ -20,7 +20,7 @@ from . import _common
 from . import _inputs
 from . import _outputs
 
-# The component to instance: one of its occurrences (unambiguous) or its name. A body/face target is
+# The component to instance: one of its occurrences or its name. A body/face target is
 # not a component, so allow= keeps those kinds out and TargetRef names the kind it got when refusing.
 # collapse_ambiguous_occurrences: the target here IS the component, so a name matching several of its
 # instances is not an ambiguity to refuse - instancing a component that already HAS instances is this

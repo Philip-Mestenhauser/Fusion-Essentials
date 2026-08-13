@@ -19,7 +19,37 @@ from . import _common
 
 MAP_BLURB = ("camera-orientation table for the standard named views - view_direction/"
              "look_direction/up_vector plus the true-orthographic-face set + "
-             "apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics)")
+             "apply_named_view/capture_png_b64 (the orient + refresh-then-grab capture mechanics) + "
+             "DISPLAY_FOLDERS/all_display_components (the category -> Component folder-bulb map and "
+             "the deduped component walk that view_set(display) and view_screenshot's fit_to shot "
+             "both toggle non-body clutter through)")
+
+
+# Display category -> the Component FOLDER bulb that controls it (one switch per component; the
+# folder bulb is separate from each entity's own bulb, so toggling it never disturbs per-entity
+# state). The ONE map every non-body visibility control reads.
+DISPLAY_FOLDERS = {
+    "sketches": "isSketchFolderLightBulbOn",
+    "construction": "isConstructionFolderLightBulbOn",
+    "origins": "isOriginFolderLightBulbOn",
+    "joints": "isJointsFolderLightBulbOn",
+}
+
+
+def all_display_components(design):
+    """Every component ONCE (root + allComponents, deduped by entityToken - allComponents holds a
+    root proxy distinct from rootComponent) - the walk a design-wide folder-bulb toggle runs."""
+    root = _common.safe(lambda: design.rootComponent)
+    comps = ([root] if root is not None else []) + list(
+        _common.safe(lambda: design.allComponents, []) or [])
+    out, seen = [], set()
+    for c in comps:
+        key = _common.safe(lambda c=c: c.entityToken) or id(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
 
 # eye - target direction per named view. Not pre-normalized (the iso corners are (+-1,+-1,+-1));
 # view_direction()/look_direction() normalize on read.

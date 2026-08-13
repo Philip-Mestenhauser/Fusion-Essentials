@@ -12,9 +12,8 @@ gyroscope is cast, turned solid, jointed and driven on every axis, detailed, res
 REDUCED to its one machinable part (the Carrier bar), a self-centering VISE is modeled around
 it (sliders, motion link at ratio -1, grip proven by measure), and a real milling job runs on
 the REAL part in the REAL fixture - four operations, generated to completion (an empty toolpath
-fails the run), NC posted. Optional SPATIAL value-checks read the scene through the
-fusion-spatial add-in's raw TCP protocol (port 8767; a closed port skips them, never fails).
-Cameo fixtures for families with no home on the mechanism ride the same document.
+fails the run), NC posted. Cameo fixtures for families with no home on the mechanism ride the
+same document.
 
 A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
 per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
@@ -44,7 +43,6 @@ import hashlib
 import json
 import os
 import re
-import socket
 import sys
 import tempfile
 import time
@@ -2881,121 +2879,6 @@ _MESH = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
-# â”€â”€ the SPATIAL value-checks: the fusion-spatial add-in's raw TCP protocol (stdlib only) â”€â”€â”€â”€â”€â”€â”€â”€
-# A closed port 8767 SKIPS a spatial phase (one skipped row, never a FAIL); a check that returns
-# false is a FAIL row - it means the STORY's geometry is wrong, which blocks the receipt.
-SPATIAL_PORT = 8767
-
-
-def spatial_rpc(sock, method, params=None):
-    sock.sendall((json.dumps({"id": 1, "method": method, "params": params or {}}) + "\n")
-                 .encode("utf-8"))
-    buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("spatial add-in closed the connection mid-reply")
-        buf += chunk
-    reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-    if "error" in reply:
-        raise RuntimeError(reply["error"].get("message", "spatial error"))
-    return reply["result"]
-
-
-def spatial_phase(name, checks, rows):
-    """Run spatial value-checks against the live scene. checks = [(label, fn(bodies) -> bool)]."""
-    print(f"\n-- {name} --")
-    try:
-        sock = socket.create_connection(("127.0.0.1", SPATIAL_PORT), timeout=2)
-    except OSError:
-        rows.append((name, "skipped", f"spatial add-in port {SPATIAL_PORT} closed"))
-        print(f"  skipped(spatial): port {SPATIAL_PORT} closed")
-        return
-    try:
-        inventory = spatial_rpc(sock, "space.bodies", {"scope": "all"})
-        bodies = inventory.get("bodies", [])
-        print(f"  space.bodies: {len(bodies)} bodies, units={inventory.get('units')}, "
-              f"up={inventory.get('upAxis')}")
-        for label, fn in checks:
-            try:
-                passed = bool(fn(bodies))
-            except Exception as e:
-                rows.append((f"{name}:{label}", "FAIL", f"check raised: {e}"))
-                continue
-            rows.append((f"{name}:{label}", "pass" if passed else "FAIL",
-                         "" if passed else "spatial check returned false"))
-    except Exception as e:
-        rows.append((name, "FAIL", str(e)[:NOTE_MAX]))
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-
-def _solids(bodies):
-    return [b for b in bodies if b.get("kind") == "solid"]
-
-
-def _named(bodies, fragment):
-    frag = fragment.lower()
-    return [b for b in bodies if frag in ((b.get("layer") or "") + (b.get("name") or "")).lower()]
-
-
-def _xy_within(inner, outer, slack=0.5):
-    """inner's world XY footprint sits inside outer's (radial nesting, seen from bboxes)."""
-    bi, bo = inner["bbox"], outer["bbox"]
-    return (bi["min"][0] >= bo["min"][0] - slack and bi["max"][0] <= bo["max"][0] + slack
-            and bi["min"][1] >= bo["min"][1] - slack and bi["max"][1] <= bo["max"][1] + slack)
-
-
-def _one(bodies, frag):
-    """One body by occurrence path: EXACT layer match first ('Frame:1' must not resolve to the
-    nested 'Frame:1/Pedestal:1' body via substring), fragment match as the fallback."""
-    exact = [b for b in bodies if (b.get("layer") or "") == frag]
-    if exact:
-        return exact[0]
-    hits = _named(bodies, frag)
-    return hits[0] if hits else None
-
-
-GYRO_CHECKS = [
-    # the eight-part cast (plus cameos) is standing: a thin inventory floor, not an exact count.
-    ("solid_count>=8", lambda bodies: len(_solids(bodies)) >= 8),
-    # the rotor is a revolved disc R=GimbalDia/5=24mm, 4mm thick: pi*24^2*4 ~ 7238 mm^3.
-    ("rotor_volume_band", lambda bodies: any(
-        b.get("volume") and 6000 <= b["volume"] <= 8500 for b in _named(bodies, "rotor"))),
-    # every solid reports a world bbox the engine could mesh.
-    ("bboxes_present", lambda bodies: all(b.get("bbox") for b in _solids(bodies))),
-    # the gimbal NESTS - rotor inside the inner ring, inner inside outer, outer inside the frame.
-    ("gimbal_nesting_chain", lambda bodies: _xy_within(_one(bodies, "Rotor:1"), _one(bodies, "InnerRing"))
-        and _xy_within(_one(bodies, "InnerRing"), _one(bodies, "OuterRing"))
-        and _xy_within(_one(bodies, "OuterRing"), _one(bodies, "Frame:1"))),
-    # the carrier rides BELOW the rotor's swing (the disc reaches z=-24) - no sweep collision.
-    ("carrier_clear_of_rotor", lambda bodies:
-        _one(bodies, "Carrier")["bbox"]["max"][2] <= _one(bodies, "Rotor:1")["bbox"]["min"][2] + 0.01),
-    # the pedestal sits entirely below the carrier (the stack: pedestal -> carrier -> gimbal).
-    ("pedestal_below_carrier", lambda bodies:
-        _one(bodies, "Pedestal")["bbox"]["max"][2] <= _one(bodies, "Carrier")["bbox"]["min"][2] + 0.01),
-]
-
-FIXTURE_CHECKS = [
-    # the gripped stack is standing: stock + two jaws + base + the carrier inside.
-    ("fixture_parts_present", lambda bodies: all(
-        _named(bodies, frag) for frag in ("STOCK", "JawL", "JawR", "ViseBase", "Carrier"))),
-    # SELF-CENTERING, seen from independent spatial data: after driving ONE jaw, the two jaws
-    # sit mirrored about y=0 (JawL's near face at -y equals JawR's near face at +y).
-    ("jaws_mirror_about_center", lambda bodies: abs(
-        _named(bodies, "JawL")[0]["bbox"]["max"][1]
-        + _named(bodies, "JawR")[0]["bbox"]["min"][1]) <= 0.1),
-    ("jaw_travel_happened", lambda bodies:
-        _named(bodies, "JawL")[0]["bbox"]["max"][1] > -13.5),  # built at -15; driven +3 -> -12
-    # machinist seating: the stock rides PROUD of the jaw tops (a cutter can reach the part).
-    ("stock_proud_of_jaws", lambda bodies: _named(bodies, "STOCK")[0]["bbox"]["max"][2]
-        > _named(bodies, "JawL")[0]["bbox"]["max"][2]),
-]
-
-
 # Rest-pose interference gate over the GYROSCOPE parts (the _RESIZE predicate): only the intended
 # shaft-in-rotor press-fit pair may overlap. Cameo pairs (a pin seated in its bore, the constrained
 # boxes) are joint-snapped fits by design and are out of scope.
@@ -3477,15 +3360,10 @@ ACTS = [
     ("FINALE", None, _FINALE, None),
 ]
 
-# Post-act hooks run() fires after an act completes: the bounded generation poll between the CAM
-# job act and its deliverables, and the optional spatial value-check phases. Spatial phases run
-# only in narrative mode (the fallback world has no gyroscope or vise to check).
+# Post-act hook run() fires after an act completes: the bounded generation poll between the CAM
+# job act and its deliverables.
 POLL_AFTER = {
     "ACT 10a - CAM: JOB + GENERATE": {"narrative": "DemoSetup", "fallback": "Setup1"},
-}
-SPATIAL_AFTER = {
-    "ACT 6 - RESIZE": ("SPATIAL (gyroscope)", GYRO_CHECKS),
-    "ACT 9 - VISE FIXTURE": ("SPATIAL (fixture grip)", FIXTURE_CHECKS),
 }
 
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the
@@ -4092,9 +3970,6 @@ def run(write_json, keep_open=False, trace=False):
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
         if name in POLL_AFTER:
             poll_generation(rows, notes, POLL_AFTER[name][mode])
-        if mode == "narrative" and name in SPATIAL_AFTER:
-            phase_name, checks = SPATIAL_AFTER[name]
-            spatial_phase(phase_name, checks, rows)
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 

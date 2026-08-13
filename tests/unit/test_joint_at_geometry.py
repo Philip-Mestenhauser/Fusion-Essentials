@@ -717,9 +717,12 @@ class TestFlipHint:
     def _faces(self, monkeypatch, n1, n2):
         # route the normal sample through the face's own stub value, via monkeypatch so the real
         # shared _geom module is restored (an imperative poke here leaks into test__geom /
-        # test_find_geometry); pointOnFace present so the real _planar_outward_normal path
-        # (isinstance + surfaceType + sample) runs.
-        monkeypatch.setattr(jg._geom, "evaluator_normal_at",
+        # test_find_geometry); pointOnFace present so the real planar_outward_normal path
+        # (isinstance + surfaceType + sample) runs. The sampler lives in _joints (the shared home
+        # joint_create reads through too), so the patch lands on THAT module's _geom.
+        import sys
+        joints_mod = sys.modules[jg._planar_outward_normal.__module__]
+        monkeypatch.setattr(joints_mod._geom, "evaluator_normal_at",
                             lambda face, point, decimals=6: getattr(face, "unit_normal", None))
         fa = FakeBRepFace(_ST.PlaneSurfaceType); fa.unit_normal = n1; fa.pointOnFace = object()
         fb = FakeBRepFace(_ST.PlaneSurfaceType); fb.unit_normal = n2; fb.pointOnFace = object()
@@ -859,3 +862,44 @@ class TestPendingMoveRefusal:
         _install_design(monkeypatch, self._faces(), snapshots=_Snapshots(blind=True))
         out = _payload(jg.handler(handle_one="rod", handle_two="pin"))
         assert out["jointed"] is True
+
+
+class TestCreateGuards:
+    def test_no_active_design_is_refused(self, monkeypatch):
+        monkeypatch.setattr(jg._common, "design", lambda: None)
+        res = jg.handler(handle_one="a", handle_two="b")
+        assert res["isError"] is True and "No active design" in res["message"]
+
+    def test_a_handle_resolver_error_surfaces_verbatim(self, monkeypatch):
+        _install_design(monkeypatch, {})
+        monkeypatch.setattr(jg._HANDLE_ONE, "resolve",
+                            lambda raw: (None, "'handle_one': stale handle - re-run find_geometry."))
+        res = jg.handler(handle_one="dead", handle_two="b")
+        assert res["isError"] is True and "stale handle" in res["message"]
+
+    def test_a_raising_createInput_is_reported(self, monkeypatch):
+        f = FakeBRepFace(_ST.PlaneSurfaceType)
+        f.pointOnFace = object()
+        joints = _install_design(monkeypatch, {"a": f, "b": f})
+        def _boom(g1, g2):
+            raise RuntimeError("geometry rejected")
+        joints.createInput = _boom
+        res = jg.handler(handle_one="a", handle_two="b")
+        assert res["isError"] is True
+        assert "Could not create joint input" in res["message"]
+        assert "geometry rejected" in res["message"]
+
+    def test_a_flip_the_input_refuses_is_reported(self, monkeypatch):
+        f = FakeBRepFace(_ST.PlaneSurfaceType)
+        f.pointOnFace = object()
+        joints = _install_design(monkeypatch, {"a": f, "b": f})
+        class _NoFlip(_FakeJointInput):
+            @property
+            def isFlipped(self):
+                return False
+            @isFlipped.setter
+            def isFlipped(self, v):
+                raise RuntimeError("flip unavailable on this input")
+        joints.createInput = lambda g1, g2: _NoFlip()
+        res = jg.handler(handle_one="a", handle_two="b", flip=True)
+        assert res["isError"] is True and "Could not apply flip" in res["message"]

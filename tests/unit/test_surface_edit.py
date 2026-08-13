@@ -37,11 +37,17 @@ class FakeBodies:
 
 
 class FakeFeature:
-    def __init__(self, name="Feat1", bodies=None, faces=None):
+    def __init__(self, name="Feat1", bodies=None, faces=None, distance_cm=None, thickness_cm=None):
         self.name = name
         self.bodies = FakeBodies(bodies if bodies is not None else [FakeBody()])
         if faces is not None:
             self.faces = FakeBodies(faces)      # a counted collection of created faces
+        # ExtendFeature.distance and ThickenFeature.thickness are ModelParameters reading CM; None
+        # gives a feature whose length parameter cannot be read at all.
+        if distance_cm is not None:
+            self.distance = types.SimpleNamespace(value=distance_cm)
+        if thickness_cm is not None:
+            self.thickness = types.SimpleNamespace(value=thickness_cm)
 
 
 def _face_on(body):
@@ -135,15 +141,24 @@ class _SwallowingExtendInput(FakeExtendInput):
 
 
 class FakeExtendFeatures:
-    def __init__(self, result_bodies=None, input_cls=FakeExtendInput):
+    def __init__(self, result_bodies=None, input_cls=FakeExtendInput, landed_cm=None,
+                 distance_readable=True):
+        # landed_cm: the distance the created feature reads back, when it differs from the one the
+        # input was given (live, the two agree). distance_readable=False models a feature whose
+        # distance parameter cannot be read at all.
         self.last_input = None
         self._result = result_bodies
         self._input_cls = input_cls
+        self._landed_cm = landed_cm
+        self._distance_readable = distance_readable
     def createInput(self, edges, dist, et, chaining):
         self.last_input = self._input_cls(edges, dist, et, chaining)
         return self.last_input
     def add(self, inp):
-        return FakeFeature(name="Extend1", bodies=self._result)
+        landed = None
+        if self._distance_readable:
+            landed = self._landed_cm if self._landed_cm is not None else inp.dist[1]
+        return FakeFeature(name="Extend1", bodies=self._result, distance_cm=landed)
 
 
 class FakeOffsetInput:
@@ -182,16 +197,25 @@ class _SwallowingThickenInput(FakeThickenInput):
 
 
 class FakeThickenFeatures:
-    def __init__(self, result_bodies=None, created_faces=None, input_cls=FakeThickenInput):
+    def __init__(self, result_bodies=None, created_faces=None, input_cls=FakeThickenInput,
+                 landed_cm=None, thickness_readable=True):
+        # landed_cm / thickness_readable play the same roles for the wall's own thickness parameter
+        # as their counterparts on FakeExtendFeatures do for the extend distance.
         self.last_input = None
         self._result = result_bodies
         self._faces = created_faces
         self._input_cls = input_cls
+        self._landed_cm = landed_cm
+        self._thickness_readable = thickness_readable
     def createInput(self, faces, thick, sym, op, chain):
         self.last_input = self._input_cls(faces, thick, sym, op, chain)
         return self.last_input
     def add(self, inp):
-        return FakeFeature(name="Thicken1", bodies=self._result, faces=self._faces)
+        landed = None
+        if self._thickness_readable:
+            landed = self._landed_cm if self._landed_cm is not None else inp.thick[1]
+        return FakeFeature(name="Thicken1", bodies=self._result, faces=self._faces,
+                           thickness_cm=landed)
 
 
 class FakeFeatures:
@@ -577,6 +601,38 @@ class TestSurfaceExtend:
         assert not hasattr(xf.last_input, "extendAlignment")
         assert "extend_alignment" not in out
 
+    def test_distance_that_reads_back_wrong_is_an_error(self):
+        # the extend landed a distance Fusion took, not the one asked for -> error, never an ok
+        # payload echoing the request as if it were the surface's growth
+        body = object()
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)], landed_cm=0.25)
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": FakeEdge(body=body)})
+        res = se.extend_handler(edges=["E1"], distance=4, units="mm")
+        assert res["isError"] is True
+        assert "reads back 2.5" in res["message"] and "requested 4.0" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_distance_read_off_the_feature_is_published(self):
+        body = object()
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": FakeEdge(body=body)})
+        out = _payload(se.extend_handler(edges=["E1"], distance=4, units="mm"))
+        assert out["distance"] == 4.0            # the feature's own parameter, in the caller's units
+        assert "unverified" not in out
+
+    def test_unreadable_distance_is_flagged_unverified_not_silently_echoed(self):
+        body = object()
+        xf = FakeExtendFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
+                                distance_readable=False)
+        comp = FakeComp(FakeFeatures(extend=xf))
+        _wire(comp, handle_map={"E1": FakeEdge(body=body)})
+        out = _payload(se.extend_handler(edges=["E1"], distance=4, units="mm"))
+        assert out["unverified"] == ["distance"]
+        assert "Not read back off the feature: distance." in out["note"]
+        assert out["distance"] == 4.0            # the request, published only because it is flagged
+
     def test_unknown_extend_alignment_rejected(self):
         comp = FakeComp(FakeFeatures(extend=FakeExtendFeatures()))
         _wire(comp, handle_map={"E1": FakeEdge()})
@@ -713,6 +769,35 @@ class TestOffsetThickenKind:
         out = _payload(se.thicken_handler(faces=["F1"], thickness=3))
         assert out["result_bodies"] == ["Wall1"]
         assert out["is_solid"] is True
+
+    def test_thickness_that_reads_back_wrong_is_an_error(self):
+        # the solid gate passes (a solid wall landed) while the wall is the WRONG thickness - only
+        # the feature's own parameter catches that, so it is an error, not an echoed request
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)], landed_cm=0.5)
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        res = se.thicken_handler(faces=["F1"], thickness=3, units="mm")
+        assert res["isError"] is True
+        assert "reads back 5.0" in res["message"] and "requested 3.0" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_thickness_read_off_the_feature_is_published(self):
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)])
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, units="mm"))
+        assert out["thickness"] == 3.0           # the wall's own parameter, in the caller's units
+        assert "unverified" not in out
+
+    def test_unreadable_thickness_is_flagged_unverified_not_silently_echoed(self):
+        tf = FakeThickenFeatures(result_bodies=[FakeBody("Wall1", is_solid=True)],
+                                 thickness_readable=False)
+        comp = FakeComp(FakeFeatures(thicken=tf))
+        _wire(comp, handle_map={"F1": FakeFace()})
+        out = _payload(se.thicken_handler(faces=["F1"], thickness=3, units="mm"))
+        assert out["unverified"] == ["thickness"]
+        assert "Not read back off the feature: thickness." in out["note"]
+        assert out["thickness"] == 3.0           # the request, published only because it is flagged
 
     def test_thicken_type_set_on_input_and_reported(self):
         import adsk.fusion

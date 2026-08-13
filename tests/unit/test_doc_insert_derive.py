@@ -582,25 +582,34 @@ class TestIntoComponent:
         out = _payload(io.handler(document_id="urn:x"))
         assert out["into_component"] == "root component"
 
-    def _nested_setup(self, monkeypatch, *, occ_activates=True, chassis_derive=None):
+    def _nested_setup(self, monkeypatch, *, occ_activates=True, chassis_derive=None,
+                      root_restore=True):
         """A design with a Chassis:1 occurrence targetable by into_component. The occ records
-        activate() calls (the platform routes a derive into the ACTIVE component, so nesting
-        activates the target first); the design records the root-restore."""
+        activate()/deactivate() calls (the platform routes a derive into the ACTIVE component, so
+        nesting activates the target first); the design records the root-restore. root_restore is
+        what activateRootComponent answers - True, False, or 'raise' for one that throws."""
         chassis_derive = chassis_derive or FakeDeriveFeatures()
         chassis_comp = FakeComp("Chassis", derive_features=chassis_derive)
-        calls = {"activated": 0, "root_restored": 0}
+        calls = {"activated": 0, "root_restored": 0, "deactivated": 0}
         occ = type("Occ", (), {
             "name": "Chassis:1", "fullPathName": "Chassis:1", "component": chassis_comp,
             "activate": lambda self=None: calls.__setitem__("activated", calls["activated"] + 1)
                         or occ_activates,
+            "deactivate": lambda self=None: calls.__setitem__("deactivated",
+                                                              calls["deactivated"] + 1) or True,
         })()
         root_comp = FakeComp("Root")
         design = FakeDesign(root_comp)
         design.rootComponent = type("Root", (), {
             "name": "Root", "allOccurrences": [occ], "occurrences": root_comp.occurrences,
         })()
-        design.activateRootComponent = (
-            lambda: calls.__setitem__("root_restored", calls["root_restored"] + 1) or True)
+
+        def _restore_root():
+            calls["root_restored"] += 1
+            if root_restore == "raise":
+                raise RuntimeError("activateRootComponent blew up")
+            return root_restore
+        design.activateRootComponent = _restore_root
         monkeypatch.setattr(io._common, "design", lambda: design)
         monkeypatch.setattr(io._inputs._common, "design", lambda: design)
         df = FakeDataFile()
@@ -616,6 +625,25 @@ class TestIntoComponent:
         assert chassis_derive.created is not None
         assert calls["activated"] == 1       # nesting = activate the target before add()
         assert calls["root_restored"] == 1   # ...and restore the root edit target after
+
+    def test_a_successful_root_restore_leaves_the_occurrence_activated_alone(self, monkeypatch):
+        # The restore took, so there is nothing to fall back to: deactivating on top of it would
+        # leave the edit target somewhere neither the tool nor the caller asked for.
+        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch)
+        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert calls["root_restored"] == 1 and calls["deactivated"] == 0
+
+    def test_a_FALSE_root_restore_falls_back_to_deactivating_the_occurrence(self, monkeypatch):
+        # A False return means the restore did NOT take - the same outcome as a raise, and it must
+        # take the same fallback, or the derive leaves Chassis:1 as the active edit target.
+        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch, root_restore=False)
+        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert calls["root_restored"] == 1 and calls["deactivated"] == 1
+
+    def test_a_RAISING_root_restore_falls_back_to_deactivating_the_occurrence(self, monkeypatch):
+        _design, _chassis, _derive, calls = self._nested_setup(monkeypatch, root_restore="raise")
+        _payload(io.handler(document_id="urn:x", into_component="Chassis:1"))
+        assert calls["root_restored"] == 1 and calls["deactivated"] == 1
 
     def test_activation_failure_refuses_before_deriving(self, monkeypatch):
         design, chassis, chassis_derive, calls = self._nested_setup(monkeypatch,

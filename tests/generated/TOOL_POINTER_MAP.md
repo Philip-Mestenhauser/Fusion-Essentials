@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 183  |  **description breadcrumbs:** 672  |  **note/error breadcrumbs:** 393
+**Tools:** 183  |  **description breadcrumbs:** 675  |  **note/error breadcrumbs:** 400
   |  **guidance smells flagged:** 6
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_inspect_toolpaths`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (36)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_recompute`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_emboss`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (34)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -35,13 +35,13 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_new`  <- 91  (desc 10, note 81)
 - `find_geometry`  <- 82  (desc 61, note 21)
 - `view_screenshot`  <- 50  (desc 21, note 29)
-- `design_delete_feature`  <- 35  (desc 20, note 15)
+- `design_delete_feature`  <- 38  (desc 20, note 18)
 - `data_get`  <- 33  (desc 19, note 14)
 - `design_get`  <- 33  (desc 13, note 20)
 - `sketch_create`  <- 32  (desc 19, note 13)
 - `cam_get`  <- 30  (desc 20, note 10)
 - `sketch_get`  <- 28  (desc 14, note 14)
-- `doc_open`  <- 23  (desc 6, note 17)
+- `doc_open`  <- 24  (desc 7, note 17)
 - `model_extrude`  <- 22  (desc 21, note 1)
 - `assembly_get`  <- 19  (desc 12, note 7)
 
@@ -73,22 +73,23 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ). Color the bodies directly (target = the body name).
 
 ### `assembly_capture_position`
+- Latest captured position discarded (back to the joint-defined state).
 - has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does; a design_add_instance placement does NOT). Use capture to record it into the timeline...
+- Current position captured into the timeline.
+- Uncaptured move thrown away - the assembly is back at its last captured position (or the joint-defined state when nothing was ever captured). Captured markers are untouched; use revert to drop the ...
+- Captured position removed from the timeline; later captured positions (if any) survive a recompute unchanged.
 - This design does not expose snapshots (capture position).
 - has_pending is null - the pending-position flag could not be read, so whether a moved-but-uncaptured position exists is UNKNOWN here (it is not a 'no'). The captured markers below were still read.
 - Nothing to revert - there are no captured positions.
 - Fusion declined to revert the latest captured position.
-- Latest captured position discarded (back to the joint-defined state).
 - Nothing to capture - there is no pending position change. Move a jointed component first (its pose is transient until captured).
 - snapshots.add() returned nothing - the position was not captured.
 - Capture reported success but the snapshot count did not advance (
 - after) - the position was not captured.
-- Current position captured into the timeline.
 - Nothing to discard - there is no pending position change.
 - Fusion declined to discard the pending position change (revertPendingSnapshot returned false) - the move still stands.
 - Discard ran, but the pending-position flag could not be re-read - the confirming read could not be taken, so the move may or may not have been thrown away. Call action='status' before acting on thi...  **[hedge]**
 - Discard reported success but a pending position change is still reported - the move was not thrown away.
-- Uncaptured move thrown away - the assembly is back at its last captured position (or the joint-defined state when nothing was ever captured). Captured markers are untouched; use revert to drop the ...
 - action='delete' needs 'marker' (the captured position's name, from action='status').
 - Nothing to delete - there are no captured positions.
 - No captured position named '
@@ -96,7 +97,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Fusion declined to delete captured position '
 - Delete reported success but '
 - ' is still present in the snapshot collection.
-- Captured position removed from the timeline; later captured positions (if any) survive a recompute unchanged.
 
 ### `assembly_constrain`
 - Components constrained with the relationship set (type inferred from geometry).
@@ -134,6 +134,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Parent lock set. isGroundToParent relocks to the TIMELINE placement and discards free moves. assembly_get's grounded_occurrences lists only the UI Ground/Fix flag (not settable here), so it stays e...
 - Specify 'ground_to_parent' (true/false). true locks the occurrence to its timeline placement; false releases it.
 - No active design with components.
+- isGroundToParent cannot be read on '
+- ' after setting it to
+- , so the change is UNCONFIRMED. Re-read the occurrence with assembly_get.
 - Assignment was accepted but '
 - ' still reads isGroundToParent=
 - - the flag did not take.
@@ -237,7 +240,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'entity' - the CAM item name to delete (see cam_get / cam_get(include=['operations']) / cam_edit_folders).
 - Fusion declined to delete '
 - ' (deleteMe returned false). It may be locked, referenced, or not deletable in its current state.
-- CAM entity removed. (design_delete_* don't reach CAM - this is the CAM-side delete.)
+- deleteMe returned true but '
+- ' still resolves in the CAM tree - the delete did not take. Re-read with cam_get.
+- CAM entity removed - verified gone by a re-resolve over the tree. (design_delete_* don't reach CAM - this is the CAM-side delete.)
 
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
@@ -625,7 +630,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide EITHER 'body' ('
 - ') OR 'occurrence' ('
 - ') - one Remove feature takes one item. Call the tool twice to remove two things.
-- Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a fullPathName from design_get(include=['tree'])) - the item to remove.
+- Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a handle or fullPathName from design_get(include=['tree'])) - the item to remove.
 - , which is what the removal is verified against - nothing was changed.
 - Could not read the component that owns the
 - to remove - nothing was changed.
@@ -848,7 +853,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not add a sketch to sheet '
 
 ### `drawing_create`
-- Drawing created as a CLOUD file (NOT opened). Opening a never-reviewed drawing surfaces an interactive view pane that blocks a headless open - open it ONCE in the Fusion UI to review the layout and...
+- Drawing created as a CLOUD file (NOT opened). To reach it: doc_open(file_id, force_api_open=true), then drawing_export for the PDF - measured on 2705.0.87, a drawing never reviewed in the Fusion UI...
 - creation_mode 'manual' requires template_file, which was empty.
 - This call stops here without creating anything. Pass the template's DataFile id/URL as template_file, or use creation_mode 'automatic'.
 - No active design to draw. Open or create a design first (see doc_new), then retry.
@@ -878,7 +883,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Save the drawing with doc_save to keep them.
 - Auto-dimensioned one view.
 - The document's modified flag could not be read, so nothing here confirms the dimensioning took.
-- No drawing to dimension: the active document is not a drawing. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
+- No drawing to dimension: the active document is not a drawing. Open the drawing (doc_open by file_id) and make it active, then retry.
 - The active drawing has no active sheet to dimension.
 - ' has no views to dimension. Drawing views are created by the automatic generator (drawing_create) or in the Fusion UI - the API cannot add one.
 - Provide 'view' - the index of the view to dimension, 0 to
@@ -899,7 +904,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not set the view to dimension (index
 
 ### `drawing_edit_sheet`
-- The active document is not a drawing, so it has no sheets. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
+- The active document is not a drawing, so it has no sheets. Open the drawing (doc_open by file_id) and make it active, then retry.
 - Provide 'sheet_size' - the preset size to give the sheet.
 - Provide 'orientation' - landscape or portrait.
 
@@ -907,7 +912,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Active drawing exported to local disk as
 - Provide 'file_path' - the local output path for the drawing file. The
 - extension is appended if missing.
-- No drawing to export: the active document is not a drawing. Open a drawing first (drawing_create makes one; open it in the Fusion UI, or doc_open a reviewed drawing), then export it as the active d...
+- No drawing to export: the active document is not a drawing. Open a drawing first (drawing_create makes one; doc_open opens it by file_id), then export it as the active document.
 - The drawing has no export manager - cannot export.
 - This Fusion build's drawing export manager has no
 - is not available here.
@@ -924,7 +929,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Unsupported image file '
 - '. A sheet image is one of:
 - Provide both 'x' and 'y' - the sheet position to place the image at.
-- No drawing to place an image on: the active document is not a drawing. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
+- No drawing to place an image on: the active document is not a drawing. Open the drawing (doc_open by file_id) and make it active, then retry.
 - The active drawing has no active sheet to place an image on.
 - This sheet exposes no images collection - an image cannot be placed on it.
 - Images.createInput returned nothing - no image can be placed on this sheet.
@@ -943,7 +948,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `drawing_update`
 - Refreshed the drawing's out-of-date references to the latest source design (views regenerated; each reference's 'version' now reflects what the views show). The drawing is modified in-session but N...
 - reference(s) could not be read back (null rows) - their post-refresh staleness is unknown, so up-to-date is unverified.
-- No drawing to update: the active document is not a drawing. Open the drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, then retry.
+- No drawing to update: the active document is not a drawing. Open the drawing (doc_open by file_id) and make it active, then retry.
 - The drawing's document references could not be read, so its staleness cannot be determined - refusing to refresh blind.
 - Drawing references are already up to date - nothing to refresh. Edit and SAVE the source design first, then this refreshes the drawing's views to match.
 - reference(s) could not be read (null rows) - their staleness is unknown, so up-to-date is unverified. Every readable reference is current; nothing to refresh.
@@ -977,6 +982,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create joint input:
 - Could not apply offset/angle/flip:
 - Limits requested but this joint type has no motion to limit (rigid/inferred). Use revolute/slider/cylindrical.
+- ' WAS CREATED, but a limit failed:
+- Limits already applied before the failure:
+- . Fix the limits with joint_edit(joint_name='
+- ', ...) or remove the joint with design_delete_feature - do NOT re-create it.
 
 ### `joint_create_as_built`
 - Occurrences joined where they already are with
@@ -1014,6 +1023,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not build joint geometry from the given anchor.
 - createInput returned nothing for this geometry.
 - jointOrigins.add returned nothing.
+- Joint origin landed on component '
+- ', not the requested '
+- '. Rolled it back; nothing changed.
+- 'component': occurrence '
+- ' has no readable component to receive the joint origin.
 - Could not create joint-origin input:
 - Joint origin creation failed:
 - Could not set the coordinate offsets on the joint origin:
@@ -1045,11 +1059,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `joint_edit`
 - Joint edited + recomputed, but the timeline still has errored feature(s) (
 - ) - the edit may over-constrain something.
-- Joint edited in place + full recompute (downstream features settled). view_screenshot to view.
 - '. Use design_get(include=['timeline']) or check the name.
 - Posing a joint to a rotation value is joint_drive's job. Use joint_drive(joint_name=..., angle_deg=...) to drive it; joint_edit changes the joint definition (type/axis/snaps/limits), not its pose.
 - '. Valid: mm, cm, in.
 - Nothing to change. Provide at least one of: input_one/input_two, joint_type (+axis), world_axis, flip, offset (+units), angle, min_deg/max_deg/rest_deg (rotation), min_mm/max_mm/rest_mm (linear).
+- Joint edited in place + full recompute (downstream features settled). view_screenshot to view.
+- Joint edited in place, but the full recompute RAISED - downstream features may be unsettled and their health unread. Run design_recompute and check workspace_orient before trusting the model state.
 - world_axis given but the joint's current motion type is not axis-based (rigid/ball have no single axis to re-point).
 - Could not resolve input_one '
 - Could not resolve input_two '
@@ -1060,6 +1075,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This joint has no offset parameter (rigid/inferred or already 0-DOF).
 - This joint has no angle parameter.
 - This joint has no editable motion (rigid/inferred has no limits).
+- Edits already applied before the failure:
 - ' is an AS-BUILT joint, which exposes no offset parameter for ANY motion type - its position cannot be driven by a parameter or an expression. Delete it (design_delete_feature) and build the pair w...
 - ' is an AS-BUILT joint, which exposes no offset/angle ModelParameter for ANY motion type - no expression can drive it. Delete it (design_delete_feature) and build the pair with joint_create instead.
 
@@ -1166,12 +1182,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - adsk.fusion.MeshPlaneCutTypes is unavailable on this Fusion version.
 - cut ANNIHILATED mesh '
 - triangles were removed and the mesh body now reads 0 triangles, so no geometry of it is left.
-- cut changed nothing: mesh '
-- triangles, unchanged.
-- Move the plane into the mesh (mesh_get reports its bounding box), then retry.
 - Could not create the mesh-plane-cut input:
 - adsk.fusion.MeshPlaneCutFillTypes is unavailable on this Fusion version.
 - Mesh plane cut failed (meshPlaneCutFeatures.add raised):
+- cut changed nothing: mesh '
+- triangles, unchanged.
+- Move the plane into the mesh (mesh_get reports its bounding box), then retry.
 
 ### `mesh_reduce`
 - No active design. Open or create a document first (see doc_new).
@@ -1311,13 +1327,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `model_base_feature`
 - No active design. Create or open a document first (see doc_new).
 - 'action' must be one of: start, finish (got '
+- Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible - that is the open scope, NOT a real...
 - No scope was open in this session to close.
 - Note: a scope opened by a DIFFERENT session/tool cannot be seen while it is open (the API hides an in-edit base feature) - only the session that opened it holds the object needed to close it.
 - captured open base-feature scope(s); design is now
 - This component has no baseFeatures collection - cannot create a base feature here.
 - BaseFeatures.add() returned nothing - could not create a base feature.
 - Could not enter base-feature edit (startEdit returned false).
-- Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible - that is the open scope, NOT a real...
 
 ### `model_combine`
 - Bodies combined. Pair with view_screenshot to view the result.
@@ -1362,15 +1378,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create component:
 
 ### `model_draft`
+- Faces tapered to the pull direction. Pair with view_screenshot to view.
 - 'angle_deg' must be non-zero - a 0 deg draft tapers nothing.
 - 'angle_deg' must be between -90 and 90 degrees (got
 - No active design. Create or open a document first (see doc_new).
 - Draft feature was created but failed to compute:
 - . Try a smaller angle, 'flip', or a different pull direction.
-- Faces tapered to the pull direction. Pair with view_screenshot to view.
 - 'angle_deg' must be a number (draft angle in degrees).
 - deg (setSingleAngle returned false), so nothing was drafted.
 - . (The pull direction may not suit these faces, or the angle undercuts the geometry - try a smaller angle or 'flip'.)
+- Draft computed but tapered nothing -
+- measures the volume it had before, so the
+- deg taper moved no material. Check 'pull_direction' is the plane the faces taper relative to, and try 'flip' or a face that is not already parallel to it.
 
 ### `model_emboss`
 - Profile stamped onto the face(s). 'mode' ECHOES the sign of the depth requested; the call is refused when the body's measured volume moves the other way, so the mode reported here is also the direc...
@@ -1390,7 +1409,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `model_extrude`
 - Open profile extruded into a SURFACE (no end caps) - pair with model_stitch to close several surfaces into a solid.
-- Profile extruded into a solid. Pair with view_screenshot (iso) to view it.
 - '. Use mm, cm, or in.
 - 'to_object' is not used with extent='
 - '. Drop 'to_object', or use extent='to_face' (or the default 'distance').
@@ -1399,23 +1417,32 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Use: new, join, cut, intersect.
 - No active design. Create or open a document first (see doc_new).
 - No sketch to extrude. Create one and draw a closed profile first.
+- profile_index mixes the sketch text '
+- ' with other regions. A sketch text extrudes on its own - pass just '
+- ', and a separate call for the closed regions.
+- as_surface is not used with the sketch text '
+- ' - a text extrudes as a solid. Drop as_surface, or pass a closed profile / an open path.
 - Extrude reported success but this
 - changed nothing: no solid body lost material and none was consumed, so the scoped bodies (
 - ) are untouched. A cut/intersect can only affect bodies named in 'target_bodies' - check the profile overlaps them in the extrude direction (a negative 'distance' reverses it).
+- Sketch text extruded into a solid. To stamp text onto an existing face instead, use model_emboss.
+- Profile extruded into a solid. Pair with view_screenshot (iso) to view it.
 - extent='two_side' needs non-zero 'distance' and 'distance2' (one per side).
 - extent='two_side' does not use 'symmetric' - pass equal 'distance' and 'distance2' for a symmetric two-sided extrude, or use extent='distance' with symmetric=true.
 - Use sketch_get or sketch_create.
 - Could not start extrude:
 - Could not set extrude extent:
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
-- ' has no closed profile to extrude. Draw a closed region (e.g. a rectangle or circle) first, or pass as_surface=true to extrude an open path into a surface.
 - taper_deg is not supported with extent=to_object/to_face - a to-entity extrude takes no taper. Use a distance extent, or drop the taper.
 - Fusion refused the to_object extent (setOneSideExtent returned false), so nothing was extruded. Check the target face is reachable from the profile in the extrude direction.
 - Could not scope to target_bodies:
 - Extrude reported success but extent=through_all removed no material from
-- - the cut ran the wrong way. through_all follows the sketch-plane normal, which on an on-face sketch points away from the body: pass the opposite 'distance' sign to cut into it.
-- taper_deg is not supported with extent=through_all (setAllExtent takes no taper).
-- Fusion rejected extent=through_all (setAllExtent returned false).
+- - the cut ran the wrong way. through_all follows the sketch-plane normal, which on an on-face sketch points away from the body: pass the opposite 'distance' sign to cut into it. The failed feature '
+- ' remains in the timeline (this check reads only those bodies, so a design-wide effect is not ruled out) - remove it with design_delete_feature if unwanted.
+- ' has no closed profile to extrude. Draw a closed region (e.g. a rectangle or circle) first, or pass as_surface=true to extrude an open path into a surface.
+- taper_deg is not supported with extent=through_all (a through-all extent carries no taper).
+- Fusion rejected a symmetric extent=through_all (setTwoSidesExtent returned false).
+- extent=through_all (setOneSideExtent returned false).
 - taper_deg is not supported with extent=two_side (setTwoSidesDistanceExtent takes no taper).
 - Fusion rejected extent=two_side (setTwoSidesDistanceExtent returned false).
 - Fusion refused a symmetric tapered extent (
@@ -1487,6 +1514,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not add loft sections:
 - Could not set loft centerline/rails:
 - . Common causes: a cut/intersect with no body in the loft's path (the API says 'No target body' for that), or incompatible profiles (a mix of open/closed, or a self-intersecting path - profiles mus...
+- Loft reported success but this
+- changed nothing - every solid body in '
+- ' measures the volume it had before and none was consumed, so the lofted shape does not overlap any of them. Check the profiles bracket the target body (an 'intersect' whose target lies entirely IN...
 - Could not set loft solid/surface mode:
 
 ### `model_measure_between`
@@ -1620,13 +1650,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Replace face reported success but body '
 
 ### `model_revolve`
+- Profile revolved into a solid. Pair with view_screenshot (iso) to view it.
 - '. Use: new, join, cut, intersect.
 - Provide a non-zero 'angle_deg' to revolve (e.g. 360 for a full revolve).
 - No active design. Create or open a document first (see doc_new).
 - No sketch to revolve. Create one and draw a closed profile first.
 - Could not resolve axis '
 - use x | y | z, a straight-edge/sketch handle, or line:<index>.
-- Profile revolved into a solid. Pair with view_screenshot (iso) to view it.
 - angle_deg must be a number (degrees).
 - Use sketch_get or sketch_create.
 - ' has no closed profile to revolve.
@@ -1635,6 +1665,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (The axis must not pass through the profile in a way that self-intersects.)
 - Could not set revolve angle:
 - . (A 'cut'/'intersect' needs existing geometry to act on. An axis outside the profile's plane is projected onto it, so that is not the cause; a profile that CROSSES the axis is refused.)
+- Revolve reported success but this
+- changed nothing - every solid body in '
+- ' measures the volume it had before and none was consumed, so the revolved shape does not overlap any of them. Check that the profile and axis put the swept solid inside the target body (an 'inters...
 - Fusion refused a two-sided revolve extent (
 - deg), so nothing was revolved.
 - deg, so nothing was revolved.
@@ -1694,7 +1727,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not configure the sweep:
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
 - . (A 'cut'/'intersect' needs existing geometry to act on; the profile and path must form a valid sweep.)
+- Sweep reported success but this
+- changed nothing - every solid body in '
+- ' measures the volume it had before and none was consumed, so the swept profile does not overlap any of them. Check the path runs through the target body (an 'intersect' whose target lies entirely ...
 - Could not scope to target_bodies:
+- measure the volumes they had before and none was consumed, so the profile does not sweep through any of them. A cut/intersect can only affect bodies named in 'target_bodies' - check the path runs t...
+- The sweep feature was rolled back.
+- Remove the empty feature with design_delete_feature.
 
 ### `model_thread`
 - Provide 'designation' - the thread call-out, e.g. 'M8x1.25' or '1/4-20 UNC'.
@@ -1910,8 +1949,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world - ...
 - No active design. Create or open a document first (see doc_new).
 - Sketch creation returned nothing on
-- Could not resolve plane '
-- '. Use one of: xy, xz, yz (origin planes; aliases top/front/right), or the name of a construction plane, or pass 'on_face' = a planar-face handle from find_geometry.
 - Failed to create sketch on
 - ' instead - 'on_face' takes a planar-FACE handle from find_geometry.
 - ', which is a construction PLANE name, not a face handle. Pass it as plane='
@@ -2056,12 +2093,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (Extend the OUTER edges of ONE open body; tangent/perpendicular need edges connected at endpoints.)
 
 ### `surface_extrude`
+- Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken.
+- The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet.
 - '. Use mm, cm, or in.
 - Provide a non-zero 'distance' to extrude.
 - '. Surface extrude supports: new, join.
 - No active design. Create or open a document first (see doc_new).
-- Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken.
-- The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet.
 - 'curves' resolved to no edges/curves.
 - No sketch or 'curves' to extrude. Draw an OPEN chain first, or pass curves.
 - , so no surface was extruded.

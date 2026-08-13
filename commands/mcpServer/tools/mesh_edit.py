@@ -19,7 +19,7 @@ from ._common import target_component as _target_component
 from . import _geom
 from . import _inputs
 from .design_mode import run_in_base_feature
-from .mesh_ops import _result_mesh_of, _tri_count
+from .mesh_ops import _area_volume, _mesh_moved, _result_mesh_of, _tri_count
 
 app = adsk.core.Application.get()
 
@@ -206,6 +206,15 @@ def _plane_misses_mesh(mesh, plane_entity, plane_geom):
     return False, None
 
 
+def _av_phrase(before, after) -> str:
+    """The area/volume evidence a flat-triangle-count verdict quotes, per signal: the before -> after
+    reading, or 'unreadable' for a signal that could not be read at both ends (never a stand-in 0)."""
+    return "; ".join(
+        f"{label} unreadable" if b is None or a is None else f"{label} {b} -> {a} {unit}"
+        for label, unit, b, a in (("area", "cm2", before[0], after[0]),
+                                  ("volume", "cm3", before[1], after[1])))
+
+
 def _rollback_state(design, feat, mesh) -> str:
     """What the model holds after a refused cut: the rollback attempt's outcome plus the remedy for
     whatever is still there.
@@ -355,14 +364,15 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
             if xerr:
                 return error(xerr)
 
-        # Snapshot the component's mesh bodies AND the target's triangle count BEFORE the add, so the
-        # cut is detected by side effect rather than by the (often None) feature object. Captured
-        # INSIDE inner_op so both are taken in the same scope the add runs in (valid in both direct
-        # and base-feature modes).
+        # Snapshot the component's mesh bodies AND the target's triangle count and area/volume BEFORE
+        # the add, so the cut is detected by side effect rather than by the (often None) feature
+        # object. Captured INSIDE inner_op so all of them are taken in the same scope the add runs in
+        # (valid in both direct and base-feature modes).
         def _mesh_count():
             return safe(lambda: comp.meshBodies.count)
         before_mesh_count = _mesh_count()
         before_tri = _tri_count(mb)
+        before_av = _area_volume(mb)
 
         # Mutation - direct call, no safe() around it. A falsy return is NOT a failure: this add()
         # method "Return nothing in the case where the feature is non-parametric" (DIRECT design OR an
@@ -374,6 +384,7 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
         # The open BaseFeature can never be re-found once the scope closes, so its name is captured
         # HERE - it is what explains a null feature to the caller.
         return {"feat": feat, "before_mesh_count": before_mesh_count, "before_tri": before_tri,
+    "before_area_volume": before_av,
     "after_mesh_count": _mesh_count(), "fill_applied": fill_applied,
     "base_feature_name": safe(lambda: base_feature.name) if base_feature else None}
 
@@ -393,11 +404,16 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     bodies = ([{"name": safe(lambda b=b: b.name), "handle": safe(lambda b=b: b.entityToken)}
                for b in _common.result_bodies(feat)] if feat else [])
 
-    # trim and split_faces re-triangulate the SAME mesh, so its triangle count IS the effect and the
-    # only signal that separates a real cut from the two silent failures below.
+    # trim and split_faces re-triangulate the SAME mesh, so its triangle count IS the headline effect
+    # that separates a real cut from the two silent failures below. The count alone cannot carry the
+    # unchanged case, though: a cut whose fill adds exactly as many triangles as it removed lands with
+    # the count flat, so the mesh's own area/volume is read as a second, independent signal.
     before_tri = result["before_tri"]
-    after_tri = (_tri_count(_result_mesh_of(feat, mb) if feat else mb)
-                 if ct in _IN_PLACE_CUTS else None)
+    before_av = result["before_area_volume"]
+    result_mesh = (_result_mesh_of(feat, mb) if feat else mb) if ct in _IN_PLACE_CUTS else None
+    after_tri = _tri_count(result_mesh) if result_mesh is not None else None
+    after_av = _area_volume(result_mesh) if result_mesh is not None else (None, None)
+    count_flat_but_moved = False
     if ct in _IN_PLACE_CUTS and before_tri and after_tri is not None:
         if after_tri == 0:
             # The whole mesh was consumed: the body survives as an empty husk, which is a destructive
@@ -423,17 +439,31 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
                 "removed and the mesh body now reads 0 triangles, so no geometry of it is left. "
                 + cause + " " + _rollback_state(design, feat, mb))
         if after_tri == before_tri:
-            if ct == "trim":
-                why = (f"'{plane_label}' cut no triangles off it, which is what a plane that does not "
-                       "pass through the mesh does.")
-            else:
-                why = (f"split_faces ADDS triangles where the plane crosses the facets (MEASURED: "
-                       f"352 -> 368 on an intersecting plane), so an unchanged count means "
-                       f"'{plane_label}' does not cross the mesh.")
-            return error(
-                f"The {ct} cut changed nothing: mesh '{mesh_name}' still reads {before_tri} "
-                f"triangles, unchanged. {why} Move the plane into the mesh (mesh_get reports its "
-                "bounding box), then retry. " + _rollback_state(design, feat, mb))
+            # The count alone cannot refuse here: a cut whose fill adds exactly as many triangles as
+            # it removed lands with the count flat, and rolling that back would destroy real geometry.
+            # So the refusal needs the second signal to AGREE that nothing moved; a moved area/volume
+            # over a flat count is a landed cut, reported as success with both readings. An unreadable
+            # second signal leaves the count as the only evidence there is, so the refusal stands on
+            # it and says so.
+            moved = _mesh_moved(before_av, after_av)
+            if moved is not True:
+                if ct == "trim":
+                    why = (f"'{plane_label}' cut no triangles off it, which is what a plane that does "
+                           "not pass through the mesh does.")
+                else:
+                    why = (f"split_faces ADDS triangles where the plane crosses the facets (MEASURED: "
+                           f"352 -> 368 on an intersecting plane), so an unchanged count means "
+                           f"'{plane_label}' does not cross the mesh.")
+                second = (f"Its area and volume did not move either ({_av_phrase(before_av, after_av)})."
+                          if moved is False else
+                          f"Its area/volume could not be read as a second check "
+                          f"({_av_phrase(before_av, after_av)}), so the triangle count is the only "
+                          "evidence here.")
+                return error(
+                    f"The {ct} cut changed nothing: mesh '{mesh_name}' still reads {before_tri} "
+                    f"triangles, unchanged. {second} {why} Move the plane into the mesh (mesh_get "
+                    "reports its bounding box), then retry. " + _rollback_state(design, feat, mb))
+            count_flat_but_moved = True
 
     note = ("Mesh cut by the plane. 'trim' keeps one side, 'split_body' makes two mesh bodies, "
     "'split_faces' cuts the triangulation in place. fill controls the new opening "
@@ -466,6 +496,14 @@ def mesh_plane_cut_handler(mesh: str = "", plane: str = "", cut_type: str = "tri
     if ct in _IN_PLACE_CUTS:
         payload["triangles_before"] = before_tri
         payload["triangles_after"] = after_tri
+        # The second signal, published beside the count so a caller can judge the cut on the geometry
+        # too - null for a signal this build could not read, never a stand-in 0.
+        payload["area_before_cm2"], payload["area_after_cm2"] = before_av[0], after_av[0]
+        payload["volume_before_cm3"], payload["volume_after_cm3"] = before_av[1], after_av[1]
+        if count_flat_but_moved:
+            note += (f" The triangle count is unchanged ({before_tri}), but the mesh's own geometry "
+                     f"MOVED ({_av_phrase(before_av, after_av)}), so the cut landed: a fill that adds "
+                     "as many triangles as the cut removed reads flat on the count alone.")
         if not before_tri or after_tri is None:
             # The gate above needs a nonzero before-count AND a readable after-count to mean anything;
             # without both, this call cannot tell a real cut from a no-op, and says so.

@@ -327,7 +327,10 @@ def handler(document_id: str = "", into_component: str = "",
             return error(f"Derive failed: {e}.")
     finally:
         if into_occ is not None:
-            if safe(lambda: design.activateRootComponent(), None) is None:
+            # ANY falsy answer takes the fallback: a False return and a raise are handled identically
+            # because the negative is unforceable live (both measured attempts - a normal call and a
+            # background-document call - returned True), so the two cannot be told apart in practice.
+            if not safe(lambda: design.activateRootComponent(), False):
                 safe(lambda: into_occ.deactivate())
     if not feature:
         return error(_common.no_feature_error(design, "Derive",

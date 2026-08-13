@@ -14,8 +14,9 @@ The tool exposes seams so the test supplies a target without the real adsk plumb
 
 import json
 import re
+from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import FakeOperation, _NamedCollection, load_tool
 
 ct = load_tool("cam_edit_tools")
 
@@ -309,9 +310,10 @@ class TestList:
         _install(monkeypatch)
         monkeypatch.setattr(ct, "_shared_libraries",
                             lambda scope: ([{"name": "Milling Tools (Metric)", "url": "u1"},
-                                           {"name": "Team Mill.hub", "url": "u2"}], None))
+                                           {"name": "Team Mill.hub", "url": "u2"}], False, None))
         out = _payload(ct.handler(action="list", scope="hub"))
         assert out["library_count"] == 2
+        assert "truncated" not in out
         assert "Team Mill.hub" in [l["name"] for l in out["libraries"]]
 
 
@@ -388,6 +390,16 @@ class TestAddRich:
         built = tgt.tools[-1]
         assert built.desc == "MCP Demo - drill"
         assert built.holder == {"description": "CT40 Holder", "segments": [1, 2]}
+
+    def test_an_empty_holder_ref_is_refused_not_silently_dropped(self, monkeypatch):
+        # PRESENCE gates the holder resolve, not truthiness: {} is a malformed ref, and dropping
+        # it shipped the sample's holder as a success (measured).
+        tgt = _install(monkeypatch)
+        before = len(tgt.tools)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "holder": {}}])
+        assert res["isError"] is True and "bad holder ref" in res["message"]
+        assert len(tgt.tools) == before             # nothing was added on the refusal
 
     def test_create_with_presets(self, monkeypatch):
         tgt = _install(monkeypatch)
@@ -889,6 +901,100 @@ class TestTargetToolIndexAlignment:
         # list turns a landed persist into "the persist did not land".
         lib = self._library_with_an_unreadable_tool()
         target = ct._Target(lib, is_document=True)
+        assert len(target.tools) == lib.count == 3
+
+
+class _MutableLib(_SrcLib):
+    """A library a target writes through, counting the item() calls one .tools walk costs."""
+
+    def __init__(self, tools):
+        super().__init__(list(tools))
+        self.walks = 0
+
+    def item(self, i):
+        self.walks += 1
+        return self._t[i]
+
+    def add(self, t):
+        self._t.append(t)
+
+    def remove(self, i):
+        del self._t[i]
+
+    def replace(self, i, t):
+        self._t[i] = t
+
+
+# ── the REAL _Target's tool list: held, and dropped by anything that changes it ──
+
+class TestTargetToolListCache:
+    """One action reads .tools several times (_do_add reads it 3x, _do_remove 2x) and each read is a
+    walk of the whole library - seconds on a 266-tool cloud one. So the list is held between reads,
+    and every method that writes the library, commits it, or re-reads it must drop the held copy:
+    a surviving list reports the library as it was and hides the very change the action just made."""
+
+    def _target(self, descs=("A", "B"), **kw):
+        lib = _MutableLib([_Tool(d) for d in descs])
+        return lib, ct._Target(lib, **kw)
+
+    def test_repeat_reads_walk_the_library_once(self):
+        lib, target = self._target(is_document=True)
+        assert [t.desc for t in target.tools] == ["A", "B"]
+        assert [t.desc for t in target.tools] == ["A", "B"]
+        assert lib.walks == 2          # two tools, ONE walk - not four
+
+    def test_an_add_is_visible_to_the_next_read(self):
+        lib, target = self._target(is_document=True)
+        assert len(target.tools) == 2                      # the read that fills the held list
+        target.add(_Tool("C"))
+        assert [t.desc for t in target.tools] == ["A", "B", "C"]
+
+    def test_a_remove_is_visible_to_the_next_read(self):
+        lib, target = self._target(is_document=True)
+        assert len(target.tools) == 2
+        target.remove(0)
+        assert [t.desc for t in target.tools] == ["B"]
+
+    def test_update_tool_is_visible_to_the_next_read(self):
+        # updateTool commits an edited tool into the library, which may hand the next read a
+        # different object for that index - so the held list cannot survive it either.
+        lib = _MutableLib([_Tool("A"), _Tool("B")])
+        replacement = _Tool("A edited")
+        target = ct._Target(lib, is_document=True,
+                            update_tool_fn=lambda t: lib.replace(0, t))
+        assert [t.desc for t in target.tools] == ["A", "B"]
+        target.update_tool(replacement)
+        assert target.tools[0] is replacement
+
+    def test_a_persist_drops_the_held_list(self):
+        lib = _MutableLib([_Tool("A"), _Tool("B")])
+        target = ct._Target(lib, is_document=False, persist_fn=lambda: lib.add(_Tool("C")))
+        assert len(target.tools) == 2
+        target.persist()
+        assert [t.desc for t in target.tools] == ["A", "B", "C"]
+
+    def test_a_refetch_drops_the_held_list(self):
+        # refetch is the read-back seam every persist gate goes through; the library it re-reads is
+        # the same one .tools walks, so the held copy is stale from that point on.
+        lib = _MutableLib([_Tool("A"), _Tool("B")])
+        target = ct._Target(lib, is_document=True, refetch_fn=lambda: lib)
+        assert len(target.tools) == 2
+        lib.add(_Tool("C"))
+        assert target.refetch() is lib
+        assert [t.desc for t in target.tools] == ["A", "B", "C"]
+
+    def test_the_persist_gate_reads_the_library_after_the_add(self, monkeypatch):
+        # the whole point, end to end: _do_add compares the re-read count against len(target.tools),
+        # so a held list would make a landed 3-tool persist read as "2, not 3".
+        lib = _MutableLib([_Tool("A"), _Tool("B")])
+        target = ct._Target(lib, is_document=False, persist_fn=lambda: None,
+                            refetch_fn=lambda: lib)
+        monkeypatch.setattr(ct, "_resolve_target", lambda scope, library: (target, None))
+        monkeypatch.setattr(ct, "_sample_for_type", lambda ty: (_Tool("sample-" + ty, tool_type=ty), None))
+        monkeypatch.setattr(ct, "_tool_from_json", lambda js: _Tool(json.loads(js).get("description", "built")))
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert out["added"] == 1 and out["tool_count"] == 3
         assert len(target.tools) == lib.count == 3
 
 
@@ -1731,3 +1837,788 @@ class TestCreationTimePresetName:
         built = tgt.tools[-1]
         assert _preset_names(built) == ["Alu 6061"]
         assert built.presets.item(0).parameters.itemByName("tool_spindleSpeed").expression == "8000"
+
+
+# ── misbehaving parameters shared by the guard tests below ──────────────────────────────────────
+
+class _WriteProtected(_Param):
+    """A parameter whose expression assignment RAISES - the platform refusing the write."""
+    error = ""
+    warning = ""
+
+    def __setattr__(self, key, value):
+        if key == "expression":
+            raise RuntimeError("locked by Fusion")
+        object.__setattr__(self, key, value)
+
+
+class _TextValued(_Param):
+    """A parameter that accepts the expression, reports no error, and evaluates to a NON-number."""
+    error = ""
+    warning = ""
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, v):
+        self._expr = v
+        self.value = _Val("n/a")
+
+
+class _Unnameable(_Preset):
+    """A preset whose name assignment raises once it carries a name - the platform refusing it."""
+    def __setattr__(self, key, value):
+        if key == "name" and getattr(self, "name", None) is not None:
+            raise RuntimeError("preset name is read-only")
+        object.__setattr__(self, key, value)
+
+
+# ── the REAL _Target: refetch is the ONE seam every read-back goes through ──────────────────────
+
+class TestRealTargetReadBacks:
+    """persisted_count / reread_param / reread_preset_names / stored_tool_numbers all read through
+    refetch(). A target that cannot re-read its library must answer None from every one of them -
+    a number there would publish evidence nothing produced."""
+
+    def test_a_target_with_no_refetch_answers_none_everywhere(self):
+        tgt = ct._Target(_SrcLib([_tool_with_presets("EM", ["Alu"], tool_number="4")]),
+                         is_document=True)
+        assert tgt.refetch() is None
+        assert tgt.persisted_count() is None
+        assert tgt.reread_param(0, "tool_number") is None
+        assert tgt.reread_preset_names(0) is None
+        assert tgt.stored_tool_numbers() is None
+
+    def test_a_refetching_target_reads_the_stored_library_back(self):
+        stored = _SrcLib([_tool_with_presets("EM", ["Alu"], tool_number="4")])
+        tgt = ct._Target(_SrcLib([_Tool("held", tool_number="9")]), is_document=False,
+                         refetch_fn=lambda: stored)
+        assert tgt.refetch() is stored
+        assert tgt.persisted_count() == 1
+        assert tgt.reread_param(0, "tool_number") == "4"     # the STORED value, not the held one
+        assert tgt.reread_preset_names(0) == ["Alu"]
+        assert tgt.stored_tool_numbers() == [4]
+
+    def test_a_refetch_that_comes_back_empty_proves_nothing(self):
+        tgt = ct._Target(_SrcLib([_Tool("EM", tool_number="4")]), is_document=False,
+                         refetch_fn=lambda: None)
+        assert tgt.persisted_count() is None and tgt.stored_tool_numbers() is None
+        assert tgt.reread_param(0, "tool_number") is None
+        assert tgt.reread_preset_names(0) is None
+
+    def test_a_tool_index_the_stored_library_does_not_hold_reads_none(self):
+        stored = _SrcLib([])
+        tgt = ct._Target(_SrcLib([_Tool("EM")]), is_document=False, refetch_fn=lambda: stored)
+        assert tgt.reread_param(0, "tool_number") is None
+        assert tgt.reread_preset_names(0) is None
+
+
+class TestRealTargetMutations:
+    def test_add_remove_and_update_reach_the_library(self):
+        lib = _SrcLib([_Tool("A"), _Tool("B")])
+        lib.add = lib._t.append
+        lib.remove = lambda i: lib._t.pop(i)
+        updated = []
+        tgt = ct._Target(lib, is_document=True, update_tool_fn=updated.append)
+        tgt.add(_Tool("C"))
+        assert [t.desc for t in tgt.tools] == ["A", "B", "C"]
+        tgt.remove(0)
+        assert [t.desc for t in tgt.tools] == ["B", "C"]
+        tool = tgt.tools[0]
+        tgt.update_tool(tool)
+        assert updated == [tool]
+
+    def test_the_commit_seam_a_target_lacks_is_a_no_op_not_a_raise(self):
+        # a shared target has no per-tool updateTool and a document target no library persist
+        recorded = []
+        tgt = ct._Target(_SrcLib([]), is_document=False,
+                         persist_fn=lambda: recorded.append("persist"))
+        tgt.update_tool(_Tool("EM"))
+        tgt.persist()
+        assert recorded == ["persist"]
+        doc = ct._Target(_SrcLib([]), is_document=True, update_tool_fn=recorded.append)
+        doc.persist()
+        assert recorded == ["persist"]      # no persist_fn: nothing else was called
+
+
+class TestRealTargetOperationsByTool:
+    """operationsByTool hands back an OperationVector - index/len accessible, NOT a Python list - so
+    the walk tries len()/[i] first and falls back to the shared count/item walk."""
+
+    def test_a_target_with_no_operations_seam_reports_none(self):
+        tgt = ct._Target(_SrcLib([]), is_document=True)
+        assert tgt.operations_by_tool(_Tool("EM")) == []
+
+    def test_a_null_vector_is_no_operations(self):
+        tgt = ct._Target(_SrcLib([]), is_document=True, ops_fn=lambda t: None)
+        assert tgt.operations_by_tool(_Tool("EM")) == []
+
+    def test_an_index_len_vector_is_read_in_order(self):
+        vec = [FakeOperation("Face1"), FakeOperation("Adaptive1")]
+        tgt = ct._Target(_SrcLib([]), is_document=True, ops_fn=lambda t: vec)
+        assert tgt.operations_by_tool(_Tool("EM")) == ["Face1", "Adaptive1"]
+
+    def test_a_count_item_collection_falls_back_to_the_shared_walk(self):
+        # a collection carrying no len() must not report zero operations - the tool is used
+        coll = _NamedCollection([FakeOperation("Face1"), FakeOperation("Adaptive1")])
+        tgt = ct._Target(_SrcLib([]), is_document=True, ops_fn=lambda t: coll)
+        assert tgt.operations_by_tool(_Tool("EM")) == ["Face1", "Adaptive1"]
+
+
+# ── the shared-library listing: _tool_libraries / _shared_libraries (the walk itself is ─────────
+# ── _cam_common.library_assets, covered in test__cam_common.py) ─────────────────────────────────
+
+class TestSharedLibraryListing:
+    def _libs(self, assets=(), folders=()):
+        root = _AssetURL("root")
+        return root, SimpleNamespace(
+            urlByLocation=lambda loc: root,
+            childAssetURLs=lambda u: list(assets) if u is root else [_AssetURL("Team Mill")],
+            childFolderURLs=lambda u: list(folders) if u is root else [])
+
+    def test_the_libraries_come_off_the_cam_manager_not_the_document(self, monkeypatch):
+        # CAMManager.get().libraryManager - the document's CAM product has no libraryManager, so a
+        # shared-scope listing must work with no CAM job open at all
+        assets = _install_samples(monkeypatch, {})
+        assert ct._tool_libraries() is assets
+
+    def test_an_unreadable_library_manager_reads_as_no_libraries(self, monkeypatch):
+        import adsk.cam as _c
+
+        def _boom():
+            raise RuntimeError("no CAM manager")
+
+        monkeypatch.setattr(_c.CAMManager, "get", _boom)
+        assert ct._tool_libraries() is None
+
+    def test_no_tool_libraries_is_an_error_not_an_empty_list(self, monkeypatch):
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: None)
+        entries, truncated, err = ct._shared_libraries("cloud")
+        assert entries is None and truncated is False and "unavailable" in err
+        res = ct.handler(action="list", scope="cloud")
+        assert res["isError"] is True and "unavailable" in res["message"]
+
+    def test_a_library_nested_in_a_folder_is_listed(self, monkeypatch):
+        # Hub/Cloud nest their libraries in folders; a walk reading only the root's own assets
+        # would report the team libraries as absent
+        _root, libs = self._libs(assets=[], folders=[_AssetURL("Team")])
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: libs)
+        entries, truncated, err = ct._shared_libraries("hub")
+        assert err is None and truncated is False
+        assert entries == [{"name": "Team Mill", "url": _AssetURL("Team Mill").toString()}]
+
+    def test_a_root_that_does_not_resolve_lists_nothing(self, monkeypatch):
+        # urlByLocation answers None for a location this install has not configured - the listing
+        # is then empty, never the root's children read against a null url. (The walk's own depth
+        # and folder bounds live on _cam_common.library_assets, covered in test__cam_common.py.)
+        libs = SimpleNamespace(urlByLocation=lambda loc: None,
+                               childAssetURLs=lambda u: [_AssetURL("L")],
+                               childFolderURLs=lambda u: [])
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: libs)
+        entries, truncated, err = ct._shared_libraries("cloud")
+        assert err is None and entries == []
+
+    def test_a_capped_walk_is_disclosed_not_presented_as_complete(self, monkeypatch):
+        # the walk reporting truncated must reach the payload - a capped listing that reads as
+        # complete asserts absence the search never proved
+        monkeypatch.setattr(ct, "_shared_libraries",
+                            lambda scope: ([{"name": "Team Mill", "url": "u"}], True, None))
+        out = _payload(ct.handler(action="list", scope="hub"))
+        assert out["truncated"] is True
+        assert "may exist unlisted" in out["note"]
+
+
+# ── _resolve_target: the document library, and the shared-library guards ────────────────────────
+
+class TestResolveTargetDocument:
+    def test_document_scope_needs_an_open_cam_document(self, monkeypatch):
+        monkeypatch.setattr(ct, "get_cam", lambda: (None, "Switch to the Manufacture workspace."))
+        target, err = ct._resolve_target("document", "")
+        assert target is None and "Manufacture" in err
+        # and the handler hands that refusal straight through instead of a generic failure
+        res = ct.handler(action="add", scope="document", add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "Manufacture" in res["message"]
+
+    def test_a_cam_product_without_a_document_library(self, monkeypatch):
+        monkeypatch.setattr(ct, "get_cam",
+                            lambda: (SimpleNamespace(documentToolLibrary=None), None))
+        target, err = ct._resolve_target("document", "")
+        assert target is None and err == "No document tool library."
+
+    def test_the_document_target_commits_per_tool_and_re_reads_the_live_library(self, monkeypatch):
+        # the document library has NO url: its refetch is the CAM product's own live library, and a
+        # tool change commits through updateTool rather than a library persist
+        updated = []
+        dtl = _SrcLib([_Tool("EM", tool_numberOfFlutes="3")])
+        dtl.updateTool = updated.append
+        dtl.operationsByTool = lambda t: [FakeOperation("Face1")]
+        monkeypatch.setattr(ct, "get_cam",
+                            lambda: (SimpleNamespace(documentToolLibrary=dtl), None))
+        target, err = ct._resolve_target("document", "")
+        assert err is None and target.is_document is True
+        assert target.refetch() is dtl
+        tool = target.tools[0]
+        target.update_tool(tool)
+        assert updated == [tool]
+        assert target.operations_by_tool(tool) == ["Face1"]
+
+
+class TestResolveTargetShared:
+    def _libs(self, assets, loads=True):
+        root = _AssetURL("root")
+        return SimpleNamespace(
+            urlByLocation=lambda loc: root,
+            childAssetURLs=lambda u: list(assets),
+            childFolderURLs=lambda u: [],
+            toolLibraryAtURL=lambda u: _SrcLib([_Tool("EM")]) if loads else None)
+
+    def test_no_tool_libraries(self, monkeypatch):
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: None)
+        target, err = ct._resolve_target("cloud", "L")
+        assert target is None and "unavailable" in err
+
+    def test_a_shared_scope_with_no_library_names_the_ones_there(self, monkeypatch):
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: self._libs([_AssetURL("Team Mill")]))
+        target, err = ct._resolve_target("hub", "   ")
+        assert target is None
+        assert "Provide 'library'" in err and "Team Mill" in err
+
+    def test_an_unknown_library_lists_the_available_ones(self, monkeypatch):
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: self._libs([_AssetURL("Team Mill")]))
+        target, err = ct._resolve_target("cloud", "Ghost")
+        assert target is None
+        assert "No cloud library 'Ghost'" in err and "Team Mill" in err
+
+    def test_a_library_resolves_by_url_as_well_as_by_name(self, monkeypatch):
+        asset = _AssetURL("Team Mill")
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: self._libs([asset]))
+        by_name, e1 = ct._resolve_target("cloud", "Team Mill")
+        by_url, e2 = ct._resolve_target("cloud", asset.toString())
+        assert e1 is None and e2 is None
+        assert by_name.is_document is False and len(by_url.tools) == 1
+
+    def test_a_library_that_does_not_load(self, monkeypatch):
+        monkeypatch.setattr(ct, "_tool_libraries",
+                            lambda: self._libs([_AssetURL("Team Mill")], loads=False))
+        target, err = ct._resolve_target("cloud", "Team Mill")
+        assert target is None and "Could not load cloud library 'Team Mill'" in err
+
+
+# ── the library cache guards + _source_tool ─────────────────────────────────────────────────────
+
+class TestLibraryCacheGuards:
+    def test_a_fetch_that_came_back_empty_is_never_cached(self, monkeypatch):
+        # caching a failed fetch would hand every later call the same nothing
+        monkeypatch.setattr(ct, "_library_cache", {})
+        ct._cache_library("k", None)
+        ct._cache_library("", object())
+        assert ct._library_cache == {}
+
+    def test_invalidating_without_a_key_clears_nothing(self, monkeypatch):
+        held = object()
+        monkeypatch.setattr(ct, "_library_cache", {"k": held})
+        ct._invalidate_library(None)
+        assert ct._library_cache == {"k": held}
+
+
+class TestSourceTool:
+    _URL = "systemlibraryroot://Samples/Milling Tools (Metric)"
+
+    def test_no_tool_libraries(self, monkeypatch):
+        import adsk.cam as _c
+        monkeypatch.setattr(ct, "_library_cache", {})
+        monkeypatch.setattr(_c.CAMManager, "get", lambda: SimpleNamespace(
+            libraryManager=SimpleNamespace(toolLibraries=None)))
+        t, err = ct._source_tool(self._URL, 0)
+        assert t is None and "unavailable" in err
+
+    def test_an_uncached_library_is_fetched_once_and_then_served_from_the_cache(self, monkeypatch):
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        t, err = ct._source_tool(self._URL, 1)
+        assert err is None and t.desc == "ball end mill"
+        assert assets.fetched == ["Milling Tools (Metric)"]
+        t2, err2 = ct._source_tool(self._URL, 0)
+        assert err2 is None and t2.desc == "flat end mill"
+        assert assets.fetched == ["Milling Tools (Metric)"]   # no second cloud round-trip
+
+    def test_a_library_that_does_not_load(self, monkeypatch):
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        monkeypatch.setattr(assets, "toolLibraryAtURL", lambda u: None)
+        t, err = ct._source_tool(self._URL, 0)
+        assert t is None and "Could not load source library" in err
+
+    def test_an_index_past_the_end_names_the_library_size(self, monkeypatch):
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        t, err = ct._source_tool(self._URL, 9)
+        assert t is None and "tool_index 9 out of range" in err and "(2 tools)" in err
+
+    def test_a_negative_index_is_out_of_range_too(self, monkeypatch):
+        # a bare 'index < count' check would take -1 as the LAST tool
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        t, err = ct._source_tool(self._URL, -1)
+        assert t is None and "out of range" in err
+
+
+class TestCreationSeams:
+    def test_the_factories_are_the_adsk_ones(self, monkeypatch):
+        # the two seams every other test stubs: the JSON reaches Tool.createFromJson verbatim, and
+        # a new library comes from ToolLibrary.createEmpty
+        import adsk.cam as _c
+        seen = []
+        monkeypatch.setattr(_c.Tool, "createFromJson", lambda js: seen.append(js) or "TOOL")
+        monkeypatch.setattr(_c.ToolLibrary, "createEmpty", lambda: "LIB")
+        assert ct._tool_from_json('{"description": "d"}') == "TOOL"
+        assert seen == ['{"description": "d"}']
+        assert ct._empty_library() == "LIB"
+
+
+class TestFusion360Child:
+    def test_finds_the_sample_library_whose_leaf_matches(self, monkeypatch):
+        assets = _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        libs, url = ct._fusion360_child("Turning Tools")
+        assert libs is assets and url.leafName == "Turning Tools (Metric)"
+
+    def test_a_leaf_that_is_not_there_answers_no_url(self, monkeypatch):
+        _install_samples(monkeypatch, _SAMPLE_ASSETS)
+        libs, url = ct._fusion360_child(ct._HOLDERS_LIB)
+        assert libs is not None and url is None
+
+    def test_no_tool_libraries_answers_nothing_at_all(self, monkeypatch):
+        import adsk.cam as _c
+        monkeypatch.setattr(_c.CAMManager, "get", lambda: SimpleNamespace(
+            libraryManager=SimpleNamespace(toolLibraries=None)))
+        assert ct._fusion360_child(ct._HOLDERS_LIB) == (None, None)
+
+    def test_an_unreadable_library_manager_leaves_the_type_vocabulary_empty(self, monkeypatch):
+        import adsk.cam as _c
+        monkeypatch.setattr(ct, "_type_map_cache", None)
+        monkeypatch.setattr(_c.CAMManager, "get", lambda: SimpleNamespace(
+            libraryManager=SimpleNamespace(toolLibraries=None)))
+        assert ct._build_type_map() == {}
+        res = ct.handler(action="list_types")
+        assert res["isError"] is True and "sample tool libraries" in res["message"]
+
+
+# ── _holder_json: the {library_url, index} holder reference ─────────────────────────────────────
+
+class TestHolderJson:
+    def test_a_holder_that_is_not_an_object_is_refused(self):
+        hd, err = ct._holder_json("Holders/3")
+        assert hd is None and "must be {library_url, index}" in err
+
+    def test_a_holder_without_an_index_is_refused(self):
+        hd, err = ct._holder_json({"library_url": "u"})
+        assert hd is None and "needs an 'index'" in err
+
+    def test_no_library_url_falls_back_to_the_default_holders_library(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(ct, "_fusion360_child",
+                            lambda leaf: asked.append(leaf) or (None, _AssetURL(leaf)))
+        monkeypatch.setattr(ct, "_source_tool", lambda url, idx: (_Tool("CT40"), None))
+        hd, err = ct._holder_json({"index": 2})
+        assert err is None and asked == [ct._HOLDERS_LIB]
+        assert hd == {"description": "stock holder", "segments": []}
+
+    def test_no_default_holders_library_asks_for_an_explicit_one(self, monkeypatch):
+        monkeypatch.setattr(ct, "_fusion360_child", lambda leaf: (None, None))
+        hd, err = ct._holder_json({"index": 0})
+        assert hd is None and "Default holders library not found" in err
+
+    def test_a_holder_reference_that_does_not_resolve_is_reported_verbatim(self, monkeypatch):
+        monkeypatch.setattr(ct, "_source_tool", lambda url, idx: (None, "tool_index 9 out of range"))
+        hd, err = ct._holder_json({"library_url": "u", "index": 9})
+        assert hd is None and err == "tool_index 9 out of range"
+
+    def test_a_holders_library_item_is_used_whole(self, monkeypatch):
+        # a Holders-library item IS a holder doc (type='holder', carries 'segments'), so there is no
+        # 'holder' sub-key to descend into - taking one would drop the whole holder
+        doc = {"type": "holder", "description": "CT40", "segments": [1, 2]}
+        monkeypatch.setattr(ct, "_source_tool", lambda url, idx:
+                            (SimpleNamespace(toJson=lambda: json.dumps(doc)), None))
+        hd, err = ct._holder_json({"library_url": "u", "index": 0})
+        assert err is None and hd == doc
+
+    def test_json_that_is_not_an_object_is_refused(self, monkeypatch):
+        monkeypatch.setattr(ct, "_source_tool", lambda url, idx:
+                            (SimpleNamespace(toJson=lambda: "[]"), None))
+        hd, err = ct._holder_json({"library_url": "u", "index": 0})
+        assert hd is None and "Could not read holder JSON" in err
+
+
+# ── tool_number: reading it, and the two ways assigning one fails ───────────────────────────────
+
+class TestToolNumberAssignment:
+    def test_a_tool_without_the_parameter_has_no_number(self):
+        t = _Tool("EM")
+        del t.parameters._d["tool_number"]
+        assert ct._read_tool_number(t) is None
+
+    def test_a_number_that_is_not_an_integer_reads_as_none(self):
+        # never a coerced 0 - an unreadable number must not look like tool 0 to the free-number walk
+        assert ct._read_tool_number(_Tool("EM", tool_number="T7")) is None
+
+    def test_a_locked_tool_number_aborts_the_add(self, monkeypatch):
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters._d["tool_number"] = _WriteProtected("tool_number", "0")
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L", add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "Could not set tool_number to 1" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_tool_number_that_does_not_land_aborts_the_add(self, monkeypatch):
+        # the assignment is accepted and the parameter still evaluates to something else
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters._d["tool_number"] = _StuckParam("tool_number", "0")
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L", add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "read back 0" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_number_the_add_itself_moves_bites(self, monkeypatch):
+        # the assignment stuck at set time and the library COUNT is right - only re-reading the
+        # in-memory tools after the add shows the number is no longer the assigned one
+        tgt = _install(monkeypatch)
+        library_add = tgt.add
+
+        def _renumbering_add(t):
+            t.parameters.itemByName("tool_number").expression = "42"
+            library_add(t)
+
+        tgt.add = _renumbering_add
+        res = ct.handler(action="add", scope="cloud", library="L", add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "did not persist" in res["message"]
+        assert "[1]" in res["message"] and "[42]" in res["message"]
+
+
+# ── list/parameters read shapes: a non-scalar value, and a tool carrying no holder ──────────────
+
+class TestReadShapes:
+    def test_a_non_scalar_parameter_value_is_reported_as_text_never_dropped(self, monkeypatch):
+        tool = _Tool("EM")
+        tool.parameters._d["tool_coolant"] = SimpleNamespace(
+            name="tool_coolant", expression="flood",
+            value=SimpleNamespace(value=("flood", "mist")))
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="parameters", scope="document", tool=0))
+        row = next(r for r in out["parameters"] if r["name"] == "tool_coolant")
+        assert row["value"] == "('flood', 'mist')"
+
+    def test_a_tool_carrying_no_holder_publishes_no_holder_field(self, monkeypatch):
+        # holder is present-only: a null 'holder' would read as a holder the tool does not have
+        tool = _Tool("EM")
+        tool.toJson = lambda: json.dumps({"description": "EM", "type": "x"})
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="list", scope="document"))
+        assert "holder" not in out["tools"][0]
+
+
+# ── preset value plumbing: the resolver's empty case, and the two set-then-read failures ────────
+
+class TestPresetValuePlumbing:
+    def test_a_preset_exposing_no_parameters_collection(self):
+        p, avail = _feed_param(SimpleNamespace(parameters=None))
+        assert p is None and avail == []
+
+    def test_a_boolean_is_never_a_plain_number(self):
+        # True would otherwise float() to 1.0 and pass a value check it has to fail
+        assert ct._plain_number(True) is None and ct._plain_number(False) is None
+        assert ct._plain_number("900") == 900.0
+        assert ct._plain_number("35in/min") is None      # units carried, not a plain number
+
+    def test_a_preset_parameter_that_refuses_the_write_rolls_back(self, monkeypatch):
+        tool = _preset_param_tool(_WriteProtected, "tool_feedCutting")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "feed": 900})
+        assert res["isError"] is True and "Could not set 'feed' = 900" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_a_preset_value_that_stores_nothing_numeric_rolls_back(self, monkeypatch):
+        tool = _preset_param_tool(_TextValued, "tool_spindleSpeed")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "spindle_speed": 12000})
+        assert res["isError"] is True and "no numeric value was stored" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_a_preset_name_the_platform_refuses_rolls_back(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        presets = tool.presets
+        presets.add = lambda: (presets._p.append(_Unnameable("", tool.preset_params))
+                               or presets._p[-1])
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "Could not set the preset name to 'Alu'" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+
+# ── _build_entry: the per-entry guards on the add path ──────────────────────────────────────────
+
+class TestBuildEntryGuards:
+    def test_an_entry_that_is_not_an_object(self, monkeypatch):
+        tgt = _install(monkeypatch)
+        res = ct.handler(action="add", scope="cloud", library="L", add_tools=["drill"])
+        assert res["isError"] is True and "must be an object" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_holder_reference_that_does_not_resolve_aborts_the_entry(self, monkeypatch):
+        tgt = _install(monkeypatch)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "holder": {"library_url": "h"}}])
+        assert res["isError"] is True and "bad holder ref" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_source_tool_whose_json_is_not_an_object(self, monkeypatch):
+        tgt = _install(monkeypatch)
+        monkeypatch.setattr(ct, "_sample_for_type",
+                            lambda ty: (SimpleNamespace(toJson=lambda: "[]"), None))
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "Could not read the source tool's JSON" in res["message"]
+        assert len(tgt.tools) == 2
+
+    def test_a_tool_the_factory_cannot_build(self, monkeypatch):
+        tgt = _install(monkeypatch)
+        monkeypatch.setattr(ct, "_tool_from_json", lambda js: None)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill"}])
+        assert res["isError"] is True and "Could not create the tool from JSON" in res["message"]
+        assert len(tgt.tools) == 2
+
+    def test_a_product_id_the_parameter_refuses(self, monkeypatch):
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters._d["tool_productId"] = _WriteProtected("tool_productId", "")
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "product_id": "HAM-123"}])
+        assert res["isError"] is True and "Could not set tool_productId" in res["message"]
+        assert len(tgt.tools) == 2
+
+    def test_a_vendor_expression_that_never_evaluates(self, monkeypatch):
+        # the quoted-string expression is stored verbatim and reads back fine; only .error reveals
+        # that it never evaluated
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters._d["tool_vendor"] = _BrokenParam("tool_vendor", "")
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "vendor": "Hoffmann"}])
+        assert res["isError"] is True
+        assert "tool_vendor" in res["message"] and "failed to evaluate" in res["message"]
+        assert len(tgt.tools) == 2
+
+    def test_a_creation_time_preset_value_with_nowhere_to_go_aborts_the_add(self, monkeypatch):
+        # a turning tool's presets carry tool_surfaceSpeed and no spindle speed at all
+        tgt = _install(monkeypatch)
+        monkeypatch.setattr(ct, "_sample_for_type",
+                            lambda ty: (_Tool("sample-" + ty, tool_type=ty), None))
+        monkeypatch.setattr(ct, "_tool_from_json",
+                            lambda js: _Tool(json.loads(js).get("description", "built"),
+                                             preset_params=_TURNING_CUTTING_DATA))
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "turning general",
+                                     "presets": [{"name": "Steel", "spindle_speed": 400}]}])
+        assert res["isError"] is True and "tool_surfaceSpeed" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+
+# ── remove / edit / where_used guards ───────────────────────────────────────────────────────────
+
+class TestRemoveGuards:
+    def test_remove_requires_indices(self, monkeypatch):
+        tgt = _install(monkeypatch)
+        res = ct.handler(action="remove", scope="local", library="L")
+        assert res["isError"] is True and "Provide 'remove_indices'" in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_document_removal_commits_without_a_library_persist(self, monkeypatch):
+        tgt = _install(monkeypatch, _Target(tools=[_Tool("A"), _Tool("B")], is_document=True))
+        out = _payload(ct.handler(action="remove", scope="document", remove_indices=[0]))
+        assert [t.desc for t in tgt.tools] == ["B"] and out["removed"] == 1
+        assert tgt.persisted == 0        # the document library has no url to persist to
+
+    def test_a_removal_whose_url_reread_disagrees_bites(self, monkeypatch):
+        tgt = _Target(tools=[_Tool("A"), _Tool("B")], persisted_count_value=2)
+        _install(monkeypatch, target=tgt)
+        res = ct.handler(action="remove", scope="local", library="L", remove_indices=[0])
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "holds 2 tool(s), not 1" in res["message"]
+
+
+class TestEditGuards:
+    def test_edit_needs_a_valid_tool_index(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("only")], is_document=True))
+        res = ct.handler(action="edit", scope="document", tool=3,
+                         parameters={"tool_diameter": "6 mm"})
+        assert res["isError"] is True and "0..0" in res["message"]
+
+    def test_edit_needs_parameters(self, monkeypatch):
+        tgt = _install(monkeypatch, _Target(tools=[_Tool("only")], is_document=True))
+        res = ct.handler(action="edit", scope="document", tool=0)
+        assert res["isError"] is True and "Provide 'parameters'" in res["message"]
+        assert tgt.updated == []
+
+
+class TestWhereUsedGuards:
+    def test_where_used_needs_a_valid_tool_index(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("EM")], is_document=True))
+        res = ct.handler(action="where_used", scope="document", tool=9)
+        assert res["isError"] is True and "0..0" in res["message"]
+
+
+# ── add_preset: the tool with no presets, and the two rollback paths ────────────────────────────
+
+class TestAddPresetRollback:
+    def test_a_tool_exposing_no_presets_collection_is_refused(self, monkeypatch):
+        tool = _Tool("EM")
+        tool.presets = None
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "exposes no presets collection" in res["message"]
+
+    def test_a_preset_the_tool_never_creates_is_an_error(self, monkeypatch):
+        tool = _tool_with_presets("EM")
+        tool.presets.add = lambda: None
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True and "none was created" in res["message"]
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_a_raising_value_applier_rolls_the_preset_back(self, monkeypatch):
+        # add() has already appended the preset, so ANY failure in the applier - not just a returned
+        # error string - has to drop it again rather than leave a half-populated preset on the tool
+        tool = _tool_with_presets("EM")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+
+        def _boom(preset, spec):
+            raise RuntimeError("preset store offline")
+
+        monkeypatch.setattr(ct, "_apply_preset_values", _boom)
+        res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
+        assert res["isError"] is True
+        assert "Could not populate the new preset 'Alu'" in res["message"]
+        assert "preset store offline" in res["message"]
+        assert tool.presets.count == 0
+        assert tgt.updated == [] and tgt.persisted == 0
+
+    def test_a_rollback_the_tool_refuses_is_disclosed(self, monkeypatch):
+        # the half-populated preset really is still on the tool - the error says so instead of
+        # reporting only the value failure
+        tool = _tool_with_presets("EM")
+        tool.presets.remove = lambda index: False
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        monkeypatch.setattr(ct, "_apply_preset_values", lambda p, s: "no room for 'feed'.")
+        res = ct.handler(action="add_preset", scope="document", tool=0,
+                         preset={"name": "Alu", "feed": 900})
+        assert res["isError"] is True
+        assert "no room for 'feed'." in res["message"]
+        assert "could not be removed again" in res["message"]
+        assert tool.presets.count == 1
+
+
+# ── create_library guards ───────────────────────────────────────────────────────────────────────
+
+class TestCreateLibraryGuards:
+    def test_no_tool_libraries(self, monkeypatch):
+        _install_create(monkeypatch)
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: None)
+        res = ct.handler(action="create_library", scope="local", library="X")
+        assert res["isError"] is True and "unavailable" in res["message"]
+
+    def test_a_root_that_does_not_resolve(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+        libs.urlByLocation = lambda loc: None
+        res = ct.handler(action="create_library", scope="cloud", library="X")
+        assert res["isError"] is True
+        assert "Could not resolve the 'cloud' library root" in res["message"]
+        assert len(libs.imported) == 0
+
+    def test_a_hub_without_a_team_folder(self, monkeypatch):
+        # hub can't import at the bare hub:// root, so with no folder to descend into there is
+        # nowhere to create the library
+        libs = _install_create(monkeypatch)
+        libs.childFolderURLs = lambda url: []
+        res = ct.handler(action="create_library", scope="hub", library="X")
+        assert res["isError"] is True and "No hub folder" in res["message"]
+        assert len(libs.imported) == 0
+
+    def test_a_seed_that_is_not_an_object(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+        res = ct.handler(action="create_library", scope="local", library="X", add_tools=["u:0"])
+        assert res["isError"] is True and "Each seed entry must be" in res["message"]
+        assert len(libs.imported) == 0
+
+    def test_an_empty_library_that_cannot_be_created(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+        monkeypatch.setattr(ct, "_empty_library", lambda: None)
+        res = ct.handler(action="create_library", scope="local", library="X")
+        assert res["isError"] is True and "Could not create an empty tool library" in res["message"]
+        assert len(libs.imported) == 0
+
+    def test_an_import_that_raises_reports_the_platform_message(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+
+        def _boom(lib, dest, name):
+            raise RuntimeError("disk full")
+
+        libs.importToolLibrary = _boom
+        res = ct.handler(action="create_library", scope="local", library="X")
+        assert res["isError"] is True and "disk full" in res["message"]
+        assert "UI" not in res["message"]          # the hub-only hint stays off the local path
+
+    def test_a_failed_hub_import_points_at_the_ui(self, monkeypatch):
+        # hub team libraries use a write path importToolLibrary does not satisfy
+        libs = _install_create(monkeypatch)
+
+        def _boom(lib, dest, name):
+            raise RuntimeError("access denied")
+
+        libs.importToolLibrary = _boom
+        res = ct.handler(action="create_library", scope="hub", library="X")
+        assert res["isError"] is True and "create Hub libraries in the UI" in res["message"]
+
+    def test_an_import_that_returns_no_url(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+        libs.importToolLibrary = lambda lib, dest, name: None
+        res = ct.handler(action="create_library", scope="cloud", library="X")
+        assert res["isError"] is True and "returned no URL" in res["message"]
+
+
+# ── read_library: the READ half cam_get(include=['library']) shares ─────────────────────────────
+
+class TestReadLibraryEntryPoint:
+    def test_read_library_refuses_an_unknown_scope(self):
+        res = ct.read_library(scope="moon")
+        assert res["isError"] is True and "Unknown scope 'moon'" in res["message"]
+
+    def test_read_library_lists_the_libraries_when_a_shared_scope_names_none(self, monkeypatch):
+        monkeypatch.setattr(ct, "_shared_libraries",
+                            lambda scope: ([{"name": "Team Mill", "url": "u"}], False, None))
+        out = _payload(ct.read_library(scope="hub"))
+        assert out["scope"] == "hub" and out["library_count"] == 1

@@ -98,16 +98,9 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
     if not occ:
         return error("Component creation returned nothing.")
 
-    want_name = (name or "").strip()
-    name_warning = None
-    if want_name:
-        safe(lambda: setattr(occ.component, "name", want_name))
-        # Read back: a rename can silently no-op (duplicate/invalid name). Surface the mismatch rather
-        # than reporting success with the wrong name.
-        actual = safe(lambda: occ.component.name)
-        if actual != want_name:
-            name_warning = (f"requested name '{want_name}' was not applied (it is '{actual}') - "
-                            "likely a duplicate or invalid name.")
+    # apply_rename is the ONE create-flow rename: set, read back, disclose a declined/deduped
+    # rename (this site hand-rolled the same contract before adopting it).
+    _final_name, name_warning = _common.apply_rename(occ.component, name)
 
     # Read the nesting back: a component created via a sub-component's occurrences is NATIVE to it, so
     # its own fullPathName shows only the child. Proxy it into the CHOSEN parent occurrence's assembly

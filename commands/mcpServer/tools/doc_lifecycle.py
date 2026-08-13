@@ -616,11 +616,12 @@ def new_document_handler() -> dict:
     if not doc:
         return error("New-document creation returned nothing.")
 
-    # `documents.add` makes the new doc active, but `app.activeDocument is doc` can read False right
-    # after creation (the active reference resolves separately). Compare by NAME, which is reliable,
-    # and don't report a misleading False that would make a caller hesitate to model into it.
+    # EQUALITY, never identity or name: Document wrappers are not identity-stable (`is` reads
+    # False even for the one active document - measured live on 2705.0.87), while `==` compares
+    # the underlying handle (measured: True across distinct wrappers of one doc, False between
+    # two docs, tracks activation). A NAME compare would false-positive on two 'Untitled' docs.
     new_name = safe(lambda: doc.name)
-    is_active = safe(lambda: app.activeDocument.name == new_name, True)
+    is_active = bool(safe(lambda: app.activeDocument == doc, False))
     info = {
     "created": True,
     "document_name": new_name,
@@ -825,7 +826,10 @@ def activate_document_handler(name: str = "") -> dict:
     # document often hasn't propagated yet when we read it here. So report the VERIFIED state, not the
     # intent: 'activated' is true only if it's actually active now; otherwise the switch is "pending"
     # (the call took, the foreground hasn't caught up). Don't claim done when it isn't.
-    is_active = bool(safe(lambda: app.activeDocument is d, False))
+    # EQUALITY, never identity: Document wrappers are not identity-stable (`is` reads False for
+    # the very document that IS active - measured live), which made every completed switch report
+    # "pending"; `==` compares the underlying handle.
+    is_active = bool(safe(lambda: app.activeDocument == d, False))
     out = {
         "activated": True if is_active else ("pending" if did else False),
         "document_name": safe(lambda: d.name),

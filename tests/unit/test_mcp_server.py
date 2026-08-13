@@ -364,3 +364,173 @@ class TestNotificationsAndPing:
             "jsonrpc": "2.0", "id": 1, "method": "ping",
         }))
         assert response["result"] == {}
+
+
+# ── _execute_on_main_thread: the timeout / cancel / claimed contract ─────────
+#
+# The one place a tool call crosses from the HTTP thread to Fusion's main thread. The scripted
+# manager below stands in for TaskManager so each race (completed / timed out+cancelled /
+# timed out+claimed / finished inside the cancel window) is forced deterministically.
+
+class _ScriptedTasks:
+    """A TaskManager stand-in: post() captures the callback; the test decides when (or whether)
+    it runs, and what cancel() answers."""
+    def __init__(self, cancel_answer=True, run_after_s=None, run_on_cancel=False):
+        self.callback = None
+        self.data = None
+        self.cancel_answer = cancel_answer
+        self.run_after_s = run_after_s      # run the callback from a timer thread after this delay
+        self.run_on_cancel = run_on_cancel  # the finished-inside-the-cancel-window race
+        self.cancel_called = False
+
+    def is_running(self):
+        return True
+
+    def start(self):
+        return True
+
+    def post(self, command, callback, data):
+        self.callback, self.data = callback, data
+        if self.run_after_s is not None:
+            import threading
+            threading.Timer(self.run_after_s, lambda: callback(data)).start()
+        return "task-1"
+
+    def cancel(self, task_id):
+        self.cancel_called = True
+        if self.run_on_cancel and self.callback:
+            self.callback(self.data)
+        return self.cancel_answer
+
+
+@pytest.fixture
+def fast_timeout(mcp_server_module, monkeypatch):
+    monkeypatch.setattr(mcp_server_module, "MAIN_THREAD_TASK_TIMEOUT_S", 0.05)
+
+
+def _execute(server, mcp_server_module, monkeypatch, tasks, handler, enforce_timeout=True):
+    monkeypatch.setattr(mcp_server_module, "TaskManager", tasks)
+    return asyncio.run(server._execute_on_main_thread(
+        handler, {"a": "1"}, enforce_timeout=enforce_timeout))
+
+
+class TestExecuteOnMainThread:
+    def test_completed_callback_returns_the_handler_result(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        tasks = _ScriptedTasks(run_after_s=0.0)
+        out = _execute(server, mcp_server_module, monkeypatch, tasks, lambda **kw: {"ok": kw})
+        assert out == {"ok": {"a": "1"}}
+
+    def test_handler_exception_propagates(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        def boom(**kw):
+            raise RuntimeError("handler blew up")
+        tasks = _ScriptedTasks(run_after_s=0.0)
+        with pytest.raises(RuntimeError, match="handler blew up"):
+            _execute(server, mcp_server_module, monkeypatch, tasks, boom)
+
+    def test_timeout_with_successful_cancel_says_safe_to_retry(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        # The callback never runs and cancel() wins the race: the operation truly never started,
+        # so the error must say so and invite a retry.
+        tasks = _ScriptedTasks(cancel_answer=True)
+        with pytest.raises(Exception) as exc:
+            _execute(server, mcp_server_module, monkeypatch, tasks, lambda **kw: None)
+        assert "cancelled before it started" in str(exc.value)
+        assert "safe to retry" in str(exc.value)
+        assert tasks.cancel_called
+
+    def test_timeout_with_claimed_task_forbids_blind_retry(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        # cancel() lost the race (the main thread claimed the callback): the side effect may be
+        # committing, so the error must NOT claim cancellation and must warn against a blind
+        # retry (the double-apply trap).
+        tasks = _ScriptedTasks(cancel_answer=False)
+        with pytest.raises(Exception) as exc:
+            _execute(server, mcp_server_module, monkeypatch, tasks, lambda **kw: None)
+        assert "could NOT be cancelled" in str(exc.value)
+        assert "Do NOT blindly retry" in str(exc.value)
+
+    def test_finished_inside_the_cancel_window_returns_the_real_result(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        # The callback completes between the timeout firing and the cancel returning False: the
+        # REAL result must be honored, never a fake timeout for work that finished.
+        tasks = _ScriptedTasks(cancel_answer=False, run_on_cancel=True)
+        out = _execute(server, mcp_server_module, monkeypatch, tasks, lambda **kw: {"late": True})
+        assert out == {"late": True}
+
+    def test_enforce_timeout_false_waits_past_the_deadline(
+            self, server, mcp_server_module, monkeypatch, fast_timeout):
+        # enforce_timeout=False is for uninterruptible work that would still commit: the call
+        # holds past the (tiny) timeout and returns the real result instead of a false failure.
+        tasks = _ScriptedTasks(run_after_s=0.15)
+        out = _execute(server, mcp_server_module, monkeypatch, tasks,
+                       lambda **kw: {"slow": True}, enforce_timeout=False)
+        assert out == {"slow": True}
+
+
+# ── TaskManager: post / claim / cancel / reap on the real class ──────────────
+
+@pytest.fixture
+def task_manager(mcp_server_module):
+    """The real TaskManager (mock adsk app), reset around each test - it is a singleton whose
+    class-level state would otherwise leak between tests."""
+    tm = mcp_server_module.TaskManager
+    tm.stop()
+    tm.start()
+    yield tm
+    tm.stop()
+
+
+def _notify(tm, mcp_server_module, task_id):
+    """Deliver the custom event the way Fusion's main thread would."""
+    import json as _json
+    import sys
+    handler_cls = sys.modules[mcp_server_module.TaskManager.__module__].TaskEventHandler
+    args = type("Args", (), {"additionalInfo": _json.dumps({"task_id": task_id, "command": "x"})})()
+    handler_cls(tm._pending_tasks).notify(args)
+
+
+class TestTaskManager:
+    def test_post_then_notify_runs_the_callback_once(self, task_manager, mcp_server_module):
+        ran = []
+        tid = task_manager.post("cmd", lambda data: ran.append(data), {"k": 1})
+        assert tid and task_manager.get_pending_task_count() == 1
+        _notify(task_manager, mcp_server_module, tid)
+        assert ran == [{"k": 1}]
+        assert task_manager.get_pending_task_count() == 0
+        _notify(task_manager, mcp_server_module, tid)      # a second delivery finds nothing
+        assert ran == [{"k": 1}]
+
+    def test_cancel_before_claim_wins_and_the_callback_never_runs(
+            self, task_manager, mcp_server_module):
+        ran = []
+        tid = task_manager.post("cmd", lambda data: ran.append(data), {})
+        assert task_manager.cancel(tid) is True
+        _notify(task_manager, mcp_server_module, tid)
+        assert ran == [] and task_manager.get_pending_task_count() == 0
+
+    def test_cancel_after_claim_answers_false(self, task_manager, mcp_server_module):
+        tid = task_manager.post("cmd", lambda data: None, {})
+        _notify(task_manager, mcp_server_module, tid)
+        assert task_manager.cancel(tid) is False
+
+    def test_callback_exception_is_contained_by_notify(self, task_manager, mcp_server_module):
+        def boom(data):
+            raise RuntimeError("callback blew up")
+        tid = task_manager.post("cmd", boom, {})
+        _notify(task_manager, mcp_server_module, tid)      # must not raise
+        assert task_manager.get_pending_task_count() == 0
+
+    def test_stale_orphan_is_reaped_on_the_next_post(self, task_manager):
+        ran = []
+        tid = task_manager.post("cmd", lambda data: ran.append(data), {})
+        with task_manager._tasks_lock:
+            task_manager._pending_tasks[tid]["created"] -= 400.0   # older than the 300s TTL
+        task_manager.post("cmd2", lambda data: None, {})
+        assert task_manager.get_pending_task_count() == 1          # the orphan is gone
+        with task_manager._tasks_lock:
+            assert tid not in task_manager._pending_tasks
+
+    def test_post_refuses_a_non_callable(self, task_manager):
+        assert task_manager.post("cmd", "not-callable", {}) is None

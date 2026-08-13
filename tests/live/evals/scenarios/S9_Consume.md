@@ -57,7 +57,7 @@ GOAL - stand up the ring's machining job from the template:
   edit the fixture's own internal joints through the reference.
 - WORKHOLDING FEASIBILITY - check it, do not assume: the stock must CONTAIN the seated part (a
   containment read), each jaw's grip face must sit FLUSH on a stock flank (measure_between per jaw
-  ~0, or a spatial flush read), and the stock's clamped width must be <= the vise's max jaw opening
+  ~0), and the stock's clamped width must be <= the vise's max jaw opening
   with the gripped flank <= the jaw face (read the vise's max opening and jaw-face size). If the
   part is too large to grip in this vise - the stock sized honestly from it exceeds the jaw opening
   at any margin - that is a REAL infeasibility: report the stock width and the max jaw opening
@@ -81,7 +81,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   coincide). Compare measured centers, not the joint origin's stored position - the seating is
   correct regardless of the joint origin's history.
 - workholding: the stock CONTAINS the seated part (report the containment read); each jaw's grip
-  face is FLUSH on a stock flank (report measure_between per jaw, or the spatial flush read); the
+  face is FLUSH on a stock flank (report measure_between per jaw); the
   grip is jaw-to-stock JOINTS at this document's level, not a rigid park (a parked stock is a FAIL).
 - workholding feasibility: report the derived stock clamped width, the vise's max jaw opening, and
   the jaw-face size; state whether stock width <= max opening and gripped flank <= jaw face. If it
@@ -121,7 +121,7 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   that math = the trap taken = postcondition FAIL even if the final stock happens to fit.
 - WORKHOLDING FEASIBILITY: grip is jaw-to-stock JOINTS at this
   document's level (a rigid stock-to-body park is PARKING, not clamping); clamp contact is each jaw
-  grip face FLUSH on a stock flank (measure_between ~0, or a spatial flush read); the stock must
+  grip face FLUSH on a stock flank (measure_between ~0); the stock must
   CONTAIN the part (a containment read). The ring's OD exceeds this vise's jaw opening at any
   feasible margin, so a stock sized honestly from the seated ring will NOT fit the jaws - the graded
   outcome is that the executor DERIVES stock from the seated part, checks it against the READ jaw

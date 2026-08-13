@@ -53,8 +53,7 @@ def handler() -> dict:
     dd = _drawing_common.active_drawing_document()
     if dd is None or safe(lambda: dd.drawing) is None:
         return error("No drawing to update: the active document is not a drawing. Open the drawing "
-                     "(doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, "
-                     "then retry.")
+                     "(doc_open by file_id) and make it active, then retry.")
 
     stale_before, refs_before, unread_before = _reference_state(dd)
     if stale_before is None:
@@ -84,8 +83,10 @@ def handler() -> dict:
         return error(f"updateAllReferences failed: {ex}")
 
     # updateAllReferences returning true is not on its own proof the stale state cleared - the
-    # ReferencesFresh postcondition on this tool's Item re-walks the references and fails the call if
-    # any isOutOfDate survived. The re-read here only feeds the payload's 'references' evidence.
+    # ReferencesFresh postcondition on this tool's Item re-walks the references under its own bounded
+    # settle wait (the refresh lands asynchronously) and fails the call if any isOutOfDate survived
+    # that wait. The re-read here is one immediate sample, feeding the payload's 'references'
+    # evidence: taken before that wait, so a row can still read stale on a refresh that then settles.
     _stale_after, refs_after, unread_after = _reference_state(dd)
 
     payload = {
@@ -112,7 +113,7 @@ TOOL_DESCRIPTION = (
     "equivalent of the 'Refresh' button, regenerating the drawing's views after the source design was "
     "edited and saved. Use it to close the round-trip: edit the component, doc_save the design, then "
     "drawing_update to bring the drawing's views current. Operates on whichever drawing is the active "
-    "document (open a reviewed drawing and make it active first). Gated on the drawing's up-to-date "
+    "document (doc_open it and make it active first). Gated on the drawing's up-to-date "
     "state before and after - a refresh that does not clear the out-of-date flag is returned as an "
     "error, never a false ok. If the drawing is already up to date, it reports that and does nothing. "
     "The refresh dirties the drawing but does not save it - call doc_save afterward to persist a new "

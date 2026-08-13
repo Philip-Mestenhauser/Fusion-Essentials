@@ -28,7 +28,7 @@ def _native_body_owners(occurrences):
     LIVE-VERIFIED: analyzeInterference hands back NATIVE bodies - `assemblyContext` reads None on
     both result entities even when the input was a set of occurrences - so the interfering INSTANCE
     cannot be read off the result. Mapping each occurrence's component-native bodies back to that
-    occurrence's fullPathName is the only way to name the instance. A component instanced twice maps
+    occurrence's fullPathName is how the instance gets named here. A component instanced twice maps
     one native body to several occurrences, which is reported as the genuine ambiguity it is."""
     owners = {}
     for occ in occurrences:

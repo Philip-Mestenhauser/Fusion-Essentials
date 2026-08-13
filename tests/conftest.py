@@ -102,6 +102,11 @@ def install_mock_adsk():
     app.version = "0.0.0-test"
     core.Application.get.return_value = app
 
+    # CustomEventHandler is SUBCLASSED (task_manager's TaskEventHandler) - an auto-created Mock
+    # attribute as a base class produces mock-flavored class machinery whose constructor cannot be
+    # called normally, so the base must be a real (empty) class.
+    core.CustomEventHandler = type("CustomEventHandler", (), {"__init__": lambda self: None})
+
     fusion = Mock()
     # Design.cast(product) fetches the active design. Model it as a
     # pass-through: whatever the test puts on app.activeProduct comes back.
@@ -415,6 +420,11 @@ class FakePoint:
         # Mirrors adsk.core.Point3D.vectorTo -> Vector3D(other - self).
         return FakeVector3D(other.x - self.x, other.y - self.y, other.z - self.z)
 
+    def distanceTo(self, other):
+        # Mirrors adsk.core.Point3D.distanceTo -> Euclidean distance.
+        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2
+                + (self.z - other.z) ** 2) ** 0.5
+
 
 class FakeBoundingBox3D:
     def __init__(self, min_pt, max_pt):
@@ -704,14 +714,58 @@ class FakeVector3D:
         self.x, self.y, self.z = self.x / mag, self.y / mag, self.z / mag
         return True
 
+    def dotProduct(self, other):
+        # Mirrors adsk.core.Vector3D.dotProduct.
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+    def isParallelTo(self, other):
+        # Mirrors adsk.core.Vector3D.isParallelTo: parallel regardless of sense (cross ~ 0).
+        cx = self.y * other.z - self.z * other.y
+        cy = self.z * other.x - self.x * other.z
+        cz = self.x * other.y - self.y * other.x
+        return (cx * cx + cy * cy + cz * cz) ** 0.5 < 1e-9
+
+
+class FakeInfiniteLine3D:
+    """Numeric adsk.core.InfiniteLine3D: origin + direction, with the colinearity test the holder
+    profile reduction runs (parallel directions AND the origin offset lying along the direction)."""
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+
+    @staticmethod
+    def create(origin, direction):
+        return FakeInfiniteLine3D(origin, direction)
+
+    def isColinearTo(self, other):
+        if not self.direction.isParallelTo(other.direction):
+            return False
+        off = self.origin.vectorTo(other.origin)
+        return off.length < 1e-9 or off.isParallelTo(self.direction)
+
 
 class Plane:
     """surfaceType is intrinsic (a Plane fake IS always PlaneSurfaceType) - set automatically so
-    callers reading face.geometry.surfaceType don't each hand-wire the same measured constant."""
+    callers reading face.geometry.surfaceType don't each hand-wire the same measured constant.
+    create/intersectWithLine mirror the adsk.core.Plane geometry the holder reduction leans on."""
     def __init__(self, normal, origin=None):
         self.normal = normal
         self.origin = origin
         self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["PlaneSurfaceType"]
+
+    @staticmethod
+    def create(origin, normal):
+        return Plane(normal, origin)
+
+    def intersectWithLine(self, line):
+        # Mirrors adsk.core.Plane.intersectWithLine: None for a line parallel to the plane.
+        denom = self.normal.dotProduct(line.direction)
+        if abs(denom) < 1e-12:
+            return None
+        t = self.normal.dotProduct(line.origin.vectorTo(self.origin)) / denom
+        return FakePoint(line.origin.x + t * line.direction.x,
+                         line.origin.y + t * line.direction.y,
+                         line.origin.z + t * line.direction.z)
 
 
 class Cylinder:
@@ -741,6 +795,12 @@ class Line3D:
         self.startPoint = start
         self.endPoint = end
         self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Line3DCurveType"]
+
+    def asInfiniteLine(self):
+        # Mirrors adsk.core.Line3D.asInfiniteLine: through startPoint along start->end.
+        d = self.startPoint.vectorTo(self.endPoint)
+        d.normalize()
+        return FakeInfiniteLine3D(self.startPoint, d)
 
 
 class Circle3D:

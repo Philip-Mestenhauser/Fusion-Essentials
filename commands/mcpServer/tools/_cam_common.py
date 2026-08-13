@@ -35,7 +35,13 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "background work; every launch path registers here) + machine_catalog / resolve_machine "
              "/ machine_label / machine_ident / query_machines (the ONE machine-library catalog read "
              "and the ONE by-name machine resolver - exact LABEL match first, ambiguity REFUSED - "
-             "that an assignment and a machine create both run through)")
+             "that an assignment and a machine create both run through) + parse_parameters (the ONE "
+             "{name: expression} / 'name=value, ...' parameter-request parser both CAM parameter "
+             "editors validate their request through) + walk_library_folders / library_assets / "
+             "library_children (the ONE CAM library folder-tree walk - tool, post and template "
+             "libraries all nest folders under a location root, so every walk is bounded on depth "
+             "AND folder count and each site passes its own leaf op; library_assets is the "
+             "collect-the-child-asset-urls projection over it)")
 
 app = adsk.core.Application.get()
 
@@ -67,6 +73,29 @@ def clamp_rows(max_results, default: int, ceiling: int) -> int:
     except (TypeError, ValueError):
         n = default
     return max(1, min(n, ceiling))
+
+
+def parse_parameters(parameters):
+    """Normalize a 'parameters' request into a dict {name: expression}. Accepts a dict or a
+    'name=value, name=value' string. Returns (dict, error). The ONE parser both CAM parameter
+    editors (operation and setup) validate their request through, so the two wire forms cannot be
+    accepted by one and refused by the other."""
+    if isinstance(parameters, dict):
+        out = {str(k).strip(): str(v) for k, v in parameters.items() if str(k).strip()}
+        return out, None
+    if isinstance(parameters, str):
+        out = {}
+        for chunk in parameters.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" not in chunk:
+                return None, f"'{chunk}' is not 'name=value'. Use name=value pairs, or a JSON object."
+            k, _, v = chunk.partition("=")
+            if k.strip():
+                out[k.strip()] = v.strip()
+        return out, None
+    return None, "Provide 'parameters' as an object {name: value} or a 'name=value, ...' string."
 
 
 def get_cam():
@@ -441,7 +470,9 @@ def _operation_type_name(op_type) -> str:
 
 def _model_names(collection) -> tuple:
     """(names, truncated) - readable names of an ObjectCollection of models (Occurrence/BRepBody/
-    MeshBody), capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
+    MeshBody), capped at _MAX_ITEMS. truncated means INCOMPLETE for either reason - the cap was
+    hit, or the collection raised mid-iteration (a short list from a dying walk is
+    indistinguishable from a full read without the flag)."""
     names = []
     truncated = False
     try:
@@ -451,7 +482,7 @@ def _model_names(collection) -> tuple:
                 break
             names.append(safe(lambda: m.name, "(unnamed)"))
     except Exception:
-        pass
+        truncated = True
     return names, truncated
 
 def get_cam_setups_handler() -> dict:
@@ -679,7 +710,7 @@ def _operations_summary(op_records) -> dict:
 
 def _operations_in(setup_obj) -> tuple:
     """(ops, truncated) - summarize the immediate operations of a setup (folders/patterns flattened),
-    capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
+    capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised."""
     ops = []
     truncated = False
     try:
@@ -695,7 +726,9 @@ def _operations_in(setup_obj) -> tuple:
                 continue
             ops.append(_operation_summary(operation))
     except Exception:
-        pass
+        # A walk that dies mid-iteration left an INCOMPLETE list - flagged, never passed off
+        # as the full read.
+        truncated = True
     return ops, truncated
 
 
@@ -810,7 +843,7 @@ def get_setup_references_handler(setup: str = "") -> dict:
 
 def _references_in(collection, role: str) -> tuple:
     """(found, truncated) - resolved external-reference info for occurrences in an ObjectCollection,
-    capped at _MAX_ITEMS. truncated is True only when the cap was actually hit."""
+    capped at _MAX_ITEMS. truncated means INCOMPLETE: the cap was hit OR the walk raised."""
     found = []
     truncated = False
     try:
@@ -841,7 +874,9 @@ def _references_in(collection, role: str) -> tuple:
                 pass
             found.append(info)
     except Exception:
-        pass
+        # A reference walk that dies mid-iteration left an INCOMPLETE list - flagged, never
+        # passed off as the full read.
+        truncated = True
     return found, truncated
 
 def get_tool_list_handler() -> dict:
@@ -1490,3 +1525,76 @@ def resolve_machine(machine):
         return None, None, (f"Ambiguous machine '{machine}' - {len(labels)} matches: "
                             f"{', '.join(labels[:8])}. Pass one of these exact names.")
     return cands[0][0], cands[0][1], None
+
+
+# ---------------------------------------------------------------------------
+# CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share.
+# All three expose the same shape off a LibraryLocations root url: childFolderURLs nests, and the
+# leaves are read per library kind (childAssetURLs for a tool library or a post config, childTemplates
+# for a template). Cloud/Hub locations NEST and are network-slow, and an unbounded enumeration of a
+# cloud tree is a measured way to hang the add-in, so the walk is bounded on BOTH axes here and each
+# site supplies only its own leaf op.
+# ---------------------------------------------------------------------------
+
+_LIBRARY_MAX_DEPTH = 6
+_LIBRARY_MAX_FOLDERS = 1500
+
+
+def library_children(lib, url, kind):
+    """One library folder's children of `kind` ('childFolderURLs' / 'childAssetURLs' /
+    'childTemplates') as a list - [] when the accessor is absent on this library or the call raises.
+    The raise-tolerant read every library walk and leaf op goes through."""
+    return list(safe(lambda: list(getattr(lib, kind)(url)), []) or [])
+
+
+def walk_library_folders(lib, root, visit, max_depth=_LIBRARY_MAX_DEPTH,
+                         max_folders=_LIBRARY_MAX_FOLDERS):
+    """Depth-first walk of a CAM library's FOLDER tree from `root`, calling `visit(folder_url)` once
+    per folder INCLUDING the root - the ONE library traversal; the leaf op stays the caller's.
+    `visit` returns True to stop the whole walk (its own collection is full). Bounded on both axes:
+    `max_depth` levels below the root and `max_folders` folders visited. An absent root walks nothing.
+    Returns True when a cap (or a full `visit`) stopped it early - i.e. the read is INCOMPLETE."""
+    truncated = [False]
+    visited = [0]
+
+    def walk(url, depth):
+        if url is None:
+            return False
+        if depth > max_depth:
+            truncated[0] = True
+            return False                      # this branch is too deep; siblings may still fit
+        if visited[0] >= max_folders:
+            truncated[0] = True
+            return True                       # the folder budget is spent everywhere, not just here
+        visited[0] += 1
+        if visit(url):
+            truncated[0] = True
+            return True
+        for f in library_children(lib, url, "childFolderURLs"):
+            if walk(f, depth + 1):
+                return True
+        return False
+
+    walk(root, 0)
+    return truncated[0]
+
+
+def library_assets(lib, root, max_depth=_LIBRARY_MAX_DEPTH, max_folders=_LIBRARY_MAX_FOLDERS,
+                   max_assets=None):
+    """(assets, truncated) - every child ASSET url under a library location root, folders recursed:
+    the collect-the-assets projection of walk_library_folders that the tool-library and post-library
+    reads share. An asset url is the addressable identity of a library/post - .leafName is its name
+    and .toString() its url - which is why the walk collects those rather than the heavy loaded
+    objects. `max_assets` caps the collection itself; truncated is True when any cap stopped it."""
+    assets = []
+
+    def visit(url):
+        for a in library_children(lib, url, "childAssetURLs"):
+            if max_assets is not None and len(assets) >= max_assets:
+                return True                   # full - stop the walk, report truncated
+            assets.append(a)
+        return False
+
+    truncated = walk_library_folders(lib, root, visit, max_depth=max_depth,
+                                     max_folders=max_folders)
+    return assets, truncated

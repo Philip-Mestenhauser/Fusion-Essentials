@@ -24,7 +24,8 @@ from ._common import ok, error, safe
 from . import _assert
 from . import _inputs
 from . import _outputs
-from ._cam_common import get_cam, live_readiness, resolve_cam_node, setups as cam_setups, operations_under
+from ._cam_common import (get_cam, library_assets, live_readiness, resolve_cam_node,
+                          setups as cam_setups, operations_under)
 from ._export import verify_written   # the file-landed proof (postProcess() true != a file)
 
 app = adsk.core.Application.get()
@@ -56,7 +57,7 @@ _MISSING = object()   # sentinel: the parameter is not present on this program
 # and node count.
 _POST_LOCATIONS = {"cloud": "CloudLibraryLocation", "hub": "HubLibraryLocation"}
 _CLOUD_MAX_DEPTH = 4
-_CLOUD_MAX_NODES = 400
+_CLOUD_MAX_POSTS = 400
 
 _POST_SCOPE_CHOICE = _inputs.Choice(
     "post_scope", options=["local", "cloud", "hub"], default="local",
@@ -93,34 +94,6 @@ def _resolve_local_cps(cam, post):
                   f"({generic}) post folder. For a deployed team post use post_scope=cloud/hub.")
 
 
-def _walk_post_assets(lib, root):
-    """(assets, truncated): every post-asset URL under root, recursing folders BOUNDED (depth and node
-    caps - Cloud/Hub is NESTED and network-slow). childAssetURLs yields the post URLs (each exposing
-    .leafName = the post name and .toString() = the full url); childPostConfigurations would load the
-    heavy PostConfiguration objects, which carry no name/url, so the asset URLs are what we match on."""
-    assets = []
-    truncated = [False]
-    seen = [0]
-
-    def walk(url, depth):
-        if url is None or depth > _CLOUD_MAX_DEPTH:
-            return
-        if seen[0] >= _CLOUD_MAX_NODES:
-            truncated[0] = True
-            return
-        for a in (safe(lambda: list(lib.childAssetURLs(url)), []) or []):
-            if seen[0] >= _CLOUD_MAX_NODES:
-                truncated[0] = True
-                return
-            assets.append(a)
-            seen[0] += 1
-        for f in (safe(lambda: list(lib.childFolderURLs(url)), []) or []):
-            walk(f, depth + 1)
-
-    walk(root, 0)
-    return assets, truncated[0]
-
-
 def _norm_post_name(name):
     """Case-fold a post name and drop a trailing .cps so 'Generic Fanuc' matches 'generic fanuc.cps'."""
     low = (name or "").strip().lower()
@@ -139,7 +112,11 @@ def _resolve_cloud_post(post, post_scope):
     root = safe(lambda: lib.urlByLocation(loc)) if loc is not None else None
     if root is None:
         return None, None, f"Could not resolve the {post_scope} post-library root URL."
-    assets, truncated = _walk_post_assets(lib, root)
+    # The shared bounded library walk. childAssetURLs yields the post URLs (each exposing .leafName =
+    # the post name and .toString() = the full url); childPostConfigurations would load the heavy
+    # PostConfiguration objects, which carry no name/url, so the asset URLs are what we match on.
+    assets, truncated = library_assets(lib, root, max_depth=_CLOUD_MAX_DEPTH,
+                                       max_assets=_CLOUD_MAX_POSTS)
     want = _norm_post_name(post)
 
     def leaf(a):

@@ -930,9 +930,8 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
 
     if not obj:
         return error(f"Construction {knd} creation returned nothing.")
-    nm = (name or "").strip()
-    if nm:
-        safe(lambda: setattr(obj, "name", nm))
+    # apply_rename, not a swallowed setattr: a declined/deduped datum rename is disclosed.
+    datum_name, rename_warning = _common.apply_rename(obj, name)
 
     # The datum's own entityToken, so the next call can point AT what was just created. Measured:
     # a ConstructionAxis carries one and design.findEntityByToken returns the same axis back
@@ -943,13 +942,15 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
     "created": True,
     "kind": knd,
     "mode": m,
-    "name": safe(lambda: obj.name),
+    "name": datum_name,
     "component": safe(lambda: comp.name),
     "units": units,
     "handle": handle,
     "geometry": _geometry_readback(knd, design, obj, 1.0 / k),
     "note": "Construction datum created - snap joints/sketches to it (e.g. joint_create_origin).",
     }
+    if rename_warning:
+        out["rename_warning"] = rename_warning
     if handle:
         out["note"] += " " + _HANDLE_NOTE[knd]
     out.update(extra or {})

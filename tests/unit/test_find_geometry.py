@@ -3,8 +3,10 @@
 This is the QUERY half of geometry-as-values: it must return each match's handle (entityToken),
 kind, position, and shape data, and filter by kind / radius / nearest_to. Pinned here (no live
 Fusion): the units scaling on positions/radii, the kind filter, the radius filter (5% tol), the
-nearest_to sort, that every match carries a handle, and the omit-when-default visibility signal
-(a hidden body's matches carry hidden:true; visible bodies' records omit the key).
+nearest_to sort, that every match carries a handle, the omit-when-default visibility signal
+(a hidden body's matches carry hidden:true; visible bodies' records omit the key), and that a body
+resolved inside a component is scanned through its occurrence PROXY, so the positions reported are
+world and not component-local.
 """
 
 import json
@@ -73,8 +75,13 @@ class FakeFace:
 class FakeBody:
     """A BRep body. `name`/`token` matter to the by-name target path (the shared body resolver walks
     every occurrence's bRepBodies by name and de-duplicates on entityToken); `parentComponent` and
-    `assemblyContext` are what a candidate's '<occurrence-or-component>:<body>' label is built from."""
-    def __init__(self, faces=(), edges=(), vertices=(), visible=True, name="Body1", token=None):
+    `assemblyContext` are what a candidate's '<occurrence-or-component>:<body>' label is built from.
+
+    `native` makes this wrapper a PROXY of that body: a body and its occurrence proxy carry DIFFERENT
+    entityTokens while nativeObject reads None on a native and the native on a proxy, which is how
+    _common.native_token collapses the two wrappers to ONE physical body."""
+    def __init__(self, faces=(), edges=(), vertices=(), visible=True, name="Body1", token=None,
+                 native=None):
         self.faces = list(faces)
         self.edges = list(edges)
         self.vertices = list(vertices)
@@ -84,6 +91,18 @@ class FakeBody:
         self.entityToken = token or f"BTOK::{name}::{id(self)}"
         self.parentComponent = None
         self.assemblyContext = None
+        self.nativeObject = native
+
+
+class FakeComp:
+    """A COMPONENT - the NATIVE home of its bodies, whose geometry is in component-LOCAL coordinates.
+    An occurrence of the component hands back PROXY bodies, whose geometry is in WORLD coordinates."""
+    def __init__(self, name, bodies=()):
+        self.name = name
+        self.bRepBodies = _NamedCollection(bodies)
+        self.meshBodies = _NamedCollection([])
+        for b in bodies:
+            b.parentComponent = self
 
 
 class FakeOcc:
@@ -91,7 +110,9 @@ class FakeOcc:
         self.name = name
         # fullPathName is the unambiguous key; defaults to name for flat (single-level) assemblies.
         self.fullPathName = full_path or name
-        self.component = type("C", (), {"name": comp})()
+        # `comp` is a component NAME for the flat cases, or a FakeComp when the test also needs the
+        # component's own (native, component-local) bodies to be reachable.
+        self.component = comp if not isinstance(comp, str) else type("C", (), {"name": comp})()
         # Counted+named collection (the live protocol): find_geometry iterates it, the by-name body
         # resolver reads count/item/itemByName off the same object.
         self.bRepBodies = _NamedCollection(bodies)
@@ -116,8 +137,10 @@ class FakeRoot:
 
 
 class FakeDesign:
-    def __init__(self, occs, root_bodies=(), all_occs=None, meshes=()):
+    def __init__(self, occs, root_bodies=(), all_occs=None, meshes=(), active=None):
         self.rootComponent = FakeRoot(occs, root_bodies, all_occs, meshes)
+        # activeComponent is the edit target the body walk also scans (None => the root, as live).
+        self.activeComponent = active
 
 
 import pytest
@@ -140,8 +163,8 @@ def _enum_sentinels(monkeypatch):
     monkeypatch.setattr(ct, "Arc3DCurveType", "ARC", raising=False)
 
 
-def _install(occs, root_bodies=(), all_occs=None, meshes=()):
-    design = FakeDesign(occs, root_bodies, all_occs, meshes)
+def _install(occs, root_bodies=(), all_occs=None, meshes=(), active=None):
+    design = FakeDesign(occs, root_bodies, all_occs, meshes, active)
     fg.app = type("A", (), {"activeProduct": design})()
     fg._common.app = fg.app
     import adsk.fusion
@@ -402,6 +425,50 @@ class TestBodyNameTargets:
         res = fg.handler(target="Scan1")
         assert res["isError"] is True
         assert "MESH" in res["message"] and "mesh_get" in res["message"]
+
+
+# ── WORLD SPACE: a body inside a component is scanned through its occurrence PROXY ──────────────
+# find_geometry publishes WORLD positions. A native body's geometry is component-LOCAL, so a body
+# resolved inside an occurrence must be scanned through the PROXY the occurrence hands back - the
+# native and the proxy are one physical body (same nativeObject token) reachable two ways, and the
+# placed wrapper is the one carrying the world placement.
+
+class TestWorldSpaceProxy:
+    def _placed(self, local, world, active=False):
+        """One physical body 'Pin' reachable two ways: NATIVE in component Frame (geometry at `local`)
+        and as occurrence Frame:1's PROXY (geometry at `world`). `active` activates the component, so
+        the walk reaches the native too and the placed-wrapper choice genuinely has to be made."""
+        native = FakeBody(faces=[_cyl("LOCAL_FACE", 0.8, local)], name="Pin", token="NATIVE_TOK")
+        proxy = FakeBody(faces=[_cyl("WORLD_FACE", 0.8, world)], name="Pin", token="PROXY_TOK",
+                         native=native)
+        comp = FakeComp("Frame", [native])
+        occ = FakeOcc("Frame:1", comp, [proxy], full_path="Frame:1")
+        _install([occ], active=comp if active else None)
+
+    def test_bare_name_reports_world_position_not_component_local(self):
+        # the component is ACTIVE, so both wrappers are in the walk: scanning the native would
+        # publish 10mm (component-local) as if it were a world position.
+        self._placed(local=(1, 0, 0), world=(11, 0, 0), active=True)
+        out = _payload(fg.handler(target="Pin", units="mm"))
+        assert out["returned"] == 1
+        m = out["matches"][0]
+        assert m["handle"].startswith("WORLD_FACE|@")
+        assert m["position"] == [110.0, 0.0, 0.0]
+        # one physical body reached twice is ONE candidate, never an ambiguity with itself
+        assert out["target"] == "body 'Frame:1:Pin'"
+
+    def test_world_position_holds_when_the_component_is_not_active(self):
+        # the ordinary case: only the occurrence pass reaches the body, and it hands back the proxy.
+        self._placed(local=(1, 0, 0), world=(11, 0, 0))
+        out = _payload(fg.handler(target="Pin", units="mm"))
+        assert out["matches"][0]["position"] == [110.0, 0.0, 0.0]
+
+    def test_qualified_form_also_lands_on_the_proxy(self):
+        self._placed(local=(1, 0, 0), world=(11, 0, 0), active=True)
+        out = _payload(fg.handler(target="Frame:1:Pin", units="mm"))
+        assert out["returned"] == 1
+        assert out["matches"][0]["handle"].startswith("WORLD_FACE|@")
+        assert out["matches"][0]["position"] == [110.0, 0.0, 0.0]
 
 
 # ── PERCEPTION FIELDS: face outward normal + linear-edge direction ──────────────────────────────

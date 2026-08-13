@@ -25,15 +25,15 @@ app = adsk.core.Application.get()
 
 
 def _find_one(design, name):
-    """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name, via the shared OccurrenceRef
-    logic - which REFUSES an ambiguous substring (several same-named instances) instead of silently
-    grabbing the first (the wrong-instance bug). Returns (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name, via
+    the shared OccurrenceRef logic - which REFUSES an ambiguous path/name (several instances answer to
+    it) instead of silently grabbing the first (the wrong-instance bug). Returns (occurrence, error)."""
     return _inputs._resolve_occurrence(name, name)
 
 
 def _resolve_many(design, names):
-    """Resolve a comma string or list of occurrence names/fullPathNames via the shared OccurrenceRef
-    logic (fullPathName-preferring, ambiguity-refusing). Returns (collection, resolved, errors)."""
+    """Resolve a comma string or list of occurrence handles/fullPathNames/names via the shared
+    OccurrenceRef logic (handle-first, ambiguity-refusing). Returns (collection, resolved, errors)."""
     if isinstance(names, str):
         wanted = [n.strip() for n in names.split(",") if n.strip()]
     else:
@@ -91,16 +91,22 @@ def ground_handler(occurrence: str = "", ground_to_parent=None) -> dict:
         occ.isGroundToParent = bool(ground_to_parent)
     except Exception as e:
         return error(f"Could not set isGroundToParent on '{safe(lambda: occ.name)}': {e}")
-    now = safe(lambda: occ.isGroundToParent)
-    if now is not None and bool(now) != bool(ground_to_parent):
+    now = _common.read_flag(lambda: occ.isGroundToParent)
+    # An UNREADABLE flag is not a confirmation: treating it as one would let a swallowed write
+    # through the mismatch gate below and publish a lock nobody read back.
+    if now is None:
+        return error(f"isGroundToParent cannot be read on '{safe(lambda: occ.name)}' after setting "
+                     f"it to {bool(ground_to_parent)}, so the change is UNCONFIRMED. Re-read the "
+                     "occurrence with assembly_get.")
+    if bool(now) != bool(ground_to_parent):
         return error(f"Assignment was accepted but '{safe(lambda: occ.name)}' still reads "
                      f"isGroundToParent={bool(now)} - the flag did not take.")
     # Report BOTH flags distinctly - isGrounded is read-only context (a human may have set it in the
-    # UI; this tool never writes it).
+    # UI; this tool never writes it), and null rather than False when it cannot be read.
     out = {
         "occurrence": safe(lambda: occ.name),
-        "isGroundToParent": safe(lambda: occ.isGroundToParent),
-        "isGrounded": safe(lambda: occ.isGrounded),
+        "isGroundToParent": bool(now),
+        "isGrounded": _common.read_flag(lambda: occ.isGrounded),
         "note": "Parent lock set. isGroundToParent relocks to the TIMELINE placement and discards "
                 "free moves. assembly_get's grounded_occurrences lists only the UI Ground/Fix flag "
                 "(not settable here), so it stays empty for agent-grounded builds - read the "

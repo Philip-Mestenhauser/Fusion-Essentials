@@ -46,6 +46,17 @@ _DENYLIST = {
     "tree_nodes": ("_cam_common", "def"),
     "resolve_cam_node": ("_cam_common", "def"),
     "operations_under": ("_cam_common", "def"),
+    # The ONE 'parameters' request parser ({name: expression} or 'name=value, ...'): the operation
+    # and setup parameter editors validate the SAME two wire forms, so a second copy is how one of
+    # them starts accepting a form the other refuses.
+    "parse_parameters": ("_cam_common", "def"),
+    # The ONE CAM library folder-tree walk (tool / post / template libraries all nest folders under
+    # a LibraryLocations root) plus its collect-the-asset-urls projection and its raise-tolerant
+    # child read. A local re-roll is how one library read loses the depth/folder bound - an
+    # unbounded cloud enumeration is a measured way to hang the add-in - while the others keep it.
+    "walk_library_folders": ("_cam_common", "def"),
+    "library_assets": ("_cam_common", "def"),
+    "library_children": ("_cam_common", "def"),
     "_b64url_decode": ("_data_common", "def"),
     # The ONE DataFile epoch-seconds -> ISO-8601-UTC conversion (None for anything that is not a
     # number); the raw integer ships beside it, so a second copy is a second convention.

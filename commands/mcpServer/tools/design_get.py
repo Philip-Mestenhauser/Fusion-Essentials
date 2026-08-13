@@ -99,8 +99,11 @@ def _walk_occurrence(occ, depth, max_depth, counter):
         counter["truncated"] = True
     node = {
         "name": safe(lambda: occ.name),
-        # fullPathName is the UNAMBIGUOUS instance key (a name is only locally unique - the same
-        # "Bolt:1" recurs under every sub-assembly); name-consuming tools resolve by it via OccurrenceRef.
+        # The entityToken is the EXACT instance identity, and the only one that always is: Fusion
+        # enforces no name uniqueness, so a name repeats under every sub-assembly ("Bolt:1") and two
+        # siblings can even wear one fullPathName (measured). Every occurrence-taking tool accepts this
+        # handle; the path is the convenience form, which refuses rather than guess when it collides.
+        "handle": safe(lambda: occ.entityToken),
         "full_path": safe(lambda: occ.fullPathName),
         "component": safe(lambda: occ.component.name),
         "is_reference": safe(lambda: occ.isReferencedComponent, False),

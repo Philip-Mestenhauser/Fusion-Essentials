@@ -15,13 +15,15 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam, expression_error
+from ._cam_common import get_cam, expression_error, library_assets
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("list", "list_types", "parameters", "add", "remove", "edit", "add_preset",
             "remove_preset", "where_used", "create_library")
 _SCOPES = ("document", "local", "cloud", "hub")
+# friendly scope -> LibraryLocations attr, for every shared scope (document hosts no shared library
+# and can host no new one). The ONE table the resolve / list / create paths all read.
 _SHARED_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLocation",
                      "hub": "HubLibraryLocation"}
 
@@ -48,11 +50,18 @@ class _Target:
         self._update_tool_fn = update_tool_fn
         self._ops_fn = ops_fn
         self._refetch_fn = refetch_fn
+        self._tools = None
+
+    def _drop_tool_cache(self):
+        """Forget the held tool list. Every method that writes to the library, commits it, or reads
+        it again calls this: a list surviving one of those would hide the change it made."""
+        self._tools = None
 
     def refetch(self):
         """The library read again: for a shared target the stored library re-read from its url, for
         the document target its own live library (None when neither can be read). See the class note
         for what each of those two reads is evidence OF."""
+        self._drop_tool_cache()
         return self._refetch_fn() if self._refetch_fn else None
 
     def _refetch_tool(self, index):
@@ -96,20 +105,30 @@ class _Target:
         # A tool's INDEX is its address ('tool', 'remove_indices', reread_param all key on it), so
         # this stays a positional walk: iter_collection drops an unreadable item, which would slide
         # every later tool onto the wrong index.
-        return [safe(lambda i=i: self._lib.item(i)) for i in range(safe(lambda: self._lib.count, 0) or 0)]
+        # The walk costs one item() call per tool (a 266-tool cloud library is the measured high
+        # water mark) and a single action reads it several times, so the list is held until
+        # _drop_tool_cache() - which every mutating and re-reading method calls - clears it.
+        if self._tools is None:
+            self._tools = [safe(lambda i=i: self._lib.item(i))
+                           for i in range(safe(lambda: self._lib.count, 0) or 0)]
+        return self._tools
 
     def add(self, tool):
+        self._drop_tool_cache()
         self._lib.add(tool)
 
     def remove(self, index):
+        self._drop_tool_cache()
         self._lib.remove(index)
 
     def update_tool(self, tool):
         if self._update_tool_fn:
+            self._drop_tool_cache()
             self._update_tool_fn(tool)
 
     def persist(self):
         if self._persist_fn:
+            self._drop_tool_cache()
             self._persist_fn()
 
     def operations_by_tool(self, tool):
@@ -135,33 +154,17 @@ def _tool_libraries():
     return safe(lambda: adsk.cam.CAMManager.get().libraryManager.toolLibraries)
 
 
-def _collect_library_urls(libs, root):
-    """Every tool-library asset URL under a shared root, recursing folders (Hub/Cloud nest), bounded
-    to depth 6. The ONE library-folder walk both _shared_libraries and _resolve_target target."""
-    found = []
-
-    def walk(url, depth):
-        if depth > 6 or url is None:
-            return
-        for a in (safe(lambda: list(libs.childAssetURLs(url)), []) or []):
-            found.append(a)
-        for f in (safe(lambda: list(libs.childFolderURLs(url)), []) or []):
-            walk(f, depth + 1)
-    walk(root, 0)
-    return found
-
-
 def _shared_libraries(scope):
     """List (name, url) of the libraries at a shared scope, recursing folders (Hub/Cloud nest).
-    Returns (entries, None) or (None, error). Patched in tests."""
+    Returns (entries, truncated, None) or (None, False, error). Patched in tests."""
     libs = _tool_libraries()
     if not libs:
-        return None, "Tool libraries unavailable."
+        return None, False, "Tool libraries unavailable."
     loc = getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])
     root = safe(lambda: libs.urlByLocation(loc))
-    found = _collect_library_urls(libs, root)
+    found, truncated = library_assets(libs, root)
     return [{"name": safe(lambda a=a: a.leafName), "url": safe(lambda a=a: a.toString())}
-            for a in found], None
+            for a in found], truncated, None
 
 
 def _resolve_target(scope, library):
@@ -186,16 +189,20 @@ def _resolve_target(scope, library):
     loc = getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])
     root = safe(lambda: libs.urlByLocation(loc))
     # collect libraries (recurse folders for Hub/Cloud) via the shared walk
-    found = _collect_library_urls(libs, root)
+    found, truncated = library_assets(libs, root)
+    # A capped walk means an unlisted library may simply be beyond the bound - the refusal says
+    # so instead of asserting absence.
+    capped = " (folder walk hit its bound - a deeper library may exist unlisted)" if truncated else ""
     target = (library or "").strip()
     if not target:
         return None, f"Provide 'library' (name or url) for {scope} scope. Available: " \
-                     f"{', '.join(safe(lambda a=a: a.leafName) for a in found)}."
+                     f"{', '.join(safe(lambda a=a: a.leafName) for a in found)}.{capped}"
     lib_url = next((a for a in found if safe(lambda a=a: a.toString()) == target), None) \
         or next((a for a in found if safe(lambda a=a: a.leafName) == target), None)
     if lib_url is None:
         avail = [safe(lambda a=a: a.leafName) for a in found]
-        return None, f"No {scope} library '{target}'. Available: {', '.join(str(a) for a in avail)}."
+        return None, (f"No {scope} library '{target}'. Available: "
+                      f"{', '.join(str(a) for a in avail)}.{capped}")
     lib = safe(lambda: libs.toolLibraryAtURL(lib_url))
     if not lib:
         return None, f"Could not load {scope} library '{target}'."
@@ -481,12 +488,16 @@ def _do_list(target, tool_type=""):
 
 
 def _do_list_libraries(scope):
-    entries, lerr = _shared_libraries(scope)
+    entries, truncated, lerr = _shared_libraries(scope)
     if lerr:
         return error(lerr)
-    return ok({"scope": scope, "library_count": len(entries), "libraries": entries,
-               "note": "Pass 'library' = one of these (name or url) to list/manage its tools. Tool "
-                       "references are (library_url, index)."})
+    out = {"scope": scope, "library_count": len(entries), "libraries": entries,
+           "note": "Pass 'library' = one of these (name or url) to list/manage its tools. Tool "
+                   "references are (library_url, index)."}
+    if truncated:
+        out["truncated"] = True
+        out["note"] += (" The folder walk hit its bound - a deeper library may exist unlisted.")
+    return ok(out)
 
 
 def _do_list_types():
@@ -685,9 +696,11 @@ def _build_entry(ref):
         return None, (f"Entry {ref!r} needs 'from_type' (clone a sample of that type) or "
                       "'library_url'+'index' (copy an existing tool).")
 
-    # 2) optional holder to ASSIGN (resolve before mutating)
+    # 2) optional holder to ASSIGN (resolve before mutating). PRESENCE gates, not truthiness: an
+    # empty {} holder ref is a malformed request, and a truthy gate silently shipped the SAMPLE's
+    # holder as success (measured) - _holder_json words the refusal.
     holder_json = None
-    if ref.get("holder"):
+    if ref.get("holder") is not None:
         hd, herr = _holder_json(ref["holder"])
         if herr:
             return None, herr
@@ -1077,11 +1090,6 @@ def _do_parameters(target, tool_index):
                        "that relationship). Set one with action='edit'."})
 
 
-# friendly scope -> LibraryLocations attr for creating a new library (document can't host a new library).
-_CREATE_LOCATIONS = {"local": "LocalLibraryLocation", "cloud": "CloudLibraryLocation",
-                     "hub": "HubLibraryLocation"}
-
-
 def _empty_library():
     return adsk.cam.ToolLibrary.createEmpty()
 
@@ -1091,15 +1099,13 @@ def _do_create_library(scope, name, seed_tools):
     document scope can't host a new library. Seeds validated before the persistent write."""
     if scope == "document":
         return error("Cannot create a library in the document scope. Use scope=local/cloud/hub.")
-    if scope not in _CREATE_LOCATIONS:
-        return error(f"Cannot create a library at scope '{scope}'. Use local / cloud / hub.")
     name = (name or "").strip()
     if not name:
         return error("Provide 'library' as the new library's name (create_library).")
     libs = _tool_libraries()
     if not libs:
         return error("Tool libraries unavailable.")
-    root = safe(lambda: libs.urlByLocation(getattr(adsk.cam.LibraryLocations, _CREATE_LOCATIONS[scope])))
+    root = safe(lambda: libs.urlByLocation(getattr(adsk.cam.LibraryLocations, _SHARED_LOCATIONS[scope])))
     if not root:
         return error(f"Could not resolve the '{scope}' library root.")
     # Hub can't import at the bare hub:// root - descend to its team folder.

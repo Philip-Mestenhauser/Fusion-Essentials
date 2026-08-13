@@ -22,10 +22,13 @@ so = load_tool("surface_ops")
 # ── fakes ───────────────────────────────────────────────────────────────────
 
 class _FakeBRepBody:
-    """Named to register as adsk.fusion.BRepBody so _BODY_KINDS surface/solid checks fire on isSolid."""
-    def __init__(self, name, is_solid=False):
+    """Named to register as adsk.fusion.BRepBody so _BODY_KINDS surface/solid checks fire on isSolid.
+    `volume` is the reading a cut/intersect is judged on; None models a body whose volume will not
+    read (an unmeasurable body, or one the operation consumed whole)."""
+    def __init__(self, name, is_solid=False, volume=None):
         self.name = name
         self.isSolid = is_solid
+        self.volume = volume
 
 
 class _FakeProfile:
@@ -164,8 +167,11 @@ class _FakeComp:
         self.features = features
         self._bodies = bodies_by_name or {}
         comp = self
+        # count/item(i) is the live collection protocol a volume census walks; itemByName is what a
+        # BodyRef resolves through. Both are real BRepBodies members, so the fake carries both.
         self.bRepBodies = type("BB", (), {
             "itemByName": staticmethod(lambda n: comp._bodies.get(n)),
+            "item": staticmethod(lambda i: list(comp._bodies.values())[i]),
             "count": property(lambda s: len(comp._bodies)),
         })()
         # Live meshBodies has count/item but NO itemByName (meshbodies-no-itembyname in
@@ -321,6 +327,62 @@ class TestLoft:
         res = so.loft_handler(profiles=["H0", "H1"], operation="weld")
         assert res["isError"] is True
         assert "new, join, cut, intersect" in res["message"]
+
+    # -- a cut/intersect loft must PROVE it moved material -------------------------------------
+    #
+    # A loft whose shape misses the body still hands back a healthy feature with a result body, so
+    # only the host component's solid volumes, read either side of the add, can tell a cut that
+    # removed something from one that removed nothing.
+
+    def _cut_design(self, bodies, moves=()):
+        """A loft over 3 profiles on a component holding `bodies`; `moves` are (body, new_volume)
+        pairs the add applies - the material effect a real cut has across the mutation."""
+        lf = _FakeLoftFeatures()
+        handles = {"H0": _FakeProfile("0"), "H1": _FakeProfile("1"), "H2": _FakeProfile("2")}
+        _install(_FakeFeatures(loft=lf), bodies_by_name={b.name: b for b in bodies},
+                 handle_map=handles)
+        base_add = lf.add
+
+        def _add(inp):
+            for body, volume in moves:
+                body.volume = volume
+            return base_add(inp)
+        lf.add = _add
+        return lf
+
+    def test_cut_that_moves_no_volume_is_an_error(self):
+        self._cut_design([_FakeBRepBody("Bar", is_solid=True, volume=12.0)])
+        res = so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"] and "'Comp'" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_cut_that_removed_material_publishes_the_delta(self):
+        bar = _FakeBRepBody("Bar", is_solid=True, volume=12.0)
+        self._cut_design([bar], moves=[(bar, 9.5)])
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut"))
+        assert out["volume_delta_cm3"] == -2.5      # signed: material LEFT the body
+
+    def test_a_consumed_body_is_not_read_as_a_no_op(self):
+        eaten = _FakeBRepBody("Eaten", is_solid=True, volume=4.0)
+        kept = _FakeBRepBody("Kept", is_solid=True, volume=8.0)
+        self._cut_design([eaten, kept], moves=[(eaten, None)])
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut"))
+        assert out["lofted"] is True
+
+    def test_a_new_body_loft_is_never_volume_gated(self):
+        self._cut_design([_FakeBRepBody("Bar", is_solid=True, volume=12.0)])
+        out = _payload(so.loft_handler(profiles=["H0", "H1", "H2"]))
+        assert out["lofted"] is True and "volume_delta_cm3" not in out
+
+    def test_a_surface_body_is_not_sampled(self):
+        # Only SOLIDS carry the volume a cut moves; sampling an open surface body (whose volume does
+        # not read) would make the census unreadable and silently drop the gate.
+        surf = _FakeBRepBody("Skin", is_solid=False, volume=None)
+        bar = _FakeBRepBody("Bar", is_solid=True, volume=12.0)
+        self._cut_design([surf, bar])
+        res = so.loft_handler(profiles=["H0", "H1", "H2"], operation="cut")
+        assert res["isError"] is True and "changed nothing" in res["message"]
 
     def test_loft_built_on_the_profiles_owning_component(self):
         # The profiles are OWNED by a sub-component while a DIFFERENT component is active. Handing

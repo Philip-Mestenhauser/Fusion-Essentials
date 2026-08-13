@@ -10,6 +10,7 @@ _active_identity and _open_documents seams.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -533,3 +534,48 @@ class TestIntegrationThroughItem:
         _set_active("Bracket", "urn:lineage:abc")
         sft = load_tool("sys_find_tool")
         assert "active_document" not in _decode(sft.item.handler(query="extrude"))
+
+
+class TestOpenDocumentsActiveFlag:
+    """The REAL _open_documents against the measured wrapper contract: Document wrappers are not
+    identity-stable (`is` reads False for the active document itself, live on 2705.0.87), while
+    `==` compares the underlying handle - the flag must come from equality."""
+
+    class _DocWrapper:
+        def __init__(self, handle, name):
+            self._handle = handle
+            self.name = name
+            self.dataFile = None
+
+        def __eq__(self, other):
+            return getattr(other, "_handle", None) == self._handle
+
+        __hash__ = None
+
+    def _app(self, monkeypatch, wrappers, active):
+        docs = SimpleNamespace(count=len(wrappers), item=lambda i: wrappers[i])
+        monkeypatch.setattr(wg, "app", SimpleNamespace(documents=docs, activeDocument=active))
+
+    def test_equal_but_not_identical_wrapper_reads_active(self, monkeypatch):
+        row_doc = self._DocWrapper("h1", "Bracket")
+        active = self._DocWrapper("h1", "Bracket")      # a DISTINCT wrapper of the same doc
+        assert row_doc is not active
+        self._app(monkeypatch, [row_doc], active)
+        rows = _REAL_OPEN_DOCUMENTS()
+        assert rows[0]["is_active"] is True
+
+    def test_a_different_document_reads_inactive(self, monkeypatch):
+        active = self._DocWrapper("h1", "Bracket")
+        other = self._DocWrapper("h2", "Bracket")       # same NAME, different handle
+        self._app(monkeypatch, [other], active)
+        rows = _REAL_OPEN_DOCUMENTS()
+        assert rows[0]["is_active"] is False
+
+    def test_a_raising_equality_degrades_to_inactive_not_a_raise(self, monkeypatch):
+        class _Hostile(self._DocWrapper):
+            def __eq__(self, other):
+                raise RuntimeError("equality unavailable")
+        active = self._DocWrapper("h1", "Bracket")
+        self._app(monkeypatch, [_Hostile("h1", "Bracket")], active)
+        rows = _REAL_OPEN_DOCUMENTS()
+        assert rows[0]["is_active"] is False

@@ -85,6 +85,35 @@ def _polygon_count(mb):
     return safe(lambda: mb.mesh.polygonCount)
 
 
+# The band a before/after mesh AREA difference counts as no change at all - the area sibling of
+# _common.NO_VOLUME_CHANGE_CM3, in Fusion's internal cm^2.
+_NO_AREA_CHANGE_CM2 = 1e-9
+
+
+def _area_volume(mb):
+    """(area cm^2, volume cm^3) of a MeshBody, each None when it cannot be read - the geometry-level
+    SECOND signal a triangle-count gate is backed with.
+
+    measured(), never safe(read, 0.0): MeshBody.volume answers 0.0 for a body that encloses nothing
+    (see _mesh_summary), so 0.0 is an ANSWER here and an unreadable read must stay None."""
+    return _common.measured(lambda: mb.area), _common.measured(lambda: mb.volume)
+
+
+def _mesh_moved(before, after):
+    """Did a mesh's geometry MOVE between two _area_volume reads? True when either signal is readable
+    at both ends and differs beyond its no-change band, False when every readable signal is flat, and
+    None when neither was readable at both ends - unknown, which is never 'flat'.
+
+    This is what separates a re-triangulation that happens to land on the SAME triangle count (a cut
+    whose fill adds exactly as many triangles as it removed) from an operation that did nothing."""
+    pairs = ((before[0], after[0], _NO_AREA_CHANGE_CM2),
+             (before[1], after[1], _common.NO_VOLUME_CHANGE_CM3))
+    readable = [(b, a, band) for b, a, band in pairs if b is not None and a is not None]
+    if not readable:
+        return None
+    return any(abs(a - b) > band for b, a, band in readable)
+
+
 def _mesh_summary(mb, include_polygon=True, inv_scale=1.0):
     """A JSON-safe summary record for one MeshBody. All reads - never raises into the handler.
 

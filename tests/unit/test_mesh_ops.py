@@ -1225,3 +1225,40 @@ class TestRemeshDensityReadBack:
         _install(FakeDesign(comp, design_type=0), handle_map={"H": src})
         out = _payload(mo.mesh_remesh_handler(mesh="H"))
         assert "density_applied" not in out
+
+
+# ── the second signal a triangle-count gate is backed with (_area_volume / _mesh_moved) ─────────
+
+class TestAreaVolumeSignal:
+    def test_reads_area_and_volume_in_internal_cm_units(self):
+        assert mo._area_volume(MeshBody("M", area=150.0, volume=125.0)) == (150.0, 125.0)
+
+    def test_an_unreadable_field_is_None_not_zero(self):
+        # 0.0 is an ANSWER for MeshBody.volume (a body enclosing nothing), so an unreadable read
+        # must not borrow it - a coerced 0.0 would read as "the geometry vanished".
+        assert mo._area_volume(MeshBody("M")) == (None, None)
+        assert mo._area_volume(MeshBody("M", area=12.0)) == (12.0, None)
+
+    def test_a_moved_area_reports_movement(self):
+        assert mo._mesh_moved((150.0, 125.0), (90.0, 125.0)) is True
+
+    def test_a_moved_volume_alone_reports_movement(self):
+        # Either signal is sufficient: a cut can shave volume while the surface area holds.
+        assert mo._mesh_moved((150.0, 125.0), (150.0, 62.5)) is True
+
+    def test_identical_readings_are_flat(self):
+        assert mo._mesh_moved((150.0, 125.0), (150.0, 125.0)) is False
+
+    def test_a_difference_inside_the_band_is_flat(self):
+        # Float noise on a re-read is not a cut; the band is what keeps it from reading as one.
+        assert mo._mesh_moved((150.0, 125.0), (150.0 + 1e-12, 125.0 - 1e-12)) is False
+
+    def test_one_readable_signal_still_decides(self):
+        assert mo._mesh_moved((None, 125.0), (None, 62.5)) is True
+        assert mo._mesh_moved((None, 125.0), (None, 125.0)) is False
+
+    def test_neither_signal_readable_is_UNKNOWN_never_flat(self):
+        # None, not False: a caller that treated unknown as "flat" would refuse a landed cut it
+        # simply could not measure.
+        assert mo._mesh_moved((None, None), (None, None)) is None
+        assert mo._mesh_moved((150.0, 125.0), (None, None)) is None

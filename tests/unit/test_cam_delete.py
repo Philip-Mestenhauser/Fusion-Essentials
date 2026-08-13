@@ -31,13 +31,18 @@ class _Entity:
 # distinct classes so the tool can report a sensible entity_type from type(x).__name__
 
 class _Coll:
+    """A CAM collection whose enumeration DROPS deleted entities - the live contract the
+    verify-gone re-resolve depends on (a deleted node stops resolving; reading it raises)."""
     def __init__(self, items):
         self._i = list(items)
     @property
+    def _live(self):
+        return [x for x in self._i if not getattr(x, "deleted", False)]
+    @property
     def count(self):
-        return len(self._i)
+        return len(self._live)
     def item(self, i):
-        return self._i[i]
+        return self._live[i]
 
 
 class _Parent:
@@ -50,9 +55,9 @@ class _Parent:
     @property
     def allOperations(self):
         # flattens nested operations, but DROPS folders/patterns (the real API gap)
-        flat = list(self.operations._i)
-        for f in self.folders._i:
-            flat.extend(getattr(f, "operations", _Coll([]))._i)
+        flat = list(self.operations._live)
+        for f in self.folders._live:
+            flat.extend(getattr(f, "operations", _Coll([]))._live)
         return _Coll(flat)
 
 
@@ -83,10 +88,13 @@ class _Setups:
     def __init__(self, setups):
         self._s = setups
     @property
+    def _live(self):
+        return [s for s in self._s if not getattr(s, "deleted", False)]
+    @property
     def count(self):
-        return len(self._s)
+        return len(self._live)
     def item(self, i):
-        return self._s[i]
+        return self._live[i]
 
 
 class _CAM:
@@ -148,10 +156,11 @@ class TestGuards:
 class TestDelete:
     def test_delete_operation(self, monkeypatch):
         cam = _install(monkeypatch)
-        out = _payload(cd.handler(entity="Face1"))
-        op = cam.setups.item(0).allOperations.item(0)
-        assert op.deleted is True
+        face1 = cam.setups.item(0).allOperations.item(0)     # held BEFORE - the delete drops it
+        out = _payload(cd.handler(entity="Face1"))           # from enumeration (live contract)
+        assert face1.deleted is True
         assert out["deleted"] is True and out["entity"] == "Face1"
+        assert "verified gone" in out["note"]
 
     def test_delete_folder(self, monkeypatch):
         cam = _install(monkeypatch)
@@ -173,8 +182,9 @@ class TestDelete:
 
     def test_delete_setup(self, monkeypatch):
         cam = _install(monkeypatch)
+        setup = cam.setups.item(0)                           # held BEFORE the delete drops it
         out = _payload(cd.handler(entity="Setup1"))
-        assert cam.setups.item(0).deleted is True
+        assert setup.deleted is True
         assert out["entity_type"] == "setup"
 
     def test_deleteme_false_is_error(self, monkeypatch):
@@ -183,3 +193,16 @@ class TestDelete:
         _install(monkeypatch, [s])
         res = cd.handler(entity="Stubborn")
         assert res["isError"] is True and "declin" in res["message"].lower()
+
+    def test_a_lying_deleteme_true_is_caught_by_the_re_resolve(self, monkeypatch):
+        # deleteMe() returns True but the node still enumerates - the verify-gone re-resolve
+        # (measured: a genuinely deleted node RAISES on a same-transaction read, so a clean
+        # resolve means the platform lied) converts the false success into an error.
+        class _Liar(Operation):
+            def deleteMe(self):
+                return True                                  # claims success, removes nothing
+        s = Setup("Setup1", ops=[_Liar("Sticky")])
+        _install(monkeypatch, [s])
+        res = cd.handler(entity="Sticky")
+        assert res["isError"] is True
+        assert "still resolves" in res["message"]

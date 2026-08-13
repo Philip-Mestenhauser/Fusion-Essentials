@@ -13,19 +13,41 @@ import adsk.fusion
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names
 from . import _common
 from . import _inputs
-# SketchText.text and .height are RETIRED properties; the live handles are textParameter (whose
-# expression holds the string QUOTED) and heightParameter. _unquote reads that expression and
-# _font_read_back turns SketchText.fontName into a name-or-None - both are sketch_set_text's own
-# readers for the entities it writes, imported rather than re-rolled (sketch_delete_entity imports
-# _unquote from the same home).
-from .sketch_set_text import _unquote, _font_read_back
 
 app = adsk.core.Application.get()
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the ONE-sketch X-ray behind sketch_get(sketch_name=...): entities, construction "
              "geometry, constraints, dimensions and profiles + curve_id (the '<type>:<index>' entity "
-             "id every sketch reference is written in, which _common.resolve_entity_ref reads back)")
+             "id every sketch reference is written in, which _common.resolve_entity_ref reads back) "
+             "+ unquote_text / font_read_back (the SketchText readers: textParameter.expression "
+             "holds the string QUOTED - .text/.height are retired - and fontName reads as a "
+             "name-or-None; sketch_set_text and sketch_delete_entity read through these)")
+
+
+def unquote_text(expr):
+    """The textParameter expression is a quoted string ('foo'); return the inner text."""
+    if expr is None:
+        return None
+    s = str(expr)
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+def font_read_back(obj):
+    """The font the landed/edited SketchText reports, or None if it will not read as a name.
+
+    Font names are case-sensitive and Fusion normalizes nothing - 'arial' is refused where 'Arial'
+    works - so a font that landed reads back as the requested string exactly, and an exact compare
+    against it is the right check. An empty string is no name at all, so it reads as None."""
+    value = safe(lambda: obj.fontName)
+    return value if isinstance(value, str) and value else None
+
+
+# local aliases (this module's own record builders read them under the short names)
+_unquote = unquote_text
+_font_read_back = font_read_back
 
 # Constraint class name -> friendly type + the attribute names that hold its referenced entities.
 _CONSTRAINT_REFS = {

@@ -7,6 +7,7 @@ classes capture what was passed in.
 """
 
 import json
+import types
 
 from conftest import load_tool
 
@@ -33,9 +34,15 @@ class FakeBodies:
 
 
 class FakeFeature:
-    def __init__(self, name="Surface1", bodies=None):
+    def __init__(self, name="Surface1", bodies=None, extent_cm=None):
         self.name = name
         self.bodies = FakeBodies(bodies if bodies is not None else [FakeBody()])
+        if extent_cm is not None:
+            # ExtrudeFeature.extentOne is a DistanceExtentDefinition (a SymmetricExtentDefinition
+            # for a symmetric extrude) whose .distance is a ModelParameter reading CM, signed as
+            # requested. extent_cm=None gives a feature whose extent cannot be read at all.
+            self.extentOne = types.SimpleNamespace(
+                distance=types.SimpleNamespace(value=extent_cm))
 
 
 class FakeExtrudeInput:
@@ -104,16 +111,25 @@ class _ContinuityRejectingPatchInput:
 
 
 class FakeExtrudeFeatures:
-    def __init__(self, result_bodies=None):
+    def __init__(self, result_bodies=None, landed_cm=None, extent_readable=True):
+        # landed_cm: the depth the created feature's extent parameter reads back, when it differs
+        # from the depth handed to setDistanceExtent (live, the two agree). extent_readable=False
+        # models a feature whose extent parameter cannot be read at all.
         self.last_input = None
         self.added = False
         self._result = result_bodies
+        self._landed_cm = landed_cm
+        self._extent_readable = extent_readable
     def createInput(self, profile, op):
         self.last_input = FakeExtrudeInput(profile, op)
         return self.last_input
     def add(self, inp):
         self.added = True
-        return FakeFeature(bodies=self._result)
+        extent = None
+        if self._extent_readable:
+            extent = (self._landed_cm if self._landed_cm is not None
+                      else inp.distance_extent[1][1])
+        return FakeFeature(bodies=self._result, extent_cm=extent)
 
 
 class FakeRevolveFeatures:
@@ -406,6 +422,45 @@ class TestSurfaceExtrude:
         _install(comp)
         res = sc.extrude_handler(sketch_name="Empty", distance=5)
         assert res["isError"] is True and "no curves" in res["message"].lower()
+
+    def test_depth_that_reads_back_wrong_is_an_error(self):
+        # the extrude landed a depth Fusion took, not the one asked for -> error, never an ok
+        # payload echoing the request as if it were the sheet's depth
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)], landed_cm=0.37)
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        res = sc.extrude_handler(sketch_name="S", distance=5, units="mm")
+        assert res["isError"] is True
+        assert "reads back 3.7" in res["message"] and "requested 5.0" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_depth_read_off_the_feature_is_published(self):
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5, units="mm"))
+        assert out["distance"] == 5.0            # the feature's own extent, in the caller's units
+        assert "unverified" not in out
+
+    def test_a_flipped_depth_is_an_error_not_a_magnitude_match(self):
+        # a -15 mm request that landed +15 mm points the sheet the other way; only a SIGNED
+        # comparison catches it (the extent parameter keeps the requested sign, measured)
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)], landed_cm=1.5)
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        res = sc.extrude_handler(sketch_name="S", distance=-15, units="mm")
+        assert res["isError"] is True
+        assert "reads back 15.0" in res["message"] and "requested -15.0" in res["message"]
+
+    def test_unreadable_depth_is_flagged_unverified_not_silently_echoed(self):
+        ef = FakeExtrudeFeatures(result_bodies=[FakeBody("Surf1", is_solid=False)],
+                                 extent_readable=False)
+        comp = FakeComp(FakeFeatures(ef=ef), sketches=[FakeSketch("S")])
+        _install(comp)
+        out = _payload(sc.extrude_handler(sketch_name="S", distance=5, units="mm"))
+        assert out["unverified"] == ["distance"]
+        assert "Not read back off the feature: distance." in out["note"]
+        assert out["distance"] == 5.0            # the request, published only because it is flagged
 
     def test_surface_extrude_built_on_the_sketchs_owning_component(self):
         # The named sketch lives in a SUB-component (its parentComponent) while a DIFFERENT component

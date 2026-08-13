@@ -75,7 +75,8 @@ def _resolve_target(design, target):
             for b in (safe(lambda o=o: list(o.bRepBodies)) or []):
                 pairs.append((o, b))
         return pairs, "whole design", None
-    # by occurrence fullPathName (unambiguous), name, or component name - recursively.
+    # by occurrence fullPathName, name, or component name - recursively. A path can be worn by two
+    # siblings (Fusion enforces no name uniqueness), which for this read means both get scanned.
     matched = [o for o in all_occs
                if (safe(lambda o=o: o.fullPathName) == name or safe(lambda o=o: o.name) == name
                    or safe(lambda o=o: o.component.name) == name)]
@@ -263,12 +264,11 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return handles to them (entity tokens), each with kind, "
     "world position, and shape data (cylinder radius+axis, edge radius, face area, face outward "
-    "normal, linear-edge direction). 'target' is an "
-    "occurrence/component/body name ('' = whole design); a name matching several occurrences (e.g. "
+    "normal, linear-edge direction). A 'target' matching several occurrences (e.g. "
     "every instance of a patterned component) scans all of them and returns candidates from each - by "
     "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. A body "
-    "inside a component resolves by its own name; a name several components hold is refused naming each "
-    "as '<occurrence-or-component>:<body>', the form that picks one. 'kind' "
+    "inside a component resolves by its own name; a name several components hold is refused, naming "
+    "each qualified candidate. 'kind' "
     "filters by geometry type; 'radius' keeps matching round geometry; 'nearest_to'=[x,y,z] sorts by "
     "distance. Handles are short-lived - use them in the next call(s); if one is rejected as stale, "
     "re-run find_geometry for a fresh one.\n"
@@ -277,7 +277,7 @@ TOOL_DESCRIPTION = (
 
 find_tool = (
     Tool.create_simple(name="find_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string", "description": "Occurrence/component/body name, or '' for the whole design."})
+    .add_input_property("target", {"type": "string", "description": "Occurrence/component/body name, '<occurrence-or-component>:<body>' to pick one instance, or '' for the whole design."})
     .add_input_property(*_inputs.Choice("kind",
         ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face",
          "circular_edge", "line_edge", "arc_edge", "vertex"],

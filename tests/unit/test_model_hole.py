@@ -30,8 +30,11 @@ _REAL_RESOLVE_CLEARANCE = mh._resolve_clearance
 class FakeHoleInput:
     # refuse_placement models the live setters' documented bool return: they answer False when the
     # entities cannot carry the placement, and a False that is not read lets add() run anyway.
-    def __init__(self, kind, args, refuse_placement=False):
+    # refuse_extent is the same for setAllExtent - a declined extent never lands, so the input goes
+    # into add() without one.
+    def __init__(self, kind, args, refuse_placement=False, refuse_extent=False):
         self.refuse_placement = refuse_placement
+        self.refuse_extent = refuse_extent
         self.kind = kind            # 'simple' | 'counterbore' | 'countersink'
         self.args = args            # the ValueInput strings passed to the builder
         self.placed = None          # ('point', pt) / ('points', [pts]) / ('center', edge) /
@@ -68,6 +71,8 @@ class FakeHoleInput:
     def setDistanceExtent(self, v):
         self.extent = ("distance", v); return True
     def setAllExtent(self, direction):
+        if self.refuse_extent:
+            return False
         self.extent = ("all", direction); return True
     def setToTappedHole(self, ti):
         self.tap = ti; self.holeTapType = 2; return True
@@ -159,6 +164,7 @@ class FakeHoleFeatures:
         self.added = []
         self.miss_indices = ()       # placement-point indices that MISS the body (cut nothing)
         self.refuse_placement = False   # the setPosition* setters answer False
+        self.refuse_extent = False      # setAllExtent answers False (the through-all extent declined)
         # True echoes the input; a bool models a flag that read back different; None models one
         # that could not be read at all
         self.modeled_readback = True
@@ -169,7 +175,7 @@ class FakeHoleFeatures:
     def __len__(self):
         return len(self.added)
     def createSimpleInput(self, dia):
-        return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement)
+        return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement, self.refuse_extent)
     def createCounterboreInput(self, dia, cbd, cbdepth):
         return FakeHoleInput("counterbore", {"dia": dia, "cb_dia": cbd, "cb_depth": cbdepth})
     def createCountersinkInput(self, dia, csd, csa):
@@ -389,6 +395,21 @@ class TestSimple:
         # live-verified: THROUGH must use PositiveExtentDirection (Negative fails)
         import adsk.fusion
         assert inp.extent == ("all", adsk.fusion.ExtentDirections.PositiveExtentDirection)
+
+    def test_refused_through_extent_is_an_honest_error(self):
+        # setAllExtent answers "did it take"; a False that is not read runs on to add() and reports a
+        # hole for an extent the platform declined. The refusal must be NAMED, not read as a garbled
+        # validation raise from the add that follows.
+        d = _install()
+        hf = d.rootComponent.features.holeFeatures
+        hf.refuse_extent = True
+        res = mh.handler(hole_type="simple", diameter="8 mm", face="h", points=[[2, 3, 0]],
+                         extent="through")
+        assert res["isError"] is True
+        assert "setAllExtent returned false" in res["message"]
+        assert hf.added == []                       # no feature was built on the declined extent
+        # the placement sketch is rolled back, never orphaned on the face
+        assert d.rootComponent.sketches._byname["HolePts0"].deleted is True
 
     def test_multiple_points_one_feature(self):
         d = _install()

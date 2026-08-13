@@ -1234,6 +1234,50 @@ class ModeGuard:
 # ── plane reference (MULTI-SOURCE: origin alias | construction name | face handle) ──────────────
 
 _ORIGIN_PLANES = {"xy": "xY", "xz": "xZ", "yz": "yZ", "top": "xY", "front": "xZ", "right": "yZ"}
+# 'xy plane' / 'XYPlane' name the same origin plane as the bare axis alias (whitespace is stripped
+# before the lookup, so both spellings land on one key). Only the AXIS aliases take the suffix:
+# 'Top plane' / 'Front plane' stay reachable as construction-plane NAMES.
+_ORIGIN_PLANES.update({f"{a}plane": _ORIGIN_PLANES[a] for a in ("xy", "xz", "yz")})
+
+
+def _planes_named_in(comp, want):
+    """Every construction plane in ONE component whose name matches `want` (already lower-cased and
+    stripped) case-insensitively EXACT - never a substring. A LIST, because what several hits mean is
+    the caller's judgment, not this leaf's."""
+    hits = []
+    for cp in _common.iter_collection(_common.safe(lambda: comp.constructionPlanes)):
+        nm = _common.safe(lambda cp=cp: cp.name)
+        if isinstance(nm, str) and nm.strip().lower() == want:
+            hits.append(cp)
+    return hits
+
+
+def _construction_planes_named(des, name):
+    """Every (construction plane, owning component) named `name` in the design - the root component
+    AND every sub-component, over the one component walk (_common.all_components). A datum an agent
+    created inside a sub-component is invisible to a root-only lookup, so the walk is design-wide and
+    the name space is NOT unique: one hit resolves, several are refused with the qualified
+    '<occurrence>:<plane name>' candidates, and the first is never taken."""
+    want = (name or "").strip().lower()
+    if not want:
+        return []
+    return [(cp, comp) for comp in _common.all_components(des)
+            for cp in _planes_named_in(comp, want)]
+
+
+def _plane_reference_names(des, cp, comp):
+    """The reference string(s) that resolve back to THIS construction plane: its bare name when the
+    owner is the design root (there is no qualified form for the root), else
+    '<occurrence fullPathName>:<name>' for every occurrence placing the owner. The candidate list an
+    ambiguity refusal prints, so what it offers is what PlaneRef accepts."""
+    nm = _common.safe(lambda: cp.name) or "?"
+    root = _common.safe(lambda: des.rootComponent)
+    if comp is None or _common.same_component(comp, root):
+        return [nm]
+    occs = _common.safe(lambda: root.allOccurrencesByComponent(comp)) if root is not None else None
+    out = [f"{p}:{nm}" for o in _common.iter_collection(occs)
+           if (p := _common.safe(lambda o=o: o.fullPathName))]
+    return out or [nm]
 
 
 class PlaneRef(InputKind):
@@ -1244,7 +1288,14 @@ class PlaneRef(InputKind):
     This is the hard case for the input-kind base: one declared param, several resolution paths. It
     proves a kind can absorb multi-source resolution so tools (model_mirror, sketch_create,
     view_section, ...) stop each hand-rolling 'origin-plane-or-name' and gain face/handle support for
-    free. Resolves against the ACTIVE component's planes (so sub-component edits land correctly)."""
+    free.
+
+    An ORIGIN ALIAS resolves against the ACTIVE component (so sub-component edits land correctly). A
+    construction-plane NAME resolves design-wide - the active component first (its names shadow the
+    rest, which is what makes Fusion's per-component default names usable at all), then every other
+    component, where a unique name resolves PROXIED into the occurrence that places its owner and a
+    shared name is refused with the qualified '<occurrence>:<plane name>' candidates. That qualified
+    form picks one instance directly."""
 
     MAP_HINT = "a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle"
 
@@ -1257,7 +1308,12 @@ class PlaneRef(InputKind):
         if not s or not isinstance(s, str):
             if self.required:
                 return None, f"'{self.name}' is required (a plane alias, name, or handle)."
-            return self.default, None
+            if not isinstance(self.default, str) or not self.default.strip():
+                return self.default, None
+            # A declared default is a plane REFERENCE like any other, so it takes the same resolution
+            # path a caller's value takes - every consumer gets an entity (or the resolve error),
+            # never the raw 'xy'/'yz' string it would then hand to the API as a plane.
+            s = self.default.strip()
         des = _common.design()
         if not des:
             return None, "No active design to resolve the plane against."
@@ -1279,12 +1335,93 @@ class PlaneRef(InputKind):
             if isinstance(ent, adsk.fusion.ConstructionPlane):
                 return ent, None
             return None, f"'{self.name}': handle points at a {type(ent).__name__}, not a plane/planar face."
-        # 3) a named construction plane
-        cp = _common.safe(lambda: comp.constructionPlanes.itemByName(s))
-        if cp:
-            return cp, None
+        # 3) a named construction plane, in ANY component
+        return self._resolve_named(des, comp, s)
+
+    def _resolve_named(self, des, comp, s):
+        """(plane, error) for the NAME forms, in the order that keeps a component-local name usable:
+        the qualified '<occurrence>:<plane name>' picking one instance, then the ACTIVE component's
+        own planes, then the rest of the design (unique, else refused)."""
+        cp, qerr = self._resolve_qualified(des, s)
+        if cp is not None or qerr:
+            return cp, qerr
+        # The active component's own names win: Fusion default-names the first datum of EVERY
+        # component 'Plane1', so a design-wide vote would refuse the commonest name there is. Its
+        # plane is native to the context being built in, so it needs no lift.
+        local = _planes_named_in(comp, s.strip().lower()) if comp is not None else []
+        if len(local) == 1:
+            return local[0], None
+        matches = _construction_planes_named(des, s)
+        if len(matches) == 1:
+            return self._in_context(des, comp, *matches[0])
+        if len(matches) > 1:
+            return None, self._ambiguous(des, s, matches)
         return None, (f"'{self.name}': '{s}' is not an origin alias (xy/xz/yz), a known construction "
                       "plane name, or a planar-face handle from find_geometry.")
+
+    def _resolve_qualified(self, des, spec):
+        """Resolve '<occurrence>:<plane name>' to that occurrence's plane, proxied into its context.
+        (None, None) when spec is not a qualified form (the bare-name paths still run), (None, err)
+        when the occurrence matched but carries no such plane, (plane, None) on success."""
+        if ":" not in spec:
+            return None, None
+        head, _, tail = spec.rpartition(":")
+        head, tail = head.strip(), tail.strip()
+        if not head or not tail:
+            return None, None
+        occ, _occ_err = _resolve_occurrence(self.name, head)
+        if occ is None:
+            return None, None                 # head isn't an occurrence - let the bare-name paths try
+        hits = _planes_named_in(_common.safe(lambda: occ.component), tail.lower())
+        if not hits:
+            return None, (f"'{self.name}': occurrence '{head}' has no construction plane named "
+                          f"'{tail}'.")
+        if len(hits) > 1:
+            return None, (f"'{self.name}': occurrence '{head}' has {len(hits)} construction planes "
+                          f"named '{tail}' - rename them, or pass the plane's handle.")
+        return (_common.safe(lambda: hits[0].createForAssemblyContext(occ)) or hits[0]), None
+
+    def _in_context(self, des, comp, cp, owner):
+        """(the plane usable where this call builds, error). A plane native to ANOTHER component is
+        component-LOCAL, and Fusion refuses it in the current context ('object is not in the assembly
+        context of this component'), so it is PROXIED into the single occurrence that places its
+        owner - the lift single_placement decides. A root-owned plane is already in assembly context
+        and is handed back native; an owner placed several times is refused rather than guessed."""
+        root = _common.safe(lambda: des.rootComponent)
+        if owner is None or _common.same_component(owner, root):
+            return cp, None
+        occ, err = single_placement(f"'{self.name}': that construction plane", cp, comp, des)
+        if err:
+            return None, self._instance_refusal(des, cp, owner)
+        if occ is None:
+            return cp, None
+        return (_common.safe(lambda: cp.createForAssemblyContext(occ)) or cp), None
+
+    def _ambiguous(self, des, s, matches):
+        """The refusal for a name several components carry: every hit named as the string that
+        resolves to it. The ROOT component's own plane has no qualified form - it is reached by the
+        bare name with the root active - so that remedy is stated whenever a root plane is a hit."""
+        cands = list(dict.fromkeys(c for cp, owner in matches
+                                   for c in _plane_reference_names(des, cp, owner)))
+        fix = (" The bare name reaches the ROOT component's own plane only while the root is active "
+               "(design_activate_component)." if any(":" not in c for c in cands) else "")
+        return (f"'{self.name}': '{s}' is ambiguous - {len(matches)} construction planes share that "
+                f"name ({', '.join(cands[:8])}). Pass one of these qualified names.{fix}")
+
+    def _instance_refusal(self, des, cp, owner):
+        """The refusal for a plane whose owning component is placed several times (each instance
+        holds it somewhere different) or not at all - single_placement's verdict, worded for a plane
+        and pointing at the form that picks an instance."""
+        nm = _common.safe(lambda: cp.name) or "?"
+        owner_name = _common.safe(lambda: owner.name) or "another component"
+        cands = [c for c in _plane_reference_names(des, cp, owner) if ":" in c]
+        if not cands:
+            return (f"'{self.name}': construction plane '{nm}' is on component '{owner_name}', which "
+                    "is not placed in this assembly, so it cannot be brought into the assembly's "
+                    "space.")
+        return (f"'{self.name}': construction plane '{nm}' is on component '{owner_name}', which is "
+                f"placed {len(cands)} times. Each instance holds it somewhere different, so the "
+                f"instance is not guessed - pass one of: {', '.join(cands[:8])}.")
 
 
 # ── the 'surface' operand: a plane, or - where the API takes one - any face ─────────────────────
@@ -1816,43 +1953,79 @@ class Choice(InputKind):
         return v, None
 
 
-# ── occurrence reference (an assembly instance, by its unambiguous fullPathName) ──────────────────
+# ── occurrence reference (an assembly instance, by its entityToken handle or a path/name) ─────────
 #
 # The wrong-instance epidemic: ~15 tools each hand-rolled "match name, else substring-match name", which
-# silently grabs the FIRST of several same-named instances. An occurrence's `name` is only locally unique
-# (e.g. "Bolt:1" appears under every sub-assembly); its `fullPathName` is the unique key. This kind
-# resolves once, here, preferring fullPathName and refusing an AMBIGUOUS substring match (listing the
-# candidates) instead of guessing - so design_get(include=['tree'])'s fullPathName (now emitted) flows straight in.
+# silently grabs the FIRST of several same-named instances. Fusion enforces NO name uniqueness at any
+# level: an occurrence's `name` repeats under every sub-assembly ("Bolt:1"), and even a fullPathName can
+# be worn by two SIBLINGS - an xref insert plus an import of the same-named source produced two
+# 'CMG-050:1' occurrences under one parent, one referenced and one not (measured), neither addressable
+# by any name form. The entityToken is the exact identity, so it is the FIRST form this resolver tries;
+# a path/name resolves only when it names exactly one instance, and is refused - listing each
+# candidate's handle - when it names several.
+
+def _occurrence_candidates(occs, cap=8):
+    """The candidate list an occurrence-ambiguity refusal names: per hit, what tells THIS instance
+    apart from the others wearing the same path/name - its component, whether it is an external
+    reference, and the entityToken 'handle' that addresses it exactly. The handle is the actionable
+    part (the caller passes it straight back), which is why it is printed rather than pointed at."""
+    out = []
+    for occ in occs[:cap]:
+        comp = _common.safe(lambda o=occ: o.component.name) or "?"
+        ref = _common.read_flag(lambda o=occ: o.isReferencedComponent)
+        ref_label = {True: "referenced", False: "local"}.get(ref, "reference state unreadable")
+        token = _common.safe(lambda o=occ: o.entityToken) or "(unreadable)"
+        out.append(f"component '{comp}', {ref_label}, handle '{token}'")
+    return "; ".join(out)
+
 
 def _resolve_occurrence(name, raw, candidates=None):
     """Resolve `raw` to a single live Occurrence. Returns (occurrence, error).
 
-    Order: (1) exact fullPathName, (2) exact name, (3) case-insensitive substring on name ONLY when it
-    matches exactly one - an ambiguous substring is an ERROR (lists the candidate fullPathNames), never a
-    silent first-match. The error on a miss samples available fullPathNames so the agent can re-issue the
-    unambiguous key (design_get(include=['tree']) emits it).
+    Order: (1) an entityToken HANDLE - the exact identity, the one form no ambiguity can reach;
+    (2) exact fullPathName; (3) exact name; (4) case-insensitive substring on name, ONLY when it
+    matches exactly one. EVERY by-string form refuses when it matches several occurrences, naming each
+    candidate's handle, and never returns a first match. The error on a miss samples the available
+    fullPathNames so the agent can re-issue a form that resolves (design_get(include=['tree']) emits
+    both the path and the handle).
 
     `candidates`: an optional list the AMBIGUOUS hits are appended to, so a caller that can still act
     on an ambiguous name (TargetRef, when every hit is an instance of ONE component) reads them from
     the one matcher instead of re-rolling it. The refusal is unchanged."""
     want = (raw or "").strip() if isinstance(raw, str) else raw
     if not want:
-        return None, f"'{name}' is required (an occurrence name or fullPathName from design_get(include=['tree']))."
+        return None, f"'{name}' is required (an occurrence handle or fullPathName from design_get(include=['tree']))."
     des = _common.design()
     if not des:
         return None, "No active design to resolve the occurrence against."
+    # 1) an entityToken handle. Resolve by what RESOLVES, not by the string's shape (BodyRef's path):
+    # ask findEntityByToken, and a plain name simply yields nothing and falls through to the string
+    # forms below. A token that resolves to something else is REFUSED naming what it found - silently
+    # falling through would report "no occurrence matching <token>" and hide the real mistake.
+    ent = _resolve_token_entity(des, want)
+    if ent is not None:
+        if _isinstance(ent, adsk.fusion.Occurrence):
+            return ent, None
+        return None, (f"'{name}': that handle points at a {type(ent).__name__}, not an occurrence. "
+                      "design_get(include=['tree']) emits an occurrence handle.")
     occs = _common.all_occurrences(des)
     paths = [(_common.safe(lambda o=o: o.fullPathName) or "") for o in occs]
     names = [(_common.safe(lambda o=o: o.name) or "") for o in occs]
-    # 1) exact fullPathName (the unambiguous key)
-    for o, fp in zip(occs, paths):
-        if fp == want:
-            return o, None
-    # 2) exact name - collect ALL hits, never the first. Occurrence.name ("Bolt:2") is NOT unique:
+    # 2) exact fullPathName - collect ALL hits, never the first. Two siblings CAN wear one path (the
+    # xref-plus-import case above), and there is no string that tells them apart, so the refusal hands
+    # back the handles that do.
+    by_path = [o for o, fp in zip(occs, paths) if fp == want]
+    if len(by_path) == 1:
+        return by_path[0], None
+    if len(by_path) > 1:
+        if candidates is not None:
+            candidates.extend(by_path)
+        return None, (f"'{name}': the path '{want}' is worn by {len(by_path)} occurrences - "
+                      f"{_occurrence_candidates(by_path)}. Pass the 'handle' of the one you mean.")
+    # 3) exact name - collect ALL hits, never the first. Occurrence.name ("Bolt:2") is NOT unique:
     # instancing a sub-assembly a second time replicates its children's names verbatim, so
-    # "SubA:1+Bolt:2" and "SubA:2+Bolt:2" both read "Bolt:2" (measured). fullPathName is the unique
-    # key. A first match would silently target the wrong instance - and design_delete_occurrence
-    # would delete it.
+    # "SubA:1+Bolt:2" and "SubA:2+Bolt:2" both read "Bolt:2" (measured). A first match would silently
+    # target the wrong instance - and design_delete_occurrence would delete it.
     exact = [(o, fp) for o, fp, nm in zip(occs, paths, names) if nm == want]
     if len(exact) == 1:
         return exact[0][0], None
@@ -1861,8 +2034,8 @@ def _resolve_occurrence(name, raw, candidates=None):
             candidates.extend(o for o, _fp in exact)
         cands = ", ".join(fp or "?" for _, fp in exact[:8])
         return None, (f"'{name}': '{want}' names {len(exact)} occurrences ({cands}). Pass the exact "
-                      "fullPathName (design_get(include=['tree']) emits it).")
-    # 3) substring on name - but ONLY if unique
+                      "fullPathName, or a 'handle' (design_get(include=['tree']) emits both).")
+    # 4) substring on name - but ONLY if unique
     low = want.lower()
     hits = [(o, fp) for o, fp, nm in zip(occs, paths, names) if low in nm.lower()]
     if len(hits) == 1:
@@ -1872,51 +2045,54 @@ def _resolve_occurrence(name, raw, candidates=None):
             candidates.extend(o for o, _fp in hits)
         cands = ", ".join(fp or "?" for _, fp in hits[:8])
         return None, (f"'{name}': '{want}' is ambiguous - matches {len(hits)} occurrences "
-                      f"({cands}). Pass the exact fullPathName (design_get(include=['tree']) emits it).")
+                      f"({cands}). Pass the exact fullPathName, or a 'handle' "
+                      "(design_get(include=['tree']) emits both).")
     sample = ", ".join(p for p in paths[:12] if p)
     return None, (f"'{name}': no occurrence matching '{want}'. Available (sample): {sample or '(none)'}. "
-                  "Use design_get(include=['tree']) for the full list / fullPathName.")
+                  "Use design_get(include=['tree']) for the full list (each row carries its handle).")
 
 
 class OccurrenceRef(InputKind):
-    """A reference to an assembly OCCURRENCE (a component instance), by its `fullPathName` (unambiguous,
-    from design_get(include=['tree'])) or its `name` (locally unique only - a bare substring is rejected when it
-    matches several instances rather than silently grabbing the first). Resolves to the live
-    adsk.fusion.Occurrence."""
+    """A reference to an assembly OCCURRENCE (a component instance): a `handle` - its entityToken, which
+    design_get(include=['tree']) emits - or its `fullPathName` / `name`. The handle is the exact identity;
+    Fusion enforces no name uniqueness at any level (two siblings can wear one fullPathName), so a path
+    or name several instances answer to is refused with each candidate's handle rather than first-matched.
+    Resolves to the live adsk.fusion.Occurrence."""
 
-    MAP_HINT = "an assembly occurrence by fullPathName (refuses ambiguous names)"
+    MAP_HINT = "an assembly occurrence by entityToken handle (exact) or fullPathName/name (refuses ambiguity)"
 
     def contract_note(self) -> str:
-        return ("An occurrence's fullPathName (unambiguous, from design_get(include=['tree'])) or its name "
-                "(a name that matches several instances is rejected, not guessed).")
+        return ("An occurrence 'handle' (the entityToken design_get(include=['tree']) emits - the exact "
+                "identity) or its fullPathName/name (refused when several instances answer to it).")
 
     def resolve(self, raw):
         if raw in (None, "", []):
             if self.required:
-                return None, f"'{self.name}' is required (an occurrence name or fullPathName)."
+                return None, f"'{self.name}' is required (an occurrence handle or fullPathName)."
             return self.default, None
         return _resolve_occurrence(self.name, raw)
 
 
 class OccurrenceRefList(InputKind):
     """A list of occurrence references (JSON list or comma-separated), each resolved via OccurrenceRef's
-    fullPathName-preferring, ambiguity-refusing logic. ALL must resolve (an unresolved/ambiguous element
+    handle-first, ambiguity-refusing logic. ALL must resolve (an unresolved/ambiguous element
     fails the whole list, with its value named, so a tool never half-applies)."""
 
     json_type = "array"
-    MAP_HINT = "several occurrences (fullPathNames/names)"
+    MAP_HINT = "several occurrences (entityToken handles or fullPathNames/names)"
 
     def schema(self) -> dict:
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc()}
 
     def contract_note(self) -> str:
-        return ("A list of occurrences, each a fullPathName (from design_get(include=['tree'])) or a name "
-                "(ambiguous names are rejected, not guessed).")
+        return ("A list of occurrences, each a 'handle' (the entityToken from "
+                "design_get(include=['tree'])) or a fullPathName/name (refused when several instances "
+                "answer to it).")
 
     def resolve(self, raw):
         if raw in (None, "", []):
             if self.required:
-                return None, f"'{self.name}' is required (occurrence names or fullPathNames)."
+                return None, f"'{self.name}' is required (occurrence handles or fullPathNames)."
             return self.default, None
         if isinstance(raw, str):
             wanted = [s.strip() for s in raw.split(",") if s.strip()]
@@ -2341,6 +2517,19 @@ def _split_text_ref(s):
     except ValueError:
         idx = None
     return sketch.strip(), idx
+
+
+def is_text_ref(v) -> bool:
+    """True when `v` is a COMPLETE sketch-TEXT address: 'text:<i>' or '<sketch>/text:<i>'.
+
+    The routing predicate for an input that carries BOTH a text address and something else (an index
+    selector, a profile handle): is_handle answers False for a text address - it is short and
+    non-numeric, not a token - so a tool that only asks is_handle reads 'text:0' as an index. Reads
+    through _split_text_ref, the same parser ProfileRef.allow_text resolves with, so the routing and
+    the resolution can never disagree about what a text address is. An address opening with 'text:'
+    but carrying no whole-number index is NOT one: only a complete address routes."""
+    parsed = _split_text_ref(v)
+    return parsed is not None and parsed[1] is not None
 
 
 def _resolve_sketch_text(name, sketch_name, index, raw):

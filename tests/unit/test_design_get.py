@@ -474,10 +474,11 @@ class TestRootBodies:
 # The router tests above stub _slice_tree; these pin the slice's OWN behavior: the depth clamp, the
 # node cap with its truncated flag, per-node counts, reference metadata, and the component scope.
 
-def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None):
-    """A tree-walkable occurrence: named collections (count + iterable) for bodies/children."""
+def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=None):
+    """A tree-walkable occurrence: named collections (count + iterable) for bodies/children, plus the
+    entityToken the row publishes as its handle."""
     return SimpleNamespace(
-        name=name, fullPathName=name,
+        name=name, fullPathName=name, entityToken=token or f"tok-{name}",
         component=SimpleNamespace(name=comp or name.split(":")[0]),
         isReferencedComponent=is_ref,
         bRepBodies=_NamedCollection([SimpleNamespace(name=f"B{i+1}") for i in range(bodies)]),
@@ -505,6 +506,21 @@ class TestSliceTree:
         assert bracket["body_count"] == 2 and bracket["child_count"] == 1
         assert [k["name"] for k in bracket["children"]] == ["Pin:1"]
         assert out["truncated"] is False and "root_bodies" not in out
+
+    def test_every_row_carries_its_exact_identity_handle(self):
+        # a name repeats under every sub-assembly and even a fullPathName can be worn by two
+        # siblings, so a row that published only names would leave some instances unaddressable.
+        design = _tree_design([_tocc("Bracket:1", kids=[_tocc("Pin:1")])])
+        out, _ = dg._slice_tree(design, 3, "")
+        node = out["children"][0]
+        assert node["handle"] == "tok-Bracket:1"
+        assert node["children"][0]["handle"] == "tok-Pin:1"
+
+    def test_an_unreadable_token_reads_as_no_handle_not_a_wrong_one(self):
+        occ = _tocc("Gear:1")
+        del occ.entityToken
+        node = dg._walk_occurrence(occ, 0, 3, {"n": 0, "truncated": False})
+        assert node["handle"] is None and node["full_path"] == "Gear:1"
 
     def test_depth_clamped_to_max(self):
         out, _ = dg._slice_tree(_tree_design([_tocc("Gear:1")]), 99, "")

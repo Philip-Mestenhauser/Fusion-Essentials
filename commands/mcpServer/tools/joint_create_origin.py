@@ -50,12 +50,68 @@ _BBOX_TARGET = _inputs.TargetRef("bbox_target", allow=("body", "occurrence", "co
 _ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z",
                                description="anchor='bbox_center': the axis the frame's Z aligns to.")
 
+# The component whose jointOrigins collection RECEIVES the origin - measured:
+# sub.component.jointOrigins.createInput(geo) + .add(inp) lands a JO whose parentComponent IS the
+# sub-component, which is what lets a JO serve as the sub-component side of a joint. Omitted = root.
+_COMPONENT = _inputs.OccurrenceRef("component", required=False,
+    description="Occurrence whose component receives the joint origin; omit for root.")
+
 
 def _vec(v):
     if v is None:
         return None
     return [round(safe(lambda: v.x, 0.0), 6), round(safe(lambda: v.y, 0.0), 6),
             round(safe(lambda: v.z, 0.0), 6)]
+
+
+def _is_identity(matrix):
+    """True/False for a 4x4 transform reading as the identity; None when it cannot be read at all."""
+    try:
+        vals = [float(v) for v in (safe(lambda: matrix.asArray()) or [])]
+    except Exception:
+        return None
+    if len(vals) != 16:
+        return None
+    ident = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+    return all(abs(v - i) <= 1e-9 for v, i in zip(vals, ident))
+
+
+def _sits_at_world_origin(occ):
+    """True when `occ` AND every occurrence it nests inside carry an identity transform - the one case
+    where a world coordinate and that component's own coordinate are the same numbers. False when a
+    transform moves/rotates it, None when a transform could not be read.
+
+    The whole chain is checked, not just the leaf: an occurrence placed at identity INSIDE a moved
+    parent is still displaced in world space. Occurrence.transform is relative to the PARENT
+    component, so nothing but the chain answers this."""
+    node = occ
+    for _ in range(64):      # a path this deep is a cycle, not an assembly
+        if node is None:
+            return True
+        m = safe(lambda n=node: n.transform2)
+        if m is None:
+            m = safe(lambda n=node: n.transform)
+        verdict = _is_identity(m) if m is not None else None
+        if verdict is not True:
+            return verdict
+        node = safe(lambda n=node: n.assemblyContext)
+    return None
+
+
+def _world_space_refusal(anchor, occ, verdict):
+    """The refusal for a WORLD-coordinate anchor aimed at a component that is not at the world origin
+    (or whose placement cannot be read). A joint origin inside a component is positioned in THAT
+    component's space, so those coordinates would land the frame somewhere else."""
+    where = safe(lambda: occ.fullPathName) or safe(lambda: occ.name) or "that occurrence"
+    why = ("could not be read" if verdict is None else
+           "is not the identity - it is moved or rotated in the assembly")
+    return (f"'component': anchor='{anchor}' places the frame from WORLD coordinates, but a joint "
+            f"origin inside a component is positioned in THAT component's own space, and the "
+            f"placement transform of '{where}' {why}. Refusing rather than landing the frame "
+            "somewhere else. Anchor on geometry inside the component instead "
+            "(anchor='geometry'/'face_center'/'sketch_line'), use anchor='coordinates' with "
+            "target='origin' to sit at the component's own origin, or omit 'component' to land on "
+            "the root, where the coordinates ARE world coordinates.")
 
 
 def _bbox_center_cm(entity):
@@ -201,7 +257,9 @@ def _geometry_from_args(design, comp, anchor, target, x_cm, y_cm, z_cm,
         # own offsetX/Y/Z PARAMETERS (applied on the input in the handler). This makes the reported
         # location REAL and recompute-robust - NOT an undimensioned point floating in a hidden auto-sketch
         # (which reads plausibly but drifts on recompute and spawns 0.00mm parameters). The frame stays
-        # world-aligned, so the offsets map straight to world X/Y/Z.
+        # world-aligned, so the offsets map straight to X/Y/Z of THIS component's space - the root's
+        # (world) unless the handler resolved a sub-component, which it only does at world-origin
+        # placement. `comp` is the NATIVE component, so its origin point is the native one.
         origin_pt = safe(lambda: comp.originConstructionPoint)
         if origin_pt is None:
             return None, None, "coordinates: the component has no origin construction point to anchor on."
@@ -257,7 +315,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             x: float = 0.0, y: float = 0.0, z: float = 0.0,
             sketch_name: str = "", entity_index: int = 0, keypoint: str = "start",
             geometry: str = "", name: str = "",
-            bbox_target: str = "", orient_axis: str = "z", flip: bool = False) -> dict:
+            bbox_target: str = "", orient_axis: str = "z", flip: bool = False,
+            component: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
@@ -285,7 +344,32 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     else:
         x_cm, y_cm, z_cm = x * scale, y * scale, z * scale
 
+    # 'component' names the occurrence whose component RECEIVES the origin (its jointOrigins
+    # collection); omitted keeps today's root landing. OccurrenceRef refuses an ambiguous name rather
+    # than grabbing an instance. The component is the NATIVE one (occ.component), so the anchor and
+    # the offsets it carries are built in that component's own space, the way the platform stores them.
     comp = design.rootComponent
+    target_occ = None
+    if (component or "").strip():
+        target_occ, cerr = _COMPONENT.resolve(component)
+        if cerr:
+            return error(cerr)
+        native = safe(lambda: target_occ.component)
+        if native is None:
+            return error(f"'component': occurrence '{safe(lambda: target_occ.fullPathName) or component}' "
+                         "has no readable component to receive the joint origin.")
+        comp = native
+        # A WORLD-coordinate anchor (an x,y,z or a world bounding-box center) only agrees with the
+        # component's own space while that component sits at the world origin unrotated. Anything
+        # else is refused rather than placed wrong; an entity anchor carries no coordinates of ours,
+        # so it is not gated here.
+        world_anchor = (anchor == "bbox_center"
+                        or (anchor == "coordinates"
+                            and any(abs(v) > 1e-12 for v in (x_cm, y_cm, z_cm))))
+        if world_anchor:
+            aligned = _sits_at_world_origin(target_occ)
+            if aligned is not True:
+                return error(_world_space_refusal(anchor, target_occ, aligned))
 
     meta = {}
     geom, desc, err = _geometry_from_args(
@@ -293,6 +377,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         bbox_target, orient_axis, flip, meta)
     if err:
         return error(err)
+    if target_occ is not None and anchor == "coordinates":
+        desc = "component origin" if target == "origin" else "coordinates in the component's space"
     if not geom:
         return error("Could not build joint geometry from the given anchor.")
 
@@ -329,6 +415,18 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         return error(f"Joint origin creation failed: {e}")
     if not joint_origin:
         return error("jointOrigins.add returned nothing.")
+
+    # Set-then-verify the LANDING: which component the origin actually belongs to is read back off the
+    # created JO, never assumed from the collection it was added to. A JO on the wrong component cannot
+    # serve as that component's side of a joint, so a mismatch is a failure - roll it back.
+    landed_comp = safe(lambda: joint_origin.parentComponent)
+    landed_name = safe(lambda: landed_comp.name) if landed_comp is not None else None
+    want_name = safe(lambda: comp.name) or "?"
+    if landed_comp is not None and not _common.same_component(landed_comp, comp):
+        got_name = landed_name or "?"
+        safe(lambda: joint_origin.deleteMe())
+        return error(f"Joint origin landed on component '{got_name}', not the requested "
+                     f"'{want_name}'. Rolled it back; nothing changed.")
 
     jo_name_final, rename_warning = apply_rename(joint_origin, name)
 
@@ -394,7 +492,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     "anchor": anchor,
     "anchored_on": desc,
     "frame_axes": axes,
-    "component": safe(lambda: comp.name),
+    "component": landed_name or want_name,
+    "component_verified": landed_comp is not None,
     "joint_origin_count": safe(lambda: comp.jointOrigins.count),
     "note": ("Joint origin created. frame_axes shows the resulting Z/X/Y directions. For an oriented "
         "frame: anchor='bbox_center' (Z = orient_axis) / 'face_center' (Z = face normal) / a sketch "
@@ -409,13 +508,19 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         payload["location"] = offset_params or {"x": (0.0 if target == "origin" else x),
     "y": (0.0 if target == "origin" else y),
     "z": (0.0 if target == "origin" else z), "units": units}
-        payload["held_by"] = "parametric offsetX/Y/Z from the model origin"
+        payload["held_by"] = ("parametric offsetX/Y/Z from the component's origin"
+                              if target_occ is not None else
+                              "parametric offsetX/Y/Z from the model origin")
         if offset_params is not None:
             payload["offset_parameters"] = offset_params
     if param_names:
         payload["model_parameters"] = param_names
         payload["note"] += (" model_parameters names the dNN offset params - param_set one to an "
                             "expression to drive this frame parametrically.")
+    if target_occ is not None:
+        payload["note"] += (f" This origin lives in component '{payload['component']}' - its offsets "
+                            "are measured from THAT component's origin, so it can serve as that "
+                            "component's side of a joint.")
     if computed is not None:
         payload["computed_anchor"] = computed
         if readback is not None:
@@ -428,7 +533,9 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 TOOL_DESCRIPTION = (
     "Create a Joint Origin (a reusable coordinate frame anchor). 'anchor' picks how it's placed:\n"
     "- coordinates (default): at x,y,z, or target='origin'. World-aligned, root-absolute; held by "
-    "parametric offsetX/Y/Z from the model origin (dNN params named in the result for param_set).\n"
+    "parametric offsetX/Y/Z from the model origin (dNN params named in the result for param_set); "
+    "with 'component' the offsets run from THAT component's origin, so x,y,z is refused unless it "
+    "sits at the world origin unrotated.\n"
     "- sketch_line: on a sketch line (sketch_name + entity_index + keypoint); Z runs along it.\n"
     "- sketch_point: on a sketch point (position only).\n"
     "- geometry: on a find_geometry handle - planar face (Z=normal), cylinder/cone face or edge "
@@ -436,7 +543,8 @@ TOOL_DESCRIPTION = (
     "- bbox_center: at bbox_target's world bounding-box center, Z aligned to 'orient_axis' (world "
     "x/y/z or an edge/line handle; 'flip' reverses it).\n"
     "- face_center: at a planar face's centroid ('geometry'), Z = the face normal.\n"
-    "Optional 'name'. Returns frame_axes (Z/X/Y). Lands on the root component, not the active one. "
+    "Optional 'name'. Returns frame_axes (Z/X/Y). Lands on the root component unless 'component' "
+    "names the occurrence/component to receive it. "
     "Placement is a snapshot - bbox_center/face_center don't track a later resize; for that, use "
     "anchor='coordinates' with offset expressions on the dNN params."
 )
@@ -460,6 +568,7 @@ tool = (
     .add_input_property("flip", {"type": "boolean",
             "description": "Flip the oriented Z axis 180 deg (anchor=bbox_center)."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the joint origin."})
+    .add_input_property(*_COMPONENT.as_property())
     .strict_schema()
 )
 

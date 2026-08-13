@@ -122,9 +122,24 @@ def main():
         return 0
 
     pytest_cmd = [sys.executable, "-m", "pytest", "-q"]
+    cov_json = None
     if args.fast:
         pytest_cmd.append(os.path.join("tests", "lints"))
-    if not _run("pytest" + (" (lints only)" if args.fast else ""), pytest_cmd,
+    else:
+        # The full suite runs coverage-instrumented so the per-file ratchet (check_coverage.py)
+        # can gate on the same run - no second suite pass. pytest-cov is a hard dependency of
+        # the full button; the stage fails loudly with the install command if it is absent.
+        try:
+            import pytest_cov  # noqa: F401
+        except ImportError:
+            print("== pytest (coverage)")
+            print("\nFAILED at: pytest (coverage)")
+            print("repair:    py -3 -m pip install pytest-cov")
+            return 1
+        cov_json = os.path.join(TESTS, ".coverage_report.json")
+        pytest_cmd += ["--cov=commands/mcpServer/tools", "--cov=commands/mcpServer/server",
+                       "--cov-branch", "--cov-report=json:" + cov_json]
+    if not _run("pytest" + (" (lints only)" if args.fast else " (with coverage)"), pytest_cmd,
                 "read the failure above - a lint names its own repair; a unit test names the "
                 "behavior that changed"):
         return 1
@@ -132,6 +147,12 @@ def main():
     if args.fast:
         print("\nFAST GREEN: generators current + lints pass. Run the full button before pushing.")
         return 0
+
+    if not _run("coverage ratchet",
+                [sys.executable, os.path.join(TESTS, "check_coverage.py"), cov_json],
+                "test the regressed file's new logic, or adjust its floor in "
+                "tests/check_coverage.py WITH the reason in the commit message"):
+        return 1
 
     verify = os.path.join(TESTS, "live", "tool_verify.py")
     if not _run("tool_verify --check", [sys.executable, verify, "--check"],

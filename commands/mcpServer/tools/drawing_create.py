@@ -4,8 +4,8 @@
 """Create a 2D drawing document from the active design's saved cloud DataFile (CreateDrawingInput +
 its automationPreferences tree). The automatic generator lays the views out; manual creation needs a
 template carrying view-placeholder information. The new drawing is a CLOUD file, returned as file_id
-(lineage URN) and NOT opened: a never-reviewed auto-drawing surfaces an interactive view pane that
-blocks a headless open - review it once in the Fusion UI first. WRITES a drawing.
+(lineage URN) and NOT opened - doc_open opens it, no Fusion UI step first (measured: a drawing never
+reviewed in the UI opens and drives on current builds). WRITES a drawing.
 """
 
 import adsk.core
@@ -557,11 +557,12 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         return error("createDrawing returned a drawing DataFile but no file_id could be read from it, "
                      "so the created drawing cannot be located for export. Treating this as a failure.")
 
-    note = ("Drawing created as a CLOUD file (NOT opened). Opening a never-reviewed drawing surfaces "
-            "an interactive view pane that blocks a headless open - open it ONCE in the Fusion UI to "
-            "review the layout and save; after that doc_open and drawing_export (PDF) work "
-            "headlessly. settings_requested were applied best-effort to the input (they configure "
-            "creation and are not read back).")
+    note = ("Drawing created as a CLOUD file (NOT opened). To reach it: doc_open(file_id, "
+            "force_api_open=true), then drawing_export for the PDF - measured on 2705.0.87, a "
+            "drawing never reviewed in the Fusion UI opens and drives that way, so no manual step "
+            "is needed up front. If that open instead fails or hangs, opening the document once in "
+            "the Fusion UI is the known workaround from earlier builds. settings_requested were "
+            "applied best-effort to the input (they configure creation and are not read back).")
     if mode_v == "automatic":
         note += (" Manual dimensions/annotations and custom title blocks beyond the automatic "
                  "layout are not placed by this tool.")
@@ -593,8 +594,8 @@ TOOL_DESCRIPTION = (
     "Create a 2D drawing from the active design via Fusion's automatic generator. Configures the "
     "generator's sheet, annotation and view-display preferences. Source design must be "
     "cloud-saved. Result is a CLOUD "
-    "file, NOT opened - file_id (lineage URN) returned. Open it ONCE in the Fusion UI before "
-    "doc_open/drawing_export can run headlessly (an unreviewed auto-drawing blocks headless open). "
+    "file, NOT opened - file_id (lineage URN) returned; doc_open then drawing_export runs it to PDF "
+    "with no Fusion UI step first (measured on current builds). "
     "Per-view placement/scale is not API-controllable. A client TIMEOUT is not a verdict here - the "
     "create can still land; re-check with data_get before retrying, or a retry mints a second drawing."
 )

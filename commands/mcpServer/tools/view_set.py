@@ -32,7 +32,7 @@ app = adsk.core.Application.get()
 # server. Cleared on reload (like _SNAPSHOTS).
 _CALL_SEQ = 0
 
-_ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation",
+_ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation", "display",
     "style", "restore", "save_view", "apply_view", "list_views")
 # The occurrence cap snapshot/restore/clear_isolation run under. An assembly with more occurrences
 # than this gets a PARTIAL snapshot, so every payload built off the walk publishes 'truncated' and
@@ -47,7 +47,7 @@ _TARGET = _inputs.OccurrenceRefList("target",
 # (Fusion isolates occurrences, not bodies). with_kinds so the handler branches occurrence-vs-body.
 _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
         description="Target(s) to isolate/show/hide.",
-        contract=("A list of occurrences (fullPathName/name) and/or - hide/show only - bodies "
+        contract=("A list of occurrences (handle/fullPathName/name) and/or - hide/show only - bodies "
                   "(find_geometry 'handle' or body name); ambiguous names are refused."))
 _FOCUS = _inputs.OccurrenceRef("focus",
         description="Occurrence to fit the view to (orient).")
@@ -162,12 +162,23 @@ def _do_snapshot(design):
             continue
         occ_state[fp] = (bool(safe(lambda o=o: o.isLightBulbOn, True)),
                          bool(safe(lambda o=o: o.isIsolated, False)))
+    # Per-component display-folder bulbs (sketches/construction/origins/joints), keyed by the
+    # component's entityToken (names are non-unique) - so a display toggle is covered by restore.
+    folder_state = {}
+    for comp in _view_common.all_display_components(design):
+        tok = safe(lambda comp=comp: comp.entityToken)
+        if not tok:
+            continue
+        folder_state[tok] = {
+            attr: _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr))
+            for attr in _view_common.DISPLAY_FOLDERS.values()}
     # Camera objects are snapshots by value when read; store a copy.
     cam = vp.camera
     _SNAPSHOTS[_doc_key()] = {
                          "camera": cam,
                          "visualStyle": int(safe(lambda: vp.visualStyle, 0)),
                          "occ": occ_state,
+                         "folders": folder_state,
                          "truncated": truncated,
     }
     note = ("Current camera, visual style, and all occurrence visibility saved. "
@@ -418,6 +429,69 @@ def _do_style(style):
         "visual_style_before": before, "visual_style_after": int(vp.visualStyle)})
 
 
+def _do_display(design, categories, visible):
+    """Toggle the non-body display FOLDERS (sketches / construction / origins / joints) design-wide
+    via each component's folder bulb - the switch that clears construction clutter from product
+    shots without touching any entity's own bulb. Every write is read back; a component whose bulb
+    does not land is reported stuck, never silently skipped."""
+    if visible is None:
+        return error("Provide 'visible' - true to show the chosen categories, false to hide them.")
+    # A permissive client can deliver the boolean as a STRING ('false' is truthy to bool()) -
+    # parse the two legal words, refuse anything else instead of guessing a direction.
+    if isinstance(visible, str):
+        word = visible.strip().lower()
+        if word not in ("true", "false"):
+            return error(f"'visible' must be true or false; got '{visible}'.")
+        visible = (word == "true")
+    if isinstance(categories, str) and categories.strip().startswith("["):
+        # A permissive client can deliver the array as its JSON text - decode before splitting.
+        try:
+            categories = json.loads(categories)
+        except ValueError:
+            pass
+    cats = categories if isinstance(categories, list) else (
+        [c.strip() for c in str(categories).split(",") if c.strip()] if categories else [])
+    cats = [str(c).strip() for c in cats if str(c).strip()]
+    cats = cats or list(_view_common.DISPLAY_FOLDERS)      # omitted = every category
+    unknown = [c for c in cats if c not in _view_common.DISPLAY_FOLDERS]
+    if unknown:
+        return error(f"Unknown display categories: {', '.join(unknown)}. "
+                     f"Valid: {', '.join(_view_common.DISPLAY_FOLDERS)}.")
+
+    want = bool(visible)
+    set_counts = {c: 0 for c in cats}
+    stuck = []
+    comps = _view_common.all_display_components(design)
+    for comp in comps:
+        cname = safe(lambda comp=comp: comp.name) or "?"
+        for cat in cats:
+            attr = _view_common.DISPLAY_FOLDERS[cat]
+            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is want:
+                continue                                   # already there - nothing to write
+            safe(lambda comp=comp, attr=attr: setattr(comp, attr, want))
+            now = _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr))
+            if now is want:
+                set_counts[cat] += 1
+            else:
+                stuck.append({"component": cname, "category": cat,
+                              "reads": now})
+    out = {
+        "action": "display",
+        "visible": want,
+        "categories": cats,
+        "components_walked": len(comps),
+        "folders_set": set_counts,
+        "note": (("Shown" if want else "Hidden") + ": " + ", ".join(cats) + " (the per-component "
+                 "folder bulbs; each entity's own bulb is untouched, so re-showing restores what "
+                 "was individually visible before). view_screenshot to see the result."),
+    }
+    if stuck:
+        out["stuck"] = stuck
+        out["note"] += (f" WARNING: {len(stuck)} folder bulb(s) did not land or could not be "
+                        "read back - see 'stuck'.")
+    return ok(out)
+
+
 def _do_restore(design):
     key = _doc_key()
     snap = _SNAPSHOTS.get(key)
@@ -449,6 +523,17 @@ def _do_restore(design):
         if isolated:
             safe(lambda o=o: setattr(o, "isIsolated", True))
         restored_occ += 1
+    # restore the display-folder bulbs a 'display' toggle may have moved (token-keyed; a bulb whose
+    # snapshot read was None is left alone - unreadable then proves nothing about the wanted state)
+    folders = snap.get("folders") or {}
+    if folders:
+        for comp in _view_common.all_display_components(design):
+            saved = folders.get(safe(lambda comp=comp: comp.entityToken) or "")
+            if not saved:
+                continue
+            for attr, val in saved.items():
+                if val is not None:
+                    safe(lambda comp=comp, attr=attr, val=val: setattr(comp, attr, val))
     # restore visual style + camera
     safe(lambda: setattr(vp, "visualStyle", snap["visualStyle"]))
     safe(lambda: setattr(vp, "camera", snap["camera"]))
@@ -539,16 +624,18 @@ def _do_list_views(design):
 
 
 def _trace(action, target, orientation, focus, style, view_name, projection="",
-           perspective_angle_deg=None):
+           perspective_angle_deg=None, categories=None, visible=None):
     """A fresh per-call tracer: a monotonic seq + an echo of the args the handler received."""
     global _CALL_SEQ
     _CALL_SEQ += 1
     echo = {"action": action}
     for k, v in (("target", target), ("orientation", orientation), ("focus", focus),
                  ("style", style), ("view_name", view_name), ("projection", projection),
-                 ("perspective_angle_deg", perspective_angle_deg)):
+                 ("perspective_angle_deg", perspective_angle_deg), ("categories", categories)):
         if v:
             echo[k] = v
+    if visible is not None:                       # False is a real answer here, never dropped
+        echo["visible"] = visible
     return {"seq": _CALL_SEQ, "received": echo}
 
 
@@ -567,7 +654,7 @@ def _with_trace(result, trace):
 
 def handler(action: str = "", target=None, orientation: str = "", focus: str = "",
             style: str = "", fit: bool = True, view_name: str = "", projection: str = "",
-            perspective_angle_deg=None) -> dict:
+            perspective_angle_deg=None, categories=None, visible=None) -> dict:
     """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
@@ -581,7 +668,7 @@ def handler(action: str = "", target=None, orientation: str = "", focus: str = "
     if not design:
         return error("No active design. Open a document with design geometry first.")
     trace = _trace(action, target, orientation, focus, style, view_name, projection,
-                   perspective_angle_deg)
+                   perspective_angle_deg, categories, visible)
     try:
         if action == "snapshot":
             result = _do_snapshot(design)
@@ -589,6 +676,8 @@ def handler(action: str = "", target=None, orientation: str = "", focus: str = "
             result = _do_orient(design, orientation, focus, fit, projection, perspective_angle_deg)
         elif action in ("isolate", "show", "hide", "clear_isolation"):
             result = _do_visibility(design, action, target)
+        elif action == "display":
+            result = _do_display(design, categories, visible)
         elif action == "style":
             result = _do_style(style)
         elif action == "restore":
@@ -614,9 +703,13 @@ TOOL_DESCRIPTION = (
     "field of view) | 'isolate'/'show'/'hide'/'clear_isolation' "
     "('target'=occurrence(s); hide/show also take BODIES (root-level / one of a multi-body "
     "component); ambiguous names refused; 'show' lights ancestors) | "
+    "'display' ('categories' + 'visible': toggle the NON-BODY folders - sketches / construction / "
+    "origins / joints - design-wide via each component's folder bulb, clearing construction "
+    "clutter from product shots without touching any entity's own bulb) | "
     "'style' (visual style) | 'save_view'/'apply_view'/'list_views' ('view_name' = a persistent "
-    "Named View, camera only). snapshot/restore is in-memory (cleared on reload). Pair with "
-    "view_screenshot; for section views use view_section (a named view won't restore a cut)."
+    "Named View, camera only). snapshot/restore is in-memory (cleared on reload) and covers the "
+    "display folders. Pair with view_screenshot; for section views use view_section (a named view "
+    "won't restore a cut)."
 )
 
 tool = (
@@ -639,6 +732,11 @@ tool = (
             description="Visual style for 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean",
             "description": "Fit the view when orienting (default true)."})
+    .add_input_property("categories", {"type": "array",
+            "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
+            "description": "Display folders for action='display' (omit = all four)."})
+    .add_input_property("visible", {"type": "boolean",
+            "description": "action='display': true shows the chosen categories, false hides them."})
     .strict_schema()
 )
 

@@ -25,9 +25,11 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-# A physical material lives on a BRepBody or a Component (whole design = root component); a face or a
-# mesh body carries no physical material, so TargetRef is restricted to the mass-bearing kinds here.
-_TARGET = _inputs.TargetRef("target", allow=("body", "occurrence", "component", "design"))
+# A physical material lives on a BRepBody, a MeshBody, or a Component (whole design = root
+# component); a FACE carries none. MeshBody.material is settable and echoes on read-back
+# (live-verified 2705.0.87: default 'Steel', assignment landed + re-read) - an unassigned mesh
+# silently carries default steel density, which is exactly why the walk must reach meshes.
+_TARGET = _inputs.TargetRef("target", allow=("body", "mesh", "occurrence", "component", "design"))
 
 RETURNS = [
     _outputs.ReturnsName("material", of="material", consumers=["model_inspect"]),
@@ -118,14 +120,17 @@ def handler(target: str = "", material: str = "") -> dict:
     # Collect the bodies to assign to. A component/design/occurrence assigns PER BODY (so
     # model_inspect's per-body mass is trustworthy and a partial failure stays visible); a body target
     # is just that one body.
-    if kind == "body":
+    if kind in ("body", "mesh"):
         bodies = [entity]
-        desc = f"body '{safe(lambda: entity.name)}'"
+        desc = f"{'mesh ' if kind == 'mesh' else ''}body '{safe(lambda: entity.name)}'"
     elif kind == "occurrence":
-        bodies = list(iter_collection(safe(lambda: entity.bRepBodies)))
+        # BRep AND mesh bodies: an unreached mesh keeps default steel density, silently wrong mass.
+        bodies = (list(iter_collection(safe(lambda: entity.bRepBodies)))
+                  + list(iter_collection(safe(lambda: entity.component.meshBodies))))
         desc = f"occurrence '{safe(lambda: entity.fullPathName) or safe(lambda: entity.name)}'"
     else: # component
-        bodies = list(iter_collection(safe(lambda: entity.bRepBodies)))
+        bodies = (list(iter_collection(safe(lambda: entity.bRepBodies)))
+                  + list(iter_collection(safe(lambda: entity.meshBodies))))
         desc = f"component '{safe(lambda: entity.name)}'"
 
     if not bodies:
@@ -179,8 +184,9 @@ def handler(target: str = "", material: str = "") -> dict:
 
 
 _DESC = (
-"Assign a PHYSICAL material (density-bearing) to a body, occurrence, component (all its bodies), or the "
-"whole design (empty target), so model_inspect's mass/density is trustworthy. This is NOT color - use "
+"Assign a PHYSICAL material (density-bearing) to a body (BRep or MESH), occurrence, component (all "
+"its bodies, meshes included), or the whole design (empty target), so model_inspect's mass/density "
+"is trustworthy - an unassigned MESH silently carries default steel density. This is NOT color - use "
 "appearance_set for cosmetic color. 'material' is matched by EXACT name across the document's materials "
 "and every loaded material library; an unknown name returns nearest candidates and a name present in "
 "more than one library is refused as ambiguous. WRITES; reads back each body's material + density.\n"

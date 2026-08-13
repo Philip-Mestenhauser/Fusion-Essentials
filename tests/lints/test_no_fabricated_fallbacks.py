@@ -37,15 +37,15 @@ _COUNTISH = frozenset({"count", "len", "quantity", "numberOfFaces", "triangleCou
 # Sites where a numeric fallback is NOT a fabricated measurement. Each needs a reason naming why
 # the number is defensible - the value must not reach a payload as a measurement. Shrink-only.
 _ALLOWED = {
-    "_inputs.py:1510": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
+    "_inputs.py:1647": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
                       "direction is REFUSED, which is the safe direction",
     "assembly_get.py:205": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
                            "face/sketch-anchored JO reports geometry.origin as-is)",
     "assembly_get.py:206": "offsetY, same contract as offsetX",
     "assembly_get.py:207": "offsetZ, same contract as offsetX",
-    "cam_edit_tools.py:428": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
+    "cam_edit_tools.py:435": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
                              "value for an absent parameter, not the tool's own request",
-    "joint_create_edit.py:271": "picking the LARGEST face - an unreadable area sorts last and is "
+    "joint_create_edit.py:272": "picking the LARGEST face - an unreadable area sorts last and is "
                                 "never published",
     "sketch_dimension.py:136": "a text-placement offset, immediately replaced by 1.0 when it is not "
                                "positive; never published",

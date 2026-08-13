@@ -169,8 +169,8 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
     dwg = _drawing_common.active_drawing()
     if dwg is None:
         return error("No drawing to export: the active document is not a drawing. Open a drawing first "
-                     "(drawing_create makes one; open it in the Fusion UI, or doc_open a reviewed "
-                     "drawing), then export it as the active document.")
+                     "(drawing_create makes one; doc_open opens it by file_id), then export it as "
+                     "the active document.")
 
     out_dir = os.path.dirname(path)
     if out_dir and not os.path.isdir(out_dir):
@@ -225,10 +225,10 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
 TOOL_DESCRIPTION = (
     "Export the active 2D drawing document to a PDF, DXF or DWG file on local disk. Exports "
     "whichever drawing is the active document, so open the drawing first (drawing_create makes one; "
-    "open it in the Fusion UI to review, or doc_open a reviewed drawing), then export. Success is "
+    "doc_open opens it by file_id, no Fusion UI step first), then export. Success is "
     "gated on a non-empty file actually landing on disk: the export waits for the write to finish, "
     "and an export that produces nothing returns an error, never a false ok. This tool does not open "
-    "a drawing by id - opening a never-reviewed auto-drawing blocks the session. WRITES a file to "
+    "a drawing by id. WRITES a file to "
     "disk (does not modify the drawing)."
 )
 

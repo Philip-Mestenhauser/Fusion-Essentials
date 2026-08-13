@@ -4,7 +4,7 @@ Pinned here (no live Fusion): the quote/unquote round-trip (the textParameter ex
 QUOTED string, with single-quote escaping), the sketch-text iterator across components + sketches
 with a name filter, the per-sketch 0-based index selection, the before/after change tally + the
 _MAX cap, the recompute gating (only in parametric mode), the create path's unit scaling and
-guards, the three layout modes with the inputs each one refuses, the definition read-back that
+guards, the align-anchored multi_line box, the three layout modes with the inputs each one refuses, the definition read-back that
 says which mode actually landed, and the font applied on both paths with its read-back. The actual
 engraving is a live side-effect.
 """
@@ -528,6 +528,59 @@ class TestCreate:
         _install_create()
         res = st.handler(text="A", create=True, sketch_name="Plate", mode="wrap_around")
         assert res["isError"] is True and "wrap_around" in res["message"]
+
+
+# ── multi_line: the box is ANCHORED by 'align' ──────────────────────────────
+
+# 8 characters at height 10mm: the box is 8 * 10mm = 8cm wide, and x=100mm is 10cm.
+_ANCHOR_TEXT = "CENTERME"
+_ANCHOR_KW = dict(create=True, sketch_name="Plate", height=10, x=100, y=0, units="mm")
+
+
+class TestMultiLineAnchor:
+    """halign aligns the glyphs WITHIN the box setAsMultiLine is given and does not move that box,
+    so the box itself must be anchored per 'align'. Anchoring it at (x,y) whatever the align lands
+    centered text half a box-width to the RIGHT of the x the caller asked for."""
+
+    @pytest.mark.parametrize("align,corner_x,diagonal_x", [("left", 10.0, 18.0),
+                                                           ("center", 6.0, 14.0),
+                                                           ("right", 2.0, 10.0)])
+    def test_box_corner_and_diagonal_are_anchored_by_align(self, align, corner_x, diagonal_x):
+        design, sk = _install_create()
+        _payload(st.handler(text=_ANCHOR_TEXT, align=align, **_ANCHOR_KW))
+        corner, diagonal = sk.sketchTexts.last_input.multiline[:2]
+        assert corner[1] == pytest.approx(corner_x)
+        assert diagonal[1] == pytest.approx(diagonal_x)
+
+    def test_center_puts_the_box_centre_on_the_requested_x(self):
+        # the contract in one line: align='center' at x=100mm centres the text on 100mm
+        design, sk = _install_create()
+        _payload(st.handler(text=_ANCHOR_TEXT, align="center", **_ANCHOR_KW))
+        corner, diagonal = sk.sketchTexts.last_input.multiline[:2]
+        assert (corner[1] + diagonal[1]) / 2 == pytest.approx(10.0)
+
+    def test_right_puts_the_box_end_on_the_requested_x(self):
+        design, sk = _install_create()
+        _payload(st.handler(text=_ANCHOR_TEXT, align="right", **_ANCHOR_KW))
+        assert sk.sketchTexts.last_input.multiline[1][1] == pytest.approx(10.0)
+
+    def test_a_longer_string_shifts_the_centered_corner_further_left(self):
+        # the anchor scales with the box width - a fixed offset would drift with the string length
+        design, sk = _install_create()
+        _payload(st.handler(text="A" * 16, align="center", **_ANCHOR_KW))
+        corner, diagonal = sk.sketchTexts.last_input.multiline[:2]
+        assert corner[1] == pytest.approx(2.0) and diagonal[1] == pytest.approx(18.0)
+
+    def test_align_leaves_y_and_the_box_height_alone(self):
+        design, sk = _install_create()
+        _payload(st.handler(text=_ANCHOR_TEXT, align="center", **dict(_ANCHOR_KW, y=30)))
+        corner, diagonal = sk.sketchTexts.last_input.multiline[:2]
+        assert corner[2] == pytest.approx(3.0) and diagonal[2] == pytest.approx(4.0)
+
+    def test_position_still_echoes_the_requested_x_not_the_shifted_corner(self):
+        design, sk = _install_create()
+        out = _payload(st.handler(text=_ANCHOR_TEXT, align="center", **_ANCHOR_KW))
+        assert out["position"] == {"x": 100, "y": 0, "units": "mm"}
 
 
 # ── path modes: along_path / fit_on_path ────────────────────────────────────

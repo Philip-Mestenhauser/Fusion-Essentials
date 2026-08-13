@@ -23,13 +23,13 @@ from _input_resolution import _bindings, _collection_vars, _iter_tool_files, _sc
 
 # Calls whose bool is genuinely uninteresting, each with the reason. Shrink-only.
 _ALLOWED = {
-    "assembly_transform.py:199": "Matrix3D math on a LOCAL matrix - the resulting transform is "
+    "assembly_transform.py:205": "Matrix3D math on a LOCAL matrix - the resulting transform is "
                                  "written to the occurrence and read back, and an unchanged pose "
                                  "after a move is already an error",
-    "assembly_transform.py:206": "as above",
-    "assembly_transform.py:216": "as above",
-    "assembly_transform.py:217": "as above",
-    "assembly_transform.py:228": "as above",
+    "assembly_transform.py:212": "as above",
+    "assembly_transform.py:222": "as above",
+    "assembly_transform.py:223": "as above",
+    "assembly_transform.py:234": "as above",
     "model_create_component.py:79": "Matrix3D math on a local matrix that places a new "
                                     "occurrence, whose creation is verified by re-listing",
 }

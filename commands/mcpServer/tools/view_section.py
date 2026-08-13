@@ -36,9 +36,9 @@ _PLANES = {
 
 
 def _find_occurrence(design, name):
-    """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
-    logic - refuses an ambiguous substring instead of cutting through the wrong instance. Returns
-    (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name via
+    the shared OccurrenceRef logic - refuses an ambiguous path/name instead of cutting through the
+    wrong instance. Returns (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence("through", name)
 
 
@@ -88,10 +88,10 @@ def _context_remedy(design, exc):
         return ""
     active = safe(lambda: _common.target_component(design).name)
     where = f" The active component is '{active}'." if active else ""
-    return (f"{where} A plane alias (xy/xz/yz) and a construction-plane name both resolve against "
-            "the ACTIVE component, and a section taken on a sub-component's plane is refused this "
-            "way. Activate the root with design_activate_component and retry - the same cut works "
-            "with the root active.")
+    return (f"{where} A plane alias (xy/xz/yz) resolves against the ACTIVE component, as does a "
+            "construction-plane name that component carries, and a section taken on a "
+            "sub-component's own plane is refused this way. Activate the root with "
+            "design_activate_component and retry - the same cut works with the root active.")
 
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,

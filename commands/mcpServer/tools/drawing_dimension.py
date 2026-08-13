@@ -58,8 +58,7 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
     dwg = _drawing_common.active_drawing()
     if dwg is None:
         return error("No drawing to dimension: the active document is not a drawing. Open the "
-                     "drawing (doc_open a reviewed drawing, or open it in the Fusion UI) and make "
-                     "it active, then retry.")
+                     "drawing (doc_open by file_id) and make it active, then retry.")
     sheet = safe(lambda: dwg.activeSheet)
     if sheet is None:
         return error("The active drawing has no active sheet to dimension.")

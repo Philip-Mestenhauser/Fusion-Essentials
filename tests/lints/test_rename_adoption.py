@@ -1,0 +1,40 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Gate: no tool renames an entity through a swallowed setattr - apply_rename is the one home.
+
+The platform declines renames SILENTLY (a duplicate name no-ops, an invalid one raises) and can
+land a DEDUPED variant ('Foo' -> 'Foo(1)'). ``_common.apply_rename`` is the one create-flow rename:
+set, read back, disclose. The re-roll shape this bans - ``setattr(<entity>, "name", ...)`` inside a
+tool module - swallows the decline and publishes the REQUESTED name as though it took (the shape
+every pre-adoption site shared). test_helper_duplication guards apply_rename's DEFINITION; this
+guards the bypass.
+
+A direct ``entity.name = value`` assignment stays legal where the module wants the raise (the
+dedicated rename tool design_set_name errors on a miss; apply_rename itself sets that way).
+"""
+
+import re
+from pathlib import Path
+
+_TOOLS = Path(__file__).resolve().parents[2] / "commands" / "mcpServer" / "tools"
+
+_SWALLOWED_RENAME = re.compile(r"""setattr\(\s*[^,]+,\s*["']name["']""")
+
+# apply_rename's own home may spell the raw form; no tool module may.
+_HOME = "_common.py"
+
+
+class TestRenameAdoption:
+    def test_no_tool_setattrs_a_name(self):
+        offenders = []
+        for path in sorted(_TOOLS.glob("*.py")):
+            if path.name == _HOME:
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if _SWALLOWED_RENAME.search(line):
+                    offenders.append(f"{path.name}:{i}: {line.strip()}")
+        assert not offenders, (
+            "swallowed-rename shape (setattr(<entity>, 'name', ...)) in a tool module - route it "
+            "through _common.apply_rename (set + read-back + disclosed decline) and publish the "
+            "returned final name + warning:\n  " + "\n  ".join(offenders))

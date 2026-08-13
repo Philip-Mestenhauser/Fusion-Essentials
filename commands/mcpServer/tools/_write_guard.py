@@ -103,7 +103,10 @@ def _open_documents():
             pass
         is_active = False
         try:
-            is_active = d is active
+            # EQUALITY, never identity: Document wrappers are not identity-stable (measured live
+            # on 2705.0.87 - `d is active` reads False for the one open, active document while
+            # `d == active` reads True; the same wrapper trap _common.same_component documents).
+            is_active = bool(d == active)
         except Exception:
             pass
         out.append({"name": name, "document_id": urn, "open_index": i, "is_active": is_active})

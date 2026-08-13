@@ -14,6 +14,8 @@ proven to BITE (the failure case goes red through the wrapper).
 import json
 import types
 
+import pytest
+
 from conftest import load_tool
 
 kernel = load_tool("_assert")
@@ -185,9 +187,13 @@ class TestReferencesFresh:
 
     def test_surviving_stale_reference_bites(self, monkeypatch):
         monkeypatch.setattr(kernel, "app", self._app([False, True]))
+        # the re-read is a bounded settle wait (the refresh lands asynchronously); a zero budget
+        # still samples once, so the bite is exercised without spending the shipped budget.
+        monkeypatch.setattr(kernel, "_REFERENCE_SETTLE_S", 0.0)
         res = kernel.wrap(lambda **kw: _ok({"updated": True}), [kernel.ReferencesFresh()])()
         assert res["isError"] is True
         assert "still out of date" in res["message"].lower()
+        assert "to settle" in res["message"]      # the error says how long the refresh was given
 
     def test_all_fresh_confirms(self, monkeypatch):
         monkeypatch.setattr(kernel, "app", self._app([False, False]))
@@ -498,6 +504,46 @@ class _PoisonHealthyItem:
     @property
     def errorOrWarningMessage(self):
         raise RuntimeError("InternalValidationError on a healthy item")
+
+
+class TestCheckInputKeys:
+    """Registration-time wiring gate: a postcondition keyed to a handler parameter that does not
+    exist would read None from kwargs, fall back to the kind's default target, verify the WRONG
+    state, and still report success - so wrap() raises at import time instead."""
+
+    class _KeyedPost(kernel.Postcondition):
+        name = "keyed"
+        input_keys = ("sketch_name",)
+
+        def capture(self, kwargs):
+            return None
+
+        def verify(self, kwargs, captured, payload):
+            return None
+
+    def test_a_key_the_handler_lacks_raises_at_wrap_time(self):
+        def handler(body_name="", distance=0.0):
+            return _ok({})
+        with pytest.raises(ValueError) as exc:
+            kernel.wrap(handler, [self._KeyedPost()])
+        msg = str(exc.value)
+        assert "sketch_name" in msg and "handler" in msg
+        assert "verify the wrong state" in msg
+
+    def test_a_key_the_handler_takes_passes(self):
+        def handler(sketch_name="", distance=0.0):
+            return _ok({})
+        assert callable(kernel.wrap(handler, [self._KeyedPost()]))
+
+    def test_an_unintrospectable_handler_is_not_refused(self):
+        # A C-level/builtin callable has no signature to check against - the gate stays quiet
+        # rather than blocking registration on a check it cannot run.
+        assert callable(kernel.wrap(min, [self._KeyedPost()]))
+
+    def test_a_post_with_no_input_keys_never_trips_the_gate(self):
+        def handler(body_name=""):
+            return _ok({})
+        assert callable(kernel.wrap(handler, [Fixed()]))
 
 
 class TestPoisonGetterOnHealthyItems:

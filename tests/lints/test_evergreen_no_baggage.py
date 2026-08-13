@@ -118,7 +118,7 @@ _ITEM_NUMBER = re.compile(r"\bitem[ -]\d+\b|#\s*item\s*\d*\s*:")
 _ALLOWLIST = {
     "tests/lints/test_generated_docs_current.py:8":
         "'remember to' states the human failure mode this gate compensates for, not an instruction",
-    "tests/unit/test_joint_create_origin.py:456":
+    "tests/unit/test_joint_create_origin.py:465":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
 }
 

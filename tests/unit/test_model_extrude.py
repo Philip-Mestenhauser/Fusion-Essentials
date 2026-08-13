@@ -43,10 +43,14 @@ class FakeSketchCurves:
 
 
 class FakeSketch:
-    def __init__(self, name, profile_count=1, curve_count=0, profiles=None):
+    def __init__(self, name, profile_count=1, curve_count=0, profiles=None, text_count=0):
         self.name = name
         self.profiles = FakeProfiles(profile_count, profiles)
         self.sketchCurves = FakeSketchCurves(curve_count)
+        # sketchTexts is the 'text:<i>' address space; each text is tagged '<sketch>#<i>' so a test
+        # can tell WHICH one resolved.
+        self.sketchTexts = _NamedCollection([types.SimpleNamespace(tag=f"{name}#{i}")
+                                             for i in range(text_count)])
 
 
 class FakeSketches:
@@ -74,7 +78,8 @@ class FakeExtrudeInput:
         self.distance_extent = None     # (isSymmetric, ValueInput) captured
         self.one_side = None
         self.symmetric_extent = None    # (distance, isFullLength, taper) captured
-        self.all_extent = None          # direction captured (extent=through_all)
+        self.all_extent = None          # direction captured (the RETIRED setAllExtent)
+        self.two_sides_extent = None    # (sideOne, sideTwo, taperOne, taperTwo) captured
         self.two_sides_distance = None  # (distanceOne, distanceTwo) captured (extent=two_side)
         self.participantBodies = None
         self.isSolid = True             # default solid; surface path sets this False
@@ -95,7 +100,12 @@ class FakeExtrudeInput:
         return self.next_result
 
     def setAllExtent(self, direction):
+        # The RETIRED through-all setter: modelled so a test can pin that it is never called.
         self.all_extent = direction
+        return self.next_result
+
+    def setTwoSidesExtent(self, sideOne, sideTwo, taperOne=None, taperTwo=None):
+        self.two_sides_extent = (sideOne, sideTwo, taperOne, taperTwo)
         return self.next_result
 
     def setTwoSidesDistanceExtent(self, distanceOne, distanceTwo):
@@ -170,6 +180,8 @@ def _install(sketches):
         def add(self, x): self.items.append(x)
     adsk.core.ObjectCollection.create = staticmethod(_OC)
     adsk.fusion.ToEntityExtentDefinition.create = staticmethod(lambda face, chained: ("to", face, chained))
+    # A FRESH definition object per call, so a test can tell one shared object from two real ones.
+    adsk.fusion.ThroughAllExtentDefinition.create = staticmethod(lambda: ["through_all"])
     return ef
 
 
@@ -686,6 +698,93 @@ class TestAsSurface:
         assert "surface" in res["message"].lower() or "open path" in res["message"].lower()
 
 
+# ── a sketch TEXT as the profile ('text:<i>') ───────────────────────────────
+# ExtrudeFeatures.createInput takes a SketchText in its profile slot, and a nameplate sketch holds
+# no closed profile at all - so the address must route to ProfileRef(allow_text) BEFORE the
+# zero-profile surface branch, which has no curves to build an open profile from.
+
+class TestSketchTextProfile:
+    def test_a_text_only_sketch_extrudes_the_text_as_a_solid(self):
+        ef = _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        out = _payload(ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0"))
+        assert ef.last_input.profile.tag == "Nameplate#0"    # the SketchText itself, not a profile
+        assert out["profile_index"] == "text" and out["profiles_extruded"] == 1
+        assert out["as_surface"] is False and ef.last_input.isSolid is True
+        assert out["is_solid"] is True
+
+    def test_a_text_address_never_reaches_the_surface_branch(self):
+        # the measured dead-end: pcount == 0 routed the call into the open-profile path, which
+        # refuses a sketch with no curves - so a text-only sketch could not be extruded at all.
+        _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        res = ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0")
+        assert res["isError"] is False, res
+        assert "no curves to extrude as a surface" not in json.dumps(res)
+
+    def test_a_text_address_is_not_read_as_an_index(self):
+        # 'text:0' is short and non-numeric, so the handle predicate says no - without the text
+        # predicate the index resolver answers "not an int, list, 'all', or '0,1,2'".
+        _install([FakeSketch("Plate", profile_count=2, text_count=1)])
+        out = _payload(ex.handler(sketch_name="Plate", distance=2, profile_index="text:0"))
+        assert out["profile_index"] == "text"
+
+    def test_the_named_sketch_owns_a_bare_text_address(self):
+        # blank-sketch resolution takes the MOST RECENT sketch, so an unqualified address handed
+        # straight to ProfileRef would extrude the wrong sketch's text - silently.
+        ef = _install([FakeSketch("Nameplate", profile_count=0, text_count=1),
+                       FakeSketch("Later", profile_count=0, text_count=1)])
+        out = _payload(ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0"))
+        assert ef.last_input.profile.tag == "Nameplate#0"
+        assert out["sketch"] == "Nameplate"
+
+    def test_a_sketch_qualified_address_is_taken_as_given(self):
+        ef = _install([FakeSketch("Nameplate", profile_count=0, text_count=1),
+                       FakeSketch("Later", profile_count=0, text_count=2)])
+        _payload(ex.handler(distance=2, profile_index="Nameplate/text:0"))
+        assert ef.last_input.profile.tag == "Nameplate#0"
+
+    def test_an_out_of_range_text_is_refused_by_the_kind(self):
+        _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        res = ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:5")
+        assert res["isError"] is True
+        assert "out of range" in res["message"] and "1 sketch text(s)" in res["message"]
+
+    def test_the_note_points_at_the_stamp_alternative(self):
+        _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        out = _payload(ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0"))
+        assert "Sketch text extruded into a solid" in out["note"]
+        assert "model_emboss" in out["note"]
+
+    def test_a_text_mixed_into_a_list_selector_is_refused(self):
+        # the list/'all' forms address CLOSED profiles by index; a text carries no index there, so
+        # a mixed selector must not silently drop it.
+        _install([FakeSketch("Plate", profile_count=2, text_count=1)])
+        res = ex.handler(sketch_name="Plate", distance=2, profile_index=["text:0", 1])
+        assert res["isError"] is True
+        assert "text:0" in res["message"] and "on its own" in res["message"]
+
+    def test_a_text_mixed_into_a_comma_selector_is_refused(self):
+        _install([FakeSketch("Plate", profile_count=2, text_count=1)])
+        res = ex.handler(sketch_name="Plate", distance=2, profile_index="text:0,1")
+        assert res["isError"] is True and "text:0" in res["message"]
+
+    def test_a_text_mixed_with_all_is_refused(self):
+        _install([FakeSketch("Plate", profile_count=2, text_count=1)])
+        res = ex.handler(sketch_name="Plate", distance=2, profile_index=["text:0", "all"])
+        assert res["isError"] is True and "text:0" in res["message"]
+
+    def test_as_surface_with_a_text_is_refused_rather_than_ignored(self):
+        _install([FakeSketch("Nameplate", profile_count=0, text_count=1)])
+        res = ex.handler(sketch_name="Nameplate", distance=2, profile_index="text:0",
+                         as_surface=True)
+        assert res["isError"] is True and "as_surface" in res["message"]
+
+    def test_a_plain_index_selector_is_untouched_by_the_text_route(self):
+        ef = _install([FakeSketch("Plate", profile_count=2, text_count=1)])
+        out = _payload(ex.handler(sketch_name="Plate", distance=2, profile_index=1))
+        assert out["profile_index"] == 1
+        assert ef.last_input.profile == ("profile", 1)
+
+
 # ── to_object extent (extrude up to a face handle) ──────────────────────────
 
 class _FakeFaceEnt:
@@ -855,16 +954,23 @@ class TestExtentGuards:
         assert ef.last_input.one_side is not None
 
 
-# ── through_all extent (setAllExtent) ────────────────────────────────────────
+# ── through_all extent (ThroughAllExtentDefinition) ──────────────────────────
 # 'distance' carries no magnitude for through_all - only its SIGN (direction hint); symmetric=true
-# goes both ways. Pinned: the direction mapping, the no-taper guard, and the returned-false path.
+# goes both ways. The extent is built from ThroughAllExtentDefinition: one side plus a direction for
+# a one-sided cut, BOTH sides for a symmetric one. The retired setAllExtent(SymmetricExtentDirection)
+# answers true while cutting a single direction (measured live - half the expected material), so it
+# is never called. Pinned: the setter per direction, the no-taper guard, and the returned-false paths.
 
 class TestThroughAll:
     def test_default_direction_is_positive(self):
         import adsk.fusion
         ef = _install([FakeSketch("S")])
         out = _payload(ex.handler(sketch_name="S", extent="through_all"))
-        assert ef.last_input.all_extent == adsk.fusion.ExtentDirections.PositiveExtentDirection
+        extent, direction, taper = ef.last_input.one_side
+        assert extent == ["through_all"]
+        assert direction == adsk.fusion.ExtentDirections.PositiveExtentDirection
+        assert taper is None
+        assert ef.last_input.all_extent is None       # the retired setter is never called
         assert out["extent"] == "through_all" and out["direction"] == "positive"
         assert out["distance"] is None
 
@@ -872,21 +978,38 @@ class TestThroughAll:
         import adsk.fusion
         ef = _install([FakeSketch("S")])
         out = _payload(ex.handler(sketch_name="S", extent="through_all", distance=-5))
-        assert ef.last_input.all_extent == adsk.fusion.ExtentDirections.NegativeExtentDirection
+        extent, direction, _taper = ef.last_input.one_side
+        assert extent == ["through_all"]
+        assert direction == adsk.fusion.ExtentDirections.NegativeExtentDirection
+        assert ef.last_input.all_extent is None
         assert out["direction"] == "negative"
 
     def test_positive_distance_picks_positive_direction(self):
         import adsk.fusion
         ef = _install([FakeSketch("S")])
         _payload(ex.handler(sketch_name="S", extent="through_all", distance=5))
-        assert ef.last_input.all_extent == adsk.fusion.ExtentDirections.PositiveExtentDirection
+        _extent, direction, _taper = ef.last_input.one_side
+        assert direction == adsk.fusion.ExtentDirections.PositiveExtentDirection
+        assert ef.last_input.all_extent is None
 
-    def test_symmetric_picks_symmetric_direction_regardless_of_distance_sign(self):
-        import adsk.fusion
+    def test_symmetric_sets_both_sides_and_never_the_retired_setter(self):
+        # setAllExtent(SymmetricExtentDirection) answers true and cuts ONE direction (measured live:
+        # a mid-plane cut removed exactly half the expected material), so a symmetric through-all
+        # must hand setTwoSidesExtent a ThroughAllExtentDefinition PER SIDE.
         ef = _install([FakeSketch("S")])
         out = _payload(ex.handler(sketch_name="S", extent="through_all", symmetric=True, distance=-9))
-        assert ef.last_input.all_extent == adsk.fusion.ExtentDirections.SymmetricExtentDirection
+        side_one, side_two, taper_one, taper_two = ef.last_input.two_sides_extent
+        assert side_one == ["through_all"] and side_two == ["through_all"]
+        assert side_one is not side_two          # one definition per side, not one object twice
+        assert (taper_one, taper_two) == (None, None)
+        assert ef.last_input.all_extent is None
+        assert ef.last_input.one_side is None    # a symmetric cut is never routed one-sided
         assert out["direction"] == "symmetric"
+
+    def test_a_one_sided_through_all_never_sets_two_sides(self):
+        ef = _install([FakeSketch("S")])
+        _payload(ex.handler(sketch_name="S", extent="through_all", distance=-5))
+        assert ef.last_input.two_sides_extent is None
 
     def test_rejects_taper(self):
         _install([FakeSketch("S")])
@@ -894,11 +1017,23 @@ class TestThroughAll:
         assert res["isError"] is True
         assert "through_all" in res["message"] and "taper" in res["message"]
 
-    def test_setAllExtent_false_is_reported(self):
+    def test_setOneSideExtent_false_is_reported(self):
         ef = _install([FakeSketch("S")])
         ef.next_result = False
-        res = ex.handler(sketch_name="S", extent="through_all")
-        assert res["isError"] is True and "setAllExtent returned false" in res["message"]
+        res = ex.handler(sketch_name="S", extent="through_all", distance=-5)
+        assert res["isError"] is True
+        assert "setOneSideExtent returned false" in res["message"]
+        assert "negative" in res["message"]        # names the direction that was refused
+        assert ef.added is False
+
+    def test_setTwoSidesExtent_false_is_reported(self):
+        ef = _install([FakeSketch("S")])
+        ef.next_result = False
+        res = ex.handler(sketch_name="S", extent="through_all", symmetric=True)
+        assert res["isError"] is True
+        assert "setTwoSidesExtent returned false" in res["message"]
+        assert "symmetric" in res["message"]        # names the call that refused, not the other one
+        assert ef.added is False
 
 
 # ── through_all CUT/INTERSECT volume read-back (the rung-4 honesty check) ───
@@ -938,6 +1073,20 @@ class TestThroughAllVolumeCheck:
         res = ex.handler(sketch_name="S", operation="cut", extent="through_all", distance=1)
         assert res["isError"] is True
         assert "removed no material" in res["message"] and "Box1" in res["message"]
+
+    def test_the_no_op_refusal_names_the_leftover_feature_and_how_to_remove_it(self):
+        # The refusal rolls nothing back - the check reads only the bodies the cut was aimed at, so
+        # an effect elsewhere is not ruled out. The dead feature is therefore DISCLOSED by name,
+        # with the tool that removes it, instead of being left in the timeline unmentioned.
+        _install([FakeSketch("S")])
+        root = ex.app.activeProduct.rootComponent
+        root.bRepBodies = _NamedCollection([BRepBody("Box1", volume=100.0)])
+        res = ex.handler(sketch_name="S", operation="cut", extent="through_all", distance=1)
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "'Extrude1' remains in the timeline" in msg
+        assert "design_delete_feature" in msg
+        assert "rolled back" not in msg          # nothing was removed - it must not claim otherwise
 
     def test_several_bodies_with_no_target_bodies_skips_the_check(self):
         # Several bodies and no target_bodies -> which one(s) intersect is ambiguous from here, so no

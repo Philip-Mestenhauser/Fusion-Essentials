@@ -28,7 +28,7 @@ from ._common import ok, error, safe, resolve_sketch, all_sketch_names, resolve_
 from . import _common
 # The readable handle on a SketchText's string is textParameter.expression, which holds it QUOTED -
 # _unquote is sketch_set_text's own reader for it, imported rather than re-rolled here.
-from .sketch_set_text import _unquote
+from ._sketch_detail import unquote_text as _unquote
 
 app = adsk.core.Application.get()
 

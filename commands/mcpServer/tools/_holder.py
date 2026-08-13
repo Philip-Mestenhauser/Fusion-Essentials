@@ -3,8 +3,8 @@
 
 """Reduces a solid tool-holder body to a CAM library holder profile (height/diameter segments along
 an axis of revolution) - the headless core behind the "Add Tool Holder" command and
-model_compute_holder. Import-light (adsk.* + stdlib only) so it loads in the test harness without
-circularity."""
+model_compute_holder. Import-light (adsk.* + stdlib + the shared CAM substrate) so it loads in the
+test harness without circularity."""
 
 import json
 import math
@@ -15,6 +15,9 @@ from typing import List
 import adsk.core
 import adsk.fusion
 import adsk.cam
+
+from ._common import safe
+from ._cam_common import library_assets   # the ONE bounded CAM library folder walk
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = "holder geometry: get_axis, get_tool_profile, build_holder_data, get_tooling_libraries"
@@ -194,6 +197,10 @@ def get_tool_profile(body, axis, plane_intersect):
 def filter_points(points):
     """Group profile points by z (within 1e-8) and keep the two largest-radius per z (one at the
     lowest z), so coincident-z points collapse to a single radial pair. (Verbatim.)"""
+    # A body with NO coaxial faces reduces to zero points; min() over the empty grouping would
+    # raise, so the empty profile answers [] instead of crashing the reduction.
+    if not points:
+        return []
     grouped_points = {}
     for x, y, z in points:
         rounded_y = round(y, 8)
@@ -282,28 +289,21 @@ def generate_tool(profile, desc, prodid="", prodlink="", prodvendor=""):
 
 # ── tool-library enumeration (READ only; library WRITES belong to the future library tool family) ──
 
+_LIBRARY_LOCATIONS = ("CloudLibraryLocation", "LocalLibraryLocation", "ExternalLibraryLocation")
+
+
 def get_tooling_libraries() -> List:
-    """URLs of every cloud + local + external tool library (read-only enumeration). The eventual
-    library building-block family will own WRITES - note a tool brought into a document is a hard FORK
-    of the library data, not a live link, so library writes need their own correct semantics."""
-    camManager = adsk.cam.CAMManager.get()
-    libraryManager = camManager.libraryManager
-    toolLibraries = libraryManager.toolLibraries
-    folder = toolLibraries.urlByLocation(adsk.cam.LibraryLocations.CloudLibraryLocation)
-    libraries = _libraries_urls(toolLibraries, folder)
-    folder = toolLibraries.urlByLocation(adsk.cam.LibraryLocations.LocalLibraryLocation)
-    libraries = libraries + _libraries_urls(toolLibraries, folder)
-    folder = toolLibraries.urlByLocation(adsk.cam.LibraryLocations.ExternalLibraryLocation)
-    libraries = libraries + _libraries_urls(toolLibraries, folder)
-    return libraries
-
-
-def _libraries_urls(libraries, url) -> List:
-    """Recursively collect library asset URLs under `url` (cloud/local/external folder). (Verbatim.)"""
+    """URLs of every cloud + local + external tool library (read-only enumeration), through the
+    shared bounded library walk. The eventual library building-block family will own WRITES - note a
+    tool brought into a document is a hard FORK of the library data, not a live link, so library
+    writes need their own correct semantics."""
+    toolLibraries = adsk.cam.CAMManager.get().libraryManager.toolLibraries
     urls = []
-    libs = libraries.childAssetURLs(url)
-    for lib in libs:
-        urls.append(lib.toString())
-    for folder in libraries.childFolderURLs(url):
-        urls = urls + _libraries_urls(libraries, folder)
+    for location in _LIBRARY_LOCATIONS:
+        loc = getattr(adsk.cam.LibraryLocations, location, None)
+        if loc is None:
+            continue
+        root = toolLibraries.urlByLocation(loc)
+        assets, _truncated = library_assets(toolLibraries, root)
+        urls.extend(safe(lambda a=a: a.toString()) for a in assets)
     return urls

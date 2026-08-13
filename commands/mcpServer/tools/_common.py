@@ -576,11 +576,51 @@ def no_feature_error(design, what, hint="") -> str:
     return text
 
 
+class _HealthName(str):
+    """One unhealthy timeline item's name, carrying the identity a name is not.
+
+    Timeline item names are NOT unique across components - a two-component design carries two
+    'Sketch1' and two 'Extrude1' (measured) - so a before/after difference keyed on the bare name
+    is blind to damage done to a feature whose name also exists healthy elsewhere, and counts the
+    opposite case twice. This reads, formats, joins and JSON-serializes exactly as the name, so
+    every consumer keeps printing the human-facing label, while ``==`` (and through it ``in`` and
+    set difference) compares the timeline row's ENTITY token whenever both sides carry one. An item
+    with no readable token falls back to comparing the name.
+
+    ``__hash__`` stays the NAME's hash: two same-named rows share one bucket and ``__eq__``
+    separates them there, which keeps "a == b implies hash(a) == hash(b)" true against a plain
+    ``str`` as well, so a set of these and a set of names still interoperate.
+    """
+
+    def __new__(cls, name, token=None):
+        obj = str.__new__(cls, name)
+        obj.token = token or None
+        return obj
+
+    def __eq__(self, other):
+        mine, theirs = self.token, getattr(other, "token", None)
+        if mine and theirs:
+            return mine == theirs
+        return str.__eq__(self, other)
+
+    def __ne__(self, other):
+        same = self.__eq__(other)
+        return same if same is NotImplemented else not same
+
+    __hash__ = str.__hash__
+
+
 def timeline_health(design, limit=None):
     """(error_names, warning_names, total) over the parametric timeline by healthState (2=error,
     1=warning) - the shared before/after guard for edits that can break downstream features, so a
     change that corrupts the model is reported instead of swallowed. A direct-modelling design
     (no timeline) yields empty lists.
+
+    Each returned name is a ``_HealthName``: the human-facing label, compared on the row's entity
+    token. The delta every guard runs over these lists - ``[n for n in after if n not in before]``,
+    ``set(after) - set(before)`` - therefore separates two features that SHARE a name in different
+    components and names only the one that actually broke; a row with no readable token is keyed on
+    its name.
 
     ``limit`` bounds the walk to the FIRST n items: a CREATE that only wants the damage it did to
     PRE-EXISTING features passes the total this returned before its mutation, which keeps the walk off
@@ -598,10 +638,16 @@ def timeline_health(design, limit=None):
         it = tl.item(i)
         total += 1
         hs = safe(lambda it=it: it.healthState)
-        if hs == 2:
-            errors.append(safe(lambda it=it: it.name) or f"#{i}")
-        elif hs == 1:
-            warnings.append(safe(lambda it=it: it.name) or f"#{i}")
+        if hs not in (1, 2):
+            continue
+        # A TimelineObject carries no entityToken of its own - the ENTITY it stands for does, and
+        # that token reads back identical across a re-read in the same session (measured), which is
+        # exactly the before/after window a guard compares over. TimelineObject.entity is None for
+        # a TimelineGroup row and for a feature class with no public-API representation, so the
+        # read is through safe() and such a row keys on its name.
+        label = _HealthName(safe(lambda it=it: it.name) or f"#{i}",
+                            safe(lambda it=it: it.entity.entityToken))
+        (errors if hs == 2 else warnings).append(label)
     return errors, warnings, total
 
 

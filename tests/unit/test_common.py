@@ -798,3 +798,90 @@ class TestApplyRename:
         final, warning = common.apply_rename(Deduping(), "Bracket")
         assert final == "Bracket(1)"
         assert "Bracket" in warning and "Bracket(1)" in warning
+
+
+# ── timeline_health: the delta is keyed on identity, not on the repeated name ────────────────────
+
+def _row(name, health, token=None):
+    """One timeline row: the three properties timeline_health reads. A row with no token models a
+    TimelineGroup / a feature class with no public-API entity, both of which answer entity as None.
+    """
+    entity = SimpleNamespace(entityToken=token) if token is not None else None
+    return SimpleNamespace(name=name, healthState=health, entity=entity)
+
+
+def _timeline(*rows):
+    return type("D", (), {"timeline": _Coll(rows)})()
+
+
+class TestTimelineHealth:
+    """timeline_health hands back NAMES, but timeline names repeat across components (two 'Sketch1',
+    two 'Extrude1' in a two-component design), so the delta the guards compute over those lists is
+    keyed on the row's entity token instead."""
+
+    def test_health_states_split_into_errors_and_warnings(self):
+        errors, warnings, total = common.timeline_health(_timeline(
+            _row("Sketch1", 0, "T:a"), _row("Extrude1", 2, "T:b"), _row("Fillet1", 1, "T:c")))
+        assert list(errors) == ["Extrude1"] and list(warnings) == ["Fillet1"] and total == 3
+
+    def test_a_design_with_no_timeline_reports_nothing(self):
+        assert common.timeline_health(type("D", (), {"timeline": None})()) == ([], [], 0)
+
+    def test_limit_bounds_the_walk_to_the_first_rows(self):
+        tl = _timeline(_row("Extrude1", 2, "T:a"), _row("Constraint1", 2, "T:b"))
+        errors, _w, total = common.timeline_health(tl, limit=1)
+        assert list(errors) == ["Extrude1"] and total == 1
+
+    def test_damage_to_a_twin_is_seen_past_an_already_broken_namesake(self):
+        # two components each hold an 'Extrude1'; one is already broken, then the OTHER breaks.
+        # Keyed on the name, the delta sees a name already present and reports nothing.
+        before, _w, _t = common.timeline_health(_timeline(
+            _row("Extrude1", 2, "T:a"), _row("Extrude1", 0, "T:b")))
+        after, _w, _t = common.timeline_health(_timeline(
+            _row("Extrude1", 2, "T:a"), _row("Extrude1", 2, "T:b")))
+        assert [n for n in after if n not in before] == ["Extrude1"]
+        assert sorted(set(after) - set(before)) == ["Extrude1"]
+
+    def test_a_feature_broken_before_the_edit_is_not_reported_as_new_damage(self):
+        # the same row read twice reports the same token, so the guard stays quiet
+        rows = (_row("Extrude1", 2, "T:a"), _row("Extrude1", 0, "T:b"))
+        before, _w, _t = common.timeline_health(_timeline(*rows))
+        after, _w, _t = common.timeline_health(_timeline(*rows))
+        assert [n for n in after if n not in before] == []
+        assert set(after) - set(before) == set()
+
+    def test_one_twin_healing_while_the_other_breaks_names_the_broken_one(self):
+        # the reverse miss: the name is in both lists yet a DIFFERENT feature carries it
+        before, _w, _t = common.timeline_health(_timeline(
+            _row("Sketch1", 2, "T:a"), _row("Sketch1", 0, "T:b")))
+        after, _w, _t = common.timeline_health(_timeline(
+            _row("Sketch1", 0, "T:a"), _row("Sketch1", 2, "T:b")))
+        assert [n for n in after if n not in before] == ["Sketch1"]
+
+    def test_rows_with_no_readable_token_key_on_their_name(self):
+        before, _w, _t = common.timeline_health(_timeline(_row("Group1", 2)))
+        after, _w, _t = common.timeline_health(_timeline(_row("Group1", 2), _row("Group2", 2)))
+        assert [n for n in after if n not in before] == ["Group2"]
+
+    def test_a_tokenless_row_compares_equal_to_the_plain_name_it_reports(self):
+        errors, _w, _t = common.timeline_health(_timeline(_row("Extrude1", 2)))
+        assert errors == ["Extrude1"] and set(errors) == {"Extrude1"}
+
+    def test_an_unreadable_name_falls_back_to_the_row_index(self):
+        class Nameless:
+            healthState = 2
+            entity = None
+
+            @property
+            def name(self):
+                raise RuntimeError("3 : unreadable")
+
+        errors, _w, _t = common.timeline_health(_timeline(Nameless()))
+        assert list(errors) == ["#0"]
+
+    def test_the_names_still_cross_the_wire_as_plain_strings(self):
+        errors, warnings, _t = common.timeline_health(_timeline(
+            _row("Extrude1", 2, "T:a"), _row("Fillet1", 1, "T:b")))
+        payload = json.loads(common.ok({"e": errors, "w": warnings})["content"][0]["text"])
+        assert payload == {"e": ["Extrude1"], "w": ["Fillet1"]}
+        assert ", ".join(errors) == "Extrude1"

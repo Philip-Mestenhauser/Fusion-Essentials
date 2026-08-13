@@ -6,7 +6,9 @@ drafted-face read-back, the no-active-design guard, resolution-error propagation
 verifier that a feature which computes with a health ERROR is reported as failure, not a false ok.
 """
 
-from conftest import (load_tool, make_design, install, MakeComp, payload,
+import types
+
+from conftest import (BRepBody, load_tool, make_design, install, MakeComp, payload,
                       error_message, assert_no_active_design)
 
 dr = load_tool("model_draft")
@@ -154,3 +156,71 @@ class TestDraft:
         out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
         for o in dr.RETURNS:
             assert o.assert_present(out) == "", o.key
+
+
+# ── the taper must MOVE material, and the face count is READ, never echoed ──────────────────────
+#
+# A draft can compute cleanly and taper nothing (a face already parallel to the pull direction, a
+# flipped direction that lands back on itself). The feature object reads identically either way, so
+# the owning bodies' volumes on both sides of the add are the only evidence.
+
+def _face_on(body):
+    """A face whose owning body is `body` - the chain _geom.owning_bodies walks to find what the
+    draft must move."""
+    return types.SimpleNamespace(body=body)
+
+
+def _add_moving_volume(feats, feature, *changes):
+    """Make draftFeatures.add apply (body, new_volume) pairs - the taper's material effect between
+    the pre- and post-mutation reads."""
+    def _add(inp):
+        for body, volume in changes:
+            body.volume = volume
+        return feature
+    feats.add = _add
+
+
+class TestTaperMovesMaterial:
+    def test_draft_that_moves_no_volume_is_an_error(self, monkeypatch):
+        bar = BRepBody("Bar", volume=20.0)
+        _wire(monkeypatch, faces=[_face_on(bar)])
+        res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5)
+        assert res["isError"] is True
+        assert "tapered nothing" in res["message"] and "Bar" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_draft_that_moved_material_publishes_the_delta(self, monkeypatch):
+        bar = BRepBody("Bar", volume=20.0)
+        feature = FakeDraftFeature(n_faces=1)
+        feats = _wire(monkeypatch, feature=feature, faces=[_face_on(bar)])
+        _add_moving_volume(feats, feature, (bar, 18.5))
+        out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
+        assert out["drafted"] is True and out["volume_delta_cm3"] == -1.5
+
+    def test_symmetric_draft_is_never_volume_gated(self, monkeypatch):
+        # A symmetric draft tapers both sides of the pull plane in OPPOSITE directions, so the two
+        # wedges can cancel on a taper that really happened - the delta cannot carry a no-op verdict.
+        bar = BRepBody("Bar", volume=20.0)
+        _wire(monkeypatch, faces=[_face_on(bar)])
+        out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5, symmetric=True))
+        assert out["drafted"] is True and out["volume_delta_cm3"] == 0.0
+
+    def test_faces_with_no_readable_body_neither_error_nor_publish_a_delta(self, monkeypatch):
+        # Cannot measure is not "measured the same": no verdict, and no null delta that would read
+        # as a measured zero.
+        _wire(monkeypatch, faces=[object()])
+        out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
+        assert out["drafted"] is True and "volume_delta_cm3" not in out
+
+
+class TestDraftedCountIsRead:
+    def test_unreadable_count_is_null_not_the_request(self, monkeypatch):
+        # The bug this pins: falling back to len(faces) publishes the REQUEST as though the feature
+        # had confirmed it, so a tangent-chain expansion (or a draft that took nothing) is invisible.
+        feature = FakeDraftFeature(n_faces=1)
+        feature.inputFaces = None
+        _wire(monkeypatch, feature=feature, faces=[object(), object()])
+        out = payload(dr.handler(faces=["a", "b"], pull_direction="xy", angle_deg=5))
+        assert out["faces_drafted"] is None
+        assert out["faces_requested"] == 2
+        assert "'faces_drafted' is null" in out["note"] and "2 face(s) were requested" in out["note"]

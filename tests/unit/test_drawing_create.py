@@ -742,6 +742,43 @@ class TestCreationMode:
         assert dm.mode is None
 
 
+# ── the route from the created file to a PDF ────────────────────────────────────────────────────────
+
+class TestTheRouteToTheDrawing:
+    """A drawing never reviewed in the Fusion UI opens and drives through the API - measured on
+    2705.0.87 across a full open/edit/dimension/export cycle. So neither surface may park the agent
+    on a human up front; the UI open survives only as failure-time teaching in the note."""
+
+    def _description(self):
+        return dc.tool.to_dict()["description"]
+
+    def test_the_description_names_the_api_route_and_asks_for_no_ui_step(self):
+        desc = self._description()
+        assert "doc_open" in desc and "drawing_export" in desc
+        assert "no Fusion UI step first" in desc
+        # the retired instruction: a human opening it before the agent may proceed
+        assert "ONCE in the Fusion UI" not in desc
+        assert "unreviewed" not in desc
+
+    def test_the_note_routes_through_doc_open_without_a_human_step(self):
+        _install()
+        note = _payload(dc.handler())["note"]
+        assert "doc_open(file_id, force_api_open=true)" in note
+        assert "no manual step is needed up front" in note
+        assert "open it ONCE in the Fusion UI" not in note
+
+    def test_the_note_keeps_the_ui_open_as_failure_time_teaching_only(self):
+        # the fallback is still worth carrying (earlier builds did block), but it is conditional on
+        # the open actually failing - not an instruction the agent follows before trying
+        _install()
+        note = _payload(dc.handler())["note"]
+        head, _, tail = note.partition("If that open instead fails or hangs")
+        assert tail, note
+        assert "workaround" not in head            # nothing to work around until the open fails
+        assert "never reviewed in the Fusion UI opens and drives that way" in head
+        assert "opening the document once in the Fusion UI is the known workaround" in tail
+
+
 # ── parts list, template, custom size, hole annotations, per-view drafting display ──────────────────
 
 class TestPartsList:

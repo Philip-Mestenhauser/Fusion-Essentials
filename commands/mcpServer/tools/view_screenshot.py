@@ -56,9 +56,9 @@ def _keep_visible(o_path, target_path):
 
 def _isolate_for_fit(name):
     """Temporarily hide every occurrence that is NOT the named one, its ancestors, or its descendants,
-    so vp.fit() frames just the named one. Returns (restore_callable, error_or_None) - error is set (and
-    restore is None) when the occurrence didn't resolve (including an ambiguous name, which names the
-    candidates).
+    so the shot shows just the named one. Returns (restore_callable, target_occurrence, error) -
+    error is set (and the other two None) when the occurrence didn't resolve (including an
+    ambiguous name, which names the candidates); the target feeds the bodies-only camera fit.
 
     The restore callable returns the NAMES of the occurrences whose bulb it could not put back
     (empty when everything was restored): this tool mutates visibility to take its picture, so a
@@ -66,12 +66,12 @@ def _isolate_for_fit(name):
     design = _common.design()
     root = safe(lambda: design.rootComponent) if design else None
     if not root:
-        return None, f"fit_to: no active design to resolve '{name}' against."
+        return None, None, f"fit_to: no active design to resolve '{name}' against."
     # Resolve via the shared OccurrenceRef kind (fullPathName-preferring, ambiguity-refusing) so an
     # ambiguous name doesn't silently frame the wrong instance.
     target, err = _FIT_TO.resolve(name)
     if target is None:
-        return None, err
+        return None, None, err
     target_path = safe(lambda: target.fullPathName)
     occs = safe(lambda: list(root.allOccurrences)) or []
     prev = []
@@ -83,14 +83,31 @@ def _isolate_for_fit(name):
             prev.append(o)
             safe(lambda o=o: setattr(o, "isLightBulbOn", False))
 
+    # ALSO hide non-body geometry design-wide for the shot: vp.fit() frames every VISIBLE entity,
+    # and construction geometry owned by the fitted component (measured: a datum plane) blows the
+    # frame to the whole scene while the occurrence isolation holds. The per-component display
+    # FOLDER bulbs (the shared _view_common map) switch sketches/construction/origins/joints off
+    # in one write each without touching any entity's own bulb.
+    folder_prev = []                       # (component, attr, saved_value) - only bulbs we moved
+    for comp in _view_common.all_display_components(design):
+        for attr in _view_common.DISPLAY_FOLDERS.values():
+            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)):
+                folder_prev.append((comp, attr))
+                safe(lambda comp=comp, attr=attr: setattr(comp, attr, False))
+
     def restore():
         stuck = []
         for o in prev:
             safe(lambda o=o: setattr(o, "isLightBulbOn", True))
             if safe(lambda o=o: o.isLightBulbOn) is not True:
-                stuck.append(safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name) or "?")
+                stuck.append(safe(lambda o=o: o.fullPathName)
+                             or safe(lambda o=o: o.name) or "?")
+        for comp, attr in folder_prev:
+            safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
+            if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
+                stuck.append(f"{safe(lambda comp=comp: comp.name) or '?'}:{attr}")
         return stuck
-    return restore, None
+    return restore, target, None
 
 
 def _restore_message(restore_fit_to):
@@ -180,7 +197,7 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     restore_fit_to = None
     want_fit = (fit_to or "").strip()
     if want_fit:
-        restore_fit_to, fit_err = _isolate_for_fit(want_fit)
+        restore_fit_to, _fit_target, fit_err = _isolate_for_fit(want_fit)
         if restore_fit_to is None:
             return error(fit_err or f"fit_to: no occurrence matched '{want_fit}'. "
                          "Use design_get(include=['tree']) to list.")

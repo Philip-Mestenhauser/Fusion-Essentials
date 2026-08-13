@@ -137,6 +137,22 @@ def _result_bodies(feature):
     return [f["name"] for f in facts], any(f["is_solid"] for f in facts)
 
 
+def _landed_length(getter, want_cm, k, subject, field):
+    """(length in display units, error) read off the CREATED feature's own length parameter.
+
+    MEASURED: ExtendFeature.distance and ThickenFeature.thickness are both ModelParameters reading
+    CM, so the length published is the feature's own rather than the echoed request, and a length
+    disagreeing with the request is an error instead of a false ok. A length that cannot be read
+    comes back None, which the caller names in `unverified`."""
+    got = safe(getter)
+    if not isinstance(got, float):
+        return None, ""
+    if abs(got - want_cm) > 1e-6:
+        return None, (f"The {subject} was created but its {field} reads back {round(got / k, 6)}, "
+                      f"not the requested {round(want_cm / k, 6)}.")
+    return round(got / k, 6), ""
+
+
 def _created_bodies(feature):
     """(bodies, created_face_count, readable) over the faces the feature CREATED. feature.bodies also
     lists the pre-existing SOURCE solid (live-verified: offsetting one face of solid Body1 reports
@@ -294,6 +310,10 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
         return error(_common.no_feature_error(design, "Extend"))
 
     names, any_solid = _result_bodies(feature)
+    landed, rerr = _landed_length(lambda: feature.distance.value, float(distance) * k, k,
+                                  "surface extend", "distance")
+    if rerr:
+        return error(rerr + " " + _common.failed_effect_remedy(design, feature))
     payload = {
         "extended": True,
         "feature": safe(lambda: feature.name),
@@ -305,6 +325,11 @@ def extend_handler(edges=None, distance: float = 0.0, units: str = "mm",
         "units": units,
         "note": "Surface extended from its open edges.",
     }
+    if landed is None:
+        payload["unverified"] = ["distance"]
+        payload["note"] += " Not read back off the feature: distance."
+    else:
+        payload["distance"] = landed
     if ea_key:
         payload["extend_alignment"] = ea_key
     return ok(payload)
@@ -447,6 +472,12 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         return error("Thicken reported success but no CREATED body reads isSolid=true - the wall "
                      "did not close into a solid. The feature remains in the timeline; inspect it "
                      "with model_inspect or remove it with design_delete_feature.")
+    # The solid gate above proves a solid wall LANDED; it says nothing about how thick it is, which
+    # is why the wall's own thickness parameter is read back here.
+    landed, rerr = _landed_length(lambda: feature.thickness.value, float(thickness) * k, k,
+                                  "wall", "thickness")
+    if rerr:
+        return error(rerr + " " + _common.failed_effect_remedy(design, feature))
     payload = {
         "thickened": True,
         "feature": safe(lambda: feature.name),
@@ -458,6 +489,11 @@ def thicken_handler(faces=None, thickness: float = 0.0, units: str = "mm",
         "symmetric": bool(symmetric),
         "note": "Faces thickened into a SOLID wall (isSolid=true). The surface->solid bridge.",
     }
+    if landed is None:
+        payload["unverified"] = ["thickness"]
+        payload["note"] += " Not read back off the feature: thickness."
+    else:
+        payload["thickness"] = landed
     if tt_key:
         payload["thicken_type"] = tt_key
     # join no-fuse disclosure: a created body whose token was NOT among the pre-add solids is a NEW

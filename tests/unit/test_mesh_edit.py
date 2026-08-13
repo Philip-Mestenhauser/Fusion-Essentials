@@ -59,9 +59,13 @@ class _FaceGroups:
 class MeshBody:
     """Stands in for adsk.fusion.MeshBody (a SEPARATE type from BRepBody)."""
     def __init__(self, name="Mesh1", tri=1000, nodes=502, is_closed=True, token=None, parent=None,
-                 face_groups=0, bbox=None):
+                 face_groups=0, bbox=None, area=150.0, volume=125.0):
         self.name = name
         self.displayMesh = TriangleMesh(tri, nodes)
+        # The SECOND signal the in-place-cut gate reads beside the triangle count (Fusion's internal
+        # cm2/cm3 - here a 5 cm cube). None models a build where the field cannot be read at all.
+        self.area = area
+        self.volume = volume
         self.isClosed = is_closed
         self.entityToken = token or f"MTOK::{name}"
         self.parentComponent = parent
@@ -164,7 +168,7 @@ class _PlaneCutFeatures:
     def __init__(self, result_bodies=None, feat_name="PlaneCut1", raise_on_add=False,
                  none_feature=False, on_add=None, tri_after=600, deletable=True,
                  restore_on_delete=False, delete_raises=False, timeline_drops=True,
-                 blind_after=False):
+                 blind_after=False, area_after=None, volume_after=None):
         self._result_bodies = result_bodies if result_bodies is not None else []
         self._feat_name = feat_name
         self.raise_on_add = raise_on_add
@@ -175,6 +179,10 @@ class _PlaneCutFeatures:
         # The triangle count the cut leaves on the mesh it re-triangulates - the effect the tool reads
         # back. None models a cut that touches no triangle; 0 models the whole mesh being consumed.
         self.tri_after = tri_after
+        # The area/volume the cut leaves on the same bodies. None leaves them where they were - a cut
+        # that moved no geometry at all.
+        self.area_after = area_after
+        self.volume_after = volume_after
         self.cut_mesh = None         # the in-place target, wired by the setups once the mesh exists
         self.timeline = None         # design.timeline, wired by the setups; deleteMe shrinks it
         self.deletable = deletable
@@ -208,6 +216,10 @@ class _PlaneCutFeatures:
         if self.tri_after is not None:
             for m in self._cut_bodies():
                 m.displayMesh.triangleCount = self.tri_after
+        for attr, value in (("area", self.area_after), ("volume", self.volume_after)):
+            if value is not None:
+                for m in self._cut_bodies():
+                    setattr(m, attr, value)
         if self.blind_after:
             for m in self._cut_bodies():
                 m.displayMesh = None          # the after-count can no longer be read at all
@@ -491,18 +503,20 @@ class TestPlaneCut:
     def _setup(self, result_bodies=None, raise_on_add=False, origin_plane=None, parametric=False,
                base_feature=None, none_feature=False, mesh_bodies=None, tri_before=1000,
                tri_after=600, deletable=True, restore_on_delete=False, delete_raises=False,
-               timeline_drops=True, blind_after=False, bbox=None):
+               timeline_drops=True, blind_after=False, bbox=None, area=150.0, volume=125.0,
+               area_after=None, volume_after=None):
         _wire_adsk()
         pc = _PlaneCutFeatures(result_bodies=result_bodies, raise_on_add=raise_on_add,
                                none_feature=none_feature, tri_after=tri_after, deletable=deletable,
                                restore_on_delete=restore_on_delete, delete_raises=delete_raises,
-                               timeline_drops=timeline_drops, blind_after=blind_after)
+                               timeline_drops=timeline_drops, blind_after=blind_after,
+                               area_after=area_after, volume_after=volume_after)
         bf = base_feature
         feats = _Features(plane_cut=pc, base_features=_BaseFeatures(made=bf) if bf else None)
         # origin plane 'xy' -> attribute 'xYConstructionPlane'
         op = {"xYConstructionPlane": origin_plane} if origin_plane is not None else {}
         comp = FakeComp("Comp", features=feats, origin_planes=op, mesh_bodies=mesh_bodies)
-        src = MeshBody("Scan", tri=tri_before, bbox=bbox)
+        src = MeshBody("Scan", tri=tri_before, bbox=bbox, area=area, volume=volume)
         src.parentComponent = comp
         pc.cut_mesh = src               # the body whose triangle count the cut re-writes
         edit_obj = bf if parametric else None
@@ -782,6 +796,44 @@ class TestPlaneCut:
         assert "1000 triangles" in msg          # the count that did not move
         assert "'CP'" in msg                    # the plane that cut nothing, named
         assert "Scan" in msg                    # the mesh, named
+
+    def test_the_unchanged_count_refusal_quotes_the_second_signal_that_agrees(self):
+        # The count alone does not carry the refusal: it stands because the mesh's own area/volume
+        # ALSO did not move, and the message states both readings it decided on.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(tri_after=None)
+        self._install_plane_handle(plane, src, pc)
+        msg = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")["message"]
+        assert "changed nothing" in msg
+        assert "area and volume did not move either" in msg
+        assert "area 150.0 -> 150.0 cm2" in msg
+        assert "volume 125.0 -> 125.0 cm3" in msg
+
+    def test_an_unchanged_count_with_MOVED_geometry_is_a_landed_cut(self):
+        # A trim whose fill adds exactly as many triangles as the cut removed leaves the count flat
+        # while real geometry went away. Refusing that would roll back a cut that landed, so the
+        # second signal decides: cut:true, with both readings published.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(tri_after=None, area_after=90.0, volume_after=62.5)
+        self._install_plane_handle(plane, src, pc)
+        out = _payload(me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim"))
+        assert out["cut"] is True
+        assert out["triangles_before"] == 1000 and out["triangles_after"] == 1000
+        assert out["area_before_cm2"] == 150.0 and out["area_after_cm2"] == 90.0
+        assert out["volume_before_cm3"] == 125.0 and out["volume_after_cm3"] == 62.5
+        assert "MOVED" in out["note"]
+
+    def test_an_unreadable_second_signal_leaves_the_count_as_the_only_evidence(self):
+        # A build whose MeshBody.area/.volume cannot be read gives no counter-evidence, so the
+        # unchanged count still refuses - and the message says the second check was unreadable
+        # rather than claiming the geometry was measured flat.
+        plane = ConstructionPlane("CP")
+        src, pc, _ = self._setup(tri_after=None, area=None, volume=None)
+        self._install_plane_handle(plane, src, pc)
+        res = me.mesh_plane_cut_handler(mesh="H", plane="P", cut_type="trim")
+        assert res["isError"] is True
+        assert "could not be read as a second check" in res["message"]
+        assert "area unreadable; volume unreadable" in res["message"]
 
     def test_split_faces_is_gated_by_the_same_unchanged_count(self):
         # split_faces re-triangulates in place exactly as trim does, so it shares the gate - gating

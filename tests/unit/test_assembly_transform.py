@@ -223,6 +223,41 @@ class TestGround:
         assert res["isError"] is True
         assert "did not take" in res["message"]
 
+    def test_unreadable_flag_after_the_set_is_unconfirmed_not_ok(self):
+        # the confirming read RAISES: a flag that cannot be read is not a confirmation, so a
+        # swallowed write must not pass as a set lock. Unconfirmed is an error, never an ok.
+        _, occs, _ = _install(["Block:1"])
+
+        class BlindOcc(FakeOcc):
+            @property
+            def isGroundToParent(self):
+                raise RuntimeError("isGroundToParent unreadable")
+
+            @isGroundToParent.setter
+            def isGroundToParent(self, v):
+                pass
+
+        occs[0].__class__ = BlindOcc
+        res = asm.ground_handler(occurrence="Block:1", ground_to_parent=False)
+        assert res["isError"] is True
+        assert "UNCONFIRMED" in res["message"]
+        assert "cannot be read" in res["message"]
+
+    def test_unreadable_isGrounded_reports_null_not_false(self):
+        # the read-only context flag is published as null when it cannot be read - False is an
+        # answer ("not fixed in the UI") and would be a reading nobody took.
+        _, occs, _ = _install(["Block:1"])
+
+        class NoUiFlagOcc(FakeOcc):
+            @property
+            def isGrounded(self):
+                raise RuntimeError("isGrounded unreadable")
+
+        occs[0].__class__ = NoUiFlagOcc
+        out = _payload(asm.ground_handler(occurrence="Block:1", ground_to_parent=True))
+        assert out["isGrounded"] is None
+        assert out["isGroundToParent"] is True
+
     def test_grounding_snap_back_is_reported_with_numbers(self):
         # Setting ground_to_parent=true snaps the part back to its timeline placement, discarding
         # free moves captured or not (live-verified) - the payload must report the snap, not let the

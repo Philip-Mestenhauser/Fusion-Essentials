@@ -23,6 +23,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
 from . import _assert
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -73,6 +74,10 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
     # DraftFeatures.createInput wants a Python list of BRepFace (per the live signature), not an
     # ObjectCollection.
     face_list = list(face_ents)
+    # The bodies the taper must move, sampled BEFORE the add: a draft that computes cleanly while
+    # tapering nothing is the silent no-op this gate catches, and a feature object cannot show it.
+    draft_bodies = _geom.owning_bodies(face_list)
+    vol_before = _geom.volumes(draft_bodies)
     angle_val = adsk.core.ValueInput.createByReal(math.radians(angle))
     try:
         di = comp.features.draftFeatures.createInput(face_list, plane, bool(tangent_chain))
@@ -96,11 +101,32 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
                      "'flip', or a different pull direction. "
                      + _common.failed_effect_remedy(design, feature))
 
+    # MATERIAL evidence. A one-sided taper always cuts or adds a wedge, so an unmoved volume there
+    # means the draft tapered nothing. A SYMMETRIC draft tapers both sides of the pull plane in
+    # OPPOSITE directions, where the two wedges can cancel to zero on a real taper - so the delta is
+    # published there but can never carry a no-op verdict.
+    volume_delta_cm3 = None
+    if draft_bodies:
+        delta, readable = _geom.volume_delta(draft_bodies, vol_before)
+        if readable:
+            volume_delta_cm3 = round(delta, 6)
+        if readable and not symmetric and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
+            named = ", ".join(str(safe(lambda b=b: b.name)) for b in draft_bodies)
+            return error(f"Draft computed but tapered nothing - {named} measures the volume it had "
+                         f"before, so the {angle} deg taper moved no material. Check 'pull_direction' "
+                         "is the plane the faces taper relative to, and try 'flip' or a face that is "
+                         "not already parallel to it. " + _common.failed_effect_remedy(design, feature))
+
     requested = len(face_list)
-    # Read the drafted-face count back off the feature (inputFaces reflects the faces it took, including
-    # any tangent-chain expansion); fall back to the requested count if the read is unavailable.
-    drafted = safe(lambda: feature.inputFaces.count, requested) or requested
-    return ok({
+    # The count the FEATURE reports (inputFaces reflects the faces it took, including any
+    # tangent-chain expansion), never the request echoed back: an unreadable read publishes null,
+    # with the requested number beside it in 'faces_requested'.
+    drafted = _common.counted(lambda: feature.inputFaces.count)
+    note = "Faces tapered to the pull direction. Pair with view_screenshot to view."
+    if drafted is None:
+        note += (f" 'faces_drafted' is null - the count could not be read off the feature, so how "
+                 f"many faces the draft took is UNKNOWN here; {requested} face(s) were requested.")
+    payload = {
         "drafted": True,
         "feature": safe(lambda: feature.name),
         "faces_requested": requested,
@@ -110,8 +136,13 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         "tangent_chain": bool(tangent_chain),
         "flipped": bool(flip),
         "pull_direction": pull_direction,
-        "note": "Faces tapered to the pull direction. Pair with view_screenshot to view.",
-    })
+        "note": note,
+    }
+    # Published only where the before/after pair was READABLE: a null here would read as "no material
+    # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
+    if volume_delta_cm3 is not None:
+        payload["volume_delta_cm3"] = volume_delta_cm3
+    return ok(payload)
 
 
 TOOL_DESCRIPTION = (

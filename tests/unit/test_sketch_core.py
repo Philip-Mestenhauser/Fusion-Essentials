@@ -1,18 +1,18 @@
 """Unit tests for ``sketch_core.py`` pure logic.
 
-``scale`` maps a unit string to a cm-per-unit factor (geometry is built in cm,
-so a wrong factor silently mis-sizes everything). ``_resolve_plane`` maps a
-plane argument — origin-plane aliases (xy/xz/yz and the top/front/right
-synonyms, whitespace/case tolerant) or a named construction plane — to a planar
-entity. Both are exactly where a quiet bug would put geometry in the wrong place
-or scale.
+``scale`` maps a unit string to a cm-per-unit factor (geometry is built in cm, so a wrong factor
+silently mis-sizes everything). ``sketch_create`` resolves its ``plane`` through the shared
+``_inputs.PlaneRef`` kind, so the whole plane vocabulary - the origin aliases, a construction-plane
+name resolved DESIGN-WIDE, the qualified ``<occurrence>:<plane>`` form, a planar-face handle - and
+the refusal of a name several components share come from one place. Both are exactly where a quiet
+bug would put geometry in the wrong place or scale.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import _NamedCollection, load_tool
 
 sk = load_tool("sketch_core")
 
@@ -26,65 +26,6 @@ class TestScaleWiring:
         common = importlib.import_module(sk.scale.__module__)
         assert sk.scale is common.scale            # same single-source callable, not a local copy
         assert sk.scale("mm") == 0.1 and sk.scale("furlongs") is None
-
-
-# ── _resolve_plane: alias + named-plane resolution ─────────────────────────
-
-class _Root:
-    """Root component exposing origin construction planes + named construction planes."""
-    def __init__(self, named=None):
-        # The tool reads getattr(root, f"{key}ConstructionPlane"); provide each.
-        self.xYConstructionPlane = SimpleNamespace(tag="xY")
-        self.xZConstructionPlane = SimpleNamespace(tag="xZ")
-        self.yZConstructionPlane = SimpleNamespace(tag="yZ")
-        self._named = named or {}
-
-    @property
-    def constructionPlanes(self):
-        named = self._named
-
-        class _CP:
-            def itemByName(self_inner, name):
-                return named.get(name)
-        return _CP()
-
-
-def _design(named=None):
-    return SimpleNamespace(rootComponent=_Root(named))
-
-
-class TestResolvePlane:
-    def test_xy_alias(self):
-        planar, desc = sk._resolve_plane(_design(), "xy")
-        assert planar.tag == "xY"
-        assert "origin plane" in desc
-
-    def test_top_alias_maps_to_xy(self):
-        planar, desc = sk._resolve_plane(_design(), "top")
-        assert planar.tag == "xY"
-
-    def test_front_alias_maps_to_xz(self):
-        planar, _ = sk._resolve_plane(_design(), "front")
-        assert planar.tag == "xZ"
-
-    def test_right_alias_maps_to_yz(self):
-        planar, _ = sk._resolve_plane(_design(), "right")
-        assert planar.tag == "yZ"
-
-    def test_whitespace_and_case_tolerant(self):
-        planar, _ = sk._resolve_plane(_design(), "  XY Plane ")
-        assert planar.tag == "xY"
-
-    def test_named_construction_plane_fallback(self):
-        custom = SimpleNamespace(tag="custom")
-        planar, desc = sk._resolve_plane(_design(named={"Datum1": custom}), "Datum1")
-        assert planar is custom
-        assert "Datum1" in desc
-
-    def test_unresolvable_plane_returns_none(self):
-        planar, desc = sk._resolve_plane(_design(), "nonsense")
-        assert planar is None
-        assert desc is None
 
 
 # ── new sketch kinds (ellipse/slot/point/spline/center_rectangle) + is_construction ─────────────
@@ -253,6 +194,7 @@ class FakeSketch:
 class FakeSketches:
     def __init__(self, sk_):
         self._l = [sk_]
+        self.added = None          # the plane entity sketches.add() was handed
     @property
     def count(self):
         return len(self._l)
@@ -261,20 +203,65 @@ class FakeSketches:
     def itemByName(self, n):
         return next((s for s in self._l if s.name == n), None)
     def add(self, planar):
+        self.added = planar
         return self._l[0]
 
 
+def _datum(name):
+    """One construction plane: its name, its owning component, and the assembly-context proxy Fusion
+    mints for a plane native to ANOTHER component - tagged with its occurrence, so a test can tell
+    the proxy from the native and see which instance carried it."""
+    cp = SimpleNamespace(name=name, component=None)
+    cp.createForAssemblyContext = lambda occ: SimpleNamespace(
+        name=name, component=cp.component, native=cp, context=occ)
+    return cp
+
+
 class FakeDesignDraw:
-    def __init__(self, sketch):
-        self.rootComponent = type("R", (), {"sketches": FakeSketches(sketch)})()
-        self.activeComponent = self.rootComponent
+    """The design the sketch tools build into: each component's sketches collection, the origin
+    construction planes PlaneRef's xy/xz/yz alias reads off the ACTIVE one, and - for the design-wide
+    name lookup - the sub-components carrying their own datums plus the occurrences placing them.
+
+    planes: [datum] on the root. subs: [(component name, [datum names], [occurrence fullPathNames])].
+    active: the component name to treat as active (default: the root).
+    """
+
+    def __init__(self, sketch, planes=(), subs=(), active=None):
+        root = self._component("Root", sketch, planes)
+        comps, occs = [root], []
+        for comp_name, datum_names, paths in subs:
+            sub = self._component(comp_name, sketch, [_datum(n) for n in datum_names])
+            for cp in sub.constructionPlanes:
+                cp.component = sub
+            comps.append(sub)
+            occs += [SimpleNamespace(fullPathName=p, name=p, component=sub) for p in paths]
+        self.rootComponent = root
+        self.allComponents = _NamedCollection(comps)
+        self.activeComponent = self.allComponents.itemByName(active) or root
+        root.allOccurrences = occs
+        root.allOccurrencesByComponent = lambda c: _NamedCollection(
+            [o for o in occs if o.component is c])
+
+    @staticmethod
+    def _component(name, sketch, planes):
+        return SimpleNamespace(name=name, sketches=FakeSketches(sketch),
+                               constructionPlanes=_NamedCollection(list(planes)),
+                               xYConstructionPlane=_datum("XY"),
+                               xZConstructionPlane=_datum("XZ"),
+                               yZConstructionPlane=_datum("YZ"))
 
 
-def _install_draw(monkeypatch, sketch):
-    """Wire a fake sketch into the tool's design seams for one test; monkeypatch undoes it after."""
+def _install_draw(monkeypatch, sketch, **design_kw):
+    """Wire a fake sketch into the tool's design seams for one test; monkeypatch undoes it after.
+    Extra keywords (planes / subs / active) shape the design PlaneRef resolves against. Returns it.
+
+    Both seams are patched: the handler's own `_common` AND the one `_inputs` resolves its kinds
+    through, so a PlaneRef lookup sees the same design the handler does."""
     import adsk.fusion, adsk.core
-    monkeypatch.setattr(sk, "app", type("A", (), {"activeProduct": FakeDesignDraw(sketch)})())
+    design = FakeDesignDraw(sketch, **design_kw)
+    monkeypatch.setattr(sk, "app", SimpleNamespace(activeProduct=design))
     monkeypatch.setattr(sk._common, "app", sk.app)
+    monkeypatch.setattr(sk._inputs._common, "app", sk.app)
     monkeypatch.setattr(adsk.fusion.Design, "cast",
                         lambda x: x if isinstance(x, FakeDesignDraw) else None)
     monkeypatch.setattr(adsk.core.Point3D, "create",
@@ -292,6 +279,7 @@ def _install_draw(monkeypatch, sketch):
     monkeypatch.setattr(adsk.core.ObjectCollection, "create", _OC)
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal", lambda v: ("real", v))
     monkeypatch.setattr(adsk.core.ValueInput, "createByString", lambda s: ("string", s))
+    return design
 
 
 def _payload(res):
@@ -1161,24 +1149,130 @@ class TestTargetSketch:
 
 class TestOnFacePlaneNameMisuse:
     def test_construction_plane_name_points_at_plane_param(self, monkeypatch):
-        s = FakeSketch(); _install_draw(monkeypatch, s)
+        s = FakeSketch(); _install_draw(monkeypatch, s, planes=[_datum("MidPlane")])
         monkeypatch.setattr(sk._ON_FACE, "resolve",
                             lambda raw: (None, "stale handle - re-run find_geometry"))
-        monkeypatch.setattr(sk, "_resolve_plane",
-                            lambda design, p: (SimpleNamespace(tag="cp"), f"construction plane '{p}'"))
         res = sk.create_sketch_handler(on_face="MidPlane")
         assert res["isError"] is True
         assert "plane='MidPlane'" in res["message"]
         assert "construction PLANE name" in res["message"]
 
+    def test_an_origin_alias_passed_as_on_face_points_at_the_plane_param_too(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        monkeypatch.setattr(sk._ON_FACE, "resolve",
+                            lambda raw: (None, "stale handle - re-run find_geometry"))
+        res = sk.create_sketch_handler(on_face="xy")
+        assert res["isError"] is True and "plane='xy'" in res["message"]
+
     def test_genuinely_bad_handle_keeps_the_resolver_error(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
         monkeypatch.setattr(sk._ON_FACE, "resolve",
                             lambda raw: (None, "stale handle - re-run find_geometry"))
-        monkeypatch.setattr(sk, "_resolve_plane", lambda design, p: (None, None))
         res = sk.create_sketch_handler(on_face="NOTAPLANE")
         assert res["isError"] is True
         assert "stale handle" in res["message"]
+
+
+# ── create_sketch_handler: 'plane' resolves through the shared PlaneRef kind ────────────────────
+
+class TestCreateSketchPlaneRef:
+    """sketch_create hands 'plane' to _inputs.PlaneRef, so the sketch lands on the entity the SHARED
+    kind resolved: an origin alias off the ACTIVE component, a construction-plane name resolved
+    DESIGN-WIDE (a sub-component's datum proxied into the occurrence that places it), the qualified
+    '<occurrence>:<plane>' form - and a name several components share is REFUSED, never resolved to
+    whichever component happened to answer first."""
+
+    def test_xy_alias_lands_on_the_active_components_origin_plane(self, monkeypatch):
+        s = FakeSketch(); d = _install_draw(monkeypatch, s)
+        out = _payload(sk.create_sketch_handler(plane="xy"))
+        assert d.rootComponent.sketches.added is d.rootComponent.xYConstructionPlane
+        assert out["on"] == "plane 'xy'"
+
+    @pytest.mark.parametrize("given, attr", [
+        ("xy", "xYConstructionPlane"), ("xz", "xZConstructionPlane"), ("yz", "yZConstructionPlane"),
+        ("top", "xYConstructionPlane"), ("front", "xZConstructionPlane"),
+        ("right", "yZConstructionPlane"), ("  XY Plane ", "xYConstructionPlane"),
+        ("xzplane", "xZConstructionPlane"), ("YZPlane", "yZConstructionPlane")])
+    def test_every_alias_spelling_the_tool_takes_still_lands_on_its_origin_plane(
+            self, monkeypatch, given, attr):
+        # the '<alias> plane' spellings are the kind's now, not a local fold - the tool must still
+        # take every one of them.
+        s = FakeSketch(); d = _install_draw(monkeypatch, s)
+        _payload(sk.create_sketch_handler(plane=given))
+        assert d.rootComponent.sketches.added is getattr(d.rootComponent, attr)
+
+    def test_a_datum_named_mid_plane_still_resolves_by_name(self, monkeypatch):
+        # the suffix handling must not swallow a construction plane whose own name ends in 'plane'
+        cp = _datum("Mid plane")
+        s = FakeSketch(); d = _install_draw(monkeypatch, s, planes=[cp])
+        _payload(sk.create_sketch_handler(plane="Mid plane"))
+        assert d.rootComponent.sketches.added is cp
+
+    def test_an_empty_plane_defaults_to_xy(self, monkeypatch):
+        s = FakeSketch(); d = _install_draw(monkeypatch, s)
+        out = _payload(sk.create_sketch_handler(plane=""))
+        assert d.rootComponent.sketches.added is d.rootComponent.xYConstructionPlane
+        assert out["on"] == "plane 'xy'"      # the label names the default that actually resolved
+
+    def test_a_root_construction_plane_resolves_by_name(self, monkeypatch):
+        cp = _datum("Datum1")
+        s = FakeSketch(); d = _install_draw(monkeypatch, s, planes=[cp])
+        _payload(sk.create_sketch_handler(plane="Datum1"))
+        assert d.rootComponent.sketches.added is cp
+
+    def test_a_sub_component_datum_resolves_as_a_proxy_into_its_occurrence(self, monkeypatch):
+        # the capability the active-component-only lookup had no reach for: a datum created inside a
+        # sub-component. Its NATIVE form is component-local, so it must arrive PROXIED into the one
+        # occurrence that places its owner.
+        s = FakeSketch()
+        d = _install_draw(monkeypatch, s, subs=[("Tower", ["Datum_A"], ["Tower:1"])])
+        _payload(sk.create_sketch_handler(plane="Datum_A"))
+        landed = d.rootComponent.sketches.added
+        native = d.allComponents.itemByName("Tower").constructionPlanes.itemByName("Datum_A")
+        assert landed.native is native
+        assert landed.context.fullPathName == "Tower:1"
+
+    def test_a_datum_name_two_components_share_is_refused_with_its_candidates(self, monkeypatch):
+        s = FakeSketch()
+        d = _install_draw(monkeypatch, s,
+                          subs=[("A", ["Mid"], ["A:1"]), ("B", ["Mid"], ["B:1"])])
+        res = sk.create_sketch_handler(plane="Mid")
+        assert res["isError"] is True and "ambiguous" in res["message"]
+        assert "A:1:Mid" in res["message"] and "B:1:Mid" in res["message"]
+        assert d.rootComponent.sketches.added is None      # refused BEFORE the sketch was created
+
+    def test_the_qualified_occurrence_form_picks_one_instance(self, monkeypatch):
+        s = FakeSketch()
+        d = _install_draw(monkeypatch, s,
+                          subs=[("A", ["Mid"], ["A:1"]), ("B", ["Mid"], ["B:1"])])
+        _payload(sk.create_sketch_handler(plane="B:1:Mid"))
+        landed = d.rootComponent.sketches.added
+        assert landed.native is d.allComponents.itemByName("B").constructionPlanes.itemByName("Mid")
+        assert landed.context.fullPathName == "B:1"
+
+    def test_the_active_components_own_datum_name_shadows_another_components(self, monkeypatch):
+        # Fusion default-names the FIRST datum of every component 'Plane1', so the active
+        # component's own must win rather than the design-wide vote refusing the commonest name.
+        s = FakeSketch()
+        d = _install_draw(monkeypatch, s, active="A",
+                          subs=[("A", ["Plane1"], ["A:1"]), ("B", ["Plane1"], ["B:1"])])
+        _payload(sk.create_sketch_handler(plane="Plane1"))
+        native = d.allComponents.itemByName("A").constructionPlanes.itemByName("Plane1")
+        assert d.activeComponent.sketches.added is native   # native: already the build context
+
+    def test_an_unresolvable_plane_names_the_vocabulary_that_would_work(self, monkeypatch):
+        s = FakeSketch(); d = _install_draw(monkeypatch, s)
+        res = sk.create_sketch_handler(plane="nonsense")
+        assert res["isError"] is True
+        assert "not an origin alias" in res["message"] and "find_geometry" in res["message"]
+        assert d.rootComponent.sketches.added is None
+
+    def test_the_plane_schema_is_the_kinds_own(self, monkeypatch):
+        # the contract an agent reads comes from PlaneRef, so it cannot drift from what resolves
+        prop = sk.create_sketch_tool.to_dict()["inputSchema"]["properties"]["plane"]
+        assert prop["description"] == sk._PLANE.schema()["description"]
+        assert "top/front/right" in prop["description"]     # the aliases the tool has always taken
+        assert "find_geometry" in prop["description"]       # plus the handle form the kind adds
 
 
 class TestCreateFrameNote:
@@ -1186,8 +1280,6 @@ class TestCreateFrameNote:
         # the create result teaches the origin-plane local-axis -> world mapping so an agent
         # need not discover it (the xz plane maps local +Y to world -Z, live-proven).
         s = FakeSketch(); _install_draw(monkeypatch, s)
-        monkeypatch.setattr(sk, "_resolve_plane",
-                            lambda design, p: (SimpleNamespace(tag="xZ"), "xZ origin plane"))
         out = _payload(sk.create_sketch_handler(plane="xz"))
         assert "local +Y maps to world -Z" in out["note"]
         assert "frame.y_world" in out["note"]
@@ -1207,8 +1299,6 @@ class TestCreateRenameDisclosure:
                 pass
 
         s = StubbornSketch(); _install_draw(monkeypatch, s)
-        monkeypatch.setattr(sk, "_resolve_plane",
-                            lambda design, p: (SimpleNamespace(tag="xY"), "xY origin plane"))
         out = _payload(sk.create_sketch_handler(plane="xy", name="Pocket Outline"))
         assert out["sketch_name"] == "Sketch1"
         assert "Pocket Outline" in out["rename_warning"]
@@ -1216,8 +1306,6 @@ class TestCreateRenameDisclosure:
 
     def test_a_clean_rename_carries_no_warning(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
-        monkeypatch.setattr(sk, "_resolve_plane",
-                            lambda design, p: (SimpleNamespace(tag="xY"), "xY origin plane"))
         out = _payload(sk.create_sketch_handler(plane="xy", name="Pocket Outline"))
         assert out["sketch_name"] == "Pocket Outline"
         assert "rename_warning" not in out

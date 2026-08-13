@@ -15,10 +15,8 @@ from ._common import ok, error, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
 from ._cam_common import (get_cam, find_setup, expression_error, machine_catalog, machine_label,
-                          resolve_machine)
+                          parse_parameters, resolve_machine)
 from . import _inputs
-# Reuse the operation editor's parameter-parsing engine (single source of truth for {name:expr} / string).
-from .cam_edit_operation import _parse_parameters
 
 app = adsk.core.Application.get()
 
@@ -147,7 +145,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     # parse parameters (may be empty)
     wanted = {}
     if parameters not in (None, "", {}):
-        wanted, perr = _parse_parameters(parameters)
+        wanted, perr = parse_parameters(parameters)
         if perr:
             return error(perr)
 

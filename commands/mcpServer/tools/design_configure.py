@@ -277,10 +277,13 @@ def _do_add_parameter(design, table, parameter, values):
         if cell is None:
             return error(f"No cell for configuration '{rname}' in the '{parameter}' column.")
         cell.expression = str(expr) # MUTATION
+        # An unreadable read-back is a FAILURE, not a pass - the same rule the material path
+        # states; a silently dropped write reads back None here.
         got = safe(lambda cell=cell: cell.expression)
-        if got is not None and got != str(expr):
-            return error(f"Cell '{rname}' of the '{parameter}' column still reads '{got}' after "
-                         f"the set - the expression '{expr}' did not take.")
+        if got is None or got != str(expr):
+            return error(f"Cell '{rname}' of the '{parameter}' column reads "
+                         f"{'nothing' if got is None else repr(got)} after the set - the "
+                         f"expression '{expr}' did not verifiably take.")
         n += 1
     return ok({"parameter": parameter, "column_id": safe(lambda: col.id), "set": n,
                "note": "Parameter column added and per-configuration expressions set. Switch with "
@@ -307,9 +310,10 @@ def _do_add_suppress(design, table, feature, suppressed_in):
         if cell is None:
             return error(f"No suppress cell for configuration '{rname}'.")
         cell.isSuppressed = True # MUTATION
-        if safe(lambda cell=cell: cell.isSuppressed) is False:
-            return error(f"Suppress cell '{rname}' still reads unsuppressed after the set - the "
-                         "suppression did not take.")
+        # read_flag semantics by hand: True is the only pass; False AND unreadable both fail.
+        if safe(lambda cell=cell: cell.isSuppressed) is not True:
+            return error(f"Suppress cell '{rname}' does not read suppressed after the set - the "
+                         "suppression did not verifiably take.")
     return ok({"feature": feature, "suppressed_in": suppressed_in,
                "note": "Suppress column added; the feature is suppressed in the listed configurations "
                        "(present in the others)."})
@@ -333,9 +337,10 @@ def _do_add_visibility(design, table, body, hidden_in):
         if cell is None:
             return error(f"No visibility cell for configuration '{rname}'.")
         cell.isVisible = False # MUTATION
-        if safe(lambda cell=cell: cell.isVisible) is True:
-            return error(f"Visibility cell '{rname}' still reads visible after the set - the hide "
-                         "did not take.")
+        # False is the only pass; still-visible AND unreadable both fail (unreadable != hidden).
+        if safe(lambda cell=cell: cell.isVisible) is not False:
+            return error(f"Visibility cell '{rname}' does not read hidden after the set - the hide "
+                         "did not verifiably take.")
     return ok({"body": body, "hidden_in": hidden_in,
                "note": "Visibility column added; the body is hidden in the listed configurations."})
 
@@ -382,10 +387,12 @@ def _do_set_appearance(design, table, body, appearances):
         if cell is None or theme_row is None:
             return error(f"No appearance cell/row at theme index {theme_idx}.")
         cell.appearance = appearance # MUTATION (assign appearance to this theme row)
+        # An unreadable read-back is a FAILURE, not a pass (the material path's stated rule).
         got = safe(lambda cell=cell: cell.appearance.name)
-        if got is not None and got != safe(lambda: appearance.name):
-            return error(f"Appearance cell at theme index {theme_idx} still reads '{got}' after "
-                         "the set - the assignment did not take.")
+        if got is None or got != safe(lambda: appearance.name):
+            return error(f"Appearance cell at theme index {theme_idx} reads "
+                         f"{'nothing' if got is None else repr(got)} after the set - the "
+                         "assignment did not verifiably take.")
         # Link the configuration row to this theme row. CRITICAL: the theme column's getCell(index)
         # does NOT share top.rows ordering - addressing by positional index links the WRONG config
         # (live-caught: Small got Large's theme). Address the theme cell by the CONFIG ROW NAME.
@@ -394,9 +401,10 @@ def _do_set_appearance(design, table, body, appearances):
             return error(f"No theme cell for configuration '{rname}'.")
         tcell.referencedTableRow = theme_row # MUTATION
         got_row = safe(lambda tcell=tcell: tcell.referencedTableRow.name)
-        if got_row is not None and got_row != safe(lambda theme_row=theme_row: theme_row.name):
-            return error(f"Configuration '{rname}' still links theme '{got_row}' after the set - "
-                         "the theme link did not take.")
+        if got_row is None or got_row != safe(lambda theme_row=theme_row: theme_row.name):
+            return error(f"Configuration '{rname}' links theme "
+                         f"{'nothing readable' if got_row is None else repr(got_row)} after the "
+                         "set - the theme link did not verifiably take.")
         set_count += 1
     return ok({"body": body, "themes": set_count,
                "note": "Appearance theme column added and configurations linked to theme rows. Switch "

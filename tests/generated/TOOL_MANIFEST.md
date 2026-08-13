@@ -21,7 +21,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `GeometryHandle` | A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken). |
 | `GeometryHandleList` | A LIST of geometry handles (e.g. the specific edges to fillet, the bodies to mirror). Accepts a |
 | `JointOriginRef` | A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the |
-| `OccurrenceRef` | A reference to an assembly OCCURRENCE (a component instance), by its `fullPathName` (unambiguous, |
+| `OccurrenceRef` | A reference to an assembly OCCURRENCE (a component instance): a `handle` - its entityToken, which |
 | `OccurrenceRefList` | A list of occurrence references (JSON list or comma-separated), each resolved via OccurrenceRef's |
 | `PlaneRef` | A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply: |
 | `ProfileRef` | A reference to a sketch PROFILE - a stable 'handle' (entityToken, order-stable across rebuilds) |
@@ -64,7 +64,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_replace_face` | Replace face(s) of a body with a different surface - re-cut the boundary without redrawing the feature that made it |
 | ✎ | `model_revolve` | Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part) |
 | ✎ | `model_scale` | Resize solid bodies about an anchor point that stays put (Fusion's Scale feature) - fit a part to a new envelope, or add a shrink allowance |
-| ✎ | `model_set_material` | Assign a PHYSICAL material (density-bearing) to a body, occurrence, component (all its bodies), or the whole design (empty target), so model_inspect's mass/dens... |
+| ✎ | `model_set_material` | Assign a PHYSICAL material (density-bearing) to a body (BRep or MESH), occurrence, component (all its bodies, meshes included), or the whole design (empty targe... |
 | ✎ | `model_shell` | Hollow a solid body into a thin-walled shell (Fusion's Shell feature) |
 | ✎ | `model_split` | Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / SplitFace feature |
 | ✎ | `model_stitch` | Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance' |

@@ -17,12 +17,12 @@ from ._common import apply_rename, ok, error, safe
 from . import _common
 from . import _inputs
 from . import _outputs
-from . import _geom
 from . import _assert
-from ._joints import (AXES as _AXES, OFFSET_PARAM_NOTE, apply_motion,
+from ._joints import (AXES as _AXES, FLIP_HINT, OFFSET_PARAM_NOTE, apply_motion,
                       build_joint_geometry as _joint_geometry_for,
                       is_joint_origin as _is_joint_origin, motion_param_names,
-                      pending_move_guard)
+                      normals_oppose as _normals_oppose, pending_move_guard,
+                      planar_outward_normal as _planar_outward_normal)
 
 app = adsk.core.Application.get()
 
@@ -105,16 +105,6 @@ def _move_delta(before, after):
             "direction": [round(dx * inv, 4), round(dy * inv, 4), round(dz * inv, 4)]}
 
 
-def _planar_outward_normal(entity):
-    """Outward unit normal of a PLANAR face (the shared evaluator sample), else None - detects the
-    flush face-to-face pick: two planar faces whose outward normals OPPOSE."""
-    if not isinstance(entity, adsk.fusion.BRepFace):
-        return None
-    if safe(lambda: entity.geometry.surfaceType) != adsk.core.SurfaceTypes.PlaneSurfaceType:
-        return None
-    return _geom.evaluator_normal_at(entity, safe(lambda: entity.pointOnFace))
-
-
 def _axis_entity(entity):
     """If 'entity' is a cylinder/cone face (or a circular edge), return it as an entity that can
     define the joint's rotation/slide axis (its own axis). Else None. A pin's joint must rotate about
@@ -193,9 +183,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
 
     # Sample the two outward normals BEFORE the joint moves anything - the flush face-to-face pick
     # (normals opposing) is detected from the pre-joint pose.
-    n1, n2 = _planar_outward_normal(e1), _planar_outward_normal(e2)
-    normals_oppose = (n1 is not None and n2 is not None
-                      and (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]) < -0.9)
+    normals_oppose = _normals_oppose(_planar_outward_normal(e1), _planar_outward_normal(e2))
 
     root = design.rootComponent
     try:
@@ -271,11 +259,7 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
     # (each planar face's frame Z = its OUTWARD normal), so opposing normals force a 180-deg rotation
     # of the free part - live-verified, typically embedding it in the other part. Say so.
     if normals_oppose and not flip:
-        out["flip_hint"] = (
-            "The two planar faces' outward normals OPPOSE (the flush face-to-face pick). A joint "
-            "aligns the two geometry frames Z-onto-Z, so the free part was ROTATED 180 deg to "
-            "satisfy that - typically embedding it. For the seated flush mate, re-run with "
-            "flip=true (or joint_edit flip).")
+        out["flip_hint"] = FLIP_HINT
     if not healthy:
         msg = (safe(lambda: joint.errorOrWarningMessage) or "").split("Compute Failed")[0].strip()
         out["health_warning"] = ("This joint FAILED TO COMPUTE (likely over-constrained): "

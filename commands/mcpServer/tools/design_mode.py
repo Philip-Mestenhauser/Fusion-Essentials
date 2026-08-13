@@ -241,9 +241,8 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
             return error("BaseFeatures.add() returned nothing - could not create a base feature.")
         # Name BEFORE startEdit - once the scope is open the feature is invisible to the API
         # (count==0, itemByName==None), so a rename attempt then would target nothing.
-        nm = (base_feature or "").strip()
-        if nm:
-            safe(lambda: setattr(bf, "name", nm))
+        # apply_rename, not a swallowed setattr: a declined rename is disclosed in the payload.
+        bf_name, rename_warning = _common.apply_rename(bf, base_feature)
         started = bf.startEdit()
         if started is False:
             # add() succeeded but the scope won't open - delete the orphan feature so it doesn't
@@ -253,9 +252,9 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
         # CAPTURE the open scope's object - the ONLY way to close it later (it is now un-findable by
         # any enumeration/lookup; see _OPEN_BASE_FEATURES). finish() pops from here.
         _OPEN_BASE_FEATURES.append(bf)
-        return ok({
+        start_payload = {
         "action": "start",
-        "base_feature": safe(lambda: bf.name),
+        "base_feature": bf_name,
         "editing": True,
         "component": safe(lambda: comp.name),
         "open_scope_count": len(_OPEN_BASE_FEATURES),
@@ -266,7 +265,10 @@ def base_feature_handler(action: str = "start", base_feature: str = "") -> dict:
             "this call opened). For a single mesh/import op prefer the auto-wrapped tools "
             "(save_as_mesh, mesh_insert, mesh_*), which open+finish a scope atomically and "
             "can never leak."),
-        })
+        }
+        if rename_warning:
+            start_payload["rename_warning"] = rename_warning
+        return ok(start_payload)
 
     # act == "finish".
     #

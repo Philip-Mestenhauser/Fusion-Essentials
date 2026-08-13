@@ -49,7 +49,8 @@ class FakeSnapshot:
 
 class FakeSnapshots:
     def __init__(self, pending=False, items=(), revert_pending_ok=True, revert_pending_lies=False,
-                 blind_after_revert=False):
+                 blind_after_revert=False, blind_count_after_delete=False,
+                 blind_count_after_add=False, blind_count_after_discard=False):
         self._pending = pending
         self._items = list(items)
         for it in self._items:
@@ -60,6 +61,12 @@ class FakeSnapshots:
         self._revert_pending_lies = revert_pending_lies   # returns True, flag stays set
         self._blind_after_revert = blind_after_revert     # the flag read RAISES after the revert
         self._blind = False
+        # the COUNT read RAISES once the collection has been mutated - per mutation path, so a test
+        # can blind exactly the re-read the handler takes after add / revertPendingSnapshot / delete
+        self._blind_count_after_delete = blind_count_after_delete
+        self._blind_count_after_add = blind_count_after_add
+        self._blind_count_after_discard = blind_count_after_discard
+        self._blind_count = False
 
     @property
     def hasPendingSnapshot(self):
@@ -73,6 +80,8 @@ class FakeSnapshots:
 
     @property
     def count(self):
+        if self._blind_count:
+            raise RuntimeError("snapshot count unreadable")
         return len(self._items)
 
     def item(self, i):
@@ -84,6 +93,8 @@ class FakeSnapshots:
         snap._parent = self
         self._items.append(snap)
         self.hasPendingSnapshot = False
+        if self._blind_count_after_add:
+            self._blind_count = True
         return snap
 
     def revertPendingSnapshot(self):
@@ -98,11 +109,15 @@ class FakeSnapshots:
             self._pending = False
         if self._blind_after_revert:
             self._blind = True
+        if self._blind_count_after_discard:
+            self._blind_count = True
         return True
 
     def _remove(self, snap):
         if snap in self._items:
             self._items.remove(snap)
+        if self._blind_count_after_delete:
+            self._blind_count = True
 
 
 class FakeOcc:
@@ -342,6 +357,21 @@ class TestCapturePosition:
         assert snaps.added is True
         assert out["captured"] is True
 
+    def test_capture_with_an_unreadable_count_publishes_null_not_the_arithmetic(self):
+        # the count re-read RAISES after add(): publishing "one more than before" would hand the
+        # caller a number the tool computed, not one it read off the collection.
+        _install([], pending=True, blind_count_after_add=True)
+        out = _payload(ja.capture_position_handler(action="capture"))
+        assert out["captured"] is True
+        assert out["snapshot_count"] is None
+        assert "'snapshot_count' is null" in out["note"]
+
+    def test_capture_publishes_the_count_it_read_back(self):
+        _install([], pending=True, snapshot_items=[FakeSnapshot("Position1")])
+        out = _payload(ja.capture_position_handler(action="capture"))
+        assert out["snapshot_count"] == 2
+        assert "null" not in out["note"]
+
     def test_capture_with_nothing_pending_errors(self):
         _install([], pending=False)
         res = ja.capture_position_handler(action="capture")
@@ -407,6 +437,21 @@ class TestCapturePosition:
         assert res["isError"] is True
         assert "still present" in res["message"].lower()
 
+    def test_delete_with_an_unreadable_count_publishes_null_not_zero(self):
+        # the count re-read RAISES after the delete: a fabricated 0 would tell the caller every
+        # captured position is gone when a later marker is still standing.
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")],
+                 blind_count_after_delete=True)
+        out = _payload(ja.capture_position_handler(action="delete", marker="Position1"))
+        assert out["deleted"] is True
+        assert out["snapshot_count"] is None
+        assert "'snapshot_count' is null" in out["note"]
+
+    def test_delete_publishes_the_count_it_read_back(self):
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")])
+        out = _payload(ja.capture_position_handler(action="delete", marker="Position1"))
+        assert out["snapshot_count"] == 1
+
     def test_delete_needs_marker_argument(self):
         _install([], snapshot_items=[FakeSnapshot("Position1")])
         res = ja.capture_position_handler(action="delete", marker="")
@@ -424,6 +469,22 @@ class TestCapturePosition:
         assert snap.deleted is True
         assert out["reverted"] is True
 
+    def test_revert_with_an_unreadable_count_publishes_null_not_the_arithmetic(self):
+        # the count re-read RAISES after the delete: publishing "one fewer than before" would hand
+        # the caller a number the tool computed, not one it read off the collection.
+        snap = FakeSnapshot()
+        _install([], snapshot_items=[snap], blind_count_after_delete=True)
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert out["reverted"] is True
+        assert out["snapshot_count"] is None
+        assert "'snapshot_count' is null" in out["note"]
+
+    def test_revert_publishes_the_count_it_read_back(self):
+        _install([], snapshot_items=[FakeSnapshot("Position1"), FakeSnapshot("Position2")])
+        out = _payload(ja.capture_position_handler(action="revert"))
+        assert out["snapshot_count"] == 1
+        assert "null" not in out["note"]
+
     def test_revert_with_no_snapshots_errors(self):
         _install([], snapshot_items=[])
         res = ja.capture_position_handler(action="revert")
@@ -439,6 +500,16 @@ class TestCapturePosition:
         # discarding the PENDING move is not reverting a CAPTURED one - the marker survives
         assert snap.deleted is False
         assert out["snapshot_count"] == 1
+
+    def test_discard_with_an_unreadable_count_publishes_null_not_the_pre_read(self):
+        # the count read RAISES after the discard: echoing the count taken BEFORE the call would
+        # publish a stale number as a fresh read-back.
+        snap = FakeSnapshot("Position1")
+        _install([], pending=True, snapshot_items=[snap], blind_count_after_discard=True)
+        out = _payload(ja.capture_position_handler(action="discard_pending"))
+        assert out["discarded"] is True
+        assert out["snapshot_count"] is None
+        assert "'snapshot_count' is null" in out["note"]
 
     def test_discard_pending_with_nothing_pending_errors_without_calling_the_api(self):
         _, snaps, _, _ = _install([], pending=False)

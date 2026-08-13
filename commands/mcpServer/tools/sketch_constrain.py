@@ -217,7 +217,10 @@ _RESULT_OPTION = _inputs.Choice("result_option", list(_RESULT_OPTIONS), default=
 # may be ignored if not applicable to the geometry" - so every one is published as REQUESTED and
 # never as applied. Each family also carries a Default* member, which is what a fresh
 # AutoConstrainInput already holds: leaving the knob unset is how the platform is left to choose,
-# so no option maps to it and nothing is assigned for it.
+# so no option maps to it and nothing is assigned for it. The four AutoConstrainInput properties
+# are stamped "not officially supported" in the live API doc (2705.0.87) and their setters can
+# raise "not currently available" on a build that gates them - set_verified surfaces that raise
+# as this tool's honest error, so the knobs stay published for builds that accept them.
 _DIMENSION_STRATEGIES = {
     "chain": "ChainDimensionStrategyType",
     "baseline": "BaselineDimensionStrategyType",

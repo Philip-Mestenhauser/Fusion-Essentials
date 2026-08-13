@@ -29,7 +29,7 @@ _TOOL_WEIGHTS = {
     "appearance_set": 1223,
     "assembly_capture_position": 1645,   # + the discard_pending action (revertPendingSnapshot): throwing an uncaptured move away is a different act from deleting a captured marker, and both belong on the one snapshot lifecycle tool
     "assembly_constrain": 2384,   # + the verification contract a caller cannot recover after the call: the create REFUSES a constraint that did not solve (or whose state is unreadable) and one whose add left other relations unhealthy, and the payload's 'moved' answers whether the parts were actually located
-    "assembly_edit_relations": 2398,   # over P40: six actions over three relation kinds (rigid group / motion link / constraint), each with its own input, plus the measured set_occurrences refusal and the ratio-sign contract; peer: design_edit_timeline
+    "assembly_edit_relations": 2425,   # over P40: six actions over three relation kinds (rigid group / motion link / constraint), each with its own input, plus the measured set_occurrences refusal and the ratio-sign contract; peer: design_edit_timeline
     "assembly_edit_contacts": 2233,   # over P40: nine actions over one object - the set lifecycle (create with the >=2-distinct rule, set_members, rename, suppress, delete) plus the two design-level analysis flags whose truth table decides whether any set acts at all, and the enable-first fact the platform enforces by raising; peer: assembly_edit_relations
     "assembly_get": 2323,   # + the relations slice (rigid groups / motion links / constraints), the contacts slice (contact sets + both contact-analysis flags), and their caps
     "assembly_ground": 1166,
@@ -68,26 +68,26 @@ _TOOL_WEIGHTS = {
     "data_get_upload_status": 1219,
     "data_switch_hub": 1158,
     "data_upload_file": 1608,
-    "design_add_instance": 2233,   # over P40: the placement surface + the landed-paths contract (children vs host instances named by measured cause); peers: doc_insert_occurrence, model_create_component
-    "design_move_occurrence": 1488,   # over P40: the no-root-target fact and its workaround are caller-unrecoverable
-    "design_activate_component": 1123,
+    "design_add_instance": 2246,   # over P40: the placement surface + the landed-paths contract (children vs host instances named by measured cause); peers: doc_insert_occurrence, model_create_component
+    "design_move_occurrence": 1514,   # over P40: the no-root-target fact and its workaround are caller-unrecoverable
+    "design_activate_component": 1136,
     "design_edit_timeline": 2605,   # five guarded timeline actions plus set/delete_attribute on the entity a timeline item wraps (three inputs; the entity-attribute surface has no other tool); delete_after_marker previews its blast radius before it will run
     "design_configure": 3077,  # + add_material (per-configuration materials via the material theme table) and the add_configuration auto-activation disclosure
     "design_delete_feature": 1149,
-    "design_delete_occurrence": 1047,
+    "design_delete_occurrence": 1176,   # the target is named as a handle (the exact identity) with the path/name as the convenience form, on both surfaces
     "design_export": 4155,   # 3MF/OBJ/USD/f3d/SMT formats, STL binary+units, DXF options, invisible flags
     "design_set_name": 1324,   # under the fleet P40 - add and go
     "design_get": 2063,   # + the materials/appearances catalog slices (library census, scoped filtered pages) - in-family peers: cam_get, assembly_get
     "design_recompute": 571,
-    "design_remove_feature": 1289,   # under the fleet P40 at pin time - add and go
+    "design_remove_feature": 1302,   # under the fleet P40 at pin time - add and go
     "design_set_mode": 969,
     "doc_activate": 885,
     "doc_close": 1261,
     "doc_copy": 2122,
     "doc_get": 2316,   # + the per-version is_milestone/milestone_name fields and the milestone rollups
-    "doc_insert_derive": 3026,
-    "doc_insert_import": 2063,   # three targeting modes (component, plane for DXF, sketch for SVG) plus the sketch_insert_svg pointer telling a caller which of the two SVG routes places the art
-    "doc_insert_occurrence": 2481,
+    "doc_insert_derive": 3039,
+    "doc_insert_import": 2076,   # three targeting modes (component, plane for DXF, sketch for SVG) plus the sketch_insert_svg pointer telling a caller which of the two SVG routes places the art
+    "doc_insert_occurrence": 2507,
     "doc_new": 685,
     "doc_open": 1805,
     "doc_restore_version": 1184,
@@ -96,17 +96,17 @@ _TOOL_WEIGHTS = {
     "doc_save_as": 1865,
     "doc_update_xref": 1266,
     "drawing_add_sketch": 1987,   # over P40: five 2D factories with different point arities are the contract (the kind enum is schema-checked, the per-kind arity cannot be), plus two caller-unrecoverable facts - coordinates are drawing units not cm, and Drawing.deleteEntities raises not-implemented so a sheet's geometry must go in one call; in-family peers drawing_edit_sheet, sketch_add_geometry
-    "drawing_create": 4453,   # center_line/center_mark state the refusal their resolver enforces rather than advertise a capability adsk.drawing carries no enum family for; the client-timeout fact (a timeout is not a verdict) is paid for by slimmer input descriptions; 47 under the hard ceiling
+    "drawing_create": 4425,   # -28: the up-front "open it once in the Fusion UI" instruction retired - a never-reviewed drawing opens and drives through doc_open (measured), so the description names that route and the UI open survives only as failure-time teaching in the note. center_line/center_mark still state the refusal their resolver enforces rather than advertise a capability adsk.drawing carries no enum family for; the client-timeout fact (a timeout is not a verdict) is paid for by slimmer input descriptions; 75 under the hard ceiling
     "drawing_dimension": 1364,   # at the fleet P40 at pin time - add and go
     "drawing_edit_sheet": 1944,   # +87: Sheet.width/height are millimetres on EVERY drawing while sheet_units is the dimension unit - the two are told apart on the wire, and a caller cannot recover a wrong unit claim
-    "drawing_export": 2214,   # +266: sheet_range carries the measured wedge at its observed severity (a single-sheet range export twice hung the Fusion main thread on 2705.0.87 and the session needed outside intervention, while all-sheets ran clean) - a caller who reaches for the input cannot recover a wedged session from the result
+    "drawing_export": 2142,   # -72: the never-reviewed-drawing blocking claim retired (a drawing never reviewed in the Fusion UI opens and exports through doc_open, measured), leaving the API route in its place. +266 still stands: sheet_range carries the measured wedge at its observed severity (a single-sheet range export twice hung the Fusion main thread on 2705.0.87 and the session needed outside intervention, while all-sheets ran clean) - a caller who reaches for the input cannot recover a wedged session from the result
     "drawing_insert_image": 1737,   # +217: rotate_deg (degrees about the insert position) and the six image extensions the guard takes - the placement surface an image needs, and neither is recoverable after a call that cannot be read back
-    "drawing_update": 1274,
-    "find_geometry": 2164,   # +170: a body inside a component resolves by name, and the qualified '<occurrence-or-component>:<body>' form the ambiguity refusal lists is what a caller must pass back - neither is recoverable from the schema
+    "drawing_update": 1262,  # shrank: retired the reviewed-drawing park-on-a-human clause
+    "find_geometry": 2116,   # +122: a body inside a component resolves by name, and the qualified '<occurrence-or-component>:<body>' form the ambiguity refusal lists is what a caller must pass back - neither is recoverable from the schema; the form rides the 'target' input description, so the prose no longer spells it a second time
     "joint_at_geometry": 2399,   # + the axis Choice enum (values machine-validated) and the frame-relative correction with its joint_edit(world_axis=) pointer; (ball uses none) stated on both surfaces
     "joint_create": 3480,
     "joint_create_as_built": 2095,  # non-rigid motion: geometry anchor + joint_type/axis/slide_axis inputs, per-DOF pose pointers; the name input (applied post-create, read back) + the no-offset/angle-parameter fact routing parametric drives to joint_create
-    "joint_create_origin": 3510,
+    "joint_create_origin": 3972,   # +462: the 'component' input (which component's collection receives the origin - the only route to a joint origin that can serve as a SUB-component's side of a joint) and the space fact it brings: those offsets run from that component's origin, so world x,y,z is refused unless it sits at the world origin unrotated - neither is recoverable from the result
     "joint_drive": 2067,
     "joint_edit": 3356,
     "joint_motion_link": 1032,
@@ -125,16 +125,16 @@ _TOOL_WEIGHTS = {
     "mesh_shell": 1367,
     "mesh_smooth": 1101,
     "mesh_to_brep": 1729,
-    "model_arrange": 1651,
+    "model_arrange": 1678,
     "model_base_feature": 1445,
     "model_chamfer": 2278,   # distance-and-angle + corner_type, read back off the feature
     "model_combine": 1590,
     "model_compute_holder": 1570,
     "model_construction": 4492,   # three modes the API has no other route to (a plane rotated about a curved face's own axis, a plane pinned through a vertex, a plane/point placed along a path proportionally, absolutely, or to an object) plus the distance_type/to_object inputs they need; +78 for the measured chaining rule (BRep chaining follows TANGENT CONTINUITY - a sharp corner stops it, open vs closed decides nothing - so the count, not the promise, is the answer)
-    "model_create_component": 2231,
+    "model_create_component": 2244,
     "model_draft": 2057,
     "model_emboss": 1458,   # + the sketch-TEXT profile route ('text:<i>' / '<sketch>/text:<i>'), the only path from a nameplate sketch to an engraving
-    "model_extrude": 3141,
+    "model_extrude": 3245,   # +104: the sketch-TEXT profile form ('text:<i>'), the only route from a text-only sketch to a solid - the index/handle vocabulary alone reads it as an index and dead-ends in the surface branch
     "model_fillet": 3412,   # variable-radius, chord-length and rule fillet, with the rule radius/topology read back
     "model_hole": 4497,   # placement modes (center/on_edge/plane_offsets) incl. the point frame, modeled thread, tip_angle, thread_type
     "model_inspect": 1566,
@@ -145,13 +145,13 @@ _TOOL_WEIGHTS = {
     "model_mirror": 1364,   # + the features input (parametric feature mirroring by exact name@index, beside bodies)
     "model_move": 2667,   # four move modes (translate/along-entity/rotate/point-to-point); the faces input carries its own refusal; + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)
     "model_offset_face": 1315,   # + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)
-    "model_pattern_circular": 1783,
-    "model_pattern_path": 2144,   # +86 for the measured chaining rule (tangent continuity, sharp corner stops it). the family's occurrence+body target pair plus the path selector (edge handles or a path sketch) and the distance/distance_type/start_point run controls
-    "model_pattern_rectangular": 2225,   # the two direction inputs carry the AxisRef contract (a world axis OR a straight-edge/sketch-line handle) instead of a bare x/y/z enum
+    "model_pattern_circular": 1810,
+    "model_pattern_path": 2171,   # +86 for the measured chaining rule (tangent continuity, sharp corner stops it). the family's occurrence+body target pair plus the path selector (edge handles or a path sketch) and the distance/distance_type/start_point run controls
+    "model_pattern_rectangular": 2252,   # the two direction inputs carry the AxisRef contract (a world axis OR a straight-edge/sketch-line handle) instead of a bare x/y/z enum
     "model_replace_face": 1287,   # under the fleet P40 at pin time - add and go
     "model_revolve": 2329,   # +20: the axis-defining face family named on the wire (cylindrical/conical/toroidal, each measured accepted), the fact a caller cannot recover from a refusal
     "model_scale": 2165,   # two scale modes (uniform + three per-axis factors), anchor input, unitless-expression guard, resolved-value echo; + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)
-    "model_set_material": 1346,
+    "model_set_material": 1443,   # mesh bodies are mass-bearing targets too - an unassigned mesh silently carries default steel density
     "model_shell": 1741,
     "model_split": 2232,   # + the conditional-'feature' PRODUCES clause (a direct design creates no timeline feature to name)
     "model_stitch": 1567,
@@ -173,14 +173,14 @@ _TOOL_WEIGHTS = {
     "sketch_constrain": 4485,   # 25 constraint kinds + per-instance pattern suppression (the rectangular row-column rule on the wire) + the four requested-only autoConstrain strategy knobs + the one entity-anchor mention (the ':center' form its point slots share with sketch_dimension) and the 'text:<i>' operand fix/unfix takes (the SketchText anchor DOF has no other route); paid for by a slimmer ref sentence, 15 under the hard ceiling
     "sketch_move": 1724,   # over P40: nine of the inputs ARE the transform (translation/rotation/scale composed into one matrix), verified by coordinate read-back
     "sketch_copy": 1752,   # over P40: same transform surface as sketch_move plus the target-sketch input and the new-refs contract
-    "sketch_create": 1400,
+    "sketch_create": 1386,
     "sketch_delete_entity": 1474,   # ref vocabulary names ellipse/spline kinds + the text:<index> target
     "sketch_dimension": 3546,   # ref vocabulary names ellipse/spline kinds; + the eight remaining SketchDimensions add* types, the surface operand and the driving/tangent-side flags, and the two measured dim_type behaviors a caller cannot see in the result (the angle wedge, the offset rotate)
     "sketch_edit_curve": 2118,   # seven curve-edit actions with per-curve pick points
     "sketch_insert_svg": 1556,   # over P40: the ignored width/height/viewBox with the 1/96-inch-times-scale rule, the y-down landing, and the doc_insert_import pointer are each a sizing/placement fact a caller cannot recover from the result
     "sketch_get": 1162,
     "sketch_project": 3558,   # two more actions on the same verb: to_surface (projectToSurface - faces, source curves from another sketch, project type, direction) and intersect (intersectWithSketchPlane - bodies/entities x the sketch plane); in-family peers: sketch_constrain, sketch_dimension
-    "sketch_set_text": 2916,   # + the along_path/fit_on_path modes (path, above_path, align, character_spacing), angle/flip formatting, and font_name (applies on create AND edit, landed/edited font read back) - in-family peers: sketch_edit_curve, sketch_constrain
+    "sketch_set_text": 2986,   # +70: 'x' names the anchor 'align' puts it on (left edge / center / right edge) - measured, the box moves with align and a caller cannot recover where centered text landed; + the along_path/fit_on_path modes (path, above_path, align, character_spacing), angle/flip formatting, and font_name (applies on create AND edit, landed/edited font read back) - in-family peers: sketch_edit_curve, sketch_constrain
     "surface_delete_face": 1386,   # + the conditional-'feature'/'bodies_consumed' PRODUCES clauses (a direct design creates no timeline feature, so both feature-derived outputs are omitted)
     "surface_extend": 1693,   # + extend_alignment (free_edges/align_edges, fresh-input default measured 0)
     "surface_extrude": 1845,
@@ -203,10 +203,10 @@ _TOOL_WEIGHTS = {
     "sys_reload_addin": 1290,
     "sys_request_selection": 2162,
     "view_list_workspaces": 462,
-    "view_screenshot": 2279,   # +455: the file_path PNG writer - the fleet's only raster output, the one route from a rendered view to a drawing sheet - plus the expect_document the write guard adds now that writing (and silently overwriting) a caller-named file makes this write-kind; the fit_to hide/restore disclosure it already carried is the rest
+    "view_screenshot": 2292,   # +455: the file_path PNG writer - the fleet's only raster output, the one route from a rendered view to a drawing sheet - plus the expect_document the write guard adds now that writing (and silently overwriting) a caller-named file makes this write-kind; the fit_to hide/restore disclosure it already carried is the rest
     "view_screenshot_multi": 1390,   # transparent-background + anti-aliased capture options
     "view_section": 2222,
-    "view_set": 2793,   # camera projection Choice + perspective angle with read-back
+    "view_set": 3419,   # camera projection Choice + perspective angle with read-back; + the display action (the four browser-folder categories with their on/off flag)
     "view_switch_workspace": 834,
     "workspace_orient": 895,
 }

@@ -82,6 +82,23 @@ def _body_names_and_solid(feature):
     return names, any_solid
 
 
+def _landed_depth(feature, want_cm, k):
+    """(depth in display units, error) read off the CREATED ExtrudeFeature.
+
+    MEASURED: extentOne is a DistanceExtentDefinition, and a symmetric extrude's is a
+    SymmetricExtentDefinition; both carry .distance as a ModelParameter reading CM with the
+    requested SIGN kept (-15 mm read back -1.5). So the depth published is the feature's own, never
+    the echoed input, and a depth disagreeing with the request is an error rather than a false ok.
+    A depth that cannot be read comes back None, which the caller names in `unverified`."""
+    got = safe(lambda: feature.extentOne.distance.value)
+    if not isinstance(got, float):
+        return None, ""
+    if abs(got - want_cm) > 1e-6:
+        return None, (f"The surface was extruded but its depth reads back {round(got / k, 6)}, not "
+                      f"the requested {round(want_cm / k, 6)}.")
+    return round(got / k, 6), ""
+
+
 # ── surface_extrude ─────────────────────────────────────────────────────────
 
 def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
@@ -142,8 +159,11 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         return error(_common.no_feature_error(design, "Surface extrude"))
 
     names, any_solid = _body_names_and_solid(feature)
+    landed, rerr = _landed_depth(feature, float(distance) * k, k)
+    if rerr:
+        return error(rerr + " " + _common.failed_effect_remedy(design, feature))
 
-    return ok({
+    payload = {
         "created": True,
         "feature": safe(lambda: feature.name),
         "operation": op_key,
@@ -157,7 +177,13 @@ def extrude_handler(sketch_name: str = "", curves=None, distance: float = 0.0,
         "note": ("Open surface body created (isSolid=false). Feed it to surface_trim/extend/patch/thicken."
                  if not any_solid else
                  "The result reads back SOLID (isSolid=true) - the profile closed into a solid, not a sheet."),
-    })
+    }
+    if landed is None:
+        payload["unverified"] = ["distance"]
+        payload["note"] += " Not read back off the feature: distance."
+    else:
+        payload["distance"] = landed
+    return ok(payload)
 
 
 # ── surface_revolve ─────────────────────────────────────────────────────────

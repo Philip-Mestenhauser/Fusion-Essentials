@@ -851,6 +851,44 @@ class TestSlideValueHasNoParameter:
         assert "co-driving the geometry" in out["note"]
 
 
+class TestCreateFlipHint:
+    """Parity with joint_at_geometry: a create that seats two OPPOSING planar faces without flip
+    rotates the free part 180 deg - the payload carries the one shared FLIP_HINT."""
+
+    def _wire(self, monkeypatch, n1, n2):
+        _, coll = _install_create(monkeypatch)
+        face1, face2 = object(), object()
+        monkeypatch.setattr(joint, "_resolve_input",
+                            lambda d, spec: (SimpleNamespace(name=spec,
+                                                             entityOne=face1 if spec == "JO_A"
+                                                             else face2),
+                                             spec, None))
+        normals = {face1: n1, face2: n2}
+        monkeypatch.setattr(joint._joints, "planar_outward_normal",
+                            lambda e: normals.get(e))
+        return coll
+
+    def test_opposing_faces_without_flip_carry_the_hint(self, monkeypatch):
+        self._wire(monkeypatch, (0.0, 0.0, 1.0), (0.0, 0.0, -1.0))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert "OPPOSE" in out["flip_hint"] and "flip=true" in out["flip_hint"]
+
+    def test_flip_true_suppresses_the_hint(self, monkeypatch):
+        self._wire(monkeypatch, (0.0, 0.0, 1.0), (0.0, 0.0, -1.0))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", flip=True))
+        assert "flip_hint" not in out
+
+    def test_aligned_faces_carry_no_hint(self, monkeypatch):
+        self._wire(monkeypatch, (0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert "flip_hint" not in out
+
+    def test_an_unreadable_normal_carries_no_hint(self, monkeypatch):
+        self._wire(monkeypatch, None, (0.0, 0.0, -1.0))
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B"))
+        assert "flip_hint" not in out
+
+
 class TestSuppressedEditDisclosure:
     def _rig(self, monkeypatch, suppressed):
         j = SimpleNamespace(name="J", isFlipped=False, isSuppressed=suppressed,
@@ -872,3 +910,531 @@ class TestSuppressedEditDisclosure:
         self._rig(monkeypatch, suppressed=False)
         out = _payload(joint.edit_handler(joint_name="J", flip=True))
         assert "suppressed" not in out and "INERT" not in out["note"]
+
+
+# ── _find_occurrence: the shared OccurrenceRef resolver, not a hand-rolled name match ────────────
+
+class TestFindOccurrence:
+    def test_delegates_to_the_shared_occurrence_resolver(self, monkeypatch):
+        # The name is passed as BOTH the field label and the raw spec, so the resolver's refusal
+        # names the input the caller actually typed. A local name walk here would resolve an
+        # ambiguous 'Bolt:1' to the first instance instead of refusing it.
+        seen = []
+        monkeypatch.setattr(joint._inputs, "_resolve_occurrence",
+                            lambda name, raw: seen.append((name, raw)) or ("OCC", None))
+        assert joint._find_occurrence(SimpleNamespace(), "Boom:1") == ("OCC", None)
+        assert seen == [("Boom:1", "Boom:1")]
+
+
+class TestAvailableJointOriginsSkipsUnnamed:
+    def test_a_jo_with_no_readable_name_is_left_out_of_the_listing(self, monkeypatch):
+        # A blank entry would render as "'' (root)" and teach the agent a name that resolves nothing.
+        design = _install_resolve_seam(monkeypatch, {})
+        design.rootComponent.jointOrigins = _IterableJOs(
+            {"named": SimpleNamespace(name="Center of Model"), "blank": SimpleNamespace(name="")})
+        listed, more = joint._available_joint_origins(design)
+        assert listed == ["'Center of Model' (root)"] and more == 0
+
+
+# ── _resolve_snap_entity: an occurrence's geometry -> one proxied BRep entity ─────────────────────
+
+def _face_bag(items, count=None):
+    """A faces collection: the .count the guard reads plus the iteration the pickers walk."""
+    n = len(items) if count is None else count
+    return type("_FaceBag", (), {"count": n, "__iter__": lambda self: iter(items)})()
+
+
+def _snap_face(surface_type, *, area=1.0, proxy=None):
+    """One face: its surface type (0 = planar, 3 = cylinder), its area, and what proxying yields."""
+    return SimpleNamespace(geometry=SimpleNamespace(surfaceType=surface_type), area=area,
+                           createForAssemblyContext=lambda occ, _p=proxy: _p)
+
+
+def _snap_occurrence(*, origin_point=None, has_body=True, faces=None):
+    """An occurrence exposing exactly what _resolve_snap_entity reads off it."""
+    body = SimpleNamespace(faces=faces) if has_body else None
+    comp = SimpleNamespace(originConstructionPoint=origin_point,
+                           bRepBodies=SimpleNamespace(item=lambda i, _b=body: _b))
+    return SimpleNamespace(component=comp)
+
+
+class TestResolveSnapEntity:
+    def _wire(self, monkeypatch, occ, err=None):
+        monkeypatch.setattr(joint, "_find_occurrence", lambda d, n: (occ, err))
+
+    def test_an_unresolved_occurrence_error_is_passed_through(self, monkeypatch):
+        self._wire(monkeypatch, None, "no occurrence 'Boom:1'")
+        assert joint._resolve_snap_entity(None, "Boom:1", "top") == (None, None, "no occurrence 'Boom:1'")
+
+    def test_origin_snap_returns_the_assembly_context_proxy(self, monkeypatch):
+        op = SimpleNamespace(createForAssemblyContext=lambda occ: "PROXY_PT")
+        self._wire(monkeypatch, _snap_occurrence(origin_point=op))
+        assert joint._resolve_snap_entity(None, "Boom:1", "origin") == ("PROXY_PT", "point", None)
+
+    def test_origin_snap_falls_back_to_the_native_point(self, monkeypatch):
+        # A root-component point has no proxy to make; the native entity is the usable form.
+        op = SimpleNamespace(createForAssemblyContext=lambda occ: None)
+        self._wire(monkeypatch, _snap_occurrence(origin_point=op))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "origin")
+        assert ent is op and kind == "point" and err is None
+
+    def test_origin_snap_without_an_origin_point_names_the_occurrence(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(origin_point=None))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "origin")
+        assert ent is None and err == "'Boom:1' has no origin construction point."
+
+    def test_an_occurrence_with_no_body_names_the_occurrence(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(has_body=False))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "top")
+        assert ent is None and err == "'Boom:1' has no body to snap to."
+
+    def test_a_body_with_zero_faces_is_refused(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([], count=0)))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "top")
+        assert ent is None and err == "'Boom:1' body has no faces."
+
+    def test_cylinder_snap_picks_the_cylindrical_face_and_proxies_it(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(
+            faces=_face_bag([_snap_face(0, proxy="FLAT"), _snap_face(3, proxy="CYL")])))
+        assert joint._resolve_snap_entity(None, "Boom:1", "cylinder") == ("CYL", "cylinder", None)
+
+    def test_cylinder_snap_on_a_body_with_no_cylinder_is_refused(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([_snap_face(0)])))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "cylinder")
+        assert ent is None and err == "'Boom:1' has no cylindrical face to snap to."
+
+    def test_a_planar_snap_returns_the_picked_face_proxied(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag(
+            [_snap_face(0, area=1.0, proxy="SMALL"), _snap_face(0, area=9.0, proxy="BIG")])))
+        # 'center' = the largest planar face
+        assert joint._resolve_snap_entity(None, "Boom:1", "center") == ("BIG", "planar", None)
+
+    def test_a_planar_snap_with_no_planar_face_names_the_snap(self, monkeypatch):
+        self._wire(monkeypatch, _snap_occurrence(faces=_face_bag([_snap_face(3)])))
+        ent, kind, err = joint._resolve_snap_entity(None, "Boom:1", "top")
+        assert ent is None and err == "Could not pick a 'top' face on 'Boom:1'."
+
+
+class TestResolveSnapInput:
+    def test_builds_a_joint_geometry_from_the_snapped_entity(self, monkeypatch):
+        import adsk.core, adsk.fusion
+        Face, _, _ = _jg_seam(monkeypatch)
+        face = Face(adsk.core.SurfaceTypes.PlaneSurfaceType)
+        monkeypatch.setattr(joint, "_resolve_snap_entity", lambda d, n, s: (face, "planar", None))
+        g, err = joint._resolve_snap_input(None, "Boom:1", "top")
+        assert err is None and g == ("planar", adsk.fusion.JointKeyPointTypes.CenterKeyPoint)
+
+    def test_an_entity_failure_is_passed_through_untouched(self, monkeypatch):
+        monkeypatch.setattr(joint, "_resolve_snap_entity", lambda d, n, s: (None, None, "no body"))
+        assert joint._resolve_snap_input(None, "Boom:1", "top") == (None, "no body")
+
+    def test_a_geometry_build_failure_is_reported_not_swallowed(self, monkeypatch):
+        _jg_seam(monkeypatch)
+        monkeypatch.setattr(joint, "_resolve_snap_entity", lambda d, n, s: (object(), "planar", None))
+        g, err = joint._resolve_snap_input(None, "Boom:1", "top")
+        assert g is None and "not a supported joint geometry" in err
+
+
+class TestResolveInputSnapPath:
+    def test_a_snap_spec_is_labelled_occurrence_and_snap(self, monkeypatch):
+        design = _install_resolve_seam(monkeypatch, {})
+        monkeypatch.setattr(joint, "_resolve_snap_input", lambda d, occ, snap: ("G", None))
+        assert joint._resolve_input(design, "Boom:1:top") == ("G", "Boom:1:top", None)
+
+    def test_a_snap_failure_keeps_the_snap_label_and_its_error(self, monkeypatch):
+        # The snap path OWNS the spec once it parses - it must not fall through to the JO-name
+        # form-guide, which would hide "has no body to snap to" behind "not a Joint Origin".
+        design = _install_resolve_seam(monkeypatch, {})
+        monkeypatch.setattr(joint, "_resolve_snap_input", lambda d, occ, snap: (None, "no body"))
+        assert joint._resolve_input(design, "Boom:1:cylinder") == (None, "Boom:1:cylinder", "no body")
+
+
+class TestResolveInputAmbiguousJointOrigin:
+    def test_an_ambiguous_jo_name_is_surfaced_verbatim(self, monkeypatch):
+        # Two components carrying the same JO name: the kind's refusal (with the qualified
+        # candidates) is what the caller needs - not the generic "not a handle/JO/snap" guide.
+        design = _install_resolve_seam(monkeypatch, {})
+        shared = "Center of Model"
+        root = SimpleNamespace(name="Root",
+                               jointOrigins=_IterableJOs({shared: SimpleNamespace(name=shared)}))
+        sub = SimpleNamespace(name="Tower",
+                              jointOrigins=_IterableJOs({shared: SimpleNamespace(name=shared)}))
+        design.rootComponent = root
+        design.allComponents = [root, sub]
+        g, label, err = joint._resolve_input(design, shared)
+        assert g is None and label == shared
+        assert "ambiguous" in err and "2 Joint Origins share that name" in err
+        assert "is not a find_geometry handle" not in err
+
+
+# ── create handler: the failure paths that must report, never return a false ok ───────────────────
+
+def _raise_refusal(*_a, **_k):
+    """A platform call that refuses - injected where the handler must report, not swallow."""
+    raise RuntimeError("7 : the platform refused")
+
+
+class TestCreateHandlerFailurePaths:
+    def test_no_active_design(self, monkeypatch):
+        monkeypatch.setattr(joint._common, "design", lambda: None)
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True and "No active design" in res["message"]
+
+    def test_an_unresolvable_first_input_carries_the_resolver_error(self, monkeypatch):
+        _install_create(monkeypatch)
+        res = joint.handler(occurrence_one="Nope", occurrence_two="JO_B")
+        assert res["isError"] is True and "'Nope' is not a find_geometry handle" in res["message"]
+
+    def test_an_unresolvable_second_input_carries_the_resolver_error(self, monkeypatch):
+        _install_create(monkeypatch)
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="Nope")
+        assert res["isError"] is True and "'Nope' is not a find_geometry handle" in res["message"]
+
+    def test_a_silent_first_input_failure_still_names_the_input(self, monkeypatch):
+        # A resolver that declines without a reason must not produce a bare/blank refusal.
+        _install_create(monkeypatch)
+        monkeypatch.setattr(joint, "_resolve_input", lambda d, spec: (None, spec, None))
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert "Could not resolve joint input 'JO_A'" in res["message"]
+
+    def test_a_silent_second_input_failure_names_the_second_input(self, monkeypatch):
+        _install_create(monkeypatch)
+        monkeypatch.setattr(
+            joint, "_resolve_input",
+            lambda d, spec: (SimpleNamespace(name=spec), spec, None) if spec == "JO_A"
+            else (None, spec, None))
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert "Could not resolve joint input 'JO_B'" in res["message"]
+
+    def test_a_raising_create_input_is_reported(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
+        coll.createInput = _raise_refusal
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True and "Could not create joint input" in res["message"]
+        assert "the platform refused" in res["message"]
+
+    def test_a_create_input_returning_nothing_is_reported(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
+        coll.createInput = lambda a, b: None
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True and "createInput returned nothing" in res["message"]
+
+    def test_a_motion_setter_returning_false_is_not_a_success(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
+        coll.createInput = lambda a, b: SimpleNamespace(setAsRigidJointMotion=lambda: False)
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True and "Could not set rigid motion" in res["message"]
+        assert coll.added is None                      # never reached joints.add
+
+    def test_an_offset_that_cannot_be_valued_is_reported(self, monkeypatch):
+        import adsk.core
+        _, coll = _install_create(monkeypatch)
+        monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(_raise_refusal))
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", offset=10)
+        assert res["isError"] is True and "Could not apply offset/angle/flip" in res["message"]
+        assert coll.added is None
+
+    def test_an_add_returning_nothing_is_reported(self, monkeypatch):
+        _, coll = _install_create(monkeypatch)
+        coll.add = lambda ji: None
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True and "joints.add returned nothing" in res["message"]
+
+
+class TestCreateLimits:
+    def _with_motion(self, monkeypatch, motion):
+        _, coll = _install_create(monkeypatch)
+        coll.add = lambda ji, _m=motion: SimpleNamespace(name="Pivot", jointMotion=_m)
+        return coll
+
+    def test_limits_on_a_joint_with_no_motion_are_refused(self, monkeypatch):
+        _install_create(monkeypatch)                   # the default add() yields jointMotion None
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B", min_deg=-45)
+        assert res["isError"] is True and "no motion to limit" in res["message"]
+
+    def test_rotation_limits_land_on_the_new_joints_motion(self, monkeypatch):
+        motion = _RevMotion()
+        self._with_motion(monkeypatch, motion)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="revolute", min_deg=-45, max_deg=90))
+        assert abs(motion.rotationLimits.maximumValue - _math.radians(90)) < 1e-9
+        assert out["min_deg"] == -45 and out["max_deg"] == 90
+
+    def test_a_limit_kind_the_motion_lacks_is_refused(self, monkeypatch):
+        self._with_motion(monkeypatch, _RevMotion())
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                            joint_type="revolute", max_mm=100)
+        assert res["isError"] is True and "LINEAR/slide limits" in res["message"]
+
+    def test_slide_limits_scale_by_the_requested_units(self, monkeypatch):
+        motion = _SlideMotion()
+        self._with_motion(monkeypatch, motion)
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="slider", max_mm=2, units="in"))
+        assert abs(motion.slideLimits.maximumValue - 5.08) < 1e-9    # 2 in -> 5.08 cm
+        assert out["max_mm"] == 2
+
+    def test_a_rest_limit_appends_the_it_does_not_pose_disclaimer(self, monkeypatch):
+        self._with_motion(monkeypatch, _RevMotion())
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="revolute", rest_deg=10))
+        assert out["rest_deg"] == 10
+        assert "does NOT reposition the static model" in out["note"]
+        assert "joint_drive" in out["note"]
+
+    def test_ordinary_limits_carry_no_rest_disclaimer(self, monkeypatch):
+        self._with_motion(monkeypatch, _RevMotion())
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      joint_type="revolute", max_deg=90))
+        assert "does NOT reposition the static model" not in out["note"]
+
+
+class TestCreateRenameDisclosure:
+    def test_a_rename_that_does_not_take_is_disclosed_not_swallowed(self, monkeypatch):
+        # The create succeeded, so a declined rename is a disclosure, never an error - but the
+        # payload must publish the name the joint ACTUALLY holds plus the warning.
+        _, coll = _install_create(monkeypatch)
+        stubborn = type("_UnrenamableJoint", (),
+                        {"name": property(lambda self: "Joint1", lambda self, v: None)})()
+        stubborn.jointMotion = None
+        coll.add = lambda ji: stubborn
+        out = _payload2(joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                                      name="BoomPivot"))
+        assert out["joint_name"] == "Joint1"
+        assert "BoomPivot" in out["rename_warning"] and "did not take" in out["rename_warning"]
+
+
+# ── edit handler: guards, rewiring order, and the failure wordings ───────────────────────────────
+
+def _edit_joint(tl_index=None, **over):
+    """A minimal editable joint: records rollTo, carries no motion/params unless overridden."""
+    j = SimpleNamespace(name="J", isFlipped=False, jointMotion=None)
+    j.rolls = []
+    j.timelineObject = SimpleNamespace(
+        index=tl_index, rollTo=lambda before: j.rolls.append(bool(before)) or True)
+    for k, v in over.items():
+        setattr(j, k, v)
+    return j
+
+
+def _joint_raising_on(attr, exc, tl_index=None):
+    """A joint whose ATTR assignment raises - the shape of a platform refusal mid-edit."""
+    def _setter(self, value):
+        raise exc
+    j = type("_RefusingJoint", (), {attr: property(lambda self: None, _setter)})()
+    j.name = "J"
+    j.jointMotion = None
+    j.rolls = []
+    j.timelineObject = SimpleNamespace(
+        index=tl_index, rollTo=lambda before: j.rolls.append(bool(before)) or True)
+    return j
+
+
+def _edit_rig(monkeypatch, j, design=None):
+    """Point BOTH design seams at one design and hand the edit handler `j` as the named joint."""
+    d = design if design is not None else SimpleNamespace(computeAll=lambda: None, timeline=None)
+    monkeypatch.setattr(joint._common, "design", lambda: d)
+    monkeypatch.setattr(joint._inputs._common, "design", lambda: d)
+    monkeypatch.setattr(joint, "_find_joint", lambda des, n: j)
+    return d
+
+
+class TestEditGuards:
+    def test_no_active_design(self, monkeypatch):
+        monkeypatch.setattr(joint._common, "design", lambda: None)
+        res = joint.edit_handler(joint_name="J", flip=True)
+        assert res["isError"] is True and "No active design" in res["message"]
+
+    def test_world_axis_on_a_joint_with_no_axis_based_motion_is_refused(self, monkeypatch):
+        # world_axis re-applies the CURRENT motion type; rigid/ball (and an unreadable motion)
+        # have no single axis to re-point, so there is nothing to re-apply.
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", world_axis="z")
+        assert res["isError"] is True and "not axis-based" in res["message"]
+        assert j.rolls == []                           # refused before the timeline moved
+
+    def test_an_unknown_axis_is_refused_before_the_timeline_moves(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", joint_type="revolute", axis="q")
+        assert res["isError"] is True and "Unknown axis 'q'" in res["message"]
+        assert j.rolls == []
+
+    def test_pin_slot_slide_axis_equal_to_the_rotation_axis_is_refused(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", joint_type="pin_slot", axis="y", slide_axis="y")
+        assert res["isError"] is True and "differ" in res["message"]
+        assert j.rolls == []
+
+
+class TestEditPinSlot:
+    def test_pin_slot_reports_the_effective_slide_axis(self, monkeypatch):
+        calls = []
+        j = _edit_joint(setAsPinSlotJointMotion=lambda rot, slide, *rest:
+                        calls.append((rot, slide)) or True)
+        _edit_rig(monkeypatch, j)
+        out = _payload(joint.edit_handler(joint_name="J", joint_type="pin_slot", axis="z"))
+        assert out["joint_type"] == "pin_slot" and out["axis"] == "z"
+        assert out["slide_axis"] == "x"                # default = the next frame axis
+        assert calls == [(_JD.ZAxisJointDirection, _JD.XAxisJointDirection)]
+
+
+class TestEditInputResolution:
+    def test_a_bad_input_one_fails_before_the_timeline_moves(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        monkeypatch.setattr(joint, "_resolve_input",
+                            lambda d, spec: (None, spec, f"no '{spec}' here"))
+        res = joint.edit_handler(joint_name="J", input_one="Ghost")
+        assert res["isError"] is True and "no 'Ghost' here" in res["message"]
+        assert j.rolls == []
+
+    def test_a_bad_input_two_fails_before_the_timeline_moves(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        monkeypatch.setattr(
+            joint, "_resolve_input",
+            lambda d, spec: (SimpleNamespace(name=spec), spec, None) if spec == "A"
+            else (None, spec, f"no '{spec}' here"))
+        res = joint.edit_handler(joint_name="J", input_one="A", input_two="Ghost")
+        assert res["isError"] is True and "no 'Ghost' here" in res["message"]
+        assert j.rolls == []
+
+
+class TestEditRewireTimelineOrder:
+    """Editing rolls the marker to just before the joint, where a LATER feature does not exist -
+    the platform answers a bare findObjectPath there, so the order is checked before rolling."""
+
+    def _rig(self, monkeypatch, jo_index, joint_index):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", type("JointOrigin", (), {}))
+        jo = adsk.fusion.JointOrigin()
+        jo.timelineObject = SimpleNamespace(index=jo_index)
+        j = _edit_joint(tl_index=joint_index)
+        _edit_rig(monkeypatch, j)
+        monkeypatch.setattr(joint, "_resolve_input", lambda d, spec: (jo, spec, None))
+        return j
+
+    def test_a_later_joint_origin_is_refused_naming_both_positions(self, monkeypatch):
+        j = self._rig(monkeypatch, jo_index=9, joint_index=4)
+        res = joint.edit_handler(joint_name="J", input_one="LateJO")
+        assert res["isError"] is True
+        assert "position 9" in res["message"] and "position 4" in res["message"]
+        assert "joint_create" in res["message"]
+        assert j.rolls == []                           # refused BEFORE the timeline is rolled
+
+    def test_a_joint_origin_at_the_joints_own_position_is_refused(self, monkeypatch):
+        # Equal index is still "not yet built" at the rolled-back marker, so the guard is >=.
+        self._rig(monkeypatch, jo_index=4, joint_index=4)
+        res = joint.edit_handler(joint_name="J", input_one="SameSlotJO")
+        assert res["isError"] is True and "position 4" in res["message"]
+
+    def test_an_earlier_joint_origin_is_rewired_normally(self, monkeypatch):
+        j = self._rig(monkeypatch, jo_index=1, joint_index=4)
+        out = _payload(joint.edit_handler(joint_name="J", input_one="EarlyJO"))
+        assert out["input_one"] == "EarlyJO"
+        assert j.rolls[0] is True                      # the edit did roll the marker
+
+
+class TestEditMotionFailure:
+    def test_a_setter_returning_false_is_reported_not_claimed_as_edited(self, monkeypatch):
+        j = _edit_joint(setAsRevoluteJointMotion=lambda ax, *rest: False)
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", joint_type="revolute", axis="z")
+        assert res["isError"] is True and "Could not set revolute motion" in res["message"]
+
+
+class TestEditLimitsGuard:
+    def test_limits_on_a_joint_with_no_motion_are_refused(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", min_deg=10)
+        assert res["isError"] is True and "no editable motion" in res["message"]
+
+
+class TestEditFailureReporting:
+    def test_a_platform_refusal_is_reported_as_an_error(self, monkeypatch):
+        j = _joint_raising_on("isFlipped", RuntimeError("3 : the flip was refused"))
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", flip=True)
+        assert res["isError"] is True
+        assert "Edit failed: 3 : the flip was refused" in res["message"]
+        assert "LATER in the timeline" not in res["message"]
+
+    def test_an_object_path_failure_names_the_timeline_cause(self, monkeypatch):
+        j = _joint_raising_on("geometryOrOriginOne",
+                              RuntimeError("2 : InternalValidationError : findObjectPath"))
+        _edit_rig(monkeypatch, j)
+        monkeypatch.setattr(joint, "_resolve_input", lambda d, spec: ("G", spec, None))
+        res = joint.edit_handler(joint_name="J", input_one="SomeJO")
+        assert res["isError"] is True
+        assert "LATER in the timeline" in res["message"] and "joint_create" in res["message"]
+
+    def test_the_timeline_marker_is_restored_even_when_the_edit_fails(self, monkeypatch):
+        j = _joint_raising_on("isFlipped", RuntimeError("refused"))
+        _edit_rig(monkeypatch, j)
+        joint.edit_handler(joint_name="J", flip=True)
+        assert j.rolls == [True, False]                # rolled before the joint, then back
+
+
+class TestEditRecomputeFailure:
+    def test_a_failing_recompute_does_not_sink_the_edit(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j,
+                  design=SimpleNamespace(computeAll=_raise_refusal, timeline=None))
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert out["edited"] is True and out["flipped"] is True and j.isFlipped is True
+        assert "timeline_errors_after" not in out
+
+    def test_a_failing_recompute_is_not_reported_as_recomputed(self, monkeypatch):
+        # computeAll raising means the model was NOT settled - the payload says so instead of
+        # claiming a recompute that never ran.
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j,
+                  design=SimpleNamespace(computeAll=_raise_refusal, timeline=None))
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert out["recomputed"] is False
+        assert "recompute RAISED" in out["note"] and "design_recompute" in out["note"]
+
+    def test_a_clean_recompute_still_reads_recomputed_true(self, monkeypatch):
+        j = _edit_joint()
+        _edit_rig(monkeypatch, j)
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert out["recomputed"] is True and "full recompute" in out["note"]
+
+
+class TestLimitsPartialSuccessDisclosure:
+    def test_create_limit_failure_names_the_created_joint_and_the_landed_limits(self, monkeypatch):
+        # The joint EXISTS and min_deg landed before max_mm failed - a bare error would invite a
+        # duplicate re-create; the message names the joint, what landed, and the two ways forward.
+        _, coll = _install_create(monkeypatch)
+        motion = _RevMotion()
+        coll.add = lambda ji, _m=motion: SimpleNamespace(name="Pivot", jointMotion=_m)
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B",
+                            joint_type="revolute", min_deg=-45, max_mm=100)
+        assert res["isError"] is True
+        msg = res["content"][0]["text"]
+        assert "'Pivot' WAS CREATED" in msg
+        assert "min_deg=-45" in msg
+        assert "do NOT re-create" in msg
+        assert abs(motion.rotationLimits.minimumValue - _math.radians(-45)) < 1e-9
+
+    def test_edit_limit_failure_names_the_edits_that_landed(self, monkeypatch):
+        j = _edit_joint(jointMotion=_RevMotion())
+        _edit_rig(monkeypatch, j)
+        res = joint.edit_handler(joint_name="J", flip=True, min_deg=-30, max_mm=50)
+        assert res["isError"] is True
+        msg = res["content"][0]["text"]
+        assert "Edits already applied before the failure" in msg
+        assert "flipped=True" in msg and "min_deg=-30" in msg
+
+
+class TestEditModelParameters:
+    def test_the_joints_own_parameters_are_published_with_the_offset_note(self, monkeypatch):
+        j = _edit_joint(offset=SimpleNamespace(name="d12"), angle=SimpleNamespace(name="d13"))
+        _edit_rig(monkeypatch, j)
+        out = _payload(joint.edit_handler(joint_name="J", flip=True))
+        assert out["model_parameters"] == {"offset": "d12", "angle": "d13"}
+        assert "co-driving the geometry" in out["note"]

@@ -97,7 +97,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   reference version numbers you read at each step).
 - the stock is gripped by JAW-TO-STOCK JOINTS and the grip TRACKS: a fresh assembly read shows the
   jaw-to-stock grip joint(s) and the vise's jaw joints healthy, each jaw's grip face FLUSH on a
-  stock flank (measure_between per jaw ~0, or a spatial flush read - report the value per jaw), and
+  stock flank (measure_between per jaw ~0 - report the value per jaw), and
   the stock seated at the vise center. AFTER the x-ref update (the jaws having moved), a second
   fresh read shows the stock STILL seated at the vise center with the grip faces still flush. A
   stock with no jaw-to-stock joint (a rigid park to a body) is a floating grip and a FAIL.
@@ -132,8 +132,8 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   artifact in the chain; record its versions in the run record).
 - THE GRIP-TRACKS CLAUSE (rule): grip is JAW-TO-STOCK JOINTS at this document's level - a
   rigid park of the stock to a body is PARKING, not clamping, and fails. Clamp contact is graded
-  concretely: each jaw's grip face FLUSH on a stock flank (measure_between per jaw ~0, or a spatial
-  flush read). S6 guarantees jointed jaws whose occurrences move under the opening parameter; this
+  concretely: each jaw's grip face FLUSH on a stock flank (measure_between per jaw ~0). S6
+  guarantees jointed jaws whose occurrences move under the opening parameter; this
   clause grades that the stock is JOINTED to the jaws and stays seated at the center AND flush
   through the x-ref update. The self-centering caution stands: BOTH jaws move symmetrically, so a
   grip that rigidly follows ONE moving jaw drags the stock off-center, and joint_create_as_built

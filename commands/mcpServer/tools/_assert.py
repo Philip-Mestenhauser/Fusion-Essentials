@@ -84,10 +84,22 @@ class VersionAdvanced(Postcondition):
         return "", {"version_confirmed": True}
 
 
+# The refresh SETTLES asynchronously: measured live, the verify read taken right after
+# updateAllReferences returned reported a reference still out of date, while a second drawing_update
+# moments later found every reference already current - the refresh had taken, the first read just
+# raced it. So the re-read is a CLOCK-BOUNDED doEvents pump (the settle only advances while the main
+# thread runs), not a single sample. The budget matches doc_save_milestone's version-settle wait
+# (_VERSION_DEADLINE_S) and the poll interval drawing_export's landing wait (_LAND_POLL_SLEEP).
+_REFERENCE_SETTLE_S = 8.0
+_REFERENCE_SETTLE_POLL_SLEEP = 0.25
+
+
 class ReferencesFresh(Postcondition):
     """After a reference refresh: no DocumentReference on the active document is still out of date.
     Gates on the per-reference isOutOfDate walk - DrawingDocument.isUpToDate reports True even while
-    a reference is stale (observed live), so it is deliberately not consulted."""
+    a reference is stale (observed live), so it is deliberately not consulted. The walk is re-read
+    under a bounded settle wait, so the call fails only on references that stayed stale for the whole
+    budget - never on the first sample of a refresh still landing."""
 
     name = "references_fresh"
     read_tool = "doc_get"        # include=['xref_tree'] re-reads per-reference freshness/stale_count
@@ -107,12 +119,22 @@ class ReferencesFresh(Postcondition):
         return self._stale_count()
 
     def verify(self, kwargs, payload, before):
-        stale = self._stale_count()
+        from . import _export
+
+        def probe():
+            stale = self._stale_count()
+            # None means the walk could not be read at all: not a staleness verdict, and not the race
+            # this waits out - it ends the wait and is reported unconfirmed rather than spending the
+            # budget on a read that is failing for another reason.
+            return stale is None or stale == 0, stale
+
+        _settled, stale = _export.pump_until(probe, _REFERENCE_SETTLE_S,
+                                             _REFERENCE_SETTLE_POLL_SLEEP)
         if stale is None:
             return "", {"references_confirmed": False}
         if stale:
             return (f"refresh ran but {stale} reference(s) are STILL out of date - the references did "
-                    "not fully update."), {}
+                    f"not fully update. The refresh was given {_REFERENCE_SETTLE_S:g}s to settle."), {}
         return "", {"stale_references_after": 0}
 
 

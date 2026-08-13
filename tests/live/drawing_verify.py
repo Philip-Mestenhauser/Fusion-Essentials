@@ -3,11 +3,12 @@
 
 """Owner-present live verification of the drawing user-present tier.
 
-The blind sweep (tool_verify.py) excludes the tools that need an open, reviewed drawing document:
+The blind sweep (tool_verify.py) excludes the tools that need an open drawing document:
 drawing_update, drawing_export, drawing_add_sketch, drawing_dimension, drawing_edit_sheet,
 drawing_insert_image - plus drawing_create's two real create paths (its sweep beats are all
-refusals). This script drives them, in two phases, because an auto-created drawing cannot be
-opened headlessly until a human has opened it once:
+refusals). This script drives them, in two phases; the pause between them keeps the owner's
+eyes on the staged drawings (never-reviewed drawings open headless fine on current builds -
+measured on 2705.0.87 - so the pause is a review checkpoint, not a technical requirement):
 
   py -3 tests/live/drawing_verify.py --stage
       Builds a parametric plate, saves it to MCP Test Project, and creates TWO drawings from it
@@ -176,7 +177,7 @@ def run():
     iso_name, iso_urn = state["drawing_iso"]
 
     # Both staged drawings share a name, so the ISO one is reached by URN: doc_activate if it is
-    # open, else doc_open (headless open works once the owner has reviewed it in the UI).
+    # open, else doc_open (a never-reviewed drawing opens headless fine on current builds).
     is_error, payload = call("doc_activate", {"name": iso_urn})
     if is_error:
         is_error, payload = call("doc_open", {"file_id": iso_urn, "force_api_open": True})

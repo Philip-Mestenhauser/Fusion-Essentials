@@ -12,7 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import get_cam, find_setup
+from ._cam_common import get_cam, find_setup, library_children, walk_library_folders
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -312,25 +312,20 @@ def _find_template_by_name(lib, location, name):
     want = name.lower()
     seen_names = []
     matches = []          # (template, containing-folder display name)
-    stack = [root]
-    visited = 0
-    while stack and visited < _MAX_NODES:
-        folder_url = stack.pop()
-        visited += 1
-        try:
-            for t in (lib.childTemplates(folder_url) or []):
-                tn = safe(lambda: t.name)
-                if tn:
-                    seen_names.append(tn)
-                if tn and tn.lower() == want:
-                    matches.append((t, safe(lambda: lib.displayName(folder_url)) or "?"))
-        except Exception:
-            pass
-        try:
-            for sub in (lib.childFolderURLs(folder_url) or []):
-                stack.append(sub)
-        except Exception:
-            pass
+
+    # The shared bounded folder walk; the LEAF op (read this folder's templates, record every name,
+    # keep the matches) is this search's own.
+    def visit(folder_url):
+        for t in library_children(lib, folder_url, "childTemplates"):
+            tn = safe(lambda t=t: t.name)
+            if tn:
+                seen_names.append(tn)
+            if tn and tn.lower() == want:
+                matches.append((t, safe(lambda folder_url=folder_url:
+                                        lib.displayName(folder_url)) or "?"))
+        return False      # every folder is searched: a duplicate name must be REFUSED, not raced
+
+    walk_library_folders(lib, root, visit, max_folders=_MAX_NODES)
     if len(matches) == 1:
         return matches[0][0], None
     if len(matches) > 1:

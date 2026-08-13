@@ -12,8 +12,8 @@ import types
 
 import pytest
 
-from conftest import (BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D, Plane,
-                      _NamedCollection, _SimpleNamed, assert_no_active_design, entity_proxy,
+from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakePoint, FakeVector3D, Line3D,
+                      Plane, _NamedCollection, _SimpleNamed, assert_no_active_design, entity_proxy,
                       load_tool)
 
 rv = load_tool("model_revolve")
@@ -422,6 +422,77 @@ class TestCrossComponentAxis:
         rv.app.activeProduct.findEntityByToken = lambda t, e=f: ([e] if t == "CYL" else [])
         out = _payload(rv.handler(sketch_name="Ring", axis="CYL"))
         assert rf.last_input.axis is f and out["axis"] == "BRepFace"
+
+
+# -- a cut/intersect must PROVE it moved material ----------------------------------------------
+#
+# A revolve whose profile sweeps through empty air still hands back a healthy feature with a result
+# body, so the feature object cannot tell a real cut from a no-op. Only the host component's solid
+# volumes, sampled either side of the add, can.
+
+def _host_bodies(*bodies):
+    """Put these solid bodies in the active component, the collection the cut check samples."""
+    rv.app.activeProduct.rootComponent.bRepBodies = _NamedCollection(list(bodies))
+
+
+def _add_moving_volume(rf, *changes):
+    """Make revolveFeatures.add apply (body, new_volume) pairs - the material effect a real
+    cut/intersect has between the pre- and post-mutation reads."""
+    def _add(inp):
+        for body, volume in changes:
+            body.volume = volume
+        return FakeRevFeature()
+    rf.add = _add
+
+
+class TestCutMovesMaterial:
+    def test_cut_that_moves_no_volume_is_an_error(self, wire):
+        wire([FakeSketch("S")])
+        _host_bodies(BRepBody("Bar", volume=12.0))
+        res = rv.handler(sketch_name="S", operation="cut")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"] and "'Comp'" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_intersect_that_moves_no_volume_is_an_error(self, wire):
+        wire([FakeSketch("S")])
+        _host_bodies(BRepBody("Bar", volume=12.0))
+        res = rv.handler(sketch_name="S", operation="intersect")
+        assert res["isError"] is True and "this intersect changed nothing" in res["message"]
+
+    def test_cut_that_removed_material_publishes_the_delta(self, wire):
+        rf = wire([FakeSketch("S")])
+        bar = BRepBody("Bar", volume=12.0)
+        _host_bodies(bar)
+        _add_moving_volume(rf, (bar, 9.5))
+        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        assert out["volume_delta_cm3"] == -2.5      # signed: material LEFT the body
+
+    def test_a_consumed_body_is_not_read_as_a_no_op(self, wire):
+        # A body the cut consumed whole stops reporting a volume, so it contributes no delta - the
+        # untouched second body's 0 must not become "nothing happened".
+        rf = wire([FakeSketch("S")])
+        eaten, kept = BRepBody("Eaten", volume=4.0), BRepBody("Kept", volume=8.0)
+        _host_bodies(eaten, kept)
+        _add_moving_volume(rf, (eaten, None))
+        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        assert out["revolved"] is True
+
+    def test_a_new_body_revolve_is_never_volume_gated(self, wire):
+        # 'new' adds a body rather than moving material in an existing one; gating it on an unmoved
+        # volume would fail every legitimate revolve in a component that already holds a body.
+        wire([FakeSketch("S")])
+        _host_bodies(BRepBody("Bar", volume=12.0))
+        out = _payload(rv.handler(sketch_name="S", operation="new"))
+        assert out["revolved"] is True and "volume_delta_cm3" not in out
+
+    def test_unreadable_volumes_neither_error_nor_publish_a_delta(self, wire):
+        # Cannot measure is not "measured the same": no verdict, and no null delta that would read
+        # as a measured zero.
+        wire([FakeSketch("S")])
+        _host_bodies(BRepBody("Bar", volume=None))
+        out = _payload(rv.handler(sketch_name="S", operation="cut"))
+        assert out["revolved"] is True and "volume_delta_cm3" not in out
 
 
 # -- the feature is built on the sketch's OWNING component, not the active one ------------------

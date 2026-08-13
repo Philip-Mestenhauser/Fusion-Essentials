@@ -8,7 +8,7 @@ import json
 
 import adsk.fusion
 
-from conftest import load_tool
+from conftest import FakeVector3D, load_tool
 
 jml = load_tool("joint_motion_link")
 
@@ -303,6 +303,59 @@ class TestLinkCreation:
         assert res["isError"] is True
         assert "could not apply the ratio" in res["message"]
         assert link.deleted is True
+
+
+def _slider(des, index, direction):
+    """Give joint `index` a SLIDER motion whose slideDirectionVector points along `direction`
+    (a None direction is the unreadable vector the API also returns off a JointInput's motion)."""
+    j = des.rootComponent.joints._j[index]
+    vec = None if direction is None else FakeVector3D(*direction)
+    j.jointMotion = type("SliderJointMotion", (),
+                         {"jointType": f"{j.name}_JOINTTYPE", "slideDirectionVector": vec})()
+    return j
+
+
+class TestMirrorOrTranslateTeaching:
+    """A linked slider pair's actual travel (mirror vs together) is not computable from the tool's
+    readable state - measured live: a reversed link over opposed slideDirectionVectors MIRRORED,
+    because each joint's occurrence ordering sets which part its slide value moves. So the payload
+    teaches the drive-and-read check and never asserts a verdict."""
+
+    def _link(self, monkeypatch, d1, d2, ratio):
+        des = _install(monkeypatch, ["SlideL", "SlideR"])
+        _slider(des, 0, d1)
+        _slider(des, 1, d2)
+        return _payload(jml.handler(joint_one="SlideL", joint_two="SlideR", ratio=ratio))
+
+    def test_a_slider_pair_gets_the_teaching_note_not_a_verdict(self, monkeypatch):
+        out = self._link(monkeypatch, (1, 0, 0), (-1, 0, 0), -1)
+        assert "MIRROR OR TRANSLATE" in out["note"]
+        assert "joint_drive" in out["note"] and "drive back to 0" in out["note"]
+        assert "world_motion" not in out and "slide_dot" not in out
+
+    def test_the_note_fires_regardless_of_ratio_sign(self, monkeypatch):
+        # the trap is not confined to reversed links - a forward link over opposed directions is
+        # just as undetermined from here.
+        out = self._link(monkeypatch, (0, 1, 0), (0, 1, 0), 2)
+        assert "MIRROR OR TRANSLATE" in out["note"]
+
+    def test_a_null_slide_vector_still_gets_the_note(self, monkeypatch):
+        # the note keys on the JOINT KIND, not the vector - an unreadable vector changes nothing
+        # about the trap.
+        out = self._link(monkeypatch, (1, 0, 0), None, -1)
+        assert "MIRROR OR TRANSLATE" in out["note"]
+
+    def test_revolute_pair_gets_no_slider_note(self, monkeypatch):
+        des = _install(monkeypatch, ["A", "B"])
+        out = _payload(jml.handler(joint_one="A", joint_two="B", ratio=-1))
+        assert "MIRROR OR TRANSLATE" not in out["note"]
+        assert des.rootComponent.motionLinks.last_link.motion_data["reversed"] is True
+
+    def test_mixed_slider_and_revolute_gets_no_slider_note(self, monkeypatch):
+        des = _install(monkeypatch, ["Slide", "Spin"])
+        _slider(des, 0, (1, 0, 0))
+        out = _payload(jml.handler(joint_one="Slide", joint_two="Spin", ratio=-1))
+        assert "MIRROR OR TRANSLATE" not in out["note"]
 
 
 def _link_that_raises(mls, msg="joint motion type cannot be linked"):

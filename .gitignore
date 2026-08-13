@@ -43,6 +43,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cov_tmp.*
+tests/.coverage_report.json
 .cache
 nosetests.xml
 coverage.xml

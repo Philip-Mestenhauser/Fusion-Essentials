@@ -1022,9 +1022,20 @@ class TestCloseAllSkipsDeadProxies:
 
 class TestNewDocument:
     def test_creates_and_reports_active(self):
+        # The active flag comes from wrapper EQUALITY (identity is measured unreliable on live
+        # Documents), so the rig models the platform: add() activates, and the active read hands
+        # back a DISTINCT wrapper that compares equal by handle.
         class _NewDoc:
             name = "Untitled"
             isSaved = False
+
+            def __init__(self, handle="h-new"):
+                self._handle = handle
+
+            def __eq__(self, other):
+                return getattr(other, "_handle", None) == self._handle
+
+            __hash__ = None
 
         class _Docs:
             def add(self, doc_type):
@@ -1032,7 +1043,7 @@ class TestNewDocument:
 
         class _App:
             documents = _Docs()
-            activeDocument = _NewDoc()
+            activeDocument = _NewDoc()      # a distinct wrapper of the same (equal-handle) doc
 
         _doc_lifecycle.app = _App()
         out = _payload(_doc_lifecycle.new_document_handler())
@@ -1040,6 +1051,31 @@ class TestNewDocument:
         assert out["document_name"] == "Untitled"
         assert out["is_active"] is True
         assert out["is_saved"] is False
+
+    def test_a_different_active_document_reads_inactive(self):
+        class _NewDoc:
+            name = "Untitled"
+            isSaved = False
+
+            def __init__(self, handle="h-new"):
+                self._handle = handle
+
+            def __eq__(self, other):
+                return getattr(other, "_handle", None) == self._handle
+
+            __hash__ = None
+
+        class _Docs:
+            def add(self, doc_type):
+                return _NewDoc("h-new")
+
+        class _App:
+            documents = _Docs()
+            activeDocument = _NewDoc("h-other")
+
+        _doc_lifecycle.app = _App()
+        out = _payload(_doc_lifecycle.new_document_handler())
+        assert out["created"] is True and out["is_active"] is False
 
     def test_add_returning_nothing_is_an_error(self):
         class _Docs:

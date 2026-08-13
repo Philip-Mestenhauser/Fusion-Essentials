@@ -366,8 +366,7 @@ def handler(action: str = "", sheet: str = "", new_name: str = "", sheet_size: s
     dwg = _drawing_common.active_drawing()
     if dwg is None:
         return error("The active document is not a drawing, so it has no sheets. Open the drawing "
-                     "(doc_open a reviewed drawing, or open it in the Fusion UI) and make it active, "
-                     "then retry.")
+                     "(doc_open by file_id) and make it active, then retry.")
 
     if act == "add":
         return _do_add(dwg, new_name)

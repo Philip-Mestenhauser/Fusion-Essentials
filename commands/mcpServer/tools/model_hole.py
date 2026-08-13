@@ -483,7 +483,13 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if extent == "blind":
         hin.setDistanceExtent(_value(depth))
     else:
-        hin.setAllExtent(_extent_dirs.PositiveExtentDirection)
+        # The HOLE setAllExtent is NOT the retired extrude sibling: it is measured honest on this
+        # build (an 8 mm through hole in a 15 mm plate removed exactly the bore volume), so a false
+        # answer here is a real refusal and must not be run past.
+        if not hin.setAllExtent(_extent_dirs.PositiveExtentDirection):
+            return _abandon("Fusion rejected the through-all hole extent (setAllExtent returned "
+                            "false), so nothing was drilled. Retry with extent='blind' and a depth "
+                            "that clears the body.")
 
     if tip_angle:
         try:

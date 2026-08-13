@@ -26,6 +26,25 @@ def _joint_names(design):
     return [nm for nm in (safe(lambda j=j: j.name) for j in all_joints(design)) if nm]
 
 
+def _is_slider(joint):
+    """True when the joint's landed motion is a slider - the pair the travel-direction trap lives
+    on."""
+    return type(safe(lambda: joint.jointMotion)).__name__ == "SliderJointMotion"
+
+
+# MEASURED live: which way a linked slider pair actually TRAVELS (mirror about the center vs both
+# parts the same way) is NOT computable from the two slideDirectionVectors plus the reversed flag -
+# a reversed link over OPPOSED vectors (dot -1.0) MIRRORED on a live rig, because each joint's
+# occurrence ordering sets which part its slide value moves, and that sense has no reliable read.
+# So the payload teaches the check instead of asserting a verdict it cannot know.
+_SLIDER_PAIR_NOTE = (
+    " MIRROR OR TRANSLATE: the ratio sign alone does not determine whether this slider pair "
+    "mirrors about the center or travels together - it also depends on each slide direction and "
+    "each joint's occurrence ordering. Prove the motion: joint_drive one member a small distance, "
+    "read both occurrence positions with assembly_get, then drive back to 0. joint_edit "
+    "(world_axis) re-aims a slide direction if the motion is not the one you meant.")
+
+
 def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dict:
     """See TOOL_DESCRIPTION."""
     j1name, j2name = (joint_one or "").strip(), (joint_two or "").strip()
@@ -113,6 +132,11 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
         "REFUSES the second member for the session - driving both has killed the Fusion process). "
         "Verify with assembly_get."),
     }
+
+    # Two sliders: teach the travel-direction check. Never a computed verdict - see the measured
+    # fact at _SLIDER_PAIR_NOTE.
+    if _is_slider(j1) and _is_slider(j2):
+        out["note"] += _SLIDER_PAIR_NOTE
     return ok(out)
 
 

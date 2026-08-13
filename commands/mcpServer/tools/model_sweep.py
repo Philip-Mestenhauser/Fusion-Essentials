@@ -19,6 +19,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component, root_body_advisory, build_path
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _outputs
 
@@ -76,6 +77,17 @@ def _path_sketch_curves(host, path_raw):
         return None
     return sum(1 for c in _common.iter_collection(curves)
                if not bool(safe(lambda c=c: c.isConstruction, False)))
+
+
+def _cut_check_bodies(comp):
+    """The solid bodies an UNSCOPED cut/intersect sweep can act on: every solid directly in the
+    feature's host component. When 'target_bodies' scopes the sweep, those bodies are the sample
+    instead - only a participant can be affected.
+
+    Resolved ONCE, before the mutation, and the same objects re-read afterwards - that is the id()
+    keying precondition _geom.volumes documents."""
+    return [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
+            if safe(lambda b=b: b.isSolid)]
 
 
 def _resolve_profile(comp, profile_raw, as_surface):
@@ -156,6 +168,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
 
     # target_bodies: scope a cut/intersect to specific bodies so it can't bleed through others.
     scoped_to = None
+    bodies_ents = None
     if target_bodies not in (None, "", []):
         if op_key == "new":
             return error("'target_bodies' only applies to cut/join/intersect (a 'new' body has no "
@@ -168,6 +181,14 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
             scoped_to = [safe(lambda b=b: b.name) for b in bodies_ents]
         except Exception as e:
             return error(f"Could not scope to target_bodies: {e}")
+
+    # cut/intersect MATERIAL evidence: the volumes the operation must move, sampled BEFORE the add.
+    # A sweep along a path that misses the body reports a healthy feature and result bodies just the
+    # same, so only this before/after pair can say material actually changed.
+    check_bodies = []
+    if op_key in ("cut", "intersect"):
+        check_bodies = list(bodies_ents) if bodies_ents else _cut_check_bodies(host)
+    vol_before = _geom.volumes(check_bodies)
 
     try:
         feature = host.features.sweepFeatures.add(sweep_input)
@@ -183,6 +204,36 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     if op_key == "new" and not body_names:
         return error("Sweep reported success but created no body. Check that the profile sits on the "
                      "path and the path forms a valid, connected sweep.")
+
+    volume_delta_cm3 = None
+    if check_bodies:
+        delta, readable = _geom.volume_delta(check_bodies, vol_before)
+        # A body whose volume read BEFORE and reads unreadable now was consumed whole - a real effect
+        # that contributes no delta, so it must not be counted as "nothing moved".
+        consumed = [b for b in check_bodies
+                    if vol_before.get(id(b)) is not None and _geom.signed_volume(b) is None]
+        if readable:
+            volume_delta_cm3 = round(delta, 6)
+        if readable and not consumed and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
+            if scoped_to:
+                # SCOPED: only a participant body can be affected, and every one of them measures
+                # what it did before - nothing landed anywhere, so the feature is safe to remove.
+                named = ", ".join(n for n in scoped_to if n) or "the scoped bodies"
+                rolled = bool(safe(lambda: feature.deleteMe(), False))
+                return error(f"Sweep reported success but this {op_key} changed nothing - "
+                             f"{named} measure the volumes they had before and none was consumed, so "
+                             "the profile does not sweep through any of them. A cut/intersect can "
+                             "only affect bodies named in 'target_bodies' - check the path runs "
+                             "through them. "
+                             + ("The sweep feature was rolled back." if rolled else
+                                "Remove the empty feature with design_delete_feature."))
+            where = safe(lambda: host.name) or "the host component"
+            return error(f"Sweep reported success but this {op_key} changed nothing - every solid "
+                         f"body in '{where}' measures the volume it had before and none was "
+                         "consumed, so the swept profile does not overlap any of them. Check the "
+                         "path runs through the target body (an 'intersect' whose target lies "
+                         "entirely INSIDE the swept solid also reads this way). "
+                         + _common.failed_effect_remedy(design, feature))
 
     # SOLID/SURFACE verdict read BACK off the feature - never assumed from the request.
     is_solid = safe(lambda: feature.isSolid)
@@ -219,6 +270,10 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     # is no such number, and publishing a null would read as an unreadable sketch.
     if sketch_curves is not None:
         payload["path_sketch_curves"] = sketch_curves
+    # Published only where the before/after pair was READABLE: a null here would read as "no material
+    # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
+    if volume_delta_cm3 is not None:
+        payload["volume_delta_cm3"] = volume_delta_cm3
     return ok(payload)
 
 

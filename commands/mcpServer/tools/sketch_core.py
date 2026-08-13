@@ -27,12 +27,14 @@ app = adsk.core.Application.get()
 _ON_FACE = _inputs.GeometryHandle("on_face", require="planar_face",
                                   description="Create the sketch ON this existing planar face.")
 
-# Length unit -> centimeters (the API's internal unit).
-_PLANE_ALIASES = {
-                                  "xy": "xY", "xz": "xZ", "yz": "yZ",
-                                  "xyplane": "xY", "xzplane": "xZ", "yzplane": "yZ",
-                                  "top": "xY", "front": "xZ", "right": "yZ",
-}
+# The plane sketch_create builds on. PlaneRef owns every reference form and every refusal: the
+# xy/xz/yz (top/front/right) origin aliases - and their '<alias> plane' spellings - against the
+# ACTIVE component, a construction-plane NAME resolved design-wide - a sub-component's datum proxied
+# into the occurrence that places it, a name several components share REFUSED with its qualified
+# candidates - the '<occurrence>:<plane>' form, a planar-face/plane handle, and the blank case, which
+# the kind resolves through this declared default.
+_PLANE = _inputs.PlaneRef("plane", default="xy",
+                          description="Default xy. Ignored when 'on_face' is given.")
 
 
 def _pt(x, y, k):
@@ -127,25 +129,6 @@ def sketch_get_handler(sketch_name: str = "", include_entities: bool = False, un
 
 # ---------------------------------------------------------------- sketch_create
 
-def _resolve_plane(design, plane: str):
-    """Resolve a plane argument to a planar entity: an origin plane alias, or a named planar face.
-
-    Uses the ACTIVE component's origin/construction planes so a sketch created while a sub-component
-    is active lands in that component's space (not root)."""
-    comp = target_component(design)
-    key = _PLANE_ALIASES.get((plane or "").strip().lower().replace(" ", ""))
-    if key:
-        return safe(lambda: getattr(comp, f"{key}ConstructionPlane")), f"{key} origin plane"
-    # Otherwise try a named construction plane.
-    try:
-        cp = comp.constructionPlanes.itemByName(plane)
-        if cp:
-            return cp, f"construction plane '{plane}'"
-    except Exception:
-        pass
-    return None, None
-
-
 def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
     """Create a new sketch on an origin/construction plane OR on an existing planar face (on_face)."""
     design = _common.design()
@@ -160,7 +143,7 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
         if ferr:
             # A construction-plane NAME lands here (find_geometry never returns plane handles), and
             # the generic stale-handle error would misdirect. Point at the 'plane' parameter instead.
-            named_plane, _ = _resolve_plane(design, on_face.strip())
+            named_plane, _ = _PLANE.resolve(on_face.strip())
             if named_plane is not None:
                 return error(f"'on_face' got '{on_face.strip()}', which is a construction PLANE name, "
                              "not a face handle. Pass it as plane='" + on_face.strip() + "' instead - "
@@ -168,11 +151,13 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
             return error(ferr)
         planar, desc = face, f"face {on_face[:12]}..."
     else:
-        planar, desc = _resolve_plane(design, plane)
-        if not planar:
-            return error(f"Could not resolve plane '{plane}'. Use one of: xy, xz, yz (origin "
-    "planes; aliases top/front/right), or the name of a construction plane, "
-    "or pass 'on_face' = a planar-face handle from find_geometry.")
+        values, perr = _inputs.resolve_inputs([_PLANE], {"plane": plane})
+        if perr:
+            return perr
+        # The kind resolves a blank 'plane' through its own default, so the label names that default
+        # rather than the empty string the caller sent.
+        given = (plane or "").strip() or _PLANE.default
+        planar, desc = values["plane"], f"plane '{given}'"
 
     try:
         sketch = target_component(design).sketches.add(planar)
@@ -953,19 +938,17 @@ sketch_get_item = Item.create_tool_item(tool=sketch_get_tool, write="read", hand
                                         run_on_main_thread=True)
 
 _CREATE_DESC = (
-                                        "Create a new sketch on a plane OR on an existing planar face. Use 'plane' = xy / xz / yz "
-                                        "(origin planes; aliases top/front/right) or a construction-plane name; OR 'on_face' = a "
+                                        "Create a new sketch on a plane OR on an existing planar face. Give 'plane', OR 'on_face' = a "
                                         "planar-face handle from find_geometry to sketch directly ON a part's face - on_face takes "
                                         "precedence. An on_face sketch AUTO-PROJECTS the face's boundary edges into it, so re-read "
                                         "sketch_get and pick the region by its area/centroid handle, not a guessed index. "
-                                        "Optional 'name' renames the sketch. For a sketch in a nested or offset component, the "
-                                        "returned 'frame' is component-LOCAL, not world. Then draw on it with "
+                                        "For a sketch in a nested or offset component, the returned 'frame' is "
+                                        "component-LOCAL, not world. Then draw on it with "
                                         "sketch_add_geometry. Requires an open design (see doc_new)."
 )
 create_sketch_tool = (
     Tool.create_simple(name="sketch_create", description=_CREATE_DESC)
-    .add_input_property("plane", {"type": "string",
-            "description": "xy | xz | yz (or top/front/right, or a construction-plane name). Default xy. Ignored if on_face is given."})
+    .add_input_property(*_PLANE.as_property())
     .add_input_property("name", {"type": "string", "description": "Optional name for the new sketch."})
     # on_face's schema (incl. its 'needs a planar-face handle from find_geometry' contract note) is
     # generated by the InputKind itself - single source of truth for resolution + schema + contract.

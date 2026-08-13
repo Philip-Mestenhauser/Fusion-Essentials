@@ -54,11 +54,11 @@ runner/grader stops matching the docs.
 
 ## Volumetric audit clause (required for physical-deliverable scenarios)
 
-A scenario whose deliverable is solid geometry includes, in its verbatim prompt, the
-spatial-digest habit (build milestones + final audit, conditional on the fusion-spatial tools
-being available) and a one-connected-solid postcondition - the orphan/multi-lump defect class
-is invisible to interference reads and screenshots, and two builds shipped floating pieces
-before this clause existed. The grader re-issues a volumetric digest when upholding a PASS.
+A scenario whose deliverable is solid geometry includes, in its verbatim prompt, the volumetric
+audit habit (per-body volume reads + a body census at build milestones and once as a final
+audit) and a one-connected-solid postcondition - the orphan/multi-lump defect class is invisible
+to interference reads and screenshots, and two builds shipped floating pieces before this clause
+existed. The grader re-issues its own volumetric inventory when upholding a PASS.
 
 ## tool_coverage.md
 

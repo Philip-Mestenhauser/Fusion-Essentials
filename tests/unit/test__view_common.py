@@ -284,3 +284,39 @@ class TestCaptureOptionsPath:
         vp = _FakeViewport(save_ok=False)
         b64, err = vc.capture_png_b64(vp, 100, 80, transparent_background=True)
         assert b64 is None and "saveAsImageFileWithOptions returned false" in err
+
+
+class TestAllDisplayComponents:
+    """The deduped component walk every folder-bulb toggle runs: allComponents holds a root proxy
+    DISTINCT from rootComponent, and the token key collapses the pair to one entry."""
+
+    def test_root_proxy_in_allcomponents_is_collapsed(self):
+        from types import SimpleNamespace
+        root = SimpleNamespace(name="Root", entityToken="tok-root")
+        root_proxy = SimpleNamespace(name="Root", entityToken="tok-root")
+        sub = SimpleNamespace(name="Sub", entityToken="tok-sub")
+        design = SimpleNamespace(rootComponent=root, allComponents=[root_proxy, sub])
+        comps = vc.all_display_components(design)
+        assert comps == [root, sub]                       # the proxy never doubles the root
+
+    def test_tokenless_components_fall_back_to_identity(self):
+        from types import SimpleNamespace
+        a = SimpleNamespace(name="A")
+        b = SimpleNamespace(name="B")
+        design = SimpleNamespace(rootComponent=a, allComponents=[a, b])
+        comps = vc.all_display_components(design)
+        assert comps == [a, b]                            # same OBJECT deduped; distinct kept
+
+    def test_an_unreadable_allcomponents_still_yields_the_root(self):
+        from types import SimpleNamespace
+        root = SimpleNamespace(name="Root", entityToken="tok-root")
+        design = SimpleNamespace(rootComponent=root)      # no allComponents at all
+        assert vc.all_display_components(design) == [root]
+
+    def test_display_folders_name_the_four_component_folder_bulbs(self):
+        assert vc.DISPLAY_FOLDERS == {
+            "sketches": "isSketchFolderLightBulbOn",
+            "construction": "isConstructionFolderLightBulbOn",
+            "origins": "isOriginFolderLightBulbOn",
+            "joints": "isJointsFolderLightBulbOn",
+        }

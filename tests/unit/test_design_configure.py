@@ -644,8 +644,11 @@ class TestSuppressVisibility:
 class TestAppearanceTheme:
     def test_appearance_adds_column_before_rows_then_links(self, monkeypatch):
         body = _FakeFeature("Body1")
+        # Appearance stubs carry a readable .name: the read-back gate treats an unreadable
+        # appearance name as a failed assignment.
+        from types import SimpleNamespace as _NS
         d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": body},
-                             appearances={"Red": object(), "Blue": object()}))
+                             appearances={"Red": _NS(name="Red"), "Blue": _NS(name="Blue")}))
         monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
                             else (None, f"No body named '{raw}'."))
         monkeypatch.setattr(dc, "_resolve_appearance", lambda design, name: d._appearances.get(name))
@@ -1086,9 +1089,11 @@ class _ActTable:
 
 
 class _ActTimeline:
-    """A timeline with N features in error (healthState 2) - what _common.timeline_health reads."""
-    def __init__(self, n_errors):
+    """A timeline with N features in error (healthState 2) and N in warning (healthState 1) - what
+    _common.timeline_health reads."""
+    def __init__(self, n_errors, n_warnings=0):
         self._items = [SimpleNamespace(healthState=2, name="F%d" % i) for i in range(n_errors)]
+        self._items += [SimpleNamespace(healthState=1, name="W%d" % i) for i in range(n_warnings)]
     @property
     def count(self):
         return len(self._items)
@@ -1097,12 +1102,13 @@ class _ActTimeline:
 
 
 class _ActDesign:
-    """A configured design whose rebuild (computeAll) can flip features into error, so the activate
-    guard's before/after timeline_health comparison has something to catch."""
-    def __init__(self, table, errors_before=0, errors_after=0):
+    """A configured design whose rebuild (computeAll) can flip features into error or warning, so the
+    activate guard's before/after timeline_health comparison has something to catch."""
+    def __init__(self, table, errors_before=0, errors_after=0, warnings_after=0):
         self._top = table
         self._computed = False
         self._before, self._after = errors_before, errors_after
+        self._warn_after = warnings_after
     @property
     def configurationTopTable(self):
         return self._top
@@ -1110,7 +1116,9 @@ class _ActDesign:
         self._computed = True
     @property
     def timeline(self):
-        return _ActTimeline(self._after if self._computed else self._before)
+        if self._computed:
+            return _ActTimeline(self._after, self._warn_after)
+        return _ActTimeline(self._before)
 
 
 class TestActivate:
@@ -1136,3 +1144,583 @@ class TestActivate:
         out = _payload(dc.handler(action="activate", name="Large"))
         assert out["activated"] is True
         assert "timeline_warning" in out and "new error" in out["timeline_warning"].lower()
+
+
+# ── cells and rows that keep what they hold: the platform's silent no-op ─────
+#
+# Every column action assigns a cell value and reads it back. These stand-ins accept the assignment
+# and keep their own value, which is the shape the read-back gate exists to catch.
+
+class _StubbornRow:
+    """A configuration row that accepts a name assignment and keeps its own name."""
+    def __init__(self, name):
+        self._name = name
+        self.id = "row-" + name
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        pass
+
+
+class _StubbornParamCell:
+    def __init__(self):
+        self._expr = "9 mm"
+
+    @property
+    def expression(self):
+        return self._expr
+
+    @expression.setter
+    def expression(self, value):
+        pass
+
+
+class _StubbornSuppressCell:
+    @property
+    def isSuppressed(self):
+        return False
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        pass
+
+
+class _StubbornVisibilityCell:
+    @property
+    def isVisible(self):
+        return True
+
+    @isVisible.setter
+    def isVisible(self, value):
+        pass
+
+
+class _StubbornAppearanceCell:
+    _held = SimpleNamespace(name="Chrome")
+
+    @property
+    def appearance(self):
+        return self._held
+
+    @appearance.setter
+    def appearance(self, value):
+        pass
+
+
+class _StubbornInsertCell:
+    _held = SimpleNamespace(name="Medium")
+
+    @property
+    def row(self):
+        return self._held
+
+    @row.setter
+    def row(self, value):
+        pass
+
+
+def _null_column(table, adder):
+    """Make the named column factory answer nothing, the way the API can."""
+    setattr(table.columns, adder, lambda arg: None)
+
+
+def _cell_less_column(table, adder):
+    """Make the next column the named factory builds carry no cell for any row name."""
+    real = getattr(table.columns, adder)
+
+    def build(arg):
+        col = real(arg)
+        col.getCellByRowName = lambda name: None
+        return col
+
+    setattr(table.columns, adder, build)
+
+
+def _cells_from(table, adder, factory):
+    """Make the next column the named factory builds hand out `factory` cells."""
+    real = getattr(table.columns, adder)
+
+    def build(arg):
+        col = real(arg)
+        col.cell_factory = factory
+        return col
+
+    setattr(table.columns, adder, build)
+
+
+@pytest.fixture
+def col_design(monkeypatch):
+    """A configured design with two configurations (Default, Small), a parameter, a body and a
+    timeline feature, and the typed body/feature seams stubbed - the rig the column actions'
+    refusals are driven through."""
+    d = _Design(configured=True,
+                params=[_Param("plate_len")],
+                bodies={"Body1": _FakeFeature("Body1")},
+                features={"Fillet1": _FakeFeature("Fillet1")})
+    _install(monkeypatch, d)
+    monkeypatch.setattr(dc._BODY, "resolve",
+                        lambda raw: (d._bodies.get(raw), None) if raw in d._bodies
+                        else (None, f"No body named '{raw}'."))
+    monkeypatch.setattr(dc._FEATURE, "resolve",
+                        lambda raw: ((d._features[raw], raw), None) if raw in d._features
+                        else (None, f"'feature': no timeline feature named '{raw}'."))
+    dc.handler(action="add_configuration", name="Small")
+    return d
+
+
+def _top(design):
+    return design.configurationTopTable
+
+
+# ── create: the refusals around the conversion itself ────────────────────────
+
+class TestCreateRefusals:
+    def test_a_conversion_that_yields_no_table_is_an_error(self, monkeypatch):
+        # createConfiguredDesign answering nothing is a failed conversion; reporting ok would tell
+        # the caller to start adding columns to a table that does not exist
+        d = _install(monkeypatch, _Design(configured=False))
+        d.createConfiguredDesign = lambda: None
+        res = dc.handler(action="create")
+        assert res["isError"] is True and "returned no table" in res["message"]
+
+    def test_the_saved_gate_reads_the_active_documents_own_flag(self, monkeypatch):
+        # the guard is only worth its wording if it reads isSaved off the active document
+        d = _Design(configured=False)
+        monkeypatch.setattr(dc._common, "design", lambda: d)
+        monkeypatch.setattr(dc, "app",
+                            SimpleNamespace(activeDocument=SimpleNamespace(isSaved=False)))
+        res = dc.handler(action="create")
+        assert res["isError"] is True and "Save the document first" in res["message"]
+        assert d.created is None
+
+
+# ── activate: the refusals a switch can hit ─────────────────────────────────
+
+class TestActivateRefusals:
+    def _design(self, monkeypatch, table=None):
+        d = _ActDesign(_ActTable(["Default", "Large"]) if table is None else table)
+        monkeypatch.setattr(dc._common, "design", lambda: d)
+        return d
+
+    def test_activate_without_a_name_is_refused(self, monkeypatch):
+        self._design(monkeypatch)
+        res = dc.handler(action="activate", name="   ")
+        assert res["isError"] is True and "Provide 'name'" in res["message"]
+
+    def test_an_activate_answering_false_is_an_error(self, monkeypatch):
+        d = self._design(monkeypatch)
+        d.configurationTopTable.rows.item(1).activate = lambda: False
+        res = dc.handler(action="activate", name="Large")
+        assert res["isError"] is True and "activate() returned false" in res["message"]
+
+    def test_an_active_row_that_did_not_move_is_an_error(self, monkeypatch):
+        # activate() answering true is not proof the switch took - the table's own activeRow is
+        d = self._design(monkeypatch)
+        d.configurationTopTable.rows.item(1).activate = lambda: True
+        res = dc.handler(action="activate", name="Large")
+        assert res["isError"] is True
+        assert "still reads 'Default'" in res["message"] and "expected 'Large'" in res["message"]
+
+    def test_timeline_warnings_after_the_switch_are_published(self, monkeypatch):
+        # a rebuild that only WARNS still leaves the switch standing, so the warnings ride along in
+        # the success payload rather than being reported as a new error
+        d = _ActDesign(_ActTable(["Default", "Large"]), warnings_after=2)
+        monkeypatch.setattr(dc._common, "design", lambda: d)
+        out = _payload(dc.handler(action="activate", name="Large"))
+        assert out["activated"] is True and out["timeline_warnings"] == ["W0", "W1"]
+        assert "timeline_warning" not in out
+
+    def test_a_table_with_no_readable_rows_refuses_instead_of_crashing(self, monkeypatch):
+        self._design(monkeypatch, table=SimpleNamespace())
+        res = dc.handler(action="activate", name="Large")
+        assert res["isError"] is True
+        assert "No configuration matched 'Large'" in res["message"] and "(none)" in res["message"]
+
+    def test_a_rows_collection_that_will_not_iterate_refuses(self, monkeypatch):
+        self._design(monkeypatch, table=SimpleNamespace(rows=object()))
+        res = dc.handler(action="activate", name="Large")
+        assert res["isError"] is True and "No configuration matched 'Large'" in res["message"]
+
+
+# ── add_configuration / rename_configuration: the row-level refusals ────────
+
+class TestAddConfigurationRefusals:
+    def test_a_duplicate_configuration_name_is_refused(self, monkeypatch):
+        # two rows sharing a name would make every by-name cell address ambiguous
+        _install(monkeypatch, _Design(configured=True))
+        res = dc.handler(action="add_configuration", name="Default")
+        assert res["isError"] is True and "already exists" in res["message"]
+
+    def test_a_row_add_that_answers_nothing_is_an_error(self, monkeypatch):
+        d = _install(monkeypatch, _Design(configured=True))
+        _top(d).rows.add = lambda name: None
+        res = dc.handler(action="add_configuration", name="Large")
+        assert res["isError"] is True and "Adding configuration 'Large' failed" in res["message"]
+
+
+class TestRenameConfigurationRefusals:
+    def test_a_rename_that_does_not_take_is_an_error(self, monkeypatch):
+        # the row keeps its old name: reporting ok would send the caller addressing cells by a name
+        # the table does not carry
+        d = _install(monkeypatch, _Design(configured=True))
+        _top(d).rows._r[0] = _StubbornRow("Default")
+        res = dc.handler(action="rename_configuration", name="Default", new_name="Medium")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+
+# ── add_parameter: the refusals around the parameter column ────────────────
+
+class TestAddParameterRefusals:
+    def test_a_missing_parameter_name_is_refused(self, col_design):
+        res = dc.handler(action="add_parameter", parameter="", values={"Default": "5 mm"})
+        assert res["isError"] is True and "Provide 'parameter'" in res["message"]
+
+    def test_a_null_parameter_column_is_an_error(self, col_design):
+        _null_column(_top(col_design), "addParameterColumn")
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "5 mm"})
+        assert res["isError"] is True
+        assert "addParameterColumn for 'plate_len' returned null" in res["message"]
+
+    def test_a_column_with_no_cell_for_a_configuration_is_an_error(self, col_design):
+        _cell_less_column(_top(col_design), "addParameterColumn")
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "5 mm"})
+        assert res["isError"] is True
+        assert "No cell for configuration 'Default' in the 'plate_len' column" in res["message"]
+
+    def test_an_expression_that_does_not_take_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addParameterColumn", _StubbornParamCell)
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "50 mm"})
+        assert res["isError"] is True
+        assert "reads '9 mm'" in res["message"]
+        assert "'50 mm' did not verifiably take" in res["message"]
+
+
+# ── add_suppress: the refusals around the suppress column ──────────────────
+
+class TestAddSuppressRefusals:
+    def test_a_missing_feature_name_is_refused(self, col_design):
+        res = dc.handler(action="add_suppress", feature="", suppressed_in=["Small"])
+        assert res["isError"] is True and "Provide 'feature'" in res["message"]
+
+    def test_suppressed_in_naming_an_unknown_configuration_is_refused(self, col_design):
+        res = dc.handler(action="add_suppress", feature="Fillet1", suppressed_in=["Ghost"])
+        assert res["isError"] is True
+        assert "suppressed_in names unknown configurations: Ghost" in res["message"]
+        assert _top(col_design).columns.added == []      # nothing mutated on a refusal
+
+    def test_a_null_suppress_column_is_an_error(self, col_design):
+        _null_column(_top(col_design), "addSuppressColumn")
+        res = dc.handler(action="add_suppress", feature="Fillet1", suppressed_in=["Small"])
+        assert res["isError"] is True
+        assert "addSuppressColumn for 'Fillet1' returned null" in res["message"]
+
+    def test_a_column_with_no_suppress_cell_is_an_error(self, col_design):
+        _cell_less_column(_top(col_design), "addSuppressColumn")
+        res = dc.handler(action="add_suppress", feature="Fillet1", suppressed_in=["Small"])
+        assert res["isError"] is True
+        assert "No suppress cell for configuration 'Small'" in res["message"]
+
+    def test_a_suppression_that_does_not_take_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addSuppressColumn", _StubbornSuppressCell)
+        res = dc.handler(action="add_suppress", feature="Fillet1", suppressed_in=["Small"])
+        assert res["isError"] is True and "does not read suppressed" in res["message"]
+
+
+# ── add_visibility: the refusals around the visibility column ──────────────
+
+class TestAddVisibilityRefusals:
+    def test_a_missing_body_is_refused(self, col_design):
+        res = dc.handler(action="add_visibility", hidden_in=["Small"])
+        assert res["isError"] is True and "Provide 'body'" in res["message"]
+
+    def test_an_unresolvable_body_is_refused_with_the_resolver_reason(self, col_design):
+        res = dc.handler(action="add_visibility", body="Ghost", hidden_in=["Small"])
+        assert res["isError"] is True and "No body named 'Ghost'" in res["message"]
+        assert _top(col_design).columns.added == []
+
+    def test_hidden_in_naming_an_unknown_configuration_is_refused(self, col_design):
+        res = dc.handler(action="add_visibility", body="Body1", hidden_in=["Ghost"])
+        assert res["isError"] is True
+        assert "hidden_in names unknown configurations: Ghost" in res["message"]
+        assert _top(col_design).columns.added == []
+
+    def test_a_null_visibility_column_is_an_error(self, col_design):
+        _null_column(_top(col_design), "addVisibilityColumn")
+        res = dc.handler(action="add_visibility", body="Body1", hidden_in=["Small"])
+        assert res["isError"] is True
+        assert "addVisibilityColumn for 'Body1' returned null" in res["message"]
+
+    def test_a_column_with_no_visibility_cell_is_an_error(self, col_design):
+        _cell_less_column(_top(col_design), "addVisibilityColumn")
+        res = dc.handler(action="add_visibility", body="Body1", hidden_in=["Small"])
+        assert res["isError"] is True
+        assert "No visibility cell for configuration 'Small'" in res["message"]
+
+    def test_a_hide_that_does_not_take_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addVisibilityColumn", _StubbornVisibilityCell)
+        res = dc.handler(action="add_visibility", body="Body1", hidden_in=["Small"])
+        assert res["isError"] is True and "does not read hidden" in res["message"]
+
+
+# ── set_appearance: the refusals along the theme build ─────────────────────
+
+class TestSetAppearanceRefusals:
+    def _named(self, monkeypatch, **named):
+        monkeypatch.setattr(dc, "_resolve_appearance",
+                            lambda design, name: named.get(name))
+
+    def test_a_missing_body_is_refused(self, col_design):
+        res = dc.handler(action="set_appearance", appearances={"Default": "Red"})
+        assert res["isError"] is True and "Provide 'body'" in res["message"]
+
+    def test_an_unresolvable_body_is_refused_with_the_resolver_reason(self, col_design):
+        res = dc.handler(action="set_appearance", body="Ghost", appearances={"Default": "Red"})
+        assert res["isError"] is True and "No body named 'Ghost'" in res["message"]
+
+    def test_an_appearance_map_naming_an_unknown_configuration_is_refused(self, col_design):
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Ghost": "Red"})
+        assert res["isError"] is True
+        assert "Appearance map references unknown configurations: Ghost" in res["message"]
+        assert _top(col_design).appearanceTable._columns_added == []
+
+    def test_an_appearance_absent_from_the_design_is_refused_before_mutating(self, col_design):
+        # the design's OWN appearances collection is what the resolver reads - a library appearance
+        # has to be copied in first, so a name it does not hold is refused
+        col_design.appearances = SimpleNamespace(itemByName=lambda n: None)
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Ghost"})
+        assert res["isError"] is True and "No appearance named 'Ghost'" in res["message"]
+        assert _top(col_design).appearanceTable._columns_added == []
+
+    def test_an_appearance_present_in_the_design_resolves(self, col_design):
+        held = SimpleNamespace(name="Red")
+        col_design.appearances = SimpleNamespace(
+            itemByName=lambda n: held if n == "Red" else None)
+        assert dc._resolve_appearance(col_design, "Red") is held
+
+    def test_a_design_with_no_appearance_table_is_named(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        _top(col_design).appearanceTable = None
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "no appearance table" in res["message"]
+
+    def test_a_null_appearance_column_is_an_error(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        _top(col_design).appearanceTable.add = lambda body: None
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True
+        assert "appearanceTable.columns.add for 'Body1' returned null" in res["message"]
+
+    def test_an_appearance_table_with_no_theme_column_is_named(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        _top(col_design).appearanceTable.parentTableColumn = None
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "no theme column" in res["message"]
+
+    def test_a_column_with_no_appearance_cell_is_an_error(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        appt = _top(col_design).appearanceTable
+        real_add = appt.add
+
+        def cell_less(body):
+            col = real_add(body)
+            col.getCell = lambda idx: None
+            return col
+
+        appt.add = cell_less
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "No appearance cell/row at theme index 0" in res["message"]
+
+    def test_a_cell_reading_back_another_appearance_is_an_error(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        appt = _top(col_design).appearanceTable
+        real_add = appt.add
+
+        def stubborn(body):
+            col = real_add(body)
+            col.cell_factory = _StubbornAppearanceCell
+            return col
+
+        appt.add = stubborn
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "reads 'Chrome'" in res["message"]
+
+    def test_a_configuration_with_no_theme_cell_is_an_error(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        _top(col_design).appearanceTable.parentTableColumn.getCellByRowName = lambda name: None
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True
+        assert "No theme cell for configuration 'Default'" in res["message"]
+
+    def test_a_theme_link_pointing_at_another_row_is_an_error(self, col_design, monkeypatch):
+        self._named(monkeypatch, Red=SimpleNamespace(name="Red"))
+        theme_col = _top(col_design).appearanceTable.parentTableColumn
+        theme_col.cell_mode = "lies"
+        theme_col.substitute = SimpleNamespace(name="Theme 9")
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "links theme 'Theme 9'" in res["message"]
+
+
+class _SilentDropCell:
+    """A cell that accepts any write and reads back nothing - the platform's silently-dropped
+    assignment. An unreadable read-back is a FAILURE (the material path's stated rule, shared by
+    every configuration writer)."""
+    def __setattr__(self, name, value):
+        pass
+
+    def __getattr__(self, name):
+        return None
+
+
+class TestSilentDropRefusals:
+    def test_a_dropped_parameter_expression_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addParameterColumn", _SilentDropCell)
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "50 mm"})
+        assert res["isError"] is True and "did not verifiably take" in res["message"]
+
+    def test_a_dropped_suppression_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addSuppressColumn", _SilentDropCell)
+        res = dc.handler(action="add_suppress", feature="Fillet1", suppressed_in=["Small"])
+        assert res["isError"] is True and "does not read suppressed" in res["message"]
+
+    def test_a_dropped_hide_is_an_error(self, col_design):
+        _cells_from(_top(col_design), "addVisibilityColumn", _SilentDropCell)
+        res = dc.handler(action="add_visibility", body="Body1", hidden_in=["Small"])
+        assert res["isError"] is True and "does not read hidden" in res["message"]
+
+    def test_a_dropped_appearance_assignment_is_an_error(self, col_design, monkeypatch):
+        monkeypatch.setattr(dc, "_resolve_appearance",
+                            lambda design, name: SimpleNamespace(name="Red"))
+        appt = _top(col_design).appearanceTable
+        real_add = appt.add
+
+        def dropping(body):
+            col = real_add(body)
+            col.cell_factory = _SilentDropCell
+            return col
+
+        appt.add = dropping
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "reads nothing" in res["message"]
+
+    def test_a_dropped_theme_link_is_an_error(self, col_design, monkeypatch):
+        monkeypatch.setattr(dc, "_resolve_appearance",
+                            lambda design, name: SimpleNamespace(name="Red"))
+        _top(col_design).appearanceTable.parentTableColumn.cell_mode = "silent"
+        res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
+        assert res["isError"] is True and "did not verifiably take" in res["message"]
+
+
+# ── add_material: the two name-resolution refusals ─────────────────────────
+
+class TestMaterialNameResolution:
+    def test_a_blank_material_name_is_refused_naming_the_field(self, mat_design):
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": ""})
+        assert res["isError"] is True
+        assert "Provide a material name for every configuration in 'materials'" in res["message"]
+        assert _mat_table(mat_design).columns.count == 0
+
+    def test_a_nameless_document_material_is_not_offered_as_a_candidate(self, monkeypatch):
+        # a material whose name is unreadable is skipped, so the miss message lists real names
+        # instead of an empty quote pair the caller cannot ask for
+        d = _Design(configured=True, bodies={"Body1": _FakeFeature("Body1")},
+                    materials=("", "Steel"))
+        _install(monkeypatch, d)
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))
+        res = dc.handler(action="add_material", body="Body1", materials={"Default": "Unobtanium"})
+        assert res["isError"] is True and "'Steel'" in res["message"]
+        assert "''" not in res["message"]
+
+
+# ── add_insert: the refusals along the nested-configuration build ──────────
+
+class TestAddInsertRefusals:
+    def _setup(self, monkeypatch, datafile=None):
+        part = datafile if datafile is not None else _FakeDataFile("Bracket", ["Medium", "Large"])
+        d = _install(monkeypatch, _Design(configured=True, datafiles={"Bracket": part}))
+        monkeypatch.setattr(dc, "_resolve_datafile", lambda design, name: d._datafiles.get(name))
+        return d
+
+    def test_a_missing_insert_part_is_refused(self, monkeypatch):
+        self._setup(monkeypatch)
+        res = dc.handler(action="add_insert", insert_part="")
+        assert res["isError"] is True and "Provide 'insert_part'" in res["message"]
+
+    def test_a_part_that_is_not_a_configured_design_is_refused(self, monkeypatch):
+        part = _FakeDataFile("Bracket", ["Medium"])
+        part.isConfiguredDesign = False
+        d = self._setup(monkeypatch, part)
+        res = dc.handler(action="add_insert", insert_part="Bracket")
+        assert res["isError"] is True and "is not a configured design" in res["message"]
+        assert d.rootComponent.occurrences.inserted == []
+
+    def test_a_part_exposing_no_configuration_rows_is_refused(self, monkeypatch):
+        part = _FakeDataFile("Bracket", ["Medium"])
+        part.configurationTable = None
+        self._setup(monkeypatch, part)
+        res = dc.handler(action="add_insert", insert_part="Bracket")
+        assert res["isError"] is True and "exposes no configuration rows" in res["message"]
+
+    def test_an_insert_config_the_part_does_not_carry_is_refused(self, monkeypatch):
+        d = self._setup(monkeypatch)
+        res = dc.handler(action="add_insert", insert_part="Bracket", insert_config="Gigantic")
+        assert res["isError"] is True
+        assert "insert_config 'Gigantic' is not a configuration of 'Bracket'" in res["message"]
+        assert d.rootComponent.occurrences.inserted == []
+
+    def test_an_insert_that_yields_no_occurrence_is_an_error(self, monkeypatch):
+        d = self._setup(monkeypatch)
+        d.rootComponent.occurrences.addFromConfiguration = lambda row, transform: None
+        res = dc.handler(action="add_insert", insert_part="Bracket")
+        assert res["isError"] is True and "returned no occurrence" in res["message"]
+
+    def test_a_null_insert_column_is_an_error(self, monkeypatch):
+        d = self._setup(monkeypatch)
+        _null_column(_top(d), "addInsertColumn")
+        res = dc.handler(action="add_insert", insert_part="Bracket",
+                         insert_map={"Default": "Medium"})
+        assert res["isError"] is True and "addInsertColumn returned null" in res["message"]
+
+    def test_a_column_with_no_insert_cell_is_an_error(self, monkeypatch):
+        d = self._setup(monkeypatch)
+        _cell_less_column(_top(d), "addInsertColumn")
+        res = dc.handler(action="add_insert", insert_part="Bracket",
+                         insert_map={"Default": "Medium"})
+        assert res["isError"] is True
+        assert "No insert cell for assembly configuration 'Default'" in res["message"]
+
+    def test_a_mapping_that_does_not_take_is_an_error(self, monkeypatch):
+        # the cell keeps the part configuration it already selected, so the nested mapping the
+        # payload would claim is not the one the table holds
+        d = self._setup(monkeypatch)
+        _cells_from(_top(d), "addInsertColumn", _StubbornInsertCell)
+        res = dc.handler(action="add_insert", insert_part="Bracket",
+                         insert_map={"Default": "Large"})
+        assert res["isError"] is True
+        assert "still selects part configuration 'Medium'" in res["message"]
+
+
+# ── _resolve_datafile: urn first, then a name in the active project ────────
+
+class TestDataFileResolution:
+    def test_a_urn_resolves_through_the_shared_decoder(self, monkeypatch):
+        # the shared decoder also base64url-decodes the lineage segment of a pasted share URL, so
+        # the urn path never re-rolls a startswith('urn:') test
+        wanted = _FakeDataFile("Bracket", ["Medium"])
+        monkeypatch.setattr(dc._data_common, "_resolve_data_file",
+                            lambda ref: (wanted, ref, [ref]))
+        assert dc._resolve_datafile(_Design(), "urn:adsk.wipprod:dm.lineage:abc") is wanted
+
+    def test_a_name_resolves_against_the_active_projects_root_folder(self, monkeypatch):
+        wanted = _FakeDataFile("Bracket", ["Medium"])
+        others = [_FakeDataFile("Plate", ["Medium"]), wanted]
+        monkeypatch.setattr(dc._data_common, "_resolve_data_file", lambda ref: (None, None, []))
+        monkeypatch.setattr(dc, "app", SimpleNamespace(data=SimpleNamespace(
+            activeProject=SimpleNamespace(rootFolder=SimpleNamespace(
+                dataFiles=SimpleNamespace(count=2, item=lambda i: others[i]))))))
+        d = _Design()
+        assert dc._resolve_datafile(d, "Bracket") is wanted
+        assert dc._resolve_datafile(d, "Missing") is None

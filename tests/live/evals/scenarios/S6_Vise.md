@@ -5,8 +5,8 @@ fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNE
   "MCP Test Project" verified to EXIST. The vise this scenario builds becomes the FIXTURE X-REF
   SOURCE the template chain consumes. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 184
-  max_tokens: 125000
+  max_tool_calls: 158
+  max_tokens: 258000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -33,6 +33,11 @@ The active design is a fresh empty document. Work IN it; do not create, open, or
 documents (the final save is not a switch). Missing save-target project = STOP, report BLOCKED.
 
 Cold start: sys_capability_map, then workspace_orient. Screenshots against numbers as you go.
+
+VOLUMETRIC AUDIT HABIT: after each part's solid lands (a build milestone) and once as a FINAL
+audit before the save, take a fresh volumetric inventory - per-body volume reads plus a body
+census (which components hold how many bodies) - and read it against what you intended: an
+orphan lump or a floating piece is invisible to interference checks and screenshots.
 
 GOAL - a SELF-CENTERING machine VISE as separate parts:
 
@@ -73,6 +78,9 @@ Finally save the document as P6-Vise into MCP Test Project / Pipeline-v1/{{RUN_F
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
 
 - three components (body + two jaws), each holding a solid body (fresh tree read).
+- ONE CONNECTED SOLID per part: the FINAL volumetric audit shows exactly three solid bodies -
+  one per component, each a single connected lump, no orphan or floating piece - report each
+  body's volume with units and the read that produced it.
 - STEPPED JAWS: each jaw's gripping face carries the workpiece seat step - fresh geometry reads
   (find_geometry per jaw) showing two gripping faces at different offsets with the horizontal
   seat ledge between them; report the step's depth and height in mm.
@@ -144,15 +152,18 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   The offset direction is the JOINT FRAME'S Z axis (not the slider's motion axis; not
   necessarily world Z - an edge-anchored JO re-points it). The offset is NOT the slide DOF;
   whether the slide value itself has a drivable model parameter is UNVERIFIED.
+- THE VOLUMETRIC AUDIT CLAUSE (scenario-authoring-spec.md, physical-deliverable requirement):
+  the grader re-issues its own volumetric inventory (per-body volumes + body census, via an
+  independent channel when one is available) before upholding a PASS - the one-connected-solid
+  postcondition is graded from that re-issued read, never the executor's claim.
 - This artifact gets EDITED by S7 (the opening-parameter bump proves x-ref staleness AND, with
   the joints in place, the jaws move as occurrences under the update) - version 1 is not
   immutable the way P1-P5 are; note it in the run record.
-- Budget: 184 calls / 125k tokens. A measured run (184 calls / ~140k tokens) spends roughly
-  half its calls discovering the offset-direction rule above when the wire does not teach it;
-  with that spend freed and the stepped-jaw + finish work absorbing part of it, the expected run
-  is ~131 calls / ~88k tokens; the slot + name-text elements add an estimated ~15 calls; + 25%
-  margin = 184 / 125k. Re-measure at the next run. An offset-driven slideway follows the joint
-  frame's Z, so a world-Z slideway is the path of least resistance with origin-snapped joints.
+- Budget: 158 calls / 258k tokens - the last measured run (126 calls / 206.5k output tokens)
+  + 25%. Run-to-run spread is large (101-126 calls, 127k-207k tokens across two measured runs):
+  the driver is whether the executor discovers the offset-drive recipe cheaply. Re-measure at
+  the next run. An offset-driven slideway follows the joint frame's Z, so a world-Z slideway is
+  the path of least resistance with origin-snapped joints.
 - THE SLOT + NAME elements nudge the executor onto the
   slot family (sketch_add_geometry kind=slot and kin) and the text surface (sketch_set_text
   create + font_name) without naming either tool - the goal names the OUTCOME (a tee-slot's

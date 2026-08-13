@@ -47,6 +47,54 @@ class _FakeAnn:
         return True
 
 
+class _RefusingSet(_FakeAnn):
+    """An annotation whose named properties raise on every write - the shape the report-the-raise
+    guards exist for. Keyword values seed plain attributes before the refusal is armed, so a
+    property can start below a floor and still refuse the repair."""
+
+    def __init__(self, raises=(), **values):
+        super().__init__()
+        for key, val in values.items():
+            setattr(self, key, val)
+        self._raises = set(raises)
+
+    def __setattr__(self, key, value):
+        if key in getattr(self, "_raises", ()):
+            raise RuntimeError(f"'{key}' is read-only on this annotation")
+        object.__setattr__(self, key, value)
+
+
+class _SuppressFlag:
+    """A timeline feature's isSuppressed: 'raise_on' names the value whose write raises, 'drop'
+    swallows every write. Both are shapes the suppression read-back gates report."""
+
+    def __init__(self, value=True, raise_on=None, drop=False):
+        object.__setattr__(self, "isSuppressed", value)
+        object.__setattr__(self, "_raise_on", raise_on)
+        object.__setattr__(self, "_drop", drop)
+
+    def __setattr__(self, key, value):
+        if key == "isSuppressed":
+            if self._raise_on is not None and value is self._raise_on:
+                raise RuntimeError("the timeline refused the flag")
+            if self._drop:
+                return
+        object.__setattr__(self, key, value)
+
+
+def _install_suppressed(rig, item, hits_after):
+    """Wire the suppressed-PMI world: `item` is the suppressed timeline feature named Note1, absent
+    from the PMI collections, and `hits_after` is what those collections report once it is
+    unsuppressed."""
+    rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
+    rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                            lambda d, n, c="": (None, None, "No PMI named 'Note1'."))
+    rig.monkeypatch.setattr(
+        pe._pmi, "annotation_hits",
+        lambda d, n, c="": (([] if item.isSuppressed else list(hits_after)), []))
+    return item
+
+
 @pytest.fixture
 def rig(monkeypatch):
     ann = _FakeAnn()
@@ -76,6 +124,26 @@ class TestSetText:
         assert "'{bogus}'" in error_message(
             pe.handler(action="set_text", annotation="Note1", text="{bogus}"))
 
+    def test_an_unrepairable_below_floor_extension_stops_the_text_edit(self, rig):
+        ann = _RefusingSet(raises=("leaderLineExtension",),
+                           leaderLineExtension=pe._pmi.LEADER_EXT_FLOOR / 2)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        msg = error_message(pe.handler(action="set_text", annotation="Note1", text="X"))
+        assert "recreate" in msg and ann.segments is None
+
+    def test_a_segments_write_that_raises_is_an_error(self, rig):
+        ann = _RefusingSet(raises=("segments",))
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        assert "Setting the note text failed" in error_message(
+            pe.handler(action="set_text", annotation="Note1", text="X"))
+
+    def test_unreadable_segments_after_the_write_is_an_error(self, rig):
+        rig.monkeypatch.setattr(pe._pmi, "segments_markup", lambda a: None)
+        assert "did not take" in error_message(
+            pe.handler(action="set_text", annotation="Note1", text="X"))
+
 
 class TestRename:
     def test_rename_reads_back(self, rig):
@@ -100,6 +168,13 @@ class TestRename:
     def test_missing_new_name_is_an_error(self, rig):
         assert "new_name" in error_message(pe.handler(action="rename", annotation="Note1"))
 
+    def test_a_name_write_that_raises_is_an_error(self, rig):
+        ann = _RefusingSet(raises=("name",))
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        assert "Rename failed" in error_message(
+            pe.handler(action="rename", annotation="Note1", new_name="X"))
+
 
 class TestVisibility:
     def test_hide_gates_on_the_reread(self, rig):
@@ -118,6 +193,13 @@ class TestVisibility:
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",
                                 lambda d, n, c="": (Frozen(), rig.comp, None))
         assert "did not take" in error_message(pe.handler(action="hide", annotation="Note1"))
+
+    def test_a_bulb_write_that_raises_is_an_error(self, rig):
+        ann = _RefusingSet(raises=("isLightBulbOn",))
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        assert "Visibility toggle failed" in error_message(
+            pe.handler(action="hide", annotation="Note1"))
 
     def test_show_with_a_parent_bulb_off_reports_the_cause(self, rig):
         rig.ann.isLightBulbOn = False
@@ -158,6 +240,22 @@ class TestUpToDateAndConvert:
         out = _payload(pe.handler(action="convert_imported", annotation="Note1"))
         assert out["converted_to"] == "hole_note"
 
+    def test_a_markuptodate_raise_is_an_error(self, rig):
+        def _boom():
+            raise RuntimeError("the warnings are attached to missing geometry")
+        rig.ann.isOutOfDate = True
+        rig.ann.markUpToDate = _boom
+        assert "markUpToDate() failed" in error_message(
+            pe.handler(action="mark_up_to_date", annotation="Note1"))
+
+    def test_a_conversion_raise_is_an_error(self, rig):
+        def _boom():
+            raise RuntimeError("this reference geometry has no Fusion counterpart")
+        rig.ann.objectType = "adsk::fusion::PMIImportedNote"
+        rig.ann.convertImportedToFusionPMI = _boom
+        assert "Conversion failed" in error_message(
+            pe.handler(action="convert_imported", annotation="Note1"))
+
 
 class TestNewActions:
     def test_set_flags_on_a_leader_note_is_refused(self, rig):
@@ -192,14 +290,7 @@ class TestNewActions:
     def _suppressed(self, rig, hits_after):
         """A suppressed timeline feature named Note1; `hits_after` is what the PMI collections
         report once the feature is unsuppressed."""
-        item = SimpleNamespace(isSuppressed=True)
-        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [(item, "Note1")])
-        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
-                                lambda d, n, c="": (None, None, "No PMI named 'Note1'."))
-        rig.monkeypatch.setattr(
-            pe._pmi, "annotation_hits",
-            lambda d, n, c="": (([] if item.isSuppressed else list(hits_after)), []))
-        return item
+        return _install_suppressed(rig, SimpleNamespace(isSuppressed=True), hits_after)
 
     def test_unsuppress_reaches_a_suppressed_pmi_through_the_timeline(self, rig):
         # suppressed PMI leaves the collections; only the suppressed timeline feature's name
@@ -285,6 +376,28 @@ class TestNewActions:
         assert "must be a number" in error_message(
             pe.handler(action="set_extension", annotation="Note1", leader_extension="six"))
 
+    def test_set_extension_without_a_length_is_refused(self, rig):
+        assert "needs 'leader_extension'" in error_message(
+            pe.handler(action="set_extension", annotation="Note1"))
+
+    def test_set_extension_on_imported_pmi_is_refused(self, rig):
+        rig.ann.objectType = "adsk::fusion::PMIImportedNote"
+        assert "read-only" in error_message(
+            pe.handler(action="set_extension", annotation="Note1", leader_extension=6))
+
+    def test_set_extension_rereads_the_length_itself(self, rig):
+        # the handler's own read-back, on top of the writer's: a writer reporting success while
+        # the length never moved is still an error.
+        rig.monkeypatch.setattr(pe._pmi, "apply_note_format", lambda ann, a, v, p, ext: None)
+        msg = error_message(pe.handler(action="set_extension", annotation="Note1",
+                                       leader_extension=6))
+        assert "did not take" in msg and "re-read" in msg
+
+    def test_set_alignment_on_imported_pmi_is_refused(self, rig):
+        rig.ann.objectType = "adsk::fusion::PMIImportedNote"
+        msg = error_message(pe.handler(action="set_alignment", annotation="Note1", align="left"))
+        assert "read-only" in msg and "convert_imported" in msg
+
     def test_set_alignment_publishes_the_perpendicular_it_read_back(self, rig):
         out = _payload(pe.handler(action="set_alignment", annotation="Note1",
                                   align="left", perpendicular=True))
@@ -331,6 +444,212 @@ class TestNewActions:
         assert "bad unit" in error_message(
             pe.handler(action="set_display", annotation="Hole Note1",
                        display={"secondary": {"units": "furlong"}}))
+
+
+class TestAnchorPoints:
+    """set_text_point / set_leader_point: the kind guard, the helper's refusal, and the record the
+    handler builds back out of the point it read."""
+
+    def test_set_text_point_on_imported_pmi_is_refused(self, rig):
+        rig.ann.objectType = "adsk::fusion::PMIImportedNote"
+        msg = error_message(pe.handler(action="set_text_point", annotation="Note1",
+                                       text_point=[1, 2, 3]))
+        assert "read-only" in msg and "convert_imported" in msg
+
+    def test_set_text_point_surfaces_a_malformed_point(self, rig):
+        assert "[x, y, z]" in error_message(
+            pe.handler(action="set_text_point", annotation="Note1", text_point=[1, 2]))
+
+    def test_set_text_point_reports_the_anchor_in_display_units(self, rig):
+        # the platform reads back in cm; the payload speaks the caller's 'units'
+        rig.monkeypatch.setattr(pe._pmi, "set_text_point",
+                                lambda a, xyz, f: (SimpleNamespace(x=0.1, y=0.2, z=0.3), None))
+        out = _payload(pe.handler(action="set_text_point", annotation="Note1",
+                                  text_point=[1, 2, 3], units="mm"))
+        assert out["text_point"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+
+    def test_set_leader_point_reports_the_target_in_display_units(self, rig):
+        rig.monkeypatch.setattr(pe._pmi, "set_leader_target",
+                                lambda a, xyz, f: (SimpleNamespace(x=0.1, y=0.2, z=0.3), None))
+        out = _payload(pe.handler(action="set_leader_point", annotation="Note1",
+                                  leader_point=[1, 2, 3], units="mm"))
+        assert out["leader_point"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+
+    def test_an_unrepairable_below_floor_extension_stops_the_leader_move(self, rig):
+        ann = _RefusingSet(raises=("leaderLineExtension",),
+                           leaderLineExtension=pe._pmi.LEADER_EXT_FLOOR / 2)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        assert "recreate" in error_message(
+            pe.handler(action="set_leader_point", annotation="Note1", leader_point=[1, 2, 3]))
+
+
+class TestSetPlane:
+    """set_plane: the kind guard, the refusals decided before the write, and the bool + read-back
+    gate on the write itself."""
+
+    def _armed(self, rig, accepts=True):
+        """Record every setAnnotationPlane call; the plane type moves either way, so `accepts` -
+        what the platform returns - is the only thing the bool gate can be reading. Returns the
+        call list."""
+        seen = []
+
+        def _set(*args):
+            seen.append(args)
+            rig.ann.annotationPlaneType = args[0]
+            return accepts
+        rig.ann.setAnnotationPlane = _set
+        return seen
+
+    def test_set_plane_on_a_hole_note_is_refused(self, rig):
+        rig.ann.objectType = "adsk::fusion::PMIHoleThreadNote"
+        assert "leader notes only" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+
+    def test_set_plane_without_a_plane_is_refused(self, rig):
+        assert "needs 'plane'" in error_message(pe.handler(action="set_plane", annotation="Note1"))
+
+    def test_set_plane_surfaces_the_face_kinds_refusal(self, rig):
+        rig.monkeypatch.setattr(pe._PLANE_FACE, "resolve",
+                                lambda raw: (None, "'plane_face': handle did not resolve"))
+        seen = self._armed(rig)
+        assert "did not resolve" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="custom_face",
+                       plane_face="stale-handle"))
+        assert seen == []                    # refused before the plane write
+
+    def test_an_unrepairable_below_floor_extension_stops_the_plane_set(self, rig):
+        ann = _RefusingSet(raises=("leaderLineExtension",),
+                           leaderLineExtension=pe._pmi.LEADER_EXT_FLOOR / 2)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        assert "recreate" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+
+    def test_a_faceless_plane_is_written_with_one_argument(self, rig):
+        seen = self._armed(rig)
+        out = _payload(pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+        assert seen == [
+            (pe.adsk.fusion.LeaderLineNotePlaneTypes.PrincipalXYLeaderLineNotePlaneType,)]
+        assert out["plane"] == "xy"
+
+    def test_the_resolved_face_reaches_the_plane_write(self, rig):
+        face = object()
+        rig.monkeypatch.setattr(pe._PLANE_FACE, "resolve", lambda raw: (face, None))
+        seen = self._armed(rig)
+        _payload(pe.handler(action="set_plane", annotation="Note1", plane="custom_face",
+                            plane_face="handle"))
+        assert seen[0][1] is face
+
+    def test_set_plane_gates_on_the_platform_bool(self, rig):
+        self._armed(rig, accepts=False)
+        assert "did not take" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+
+    def test_set_plane_gates_on_the_reread_even_when_the_call_returns_true(self, rig):
+        types = pe.adsk.fusion.LeaderLineNotePlaneTypes
+        rig.ann.annotationPlaneType = types.PrincipalYZLeaderLineNotePlaneType
+        rig.ann.setAnnotationPlane = lambda *args: True      # accepted, but nothing moved
+        assert "did not take" in error_message(
+            pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+
+    def test_a_plane_write_that_raises_names_the_face_input(self, rig):
+        def _boom(*args):
+            raise RuntimeError("the note is not adjacent to that face")
+        rig.ann.setAnnotationPlane = _boom
+        msg = error_message(pe.handler(action="set_plane", annotation="Note1", plane="face"))
+        assert "setAnnotationPlane failed" in msg and "plane_face" in msg
+
+
+class TestSuppression:
+    """The timeline flag behind suppress/unsuppress: every write is read back, and the by-name
+    unsuppress path reaches a PMI that has left the collections."""
+
+    def test_a_suppression_write_that_raises_is_an_error(self, rig):
+        rig.ann.timelineObject = _SuppressFlag(value=False, raise_on=True)
+        assert "Timeline suppression toggle failed" in error_message(
+            pe.handler(action="suppress", annotation="Note1"))
+
+    def test_a_dropped_suppression_write_is_an_error(self, rig):
+        rig.ann.timelineObject = _SuppressFlag(value=False, drop=True)
+        assert "did not take" in error_message(pe.handler(action="suppress", annotation="Note1"))
+
+    def test_unsuppress_of_a_findable_pmi_clears_the_timeline_flag(self, rig):
+        tl = SimpleNamespace(isSuppressed=True)
+        rig.ann.timelineObject = tl
+        out = _payload(pe.handler(action="unsuppress", annotation="Note1"))
+        assert out["suppressed"] is False and tl.isSuppressed is False
+
+    def test_unsuppress_with_no_suppressed_feature_surfaces_the_resolver_error(self, rig):
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (None, None, "No PMI named 'Ghost'."))
+        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features", lambda d: [])
+        assert "No PMI named 'Ghost'." in error_message(
+            pe.handler(action="unsuppress", annotation="Ghost"))
+
+    def test_unsuppress_refuses_two_suppressed_features_of_one_name(self, rig):
+        first, second = _SuppressFlag(), _SuppressFlag()
+        rig.monkeypatch.setattr(pe._pmi, "suppressed_pmi_features",
+                                lambda d: [(first, "Note1"), (second, "Note1")])
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (None, None, "No PMI named 'Note1'."))
+        msg = error_message(pe.handler(action="unsuppress", annotation="Note1"))
+        assert "2 suppressed timeline features" in msg
+        assert first.isSuppressed is True and second.isSuppressed is True
+
+    def test_an_unsuppress_write_that_raises_is_an_error(self, rig):
+        item = _install_suppressed(rig, _SuppressFlag(raise_on=False), [])
+        assert "Timeline unsuppress failed" in error_message(
+            pe.handler(action="unsuppress", annotation="Note1"))
+        assert item.isSuppressed is True
+
+    def test_a_failed_rollback_after_a_non_pmi_unsuppress_is_reported(self, rig):
+        # no PMI reappeared AND the re-suppress raised: the caller is told both, and the timeline
+        # is left with the feature unsuppressed
+        item = _install_suppressed(rig, _SuppressFlag(raise_on=True), [])
+        msg = error_message(pe.handler(action="unsuppress", annotation="Note1"))
+        assert "not a PMI annotation" in msg and "re-suppressing it failed" in msg
+        assert item.isSuppressed is False
+
+
+class TestHoleCallouts:
+    """set_flags / set_display on a hole callout: what the payload republishes after the write."""
+
+    @pytest.fixture
+    def hole(self, rig):
+        ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        return ann
+
+    def test_set_flags_reports_each_flag_it_read_back(self, hole):
+        out = _payload(pe.handler(action="set_flags", annotation="Hole Note1",
+                                  flags={"through": True, "threaded": False}))
+        assert out["flags"] == {"through": True, "threaded": False}
+        assert hole.isThrough is True and hole.isThreaded is False
+
+    def test_an_unknown_flag_is_refused(self, hole):
+        assert "Unknown flag 'bogus'" in error_message(
+            pe.handler(action="set_flags", annotation="Hole Note1", flags={"bogus": True}))
+
+    def test_set_display_without_a_display_object_is_refused(self, hole):
+        assert "needs 'display'" in error_message(
+            pe.handler(action="set_display", annotation="Hole Note1"))
+
+    def test_set_display_republishes_the_secondary_settings_a_note_carries(self, hole, rig):
+        mm = pe.adsk.fusion.PMIUnitTypes.MillimetersPMIUnitType
+        hole.primaryDisplaySettings = SimpleNamespace(
+            precision=2, unitType=mm, hasLeadingZeros=True, hasTrailingZeros=False,
+            hasUnitAbbreviation=True)
+        hole.secondaryDisplaySettings = SimpleNamespace(
+            precision=4, unitType=mm, hasLeadingZeros=True, hasTrailingZeros=False,
+            hasUnitAbbreviation=False)
+        hole.hasSecondaryDisplaySettings = True
+        rig.monkeypatch.setattr(pe._pmi, "apply_display", lambda obj, spec: None)
+        out = _payload(pe.handler(action="set_display", annotation="Hole Note1",
+                                  display={"precision": 2, "secondary": {"precision": 4}}))
+        assert out["display"]["precision"] == 2
+        assert out["display_secondary"]["precision"] == 4
 
 
 class _RecordingTolerance:
@@ -465,3 +784,11 @@ class TestGuards:
     def test_no_active_design_is_an_error(self, rig):
         rig.monkeypatch.setattr(pe._common, "design", lambda: None)
         assert "No active design" in error_message(pe.handler(action="hide", annotation="N"))
+
+    def test_an_unknown_action_is_refused_listing_the_vocabulary(self, rig):
+        msg = error_message(pe.handler(action="set_colour", annotation="Note1"))
+        assert "must be one of" in msg and "set_text" in msg
+
+    def test_unknown_units_are_refused(self, rig):
+        assert "Unknown units 'furlong'" in error_message(
+            pe.handler(action="hide", annotation="Note1", units="furlong"))

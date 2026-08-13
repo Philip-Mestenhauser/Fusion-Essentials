@@ -41,6 +41,30 @@ _EXTENT = _inputs.Choice("extent", _EXTENTS, default="distance",
 _PROFILE = _inputs.ProfileRef("profile_index")
 _looks_like_handle = _inputs.is_handle
 
+# profile_index may instead carry a sketch TEXT address ('text:<i>'). ExtrudeFeatures.createInput
+# names "a single SketchText object" among what its profile argument takes, so the text is extruded
+# as itself - the only route from a nameplate sketch, which holds no closed profile at all, to a
+# raised solid. allow_text is enabled on THIS resolution alone: the handle/index path above still
+# refuses a text address.
+_TEXT_PROFILE = _inputs.ProfileRef("profile_index", allow_text=True)
+_is_text_ref = _inputs.is_text_ref
+
+
+def _text_ref_in_multi(profile_index):
+    """The sketch-TEXT address hiding inside a MULTI-region selector - a list entry, or one field of
+    a comma string - or None. The multi forms address CLOSED profiles by index and a text carries no
+    index in that space, so a mixed selector is refused rather than silently dropping the text."""
+    if isinstance(profile_index, (list, tuple)):
+        items = profile_index
+    elif isinstance(profile_index, str) and "," in profile_index and not _is_text_ref(profile_index):
+        items = profile_index.split(",")
+    else:
+        return None
+    for x in items:
+        if _is_text_ref(x):
+            return x
+    return None
+
 
 def _is_all_selector(profile_index) -> bool:
     """True for the 'all' (or '*') profile selector - one spelling shared by the resolver below and
@@ -431,9 +455,22 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     profiles = safe(lambda: sketch.profiles)
     pcount = safe(lambda: profiles.count, 0) if profiles else 0
 
+    # A sketch TEXT address selects the text itself, which is what a text-only sketch carries INSTEAD
+    # of a closed profile - so it is read BEFORE the zero-profile routing below, which would
+    # otherwise send a nameplate sketch down the open-curve surface path and dead-end there.
+    mixed_text = _text_ref_in_multi(profile_index)
+    if mixed_text:
+        return error(f"profile_index mixes the sketch text '{mixed_text}' with other regions. A "
+                     f"sketch text extrudes on its own - pass just '{mixed_text}', and a separate "
+                     "call for the closed regions.")
+    text_addr = profile_index.strip() if _is_text_ref(profile_index) else None
+    if text_addr and as_surface:
+        return error(f"as_surface is not used with the sketch text '{text_addr}' - a text extrudes "
+                     "as a solid. Drop as_surface, or pass a closed profile / an open path.")
+
     # SURFACE path: forced via as_surface, OR auto when there is no closed profile but the sketch has
     # open curves. Build an OPEN profile and set ExtrudeFeatureInput.isSolid = False (no end caps).
-    want_surface = bool(as_surface) or pcount == 0
+    want_surface = bool(as_surface) or (pcount == 0 and not text_addr)
     open_surface = False
     indices = [0]
     took_all = False
@@ -454,10 +491,21 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             open_surface = True
 
     if not want_surface:
-        # HANDLE path: a profile entityToken from sketch_get (a real ProfileRef) targets the exact
-        # region - the robust way to pick one of several profiles (face ring vs the region you drew).
-        # _looks_like_handle distinguishes it from an int/list/'all' selector.
-        if _looks_like_handle(profile_index):
+        # Three ways to name what is extruded: a TEXT address, a profile HANDLE (an entityToken from
+        # sketch_get - the robust way to pick one of several regions, face ring vs the region you
+        # drew), or an index/list/'all' selector. Each predicate says no to the other two's forms.
+        if text_addr:
+            # ProfileRef resolves the address's OWN sketch, so a bare 'text:<i>' is qualified with
+            # the sketch this call already resolved by name - otherwise the two reads can land on
+            # different sketches (the address alone falls back to the most recent one).
+            addr = text_addr
+            if "/" not in addr and (sketch_name or "").strip():
+                addr = f"{sketch_name.strip()}/{addr}"
+            prof, perr = _TEXT_PROFILE.resolve(addr)
+            if perr:
+                return error(perr)
+            profile_arg, indices = prof, [None]
+        elif _looks_like_handle(profile_index):
             prof, perr = _PROFILE.resolve(profile_index)
             if perr:
                 return error(perr)
@@ -511,20 +559,28 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                              "profile in the extrude direction.")
         elif ext_key == "through_all":
             if taper:
-                return error("taper_deg is not supported with extent=through_all (setAllExtent takes "
-                             "no taper).")
-            # setAllExtent(direction) itself returns true for all three directions - confirmed live -
-            # but symmetric=true can still fail AT add() ("body not found to extrude through") when the
-            # profile sits exactly on a body's own face (one of the two symmetric directions is pure
-            # air): a one-sided direction into the material succeeds where symmetric does not. Fusion's
-            # own exception surfaces through the generic 'Extrude failed' handler below, never swallowed.
+                return error("taper_deg is not supported with extent=through_all (a through-all "
+                             "extent carries no taper).")
+            # ThroughAllExtentDefinition is the working through-all contract: the RETIRED
+            # setAllExtent(SymmetricExtentDirection) answers true while cutting ONE direction only
+            # (measured live - a mid-plane cut through a plate removed exactly half the material), so
+            # symmetric sets BOTH sides and a one-sided extent names its direction. Either can still
+            # fail AT add() ("body not found to extrude through") when the profile sits exactly on a
+            # body's own face and that direction is pure air; Fusion's own exception surfaces through
+            # the generic 'Extrude failed' handler below, never swallowed.
             through_all_dir = _through_all_direction_key(symmetric, distance)
-            ext_dirs = adsk.fusion.ExtentDirections
-            direction = {"positive": ext_dirs.PositiveExtentDirection,
-                        "negative": ext_dirs.NegativeExtentDirection,
-                        "symmetric": ext_dirs.SymmetricExtentDirection}[through_all_dir]
-            if not ext_input.setAllExtent(direction):
-                return error("Fusion rejected extent=through_all (setAllExtent returned false).")
+            all_extent = adsk.fusion.ThroughAllExtentDefinition
+            if through_all_dir == "symmetric":
+                if not ext_input.setTwoSidesExtent(all_extent.create(), all_extent.create()):
+                    return error("Fusion rejected a symmetric extent=through_all "
+                                 "(setTwoSidesExtent returned false).")
+            else:
+                ext_dirs = adsk.fusion.ExtentDirections
+                direction = {"positive": ext_dirs.PositiveExtentDirection,
+                             "negative": ext_dirs.NegativeExtentDirection}[through_all_dir]
+                if not ext_input.setOneSideExtent(all_extent.create(), direction):
+                    return error(f"Fusion rejected a {through_all_dir} extent=through_all "
+                                 "(setOneSideExtent returned false).")
         elif ext_key == "two_side":
             if taper:
                 return error("taper_deg is not supported with extent=two_side "
@@ -634,10 +690,17 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         if deltas:
             through_all_removed = deltas
             if all(abs(d) < _common.NO_VOLUME_CHANGE_CM3 for d in deltas.values()):
+                # The check reads only the bodies this cut was aimed at, so an effect elsewhere in
+                # the design is not ruled out - the feature is DISCLOSED, never deleted from under
+                # a caller whose evidence stops at those bodies.
+                fname = safe(lambda: feature.name) or "the new extrude feature"
                 return error("Extrude reported success but extent=through_all removed no material "
                              f"from {', '.join(deltas)} - the cut ran the wrong way. through_all "
                              "follows the sketch-plane normal, which on an on-face sketch points away "
-                             "from the body: pass the opposite 'distance' sign to cut into it.")
+                             "from the body: pass the opposite 'distance' sign to cut into it. The "
+                             f"failed feature '{fname}' remains in the timeline (this check reads "
+                             "only those bodies, so a design-wide effect is not ruled out) - remove "
+                             "it with design_delete_feature if unwanted.")
 
     # cut/intersect EFFECT evidence, read BEFORE any rollback below: which bodies lost material, and
     # whether the solid census moved at all. Both are needed to claim nothing happened - a consumed
@@ -722,6 +785,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     if open_surface:
         note = ("Open profile extruded into a SURFACE (no end caps) - pair with model_stitch to "
     "close several surfaces into a solid.")
+    elif text_addr:
+        note = ("Sketch text extruded into a solid. To stamp text onto an existing face instead, "
+                "use model_emboss.")
     else:
         note = "Profile extruded into a solid. Pair with view_screenshot (iso) to view it."
     if op_key == "new":
@@ -767,7 +833,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         "operation": op_key,
         "sketch": safe(lambda: sketch.name),
         "component": component_field,
-        "profile_index": ("handle" if indices == [None]
+        "profile_index": ("text" if text_addr
+                          else "handle" if indices == [None]
                           else (indices[0] if len(indices) == 1 else indices)),
         "profiles_extruded": len(indices),
         "as_surface": bool(open_surface),
@@ -832,7 +899,7 @@ extrude_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' - a LIST of handles is rejected (several regions = index list)."})
+            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' - a LIST of handles is rejected (several regions = index list). A sketch TEXT extrudes as itself: 'text:<i>' (or '<sketch>/text:<i>'), alone, no closed profile needed."})
     .add_input_property("distance", {"type": ["number", "string"],
             "description": "Extrude depth in 'units' (negative reverses), OR a parameter EXPRESSION string ('StockZ/2', '25 mm'; carries its own units). Side one for two_side; sign-only direction for through_all."})
     .add_input_property("distance2", {"type": ["number", "string"],

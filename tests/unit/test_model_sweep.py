@@ -93,12 +93,13 @@ class FakeFeatures:
 
 
 def _install(*, closed_profiles=1, open_curves=0, body_names=("Body1",), tokens=None,
-             extra_sketches=()):
+             extra_sketches=(), bodies=()):
     """Build a root component carrying the sweep surface (sketches + features + createOpenProfile) and
-    wire it in via conftest's make_design/install (both seams). Returns (module-features, design)."""
+    wire it in via conftest's make_design/install (both seams). `bodies` are the component's existing
+    solid bodies - what a cut/intersect samples volumes over. Returns (module-features, design)."""
     from conftest import MakeComp
     sf = FakeSweepFeatures(body_names=body_names)
-    comp = MakeComp(name="Root", bodies=())
+    comp = MakeComp(name="Root", bodies=list(bodies))
     comp.features = FakeFeatures(sf)
     comp.createOpenProfile = lambda coll, chain: FakeOpenProfile()
 
@@ -293,6 +294,88 @@ class TestHonesty:
         sf.add_raises = True
         res = sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch")
         assert res["isError"] is True and "sweep failed" in res["message"].lower()
+
+
+# ── a cut/intersect must PROVE it moved material ────────────────────────────
+#
+# A sweep whose path runs past the body still hands back a healthy feature with result bodies, so
+# the feature object cannot tell a real cut from a no-op. Only the volumes of the bodies it could
+# act on - the participants when target_bodies scopes it, otherwise the host's solids - can.
+
+def _add_moving_volume(sf, *changes, rolled_back=None):
+    """Make sweepFeatures.add apply (body, new_volume) pairs - the material effect a real
+    cut/intersect has between the pre- and post-mutation reads. `rolled_back` collects the
+    feature's deleteMe() calls, which is how the scoped no-op path reports its rollback."""
+    def _add(inp):
+        for body, volume in changes:
+            body.volume = volume
+        feature = FakeSweepFeature(bodies_names=sf.body_names, is_solid=inp.isSolid)
+        if rolled_back is not None:
+            feature.deleteMe = lambda: rolled_back.append(True) or True
+        return feature
+    sf.add = _add
+
+
+class TestCutMovesMaterial:
+    def test_unscoped_cut_that_moves_no_volume_is_an_error(self):
+        _install(bodies=[BRepBody("Bar", volume=12.0)])
+        res = sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch", operation="cut")
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"] and "'Root'" in res["message"]
+        # unscoped: the cut could have reached a co-located component this sample never read, so the
+        # feature is LEFT and named, never silently rolled back
+        assert "design_delete_feature" in res["message"]
+
+    def test_scoped_cut_that_moves_no_volume_rolls_the_feature_back(self):
+        bar = BRepBody("Bar", volume=12.0)
+        sf, _ = _install(bodies=[bar])
+        rolled = []
+        _add_moving_volume(sf, rolled_back=rolled)
+        res = sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch", operation="cut",
+                         target_bodies=["Bar"])
+        assert res["isError"] is True
+        assert "changed nothing" in res["message"] and "Bar" in res["message"]
+        # only a participant can be affected, so nothing landed anywhere - safe to remove
+        assert rolled == [True] and "rolled back" in res["message"]
+
+    def test_scoped_cut_samples_only_the_participants(self):
+        # A volume that moved on a body OUTSIDE 'target_bodies' is not this cut's effect - sampling
+        # the whole component instead of the participants would pass this no-op as a success.
+        bar, other = BRepBody("Bar", volume=12.0), BRepBody("Other", volume=5.0)
+        sf, _ = _install(bodies=[bar, other])
+        _add_moving_volume(sf, (other, 1.0))
+        res = sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch", operation="cut",
+                         target_bodies=["Bar"])
+        assert res["isError"] is True and "changed nothing" in res["message"]
+
+    def test_cut_that_removed_material_publishes_the_delta(self):
+        bar = BRepBody("Bar", volume=12.0)
+        sf, _ = _install(bodies=[bar])
+        _add_moving_volume(sf, (bar, 9.5))
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  operation="cut"))
+        assert out["volume_delta_cm3"] == -2.5      # signed: material LEFT the body
+
+    def test_a_consumed_body_is_not_read_as_a_no_op(self):
+        # A body the cut consumed whole stops reporting a volume, so it contributes no delta - the
+        # untouched second body's 0 must not become "nothing happened".
+        eaten, kept = BRepBody("Eaten", volume=4.0), BRepBody("Kept", volume=8.0)
+        sf, _ = _install(bodies=[eaten, kept])
+        _add_moving_volume(sf, (eaten, None))
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  operation="cut"))
+        assert out["swept"] is True
+
+    def test_a_new_body_sweep_is_never_volume_gated(self):
+        _install(bodies=[BRepBody("Bar", volume=12.0)])
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
+        assert out["swept"] is True and "volume_delta_cm3" not in out
+
+    def test_unreadable_volumes_neither_error_nor_publish_a_delta(self):
+        _install(bodies=[BRepBody("Bar", volume=None)])
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  operation="cut"))
+        assert out["swept"] is True and "volume_delta_cm3" not in out
 
 
 # ── cross-component hosting: the feature lands on the profile's OWNER ────────────────────────────

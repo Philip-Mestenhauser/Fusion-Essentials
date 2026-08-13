@@ -470,33 +470,81 @@ class FakeConstructionPlane:
     pass
 
 
-def _install_planes(named=None, handle_map=None):
-    """Install a fake design+component exposing origin planes, named construction planes, and a
-    findEntityByToken for handle resolution. PlaneRef resolves via _common.design()/target_component."""
+class _CP:
+    """A ConstructionPlane fake: its name, the component that owns it, and a
+    createForAssemblyContext that returns a DISTINCT proxy tagged with its occurrence - so a test can
+    tell a proxy from the native and confirm WHICH occurrence it was lifted into."""
+
+    def __init__(self, name, component=None):
+        self.name = name
+        self.component = component
+
+    def createForAssemblyContext(self, occ):
+        p = _CP(self.name, self.component)
+        p.native = self
+        p.context = occ
+        return p
+
+
+def _install_planes(named=None, handle_map=None, subs=(), active=None):
+    """Install a fake design exposing origin planes, construction planes on the ROOT and on each
+    sub-component, and a findEntityByToken for handle resolution. PlaneRef resolves via
+    _common.design()/target_component().
+
+    `named`: {name: the object the test expects back} for the ROOT component's planes.
+    `subs`: [(component name, [plane names], [occurrence fullPathNames placing it])].
+    `active`: the component name PlaneRef should treat as active (default: the root).
+    Returns the design; its components are reachable by name through allComponents.itemByName."""
     import adsk.fusion
     adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
     adsk.fusion.ConstructionPlane = FakeConstructionPlane
     named = named or {}
     handle_map = handle_map or {}
 
-    class FakeConsPlanes:
-        def itemByName(self, n):
-            return named.get(n)
+    class FakeConsPlanes(_NamedCollection):
+        """The count/item(i)/itemByName collection the design-wide plane walk reads."""
 
     class FakeComp:
         xYConstructionPlane = ("origin", "xy")
         xZConstructionPlane = ("origin", "xz")
         yZConstructionPlane = ("origin", "yz")
-        constructionPlanes = FakeConsPlanes()
+
+        def __init__(self, name, planes=()):
+            self.name = name
+            self.constructionPlanes = FakeConsPlanes(planes)
 
     class FakeDesign:
+        def __init__(self, comps, occs):
+            self.rootComponent = comps[0]
+            self.allComponents = _NamedCollection(comps)
+            self.activeComponent = self.allComponents.itemByName(active) or comps[0]
+            self.rootComponent.allOccurrences = list(occs)
+            self.rootComponent.allOccurrencesByComponent = lambda c: _NamedCollection(
+                [o for o in occs if o.component is c])
+
         def findEntityByToken(self, h):
             e = handle_map.get(h)
             return [e] if e is not None else []
-    comp = FakeComp()
-    inp._common.design = lambda: FakeDesign()
-    inp._common.target_component = lambda d: comp
-    return comp
+
+    root = FakeComp("Root")
+    for nm, cp in named.items():
+        cp.name, cp.component = nm, root       # the walk matches on the plane's OWN name
+    root.constructionPlanes = FakeConsPlanes(list(named.values()))
+    comps, occs = [root], []
+    for comp_name, plane_names, paths in subs:
+        sub = FakeComp(comp_name)
+        sub.constructionPlanes = FakeConsPlanes([_CP(n, sub) for n in plane_names])
+        comps.append(sub)
+        occs += [types.SimpleNamespace(fullPathName=p, name=p, component=sub) for p in paths]
+    design = FakeDesign(comps, occs)
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d: d.activeComponent
+    return design
+
+
+def _sub_plane(design, comp_name, plane_name):
+    """The NATIVE construction plane a sub-component of the installed design owns."""
+    return design.allComponents.itemByName(comp_name).constructionPlanes.itemByName(plane_name)
 
 
 class TestPlaneRef:
@@ -558,6 +606,107 @@ class TestPlaneRef:
         _install_planes()
         val, err = inp.PlaneRef("plane", required=True).resolve(["xy"])
         assert val is None and err is not None      # clean rejection, not an AttributeError
+
+    def test_subcomponent_plane_resolves_from_the_root_as_a_proxy(self):
+        # the bug this walk exists for: a datum created inside a sub-component is invisible to a
+        # root-only lookup, and its NATIVE form is component-local - Fusion refuses it in root
+        # context. A design-unique bare name resolves, PROXIED into the occurrence that places it.
+        design = _install_planes(subs=[("Tower", ["Datum_A"], ["Tower:1"])])
+        val, err = inp.PlaneRef("plane").resolve("Datum_A")
+        assert err is None
+        assert getattr(val, "native", None) is _sub_plane(design, "Tower", "Datum_A")
+        assert val.context.fullPathName == "Tower:1"
+
+    def test_bare_name_shared_by_two_components_is_refused_with_qualified_candidates(self):
+        _install_planes(subs=[("A", ["Mid"], ["A:1"]), ("B", ["Mid"], ["B:1"])])
+        val, err = inp.PlaneRef("plane").resolve("Mid")
+        assert val is None and "ambiguous" in err
+        assert "A:1:Mid" in err and "B:1:Mid" in err        # every candidate resolves
+
+    def test_qualified_name_picks_the_named_occurrence(self):
+        design = _install_planes(subs=[("A", ["Mid"], ["A:1"]), ("B", ["Mid"], ["B:1"])])
+        val, err = inp.PlaneRef("plane").resolve("B:1:Mid")
+        assert err is None
+        assert getattr(val, "native", None) is _sub_plane(design, "B", "Mid")
+        assert val.context.fullPathName == "B:1"
+
+    def test_qualified_name_on_an_occurrence_without_that_plane_is_named(self):
+        _install_planes(subs=[("Tower", ["Datum_A"], ["Tower:1"])])
+        val, err = inp.PlaneRef("plane").resolve("Tower:1:Nope")
+        assert val is None and "no construction plane named 'Nope'" in err
+
+    def test_root_plane_is_handed_back_native(self):
+        # a root-owned plane is already in assembly context: it must NOT be lifted into an
+        # occurrence, and the presence of sub-components must not change what it resolves to.
+        cp = FakeConstructionPlane()
+        _install_planes(named={"MidPlane": cp}, subs=[("A", ["Other"], ["A:1"])])
+        val, err = inp.PlaneRef("plane").resolve("MidPlane")
+        assert err is None and val is cp
+
+    def test_active_component_name_shadows_another_components_plane(self):
+        # Fusion default-names the first datum of EVERY component 'Plane1'; the active component's
+        # own plane wins (native - it is already the context being built in) instead of a refusal.
+        design = _install_planes(subs=[("A", ["Plane1"], ["A:1"]), ("B", ["Plane1"], ["B:1"])],
+                                 active="A")
+        val, err = inp.PlaneRef("plane").resolve("Plane1")
+        assert err is None and val is _sub_plane(design, "A", "Plane1")
+
+    def test_plane_on_a_component_placed_twice_is_refused(self):
+        # one NAME, but the owning component is instanced twice - each instance holds the plane
+        # somewhere different, so the instance is refused rather than guessed.
+        _install_planes(subs=[("Jaw", ["Grip"], ["Jaw:1", "Jaw:2"])])
+        val, err = inp.PlaneRef("plane").resolve("Grip")
+        assert val is None and "placed 2 times" in err
+        assert "Jaw:1:Grip" in err and "Jaw:2:Grip" in err
+
+    @pytest.mark.parametrize("given, origin", [
+        ("xyplane", ("origin", "xy")), ("xzplane", ("origin", "xz")),
+        ("yzplane", ("origin", "yz")), ("XYPlane", ("origin", "xy")),
+        ("  XY Plane ", ("origin", "xy")), ("yz plane", ("origin", "yz"))])
+    def test_the_alias_plane_spelling_names_the_same_origin_plane(self, given, origin):
+        # '<alias> plane' / '<alias>plane' is the spelling an agent reaches for; it resolves to the
+        # very plane the bare alias does, so no consumer needs its own fold.
+        _install_planes()
+        val, err = inp.PlaneRef("plane").resolve(given)
+        assert err is None and val == origin
+
+    def test_a_datum_named_mid_plane_still_reaches_the_name_lookup(self):
+        # only the three AXIS aliases take the 'plane' suffix - a construction plane genuinely
+        # named 'Mid plane' must not be folded into an origin alias.
+        cp = FakeConstructionPlane()
+        _install_planes(named={"Mid plane": cp})
+        val, err = inp.PlaneRef("plane").resolve("Mid plane")
+        assert err is None and val is cp
+
+    def test_an_empty_value_resolves_the_declared_default_to_an_entity(self):
+        # the raw default string is not a plane: an empty value must come back as the SAME resolved
+        # entity the default's own spelling resolves to, so no consumer hands 'xy' to the API.
+        _install_planes()
+        k = inp.PlaneRef("plane", default="xy")
+        val, err = k.resolve("")
+        assert err is None
+        assert val == ("origin", "xy") == k.resolve("xy")[0]
+        assert val != "xy"
+
+    def test_the_default_resolves_down_the_same_path_a_given_value_takes(self):
+        # not an alias-only shortcut: a default naming a construction plane resolves by NAME.
+        cp = FakeConstructionPlane()
+        _install_planes(named={"Datum1": cp})
+        val, err = inp.PlaneRef("plane", default="Datum1").resolve("")
+        assert err is None and val is cp
+
+    def test_an_unresolvable_default_returns_the_resolve_error(self):
+        _install_planes()
+        val, err = inp.PlaneRef("plane", default="qq").resolve("")
+        assert val is None and "not an origin alias" in err
+
+    def test_an_empty_value_with_no_default_stays_none(self):
+        # a kind with no default has nothing to resolve: empty is still empty, and a required kind
+        # still refuses.
+        _install_planes()
+        assert inp.PlaneRef("plane").resolve("") == (None, None)
+        val, err = inp.PlaneRef("plane", required=True).resolve("")
+        assert val is None and "is required" in err
 
     def test_composite_face_handle_resolves(self):
         # PlaneRef already routes through _resolve_token_entity, so a COMPOSITE planar-face handle
@@ -2101,26 +2250,125 @@ class TestProfileRefSketchText:
         assert "text:<i>" in inp.ProfileRef("profile", allow_text=True).schema()["description"]
 
 
+class TestIsTextRef:
+    """is_text_ref is the ROUTING predicate over the same grammar ProfileRef.allow_text resolves:
+    a tool whose one input carries a text address, a profile handle AND an index selector asks it
+    before is_handle, which answers False for a short non-numeric string like 'text:0'."""
+
+    def test_both_published_forms_are_text_addresses(self):
+        assert inp.is_text_ref("text:0") is True
+        assert inp.is_text_ref("Nameplate/text:2") is True
+
+    def test_a_sketch_name_carrying_a_slash_still_reads_as_one(self):
+        assert inp.is_text_ref("Plate/Front/text:0") is True
+
+    def test_an_address_with_no_whole_number_index_is_not_one(self):
+        # an incomplete address must not route: it carries no text to resolve
+        for raw in ("text:", "text:abc", "text:1.5", "Nameplate/text:"):
+            assert inp.is_text_ref(raw) is False, raw
+
+    def test_index_selectors_are_not_text_addresses(self):
+        for raw in (0, "0", "0,2,3", "all", "*", [0, 1], None, "", "line:0"):
+            assert inp.is_text_ref(raw) is False, raw
+
+    def test_a_geometry_handle_is_not_a_text_address(self):
+        assert inp.is_text_ref("/v4BAAAARlJLZXkAH4sIAAAA" + "x" * 40) is False
+        assert inp.is_text_ref("sometoken|@profile:0.4,0.2,0.0") is False
+
+    def test_the_two_routing_predicates_do_not_overlap(self):
+        # the measured defect: is_handle reads 'text:0' as an index selector, so a tool asking only
+        # is_handle never reaches ProfileRef with it. The two must classify each address exactly once.
+        assert inp.is_handle("text:0") is False
+        assert inp.is_text_ref("/v4BAAAARlJLZXkAH4sIAAAA" + "x" * 40) is False
+
+
 # ── OccurrenceRef: fullPathName-preferring, ambiguity-refusing instance resolution ────────────────
 
 class _FakeOcc:
-    def __init__(self, name, full_path):
+    """An occurrence as the resolver reads it: both name forms plus the identity facts a collision
+    refusal names - its component, whether it is an external reference, and its entityToken."""
+
+    def __init__(self, name, full_path, token="", component="", is_reference=False):
         self.name = name
         self.fullPathName = full_path
+        self.entityToken = token
+        self.component = types.SimpleNamespace(name=component or name.split(":")[0])
+        self.isReferencedComponent = is_reference
 
 
-def _install_occurrences(*occs):
-    """Point _common.design() at a root whose allOccurrences are the given _FakeOcc list."""
+def _install_occurrences(*occs, tokens=None):
+    """Point _common.design() at a root whose allOccurrences are the given _FakeOcc list, with
+    findEntityByToken answering from each occurrence's own entityToken (plus any extra `tokens`
+    entries - the non-occurrence entity a handle can point at). adsk.fusion.Occurrence is wired to
+    the fake so the resolver's type check is real; the autouse fixture puts it back."""
+    import adsk.fusion
+    adsk.fusion.Occurrence = _FakeOcc
+    by_token = dict(tokens or {})
+    for o in occs:
+        if getattr(o, "entityToken", ""):
+            by_token.setdefault(o.entityToken, o)
+
     class _Root:
         allOccurrences = list(occs)
 
     class FakeDesign:
         rootComponent = _Root()
+
+        def findEntityByToken(self, token):
+            hit = by_token.get(token)
+            return [hit] if hit is not None else []
     inp._common.design = lambda: FakeDesign()
     return list(occs)
 
 
 class TestOccurrenceRef:
+    def test_a_handle_resolves_to_that_exact_instance(self):
+        # the token is the identity: it picks one of two instances a shared NAME cannot tell apart.
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1", token="tok-A")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1", token="tok-B")
+        _install_occurrences(a, b)
+        val, err = inp.OccurrenceRef("occ").resolve("tok-B")
+        assert err is None and val is b
+
+    def test_a_handle_on_a_non_occurrence_is_refused_naming_the_type(self):
+        # silently falling through to the name paths would report "no occurrence matching <token>"
+        # and hide what the caller actually passed.
+        a = _FakeOcc("Bolt:1", "Bolt:1", token="tok-A")
+        _install_occurrences(a, tokens={"tok-body": FakeBRep("Body1")})
+        val, err = inp.OccurrenceRef("occ").resolve("tok-body")
+        assert val is None
+        assert "FakeBRep" in err and "not an occurrence" in err
+
+    def test_an_unknown_handle_is_refused_not_guessed(self):
+        # a stale/unknown token resolves to nothing and matches no name either - a refusal, never a
+        # fall-back to some instance.
+        a = _FakeOcc("Bolt:1", "Bolt:1", token="tok-A")
+        _install_occurrences(a)
+        val, err = inp.OccurrenceRef("occ").resolve("tok-GONE")
+        assert val is None and "no occurrence matching" in err
+
+    def test_a_path_worn_by_two_siblings_is_REFUSED_with_both_handles(self):
+        # measured: an xref insert plus an import of the same-named source leave two siblings with
+        # ONE fullPathName, one referenced and one not. No name form tells them apart, so the refusal
+        # carries what does - the discriminator and the handle that addresses each.
+        xref = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-xref", component="CMG-050",
+                        is_reference=True)
+        imported = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-import", component="CMG-050")
+        _install_occurrences(xref, imported)
+        val, err = inp.OccurrenceRef("occ").resolve("CMG-050:1")
+        assert val is None, "a path two occurrences wear must not resolve to one of them"
+        assert "tok-xref" in err and "tok-import" in err
+        assert "referenced" in err and "local" in err
+        assert "CMG-050" in err
+
+    def test_each_collided_sibling_resolves_by_its_own_handle(self):
+        # the refusal above must hand back keys that WORK - otherwise the collision is a dead end.
+        xref = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-xref", is_reference=True)
+        imported = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-import")
+        _install_occurrences(xref, imported)
+        assert inp.OccurrenceRef("occ").resolve("tok-import") == (imported, None)
+        assert inp.OccurrenceRef("occ").resolve("tok-xref") == (xref, None)
+
     def test_exact_fullpathname_wins(self):
         a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
         b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")     # same NAME, different path
@@ -2182,6 +2430,13 @@ class TestOccurrenceRef:
 
 
 class TestOccurrenceRefList:
+    def test_a_handle_element_resolves_beside_a_path_element(self):
+        a = _FakeOcc("X:1", "A:1+X:1", token="tok-a")
+        b = _FakeOcc("X:1", "B:1+X:1", token="tok-b")
+        _install_occurrences(a, b)
+        val, err = inp.OccurrenceRefList("occs").resolve(["tok-b", "A:1+X:1"])
+        assert err is None and val == [b, a]
+
     def test_resolves_each_by_path_in_order(self):
         a = _FakeOcc("X:1", "A:1+X:1")
         b = _FakeOcc("X:1", "B:1+X:1")
@@ -2207,8 +2462,23 @@ class TestOccurrenceRefList:
 class TestSharedResolverBehaviour:
     """Behavioural anchors for _resolve_occurrence ITSELF - the canonical resolver
     test_occurrence_ref_lint.py points every routed tool at. OccurrenceRef wraps it, but a tool may
-    also call it directly, so the helper's own contract (fullPathName beats a same-named instance;
-    an ambiguous bare name errors) is pinned here, not only through the kind."""
+    also call it directly, so the helper's own contract (a handle is the exact identity; fullPathName
+    beats a same-named instance; an ambiguous bare name or a collided path errors) is pinned here,
+    not only through the kind."""
+
+    def test_a_handle_resolves_directly(self):
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1", token="tok-A")
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1", token="tok-B")
+        _install_occurrences(a, b)
+        occ, err = inp._resolve_occurrence("t", "tok-A")
+        assert err is None and occ is a
+
+    def test_a_collided_path_errors_with_the_handles(self):
+        one = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-1", is_reference=True)
+        two = _FakeOcc("CMG-050:1", "CMG-050:1", token="tok-2")
+        _install_occurrences(one, two)
+        occ, err = inp._resolve_occurrence("t", "CMG-050:1")
+        assert occ is None and "tok-1" in err and "tok-2" in err
 
     def test_fullpath_beats_a_same_named_instance(self):
         a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")

@@ -11,6 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from . import _common
+from . import _geom
 from ._common import safe
 
 
@@ -46,7 +47,39 @@ MAP_BLURB = ("build_joint_geometry (keypoint factory per entity kind) + apply_mo
              "pending_position/pending_move_guard/PENDING_MOVE_REFUSAL (the ONE moved-but-uncaptured "
              "position read - Design.snapshots.hasPendingSnapshot as True/False/None - and the "
              "refusal every joint CREATE returns while it is set, since the create's recompute "
-             "silently reverts the uncaptured pose and freezes the reverted one)")
+             "silently reverts the uncaptured pose and freezes the reverted one) + "
+             "planar_outward_normal/normals_oppose/FLIP_HINT (the flush face-to-face detection - "
+             "two planar faces whose outward normals OPPOSE force a 180-deg rotation of the free "
+             "part, so every joint create that can seat two faces publishes the same flip_hint)")
+
+
+def planar_outward_normal(entity):
+    """Outward unit normal of a PLANAR face (the shared evaluator sample), else None - the input to
+    the flush face-to-face detection: two planar faces whose outward normals OPPOSE."""
+    try:
+        if not isinstance(entity, adsk.fusion.BRepFace):
+            return None
+    except TypeError:               # the type is unavailable - nothing can be a face then
+        return None
+    if safe(lambda: entity.geometry.surfaceType) != adsk.core.SurfaceTypes.PlaneSurfaceType:
+        return None
+    return _geom.evaluator_normal_at(entity, safe(lambda: entity.pointOnFace))
+
+
+def normals_oppose(n1, n2):
+    """True when two unit normals point at each other (dot below -0.9) - the flush face-to-face
+    pick. False when either is absent."""
+    return (n1 is not None and n2 is not None
+            and (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]) < -0.9)
+
+
+# The ONE flip-hint sentence every joint create publishes for the flush face-to-face pick without
+# flip (live-verified: a joint aligns the two geometry frames Z-onto-Z - each planar face's frame Z
+# is its OUTWARD normal - so opposing normals rotate the free part 180 deg, typically embedding it).
+FLIP_HINT = ("The two planar faces' outward normals OPPOSE (the flush face-to-face pick). A joint "
+             "aligns the two geometry frames Z-onto-Z, so the free part was ROTATED 180 deg to "
+             "satisfy that - typically embedding it. For the seated flush mate, re-run with "
+             "flip=true (or joint_edit flip).")
 
 
 def motion_param_names(joint):

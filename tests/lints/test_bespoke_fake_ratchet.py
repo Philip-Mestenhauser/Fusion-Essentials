@@ -166,6 +166,12 @@ _PER_FILE_BASELINE = {
 # allowlist uses). _raise_offenders keeps each entry real - a ceiling at or below the file's
 # baseline entry has nothing to justify and must collapse back into it.
 _RAISED = {
+    "test_find_geometry.py": (
+        7,
+        "FakeComp - the component that owns the NATIVE, component-local body an occurrence hands "
+        "back a world-space PROXY of. One physical body reachable as both wrappers is what proves "
+        "find_geometry scans a nested body through its proxy (world coordinates) rather than the "
+        "native (component-local); the conftest fakes model no native/proxy pair of one body"),
     "test__sketch_detail.py": (
         20,
         "the three spline SketchCurves collections (fitted / cv / fixed), each carrying its own "

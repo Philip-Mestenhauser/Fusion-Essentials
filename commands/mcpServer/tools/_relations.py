@@ -97,8 +97,8 @@ def find_relation(design, kind, name):
 
 
 def rigid_group_members(rg, cap=None):
-    """A rigid group's member occurrences as fullPathNames (the unambiguous key OccurrenceRef
-    resolves), falling back to the local name when a path cannot be read. Returns (names, total):
+    """A rigid group's member occurrences as fullPathNames (the readable key OccurrenceRef resolves
+    when no instance collides on it), falling back to the local name when a path cannot be read. Returns (names, total):
     `cap` bounds the returned list while total stays the honest member count. The collection is
     tested against None, never for truth."""
     occs = safe(lambda: rg.occurrences)

@@ -14,6 +14,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _assert
 
@@ -25,6 +26,16 @@ _OPERATIONS = ("new", "new_body", "join", "cut", "intersect")
 
 def _feature_operation(op_key):
     return getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
+
+
+def _cut_check_bodies(comp):
+    """The solid bodies a cut/intersect loft can act on: every solid directly in the feature's host
+    component. A loft takes no participant-body scoping, so there is no narrower sample.
+
+    Resolved ONCE, before the mutation, and the same objects re-read afterwards - that is the id()
+    keying precondition _geom.volumes documents."""
+    return [b for b in _common.iter_collection(safe(lambda: comp.bRepBodies))
+            if safe(lambda b=b: b.isSolid)]
 
 
 def _result_body_report(feature):
@@ -137,6 +148,12 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
         if cerr:
             return error(cerr)
 
+    # cut/intersect MATERIAL evidence: the volumes the operation must move, sampled BEFORE the add.
+    # A loft whose swept shape misses the body still reports a healthy feature, so only this
+    # before/after pair can say material actually changed.
+    check_bodies = _cut_check_bodies(root) if op_key in ("cut", "intersect") else []
+    vol_before = _geom.volumes(check_bodies)
+
     try:
         feature = root.features.loftFeatures.add(loft_input)
     except Exception as e:
@@ -148,6 +165,24 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
                      "kind and orderable into a single sweep).")
     if not feature:
         return error(_common.no_feature_error(design, "Loft"))
+
+    volume_delta_cm3 = None
+    if check_bodies:
+        delta, readable = _geom.volume_delta(check_bodies, vol_before)
+        # A body whose volume read BEFORE and reads unreadable now was consumed whole - a real effect
+        # that contributes no delta, so it must not be counted as "nothing moved".
+        consumed = [b for b in check_bodies
+                    if vol_before.get(id(b)) is not None and _geom.signed_volume(b) is None]
+        if readable:
+            volume_delta_cm3 = round(delta, 6)
+        if readable and not consumed and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
+            where = safe(lambda: root.name) or "the host component"
+            return error(f"Loft reported success but this {op_key} changed nothing - every solid "
+                         f"body in '{where}' measures the volume it had before and none was "
+                         "consumed, so the lofted shape does not overlap any of them. Check the "
+                         "profiles bracket the target body (an 'intersect' whose target lies "
+                         "entirely INSIDE the lofted solid also reads this way). "
+                         + _common.failed_effect_remedy(design, feature))
 
     body_names, _flags = _result_body_report(feature)
     is_solid = safe(lambda: feature.isSolid)
@@ -166,6 +201,10 @@ def loft_handler(profiles=None, rails=None, centerline="", operation="new",
     }
     if is_closed is not None:
         payload["is_closed"] = bool(is_closed)
+    # Published only where the before/after pair was READABLE: a null here would read as "no material
+    # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
+    if volume_delta_cm3 is not None:
+        payload["volume_delta_cm3"] = volume_delta_cm3
     return ok(payload)
 
 

@@ -956,3 +956,109 @@ class TestRequestTracer:
         monkeypatch.setattr(iv, "_do_list_views", lambda design: iv.ok({"action": "list_views"}))
         out = json.loads(iv.handler(action="list_views")["content"][0]["text"])
         assert out["request_echo"]["received"]["action"] == "list_views"
+
+
+# ── display: the non-body folder bulbs ───────────────────────────────────────
+
+_FOLDER_ATTRS = ("isSketchFolderLightBulbOn", "isConstructionFolderLightBulbOn",
+                 "isOriginFolderLightBulbOn", "isJointsFolderLightBulbOn")
+
+
+def _lit_root(design, token="root-tok"):
+    """Give the fake root the four folder bulbs (all on) + a token for the component walk."""
+    r = design.rootComponent
+    for attr in _FOLDER_ATTRS:
+        setattr(r, attr, True)
+    r.entityToken = token
+    return r
+
+
+class TestDisplay:
+    def test_hide_all_categories_sets_each_folder_bulb(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        out = _payload(iv.handler(action="display", visible=False))
+        assert out["folders_set"] == {"sketches": 1, "construction": 1, "origins": 1, "joints": 1}
+        assert all(getattr(r, a) is False for a in _FOLDER_ATTRS)
+        assert "Hidden" in out["note"]
+
+    def test_scoped_categories_touch_only_their_folders(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        out = _payload(iv.handler(action="display", visible=False, categories=["construction"]))
+        assert out["folders_set"] == {"construction": 1}
+        assert r.isConstructionFolderLightBulbOn is False
+        assert r.isSketchFolderLightBulbOn is True          # untouched
+
+    def test_an_already_matching_bulb_is_not_rewritten(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        r.isSketchFolderLightBulbOn = False
+        out = _payload(iv.handler(action="display", visible=False, categories=["sketches"]))
+        assert out["folders_set"] == {"sketches": 0}         # nothing to write
+
+    def test_a_string_false_is_parsed_never_truthy(self, monkeypatch):
+        # A permissive client delivers booleans as strings; bool('false') would SHOW instead.
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        out = _payload(iv.handler(action="display", visible="false"))
+        assert out["visible"] is False and r.isSketchFolderLightBulbOn is False
+
+    def test_a_garbage_visible_string_is_refused(self, monkeypatch):
+        _install(monkeypatch)
+        res = iv.handler(action="display", visible="maybe")
+        assert res["isError"] is True and "'visible' must be true or false" in res["message"]
+
+    def test_json_string_categories_decode(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        out = _payload(iv.handler(action="display", visible=False,
+                                  categories='["construction", "sketches"]'))
+        assert sorted(out["categories"]) == ["construction", "sketches"]
+        assert r.isOriginFolderLightBulbOn is True           # unscoped category untouched
+
+    def test_unknown_category_refused(self, monkeypatch):
+        _install(monkeypatch)
+        res = iv.handler(action="display", visible=False, categories=["decals"])
+        assert res["isError"] is True and "decals" in res["message"]
+
+    def test_missing_visible_refused(self, monkeypatch):
+        _install(monkeypatch)
+        res = iv.handler(action="display", categories=["sketches"])
+        assert res["isError"] is True and "Provide 'visible'" in res["message"]
+
+    def test_a_stuck_bulb_is_disclosed_not_silent(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+
+        class _StuckFolders:
+            entityToken = "stuck-tok"
+            name = "Stuck"
+            isSketchFolderLightBulbOn = True     # class attr; instance writes land, but the
+                                                 # property below swallows the one that matters
+
+            def __setattr__(self, attr, value):
+                if attr == "isSketchFolderLightBulbOn":
+                    return                        # the platform's silent drop
+                object.__setattr__(self, attr, value)
+
+        stuck = _StuckFolders()
+        for a in _FOLDER_ATTRS[1:]:
+            setattr(stuck, a, True)
+        monkeypatch.setattr(iv._view_common, "all_display_components",
+                            lambda design: [r, stuck])
+        out = _payload(iv.handler(action="display", visible=False, categories=["sketches"]))
+        assert out["folders_set"] == {"sketches": 1}
+        assert out["stuck"] == [{"component": "Stuck", "category": "sketches", "reads": True}]
+        assert "did not land" in out["note"]
+
+    def test_snapshot_restore_covers_the_folder_bulbs(self, monkeypatch):
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        r.isConstructionFolderLightBulbOn = False            # a pre-existing hidden folder
+        _payload(iv.handler(action="snapshot"))
+        _payload(iv.handler(action="display", visible=True))  # shows construction too
+        assert r.isConstructionFolderLightBulbOn is True
+        _payload(iv.handler(action="restore"))
+        assert r.isConstructionFolderLightBulbOn is False     # back to the snapshotted state
+        assert r.isSketchFolderLightBulbOn is True

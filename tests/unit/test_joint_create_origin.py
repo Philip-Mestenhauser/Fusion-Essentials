@@ -207,8 +207,9 @@ class _FakeJointOrigin:
 
 
 class _FakeJointOrigins:
-    def __init__(self):
+    def __init__(self, owner=None):
         self.count = 0
+        self.owner = owner          # the component this collection hangs off
 
     def createInput(self, geom):
         return _FakeJointOriginInput()
@@ -216,6 +217,9 @@ class _FakeJointOrigins:
     def add(self, jo_input):
         self.count += 1
         origin = _FakeJointOrigin()
+        # A created JO belongs to the component owning the collection it was added to: sub-component
+        # jointOrigins.add lands a JO whose parentComponent IS that sub-component.
+        origin.parentComponent = self.owner
         # Model the offset parameters: the created JO reports back whatever offsets the input carried
         # (createByReal wraps the cm value as ._real). This is what the honesty read-back verifies.
         for ax, dnn in (("offsetX", "d5"), ("offsetY", "d6"), ("offsetZ", "d7")):
@@ -226,17 +230,19 @@ class _FakeJointOrigins:
 
 
 class _FakeComp:
-    def __init__(self):
-        self.name = "Comp1"
+    def __init__(self, name="Comp1"):
+        self.name = name
         self.sketches = _FakeSketches()
         self.xYConstructionPlane = object()
         self.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
-        self.jointOrigins = _FakeJointOrigins()
+        self.jointOrigins = _FakeJointOrigins(self)
+        self.allOccurrences = []                    # the root's assembly walk (occurrence resolution)
 
 
 class _FakeDesign:
-    def __init__(self):
+    def __init__(self, occurrences=()):
         self.rootComponent = _FakeComp()
+        self.rootComponent.allOccurrences = list(occurrences)
 
 
 def _install_handler(monkeypatch, design=None):
@@ -244,7 +250,10 @@ def _install_handler(monkeypatch, design=None):
     Returns (design, point3d_calls) so a test can assert the exact cm values Point3D.create received.
     """
     d = design if design is not None else _FakeDesign()
+    # BOTH design seams: the handler's own _common, and _inputs' _common, which OccurrenceRef
+    # resolves 'component' through.
     monkeypatch.setattr(jo._common, "design", lambda: d)
+    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
     import adsk.core
     import adsk.fusion
     calls = []
@@ -648,3 +657,180 @@ class TestBboxCenterAmbiguousTarget:
         res = jo.handler(anchor="bbox_center", bbox_target="Bolt")
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
+
+
+# ── 'component': which component's jointOrigins collection receives the origin ───────────────────
+# The platform accepts a JO on a sub-component (its parentComponent then IS that component), which is
+# what lets the frame serve as that component's side of a joint. Omitted keeps the root landing.
+# A joint origin is positioned in ITS component's space, so a WORLD coordinate (an x,y,z, a world
+# bounding-box center) is only the same number there while the component sits at the world origin
+# unrotated - anything else is refused rather than placed somewhere else.
+
+_IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+
+
+def _matrix(values):
+    """A Matrix3D stand-in - asArray() is the only read the placement guard makes."""
+    return SimpleNamespace(asArray=lambda: list(values))
+
+
+def _moved(dx_cm):
+    """A transform translated dx_cm along X (row-major: translation sits in element 3)."""
+    vals = list(_IDENTITY)
+    vals[3] = dx_cm
+    return vals
+
+
+def _occurrence(comp, path="Sub:1", transform=None, context=None):
+    return SimpleNamespace(component=comp, fullPathName=path, name=path.split("+")[-1],
+                           transform2=_matrix(_IDENTITY if transform is None else transform),
+                           assemblyContext=context)
+
+
+def _install_with_sub(monkeypatch, transform=None, sub_name="Sub", path="Sub:1"):
+    """A design whose root holds ONE sub-component occurrence, with the coordinate-anchor adsk seams
+    wired. Returns (design, sub_component, occurrence)."""
+    sub = _FakeComp(sub_name)
+    occ = _occurrence(sub, path=path, transform=transform)
+    design = _FakeDesign(occurrences=[occ])
+    _install_handler(monkeypatch, design=design)
+    return design, sub, occ
+
+
+class TestPlacementIdentity:
+    def test_identity_matrix_reads_true(self):
+        assert jo._is_identity(_matrix(_IDENTITY)) is True
+
+    def test_a_rotation_is_not_the_identity(self):
+        vals = list(_IDENTITY)
+        vals[0], vals[1], vals[4], vals[5] = 0.0, -1.0, 1.0, 0.0   # 90 deg about Z, no translation
+        assert jo._is_identity(_matrix(vals)) is False
+
+    def test_an_unreadable_matrix_answers_none_not_false(self):
+        # None and False are different verdicts: one refuses because it cannot tell, the other
+        # because it can. Coercing either to False would let an unknown placement through as "moved".
+        assert jo._is_identity(SimpleNamespace()) is None
+        assert jo._is_identity(_matrix([1, 0, 0])) is None
+
+
+class TestLandingComponent:
+    def test_omitted_component_lands_on_root(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        out = _payload(jo.handler(anchor="coordinates", target="origin"))
+        assert design.rootComponent.jointOrigins.count == 1
+        assert sub.jointOrigins.count == 0
+        assert out["component"] == "Comp1"
+
+    def test_named_component_receives_the_joint_origin(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
+        assert sub.jointOrigins.count == 1
+        assert design.rootComponent.jointOrigins.count == 0
+        assert out["component"] == "Sub"            # read off the LANDED jo.parentComponent
+        assert out["component_verified"] is True
+
+    def test_coordinates_in_a_world_origin_component_keep_their_numbers(self, monkeypatch):
+        _, sub, _ = _install_with_sub(monkeypatch)
+        out = _payload(jo.handler(anchor="coordinates", x=10, y=0, z=0, units="mm",
+                                  component="Sub:1"))
+        assert out["offset_parameters"] == {"x": 10.0, "y": 0.0, "z": 0.0, "units": "mm"}
+        assert out["held_by"] == "parametric offsetX/Y/Z from the component's origin"
+        assert sub.jointOrigins.count == 1
+
+    def test_world_coordinates_into_a_moved_component_are_refused(self, monkeypatch):
+        _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
+        res = jo.handler(anchor="coordinates", x=10, y=0, z=0, units="mm", component="Sub:1")
+        assert res["isError"] is True
+        assert "not the identity" in res["message"] and "Sub:1" in res["message"]
+        assert sub.jointOrigins.count == 0          # refused before anything was created
+
+    def test_bbox_center_into_a_moved_component_is_refused(self, monkeypatch):
+        # the bounding-box center is a WORLD point too - the same wrong landing as a raw x,y,z.
+        _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
+        res = jo.handler(anchor="bbox_center", bbox_target="BODYH", component="Sub:1")
+        assert res["isError"] is True and "not the identity" in res["message"]
+        assert sub.jointOrigins.count == 0
+
+    def test_component_origin_is_allowed_in_a_moved_component(self, monkeypatch):
+        # target='origin' carries no world coordinate: it sits at the component's OWN origin, which
+        # is unambiguous wherever that component is placed.
+        _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
+        out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
+        assert sub.jointOrigins.count == 1
+        assert out["anchored_on"] == "component origin"
+
+    def test_a_moved_ancestor_refuses_even_at_an_identity_leaf(self, monkeypatch):
+        # a transform is relative to the PARENT component, so an identity leaf inside a moved parent
+        # is still displaced in world space - the whole chain decides, not the leaf.
+        parent_comp = _FakeComp("Parent")
+        parent = _occurrence(parent_comp, path="Parent:1", transform=_moved(7.0))
+        sub = _FakeComp("Sub")
+        leaf = _occurrence(sub, path="Parent:1+Sub:1", context=parent)
+        _install_handler(monkeypatch, design=_FakeDesign(occurrences=[parent, leaf]))
+        res = jo.handler(anchor="coordinates", x=10, component="Parent:1+Sub:1")
+        assert res["isError"] is True and "not the identity" in res["message"]
+        assert sub.jointOrigins.count == 0
+
+    def test_unreadable_placement_is_refused_rather_than_assumed(self, monkeypatch):
+        _, sub, occ = _install_with_sub(monkeypatch)
+        del occ.transform2                          # no transform of any kind reads
+        res = jo.handler(anchor="coordinates", x=10, component="Sub:1")
+        assert res["isError"] is True and "could not be read" in res["message"]
+        assert sub.jointOrigins.count == 0
+
+    def test_an_entity_anchor_is_not_gated_by_the_placement_transform(self, monkeypatch):
+        # the guard covers coordinates the tool computes; a sketch/geometry anchor carries none, so a
+        # moved component still gets its joint origin (the platform decides a cross-component anchor).
+        _, sub, _ = _install_with_sub(monkeypatch, transform=_moved(5.0))
+        monkeypatch.setattr(jo, "_find_sketch", lambda design, name: SimpleNamespace(
+            sketchPoints=SimpleNamespace(count=1, item=lambda i: "PT")))
+        out = _payload(jo.handler(anchor="sketch_point", sketch_name="S", entity_index=0,
+                                  component="Sub:1"))
+        assert sub.jointOrigins.count == 1
+        assert out["component"] == "Sub"
+
+    def test_ambiguous_component_name_is_refused(self, monkeypatch):
+        # two sub-assemblies each holding a "Bolt:1": no string tells them apart, so the call is
+        # refused with both paths instead of one being picked.
+        a, b = _FakeComp("BoltA"), _FakeComp("BoltB")
+        design = _FakeDesign(occurrences=[_occurrence(a, path="SubA:1+Bolt:1"),
+                                          _occurrence(b, path="SubB:1+Bolt:1")])
+        _install_handler(monkeypatch, design=design)
+        res = jo.handler(anchor="coordinates", target="origin", component="Bolt:1")
+        assert res["isError"] is True
+        assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
+        assert a.jointOrigins.count == 0 and b.jointOrigins.count == 0
+        assert design.rootComponent.jointOrigins.count == 0   # nor did it fall back to root
+
+    def test_unknown_component_name_is_refused_with_the_available_paths(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        res = jo.handler(anchor="coordinates", target="origin", component="Ghost")
+        assert res["isError"] is True and "Sub:1" in res["message"]
+        assert design.rootComponent.jointOrigins.count == 0 and sub.jointOrigins.count == 0
+
+    def test_landing_on_another_component_errors_and_rolls_back(self, monkeypatch):
+        # the reported component is READ BACK off the created origin - a JO that reports a different
+        # parent than the collection it was added to is a failure, not a quietly renamed success.
+        design, sub, _ = _install_with_sub(monkeypatch)
+        rolled = {"back": False}
+        real_add = sub.jointOrigins.add
+
+        def _lying_add(jo_input):
+            origin = real_add(jo_input)
+            origin.parentComponent = design.rootComponent      # landed somewhere else
+            origin.deleteMe = lambda: rolled.__setitem__("back", True) or True
+            return origin
+        monkeypatch.setattr(sub.jointOrigins, "add", _lying_add)
+        res = jo.handler(anchor="coordinates", target="origin", component="Sub:1")
+        assert res["isError"] is True
+        assert "landed on component 'Comp1'" in res["message"]
+        assert rolled["back"] is True
+
+    def test_an_unverifiable_landing_is_disclosed_not_claimed(self, monkeypatch):
+        # parentComponent unreadable: the payload still names the component that was asked for, but
+        # says the landing was not verified rather than implying it was.
+        _, sub, _ = _install_with_sub(monkeypatch)
+        sub.jointOrigins.owner = None               # the created JO reports no parentComponent
+        out = _payload(jo.handler(anchor="coordinates", target="origin", component="Sub:1"))
+        assert out["component"] == "Sub"
+        assert out["component_verified"] is False

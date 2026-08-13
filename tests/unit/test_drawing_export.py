@@ -518,6 +518,14 @@ class TestGuards:
         assert res["isError"] is True
         assert "not a drawing" in res["message"].lower()
 
+    def test_the_not_a_drawing_error_routes_through_doc_open_not_a_human(self, install, tmp_path):
+        # a drawing never reviewed in the Fusion UI opens and exports through the API (measured on
+        # 2705.0.87), so the refusal names the tool that opens it, not an operator
+        install(active_doc="notdrawing")
+        msg = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))["message"]
+        assert "doc_open opens it by file_id" in msg
+        assert "reviewed" not in msg and "Fusion UI" not in msg
+
     def test_missing_path_errors(self, install):
         install()
         res = _run(format="pdf")
@@ -529,6 +537,26 @@ class TestGuards:
         res = _run(format="dwg")
         assert res["isError"] is True
         assert ".dwg" in res["message"]
+
+
+class TestTheDescriptionAsksForNoHumanStep:
+    """Measured on 2705.0.87: a drawing never reviewed in the Fusion UI opens headlessly and exports,
+    so the description states the API route instead of parking the agent on an operator."""
+
+    def _description(self):
+        return de.tool.to_dict()["description"]
+
+    def test_it_names_doc_open_as_the_route(self):
+        desc = self._description()
+        assert "doc_open opens it by file_id" in desc
+        assert "no Fusion UI step first" in desc
+
+    def test_it_makes_no_never_reviewed_blocking_claim(self):
+        desc = self._description()
+        assert "never-reviewed" not in desc
+        assert "reviewed drawing" not in desc
+        # the tool still does not open anything - that is a scope fact, not a review fact
+        assert "does not open a drawing by id" in desc
 
 
 class TestSheetRangeCarriesTheWedgeFact:

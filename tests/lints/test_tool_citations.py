@@ -22,20 +22,11 @@ purpose) keep legitimate non-tool references from flagging.
 """
 
 import re
-from pathlib import Path
 
 from conftest import register_all_tools
-
-REPO = Path(__file__).resolve().parent.parent.parent
-_MCP = REPO / "commands" / "mcpServer"
-_DOCS = [
-    REPO / "CLAUDE.md",
-    REPO / "CONTRIBUTING.md",
-    _MCP / "tools" / "CLAUDE.md",
-    REPO / "tests" / "CLAUDE.md",
-    REPO / "tests" / "README.md",
-    _MCP / "README.md",
-]
+# One membership for both citation lints, defined beside the file resolver this is the tool-name
+# analog of - never a second copy that can drift to a different set of docs.
+from test_doc_citations import CONSTITUTION_DOCS, MCP, REPO
 
 _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 _INLINE_CODE = re.compile(r"`([^`]+)`")
@@ -55,7 +46,7 @@ def _registered_names():
 def _module_basenames():
     # a grandfathered module (data_ops, doc_lifecycle) or helper (_cam_common) is family-shaped but is
     # a FILE a doc legitimately names, not a dangling tool - never flag one.
-    return {p.stem for p in _MCP.rglob("*.py")}
+    return {p.stem for p in MCP.rglob("*.py")}
 
 
 def _is_tool_citation(tok, families):
@@ -71,7 +62,7 @@ class TestToolCitations:
         # it, so admit the stripped form too; a truly stale `data_read.py` is owned by the file lint.
         known = registered | stems | {s.lstrip("_") for s in stems}
         offenders = []
-        for doc in _DOCS:
+        for doc in CONSTITUTION_DOCS:
             if not doc.exists():
                 continue
             code = " ".join(m.group(1) for m in _INLINE_CODE.finditer(doc.read_text(encoding="utf-8")))
@@ -89,7 +80,7 @@ class TestToolCitations:
         # SHADOWS the check; an entry no doc cites anymore is dead weight. Either way, drop it.
         registered = _registered_names()
         cited = set()
-        for doc in _DOCS:
+        for doc in CONSTITUTION_DOCS:
             if doc.exists():
                 code = " ".join(m.group(1)
                                 for m in _INLINE_CODE.finditer(doc.read_text(encoding="utf-8")))

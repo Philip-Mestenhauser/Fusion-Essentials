@@ -32,6 +32,7 @@ from ._joints import (
     motion_param_names as _motion_param_names,
     pending_move_guard as _pending_move_guard,
 )
+from . import _joints
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
 # since a joint can land on a face/edge/vertex/point). Not required at the kind level - a non-token spec
@@ -78,9 +79,9 @@ def _fmt_num(v):
 
 
 def _find_occurrence(design, name):
-    """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
-    logic - refuses an ambiguous substring instead of grabbing the first instance. Returns
-    (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name via
+    the shared OccurrenceRef logic - refuses an ambiguous path/name instead of grabbing the first
+    instance. Returns (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence(name, name)
 
 
@@ -411,6 +412,13 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     if not jo2:
         return error(err2 or f"Could not resolve joint input '{n2}'.")
 
+    # Flush face-to-face detection, sampled PRE-ADD off the resolved JointGeometry entities (the
+    # add moves the free part) - the same shared hint joint_at_geometry publishes, so a snap-based
+    # create that seats two opposing planar faces gets the same 180-deg warning.
+    opposing = _joints.normals_oppose(
+        _joints.planar_outward_normal(safe(lambda: jo1.entityOne)),
+        _joints.planar_outward_normal(safe(lambda: jo2.entityOne)))
+
     # Joints live on the root component (a joint between two components is owned there).
     joints = design.rootComponent.joints
     try:
@@ -464,7 +472,17 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             jm, min_deg=min_deg, max_deg=max_deg, rest_deg=rest_deg,
             min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=scale)
         if lim_err:
-            return error(lim_err)
+            # PARTIAL SUCCESS disclosed: the joint EXISTS in the timeline and any limits applied
+            # before the failing one HAVE been written (measured: a bad max_mm after a good
+            # min_deg left the joint created with the rotation minimum set) - a bare error would
+            # hide both, inviting a duplicate re-create.
+            applied_txt = (", ".join(f"{k}={v}" for k, v in lim_changed.items())
+                           if lim_changed else "none")
+            return error(
+                f"Joint '{joint_name_final}' WAS CREATED, but a limit failed: {lim_err} "
+                f"Limits already applied before the failure: {applied_txt}. Fix the limits with "
+                f"joint_edit(joint_name='{joint_name_final}', ...) or remove the joint with "
+                "design_delete_feature - do NOT re-create it.")
         limits_out = lim_changed
 
     payload = {
@@ -483,6 +501,11 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     }
     if rename_warning:
         payload["rename_warning"] = rename_warning
+    # The shared flush face-to-face hint (see _joints.FLIP_HINT) - parity with joint_at_geometry:
+    # a snap create that seats two opposing planar faces without flip lands the part rotated
+    # 180 deg, and the payload says so instead of leaving a coincident-looking embed unexplained.
+    if opposing and not flip:
+        payload["flip_hint"] = _joints.FLIP_HINT
     if any(k in limits_out for k in ("rest_mm", "rest_deg")):
         payload["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)
@@ -663,7 +686,12 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                 min_mm=min_mm, max_mm=max_mm, rest_mm=rest_mm, cm_scale=lim_scale)
             changed.update(lim_changed)
             if lim_err:
-                return error(lim_err)
+                # PARTIAL SUCCESS disclosed: every edit recorded in `changed` so far HAS landed
+                # (earlier fields and any limit applied before the failing one) - a bare error
+                # would hide the writes that took.
+                applied_txt = (", ".join(f"{k}={v}" for k, v in changed.items())
+                               if changed else "none")
+                return error(f"{lim_err} Edits already applied before the failure: {applied_txt}.")
     except Exception as e:
         msg = f"Edit failed: {e}"
         if "findObjectPath" in str(e) or "InternalValidationError" in str(e):
@@ -688,10 +716,14 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
     # Editing a joint rolls the timeline marker, which can leave DOWNSTREAM features (patterns, later
     # joints) in a stale compute-failed state until a full recompute. Do it here so the caller gets a
-    # settled, accurate model without a separate design_recompute call.
+    # settled, accurate model without a separate design_recompute call. A computeAll that RAISES is
+    # not a failure of the edit (which already landed), but it must not be reported as a recompute
+    # that happened - 'recomputed' publishes what actually ran.
     recompute_errors = None
+    recomputed = False
     try:
         design.computeAll()
+        recomputed = True
         recompute_errors, _, _ = _common.timeline_health(design)
     except Exception:
         pass
@@ -702,14 +734,18 @@ def edit_handler(joint_name: str = "", input_one: str = "", input_two: str = "",
                        "offset", "angle", "min_deg", "max_deg", "rest_deg", "min_mm", "max_mm", "rest_mm"):
         if key in changed:
             out[key] = changed[key]
-    out["recomputed"] = True
+    out["recomputed"] = recomputed
     if recompute_errors:
         out["timeline_errors_after"] = recompute_errors
         out["note"] = ("Joint edited + recomputed, but the timeline still has errored feature(s) "
                        f"({', '.join(recompute_errors)}) - the edit may over-constrain something.")
-    else:
+    elif recomputed:
         out["note"] = ("Joint edited in place + full recompute (downstream features settled). "
                        "view_screenshot to view.")
+    else:
+        out["note"] = ("Joint edited in place, but the full recompute RAISED - downstream features "
+                       "may be unsettled and their health unread. Run design_recompute and check "
+                       "workspace_orient before trusting the model state.")
     if any(k in changed for k in ("rest_mm", "rest_deg")):
         out["note"] += _REST_LIMIT_NOTE
     mp = _motion_param_names(joint)

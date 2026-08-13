@@ -48,9 +48,9 @@ _CAPTURE_ACTION = _inputs.Choice(
 
 
 def _find_one(design, name):
-    """Resolve a SINGLE occurrence by fullPathName (unambiguous) or name via the shared OccurrenceRef
-    logic - refuses an ambiguous substring instead of grabbing the first instance (the wrong-instance
-    bug). Returns (occurrence, error_or_None)."""
+    """Resolve a SINGLE occurrence by entityToken handle (the exact identity) or fullPathName/name via
+    the shared OccurrenceRef logic - refuses an ambiguous path/name instead of grabbing the first
+    instance (the wrong-instance bug). Returns (occurrence, error_or_None)."""
     return _inputs._resolve_occurrence(name, name)
 
 
@@ -120,13 +120,19 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
             return error(f"Capture failed: {e}")
         if not snap:
             return error("snapshots.add() returned nothing - the position was not captured.")
-        count_after = safe(lambda: snaps.count)
+        # The count the collection reports, never the arithmetic the add expected: an unreadable
+        # re-read publishes null, so no caller reads a computed number back as a measurement.
+        count_after = _common.counted(lambda: snaps.count)
         if count_after is not None and count_after <= count:
             return error(f"Capture reported success but the snapshot count did not advance "
                          f"({count} before, {count_after} after) - the position was not captured.")
+        note = "Current position captured into the timeline."
+        if count_after is None:
+            note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
+                     f"capture, so the advance could not be confirmed; {count} marker(s) were "
+                     "counted before it.")
         return ok({"captured": True, "snapshot": safe(lambda: snap.name),
-        "snapshot_count": count_after if count_after is not None else count + 1,
-        "note": "Current position captured into the timeline."})
+        "snapshot_count": count_after, "note": note})
 
     if act == "discard_pending":
         # Live-verified: with nothing pending revertPendingSnapshot() RAISES "3 : Has no pending
@@ -152,11 +158,17 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         # Live-verified restore target: with a captured marker the assembly goes back to the last
         # captured position; with nothing ever captured it goes back to the joint rest pose. The
         # captured markers and their names survive the discard untouched.
+        # The count the collection reports, never the pre-read echoed back: an unreadable re-read
+        # publishes null, so no caller reads a stale number back as a fresh measurement.
+        count_after = _common.counted(lambda: snaps.count)
+        note = ("Uncaptured move thrown away - the assembly is back at its last captured position "
+                "(or the joint-defined state when nothing was ever captured). Captured markers are "
+                "untouched; use revert to drop the latest of those.")
+        if count_after is None:
+            note += (" 'snapshot_count' is null - the snapshot count could not be read after the "
+                     f"discard; {count} marker(s) were counted before it.")
         return ok({"discarded": True, "has_pending": bool(still_pending),
-        "snapshot_count": safe(lambda: snaps.count, count),
-        "note": "Uncaptured move thrown away - the assembly is back at its last captured position "
-        "(or the joint-defined state when nothing was ever captured). Captured markers are "
-        "untouched; use revert to drop the latest of those."})
+        "snapshot_count": count_after, "note": note})
 
     if act == "delete":
         want = (marker or "").strip()
@@ -180,14 +192,20 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
             return error(f"Delete failed: {e}")
         if not did:
             return error(f"Fusion declined to delete captured position '{found_name}'.")
-        count_after = safe(lambda: snaps.count, 0) or 0
+        # The count the collection reports, never a fabricated 0: an unreadable re-read publishes
+        # null, so no caller reads "no captured positions remain" off a read that never answered.
+        count_after = _common.counted(lambda: snaps.count)
         survivors = _find_captured(snaps, want)
         if survivors:
             return error(f"Delete reported success but '{found_name}' is still present in the "
                          "snapshot collection.")
+        note = ("Captured position removed from the timeline; later captured positions (if any) "
+                "survive a recompute unchanged.")
+        if count_after is None:
+            note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
+                     f"delete; {count} marker(s) were counted before it.")
         return ok({"deleted": True, "marker": found_name, "snapshot_count": count_after,
-        "note": "Captured position removed from the timeline; later captured positions (if any) "
-        "survive a recompute unchanged."})
+        "note": note})
 
     # revert
     if count < 1:
@@ -199,8 +217,14 @@ def capture_position_handler(action: str = "status", marker: str = "") -> dict:
         return error(f"Revert failed: {e}")
     if not did:
         return error("Fusion declined to revert the latest captured position.")
-    return ok({"reverted": True, "snapshot_count": safe(lambda: snaps.count, count - 1),
-        "note": "Latest captured position discarded (back to the joint-defined state)."})
+    # The count the collection reports, never the arithmetic the delete expected: an unreadable
+    # re-read publishes null, so no caller reads a computed number back as a measurement.
+    count_after = _common.counted(lambda: snaps.count)
+    note = "Latest captured position discarded (back to the joint-defined state)."
+    if count_after is None:
+        note += (" 'snapshot_count' is null - the snapshot count could not be re-read after the "
+                 f"delete; {count} marker(s) were counted before it.")
+    return ok({"reverted": True, "snapshot_count": count_after, "note": note})
 
 
 # ---------------------------------------------------------------- joint_create_as_built
@@ -261,7 +285,9 @@ def as_built_joint_handler(occurrence_one: str = "", occurrence_two: str = "", g
     # Distinctness by fullPathName, not .name: a local name is only locally unique, so two DISTINCT
     # instances of the same component (e.g. "Bolt:1" under different parents) share a .name but differ by
     # fullPathName. Comparing .name would false-positive and reject a legitimate pair. Fall back to .name
-    # only if a fullPathName isn't available (then identity catches the same-object case).
+    # only if a fullPathName isn't available (then identity catches the same-object case). Two siblings
+    # CAN wear one path (Fusion enforces no name uniqueness), so this can still refuse a legitimate
+    # pair - it errors rather than joints the wrong instance, and each is addressable by its handle.
     id1 = safe(lambda: o1.fullPathName) or safe(lambda: o1.name)
     id2 = safe(lambda: o2.fullPathName) or safe(lambda: o2.name)
     if (id1 is not None and id1 == id2) or o1 is o2:

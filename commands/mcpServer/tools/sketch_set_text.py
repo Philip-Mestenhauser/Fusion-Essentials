@@ -19,6 +19,9 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, resolve_sketch, all_sketch_names
 from . import _common
 from . import _inputs
+# The SketchText readers live in _sketch_detail (the shared sketch X-ray helper) - a tool imports
+# from a helper, never the reverse.
+from ._sketch_detail import font_read_back as _font_read_back, unquote_text as _unquote
 
 _MAX = 500
 
@@ -30,6 +33,10 @@ _ALIGN = _inputs.Choice("align", ["left", "center", "right"], default="left",
 
 _ALIGN_MEMBERS = {"left": "LeftHorizontalAlignment", "center": "CenterHorizontalAlignment",
                   "right": "RightHorizontalAlignment"}
+
+# Where (x,y) sits along the multi_line box: the fraction of the box width to shift the box LEFT so
+# the requested x is the text's left edge / center / right edge.
+_ALIGN_ANCHOR = {"left": 0.0, "center": 0.5, "right": 1.0}
 
 # Each mode's definition class, as the created text's objectType reports it. All three spellings
 # are bindings-sourced; only fit-on-path's is MEASURED live, where objectType reads
@@ -99,16 +106,6 @@ def _already_changed(changed):
     names = list(dict.fromkeys(c["sketch"] for c in changed))
     where = ", ".join(f"'{n}'" for n in names[:5]) + (", ..." if len(names) > 5 else "")
     return f" {len(changed)} sketch text(s) earlier in this call were already updated ({where})."
-
-
-def _font_read_back(obj):
-    """The font the landed/edited SketchText reports, or None if it will not read as a name.
-
-    Font names are case-sensitive and Fusion normalizes nothing - 'arial' is refused where 'Arial'
-    works - so a font that landed reads back as the requested string exactly, and an exact compare
-    against it is the right check. An empty string is no name at all, so it reads as None."""
-    value = safe(lambda: obj.fontName)
-    return value if isinstance(value, str) and value else None
 
 
 def _refuse_wrong_mode_inputs(mode, path, above_path, align, character_spacing, x, y):
@@ -304,9 +301,15 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
             # setAsMultiLine takes SKETCH-plane coordinates (the text lies on the sketch x-y plane,
             # NOT in world/model space); the corner->diagonal box must not be axis-aligned, so both
             # offsets are strictly non-zero (len>=1, h>0).
+            # Measured: halign aligns the glyphs WITHIN this box and never moves the box, so the box
+            # is ANCHORED per align - centered on x for 'center', ending at x for 'right'. That is
+            # what puts the text on the requested x whatever the crude width estimate is worth: the
+            # estimate sizes the box, and both edges of it move together with the anchor.
+            width = max(len(text), 1) * h * k
+            corner_x = px * k - _ALIGN_ANCHOR[align_key] * width
             placed = ipt.setAsMultiLine(
-                adsk.core.Point3D.create(px * k, py * k, 0),
-                adsk.core.Point3D.create(px * k + max(len(text), 1) * h * k, py * k + h * k, 0),
+                adsk.core.Point3D.create(corner_x, py * k, 0),
+                adsk.core.Point3D.create(corner_x + width, py * k + h * k, 0),
                 halign,
                 adsk.core.VerticalAlignments.BottomVerticalAlignment, spacing)
         if not placed:
@@ -391,16 +394,6 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
                  "view_screenshot.")
     out["note"] = note
     return ok(out)
-
-
-def _unquote(expr):
-    """The textParameter expression is a quoted string ('foo'); return the inner text."""
-    if expr is None:
-        return None
-    s = str(expr)
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-        return s[1:-1]
-    return s
 
 
 def _quote(text):
@@ -587,7 +580,7 @@ tool = (
     .add_input_property("create", {"type": "boolean",
             "description": "CREATE new text instead of editing: add it to 'sketch_name' at (x,y) with 'height'. Default false."})
     .add_input_property("height", {"type": "number", "description": "Text height in 'units' (create only; default 5)."})
-    .add_input_property("x", {"type": "number", "description": "Text X position in 'units' (multi_line only)."})
+    .add_input_property("x", {"type": "number", "description": "Text X in 'units' (multi_line only): with align left/center/right it is the text's left edge / center / right edge."})
     .add_input_property("y", {"type": "number", "description": "Text Y position in 'units' (multi_line only)."})
     .add_input_property(*_inputs.units_property(description="Units for text height (create only)."))
     .add_input_property(*_MODE.as_property())

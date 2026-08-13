@@ -49,23 +49,48 @@ class TestIsolateForFit:
     def test_hides_others_and_restores(self):
         a, b, c = FakeOcc("A:1"), FakeOcc("B:1"), FakeOcc("C:1")
         _install([a, b, c])
-        restore, err = gs._isolate_for_fit("B:1")
+        restore, target, err = gs._isolate_for_fit("B:1")
         assert restore is not None and err is None
+        assert target is b                     # the resolved occurrence rides along
         # only B stays on
         assert b.isLightBulbOn is True
         assert a.isLightBulbOn is False and c.isLightBulbOn is False
         restore()
         assert a.isLightBulbOn is True and c.isLightBulbOn is True
 
+    def test_display_folders_hidden_for_the_shot_and_restored(self):
+        # vp.fit() frames every VISIBLE entity, so a big construction plane in the fitted
+        # component blows the frame to the whole scene (measured) - the shot switches the
+        # per-component display folders off and the restore puts back exactly what it moved.
+        a = FakeOcc("A:1")
+        design = _install([a])
+        r = design.rootComponent
+        r.entityToken = "root-tok"
+        r.isSketchFolderLightBulbOn = True
+        r.isConstructionFolderLightBulbOn = True
+        r.isOriginFolderLightBulbOn = False              # already off - never touched
+        r.isJointsFolderLightBulbOn = True
+        restore, _target, err = gs._isolate_for_fit("A:1")
+        assert err is None
+        assert r.isSketchFolderLightBulbOn is False
+        assert r.isConstructionFolderLightBulbOn is False
+        assert r.isJointsFolderLightBulbOn is False
+        assert r.isOriginFolderLightBulbOn is False      # was off, stays off
+        assert restore() == []
+        assert r.isSketchFolderLightBulbOn is True
+        assert r.isConstructionFolderLightBulbOn is True
+        assert r.isJointsFolderLightBulbOn is True
+        assert r.isOriginFolderLightBulbOn is False      # not moved, not force-lit
+
     def test_substring_match(self):
         a = FakeOcc("Bracket:1")
         _install([a, FakeOcc("Other:1")])
-        restore, err = gs._isolate_for_fit("bracket")
+        restore, _target, err = gs._isolate_for_fit("bracket")
         assert restore is not None and err is None and a.isLightBulbOn is True
 
     def test_no_match_returns_none(self):
         _install([FakeOcc("A:1")])
-        restore, err = gs._isolate_for_fit("Ghost")
+        restore, _target, err = gs._isolate_for_fit("Ghost")
         assert restore is None and err is not None
 
     def test_ambiguous_name_refused_not_first_match(self):
@@ -74,7 +99,7 @@ class TestIsolateForFit:
         a = FakeOcc("Bolt:1"); a.fullPathName = "Sub-A:1+Bolt:1"
         b = FakeOcc("Bolt:1"); b.fullPathName = "Sub-B:1+Bolt:1"
         _install([a, b])
-        restore, err = gs._isolate_for_fit("Bolt")
+        restore, _target, err = gs._isolate_for_fit("Bolt")
         assert restore is None
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
@@ -83,14 +108,14 @@ class TestIsolateForFit:
         # an occurrence that was already OFF should stay off after restore (we only flip ones we hid)
         a, b = FakeOcc("A:1", on=True), FakeOcc("B:1", on=False)
         _install([a, b])
-        restore, err = gs._isolate_for_fit("A:1")
+        restore, _target, err = gs._isolate_for_fit("A:1")
         restore()
         assert b.isLightBulbOn is False      # we never turned it on
 
     def test_a_clean_restore_reports_nothing_stuck(self):
         a, b = FakeOcc("A:1"), FakeOcc("B:1")
         _install([a, b])
-        restore, _err = gs._isolate_for_fit("A:1")
+        restore, _target, _err = gs._isolate_for_fit("A:1")
         assert restore() == []
 
     def test_a_bulb_that_will_not_come_back_on_is_named_by_the_restore(self):
@@ -113,7 +138,7 @@ class TestIsolateForFit:
         stuck = OneWay("B:1")
         object.__setattr__(stuck, "fullPathName", "Sub:1+B:1")
         _install([FakeOcc("A:1"), stuck])
-        restore, _err = gs._isolate_for_fit("A:1")
+        restore, _target, _err = gs._isolate_for_fit("A:1")
         assert stuck.isLightBulbOn is False           # the hide DID take
         assert restore() == ["Sub:1+B:1"]
 
@@ -222,7 +247,8 @@ class TestFitToRestoreDisclosure:
         return monkeypatch
 
     def _stub_isolate(self, monkeypatch, stuck):
-        monkeypatch.setattr(gs, "_isolate_for_fit", lambda name: (lambda: list(stuck), None))
+        monkeypatch.setattr(gs, "_isolate_for_fit",
+                            lambda name: (lambda: list(stuck), object(), None))
 
     def test_a_clean_restore_leaves_the_image_alone(self, rig):
         self._stub_isolate(rig, [])
@@ -241,7 +267,7 @@ class TestFitToRestoreDisclosure:
     def test_a_restore_that_raises_is_reported_not_swallowed(self, rig):
         def boom():
             raise RuntimeError("occurrence went invalid")
-        rig.setattr(gs, "_isolate_for_fit", lambda name: (boom, None))
+        rig.setattr(gs, "_isolate_for_fit", lambda name: (boom, object(), None))
         result = gs.handler(fit_to="Bracket:1")
         assert "occurrence went invalid" in result["content"][0]["text"]
 

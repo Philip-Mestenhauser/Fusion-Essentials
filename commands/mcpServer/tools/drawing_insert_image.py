@@ -140,9 +140,8 @@ def handler(image_path: str = "", x=None, y=None, scale=None, rotate_deg=None) -
     dwg = _drawing_common.active_drawing()
     if dwg is None:
         return error(_composed(held, "No drawing to place an image on: the active document is "
-                                    "not a drawing. Open the drawing (doc_open a reviewed "
-                                    "drawing, or open it in the Fusion UI) and make it active, "
-                                    "then retry."))
+                                    "not a drawing. Open the drawing (doc_open by file_id) and "
+                                    "make it active, then retry."))
     sheet = safe(lambda: dwg.activeSheet)
     if sheet is None:
         return error(_composed(held, "The active drawing has no active sheet to place an image "

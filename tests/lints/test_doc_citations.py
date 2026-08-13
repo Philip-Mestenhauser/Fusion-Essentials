@@ -26,10 +26,16 @@ from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
-_DOCS = [
+MCP = REPO / "commands" / "mcpServer"
+
+# The prose surface both citation lints police - this list is the ONE membership, imported by
+# test_tool_citations rather than re-listed there, so a doc can never be checked for dangling FILE
+# citations while its dangling TOOL citations go unchecked (or the reverse).
+CONSTITUTION_DOCS = [
     REPO / "CLAUDE.md",
     REPO / "CONTRIBUTING.md",
-    REPO / "commands" / "mcpServer" / "tools" / "CLAUDE.md",
+    MCP / "README.md",
+    MCP / "tools" / "CLAUDE.md",
     REPO / "tests" / "CLAUDE.md",
     REPO / "tests" / "README.md",
 ]
@@ -56,8 +62,8 @@ def _present():
 def _scanned_files():
     # the constitution docs PLUS the server source - a docstring/comment that cites a file rots the
     # same way a doc does when the file is renamed/moved.
-    files = [d for d in _DOCS if d.exists()]
-    files += sorted((REPO / "commands" / "mcpServer").rglob("*.py"))
+    files = [d for d in CONSTITUTION_DOCS if d.exists()]
+    files += sorted(MCP.rglob("*.py"))
     return files
 
 
@@ -85,7 +91,7 @@ class TestDocCitations:
         # the path is doing disambiguation work, not a location hint, so it is left alone.
         present = _present()
         offenders = []
-        for doc in _DOCS:
+        for doc in CONSTITUTION_DOCS:
             if not doc.exists():
                 continue
             for m in _INLINE_CODE.finditer(doc.read_text(encoding="utf-8")):

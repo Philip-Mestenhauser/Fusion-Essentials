@@ -131,7 +131,9 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
         if i < cap:
             row = terse({
                 "name": name,
-                "is_active": safe(lambda d=d: d is active),
+                # EQUALITY, never identity: Document wrappers are not identity-stable (measured
+                # live - `is` reads False for the active doc); `==` compares the handle.
+                "is_active": bool(safe(lambda d=d: d == active, False)),
                 "is_visible": safe(lambda d=d: d.isVisible),
                 "is_saved": is_saved,
                 "is_modified": is_modified,

@@ -10,30 +10,9 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, expression_error, resolve_cam_node
+from ._cam_common import get_cam, expression_error, parse_parameters, resolve_cam_node
 
 app = adsk.core.Application.get()
-
-
-def _parse_parameters(parameters):
-    """Normalize 'parameters' into a dict {name: expression}. Accepts a dict or a
-    'name=value, name=value' string. Returns (dict, error)."""
-    if isinstance(parameters, dict):
-        out = {str(k).strip(): str(v) for k, v in parameters.items() if str(k).strip()}
-        return out, None
-    if isinstance(parameters, str):
-        out = {}
-        for chunk in parameters.split(","):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            if "=" not in chunk:
-                return None, f"'{chunk}' is not 'name=value'. Use name=value pairs, or a JSON object."
-            k, _, v = chunk.partition("=")
-            if k.strip():
-                out[k.strip()] = v.strip()
-        return out, None
-    return None, "Provide 'parameters' as an object {name: value} or a 'name=value, ...' string."
 
 
 def handler(operation: str = "", parameters=None) -> dict:
@@ -41,7 +20,7 @@ def handler(operation: str = "", parameters=None) -> dict:
     if not (operation or "").strip():
         return error("Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).")
 
-    wanted, perr = _parse_parameters(parameters)
+    wanted, perr = parse_parameters(parameters)
     if perr:
         return error(perr)
     if not wanted:
