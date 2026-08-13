@@ -20,8 +20,7 @@ Usage:
   py -3 tests/check_all.py --live          # ...with a FULL measurement run (regenerates facts)
   py -3 tests/check_all.py --offline       # no Fusion here: skip the live gate, visibly
   py -3 tests/check_all.py --fast          # generators + lints only
-  py -3 tests/check_all.py --gen           # generator checks only (the pre-commit path)
-  py -3 tests/check_all.py --install-hook  # write pre-commit (--gen) and pre-push (--push) hooks
+  py -3 tests/check_all.py --gen           # generator checks only
 
 The quality system, layer by layer (the one guarantee each makes):
   constitution docs      the rules, taught once at the point of use (CLAUDE.md beside the code)
@@ -43,7 +42,6 @@ import urllib.request
 TESTS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TESTS)
 HEALTH = "http://127.0.0.1:27182/health"
-_HOOK_MARKER = "installed by tests/check_all.py"
 
 
 def _run(label, cmd, repair):
@@ -64,35 +62,6 @@ def _fusion_up():
         return False
 
 
-def _install_hook():
-    hooks = os.path.join(REPO, ".git", "hooks")
-    if not os.path.isdir(hooks):
-        print("no .git/hooks directory - is this a git checkout?")
-        return 1
-    wrote = []
-    for name, flag in (("pre-commit", "--gen"), ("pre-push", "--push")):
-        path = os.path.join(hooks, name)
-        if os.path.exists(path):
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                if _HOOK_MARKER not in fh.read():
-                    print("a " + name + " hook already exists and is not ours - not overwriting: "
-                          + path)
-                    continue
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write("#!/bin/sh\n# " + _HOOK_MARKER + " --install-hook\n"
-                     "py -3 tests/check_all.py " + flag + " || exit 1\n")
-        try:
-            os.chmod(path, 0o755)
-        except OSError:
-            pass
-        wrote.append(path)
-    for p in wrote:
-        print("wrote " + p)
-    print("pre-commit runs the generated-docs staleness check (about a minute); pre-push runs the")
-    print("full button - live gate when Fusion answers, a LOUD skip when it does not.")
-    return 0 if wrote else 1
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -103,22 +72,15 @@ def main():
     ap.add_argument("--fast", action="store_true",
                     help="generators + lints only")
     ap.add_argument("--gen", action="store_true",
-                    help="generator staleness checks only (the pre-commit path)")
-    ap.add_argument("--push", action="store_true",
-                    help="pre-push mode: live gate when Fusion answers, LOUD skip when it does not")
-    ap.add_argument("--install-hook", action="store_true",
-                    help="install pre-commit (--gen) and pre-push (--push) hooks")
+                    help="generator staleness checks only")
     args = ap.parse_args()
-
-    if args.install_hook:
-        return _install_hook()
 
     if not _run("gen_all --check", [sys.executable, os.path.join(TESTS, "gen_all.py"), "--check"],
                 "py -3 tests/gen_all.py   (then commit the regenerated files)"):
         return 1
     if args.gen:
-        print("\nGEN GREEN: every generated artifact is current. This is the commit gate only -")
-        print("run the full button before pushing.")
+        print("\nGEN GREEN: every generated artifact is current. Run the full button before "
+              "calling the change done.")
         return 0
 
     pytest_cmd = [sys.executable, "-m", "pytest", "-q"]
@@ -145,7 +107,8 @@ def main():
         return 1
 
     if args.fast:
-        print("\nFAST GREEN: generators current + lints pass. Run the full button before pushing.")
+        print("\nFAST GREEN: generators current + lints pass. Run the full button before "
+              "calling the change done.")
         return 0
 
     if not _run("coverage ratchet",
@@ -156,7 +119,7 @@ def main():
 
     verify = os.path.join(TESTS, "live", "tool_verify.py")
     if not _run("tool_verify --check", [sys.executable, verify, "--check"],
-                "py -3 tests/live/tool_verify.py   (Fusion up - a green run rewrites "
+                "py -3 tests/live/tool_verify.py   (Fusion up, ~2 min - a green run rewrites "
                 "VERIFIED_TOOLS.md)"):
         return 1
 
@@ -166,11 +129,6 @@ def main():
         print("Fusion. Re-run without --offline (Fusion up, add-in enabled) before releasing.")
         return 0
     if not _fusion_up():
-        if args.push:
-            print("\nPUSH GREEN WITH A HOLE: Fusion is not reachable, so the facts stamp was NOT")
-            print("checked against the installed Fusion (the tool-source receipt WAS checked")
-            print("offline and matches). Run the full button with Fusion up before releasing.")
-            return 0
         print("\nLIVE GATE FAILED: Fusion is not reachable on 127.0.0.1:27182.")
         print("Start Fusion with the add-in enabled and re-run - or pass --offline to accept an")
         print("unverified-mocks green, visibly.")

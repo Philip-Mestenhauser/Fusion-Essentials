@@ -79,8 +79,9 @@ conclusion: CAM validity flags are stale until the Manufacture workspace has bee
 `is_fully_constrained` is sketch-only (assembly freedom comes from joint motion types); grounding
 is a two-flag trap (`isGrounded` vs `ground_to_parent`); the open-documents list is a superset of
 the visible tabs; a bounding-box center is not the modelling origin; saves and opens are
-asynchronous (confirm with a fresh read, never assume). When a read result is ambiguous, re-read
-with the narrower tool named in the payload's `pointers`.
+asynchronous (confirm with a fresh read, never assume); names are never unique - when a tree read
+offers a `handle`, carry it into the next call instead of the name. When a read result is
+ambiguous, re-read with the narrower tool named in the payload's `pointers`.
 
 ## Tools
 
@@ -104,6 +105,7 @@ are predictable: `<family>_<verb>`, so the family prefix tells you the area —
 | `find_` | geometry queries returning handles | `find_geometry` |
 | `view_` | workspace & viewport (screenshots, isolate, section) | `view_screenshot`, `view_set`, `view_section` |
 | `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get`, `cam_generate`, `cam_get_status` |
+| `pmi_` | model-based annotations (notes, leaders, GD&T) | `pmi_get`, `pmi_create`, `pmi_edit` |
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
 | `drawing_` / `workspace_` / `save_` | 2D drawings, orientation, save-as-mesh | `drawing_create`, `workspace_orient`, `save_as_mesh` |
 
@@ -143,12 +145,10 @@ here when learning the surface:
 
 Two kinds of runnable demonstration show the surface driving real work end-to-end:
 
-- **Shipped procedures** (Claude Code skills in `.claude/skills/`): `build-tool-from-url` scrapes a
-  vendor cutting-tool page and adds the tool to the active document's CAM library via
-  `cam_edit_tools`; `insert-into-template` stands up a CAM job for a part — saves the CAD, defines a
-  part-space origin, places the shop template, inserts and positions the part, and sizes stock from
-  measurements. Both are built entirely from these tools; fork them as patterns for your own shop
-  procedures.
+- **A shipped procedure** (a Claude Code skill in `.claude/skills/`): `insert-into-template` stands
+  up a CAM job for a part — saves the CAD, defines a part-space origin, places the shop template,
+  inserts and positions the part, and sizes stock from measurements. It is built entirely from
+  these tools; fork it as the pattern for your own shop procedures.
 - **The eval pipeline** (`tests/live/evals/scenarios/`): goal-shaped scenarios (parametric
   multi-part foundations, joints and motion, detail features, external references, CAM templating)
   that a context-isolated agent runs against a live session holding only this server's wire — the
@@ -169,7 +169,18 @@ forking this as a pattern for your own MCP server:
 - **Postconditions** ([`tools/_assert.py`](tools/_assert.py)) — a write tool declares
   verify-the-effect kinds; the kernel re-reads ground truth after the mutation and converts a
   "success" that changed nothing into an error. The platform does return success while changing
-  nothing; the kernel exists because of it.
+  nothing; the kernel exists because of it. Where the effect is material, the evidence is
+  geometric: a cut that removed no volume, a mesh trim that moved neither count nor area, a delete
+  whose target still resolves — each is an error carrying its measurements, never a false ok.
+
+Two further habits run through every payload. **Honest reads**: a value that cannot be read is
+published as null (or the key is absent), never a fabricated 0/False/echo of the request — so an
+agent can always tell "measured as nothing" from "could not be measured" — and a partial success
+(a joint created but a limit refused, a rename the platform declined) is disclosed with exactly
+what landed. **Identity by handle**: Fusion enforces no name uniqueness at any level (even two
+siblings can share a full path), so structural reads emit each entity's `handle` (its
+entityToken), every reference-taking input accepts it as the exact identity, and a name several
+entities answer to is refused with the candidates' handles rather than silently matched.
 
 The naming schema (`<family>_<verb>`, with the verb's read/write kind linted against the declared
 write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by

@@ -4,7 +4,7 @@
 """Run every doc generator (or every --check) in ONE process.
 
 Each generator pays a full mocked-registry load when run as its own process; importing them here
-means that load happens once, so the pre-commit gate stays fast. Same contracts as running them
+means that load happens once, so the staleness check stays fast. Same contracts as running them
 individually: writes tests/generated/* (and the CLAUDE.md spliced maps), or with --check exits 1
 naming what is stale.
 

@@ -26,9 +26,8 @@ stage. Its green has two honest flavors: LIVE-VERIFIED (the facts stamp was chec
 reachable Fusion) and OFFLINE (you said so explicitly - the mocks were not re-confirmed). Either
 way it checks the live-run receipt: `tests/live/VERIFIED_TOOLS.md` carries a source hash from the last
 green `tool_verify.py` run, and the button goes red when tool source has changed since (repair:
-re-run `tool_verify.py` with Fusion up, commit the rewritten receipt). `--install-hook` makes
-every commit run the generator staleness checks. The layer-by-layer quality-system map lives in
-ONE place: `py -3 tests/check_all.py --help`.
+re-run `tool_verify.py` with Fusion up, commit the rewritten receipt). The layer-by-layer
+quality-system map lives in ONE place: `py -3 tests/check_all.py --help`.
 
 > Requires `pytest` (`py -3 -m pip install pytest`). Config lives in
 > `pytest.ini` at the repo root — it sets `testpaths`/`pythonpath` so no env

@@ -208,7 +208,7 @@ def trim_handler(surface=None, trim_tool=None, keep=None) -> dict:
         cell_info = {"cells_total": total, "cells_kept": kept,
     "cells_removed": [i for i in range(total) if i not in set(kept)],
     "kept_area": kept_area}
-        # PHANTOM-CELL GATE (pre-commit). createInput takes only the tool, not the target, so its cells
+        # PHANTOM-CELL GATE (before the add). createInput takes only the tool, not the target, so its cells
         # span every VISIBLE surface the tool crosses - a coincident/overlapping surface injects extra
         # cells and 'keep larger' can latch onto one that isn't part of the target at all. A kept area
         # LARGER than the target's own area proves that (a subset of the target can never exceed it).

@@ -154,8 +154,10 @@ cython_debug/
 #.idea/
 
 # Claude Code: machine-local and session scaffolding never ship. The exemplar skill and the shared
-# settings.json (a worked example of scoping agent tool-call approvals) are deliberately tracked.
+# settings.json (a worked example of scoping agent tool-call approvals) are deliberately tracked;
+# agent definitions are owner-local working machinery, not part of the product.
 .claude/settings.local.json
+.claude/agents/
 CLAUDE.local.md
 
 # Plans / review scaffolding: stand-up-the-work notes, useful while work is in flight, removed once

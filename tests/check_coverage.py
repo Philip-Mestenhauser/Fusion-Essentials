@@ -113,7 +113,7 @@ _FLOORS = {
     "tools/find_geometry.py": 90,
     "tools/joint_at_geometry.py": 94,
     "tools/joint_create_edit.py": 99,
-    "tools/joint_create_origin.py": 80,
+    "tools/joint_create_origin.py": 84,
     "tools/joint_drive.py": 89,
     "tools/joint_motion_link.py": 95,
     "tools/mesh_combine.py": 96,
