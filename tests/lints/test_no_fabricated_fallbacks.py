@@ -39,10 +39,10 @@ _COUNTISH = frozenset({"count", "len", "quantity", "numberOfFaces", "triangleCou
 _ALLOWED = {
     "_inputs.py:1647": "a degeneracy GUARD - an unreadable vector length is treated as zero so the "
                       "direction is REFUSED, which is the safe direction",
-    "assembly_get.py:205": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
+    "assembly_get.py:252": "a joint origin's offsetX genuinely defaults to 0 (live-verified: a "
                            "face/sketch-anchored JO reports geometry.origin as-is)",
-    "assembly_get.py:206": "offsetY, same contract as offsetX",
-    "assembly_get.py:207": "offsetZ, same contract as offsetX",
+    "assembly_get.py:253": "offsetY, same contract as offsetX",
+    "assembly_get.py:254": "offsetZ, same contract as offsetX",
     "cam_edit_tools.py:435": "a generic CAM-parameter reader whose 'default' is the CALLER's chosen "
                              "value for an absent parameter, not the tool's own request",
     "joint_create_edit.py:272": "picking the LARGEST face - an unreadable area sorts last and is "

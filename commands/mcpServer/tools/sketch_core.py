@@ -17,6 +17,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, scale, target_component
+from ._sketch_detail import sketch_world_frame
 from . import _common
 from . import _inputs
 
@@ -47,32 +48,6 @@ def _pt(x, y, k):
 def _plane_name(sketch) -> str:
     rp = safe(lambda: sketch.referencePlane)
     return safe(lambda: rp.name) if rp is not None else None
-
-
-def _sketch_world_frame(sketch) -> dict:
-    """Map a sketch's local 2D coords to world: where sketch (0,0) lands and where +X/+Y point.
-
-    On a face (or xz/yz) the sketch origin is NOT the face centre and the in-plane axes need not align
-    with world - reporting this lets the caller place geometry by computed coords, not trial+error.
-    All vectors are unit world directions; origin is in mm.
-    """
-    def _vec(g):
-        return [round(safe(lambda: g.x, 0.0) or 0.0, 6),
-                round(safe(lambda: g.y, 0.0) or 0.0, 6),
-                round(safe(lambda: g.z, 0.0) or 0.0, 6)]
-
-    op = safe(lambda: sketch.origin)            # world Point3D of sketch (0,0)
-    xd = safe(lambda: sketch.xDirection)        # world Vector3D of sketch +X
-    yd = safe(lambda: sketch.yDirection)        # world Vector3D of sketch +Y
-    if op is None or xd is None or yd is None:
-        return None
-    return {
-    "origin_mm": [round((safe(lambda: op.x, 0.0) or 0.0) * 10, 4),
-                      round((safe(lambda: op.y, 0.0) or 0.0) * 10, 4),
-                      round((safe(lambda: op.z, 0.0) or 0.0) * 10, 4)],
-    "x_world": _vec(xd),
-    "y_world": _vec(yd),
-    }
 
 
 def _sketch_summary(sketch) -> dict:
@@ -171,7 +146,8 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
     # Encode the sketch's world FRAME so the caller can place geometry on the first try instead of
     # guess-and-screenshot. On a face (and on xz/yz) the sketch's (0,0) is NOT the face centre and its
     # axes may not line up with world - report where sketch (0,0) is in world and where +X/+Y point.
-    frame = _sketch_world_frame(sketch)
+    # The same block sketch_get publishes, from the same helper, so place and verify read alike.
+    frame = safe(lambda: sketch_world_frame(sketch))
 
     payload = {
         "created": True,
@@ -181,9 +157,11 @@ def create_sketch_handler(plane: str = "xy", name: str = "", on_face: str = "") 
         "frame": frame,
         "note": ("Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps "
             "sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along "
-            "frame.x_world, +Y along frame.y_world - place geometry from those, not by eye. On the "
+            "frame.x_world, +Y along frame.y_world, and frame.normal is the plane's world normal - "
+            "place geometry from those, not by eye. On the "
             "xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z "
-            "(read frame.y_world for the exact per-plane axis directions)."),
+            "(read frame.y_world for the exact per-plane axis directions). sketch_get(sketch_name) "
+            "returns the same 'frame' for any sketch, which is how you verify a plane later."),
     }
     if rename_warning:
         payload["rename_warning"] = rename_warning
@@ -921,7 +899,9 @@ _GET_DESC = (
     "entity + profile counts, visibility). WITH 'sketch_name': that sketch's OVERVIEW, in 'units' - "
     "entity counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
     "'handle' to pass as a ProfileRef to model_extrude / model_revolve / model_loft - pick a region "
-    "by area/position, not a guessed index). Add include_entities=true for the full per-entity/"
+    "by area/position, not a guessed index). The overview also carries 'frame' - where sketch (0,0) "
+    "sits in world plus the unit +X/+Y/normal directions - the map from these sketch-LOCAL "
+    "coordinates to world. Add include_entities=true for the full per-entity/"
     "constraint/dimension X-ray (heavier - only when editing the sketch). Entity ids match "
     "sketch_constrain's."
 )

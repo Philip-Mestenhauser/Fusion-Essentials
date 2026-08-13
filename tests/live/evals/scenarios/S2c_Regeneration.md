@@ -6,8 +6,8 @@ fixture: P2-Gimbal (the S2b artifact - pins, bores, seats, zero-interference ver
   stage - the agent changes parameters but never saves; the cloud artifact must remain at the
   version staged. Missing fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 43
-  max_tokens: 32000
+  max_tool_calls: 35
+  max_tokens: 80000
 substitutions: none
 perturbations: none (baseline)
 expected_refusals: none
@@ -31,8 +31,9 @@ the entire task yourself, one tool call at a time. Use ONLY the fusion-essential
 already loaded). No local files, no shell.
 
 The active design is already staged: the saved document "P2-Gimbal" - the gyroscope with its
-pivot pins, bores, and bearing seats, verified interference-clean (contact only where pins and
-shaft meet their bores and seats). Work IN the active design; do not create, open, or switch
+pivot pins, bores, and bearing seats: zero overlap anywhere, support contacts only at the
+carrier-on-pedestal and crank-on-frame engagements, clearance at every pin, bore, and seat.
+Work IN the active design; do not create, open, or switch
 documents, and do NOT SAVE at any point - this stage proves a property and leaves the document
 exactly as found (your restore is verified by reads, not by a save).
 
@@ -50,8 +51,10 @@ GOAL - PROVE THE MODEL REGENERATES:
    a value that did not change names a part whose solids are not actually driven by the
    parameter; report it as the defect it is.
 5. Health read: the timeline must recompute with ZERO errors at the new scale.
-6. Interference check at the new scale: contact ONLY where pins/shaft meet bores/seats - the
-   clearance architecture must survive scaling, not just exist at one lucky size.
+6. Interference check at the new scale: ZERO overlapping pairs, and with coincident faces
+   included the only contacts named are the support engagements (carrier-on-pedestal,
+   crank-on-frame) - the clearance architecture must survive scaling, not just exist at one
+   lucky size.
 7. RESTORE the driver to its exact baseline value. Fresh reads: the three geometry values match
    the baseline again, health is clean, interference matches the baseline state.
 
@@ -64,8 +67,9 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 - PROPAGATION AT THE SOLID LEVEL: all three tracked geometry reads moved under the bump,
   consistent in direction and proportion with the change (report before/after per value).
 - HEALTH UNDER REGENERATION: zero timeline errors after the bump (fresh health read quoted).
-- CLEARANCE SURVIVES SCALE: the post-bump interference check reports contact only at the
-  pin/bore and shaft/seat interfaces (report the checker's actual output).
+- CLEARANCE SURVIVES SCALE: the post-bump interference check reports zero overlapping pairs,
+  with contacts (coincident faces included) only at the support engagements (report the
+  checker's actual output).
 - CLEAN RESTORE: after restoring the driver, the three geometry reads match their baselines,
   health is clean, and the document was never saved (report the doc's saved/modified state).
 
@@ -103,5 +107,5 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   saved, the run is INVALID regardless of verdict - restage from the prior version.
 - Staging: doc_open the S2b artifact BY URN (force_api_open), confirm active; run the block.
 - Chain placement: after S2b, before S3 (S3 consumes the same P2 artifact; S2c leaves it
-  untouched). Budget PROVISIONAL 45 calls / 32k tokens - recalibrate to measured + 25% once a
-  measured run lands.
+  untouched). Budget: the last measured run (Agent-executor harness) was 26 calls - a run that
+  FOUND a frozen-pin defect and reported it precisely; 35 = 26 + 25% rounded up.

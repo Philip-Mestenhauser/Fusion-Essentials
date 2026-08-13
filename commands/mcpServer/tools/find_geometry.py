@@ -122,6 +122,31 @@ def _dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _plane_frame(g, inv_k):
+    """A planar face's own orthonormal frame in WORLD coordinates, or None when it cannot be read.
+
+    adsk.core.Plane carries origin + uDirection/vDirection/normal (live-verified numerically on stock
+    faces: u x v = normal), which is what lets a caller express a point ON the face in local (u, v)
+    coordinates. The plane's origin is its PARAMETRIC origin - NOT the face centroid the record
+    reports as 'position' - so the two are different points and the record publishes both.
+
+    All-or-nothing on purpose: a frame missing its origin or one axis cannot locate a point at all,
+    so a partial read publishes null instead of three quarters of a coordinate system."""
+    def build():
+        plane = adsk.core.Plane.cast(g)
+        if plane is None:
+            return None
+        x = _geom.unit_vector(plane.uDirection)
+        y = _geom.unit_vector(plane.vDirection)
+        n = _geom.unit_vector(plane.normal)
+        if x is None or y is None or n is None:
+            return None
+        o = plane.origin
+        return {"origin": [round(o.x * inv_k, 3), round(o.y * inv_k, 3), round(o.z * inv_k, 3)],
+                "x_world": x, "y_world": y, "normal": n}
+    return safe(build)
+
+
 def _face_record(face, inv_k):
     g = safe(lambda: face.geometry)
     st = safe(lambda: g.surfaceType)
@@ -141,6 +166,10 @@ def _face_record(face, inv_k):
     nrm = _geom.evaluator_normal_at(face, c, decimals=4)
     if nrm is not None:
         rec["normal"] = nrm
+    if kind == "planar_face":
+        # The face plane's own frame, so a caller can compute a point on the face instead of
+        # guessing at world coordinates. Always published for a planar face; null when unreadable.
+        rec["frame"] = _plane_frame(g, inv_k)
     if kind == "cylinder_face":
         rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
         ax = safe(lambda: g.axis)
@@ -257,14 +286,22 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         # hand-typed here and paraphrased in every consumer). Plus the one tool-specific tip.
         "note": _outputs.produces_block(RETURNS) + "\nNarrow with kind / radius / nearest_to "
         "when a part has many similar faces. A match on a body that is not visible carries "
-        "hidden:true (visible bodies' records omit it).",
+        "hidden:true (visible bodies' records omit it).\nA planar face's 'frame' is that face's "
+        "plane in world space: the point at local (u, v) on it is frame.origin + u*frame.x_world + "
+        "v*frame.y_world, and frame.normal is off-plane. frame.origin is the plane's PARAMETRIC "
+        "origin, NOT the face centre - 'position' stays the centroid, so the two differ. This is "
+        "NOT the frame of a sketch a tool creates on the face: that one is measured to differ in "
+        "origin AND in axis SIGN, so pass world coordinates (model_hole points_space='world') "
+        "rather than converting into a sketch frame by hand.",
     })
 
 
 TOOL_DESCRIPTION = (
     "Scan a part's faces/edges/vertices and return handles to them (entity tokens), each with kind, "
     "world position, and shape data (cylinder radius+axis, edge radius, face area, face outward "
-    "normal, linear-edge direction). A 'target' matching several occurrences (e.g. "
+    "normal, linear-edge direction, plus a planar face's 'frame' - that face's plane in world space, "
+    "origin + x_world/y_world/normal, for computing a point ON the face). A 'target' matching "
+    "several occurrences (e.g. "
     "every instance of a patterned component) scans all of them and returns candidates from each - by "
     "design, not a first-match guess - so pass an exact fullPathName to scan just one instance. A body "
     "inside a component resolves by its own name; a name several components hold is refused, naming "

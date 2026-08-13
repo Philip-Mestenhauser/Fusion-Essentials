@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 183  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 184  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -241,6 +241,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `drawing_dimension` | Auto-dimension one view on the active drawing's active sheet - the API's only route to dimensions (no manual dimension, note or leader exists) |
 | ⚠ | `drawing_edit_sheet` | Manage the active 2D drawing's sheets: 'add' a sheet, 'copy' one (sketches and tables come along; it lands last), 'delete' one, 'rename' one, 'set_size', 'set_o... |
 | ✎ | `drawing_export` | Export the active 2D drawing document to a PDF, DXF or DWG file on local disk |
+| · | `drawing_get` | Read the ACTIVE 2D drawing: standard (iso/asme), units, sheet listing with 1-based export_index (the address drawing_export/drawing_edit_sheet take), per-sheet ... |
 | ✎ | `drawing_insert_image` | Place an image file from local disk onto the active drawing's active sheet |
 | ✎ | `drawing_update` | Refresh the active 2D drawing's out-of-date references to the latest source design - the API equivalent of the 'Refresh' button, regenerating the drawing's view... |
 

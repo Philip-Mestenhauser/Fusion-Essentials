@@ -6,8 +6,8 @@ fixture: P7-Template (the S7 artifact) OPENED as the active document by the orch
   IN the template and saves it in place (this scenario advances P7-Template's version - by
   design; the template is the chain's second mutable artifact). Missing fixture = ask.
 budget:
-  max_tool_calls: 78
-  max_tokens: 72000
+  max_tool_calls: 90
+  max_tokens: 200000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -51,7 +51,10 @@ GOAL - the template's manufacturing layer:
   pass (ball endmill) ON THE PLACEHOLDER'S CURVED FEATURE. The placeholder already carries a curved
   feature and a through hole - do NOT add geometry to invent a target. GENERATE the toolpaths and
   poll to completion - every operation must compute healthy (fix or honestly report any that do
-  not).
+  not), and every operation must CUT REAL MATERIAL: after generation, sanity-check each op's
+  target against the geometry it aims at (a drill aimed at a hole that is already open through
+  the stock, or a pass whose heights sit outside the stock, computes fine and cuts air - that is
+  a defect to fix or report, not a green light).
 - ACTIVATE the second setup, confirm the activation took, then activate back.
 - Persist BOTH ways: save the document in place, AND save the job as a reusable CAM TEMPLATE
   artifact (the template-library save), reporting where it landed.
@@ -102,4 +105,7 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   versions); everything P1-P5 stays untouched.
 - cam_save_template creates NEW library entries every run (re-run hygiene: address by the
   returned URL/name recorded in the run record; no tool deletes them).
-- Budget: measured run + 25% (105 calls / 57.3k output tokens, including ~11 calls investigating the WCS-to-JointOrigin binding gap).
+- Budget: the last measured run (Agent-executor harness) was 58 calls, PASS incl. two
+  skeleton-defect repairs that S7's postconditions now prevent; 90 = 58 + 25% plus margin for
+  the cuts-real-material sanity pass. cam_get's setup rows read the WCS back (origin/orientation
+  mode + bound entities), so grade that postcondition from the typed read.

@@ -12,9 +12,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _inputs
-# The catalog read and the by-name resolver are the shared CAM substrate's: this tool checks a new
-# name against the SAME rows cam_get publishes and gates on the SAME query an assignment resolves by.
-from ._cam_common import machine_catalog, resolve_machine
+# The by-name resolver is the shared CAM substrate's: this tool checks a new name through the SAME
+# query an assignment resolves by, and gates the created machine's reachability on it. The full
+# machine_catalog walk is deliberately NOT used here: an unfiltered walk reads capabilities on every
+# bundled machine (measured ~46s over 982 machines - past the 30s handler cap), while the resolver's
+# query is filtered and fast; both read the same Local + Fusion360 locations.
+from ._cam_common import machine_kinds, resolve_machine
 
 # Wire value -> the adsk.cam.MachineTemplate member it builds from. The template fixes the new
 # machine's kinematics tree; a member this Fusion version does not expose is refused by name.
@@ -30,11 +33,6 @@ _TEMPLATES = {
 _TEMPLATE = _inputs.Choice("template", options=list(_TEMPLATES), default="generic_3_axis",
                            description="The machine template the new machine is built from.")
 
-# The catalog read is the collision check's evidence, so it must not come back capped: a row hidden
-# past the cap would let a duplicate name through.
-_CATALOG_CAP = 5000
-
-
 def _machine_library():
     """The shared MachineLibrary - it hangs off CAMManager.get().libraryManager, not the document's
     CAM product, so no open CAM job is needed. Returns (library, None) or (None, error)."""
@@ -44,28 +42,45 @@ def _machine_library():
     return lib, None
 
 
-def _catalog_clash(name):
-    """The catalog row `name` already reaches and the KEY it reaches it by - read from the same
-    Local + Fusion360 catalog an assignment resolves out of. Every key that resolver selects on is
-    compared (case-insensitively, EXACT): _cam_common's exact-match rung takes a label, then
-    'vendor model', then the model, so a new machine taking any of them as its name retargets an
-    assignment string that resolves to a different machine.
-    Returns (row, key, None), (None, None, None) when the name is free, or (None, None, error)."""
-    rows, truncated, err = machine_catalog("", "", _CATALOG_CAP)
-    if err is not None:
-        return None, None, f"Could not read the machine catalog to check '{name}': {err}"
-    if truncated:
-        return None, None, (f"The machine catalog holds more than {_CATALOG_CAP} machines, so the "
-                            f"name '{name}' cannot be proven free - refused instead of risking a "
-                            "duplicate.")
+# resolve_machine's no-match error opens with this - the ONE outcome that proves the name is FREE.
+# Any other resolver answer (a hit, an ambiguity refusal, a library error) means the name is not
+# provably free and the create must refuse rather than risk retargeting an assignment string.
+_NAME_FREE_PREFIX = "No machine matches"
+
+
+def _name_clash(lib, name):
+    """What `name` already reaches, through the SAME query cam_edit_setup assigns by.
+    Returns (machine, rung, location, None) on a clash, (None, None, None, None) when the name is
+    provably free, or (None, None, None, error) when freeness cannot be proven (an ambiguous name
+    IS a clash: several machines answer to it)."""
+    found, label, rerr = resolve_machine(name)
+    if found is None:
+        if rerr and rerr.strip().startswith(_NAME_FREE_PREFIX):
+            return None, None, None, None
+        return None, None, None, (f"'{name}' cannot be proven free: {rerr}")
+    # The rung the name matched on, recomputed against the ONE machine the resolver returned - the
+    # same keys the resolver selects by (label, then 'vendor model', then model).
     want = name.strip().lower()
-    for row in (rows or []):
-        vendor, model = (row.get("vendor") or ""), (row.get("model") or "")
-        for key, value in (("name", row.get("name")), ("model", model),
-                           ("vendor model", (vendor + " " + model).strip())):
-            if (value or "").strip().lower() == want:
-                return row, key, None
-    return None, None, None
+    vendor, model = (safe(lambda: found.vendor) or ""), (safe(lambda: found.model) or "")
+    rung = "name"
+    for key, value in (("name", label), ("vendor model", (vendor + " " + model).strip()),
+                       ("model", model)):
+        if (value or "").strip().lower() == want:
+            rung = key
+            break
+    # Which location holds it: one FILTERED Local query (query_machines searches Local first, so a
+    # Local hit with this machine's id means Local; otherwise it came from the bundled Fusion360).
+    location = "fusion360"
+    fid = safe(lambda: found.id)
+    try:
+        loc = adsk.cam.LibraryLocations.LocalLibraryLocation
+        for m in (lib.createQuery(loc, vendor, model).execute() or []):
+            if safe(lambda m=m: m.id) == fid:
+                location = "local"
+                break
+    except Exception:
+        location = "local or fusion360"
+    return found, rung, location, None
 
 
 def _write_field(machine, prop, value):
@@ -103,14 +118,17 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
     # Refuse before anything is created when the name is ALREADY how the library reaches some other
     # machine - by its label, its model, or its 'vendor model'. Taking such a name does not just
     # duplicate a label: it retargets an assignment string that resolves to another machine.
-    clash, clash_key, cerr = _catalog_clash(name)
+    clash, clash_key, clash_loc, cerr = _name_clash(lib, name)
     if cerr:
         return error(cerr)
     if clash:
-        return error(f"'{name}' is already how the {clash.get('location')} machine library reaches "
-                     f"'{clash.get('name')}' (vendor '{clash.get('vendor')}', model "
-                     f"'{clash.get('model')}') - it matches that machine's {clash_key}. An "
-                     "assignment resolves by those keys, so pick another 'name'.")
+        c_label, c_vendor, c_model = (safe(lambda: clash.description) or "",
+                                      safe(lambda: clash.vendor) or "",
+                                      safe(lambda: clash.model) or "")
+        return error(f"'{name}' is already how the {clash_loc} machine library reaches "
+                     f"'{c_label or c_model}' (vendor '{c_vendor}', model '{c_model}') - it "
+                     f"matches that machine's {clash_key}. An assignment resolves by those keys, "
+                     "so pick another 'name'.")
 
     try:
         machine = adsk.cam.Machine.createFromTemplate(member)
@@ -161,21 +179,15 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
                      f"that name resolves to '{label}' - an assignment would pick a different "
                      "machine. The stored machine is still there.")
 
-    # The catalog cam_get(include=['machines']) publishes is read AGAIN, after the store, and must
-    # now list this name - otherwise the payload's catalog claim would be an assumption.
-    row, row_key, rowerr = _catalog_clash(name)
-    if rowerr:
-        return error(rowerr)
-    if row is None or row_key != "name":
-        return error(f"Machine '{name}' was stored in the Local machine library ({stored_url}) but "
-                     "the machine catalog does not list that name - the create did not land where "
-                     "an assignment reads. The stored machine is still there.")
-
+    # The resolver gate above IS the catalog evidence: cam_get(include=['machines']) reads the same
+    # Local + Fusion360 locations through the same library queries, so a machine that resolves by
+    # its name is the machine that catalog lists. A second UNFILTERED catalog walk is deliberately
+    # not run - it reads capabilities on every bundled machine (~46s, past the handler cap).
     has_sim = bool(safe(lambda: found.hasSimulationModel, False))
-    note = ("Machine created, re-resolved through the query cam_edit_setup assigns from, and re-read "
-            f"from the cam_get(include=['machines']) catalog. Assign it: cam_edit_setup(setup=..., "
-            f"machine='{label}'). It persists in the {row.get('location')} machine library - this "
-            "server has no tool that removes a machine.")
+    note = ("Machine created and re-resolved through the query cam_edit_setup assigns from - the "
+            f"same read the cam_get(include=['machines']) catalog is built on. Assign it: "
+            f"cam_edit_setup(setup=..., machine='{label}'). It persists in the local machine "
+            "library - this server has no tool that removes a machine.")
     if has_sim:
         note += (" It carries a simulation model, which the assignment refuses - pass "
                  "machine_strip_simulation=true to cam_edit_setup.")
@@ -184,12 +196,12 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
         "name": label,
         "machine_id": safe(lambda: found.id),
         "template": key,
-        "location": row.get("location"),
+        "location": "local",     # importMachine targeted the Local root and machineAtURL confirmed
         "url": stored_url,
         "asset_name": safe(lambda: url.leafName),
         "vendor": safe(lambda: found.vendor),
         "model": safe(lambda: found.model),
-        "kind": row.get("kind"),
+        "kind": machine_kinds(found),
         "has_post": bool(safe(lambda: found.hasPost, False)),
         "has_simulation_model": has_sim,
         "note": note,

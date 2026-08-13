@@ -27,6 +27,7 @@
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",
       "mcp__fusion-essentials__doc_get",
+      "mcp__fusion-essentials__drawing_get",
       "mcp__fusion-essentials__find_geometry",
       "mcp__fusion-essentials__mesh_get",
       "mcp__fusion-essentials__model_compute_holder",

@@ -6,6 +6,8 @@ occurrence's world position, ground flags, and joints, plus a design-level joint
 rollup. Read-only.
 """
 
+import math
+
 import adsk.core
 import adsk.fusion
 
@@ -35,50 +37,33 @@ _MOTION = {
 
 
 
-def _axis_vec(v):
-    """A basis axis Vector3D as a [x,y,z] unit vector (4dp), or None. Directions are dimensionless."""
-    x = safe(lambda: v.x); y = safe(lambda: v.y); z = safe(lambda: v.z)
-    if x is None or y is None or z is None:
-        return None
-    return [round(x, 4), round(y, 4), round(z, 4)]
+def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):
+    """ONE occurrence row: identity + ground flags + body count + its world placement
+    (_geom.occ_world_frame) + the joints it takes part in. full_path adds the occurrence's
+    fullPathName, which is what distinguishes two nested instances carrying the same leaf name."""
+    name = safe(lambda: occ.name)
+    rec = {
+    "name": name,
+    "component": safe(lambda: occ.component.name),
+    "grounded": bool(safe(lambda: occ.isGrounded, False)),
+    "ground_to_parent": bool(safe(lambda: occ.isGroundToParent, False)),
+    "body_count": safe(lambda: occ.bRepBodies.count, 0),
+    }
+    if full_path:
+        rec["full_path"] = safe(lambda: occ.fullPathName)
+    rec.update(_geom.occ_world_frame(occ, inv_k))
+    if include_joints:
+        rec["joints"] = occ_joints.get(name, [])
+    return rec
 
 
-def _occ_world(occ, inv_k):
-    """World origin (translation) + rotation basis axes + bbox center/size, in display units.
-
-    x_axis/y_axis/z_axis are the occurrence transform's basis vectors (its ROTATION): an unrotated
-    occurrence reads x=[1,0,0], y=[0,1,0], z=[0,0,1]. Directions are dimensionless, so - unlike origin
-    - they are NOT unit-scaled.
-    """
-    out = {}
-    m = safe(lambda: occ.transform2)
-    t = safe(lambda: m.translation) if m is not None else None
-    if t is not None:
-        out["origin"] = [round(safe(lambda: t.x, 0.0) * inv_k, 3),
-                         round(safe(lambda: t.y, 0.0) * inv_k, 3),
-                         round(safe(lambda: t.z, 0.0) * inv_k, 3)]
-    if m is not None:
-        # getAsCoordinateSystem returns (origin, xAxis, yAxis, zAxis) in Python.
-        cs = safe(lambda: m.getAsCoordinateSystem())
-        if isinstance(cs, (list, tuple)) and len(cs) == 4:
-            for key, vec in (("x_axis", cs[1]), ("y_axis", cs[2]), ("z_axis", cs[3])):
-                av = _axis_vec(vec)
-                if av is not None:
-                    out[key] = av
-    # Bodies-only box (_geom.body_aabb): the plain occ.boundingBox also counts visible sketches +
-    # construction datums, so an orphaned oversized sketch mis-reported a 68x10 body as 120x120
-    # (live-verified). None (no bodies) -> bbox omitted, never a datum-inflated box.
-    bb = _geom.body_aabb(occ)
-    if bb is not None:
-        mn = safe(lambda: bb.minPoint); mx = safe(lambda: bb.maxPoint)
-        if mn is not None and mx is not None:
-            out["bbox_center"] = [round((mn.x + mx.x) / 2 * inv_k, 3),
-                                  round((mn.y + mx.y) / 2 * inv_k, 3),
-                                  round((mn.z + mx.z) / 2 * inv_k, 3)]
-            out["bbox_size"] = [round((mx.x - mn.x) * inv_k, 3),
-                                round((mx.y - mn.y) * inv_k, 3),
-                                round((mx.z - mn.z) * inv_k, 3)]
-    return out
+def _all_occurrence_rows(design, inv_k, cap, occ_joints, include_joints):
+    """The all_occurrences slice: the same row as above for EVERY occurrence in the design - nested
+    children included - over the ONE assembly-context walk (_common.all_occurrences, the only source
+    of true fullPathNames). Bounded by cap; returns (rows, total)."""
+    occs = _common.all_occurrences(design)
+    rows = [_occ_record(o, inv_k, occ_joints, include_joints, full_path=True) for o in occs[:cap]]
+    return rows, len(occs)
 
 
 def _health(obj):
@@ -113,7 +98,64 @@ def _limit_facts(lims, to_out):
     return out
 
 
-def _joint_record(j):
+# JointMotion attribute -> wire key + the conversion out of Fusion's internal units (radians for a
+# rotation, cm for a slide). A motion class exposes only the values ITS degrees of freedom have -
+# RevoluteJointMotion.rotationValue, SliderJointMotion.slideValue, PlanarJointMotion's rotation plus
+# both slides - so an absent attribute is that joint kind not carrying that DOF, not a failed read.
+_VALUE_NOW = (("rotationValue", "angle_deg", math.degrees),
+              ("slideValue", "slide_mm", lambda cm: cm * 10.0),
+              ("primarySlideValue", "slide_primary_mm", lambda cm: cm * 10.0),
+              ("secondarySlideValue", "slide_secondary_mm", lambda cm: cm * 10.0))
+
+
+def _value_now(j):
+    """The joint's CURRENT driven value(s) in the same units as its limits ({angle_deg} for a
+    revolute, {slide_mm} for a slider, all three for a planar), or None when the motion carries no
+    driven value at all (rigid). Read straight off jointMotion, so nobody has to derive a joint angle
+    from the occurrences' basis vectors."""
+    jm = safe(lambda: j.jointMotion)
+    if jm is None:
+        return None
+    out = {}
+    for attr, key, conv in _VALUE_NOW:
+        v = _common.measured(lambda a=attr: getattr(jm, a))
+        if v is not None:
+            out[key] = round(conv(v), 4)
+    return out or None
+
+
+def _joint_frame(j, inv_k):
+    """The joint's own frame in WORLD coordinates - {origin (display units), z_axis, x_axis, y_axis} -
+    from geometryOrOriginOne, falling back to geometryOrOriginTwo, and None when neither reads.
+
+    The frame's Z is primaryAxisVector (X is secondary, Y is third), and that Z is the direction the
+    joint's OFFSET drives along - the fact a caller otherwise has to probe for."""
+    for attr in ("geometryOrOriginOne", "geometryOrOriginTwo"):
+        g = safe(lambda a=attr: getattr(j, a))
+        if g is None:
+            continue
+        z = _geom.axis_vec(safe(lambda g=g: g.primaryAxisVector))
+        x = _geom.axis_vec(safe(lambda g=g: g.secondaryAxisVector))
+        y = _geom.axis_vec(safe(lambda g=g: g.thirdAxisVector))
+        if _joints.is_joint_origin(g):
+            # A JointOrigin carries the three axis vectors but NO origin of its own - its position is
+            # the base anchor plus its offsetX/Y/Z, which _jo_world_origin (the JO slice's read)
+            # already assembles.
+            origin = _jo_world_origin(g, x, y, z, inv_k)
+        else:
+            o = safe(lambda g=g: g.origin)
+            origin = None
+            if o is not None:
+                c = [_common.measured(lambda ax=ax: getattr(o, ax), inv_k, 3)
+                     for ax in ("x", "y", "z")]
+                origin = None if None in c else c
+        if origin is None and not (z or x or y):
+            continue
+        return {"origin": origin, "z_axis": z, "x_axis": x, "y_axis": y}
+    return None
+
+
+def _joint_record(j, inv_k):
     mt = safe(lambda: j.jointMotion.jointType)
     friendly, dof = _MOTION.get(mt, ("?", None))
     healthy, msg = _health(j)
@@ -135,19 +177,24 @@ def _joint_record(j):
            _common.read_flag(lambda: j.timelineObject.isSuppressed))
     if sup:
         rec["is_suppressed"] = True
-    import math as _m
-    rot = _limit_facts(safe(lambda: j.jointMotion.rotationLimits), _m.degrees)
+    rot = _limit_facts(safe(lambda: j.jointMotion.rotationLimits), math.degrees)
     sld = _limit_facts(safe(lambda: j.jointMotion.slideLimits), lambda cm: cm * 10.0)
     if rot:
         rec["rotation_limits_deg"] = rot
     if sld:
         rec["slide_limits_mm"] = sld
+    now = _value_now(j)
+    if now:
+        rec["value_now"] = now
+    frame = _joint_frame(j, inv_k)
+    if frame:
+        rec["frame"] = frame
     return rec
 
 
 # ── joint_origins slice: each Joint Origin (a reusable WCS frame) as a referenceable, handle-bearing row ──
 
-_SLICES = ("joint_origins", "relations", "contacts")
+_SLICES = ("all_occurrences", "joint_origins", "relations", "contacts")
 
 # Per-rigid-group / per-contact-set member preview; the row's own count carries the rest.
 _MEMBER_CAP = 12
@@ -221,9 +268,9 @@ def _jo_row(jo, ref, comp, inv_k, consumers):
     JointOriginRef)."""
     nm = safe(lambda: jo.name)
     row = {"name": nm, "qualified_name": ref, "component": safe(lambda: comp.name)}
-    z = _axis_vec(safe(lambda: jo.primaryAxisVector))
-    x = _axis_vec(safe(lambda: jo.secondaryAxisVector))
-    y = _axis_vec(safe(lambda: jo.thirdAxisVector))
+    z = _geom.axis_vec(safe(lambda: jo.primaryAxisVector))
+    x = _geom.axis_vec(safe(lambda: jo.secondaryAxisVector))
+    y = _geom.axis_vec(safe(lambda: jo.thirdAxisVector))
     wp = _jo_world_origin(jo, x, y, z, inv_k)
     if wp is not None:
         row["world_position"] = wp
@@ -367,7 +414,8 @@ def _normalize_include(include):
 
 def handler(units: str = "mm", include=None, include_joints: bool = True,
             max_occurrences: int = 50, max_joints: int = 100, max_joint_origins: int = 50,
-            max_relations: int = 50, max_contacts: int = 50) -> dict:
+            max_relations: int = 50, max_contacts: int = 50,
+            max_all_occurrences: int = 100) -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -393,7 +441,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     joints = []
     occ_joints = {}
     for j in _joints.all_joints(design):
-        rec = _joint_record(j)
+        rec = _joint_record(j, inv_k)
         joints.append(rec)
         for key in ("occurrence_one", "occurrence_two"):
             nm = rec.get(key)
@@ -411,20 +459,9 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     occurrences = []
     grounded_names = []
     for occ in _common.iter_collection(safe(lambda: root.occurrences)):
-        name = safe(lambda: occ.name)
-        grounded = bool(safe(lambda: occ.isGrounded, False))
-        if grounded:
-            grounded_names.append(name)
-        rec = {
-        "name": name,
-        "component": safe(lambda: occ.component.name),
-        "grounded": grounded,
-        "ground_to_parent": bool(safe(lambda: occ.isGroundToParent, False)),
-        "body_count": safe(lambda: occ.bRepBodies.count, 0),
-        }
-        rec.update(_occ_world(occ, inv_k))
-        if include_joints:
-            rec["joints"] = occ_joints.get(name, [])
+        rec = _occ_record(occ, inv_k, occ_joints, include_joints)
+        if rec["grounded"]:
+            grounded_names.append(rec["name"])
         occurrences.append(rec)
 
     # Cap the OCCURRENCES array reported to the caller; occurrence_count/grounded_occurrences below
@@ -502,6 +539,23 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "timeline_problems name them. Then reason about grounding/positions/joint-wiring from "
     "these NUMBERS rather than a cluttered screenshot; pair with view_set(isolate).",
     }
+
+    # all_occurrences slice (opt-in): the same occurrence row for the NESTED instances too. The
+    # 'occurrences' array above walks root.occurrences - top-level only - so a part sitting inside a
+    # sub-assembly appears nowhere in it, and its position (drifted or not) is unreadable here.
+    if "all_occurrences" in inc:
+        cap_ao = max(1, int(max_all_occurrences))
+        ao_rows, ao_total = _all_occurrence_rows(design, inv_k, cap_ao, occ_joints, include_joints)
+        out["all_occurrences"] = ao_rows
+        out["all_occurrence_count"] = ao_total
+        out["all_occurrences_truncated"] = ao_total > len(ao_rows)
+        if out["all_occurrences_truncated"]:
+            out["note"] += (f" all_occurrences was capped at {cap_ao} of {ao_total}; raise "
+                            "max_all_occurrences to see the rest.")
+    else:
+        out["note"] += (" The 'occurrences' array is TOP-LEVEL only; include=['all_occurrences'] "
+                        "repeats the same record for every occurrence in the design - nested children "
+                        "included - each with its full_path.")
 
     # joint_origins slice (opt-in): each Joint Origin (WCS frame) as a referenceable, handle-bearing row.
     if "joint_origins" in inc:
@@ -584,6 +638,12 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
         out["note"] += (" WARNING: broken_joints is non-empty but the TIMELINE shows no errored feature - "
     "the joint health likely LAGS an uncommitted edit. Run design_recompute, then "
     "re-probe; the timeline (design_get) is authoritative.")
+    if include_joints and joints_out:
+        out["note"] += (" Each joint row carries value_now - the joint's CURRENT driven value read "
+                        "off its motion (angle_deg / slide_mm), so it never has to be derived from "
+                        "the parts' basis vectors - and frame, that joint's frame in WORLD "
+                        "coordinates, whose z_axis is the direction a joint OFFSET drives along "
+                        "(param_set on the joint's offset parameter, or joint_edit offset).")
     if root_bodies:
         out["note"] += (" NOTE: root_bodies lists geometry directly in the root component - these are "
                         "NOT occurrences and can't be jointed/grounded; promote one to a component "
@@ -598,30 +658,34 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 TOOL_DESCRIPTION = (
     "Read the active assembly's kinematic state as JSON. For every top-level occurrence: its world "
-    "position (origin + bodies-only bbox center/size in 'units'), rotation as three basis axes "
-    "(x_axis/y_axis/z_axis unit vectors), ground flags (grounded/ground_to_parent), and its joints. "
-    "Plus a design-level joint list (type, degrees of freedom, the two occurrences each connects) and "
-    "which occurrences are grounded. Use it to verify grounding, joint wiring, and part positions from "
-    "numbers instead of a screenshot. include_joints=false for just positions/grounding. "
+    "position (origin + bodies-only bbox center/size in 'units'), rotation as x_axis/y_axis/z_axis "
+    "basis vectors, ground flags (grounded/ground_to_parent), and its joints. "
+    "Plus a design-level joint list: type, degrees of freedom, the two occurrences each connects, "
+    "value_now (its CURRENT driven value: angle_deg / slide_mm) and frame (its WORLD origin + axes, "
+    "whose z_axis is the direction a joint OFFSET drives along). Verify grounding, joint wiring and "
+    "part positions from numbers, not a screenshot. include_joints=false for just positions/"
+    "grounding. include=['all_occurrences'] repeats that record for NESTED occurrences too (the "
+    "array above is top-level only), each with its full_path. "
     "include=['joint_origins'] adds each Joint Origin (WCS frame): qualified name + handle (feed "
     "joint_create / cam_edit_setup wcs), world position/axes, consuming joints. include=['relations'] "
     "adds the non-joint relationships (rigid groups, motion links, constraints) by name, to edit with "
     "assembly_edit_relations. include=['contacts'] adds the design's contact sets plus whether contact "
-    "analysis is on and what it is scoped to (assembly_edit_contacts). occurrences/joints are capped "
-    "(max_occurrences 50, max_joints 100); *_truncated flags a hit cap."
+    "analysis is on and what it is scoped to (assembly_edit_contacts). Every list is capped; a "
+    "*_truncated flag marks one that hit its cap."
 )
 
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slice: 'joint_origins' (each Joint Origin WCS frame + handle), 'relations' (rigid groups / motion links / constraints), 'contacts' (contact sets + the contact-analysis flags). Omit for kinematic state only."})
+            "description": "Deeper slice: 'all_occurrences' (every occurrence, nested ones included, with its full path), 'joint_origins' (each Joint Origin WCS frame + handle), 'relations' (rigid groups / motion links / constraints), 'contacts' (contact sets + the contact-analysis flags). Omit for kinematic state only."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
     .add_input_property("max_occurrences", {"type": "integer", "description": "Cap on the 'occurrences' array returned (default 50)."})
     .add_input_property("max_joints", {"type": "integer", "description": "Cap on the 'joints' array returned (default 100)."})
     .add_input_property("max_joint_origins", {"type": "integer", "description": "Cap on the 'joint_origins' array (default 50)."})
     .add_input_property("max_relations", {"type": "integer", "description": "Cap on each 'relations' list (default 50)."})
     .add_input_property("max_contacts", {"type": "integer", "description": "Cap on the 'contacts' list (default 50)."})
+    .add_input_property("max_all_occurrences", {"type": "integer", "description": "Cap on the 'all_occurrences' list (default 100)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

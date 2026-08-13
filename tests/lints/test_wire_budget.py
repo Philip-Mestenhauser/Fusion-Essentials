@@ -31,7 +31,7 @@ _TOOL_WEIGHTS = {
     "assembly_constrain": 2384,   # + the verification contract a caller cannot recover after the call: the create REFUSES a constraint that did not solve (or whose state is unreadable) and one whose add left other relations unhealthy, and the payload's 'moved' answers whether the parts were actually located
     "assembly_edit_relations": 2425,   # over P40: six actions over three relation kinds (rigid group / motion link / constraint), each with its own input, plus the measured set_occurrences refusal and the ratio-sign contract; peer: design_edit_timeline
     "assembly_edit_contacts": 2233,   # over P40: nine actions over one object - the set lifecycle (create with the >=2-distinct rule, set_members, rename, suppress, delete) plus the two design-level analysis flags whose truth table decides whether any set acts at all, and the enable-first fact the platform enforces by raising; peer: assembly_edit_relations
-    "assembly_get": 2323,   # + the relations slice (rigid groups / motion links / constraints), the contacts slice (contact sets + both contact-analysis flags), and their caps
+    "assembly_get": 2707,   # + the all_occurrences slice with its cap, and the joint rows' value_now/frame teaching (the frame's z_axis is the direction a joint offset drives along - the read that retires per-build probe cycles)
     "assembly_ground": 1166,
     "assembly_inspect_interference": 893,
     "assembly_move": 2434,
@@ -49,7 +49,7 @@ _TOOL_WEIGHTS = {
     "cam_edit_tools": 3447,   # turning+hole-making(inch) sample sources, add/remove_preset actions, preset units contract
     "cam_generate": 1386,
     "cam_generate_setup_sheet": 1313,   # under the fleet P40 at pin time - add and go
-    "cam_get": 3804,   # + the inspection slice (per-measure rollup + worst point, scoped out-of-tolerance drill, the measured None empty state)
+    "cam_get": 3819,   # + the setups slice reads the bound WCS back (origin/orientation mode + bound geometry), the only read-back of what cam_edit_setup's wcs binding did; paid for by trimming six description spots
     "cam_get_status": 1684,
     "cam_inspect_toolpaths": 1333,
     "cam_post": 2974,
@@ -77,7 +77,7 @@ _TOOL_WEIGHTS = {
     "design_delete_occurrence": 1176,   # the target is named as a handle (the exact identity) with the path/name as the convenience form, on both surfaces
     "design_export": 4155,   # 3MF/OBJ/USD/f3d/SMT formats, STL binary+units, DXF options, invisible flags
     "design_set_name": 1324,   # under the fleet P40 - add and go
-    "design_get": 2063,   # + the materials/appearances catalog slices (library census, scoped filtered pages) - in-family peers: cam_get, assembly_get
+    "design_get": 2701,   # + the attributes slice (group/key scope, required-group refusal) and timeline_params - a feature's own model parameters with their roles, the only readable route to a fillet's radius; in-family peers: cam_get, assembly_get
     "design_recompute": 571,
     "design_remove_feature": 1302,   # under the fleet P40 at pin time - add and go
     "design_set_mode": 969,
@@ -99,10 +99,11 @@ _TOOL_WEIGHTS = {
     "drawing_create": 4425,   # -28: the up-front "open it once in the Fusion UI" instruction retired - a never-reviewed drawing opens and drives through doc_open (measured), so the description names that route and the UI open survives only as failure-time teaching in the note. center_line/center_mark still state the refusal their resolver enforces rather than advertise a capability adsk.drawing carries no enum family for; the client-timeout fact (a timeout is not a verdict) is paid for by slimmer input descriptions; 75 under the hard ceiling
     "drawing_dimension": 1364,   # at the fleet P40 at pin time - add and go
     "drawing_edit_sheet": 1944,   # +87: Sheet.width/height are millimetres on EVERY drawing while sheet_units is the dimension unit - the two are told apart on the wire, and a caller cannot recover a wrong unit claim
-    "drawing_export": 2142,   # -72: the never-reviewed-drawing blocking claim retired (a drawing never reviewed in the Fusion UI opens and exports through doc_open, measured), leaving the API route in its place. +266 still stands: sheet_range carries the measured wedge at its observed severity (a single-sheet range export twice hung the Fusion main thread on 2705.0.87 and the session needed outside intervention, while all-sheets ran clean) - a caller who reaches for the input cannot recover a wedged session from the result
+    "drawing_get": 975,   # under the fleet P40 - the drawing family's ONE read: sheet listing by export_index, per-sheet facts, per-view rows; the read the whole tier lacked (and scripts cannot substitute - they die on DrawingDocuments)
+    "drawing_export": 2195,   # sheet_range carries the DISCRIMINATED hazard at its measured truth: the minutes-long main-thread block strikes a sheet_range export issued AFTER another export (2/2), while one run FIRST completed clean - run-first is the teaching a caller cannot recover from the result
     "drawing_insert_image": 1737,   # +217: rotate_deg (degrees about the insert position) and the six image extensions the guard takes - the placement surface an image needs, and neither is recoverable after a call that cannot be read back
     "drawing_update": 1262,  # shrank: retired the reviewed-drawing park-on-a-human clause
-    "find_geometry": 2116,   # +122: a body inside a component resolves by name, and the qualified '<occurrence-or-component>:<body>' form the ambiguity refusal lists is what a caller must pass back - neither is recoverable from the schema; the form rides the 'target' input description, so the prose no longer spells it a second time
+    "find_geometry": 2249,   # + the planar-face frame (origin + in-plane axes + normal), a field a caller cannot recover from the schema; the qualified '<occurrence-or-component>:<body>' target form rides the 'target' input description
     "joint_at_geometry": 2399,   # + the axis Choice enum (values machine-validated) and the frame-relative correction with its joint_edit(world_axis=) pointer; (ball uses none) stated on both surfaces
     "joint_create": 3480,
     "joint_create_as_built": 2095,  # non-rigid motion: geometry anchor + joint_type/axis/slide_axis inputs, per-DOF pose pointers; the name input (applied post-create, read back) + the no-offset/angle-parameter fact routing parametric drives to joint_create
@@ -136,8 +137,8 @@ _TOOL_WEIGHTS = {
     "model_emboss": 1458,   # + the sketch-TEXT profile route ('text:<i>' / '<sketch>/text:<i>'), the only path from a nameplate sketch to an engraving
     "model_extrude": 3245,   # +104: the sketch-TEXT profile form ('text:<i>'), the only route from a text-only sketch to a solid - the index/handle vocabulary alone reads it as an index and dead-ends in the surface branch
     "model_fillet": 3412,   # variable-radius, chord-length and rule fillet, with the rule radius/topology read back
-    "model_hole": 4497,   # placement modes (center/on_edge/plane_offsets) incl. the point frame, modeled thread, tip_angle, thread_type
-    "model_inspect": 1566,
+    "model_hole": 4467,   # placement modes (center/on_edge/plane_offsets), points_space sketch/world (the sketch-on-face frame is unknowable a priori - world lets find_geometry positions drive holes directly), modeled thread, tip_angle, thread_type
+    "model_inspect": 1713,   # per_body names every occurrence in the subtree and discloses that a parent row aggregates its children - the read that stops a nested body folding invisibly into its parent
     "model_pipe": 2949,   # +86 for the measured chaining rule (tangent continuity, sharp corner stops it). over P40: the path-fraction extents (both ends), section type/size, the order-coupled hollow wall verified off the feature, and the open-path refusal contract; nearest path-driven peer model_sweep
     "model_loft": 1959,   # + is_closed (the one measured-real loft option; alignment measured a no-op on profiles and dropped) + the ordering sentence relocated from the ProfileRefList kind note
     "model_measure_between": 1137,
@@ -178,13 +179,13 @@ _TOOL_WEIGHTS = {
     "sketch_dimension": 3546,   # ref vocabulary names ellipse/spline kinds; + the eight remaining SketchDimensions add* types, the surface operand and the driving/tangent-side flags, and the two measured dim_type behaviors a caller cannot see in the result (the angle wedge, the offset rotate)
     "sketch_edit_curve": 2118,   # seven curve-edit actions with per-curve pick points
     "sketch_insert_svg": 1556,   # over P40: the ignored width/height/viewBox with the 1/96-inch-times-scale rule, the y-down landing, and the doc_insert_import pointer are each a sizing/placement fact a caller cannot recover from the result
-    "sketch_get": 1162,
+    "sketch_get": 1325,   # the read publishes 'frame' (world origin + X/Y/normal), the only typed route to a sketch plane's position, facing and coplanarity
     "sketch_project": 3558,   # two more actions on the same verb: to_surface (projectToSurface - faces, source curves from another sketch, project type, direction) and intersect (intersectWithSketchPlane - bodies/entities x the sketch plane); in-family peers: sketch_constrain, sketch_dimension
     "sketch_set_text": 2986,   # +70: 'x' names the anchor 'align' puts it on (left edge / center / right edge) - measured, the box moves with align and a caller cannot recover where centered text landed; + the along_path/fit_on_path modes (path, above_path, align, character_spacing), angle/flip formatting, and font_name (applies on create AND edit, landed/edited font read back) - in-family peers: sketch_edit_curve, sketch_constrain
     "surface_delete_face": 1386,   # + the conditional-'feature'/'bodies_consumed' PRODUCES clauses (a direct design creates no timeline feature, so both feature-derived outputs are omitted)
     "surface_extend": 1693,   # + extend_alignment (free_edges/align_edges, fresh-input default measured 0)
     "surface_extrude": 1845,
-    "surface_offset": 1374,  # +119: the isSolid claim was measured FALSE for a solid's face (probe_w7.log R1) - the description now states the measured split
+    "surface_offset": 1409,  # the distance input teaches 0 = a COINCIDENT copy of the face (legal, measured live - the machining-prep copy-face idiom); the description states the measured isSolid split
     "surface_patch": 2209,   # + continuity (the plural enum class - the only one that exists) and edges-only interior rails
     "surface_fill": 1715,   # over P40: the cell-disclosure contract + two measured legality facts ARE the tool (peer: surface_patch)
     "surface_reverse_normal": 1244,

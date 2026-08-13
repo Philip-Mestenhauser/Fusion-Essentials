@@ -560,29 +560,31 @@ class TestTheDescriptionAsksForNoHumanStep:
 
 
 class TestSheetRangeCarriesTheWedgeFact:
-    """Measured on 2705.0.87: a single-sheet sheet_range export twice wedged the Fusion main thread -
-    every later call timed out and the session never recovered on its own - while the all-sheets
-    export of the same drawing ran clean. Until that is discriminated the input itself has to carry
-    the fact, at its observed SEVERITY: a caller who reaches for sheet_range cannot recover a wedged
-    session from the result, and "it may be slow" would understate what it costs."""
+    """Measured on 2705.0.87, DISCRIMINATED across three sessions: the minutes-long main-thread
+    block strikes a sheet_range export issued soon AFTER another export of the same drawing (2/2,
+    self-recovering, the file never lands), while a sheet_range export run FIRST completed clean.
+    The input carries that ordering rule - a caller cannot recover the lost minutes or the missing
+    file from the result."""
 
     def _sheet_range_description(self):
         return de.tool.to_dict()["inputSchema"]["properties"]["sheet_range"]["description"]
 
-    def test_the_input_states_the_measured_wedge(self):
+    def test_the_input_states_the_measured_block(self):
         desc = self._sheet_range_description()
         assert "2705.0.87" in desc
-        assert "wedged" in desc
+        assert "blocked" in desc and "minutes" in desc
 
-    def test_the_input_states_the_observed_severity(self):
-        # the session did not recover by itself - that is what makes this worth a wire warning
+    def test_the_input_states_the_trigger_ordering(self):
+        # the block is a follow-up-export collision, not an inherent single-sheet defect
         desc = self._sheet_range_description()
-        assert "did not recover" in desc
-        assert "outside intervention" in desc
+        assert "AFTER another export" in desc
 
-    def test_the_input_says_prefer_omitting_it(self):
-        assert "prefer omitting" in self._sheet_range_description()
+    def test_the_input_states_the_honest_severity(self):
+        # it self-recovers, but the deliverable never lands - both halves stated
+        desc = self._sheet_range_description()
+        assert "self-recovers" in desc
+        assert "never lands" in desc
 
-    def test_the_all_sheets_comparison_is_kept(self):
-        # without the clean all-sheets half the fact reads as "PDF export is broken", which it is not
-        assert "all-sheets export of the same drawing ran clean" in self._sheet_range_description()
+    def test_the_input_teaches_run_first(self):
+        desc = self._sheet_range_description()
+        assert "FIRST" in desc and "never a follow-up" in desc

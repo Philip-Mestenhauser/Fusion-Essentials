@@ -159,12 +159,17 @@ class FakeUserParameters:
 class FakeDesign:
     """The DESTINATION design (what _common.design() returns). designType: 1 = parametric, 0 = direct.
     No allComponents/computeAll surface: design_wide_counts falls back to the root (0 bodies) and
-    computeAll is swallowed by safe() - the landed body DELTA is asserted live, not here."""
+    computeAll is swallowed by safe() - the landed body DELTA is asserted live, not here.
 
-    def __init__(self, root_comp, design_type=1, user_param_count=0):
+    all_param_count=None leaves the design with NO allParameters collection, so the design-level
+    model-parameter count reads as UNKNOWN rather than zero."""
+
+    def __init__(self, root_comp, design_type=1, user_param_count=0, all_param_count=None):
         self.rootComponent = root_comp
         self.designType = design_type
         self.userParameters = FakeUserParameters(user_param_count)
+        if all_param_count is not None:
+            self.allParameters = FakeUserParameters(all_param_count)
 
 
 class FakeProducts:
@@ -230,12 +235,13 @@ def _make_source(components=(), occ_by_comp=None, root_name="SrcRoot"):
 
 def _install(monkeypatch, *, design_type=1, user_param_count=0, occurrences=(),
              derive_features=None, comp_name="Root", data_file=None,
-             source_design=_NO_DEFAULT, source_open=True):
+             source_design=_NO_DEFAULT, source_open=True, all_param_count=None):
     """Wire both design seams + a fake app.documents holding the (open) source doc + a stubbed
     _resolve_data_file. Returns (design, comp, docs, data_file, derive_features, source_doc)."""
     derive_features = derive_features if derive_features is not None else FakeDeriveFeatures()
     comp = FakeComp(comp_name, derive_features=derive_features, occurrences=occurrences)
-    design = FakeDesign(comp, design_type=design_type, user_param_count=user_param_count)
+    design = FakeDesign(comp, design_type=design_type, user_param_count=user_param_count,
+                        all_param_count=all_param_count)
     monkeypatch.setattr(io._common, "design", lambda: design)
     monkeypatch.setattr(io._inputs._common, "design", lambda: design)
     df = data_file or FakeDataFile()
@@ -549,6 +555,35 @@ class TestParameterVerify:
         out = _payload(io.handler(document_id="urn:x"))
         assert out["parameters_imported"] == 0
         assert "parameter_warning" in out and "flaky" in out["parameter_warning"]
+
+    def test_warning_points_at_the_model_parameter_route(self, monkeypatch):
+        # 0 user parameters is not "nothing arrived": source values can land as read-only MODEL
+        # parameters, and the warning must name the read that sees them.
+        _install(monkeypatch, user_param_count=4)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert "param_get(include_model_parameters=true)" in out["parameter_warning"]
+
+    def test_model_parameters_added_is_the_design_level_delta(self, monkeypatch):
+        # the imported values land as MODEL parameters at the DESIGN level, so the delta is taken
+        # over design.allParameters - not over the derived component, which holds only its own.
+        design, comp, docs, df, dfs, _ = _install(monkeypatch, user_param_count=4,
+                                                  all_param_count=9)
+        dfs.on_add = lambda: setattr(design.allParameters, "_count", 29)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["parameters_imported"] == 0        # the userParameters delta saw none...
+        assert out["model_parameters_added"] == 20    # ...while 20 model parameters landed
+
+    def test_zero_delta_is_published_honestly(self, monkeypatch):
+        # both counts read, and they matched: 0 is an ANSWER here, unlike an unreadable count.
+        _install(monkeypatch, all_param_count=9)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["model_parameters_added"] == 0
+
+    def test_model_parameter_delta_omitted_when_unreadable(self, monkeypatch):
+        # allParameters cannot be read, so the delta is UNKNOWN - the key is omitted, never a false 0.
+        _install(monkeypatch)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert "model_parameters_added" not in out
 
     def test_no_warning_when_both_flags_false(self, monkeypatch):
         _install(monkeypatch, user_param_count=4)

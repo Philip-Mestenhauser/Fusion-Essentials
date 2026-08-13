@@ -356,10 +356,42 @@ def run():
     return rc
 
 
+def get_only():
+    """READ-ONLY drawing_get beats against whatever drawing is ACTIVE - no staging, nothing
+    written. The read tool's live verification: sheets listed by export_index, per-view rows,
+    the one-sheet scope, and the miss refusal naming the available sheets."""
+    health_gate()
+    ctx = {}
+    steps = [
+        ("drawing_get", {}, "ok",
+         ("sheet_names", lambda p: [s.get("name") for s in (p.get("sheets") or []) if s])),
+        # the payload's own shape claims: contiguous 1-based export indices, exactly one active
+        ("drawing_get", {}, lambda p: isinstance(p.get("sheet_count"), int), None),
+        ("drawing_get", {}, lambda p: (
+            [s.get("export_index") for s in p.get("sheets") or []]
+            == list(range(1, len(p.get("sheets") or []) + 1))), None),
+        ("drawing_get", {}, lambda p: (
+            sum(1 for s in p.get("sheets") or [] if s.get("is_active")) == 1), None),
+        # view_rows agree with each sheet's own view count (uncapped sheets only)
+        ("drawing_get", {"include": "views"}, lambda p: all(
+            isinstance(s.get("view_rows"), list) and len(s["view_rows"]) == s.get("views")
+            for s in p.get("sheets") or [] if (s.get("views") or 0) <= 50), None),
+        ("drawing_get", lambda c: {"sheet": (c.get("sheet_names") or [""])[0]},
+         lambda p: len(p.get("sheets") or []) == 1, None),
+        ("drawing_get", {"sheet": "NoSuchSheet_XYZ"}, "refused", None),
+        ("drawing_get", {"include": "dimensions"}, "refused", None),
+    ]
+    print("-- GET-ONLY: drawing_get against the active drawing --")
+    rows = _run_steps(steps, ctx)
+    return _report(rows, "get-only")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--stage", action="store_true")
     g.add_argument("--run", action="store_true")
+    g.add_argument("--get-only", action="store_true", dest="get_only",
+                   help="read-only drawing_get beats against the ACTIVE drawing (no staging)")
     args = ap.parse_args()
-    sys.exit(stage() if args.stage else run())
+    sys.exit(stage() if args.stage else (get_only() if args.get_only else run()))

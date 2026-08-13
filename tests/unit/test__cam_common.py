@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, make_cam
+from conftest import load_tool, make_cam, wcs_params
 from conftest import FakeSetup, FakeCAMFolder, FakeOperation
 
 cc = load_tool("_cam_common")
@@ -169,7 +169,7 @@ class TestOperationsFilterNamedBranch:
 
 class TestOperationSummaryStateNaming:
     def test_operation_state_1_is_named_out_of_date(self, install, operation_cast_passthrough):
-        # the op-level state name (_OP_STATE_NAMES) must agree with op_primary_state's own vocabulary.
+        # the op row's state comes from op_primary_state, so it speaks that one vocabulary.
         op = SimpleNamespace(name="Op1", tool=None, strategy="adaptive", operationState=1,
                              hasWarning=False, hasError=False, hasToolpath=True,
                              isToolpathValid=False, isGenerating=False, isSuppressed=False,
@@ -178,6 +178,53 @@ class TestOperationSummaryStateNaming:
         install(FakeCAM([s]))
         out = _payload(cc.get_cam_operations_handler())
         assert out["setups"][0]["operations"][0]["state"] == "out_of_date"
+
+
+# ── the two op-state aggregations agree by construction ─────────────────────────────────────────
+# An op carrying hasError reads operationState 0 ("valid") with no toolpath at all, so a state
+# derived from operationState alone puts that op in the summary's "valid" bucket while the
+# per-setup op_states rollup puts it in "error" - one response contradicting itself, and an agent
+# reading the summary calls an errored op healthy. Both derive through op_primary_state.
+
+class TestErroredOpNeverReadsValid:
+    def _cam(self):
+        """Three healthy ops plus an errored one: no toolpath, hasError, operationState still 0."""
+        errored = FakeOperation("Drill1", has_toolpath=False, valid=False, operation_state=0,
+                                has_error=True, error="Toolpath is empty")
+        assert errored.operationState == 0        # the trap this whole class exists for
+        return FakeCAM([FakeSetup("Setup1", ops=[
+            FakeOperation("Face1"), FakeOperation("Adaptive1"), FakeOperation("Contour1"),
+            errored])])
+
+    def test_the_errored_row_reads_error_not_valid(self, install, operation_cast_passthrough):
+        install(self._cam())
+        rows = _payload(cc.get_cam_operations_handler())["setups"][0]["operations"]
+        drill = next(r for r in rows if r["name"] == "Drill1")
+        assert drill["state"] == "error"
+        assert drill["has_toolpath"] is False and drill["has_error"] is True
+        assert [r["state"] for r in rows if r["has_error"]] == ["error"]
+
+    def test_both_aggregations_report_the_same_buckets(self, install,
+                                                        operation_cast_passthrough):
+        install(self._cam())
+        op_states = _payload(cc.get_cam_setups_handler())["setups"][0]["op_states"]
+        summary = _payload(cc.get_cam_operations_handler())["setups"][0]["summary"]
+        assert op_states == {"valid": 3, "error": 1}
+        assert summary["states"] == op_states           # no response contradicts itself
+        drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
+        assert "operation_error" in drill["blocked_by"]
+
+    def test_a_generating_op_reads_generating_in_both(self, install, operation_cast_passthrough):
+        # the priority order is the row's too: generating outranks the stale operationState, so the
+        # summary cannot bucket an op as out_of_date while op_states calls it generating.
+        op = SimpleNamespace(name="Adaptive1", tool=None, strategy="adaptive", operationState=1,
+                             hasWarning=False, hasError=False, hasToolpath=True,
+                             isToolpathValid=False, isGenerating=True, isSuppressed=False,
+                             isOptional=False, messageLog="")
+        install(FakeCAM([FakeSetup("Setup1", ops=[op])]))
+        assert _payload(cc.get_cam_setups_handler())["setups"][0]["op_states"] == {"generating": 1}
+        summary = _payload(cc.get_cam_operations_handler())["setups"][0]["summary"]
+        assert summary["states"] == {"generating": 1}
 
 
 # ── get_setup_references_handler: per-setup 'references_truncated' ──────────────────────────────
@@ -1125,6 +1172,60 @@ class TestSetupInvalidationRollup:
         install(FakeCAM([FakeSetup("S1", ops=[_rollup_op("A"), SimpleNamespace(name="Holes")])]))
         rec = _payload(cc.get_cam_setups_handler())["setups"][0]
         assert rec["op_states"] == {"valid": 1}
+
+
+# --- setup_wcs: the read-back of what cam_edit_setup's 'wcs' binding did ---
+# The WCS lives in Setup.parameters: a mode parameter answers its choice string, a geometry binding
+# answers an iterable of the entities it is bound to.
+
+class TestSetupWcs:
+    def _rec(self, install, params):
+        install(FakeCAM([FakeSetup("Setup1", parameters=params)]))
+        return _payload(cc.get_cam_setups_handler())["setups"][0]
+
+    def test_a_geometry_bound_wcs_publishes_its_modes_and_entities(self, install):
+        rec = self._rec(install, wcs_params(
+            origin_mode="point", orientation_mode="axesZX",
+            origin=[("adsk::fusion::JointOrigin", "StockCenter")],
+            z_axis=[("adsk::fusion::BRepFace", None)]))
+        assert rec["wcs"] == {
+            "origin_mode": "point", "orientation_mode": "axesZX",
+            "origin_entities": [{"type": "JointOrigin", "name": "StockCenter"}],
+            # a BRepFace carries no readable name - the type still identifies what is bound
+            "orientation_z_entities": [{"type": "BRepFace"}]}
+
+    def test_an_unbound_wcs_carries_the_modes_and_no_entity_lists(self, install):
+        # the parameters are PRESENT and bound to nothing; an empty list is omitted, not published
+        # as a key an agent would read as "there is a binding here".
+        rec = self._rec(install, wcs_params(origin_mode="point",
+                                            orientation_mode="modelOrientation",
+                                            origin=[], z_axis=[]))
+        assert rec["wcs"] == {"origin_mode": "point", "orientation_mode": "modelOrientation"}
+
+    def test_every_bound_entity_is_listed_not_just_the_first(self, install):
+        rec = self._rec(install, wcs_params(
+            origin_mode="point",
+            origin=[("adsk::fusion::JointOrigin", "StockCenter"),
+                    ("adsk::fusion::BRepVertex", "Corner")]))
+        assert rec["wcs"]["origin_entities"] == [{"type": "JointOrigin", "name": "StockCenter"},
+                                                 {"type": "BRepVertex", "name": "Corner"}]
+
+    def test_one_unreadable_parameter_does_not_cost_the_rest(self, install):
+        # only wcs_orientation_mode reads; the block still reports what it could read rather than
+        # collapsing to null and claiming nothing is known about the WCS.
+        rec = self._rec(install, wcs_params(orientation_mode="modelOrientation"))
+        assert rec["wcs"] == {"orientation_mode": "modelOrientation"}
+
+    def test_an_unreadable_parameter_collection_makes_the_whole_block_null(self, install):
+        def _boom(_name):
+            raise RuntimeError("parameters unavailable")
+        rec = self._rec(install, SimpleNamespace(itemByName=_boom))
+        assert rec["wcs"] is None                  # nothing about the WCS can be claimed
+
+    def test_a_setup_whose_parameters_do_not_read_is_still_a_full_row(self, install):
+        rec = self._rec(install, None)
+        assert rec["wcs"] is None
+        assert rec["name"] == "Setup1" and rec["operation_count"] == 0
 
 
 class TestInvalidationReasonsBlankLines:

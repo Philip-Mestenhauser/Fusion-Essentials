@@ -6,8 +6,8 @@ fixture: P6-Vise (or any saved solid pipeline artifact) OPEN and ACTIVE, staged 
   must be cloud-saved - drawing creation requires it. Missing fixture = the executor reports
   BLOCKED; a scenario never creates a project.
 budget:
-  max_tool_calls: 110
-  max_tokens: 85000
+  max_tool_calls: 80
+  max_tokens: 120000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: an off-sheet image position is REFUSED naming the extent (graded)
@@ -45,13 +45,17 @@ GOAL - the SHOP DRAWING PACKAGE for this model:
   itself, so first EXPORT a small screenshot/image through whatever tool writes one, then
   insert that file. Then DELIBERATELY attempt one more insert at a position far past the
   sheet's width and report what the tool does - the refusal text is part of your report.
-- Add at least TWO dimensions of your own to a generated view (the automatic pass never catches
-  everything a machinist wants) - report what each dimension attached to and the value it reads.
+- Run at least ONE additional dimensioning pass of your own choosing on a generated view, beyond
+  what the initial generation placed (the automatic pass never catches everything a machinist
+  wants) - report the strategy/datum you chose, the view you targeted, and exactly what the
+  tool's read-back confirms. Report ONLY what a read returns; if the platform offers no way to
+  read a placed dimension back, say so plainly - never invent values.
 - Name the sheets meaningfully (the cover carries {{RUN_FOLDER}} in its name) and report the
   sheet listing with the 1-based export indices the tools give you.
 - Export the WHOLE package as one PDF to a path of your choosing and report the file evidence
-  the tool returns (path + size). Then export ONLY the custom sheet by its index to a second
-  PDF and report its evidence too.
+  the tool returns (path + size). Export the full sheet set only - if a narrower export path
+  carries a hazard warning in its own description, respect it and report the warning instead of
+  attempting it.
 
 POSTCONDITIONS - verify EACH with your own fresh read or the tool's own read-back; report
 actual values WITH units.
@@ -62,10 +66,11 @@ actual values WITH units.
   height_applied or the sheet listing's facts - whichever read you used).
 - the on-sheet image insert reports position_bounds_checked true and the position you computed;
   the OFF-sheet attempt was REFUSED with the sheet extent in the message (quote it).
-- at least two manual dimensions landed (each report names its target and value).
+- the additional dimensioning pass landed (the tool's read-back quoted: what it confirms and,
+  honestly, what it cannot confirm on this platform).
 - the sheet listing shows your names with 1-based export indices; the cover name carries
   {{RUN_FOLDER}}.
-- both PDFs landed on disk with nonzero size (the export payloads' own file evidence).
+- the package PDF landed on disk with nonzero size (the export payload's own file evidence).
 
 REPORT - return EXACTLY this structure, nothing else:
 
@@ -106,9 +111,19 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - Custom-size platform facts backing the grade: CreateDrawingInput.customSize setter-assign in
   DOCUMENT units (mm ISO / in ASME), zones >= 2, verified live at 500x333 and 508x254; the
   created sheet's Sheet.width/height read millimetres regardless of standard.
-- Budget: 110 calls / 85k tokens - an unmeasured estimate: ~15 orientation
-  + ~20 create/settings + ~15 custom sheet + ~20 artwork loop (screenshot, insert, off-sheet
-  probe) + ~15 dimensions + ~10 naming/listing + ~10 exports, + 25% margin. Re-measure against
-  a measured run and re-pin.
+- SINGLE-SHEET EXPORT IS WITHDRAWN while the drawing_export hazard row (NEW-12) stays open: a
+  single-sheet sheet_range call blocks the Fusion main thread for minutes on first use and its
+  file never lands - an eval must not require a known session-killer. Restore the requirement
+  when NEW-12 closes. The "respect a hazard warning" line in the export step doubles as a
+  wire-honesty probe: an executor that attempts the hazardous path anyway has ignored the
+  tool's own teaching.
+- DIMENSION VALUES UNREADABLE (platform): adsk.drawing exposes no dimension entity, so placed
+  dimensions cannot be listed or valued; the pass is graded on the tool's dimensioned:true
+  read-back + view identity, and on the executor's honesty about the limit. drawing_get reads
+  the package structure (sheets by export_index, sizes, per-view rows) - grade sheet claims
+  from it - but it cannot read dimensions either; re-probe on the next Fusion build.
+- Budget: the last run reached 21 calls before the wedge BLOCKED it; with the hazard path
+  removed the full package is estimated ~55 calls; 80 = estimate + margin. Re-pin at the first
+  measured full run.
 - The scenario deliberately does NOT name any tool in the goal text - discovery is graded via
   the BREAKDOWN.

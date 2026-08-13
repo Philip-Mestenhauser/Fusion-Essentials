@@ -27,7 +27,12 @@ MAP_BLURB = (
     "NO_PORTRAIT (the ONE measured (standard, sheet size) table Fusion refuses portrait on), "
     "resolve_sheet (the ONE sheet-by-name resolver: case-insensitive EXACT - sheet names are "
     "measured case-insensitively unique, a duplicate add RAISES and a duplicate rename "
-    "silently no-ops - a miss returns the available names)"
+    "silently no-ops - a miss returns the available names), "
+    "size_label / orientation_label / ORIENTATION_MEMBERS (the SheetSizes / "
+    "SheetOrientationTypes value -> wire-key decoders), sheet_listing (the ONE 1-based "
+    "export-index sheet walk drawing_export's sheet_range is addressed by - positional, so an "
+    "unreadable sheet never slides later indices), sheet_facts (the ONE per-sheet readable-state "
+    "record; it never reads Sheet.tidyUp, a property whose READ tidies the sheet)"
 )
 
 # Sheet.width/height are MILLIMETRES on every drawing, ISO and ASME alike: an ASME B sheet (17 x 11
@@ -149,6 +154,65 @@ def coordinate_unit(dwg):
     wire that no read backs.
     """
     return DOCUMENT_UNIT.get(standard_label(dwg))
+
+
+# orientation key -> SheetOrientationTypes member.
+ORIENTATION_MEMBERS = {"landscape": "LandscapeSheetOrientationType",
+                       "portrait": "PortraitSheetOrientationType"}
+
+
+def size_label(value):
+    """'a3' for the SheetSizes value a sheet reads back, or None for a value outside the preset
+    table - CustomSizeSheetSize among them. A custom-sized sheet keeps its extents in width/height."""
+    if value is None:
+        return None
+    for key, (_standard, member) in SHEET_SIZE_MAP.items():
+        if value == enum_value("SheetSizes", member):
+            return key
+    return None
+
+
+def orientation_label(value):
+    """'landscape'/'portrait' for the SheetOrientationTypes value a sheet reads back, or None."""
+    if value is None:
+        return None
+    for key, member in ORIENTATION_MEMBERS.items():
+        if value == enum_value("SheetOrientationTypes", member):
+            return key
+    return None
+
+
+def sheet_listing(dwg):
+    """The drawing's sheets in order as [{export_index, name}]. export_index is 1-BASED - the
+    numbering drawing_export's sheet_range takes - and the sheet-changing writes and drawing_get
+    hand back the SAME list, so the caller's index is never a guess."""
+    # A sheet's INDEX is its address (export_index is exactly what drawing_export's sheet_range
+    # takes), so this stays a positional walk: iter_collection drops an unreadable sheet, which
+    # would slide every later export_index down one and export the WRONG sheets.
+    sheets = safe(lambda: dwg.sheets)
+    return [{"export_index": i + 1, "name": safe(lambda i=i: sheets.item(i).name)}
+            for i in range(safe(lambda: sheets.count, 0) or 0)]
+
+
+def sheet_facts(sheet):
+    """One sheet's readable state. width/height are read-only, derive from size + orientation, and
+    are MILLIMETRES on every drawing - width_height_unit carries that constant fact beside them, so
+    the numbers are never read against sheet_units (the drawing's DIMENSION display unit, which on
+    an inch drawing reads 'in' while these two still read mm). Sheet.tidyUp is deliberately NOT read
+    here: it is a property whose READ tidies the sheet."""
+    size = safe(lambda: sheet.sheetSize)
+    orientation = safe(lambda: sheet.orientation)
+    return {
+        "name": safe(lambda: sheet.name),
+        "sheet_size": size_label(size),
+        "orientation": orientation_label(orientation),
+        "width": _common.measured(lambda: sheet.width, 1.0, 3),
+        "height": _common.measured(lambda: sheet.height, 1.0, 3),
+        "width_height_unit": SHEET_EXTENT_UNIT,
+        "views": safe(lambda: sheet.views.count, 0),
+        "sketches": safe(lambda: sheet.sketches.count, 0),
+        "custom_tables": safe(lambda: sheet.customTables.count, 0),
+    }
 
 
 def resolve_sheet(dwg, name):

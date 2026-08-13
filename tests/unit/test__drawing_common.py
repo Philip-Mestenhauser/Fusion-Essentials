@@ -212,6 +212,21 @@ class TestResolveSheet:
         sheet, err = dc.resolve_sheet(dwg, "")
         assert sheet is None and "active sheet" in err
 
+    def test_a_duplicated_name_is_refused_not_first_matched(self, drawing_module):
+        # The invariant guard: names are case-insensitively unique on this build, but if two ever
+        # match, the resolver must refuse rather than hand back whichever came first.
+        dwg = _drawing(["Front", "front"])
+        sheet, err = dc.resolve_sheet(dwg, "FRONT")
+        assert sheet is None and "matches 2 sheets" in err
+
+
+class TestLabelNoneGuards:
+    def test_size_label_of_an_unreadable_value_is_none(self, drawing_module):
+        assert dc.size_label(None) is None
+
+    def test_orientation_label_of_an_unreadable_value_is_none(self, drawing_module):
+        assert dc.orientation_label(None) is None
+
 
 class TestSharedEnumTables:
     def test_every_sheet_size_member_exists_on_the_family_with_its_standard(self, drawing_module):

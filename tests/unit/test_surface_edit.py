@@ -886,12 +886,19 @@ class TestOffsetThickenKind:
         assert tf.last_input.op == "JoinFeatureOperation"
 
 
-class TestOffsetZeroGuard:
-    def test_zero_distance_refused(self):
-        # distance=0 creates a surface exactly coincident with the source (measured) - refused,
-        # matching every sibling's zero guard in this file.
-        res = se.offset_handler(faces=["F1"], distance=0)
-        assert res["isError"] is True and "non-zero" in res["message"]
+class TestOffsetZeroDistance:
+    def test_zero_distance_copies_the_face_as_a_coincident_surface(self):
+        # distance=0 is legal (measured live: the feature lands, the copy reads coincident) - the
+        # machining-prep copy-face idiom. The note names the coincident copy so a caller knows the
+        # surface is indistinguishable from its source by eye.
+        f1 = FakeFace()
+        of = FakeOffsetFeatures(result_bodies=[FakeBody("Copy1", is_solid=False)])
+        comp = FakeComp(FakeFeatures(offset=of))
+        _wire(comp, handle_map={"F1": f1})
+        out = _payload(se.offset_handler(faces=["F1"], distance=0))
+        assert out["offset"] is True
+        assert out["distance"] == 0.0
+        assert "COINCIDENT" in out["note"]
 
 
 class TestThickenJoinDisclosure:

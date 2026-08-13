@@ -21,7 +21,10 @@ MAP_BLURB = ("unit_vector/unit_vector_between - the normalize / point-to-point-d
              "find_geometry and sys_get_selection both need; evaluator_normal_at - the "
              "evaluator.getNormalAtPoint sample find_geometry uses for every face's normal; "
              "body_aabb - the bodies-only (solid+surface+mesh) AABB of an occurrence/component/"
-             "body that model_inspect and assembly_get size reads share; owning_bodies/volumes/"
+             "body that model_inspect and assembly_get size reads share; occ_world_frame/axis_vec - "
+             "the ONE occurrence world-placement record (origin + the x/y/z basis axes of its "
+             "rotation + the bodies-only bbox centre/size, lengths scaled to display units) every "
+             "occurrence row is built from, and the 4dp basis-axis read under it; owning_bodies/volumes/"
              "volume_delta - the owning-body set and the before/after volume diff every "
              "material-changing feature verifies its cut with; signed_volume - ONE body's signed "
              "volume or None, the single-read counterpart for a feature judged on the SIGN (a "
@@ -56,6 +59,56 @@ def body_aabb(entity):
     if callable(bb2):
         return safe(lambda: bb2(_BODY_BBOX_TYPES))
     return safe(lambda: entity.boundingBox)
+
+
+def axis_vec(v):
+    """A basis axis Vector3D as an [x,y,z] list rounded to 4dp, or None when any component is not a
+    readable number. A direction is dimensionless, so this never unit-scales."""
+    x = safe(lambda: v.x); y = safe(lambda: v.y); z = safe(lambda: v.z)
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in (x, y, z)):
+        return None
+    return [round(x, 4), round(y, 4), round(z, 4)]
+
+
+def occ_world_frame(occ, inv_k):
+    """One occurrence's world placement as a dict: origin (its transform's translation), the three
+    rotation basis axes, and the bodies-only bbox center/size - lengths scaled by inv_k (cm ->
+    display units), keys omitted rather than faked when a read fails. The ONE occurrence-placement
+    record, so a top-level row and a nested row describe a part the same way.
+
+    x_axis/y_axis/z_axis are the occurrence transform's basis vectors (its ROTATION): an unrotated
+    occurrence reads x=[1,0,0], y=[0,1,0], z=[0,0,1]. Directions are dimensionless, so - unlike
+    origin - they are NOT unit-scaled.
+    """
+    out = {}
+    m = safe(lambda: occ.transform2)
+    t = safe(lambda: m.translation) if m is not None else None
+    if t is not None:
+        out["origin"] = [round(safe(lambda: t.x, 0.0) * inv_k, 3),
+                         round(safe(lambda: t.y, 0.0) * inv_k, 3),
+                         round(safe(lambda: t.z, 0.0) * inv_k, 3)]
+    if m is not None:
+        # getAsCoordinateSystem returns (origin, xAxis, yAxis, zAxis) in Python.
+        cs = safe(lambda: m.getAsCoordinateSystem())
+        if isinstance(cs, (list, tuple)) and len(cs) == 4:
+            for key, vec in (("x_axis", cs[1]), ("y_axis", cs[2]), ("z_axis", cs[3])):
+                av = axis_vec(vec)
+                if av is not None:
+                    out[key] = av
+    # Bodies-only box (body_aabb): the plain occ.boundingBox also counts visible sketches +
+    # construction datums, so an orphaned oversized sketch mis-reported a 68x10 body as 120x120
+    # (live-verified). None (no bodies) -> bbox omitted, never a datum-inflated box.
+    bb = body_aabb(occ)
+    if bb is not None:
+        mn = safe(lambda: bb.minPoint); mx = safe(lambda: bb.maxPoint)
+        if mn is not None and mx is not None:
+            out["bbox_center"] = [round((mn.x + mx.x) / 2 * inv_k, 3),
+                                  round((mn.y + mx.y) / 2 * inv_k, 3),
+                                  round((mn.z + mx.z) / 2 * inv_k, 3)]
+            out["bbox_size"] = [round((mx.x - mn.x) * inv_k, 3),
+                                round((mx.y - mn.y) * inv_k, 3),
+                                round((mx.z - mn.z) * inv_k, 3)]
+    return out
 
 
 def owning_bodies(entities):

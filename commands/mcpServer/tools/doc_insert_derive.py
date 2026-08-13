@@ -303,6 +303,11 @@ def handler(document_id: str = "", into_component: str = "",
         return error(f"Could not configure the derive: {e}")
 
     before_params = safe(lambda: design.userParameters.count, 0) or 0
+    # A source value can land as a read-only MODEL parameter, which the userParameters delta never
+    # sees. Those land at the DESIGN level, not on the derived component (measured: a derived
+    # component's own modelParameters held only its LOCAL feature's parameters while every imported
+    # one sat in design.allParameters), so the honest count is a design-wide before/after delta.
+    before_all_params = _common.counted(lambda: design.allParameters.count)
     before_bodies, _ = _common.design_wide_counts(design)
     before_occ_tokens = _occurrence_tokens(comp)
     root = safe(lambda: design.rootComponent)
@@ -384,11 +389,16 @@ def handler(document_id: str = "", into_component: str = "",
 
     after_params = safe(lambda: design.userParameters.count, 0) or 0
     parameters_imported = max(0, after_params - before_params)
+    after_all_params = _common.counted(lambda: design.allParameters.count)
+    model_parameters_added = (None if before_all_params is None or after_all_params is None
+                              else after_all_params - before_all_params)
     param_warning = None
     if (include_parameters or include_favorite_parameters) and parameters_imported == 0:
         param_warning = ("include_parameters/include_favorite_parameters was requested but 0 new "
                          "user parameters landed - this Fusion API flag is reported flaky; confirm "
-                         "with param_get (the source design may also simply define none).")
+                         "with param_get (the source design may also simply define none). Source "
+                         "values can land as read-only model parameters instead - read them with "
+                         "param_get(include_model_parameters=true).")
 
     representative = (derived_components[0]["name"] if derived_components
                       else (direct_bodies[0]["name"] if direct_bodies else None))
@@ -412,6 +422,11 @@ def handler(document_id: str = "", into_component: str = "",
             "here (a fillet, a patch, an offset) never travel back to the source, and the source "
             "itself was not modified. Build prep on top of the derived body/bodies."),
     }
+    if model_parameters_added is not None:
+        # Beside parameters_imported (the userParameters delta), because the two count different
+        # things and only the pair shows whether source values arrived at all. Omitted rather than
+        # zeroed when either count was unreadable - an unknown delta is not "nothing arrived".
+        result["model_parameters_added"] = model_parameters_added
     if excluded_entities:
         result["excluded"] = ", ".join(excl_comp_names + excl_body_names)
     if param_warning:

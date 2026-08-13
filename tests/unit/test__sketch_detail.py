@@ -15,8 +15,11 @@ records (the read half of sketch_set_text: string, height, font, sketch-space bo
 """
 
 import json
+from types import SimpleNamespace
 
-from conftest import FakeBoundingBox3D, FakePoint, load_tool
+import pytest
+
+from conftest import FakeBoundingBox3D, FakePoint, install, load_tool, make_design
 
 sd = load_tool("_sketch_detail")
 
@@ -911,6 +914,125 @@ class TestSplineCounts:
 
 
 # ── sketch text: the read half of sketch_set_text ────────────────────────────
+
+def _frame_sketch(name="Framed", origin=(0.0, 0.0, 0.0), x=(1.0, 0.0, 0.0), y=(0.0, 1.0, 0.0)):
+    """A sketch answering only the three plane reads the world frame is built from - origin (a world
+    Point3D in cm) and the xDirection/yDirection world vectors. Every other read this file's payload
+    makes degrades through safe(), so the frame can be exercised on its own."""
+    return SimpleNamespace(name=name, origin=_Pt(*origin), xDirection=_Pt(*x), yDirection=_Pt(*y))
+
+
+@pytest.fixture
+def read_frame():
+    """Install a design holding ONE sketch and read it back through the handler. install() wires both
+    design seams and the autouse conftest fixture reverts them after the test."""
+    def _read(sketch, **kw):
+        install(sd, make_design(sketches=[sketch]))
+        return _payload(sd.handler(sketch_name=sketch.name, **kw))
+    return _read
+
+
+class TestWorldFrameHelper:
+    """sketch_world_frame itself: a sketch's (0,0) is NOT the face centre and its axes need not align
+    with world, so the helper reports where sketch (0,0) lands, where +X/+Y point, and the normal
+    they span - the block sketch_create and sketch_get both publish."""
+
+    def _sk(self, origin, xdir, ydir):
+        P = lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)
+        return SimpleNamespace(origin=P(*origin), xDirection=P(*xdir), yDirection=P(*ydir))
+
+    def test_origin_reported_in_mm(self):
+        # origin is cm in the API -> reported x10 as mm
+        f = sd.sketch_world_frame(self._sk((-3.2, 0.8, 9.2), (1, 0, 0), (0, 1, 0)))
+        assert f["origin_mm"] == [-32.0, 8.0, 92.0]
+
+    def test_axes_reported_as_world_unit_vectors(self):
+        f = sd.sketch_world_frame(self._sk((0, 0, 0), (1, 0, 0), (0, 0, 1)))
+        assert f["x_world"] == [1, 0, 0]
+        assert f["y_world"] == [0, 0, 1]
+
+    def test_xz_plane_y_maps_to_negative_world_z(self):
+        # the key gotcha: on XZ, sketch +Y -> world -Z
+        f = sd.sketch_world_frame(self._sk((0, 0, 0), (1, 0, 0), (0, 0, -1)))
+        assert f["y_world"] == [0, 0, -1]
+
+    def test_unreadable_frame_is_none(self):
+        assert sd.sketch_world_frame(
+            SimpleNamespace(origin=None, xDirection=None, yDirection=None)) is None
+
+    def test_partial_frame_is_none(self):
+        # missing any of origin/x/y -> None (don't report a half-frame the caller would misread)
+        s = SimpleNamespace(origin=SimpleNamespace(x=0, y=0, z=0), xDirection=None,
+                            yDirection=SimpleNamespace(x=0, y=1, z=0))
+        assert sd.sketch_world_frame(s) is None
+
+
+class TestWorldFrame:
+    """The read-side world FRAME: every x/y in this payload is sketch-LOCAL, so 'frame' is the only
+    thing that answers where the plane sits in world, which way it faces, and whether two sketches
+    are coplanar - without it those questions have no typed read at all."""
+
+    def test_overview_reports_the_origin_and_both_axes_of_the_sketch_plane(self, read_frame):
+        # origin 1.5 cm up world Z reads 15 mm; the axes pass through as unit world directions.
+        out = read_frame(_frame_sketch(origin=(0.0, 0.0, 1.5), x=(1.0, 0.0, 0.0),
+                                       y=(0.0, 0.0, -1.0)))
+        assert out["frame"]["origin_mm"] == [0.0, 0.0, 15.0]
+        assert out["frame"]["x_world"] == [1.0, 0.0, 0.0]
+        assert out["frame"]["y_world"] == [0.0, 0.0, -1.0]
+
+    def test_normal_is_the_cross_product_of_the_two_published_axes(self, read_frame):
+        # x cross y for (1,0,0) x (0,0,-1) is (0,1,0) - a normal read off the wrong operand order
+        # (or off a single axis) points the opposite way and mis-aims every offset built from it.
+        out = read_frame(_frame_sketch(x=(1.0, 0.0, 0.0), y=(0.0, 0.0, -1.0)))
+        assert out["frame"]["normal"] == [0.0, 1.0, 0.0]
+
+    def test_normal_is_normalized_not_the_raw_cross(self, read_frame):
+        # axes 2 and 3 long cross to (0, 0, 6); the published normal must be the unit vector.
+        out = read_frame(_frame_sketch(x=(2.0, 0.0, 0.0), y=(0.0, 3.0, 0.0)))
+        assert out["frame"]["normal"] == [0.0, 0.0, 1.0]
+
+    def test_parallel_axes_span_no_plane_so_the_normal_is_null(self, read_frame):
+        # a zero-length cross has no direction - reporting one would be a fabricated normal.
+        out = read_frame(_frame_sketch(x=(1.0, 0.0, 0.0), y=(1.0, 0.0, 0.0)))
+        assert out["frame"]["normal"] is None
+        assert out["frame"]["x_world"] == [1.0, 0.0, 0.0]
+
+    def test_an_unreadable_plane_reports_frame_null_without_sinking_the_read(self, read_frame):
+        class _NoPlane:
+            name = "Blind"
+
+            @property
+            def origin(self):
+                raise RuntimeError("4 : An API Object refers to a deleted Object")
+
+        out = read_frame(_NoPlane())
+        assert out["frame"] is None
+        assert out["sketch"] == "Blind" and out["counts"]["lines"] == 0
+
+    def test_a_frame_read_that_raises_outright_reports_null_and_the_rest_still_lands(
+            self, read_frame, monkeypatch):
+        def _boom(_sketch):
+            raise RuntimeError("2 : InternalValidationError")
+
+        monkeypatch.setattr(sd, "sketch_world_frame", _boom)
+        out = read_frame(_frame_sketch())
+        assert out["frame"] is None
+        assert out["profile_count"] == 0 and out["units"] == "mm"
+
+    def test_the_xray_carries_the_frame_too(self, read_frame):
+        # the X-ray is where the sketch-LOCAL entity coordinates are listed, so the map to world
+        # must ride along with them rather than only with the light overview.
+        out = read_frame(_frame_sketch(origin=(0.0, 0.0, 1.5)), include_entities=True)
+        assert out["frame"]["origin_mm"] == [0.0, 0.0, 15.0]
+
+    def test_both_notes_teach_that_entity_coordinates_are_local(self, read_frame):
+        sketch = _frame_sketch()
+        light = read_frame(sketch)
+        xray = read_frame(sketch, include_entities=True)
+        for note in (light["note"], xray["note"]):
+            assert "sketch-LOCAL" in note and "'frame'" in note
+            assert "local +Y is world -Z" in note
+
 
 class TestSketchTextRecords:
     """A SketchText is an addressable sketch entity, so the X-ray lists one record per text at the

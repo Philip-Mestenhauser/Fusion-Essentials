@@ -343,11 +343,9 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    # distance=0 produces a surface exactly COINCIDENT with the source (measured: published as a
-    # success, space_measure distance 0) - the same zero-refusal every sibling in this file holds.
-    if distance == 0:
-        return error("Provide a non-zero 'distance' to offset - distance=0 would create a surface "
-                     "exactly coincident with the source face.")
+    # distance=0 is LEGAL: it copies the face as a coincident surface (measured live - the feature
+    # lands and space_measure reads distance 0), the standard machining-prep copy-face idiom. The
+    # zero refusals on extrude/extend/thicken stay: zero there genuinely produces nothing.
     op_key = (operation or "new").strip().lower()
     if op_key not in _OFFSET_OPS:
         return error(f"Unknown operation '{operation}'. Offset supports: new, new_component.")
@@ -384,6 +382,9 @@ def offset_handler(faces=None, distance: float = 0.0, units: str = "mm",
     any_solid = any(bool(safe(lambda b=b: b.isSolid)) for b in created)
     requested = len(face_ents)
     note = "Faces offset into a new surface (isSolid=false)."
+    if distance == 0:
+        note = ("Faces copied as a COINCIDENT surface (distance=0; isSolid=false) - the zero-offset "
+                "copy-face idiom.")
     if faces_offset > requested:
         note += (f" chaining=true EXPANDED the selection: {requested} face(s) requested, "
                  f"{faces_offset} tangent-connected face(s) offset. Pass chaining=false to offset "
@@ -571,7 +572,7 @@ _OFFSET_DESC = (
 surface_offset_tool = (
     Tool.create_simple(name="surface_offset", description=_OFFSET_DESC)
     .add_input_property("faces", _OFFSET_FACES.schema())
-    .add_input_property("distance", {"type": "number", "description": "Offset distance in 'units' (positive = along the normal)."})
+    .add_input_property("distance", {"type": "number", "description": "Offset distance in 'units' (positive = along the normal; 0 = a COINCIDENT copy of the face)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Expand across tangent-connected faces (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())

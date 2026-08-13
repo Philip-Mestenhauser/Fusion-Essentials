@@ -34,6 +34,22 @@ _FACE = _inputs.GeometryHandle("face", require="planar_face", required=True,
 
 _PLACEMENTS = ("sketch_points", "center", "on_edge", "plane_offsets")
 
+# Which frame 'points' are measured in. The placement sketch this tool creates carries its OWN
+# frame, and nothing predicts it before the sketch exists: measured, a 45-deg chamfer face gave a
+# sketch origin of (0, 0.5, -0.5) against its plane's (3, 3.5, 2.5), and a flat face gave sketch X
+# (-1,0,0) against plane u (+1,0,0) - an origin shift AND an axis flip, neither derivable from the
+# face. So 'world' exists to let a caller hand over coordinates it already read; the conversion
+# goes through the sketch's own converter (see _sketch_space_point).
+_POINTS_SPACES = ("sketch", "world")
+_POINTS_SPACE = _inputs.Choice("points_space", options=list(_POINTS_SPACES), default="sketch",
+    description="Which frame 'points' are read in.")
+
+# How far off the face's plane a WORLD point may sit and still be drilled. It absorbs the rounding
+# a world read publishes (find_geometry rounds to 3 decimals in the caller's units - 0.0013 cm at
+# worst, in inches); past it the point is not on the face, and projecting it would drill somewhere
+# the caller never asked for.
+_OFF_PLANE_TOL_CM = 0.005
+
 _EDGE = _inputs.GeometryHandle("edge", require="edge",
     description="center: circular/elliptical edge to centre on. on_edge: the edge to sit on")
 _OFFSET_EDGE_ONE = _inputs.GeometryHandle("offset_edge_one", require="edge",
@@ -182,6 +198,42 @@ def _require_linear_edge(edge_ent, label):
             "Pass a linear edge handle from find_geometry(kind='line_edge').")
 
 
+def _sketch_space_is_world(sketch, design):
+    """True only when the sketch's model space IS world - that is, it belongs to the design ROOT.
+
+    modelToSketchSpace maps from the SKETCH'S PARENT COMPONENT's model space, so in any other
+    component a 'world' point would silently be read as that component's local coordinates.
+    Unreadable reads answer False: an unproven space is refused, never assumed. Component identity
+    goes through same_component - component wrappers are measured never identity-stable."""
+    return _common.same_component(safe(lambda: sketch.parentComponent),
+                                  safe(lambda: design.rootComponent))
+
+
+def _sketch_space_point(sketch, x, y, z):
+    """A WORLD point (cm) in the sketch's own space: (u, v, off_plane) in cm, or (None, None, None)
+    when the conversion cannot be made.
+
+    modelToSketchSpace is the API's own converter and the only thing that can be right here,
+    because the space a placement sketch reads follows the sketch's OWNER, not the face: a sketch
+    created in the ROOT on an occurrence PROXY face reports a WORLD frame (measured: origin
+    (2,0,1) cm, the world face corner), while the same face sketched inside its owning component
+    reports a component-LOCAL one (origin (0,0,1)). So no fixed occurrence transform can serve both
+    - applied to the root-owned case one double-compensated, drilling at u=0 where world u=40 mm
+    was asked for. Measured on the real placement sketch: modelToSketchSpace((4,2,1) cm world) ->
+    (2.0, 2.0, 0.0), and sketchToModelSpace round-trips it back to (4,2,1).
+
+    q.z is the off-plane distance - how a point that does not lie on the face is caught instead of
+    being silently flattened onto it. Reads are STRICT: an unreadable coordinate voids the whole
+    conversion rather than drilling at a guessed one."""
+    p = safe(lambda: adsk.core.Point3D.create(x, y, z))
+    q = safe(lambda: sketch.modelToSketchSpace(p)) if p is not None else None
+    c = ((safe(lambda: q.x), safe(lambda: q.y), safe(lambda: q.z))
+         if q is not None else (None, None, None))
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in c):
+        return None, None, None
+    return c
+
+
 def _feature_warning(feature):
     """The feature's error/warning text, stripped of the platform's markup (Fusion concatenates
     fragments like 'No target body!<b>1 Reference Failures</b><br/>...' - live-verified)."""
@@ -248,7 +300,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             cbore_diameter: str = "", cbore_depth: str = "",
             csink_diameter: str = "", csink_angle: str = "",
             tap: str = "", fastener: str = "", fit: str = "normal", units: str = "mm",
-            placement: str = "sketch_points", edge: str = "", edge_position: str = "",
+            placement: str = "sketch_points", points_space: str = "", edge: str = "",
+            edge_position: str = "",
             point: list = None, offset_edge_one: str = "", offset_one: str = "",
             offset_edge_two: str = "", offset_two: str = "",
             modeled: bool = False, tip_angle: str = "", thread_type: str = "") -> dict:
@@ -274,6 +327,13 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     placement = (placement or "sketch_points").strip().lower()
     if placement not in _PLACEMENTS:
         return error(f"Unknown placement '{placement}'. Use one of: {', '.join(_PLACEMENTS)}.")
+    points_space, pserr = _POINTS_SPACE.resolve(points_space)
+    if pserr:
+        return error(pserr)
+    if points_space == "world" and placement != "sketch_points":
+        # it would otherwise be accepted and do nothing - the other placements take no 'points'
+        return error(f"points_space='world' applies to placement='sketch_points' (got "
+                     f"'{placement}', which positions the hole off 'edge'/offsets instead).")
     pts = points or []
     edge_position = (edge_position or "").strip().lower()
     pt = point or []
@@ -419,17 +479,44 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             return error(f"Could not create a placement sketch on the face: {e}")
         if not sketch:
             return error("Could not create a placement sketch on the face (sketches.add returned nothing).")
+        if points_space == "world" and not _sketch_space_is_world(sketch, design):
+            # The sketch's OWNER decides the space it converts from, so outside the root a 'world'
+            # point would be read as that component's local coordinates. Refuse the ambiguous space.
+            owner = safe(lambda: sketch.parentComponent.name)
+            return _abandon(f"The placement sketch did not land in the ROOT component"
+                            + (f" (it is in '{owner}')" if owner else "") + ", so a "
+                            "points_space='world' point would be read in that component's own "
+                            "coordinates instead of world. Activate the root component "
+                            "(design_activate_component), or pass points_space='sketch'.")
         for xyz in pts:
             try:
-                p = adsk.core.Point3D.create(float(xyz[0]) * factor, float(xyz[1]) * factor,
-                                             float(xyz[2]) * factor)
+                sx, sy, sz = (float(xyz[0]) * factor, float(xyz[1]) * factor,
+                              float(xyz[2]) * factor)
             except Exception:
                 return _abandon(f"Bad point {xyz!r}; expected [x, y, z] in '{units}'.")
+            local = (sx, sy, sz)
+            if points_space == "world":
+                # sketchPoints.add takes SKETCH coordinates, and the sketch's own converter is the
+                # only thing that knows the mapping - see _sketch_space_point.
+                u, v, off = _sketch_space_point(sketch, sx, sy, sz)
+                if u is None:
+                    return _abandon(f"Point {xyz!r} could not be converted into the placement "
+                                    "sketch's space (modelToSketchSpace). Retry with "
+                                    "points_space='sketch'.")
+                if abs(off) > _OFF_PLANE_TOL_CM:
+                    return _abandon(f"Point {xyz!r} lies {round(off / factor, 4):g} '{units}' off "
+                                    "the plane of 'face', and a points_space='world' point must lie "
+                                    "ON that face - projecting it would drill somewhere else. Take "
+                                    "the position from find_geometry on this face.")
+                local = (u, v, 0.0)
+            p = safe(lambda local=local: adsk.core.Point3D.create(*local))
+            if p is None:
+                return _abandon(f"Could not build a point from {xyz!r} (in '{units}').")
             sp = safe(lambda p=p: sketch.sketchPoints.add(p))
             if not sp:
                 return _abandon(f"Could not add a sketch point at {xyz!r}.")
             sketch_pts.append(sp)
-            scaled_pts.append((float(xyz[0]) * factor, float(xyz[1]) * factor, float(xyz[2]) * factor))
+            scaled_pts.append((sx, sy, sz))
         if len(sketch_pts) == 1:
             hin.setPositionBySketchPoint(sketch_pts[0])
         else:
@@ -563,6 +650,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
         "hole_type": hole_type,
         "extent": extent,
         "placement": placement,
+        "points_space": points_space,
         "feature": safe(lambda: feature.name),
         "note": "Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). "
                 "For a bolt circle, pass every position in 'points' in ONE call - the pattern tools "
@@ -611,18 +699,18 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
 TOOL_DESCRIPTION = (
     "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
-    "hole/thread metadata. 'diameter' e.g. '8 mm'. "
-    "'face' = a find_geometry planar-face handle to drill into; 'points' = list of [x,y,z] (mm) in "
-    "the FACE'S LOCAL frame - the SAME frame sketch_create(on_face=...) reports for that face "
-    "(sketch (0,0) at its origin_mm, axes x_world/y_world); z is off-plane, so [x,y,0] drills at "
-    "x,y on it. Multiple points => one patterned hole feature. 'placement' can instead place ONE "
+    "hole/thread metadata. 'face' = a find_geometry planar-face handle to drill into; 'points' = "
+    "[x,y,z] positions (mm) in the frame 'points_space' names: 'world' takes find_geometry "
+    "positions directly, 'sketch' (default) is the placement sketch's own frame - measured to "
+    "differ from the face plane's in origin AND in axis SIGN, so only [x,y,0] there sits on the "
+    "face. Multiple points => ONE patterned hole feature, so pass a whole bolt circle in one call. "
+    "'placement' can instead place ONE "
     "hole off existing geometry on 'face': 'center' (needs 'edge') / 'on_edge' (needs "
     "'edge'+'edge_position') / 'plane_offsets' (needs 'point'+'offset_edge_one'/'offset_one'). "
     "counterbore needs 'cbore_diameter'/'cbore_depth'; countersink needs "
     "'csink_diameter'/'csink_angle'. 'tap' = a thread designation like 'M5x0.8' to make it tapped. "
-    "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit' close/normal/loose) sizes + "
-    "tags the hole for that fastener (overrides 'diameter'). For a bolt circle, pass every "
-    "position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hole features."
+    "'fastener' = a clearance spec like 'M6 Socket Head Cap Screw' (+ 'fit') sizes + "
+    "tags the hole for that fastener (overrides 'diameter')."
 )
 
 tool = (
@@ -632,10 +720,11 @@ tool = (
     .add_input_property("diameter", {"type": "string", "description": "Hole diameter, e.g. '8 mm'."})
     .add_input_property("face", _FACE.schema())
     .add_input_property("points", {"type": "array", "items": {"type": "array", "items": {"type": "number"}},
-            "description": "Positions in the face's LOCAL frame (in 'units'); [x,y,0] drills at x,y on the face."})
+            "description": "Positions to drill at (in 'units'), read in the frame 'points_space' names."})
+    .add_input_property(*_POINTS_SPACE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("extent", {"type": "string", "enum": list(_EXTENTS),
-            "description": "'blind' (with 'depth') or 'through'."})
+            "description": "'blind' needs 'depth'."})
     .add_input_property("depth", {"type": "string", "description": "Blind hole depth, e.g. '10 mm'."})
     .add_input_property("cbore_diameter", {"type": "string", "description": "Counterbore diameter."})
     .add_input_property("cbore_depth", {"type": "string", "description": "Counterbore depth."})
@@ -648,8 +737,8 @@ tool = (
             "description": "True = real MODELED thread (needs 'tap'); default cosmetic."})
     .add_input_property("tip_angle", {"type": "string",
             "description": "Drill tip angle, e.g. '118 deg'."})
-    .add_input_property("fastener", {"type": "string", "description": "Clearance fastener spec, e.g. 'M6 Socket Head Cap Screw' (sizes + tags the hole; overrides 'diameter')."})
-    .add_input_property("fit", {"type": "string", "enum": list(_FITS), "description": "Clearance fit for 'fastener': close/normal/loose (default normal)."})
+    .add_input_property("fastener", {"type": "string", "description": "Clearance fastener spec, e.g. 'M6 Socket Head Cap Screw'."})
+    .add_input_property("fit", {"type": "string", "enum": list(_FITS), "description": "Clearance fit for 'fastener' (default normal)."})
     .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS),
             "description": "Default 'sketch_points'; else see 'edge'/'point'."})
     .add_input_property(*_EDGE.as_property())
@@ -657,7 +746,7 @@ tool = (
             "description": "Where on 'edge' to place the hole, for placement='on_edge'."})
     .add_input_property("point", {"type": "array", "items": {"type": "number"},
             "description": "plane_offsets: approximate [x,y,z] in the frame of the component that "
-                           "OWNS 'face', NOT the face-local frame 'points' uses."})
+                           "OWNS 'face' (never the frame 'points_space' names)."})
     .add_input_property(*_OFFSET_EDGE_ONE.as_property())
     .add_input_property("offset_one", {"type": "string", "description": "Distance from 'offset_edge_one', e.g. '10 mm'."})
     .add_input_property(*_OFFSET_EDGE_TWO.as_property())

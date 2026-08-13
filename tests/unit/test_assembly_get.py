@@ -7,6 +7,7 @@ occurrence<->joint cross-index.
 """
 
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -48,8 +49,12 @@ class _Matrix:
 
 class FakeOcc:
     def __init__(self, name, comp, origin=(0, 0, 0), bbox=None, body_bbox=None,
-                 grounded=False, ground_to_parent=False, body_count=1, basis=None):
+                 grounded=False, ground_to_parent=False, body_count=1, basis=None,
+                 full_path=None):
         self.name = name
+        # fullPathName is the ONLY thing that tells two nested instances sharing a leaf name apart;
+        # a top-level occurrence's path is just its name.
+        self.fullPathName = full_path or name
         self.component = type("C", (), {"name": comp})()
         self.transform2 = _Matrix(origin, basis)
         self.boundingBox = _BBox(*bbox) if bbox else None
@@ -64,14 +69,65 @@ class FakeOcc:
         self.bRepBodies = type("B", (), {"count": body_count})()
 
 
+class _Vec:
+    def __init__(self, x, y, z):
+        self.x = x; self.y = y; self.z = z
+
+
+class _Motion:
+    """A JointMotion carrying ONLY the value attributes its own class exposes: rotationValue
+    (radians) on a revolute, slideValue (cm) on a slider, rotationValue + primarySlideValue +
+    secondarySlideValue on a planar, none at all on a rigid."""
+    def __init__(self, joint_type, **values):
+        self.jointType = joint_type
+        for key, value in values.items():
+            setattr(self, key, value)
+
+
+class _UnreadableMotion(_Motion):
+    """A motion whose value read raises - unknown, which is not a zero."""
+
+    @property
+    def rotationValue(self):
+        raise RuntimeError("3 : the value cannot be read")
+
+
+class _JointFrame:
+    """A joint's geometryOrOriginOne/Two: the joint frame in WORLD coordinates - origin (cm) plus
+    primaryAxisVector (the frame Z), secondaryAxisVector (X) and thirdAxisVector (Y)."""
+    def __init__(self, origin=(0.0, 0.0, 0.0), z=(0, 0, 1), x=(1, 0, 0), y=(0, 1, 0)):
+        self.origin = _Vec(*origin)
+        self.primaryAxisVector = _Vec(*z)
+        self.secondaryAxisVector = _Vec(*x)
+        self.thirdAxisVector = _Vec(*y)
+
+
+class _OpaqueFrame:
+    """A geometry reference that EXISTS but answers nothing - every frame read raises. Distinct from
+    a null reference, and it must not shadow a readable second geometry."""
+
+    def _unreadable(self):
+        raise RuntimeError("3 : the frame cannot be read")
+
+    origin = property(_unreadable)
+    primaryAxisVector = property(_unreadable)
+    secondaryAxisVector = property(_unreadable)
+    thirdAxisVector = property(_unreadable)
+
+
 class FakeJoint:
-    def __init__(self, name, motion_type, occ1, occ2, health_state=0, message=""):
+    def __init__(self, name, motion_type, occ1, occ2, health_state=0, message="",
+                 motion_values=None, motion_cls=_Motion, frame_one=None, frame_two=None):
         self.name = name
-        self.jointMotion = type("M", (), {"jointType": motion_type})()
+        self.jointMotion = motion_cls(motion_type, **(motion_values or {}))
         self.occurrenceOne = type("O", (), {"name": occ1})() if occ1 else None
         self.occurrenceTwo = type("O", (), {"name": occ2})() if occ2 else None
         self.healthState = health_state          # 0 = healthy, non-zero = error/warning
         self.errorOrWarningMessage = message
+        # Both geometry references exist and read null on an inferred joint - that null is what the
+        # frame read falls back over, so the fakes model the attribute, not its absence.
+        self.geometryOrOriginOne = frame_one
+        self.geometryOrOriginTwo = frame_two
 
 
 class FakeTimelineObj:
@@ -96,16 +152,20 @@ class _NamedBody:
 
 
 class FakeRoot:
-    def __init__(self, occs, joints, root_bodies=(), asbuilt=()):
+    def __init__(self, occs, joints, root_bodies=(), asbuilt=(), all_occs=None):
         self.occurrences = _Coll(occs)
+        # allOccurrences is a plain list on the ROOT component and is the only walk that reaches
+        # NESTED occurrences (root.occurrences is top-level only).
+        self.allOccurrences = list(occs) if all_occs is None else list(all_occs)
         self.joints = _Coll(joints)
         self.asBuiltJoints = _Coll(asbuilt)
         self.bRepBodies = _Coll([_NamedBody(n) for n in root_bodies])
 
 
 class FakeDesign:
-    def __init__(self, occs, joints, timeline=None, root_bodies=(), asbuilt=(), marker=None):
-        self.rootComponent = FakeRoot(occs, joints, root_bodies, asbuilt)
+    def __init__(self, occs, joints, timeline=None, root_bodies=(), asbuilt=(), marker=None,
+                 all_occs=None):
+        self.rootComponent = FakeRoot(occs, joints, root_bodies, asbuilt, all_occs)
         self.timeline = _Coll(timeline or [])
         if marker is not None:                 # marker < count = a rolled-back timeline
             self.timeline.markerPosition = marker
@@ -1026,6 +1086,238 @@ class TestBrokenRelationInHeadline:
         ap.app.activeProduct.rootComponent.assemblyConstraints = _Coll([con])
         out = _payload(ap.handler())
         assert out["is_healthy"] is True and out["broken_relations"] == []
+
+
+@pytest.fixture
+def kin_design(monkeypatch):
+    """A design of occurrences + joints wired into assembly_get through a fixture, so the patches
+    undo themselves. all_occs is what root.allOccurrences reports - the NESTED walk - while occs is
+    the top-level root.occurrences."""
+    def _build(occs=(), joints=(), all_occs=None, asbuilt=()):
+        design = FakeDesign(list(occs), list(joints), asbuilt=asbuilt, all_occs=all_occs)
+        fake_app = type("A", (), {"activeProduct": design})()
+        monkeypatch.setattr(ap, "app", fake_app)
+        monkeypatch.setattr(ap._common, "app", fake_app)
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda x: x if isinstance(x, FakeDesign) else None)
+        return design
+    return _build
+
+
+# ── value_now: the joint's CURRENT driven value, straight off its motion ─────────────────────────
+#
+# The motion class carries the value (RevoluteJointMotion.rotationValue in radians,
+# SliderJointMotion.slideValue in cm, PlanarJointMotion's rotation + both slides). Without it on the
+# row a caller has to infer a joint angle from the occurrences' basis vectors. The wire units are the
+# ones the row's LIMITS already use: degrees and mm.
+
+class TestJointValueNow:
+    def test_revolute_angle_is_converted_from_radians_to_degrees(self, kin_design):
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1",
+                                     motion_values={"rotationValue": math.radians(30)})])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["value_now"] == {"angle_deg": 30.0}
+
+    def test_slider_value_is_converted_from_cm_to_mm(self, kin_design):
+        kin_design(joints=[FakeJoint("Travel", 2, "A:1", "B:1",
+                                     motion_values={"slideValue": 2.5})])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["value_now"] == {"slide_mm": 25.0}
+
+    def test_planar_reports_its_rotation_and_both_slides(self, kin_design):
+        kin_design(joints=[FakeJoint("Pad", 5, "A:1", "B:1",
+                                     motion_values={"rotationValue": math.radians(-45),
+                                                    "primarySlideValue": 1.2,
+                                                    "secondarySlideValue": -0.35})])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["value_now"] == {"angle_deg": -45.0, "slide_primary_mm": 12.0,
+                                    "slide_secondary_mm": -3.5}
+
+    def test_rigid_joint_carries_no_value(self, kin_design):
+        # a rigid motion exposes no value at all - an invented 0.0 would read as "driven to zero".
+        kin_design(joints=[FakeJoint("Locked", 0, "A:1", "B:1")])
+        assert "value_now" not in _payload(ap.handler())["joints"][0]
+
+    def test_an_unreadable_value_is_omitted_not_reported_as_zero(self, kin_design):
+        kin_design(joints=[FakeJoint("Hinge", 1, "A:1", "B:1", motion_cls=_UnreadableMotion)])
+        assert "value_now" not in _payload(ap.handler())["joints"][0]
+
+    def test_value_now_is_the_current_pose_beside_the_limits(self, kin_design):
+        # the two are separate reads in the same units: 30 deg driven inside a +/-60 deg limit.
+        j = FakeJoint("Swing", 1, "A:1", "B:1", motion_values={"rotationValue": math.radians(30)})
+        j.jointMotion.rotationLimits = SimpleNamespace(
+            isMinimumValueEnabled=True, minimumValue=math.radians(-60),
+            isMaximumValueEnabled=True, maximumValue=math.radians(60),
+            isRestValueEnabled=False, restValue=None)
+        kin_design(joints=[j])
+        rec = _payload(ap.handler())["joints"][0]
+        assert rec["value_now"] == {"angle_deg": 30.0}
+        assert rec["rotation_limits_deg"] == {"min": -60.0, "max": 60.0}
+
+
+# ── frame: the joint's own frame in WORLD coordinates ────────────────────────────────────────────
+#
+# geometryOrOriginOne/Two expose the frame world-framed: .origin plus primaryAxisVector (the frame
+# Z), secondaryAxisVector (X) and thirdAxisVector (Y). The frame Z is the axis a joint OFFSET drives
+# along, which is the fact a caller otherwise pays a probe cycle to discover.
+
+class TestJointFrame:
+    def test_frame_reports_the_world_origin_and_axes_of_the_first_geometry(self, kin_design):
+        f1 = _JointFrame(origin=(6.3027, 0.0, 1.6), z=(1, 0, 0), x=(0, 0, -1), y=(0, 1, 0))
+        kin_design(joints=[FakeJoint("Grip", 0, "A:1", "B:1", frame_one=f1)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [63.027, 0.0, 16.0]     # 6.3027 cm -> 63.027 mm
+        assert frame["z_axis"] == [1.0, 0.0, 0.0]         # primaryAxisVector
+        assert frame["x_axis"] == [0.0, 0.0, -1.0]        # secondaryAxisVector
+        assert frame["y_axis"] == [0.0, 1.0, 0.0]         # thirdAxisVector
+
+    def test_frame_falls_back_to_the_second_geometry_when_the_first_is_null(self, kin_design):
+        # an inferred joint reads null on geometryOrOriginOne; the frame is still readable off Two.
+        f2 = _JointFrame(origin=(0.0, 4.0, 0.0), z=(0, 1, 0), x=(1, 0, 0), y=(0, 0, -1))
+        kin_design(joints=[FakeJoint("Inferred", 1, "A:1", "B:1", frame_one=None, frame_two=f2)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [0.0, 40.0, 0.0]
+        assert frame["z_axis"] == [0.0, 1.0, 0.0]
+
+    def test_the_first_geometry_wins_when_both_are_present(self, kin_design):
+        one = _JointFrame(origin=(1.0, 0.0, 0.0), z=(1, 0, 0))
+        two = _JointFrame(origin=(0.0, 9.0, 0.0), z=(0, 0, 1))
+        kin_design(joints=[FakeJoint("Pin", 1, "A:1", "B:1", frame_one=one, frame_two=two)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [10.0, 0.0, 0.0] and frame["z_axis"] == [1.0, 0.0, 0.0]
+
+    def test_no_frame_key_when_both_geometries_are_null(self, kin_design):
+        kin_design(joints=[FakeJoint("Bare", 1, "A:1", "B:1")])
+        assert "frame" not in _payload(ap.handler())["joints"][0]
+
+    def test_no_frame_key_when_the_geometry_answers_nothing(self, kin_design):
+        # a frame of four nulls claims a frame that was never read.
+        kin_design(joints=[FakeJoint("Opaque", 1, "A:1", "B:1", frame_one=_OpaqueFrame(),
+                                     frame_two=_OpaqueFrame())])
+        assert "frame" not in _payload(ap.handler())["joints"][0]
+
+    def test_a_geometry_that_answers_nothing_does_not_shadow_the_second(self, kin_design):
+        good = _JointFrame(origin=(0.0, 0.0, 5.0), z=(0, 0, 1))
+        kin_design(joints=[FakeJoint("Pin", 1, "A:1", "B:1", frame_one=_OpaqueFrame(),
+                                     frame_two=good)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [0.0, 0.0, 50.0] and frame["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_frame_origin_follows_the_units_but_the_axes_do_not(self, kin_design):
+        # a direction is dimensionless - scaling it by the unit factor would corrupt it.
+        f1 = _JointFrame(origin=(2.54, 0.0, 0.0), z=(0, 0, 1))
+        kin_design(joints=[FakeJoint("Grip", 1, "A:1", "B:1", frame_one=f1)])
+        frame = _payload(ap.handler(units="in"))["joints"][0]["frame"]
+        assert frame["origin"] == [1.0, 0.0, 0.0]         # 2.54 cm -> 1 inch
+        assert frame["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_a_joint_origin_reference_reports_its_offset_world_position(self, monkeypatch,
+                                                                        kin_design):
+        # a JointOrigin exposes the three axis vectors but no origin of its own: its position is the
+        # base anchor PLUS offsetX/Y/Z along the frame axes. A plain .origin read reports null here.
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "JointOrigin", _SliceJO, raising=False)
+        jo = _SliceJO("Stock_Center", pos=(0.0, 0.0, 0.0), offsets=(0.0, 0.0, 4.5), token="T")
+        kin_design(joints=[FakeJoint("Grip", 0, "A:1", "B:1", frame_one=jo)])
+        frame = _payload(ap.handler(units="mm"))["joints"][0]["frame"]
+        assert frame["origin"] == [0.0, 0.0, 45.0]      # base (0,0,0) + offsetZ 4.5 cm along +Z
+        assert frame["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_the_note_teaches_that_the_frame_z_is_the_offset_axis(self, kin_design):
+        kin_design(joints=[FakeJoint("Grip", 1, "A:1", "B:1", frame_one=_JointFrame())])
+        note = _payload(ap.handler())["note"]
+        assert "z_axis is the direction a joint OFFSET drives along" in note
+        assert "value_now" in note
+
+    def test_no_joint_teaching_when_joints_are_not_emitted(self, kin_design):
+        kin_design(occs=[FakeOcc("A:1", "A")],
+                   joints=[FakeJoint("Grip", 1, "A:1", "B:1", frame_one=_JointFrame())])
+        assert "OFFSET drives along" not in _payload(ap.handler(include_joints=False))["note"]
+
+
+# ── include=['all_occurrences']: the NESTED occurrences, each with its full path ─────────────────
+#
+# The 'occurrences' array walks root.occurrences - top-level only - so a part inside a sub-assembly
+# appears nowhere in it and its position is unreadable. This slice repeats the same record over
+# root.allOccurrences, the only walk that reaches nested instances and reports true full paths.
+
+class TestAllOccurrencesSlice:
+    def test_default_omits_the_slice_and_advertises_it(self, kin_design):
+        kin_design(occs=[FakeOcc("Tower:1", "Tower")])
+        out = _payload(ap.handler())
+        assert "all_occurrences" not in out and "all_occurrence_count" not in out
+        assert "include=['all_occurrences']" in out["note"]
+
+    def test_a_nested_occurrence_is_listed_with_its_full_path_and_position(self, kin_design):
+        # the drift case: the child moved inside its parent, and the top-level rows cannot show it.
+        top = FakeOcc("Tower:1", "Tower")
+        nested = FakeOcc("Bolt:1", "Bolt", origin=(1.0, 2.0, 3.0),
+                         full_path="Tower:1+Bolt:1")
+        kin_design(occs=[top], all_occs=[top, nested])
+        out = _payload(ap.handler(include=["all_occurrences"], units="mm"))
+        rows = {r["full_path"]: r for r in out["all_occurrences"]}
+        assert set(rows) == {"Tower:1", "Tower:1+Bolt:1"}
+        assert rows["Tower:1+Bolt:1"]["origin"] == [10.0, 20.0, 30.0]
+        assert rows["Tower:1+Bolt:1"]["component"] == "Bolt"
+        # the top-level array and its count stay top-level - the slice ADDS a view, never edits one
+        assert out["occurrence_count"] == 1 and len(out["occurrences"]) == 1
+
+    def test_the_slice_row_is_the_same_record_as_a_top_level_row(self, kin_design):
+        occ = FakeOcc("Tower:1", "Tower", origin=(1.0, 0.0, 0.0), body_bbox=((0, 0, 0), (2, 1, 1)),
+                      grounded=True, ground_to_parent=True, body_count=3,
+                      basis=((1, 0, 0), (0, 1, 0), (0, 0, 1)))
+        kin_design(occs=[occ], joints=[FakeJoint("J1", 1, "Tower:1", None)])
+        out = _payload(ap.handler(include=["all_occurrences"], units="mm"))
+        top, nested = out["occurrences"][0], out["all_occurrences"][0]
+        assert set(nested) - set(top) == {"full_path"}       # the ONE key the slice adds
+        assert {k: v for k, v in nested.items() if k != "full_path"} == top
+        assert nested["grounded"] is True and nested["ground_to_parent"] is True
+        assert nested["body_count"] == 3 and nested["joints"] == ["J1"]
+        assert nested["bbox_size"] == [20.0, 10.0, 10.0] and nested["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_the_slice_walks_all_occurrences_not_the_top_level_collection(self, kin_design):
+        # root.occurrences holds ONE occurrence while the design holds three - a slice built on the
+        # top-level collection would report the two nested ones as not existing.
+        top = FakeOcc("Tower:1", "Tower")
+        kids = [FakeOcc(f"Bolt:{i}", "Bolt", full_path=f"Tower:1+Bolt:{i}") for i in (1, 2)]
+        kin_design(occs=[top], all_occs=[top] + kids)
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert out["all_occurrence_count"] == 3 and len(out["all_occurrences"]) == 3
+        assert out["all_occurrences_truncated"] is False
+
+    def test_two_nested_instances_sharing_a_leaf_name_are_told_apart_by_path(self, kin_design):
+        # 'Bolt:1' under two different parents is the same leaf name twice; only the path separates
+        # them, so a name-keyed row would collapse the pair.
+        a = FakeOcc("Bolt:1", "Bolt", full_path="Left:1+Bolt:1")
+        b = FakeOcc("Bolt:1", "Bolt", full_path="Right:1+Bolt:1")
+        kin_design(occs=[], all_occs=[a, b])
+        rows = _payload(ap.handler(include=["all_occurrences"]))["all_occurrences"]
+        assert sorted(r["full_path"] for r in rows) == ["Left:1+Bolt:1", "Right:1+Bolt:1"]
+
+    def test_the_cap_truncates_the_list_and_flags_it(self, kin_design):
+        kids = [FakeOcc(f"P{i}:1", "P", full_path=f"Tower:1+P{i}:1") for i in range(9)]
+        kin_design(occs=[], all_occs=kids)
+        out = _payload(ap.handler(include=["all_occurrences"], max_all_occurrences=4))
+        assert len(out["all_occurrences"]) == 4
+        assert out["all_occurrence_count"] == 9          # the truth, uncapped
+        assert out["all_occurrences_truncated"] is True
+        assert "max_all_occurrences" in out["note"]
+
+    def test_an_uncapped_list_is_not_flagged(self, kin_design):
+        kin_design(occs=[], all_occs=[FakeOcc("A:1", "A")])
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert out["all_occurrences_truncated"] is False and "max_all_occurrences" not in out["note"]
+
+    def test_an_empty_design_reports_an_empty_list(self, kin_design):
+        kin_design()
+        out = _payload(ap.handler(include=["all_occurrences"]))
+        assert out["all_occurrences"] == [] and out["all_occurrence_count"] == 0
+
+    def test_include_joints_false_drops_the_joints_key_from_the_slice_rows(self, kin_design):
+        kin_design(occs=[FakeOcc("A:1", "A")], joints=[FakeJoint("J", 1, "A:1", None)])
+        out = _payload(ap.handler(include=["all_occurrences"], include_joints=False))
+        assert "joints" not in out["all_occurrences"][0]
 
 
 class TestJointLimitsRead:

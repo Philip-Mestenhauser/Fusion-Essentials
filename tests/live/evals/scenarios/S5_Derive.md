@@ -9,8 +9,8 @@ fixture: the S4 artifact P4-Gimbal (verified BY URN) OPENED by the orchestrator 
   (per-run subfolders + legacy chains), so a by-name search picks the wrong lineage. Missing
   fixture = ask - never create a project.
 budget:
-  max_tool_calls: 72
-  max_tokens: 76000
+  max_tool_calls: 60
+  max_tokens: 150000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
@@ -62,7 +62,8 @@ between frame and inner ring):
   - OFFSET surfaces from at least two faces - one at ZERO offset and one at a nonzero offset
     you choose (report which faces and offsets),
   - at least one BOUNDARY SKETCH projecting/outlining machining-relevant geometry,
-  - a JOINT ORIGIN at the center of the model's bounding box, axes oriented to the machining
+  - a JOINT ORIGIN at the measured center of the DERIVED PART's bounding box (the part alone -
+    prep surfaces you added do not count toward the box), axes oriented to the machining
     direction you choose.
 
 Finally save the document as P5-RingModel into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
@@ -81,8 +82,8 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 - the prep layer exists: a patch surface per cross-hole opening (report the patch body count
   and which opening each caps; a fresh read shows the central bore still OPEN), offset
   surfaces (>= 2, with the zero and nonzero offsets you declared), the boundary sketch, and
-  the joint origin at the measured bbox center (report the center you measured and the
-  origin's read-back position - they must match).
+  the joint origin at the measured center of the derived PART's bbox (report the center you
+  measured and the origin's read-back position - they must match).
 - one-way proof: your prep work - INCLUDING the local edits on the derived body - did NOT touch
   the source: a fresh cloud read shows P4-Gimbal still at the version you found it.
 - doc_get -> saved as "P5-RingModel", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
@@ -131,7 +132,6 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   error names it on failure). Grade the honest struggle-and-recover path; a silently skipped
   opening or a patched-over bore is a FAIL of this element.
 - Staging: verify P4 present BY URN; doc_open the source P4 by URN (force_api_open, leave open);
-  doc_new for the fresh empty active AFTER; verify twice; run the block. Budget:
-  measured + 25% (72 calls incl. a surface_offset chaining recovery); the
-  cross-hole patch work replaces the single bore patch - recalibrate from the next blind run's
-  measured count.
+  doc_new for the fresh empty active AFTER; verify twice; run the block. Budget: the last
+  measured run (Agent-executor harness) was 47 calls, PASS with 8/8 cross-hole patches first
+  try; 60 = 47 + 25% rounded.

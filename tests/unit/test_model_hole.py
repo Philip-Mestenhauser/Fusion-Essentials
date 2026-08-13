@@ -243,10 +243,20 @@ class _SketchPoints:
 
 
 class _Sketch:
-    def __init__(self, name="Sketch1"):
+    def __init__(self, name="Sketch1", to_sketch=None, parent=None):
         self.name = name
         self.sketchPoints = _SketchPoints()
         self.deleted = False
+        # modelToSketchSpace maps a point from the sketch's PARENT COMPONENT's model space into the
+        # sketch's own 2D space. `to_sketch` is the mapping a live sketch applies; None models one
+        # that cannot convert at all. `parent` is what decides WHOSE model space it maps from.
+        self._to_sketch = to_sketch
+        self.parentComponent = parent
+
+    def modelToSketchSpace(self, p):
+        if self._to_sketch is None:
+            raise RuntimeError("sketch space unavailable")
+        return FakePoint(*self._to_sketch(p.x, p.y, p.z))
 
     def sketchToModelSpace(self, p):
         # identity: these test sketches sit on the XY plane at the origin
@@ -258,16 +268,19 @@ class _Sketch:
 
 
 class _Sketches:
-    def __init__(self):
+    def __init__(self, owner=None):
         self._byname = {}
         self.created_on = []
+        self.to_sketch = None      # the model -> sketch mapping every sketch created here applies
+        self.owner = owner         # the component they report as parentComponent
     def add(self, plane):
         # The live Sketches.add rejects a wrong-typed argument with a TypeError (it expects a face/plane
         # entity, NOT a tuple). Model that so an unpacking bug — passing _resolve_face's (entity, error)
         # tuple instead of the entity — fails here as it does live, rather than silently passing.
         if isinstance(plane, tuple):
             raise TypeError("Wrong number or type of arguments for overloaded function 'Sketches_add'.")
-        s = _Sketch("HolePts%d" % len(self.created_on)); self.created_on.append(plane)
+        s = _Sketch("HolePts%d" % len(self.created_on), to_sketch=self.to_sketch, parent=self.owner)
+        self.created_on.append(plane)
         self._byname[s.name] = s; return s
     def itemByName(self, n):
         return self._byname.get(n)
@@ -281,8 +294,10 @@ class _Features:
 
 class _Root:
     def __init__(self):
-        self.sketches = _Sketches()
+        # the root OWNS the sketches created in it, which is what makes their model space world
+        self.sketches = _Sketches(owner=self)
         self.features = _Features()
+        self.name = "Root"
 
 
 class _ObjColl:
@@ -506,6 +521,204 @@ class TestPerPointVerification:
 
 
 # ── counterbore / countersink ───────────────────────────────────────────────
+
+# -- points_space: world points converted by the sketch's OWN converter --------------------------
+# A placement sketch's space is not predictable from the face - it follows the sketch's OWNER. The
+# tool hands the world point to that sketch's own modelToSketchSpace rather than doing frame maths,
+# and refuses when the sketch did not land in the root component (whose model space IS world).
+
+_ROOT = object()        # "owned by the design root", for _framed
+
+
+def _identity(x, y, z):
+    return (x, y, z)
+
+
+def _framed(monkeypatch, to_sketch, owner=_ROOT):
+    """_install plus a placement sketch whose modelToSketchSpace applies `to_sketch`.
+
+    `owner` defaults to the design root - the space that IS world; pass another object to model a
+    sketch that landed in a sub-component, and None one whose owner cannot be read."""
+    import adsk.core
+    d = _install()
+    monkeypatch.setattr(adsk.core.Point3D, "create",
+                        staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+    d.rootComponent.sketches.to_sketch = to_sketch
+    d.rootComponent.sketches.owner = d.rootComponent if owner is _ROOT else owner
+    return d
+
+
+def _placed(d):
+    """(x, y, z) in cm of every point actually added to the placement sketch."""
+    sketch = next(iter(d.rootComponent.sketches._byname.values()))
+    return [(p.geometry.x, p.geometry.y, p.geometry.z) for p in sketch.sketchPoints.items]
+
+
+def _drill(**kw):
+    kw.setdefault("hole_type", "simple")
+    kw.setdefault("diameter", "5 mm")
+    kw.setdefault("face", "h")
+    kw.setdefault("extent", "through")
+    return mh.handler(**kw)
+
+
+class TestPointsSpaceWorld:
+    def test_world_points_go_through_the_sketchs_own_converter(self, monkeypatch):
+        # a sketch space rotated about origin (1,2,0): its +X runs along world +Y, its +Y along -X
+        d = _framed(monkeypatch, lambda x, y, z: (y - 2, -(x - 1), z))
+        out = _payload(_drill(points=[[30, 40, 0]], points_space="world"))
+        assert _placed(d) == [(2.0, -2.0, 0.0)]
+        assert out["points_space"] == "world"
+
+    def test_a_flipped_axis_space_flips_the_local_coordinate(self, monkeypatch):
+        # the measured axis-SIGN case: passing world numbers through raw would mirror the hole
+        d = _framed(monkeypatch, lambda x, y, z: (-x, y, -z))
+        _drill(points=[[50, 0, 0]], points_space="world")
+        assert _placed(d) == [(-5.0, 0.0, 0.0)]
+
+    def test_an_offset_space_shifts_every_point(self, monkeypatch):
+        # the measured origin case: the sketch origin is nowhere near the face plane's own origin
+        d = _framed(monkeypatch, lambda x, y, z: (x - 3, y - 3.5, z - 2.5))
+        _drill(points=[[40, 55, 25]], points_space="world")
+        assert _placed(d) == [(1.0, 2.0, 0.0)]
+
+    def test_every_point_of_a_bolt_circle_converts(self, monkeypatch):
+        d = _framed(monkeypatch, lambda x, y, z: (x - 1, y - 1, z))
+        out = _payload(_drill(points=[[20, 10, 0], [10, 20, 0], [30, 30, 0]], points_space="world"))
+        assert _placed(d) == [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (2.0, 2.0, 0.0)]
+        assert out["holes"] == 3
+
+    def test_an_off_plane_world_point_is_refused_naming_it_and_the_distance(self, monkeypatch):
+        # the converter's z IS the off-plane distance; projecting it would drill somewhere else
+        d = _framed(monkeypatch, _identity)
+        res = _drill(points=[[0, 0, 5]], points_space="world")
+        assert res["isError"] is True
+        assert "[0, 0, 5]" in res["message"] and "5 'mm'" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []       # nothing was drilled
+        sketch = next(iter(d.rootComponent.sketches._byname.values()))
+        assert sketch.deleted is True                                  # no orphaned placement sketch
+
+    def test_the_off_plane_distance_is_reported_in_the_callers_units(self, monkeypatch):
+        d = _framed(monkeypatch, _identity)
+        res = _drill(points=[[0, 0, 1]], points_space="world", units="cm")
+        assert res["isError"] is True and "1 'cm'" in res["message"]
+
+    def test_a_point_inside_the_tolerance_band_still_drills(self, monkeypatch):
+        # the band absorbs the rounding a world read publishes - it is not a licence to project
+        d = _framed(monkeypatch, _identity)
+        _drill(points=[[10, 0, 0.02]], points_space="world")
+        assert _placed(d) == [(1.0, 0.0, 0.0)]
+
+    def test_default_points_space_leaves_the_points_untouched(self, monkeypatch):
+        # back-compatible: with no points_space the numbers go in exactly as before, even though
+        # this sketch WOULD have converted them somewhere else.
+        d = _framed(monkeypatch, lambda x, y, z: (y - 2, -(x - 1), z))
+        out = _payload(_drill(points=[[30, 40, 0]]))
+        assert _placed(d) == [(3.0, 4.0, 0.0)]
+        assert out["points_space"] == "sketch"
+
+    def test_a_sketch_that_cannot_convert_refuses_instead_of_guessing(self, monkeypatch):
+        d = _framed(monkeypatch, None)          # modelToSketchSpace raises
+        res = _drill(points=[[10, 10, 0]], points_space="world")
+        assert res["isError"] is True and "points_space='sketch'" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+    def test_world_space_with_another_placement_is_refused(self):
+        # the other placements take no 'points', so accepting it would silently do nothing
+        _install()
+        res = _drill(placement="center", edge="e", points_space="world")
+        assert res["isError"] is True and "sketch_points" in res["message"]
+
+    def test_an_unknown_points_space_is_refused_listing_the_options(self):
+        _install()
+        res = _drill(points=[[1, 2, 0]], points_space="face")
+        assert res["isError"] is True
+        assert "sketch" in res["message"] and "world" in res["message"]
+
+
+class TestPointsSpaceWorldOnAnOffsetComponent:
+    """The regression a hand-rolled occurrence transform got wrong. Measured rig: an occurrence at
+    +2cm X, box local 0..3cm, drilled on the PROXY top face from the root. The sketch the tool
+    creates is ROOT-owned, so its space is WORLD - origin (2,0,1)cm, the world face corner - and
+    modelToSketchSpace((4,2,1)) answers (2,2,0). Compensating for the occurrence on top of that
+    subtracted the offset twice and drilled at u=0 where world u=40mm was asked for."""
+
+    def _measured_rig(self, monkeypatch):
+        return _framed(monkeypatch, lambda x, y, z: (x - 2, y, z - 1))
+
+    def test_a_world_point_over_an_offset_component_lands_where_find_geometry_said(self, monkeypatch):
+        d = self._measured_rig(monkeypatch)
+        _drill(points=[[40, 20, 10]], points_space="world")
+        assert _placed(d) == [(2.0, 2.0, 0.0)]
+
+    def test_sketch_space_points_are_untouched_on_the_same_rig(self, monkeypatch):
+        # points_space='sketch' means "already in the sketch's space" - no conversion at all
+        d = self._measured_rig(monkeypatch)
+        _drill(points=[[40, 20, 0]])
+        assert _placed(d) == [(4.0, 2.0, 0.0)]
+
+    def test_a_sketch_outside_the_root_refuses_the_world_space(self, monkeypatch):
+        # modelToSketchSpace maps from the sketch OWNER's model space, so anywhere but the root a
+        # 'world' point is really that component's local one - refuse rather than convert wrongly.
+        sub = type("Comp", (), {"name": "Bracket"})()
+        d = _framed(monkeypatch, lambda x, y, z: (x - 2, y, z - 1), owner=sub)
+        res = _drill(points=[[40, 20, 10]], points_space="world")
+        assert res["isError"] is True
+        assert "Bracket" in res["message"] and "ROOT" in res["message"]
+        assert "points_space='sketch'" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+        sketch = next(iter(d.rootComponent.sketches._byname.values()))
+        assert sketch.deleted is True
+
+    def test_a_sketch_with_no_readable_owner_refuses_too(self, monkeypatch):
+        # an unproven space is refused; an unreadable owner is not a yes
+        d = _framed(monkeypatch, _identity, owner=None)
+        res = _drill(points=[[10, 0, 0]], points_space="world")
+        assert res["isError"] is True and "ROOT" in res["message"]
+        assert d.rootComponent.features.holeFeatures.added == []
+
+
+class TestSketchSpacePoint:
+    """The conversion on its own: (u, v, off_plane) in cm, straight off the sketch's converter."""
+
+    @pytest.fixture(autouse=True)
+    def _real_points(self, monkeypatch):
+        # the conversion builds a Point3D to hand to the converter, so it needs real coordinates
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create",
+                            staticmethod(lambda x, y, z: FakePoint(x, y, z)))
+
+    def test_it_returns_the_converters_three_coordinates(self):
+        s = _Sketch("S", to_sketch=lambda x, y, z: (x - 1, y - 2, z - 3))
+        assert mh._sketch_space_point(s, 4.0, 6.0, 3.5) == (3.0, 4.0, 0.5)
+
+    def test_off_plane_is_signed(self):
+        s = _Sketch("S", to_sketch=_identity)
+        assert mh._sketch_space_point(s, 0.0, 0.0, 0.7)[2] == 0.7
+        assert mh._sketch_space_point(s, 0.0, 0.0, -0.7)[2] == -0.7
+
+    def test_a_sketch_that_cannot_convert_returns_nones(self):
+        assert mh._sketch_space_point(_Sketch("S"), 1.0, 2.0, 3.0) == (None, None, None)
+
+
+class TestSketchSpaceIsWorld:
+    """Only a ROOT-owned sketch converts from world - and an unreadable owner is not a yes."""
+
+    def _design(self, root):
+        return type("D", (), {"rootComponent": root})()
+
+    def test_a_root_owned_sketch_is_world(self):
+        root = _Root()
+        assert mh._sketch_space_is_world(_Sketch("S", parent=root), self._design(root)) is True
+
+    def test_a_sub_component_sketch_is_not(self):
+        sub = type("Comp", (), {"name": "Bracket"})()
+        assert mh._sketch_space_is_world(_Sketch("S", parent=sub), self._design(_Root())) is False
+
+    def test_an_unreadable_owner_is_not(self):
+        assert mh._sketch_space_is_world(_Sketch("S", parent=None), self._design(_Root())) is False
+
+
 
 class TestCounterboreCountersink:
     def test_counterbore_passes_three_dims(self):

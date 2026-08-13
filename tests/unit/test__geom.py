@@ -428,3 +428,90 @@ class TestAabbGapSameSpacePrecondition:
         b = self._in_comp("B", types.SimpleNamespace(name="Lid", entityToken="CTOK::Lid"),
                           (5, 0, 0), (6, 1, 1))
         assert geom.aabb_gap(a, b) is None
+
+    def test_proxies_under_different_occurrences_do_not_compare(self):
+        # Two proxies whose assembly contexts sit on DIFFERENT components are in different frames
+        # even though both answer an assemblyContext.
+        import types
+        from conftest import body_proxy
+        comp_a = types.SimpleNamespace(name="Frame", entityToken="CTOK::Frame")
+        comp_b = types.SimpleNamespace(name="Lid", entityToken="CTOK::Lid")
+        pa = body_proxy(self._in_comp("A", comp_a, (0, 0, 0), (1, 1, 1)),
+                        types.SimpleNamespace(name="Frame:1", fullPathName="Frame:1",
+                                              component=comp_a))
+        pb = body_proxy(self._in_comp("B", comp_b, (5, 0, 0), (6, 1, 1)),
+                        types.SimpleNamespace(name="Lid:1", fullPathName="Lid:1",
+                                              component=comp_b))
+        assert geom.aabb_gap(pa, pb) is None
+
+
+class _RaisingCoord:
+    """A vector/point whose .y read raises - the unreadable-coordinate case the None-guards catch."""
+
+    x = 1.0
+    z = 0.0
+
+    @property
+    def y(self):
+        raise RuntimeError("unreadable")
+
+
+class TestUnreadableCoordinateGuards:
+    def test_unit_vector_with_an_unreadable_coordinate_is_none(self):
+        assert geom.unit_vector(_RaisingCoord()) is None
+
+    def test_unit_vector_between_with_an_unreadable_endpoint_is_none(self):
+        assert geom.unit_vector_between(_RaisingCoord(), FakePoint(1, 0, 0)) is None
+        assert geom.unit_vector_between(FakePoint(0, 0, 0), _RaisingCoord()) is None
+
+    def test_axis_vec_with_a_non_numeric_component_is_none(self):
+        from unittest.mock import Mock
+        assert geom.axis_vec(FakeVector3D(Mock(), 0, 0)) is None
+        assert geom.axis_vec(_RaisingCoord()) is None
+
+
+class TestOccWorldFrameGuards:
+    """occ_world_frame omits keys rather than faking them: every unreadable piece drops ONLY its
+    own keys, so a partial read stays honest instead of publishing a zeroed placement."""
+
+    def test_an_unreadable_transform_omits_origin_and_axes_but_keeps_the_bbox(self):
+        import types
+        # body_aabb reads Occurrence.boundingBox2(entityTypes) - the bodies-only box.
+        box = FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(2, 2, 2))
+        occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: box)
+        out = geom.occ_world_frame(occ, 10.0)
+        assert "origin" not in out and "x_axis" not in out
+        assert out["bbox_center"] == [10.0, 10.0, 10.0]
+        assert out["bbox_size"] == [20.0, 20.0, 20.0]
+
+    def test_a_malformed_coordinate_system_omits_the_axes(self):
+        import types
+        m = types.SimpleNamespace(translation=FakeVector3D(1, 2, 3),
+                                  getAsCoordinateSystem=lambda: "not-a-4-tuple")
+        occ = types.SimpleNamespace(transform2=m, bRepBodies=[])
+        out = geom.occ_world_frame(occ, 10.0)
+        assert out["origin"] == [10.0, 20.0, 30.0]
+        assert "x_axis" not in out and "y_axis" not in out and "z_axis" not in out
+
+    def test_a_degenerate_axis_is_omitted_while_readable_ones_land(self):
+        import types
+        from unittest.mock import Mock
+        cs = (FakePoint(0, 0, 0), FakeVector3D(1, 0, 0), FakeVector3D(Mock(), 0, 0),
+              FakeVector3D(0, 0, 1))
+        m = types.SimpleNamespace(translation=FakeVector3D(0, 0, 0),
+                                  getAsCoordinateSystem=lambda: cs)
+        occ = types.SimpleNamespace(transform2=m, bRepBodies=[])
+        out = geom.occ_world_frame(occ, 1.0)
+        assert out["x_axis"] == [1.0, 0.0, 0.0] and out["z_axis"] == [0.0, 0.0, 1.0]
+        assert "y_axis" not in out
+
+    def test_an_unreadable_bbox_endpoint_omits_the_bbox_keys(self):
+        import types
+
+        class _NoMin:
+            minPoint = property(lambda s: (_ for _ in ()).throw(RuntimeError("unreadable")))
+            maxPoint = FakePoint(1, 1, 1)
+
+        occ = types.SimpleNamespace(transform2=None, boundingBox2=lambda types_: _NoMin())
+        out = geom.occ_world_frame(occ, 1.0)
+        assert "bbox_center" not in out and "bbox_size" not in out

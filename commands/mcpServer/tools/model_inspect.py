@@ -37,6 +37,8 @@ _ACCURACY = {
 }
 _ACCURACY_NAME = {v: k for k, v in _ACCURACY.items()}   # for reporting the accuracy the API used
 
+_MAX_PER_OCCURRENCE_ROWS = 200   # per_body rows: one per occurrence, each crossing the wire
+
 
 # ── small geometry helpers ───────────────────────────────────────────────────
 
@@ -88,6 +90,31 @@ def _measurable_geometry(entity):
     if best is None:
         best = bodies.item(0); best_name = safe(lambda: bodies.item(0).name)
     return best, (f" (largest of {n} bodies: '{best_name}'; measure a specific body for one part)")
+
+
+def _subtree_occurrences(entity, limit):
+    """Every occurrence in `entity`'s subtree - nested levels included - capped at `limit` + 1.
+
+    A Component answers ``allOccurrences``, its whole subtree already flattened; its ``occurrences``
+    collection holds only the DIRECT children, so a body owned by a grandchild component would never
+    reach a row of its own. An Occurrence carries no flattened list - only ``childOccurrences`` - so
+    its subtree is walked here. The one extra item past `limit` is what lets the caller say the list
+    was cut without publishing a total it never counted.
+    """
+    out = []
+    flat = safe(lambda: entity.allOccurrences)
+    if flat is not None:
+        for o in _common.iter_collection(flat):
+            out.append(o)
+            if len(out) > limit:
+                break
+        return out
+    frontier = list(_common.iter_collection(safe(lambda: entity.childOccurrences)))
+    while frontier and len(out) <= limit:
+        o = frontier.pop(0)
+        out.append(o)
+        frontier.extend(_common.iter_collection(safe(lambda o=o: o.childOccurrences)))
+    return out
 
 
 def _joint_origin_axes(design, frame_name):
@@ -232,28 +259,49 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
     result.update(_full_props(pp, k))
     result["accuracy_used"] = _ACCURACY_NAME.get(safe(lambda: pp.accuracy), acc_key)
 
+    truncated = False
     if per_body:
-        # per top-level occurrence mass + CoM. Only the whole-design / a component-with-children has
-        # children; for a single body/occurrence target this list is empty.
+        # A mass + CoM row per occurrence in the target's SUBTREE, at every depth - a body owned by a
+        # nested sub-component is otherwise folded into its parent's row and never named.
+        occs = _subtree_occurrences(entity, _MAX_PER_OCCURRENCE_ROWS)
+        truncated = len(occs) > _MAX_PER_OCCURRENCE_ROWS
         breakdown = []
-        # root and any component expose .occurrences; an identity test against rootComponent can
-        # never be true (each property access mints a new proxy), so resolve by attribute only.
-        occ_source = safe(lambda: getattr(entity, "occurrences", None))
-        for o in _common.iter_collection(occ_source):
+        for o in occs[:_MAX_PER_OCCURRENCE_ROWS]:
             opp = safe(lambda o=o: o.getPhysicalProperties(acc))
             if opp is None:
                 continue
-            breakdown.append({
-                "occurrence": safe(lambda o=o: o.name),
+            row = {
+                # the FULL path: two occurrences of one component, or two 'Bolt:1' under different
+                # parents, are separate rows and a bare name would collapse them.
+                "occurrence": safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name),
                 "mass_kg": _common.measured(lambda: opp.mass),
                 "center_of_mass": _vec(safe(lambda: opp.centerOfMass), 1.0 / k),
-            })
+            }
+            # An occurrence's physical properties cover its whole subtree, so a row with children
+            # already contains the rows nested under it. An unreadable child count publishes null
+            # rather than a confident "this one is a leaf".
+            kids = _common.counted(lambda o=o: o.childOccurrences.count)
+            if kids is None:
+                row["aggregates_children"] = None
+            elif kids > 0:
+                row["aggregates_children"] = True
+            breakdown.append(row)
         result["per_occurrence"] = breakdown
         result["per_occurrence_count"] = len(breakdown)
+        result["per_occurrence_truncated"] = truncated
 
-    result["note"] = ("Mass is driven by each body's PHYSICAL MATERIAL (density), not its appearance - "
-                      "if a mass looks wrong, check 'density'. Inertia_world is about the WORLD origin; "
-                      "principal_moments are about the center of mass.")
+    note = ("Mass is driven by each body's PHYSICAL MATERIAL (density), not its appearance - "
+            "if a mass looks wrong, check 'density'. Inertia_world is about the WORLD origin; "
+            "principal_moments are about the center of mass.")
+    if per_body:
+        note += (" per_occurrence carries one row per occurrence in the target's subtree, NESTED ones "
+                 "included, keyed by full path; a row marked aggregates_children:true already covers "
+                 "the rows beneath it, so summing every row double-counts (null there = the child "
+                 "count could not be read).")
+        if truncated:
+            note += (f" Cut at {_MAX_PER_OCCURRENCE_ROWS} rows - there are more occurrences than "
+                     "that (per_occurrence_truncated).")
+    result["note"] = note
     return ok(result)
 
 
@@ -334,8 +382,8 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
         out["note"] = ("Bounding box over the SOLID/SURFACE/MESH bodies only - sketch and construction "
                        "geometry (planes, axes) are excluded, so an orphaned datum does not inflate it. "
                        "Add include=['mass'] for full physical properties (mass/volume/CoM/inertia; "
-                       "'per_body' breaks it down per occurrence). 'frame'=<Joint Origin> measures in "
-                       "part space.")
+                       "'per_body' adds a row per occurrence in the subtree). 'frame'=<Joint Origin> "
+                       "measures in part space.")
     return ok(out)
 
 
@@ -343,8 +391,9 @@ TOOL_DESCRIPTION = (
     "Measure a target - size, mass, or mesh stats - in one read. 'target' is a find_geometry handle "
     "(body/face/mesh) OR an occurrence/component/body name, or '' for the WHOLE design. Default: the "
     "bounding box (X/Y/Z extents + center in 'units'; 'frame'=<Joint Origin> measures in part space). "
-    "include=['mass'] adds full physical properties (mass/volume/area/CoM/inertia; 'accuracy', "
-    "'per_body'). A MESH target reports triangle/vertex counts + watertight instead. For the distance "
+    "include=['mass'] adds full physical properties (mass/volume/area/CoM/inertia; 'accuracy'; "
+    "'per_body' adds a mass + CoM row per occurrence in the target's subtree, nested ones included). "
+    "A MESH target reports triangle/vertex counts + watertight instead. For the distance "
     "or angle BETWEEN two entities, use model_measure_between."
 )
 
@@ -358,7 +407,8 @@ tool = (
     .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
             "description": "Physical-properties accuracy when include=['mass'] (default medium)."})
     .add_input_property("per_body", {"type": "boolean",
-            "description": "With include=['mass']: also a per-occurrence mass + CoM breakdown."})
+            "description": "With include=['mass']: also a mass + CoM row per occurrence in the "
+                           "subtree (nested included; a row with children aggregates them)."})
     .add_input_property("frame", {"type": "string",
             "description": "A Joint Origin name to measure the bounding box in that part-space frame."})
     .strict_schema()

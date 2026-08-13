@@ -1,8 +1,8 @@
 ---
 id: S3_Motion
 tier: pipeline
-fixture: P2-Gimbal (the S2b artifact - all hardware solid, zero-interference verified (pins in
-  clearance bores), no joints)
+fixture: P2-Gimbal (the S2b artifact - all hardware solid, zero overlap, support contacts at the
+  carrier-on-pedestal and crank-on-frame engagements, pins in clearance bores, no joints)
   OPENED as the active document
   by the orchestrator from MCP Test Project / Pipeline-v1 BY URN, active hub PINNED first. The
   agent assembles the motion and saves AS A NEW document (P3-Gimbal); P2-Gimbal's cloud version
@@ -65,10 +65,11 @@ pose and read it back.
 
 INTERFERENCE: run an interference check at REST and AT EACH JOINT'S TWO TRAVEL EXTREMES (the
 worst-case poses the sweep reaches). Pins ride in clearance bores and the shaft in a clearance
-seat, so with clearance they do NOT touch - the expected result is ZERO interfering pairs. NAME
-any contact you find with its volume and the two bodies. A ring swinging into the pedestal or the
-carrier at a travel extreme is a real BINDING defect: report it as a FAIL with the offending pose
-and volume - do NOT narrow the declared range to slip under it.
+seat, so the expected result is ZERO overlapping pairs at every pose; the design's support
+engagements (carrier on its pedestal, crank on its frame mount) are flush contacts, not
+overlaps. NAME any overlap you find with its volume and the two bodies. A ring swinging into the
+pedestal or the carrier at a travel extreme is a real BINDING defect: report it as a FAIL with
+the offending pose and volume - do NOT narrow the declared range to slip under it.
 
 Finally save AS A NEW document: P3-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
@@ -87,9 +88,10 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   crank at the declared ratio at each station; rest pose restored afterward (fresh reads show
   original orientations within float noise).
 - interference across travel: the REST check plus a check at EACH joint's two travel extremes all
-  ran; the expected result is ZERO interfering pairs (clearance bores/seat); any contact is NAMED
-  with its volume and the two bodies, and a ring binding into the pedestal or carrier at a travel
-  extreme is reported as a FAIL with the pose (report the checker's actual output at each pose).
+  ran; the expected result is ZERO overlapping pairs at every pose (clearance bores/seat; flush
+  support engagements are not overlaps); any overlap is NAMED with its volume and the two bodies,
+  and a ring binding into the pedestal or carrier at a travel extreme is reported as a FAIL with
+  the pose (report the checker's actual output at each pose).
 - doc_get -> saved as "P3-Gimbal", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} -
   AND P2-Gimbal still at the version you found it.
 
@@ -142,7 +144,9 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   that is the known hazard, not agent error.
 - Motion-link API limit (audit-known): 2-slider coupling is refused by Fusion; revolute-revolute
   couples fine across chains.
+- SPIN-PARALLEL-TO-OUTER-PIVOT IS CORRECT, not degenerate: at the rest pose a real gimbal's
+  spin axis coincides with the outer pivot's direction (they are different links of the chain);
+  a run flagging that pairing as a defect has misread the mechanism - do not grade it down.
 - Staging: doc_open the S2b artifact (P2-Gimbal) BY URN, confirm active; run the block. Budget:
-  measured clean-upstream run + 25% (113 calls / 103.3k
-  output tokens / 24.8 min, incl. four self-caught joint-teleport recoveries; a PASS with a
-  fully-clean interference result at rest AND driven, on the real-pin P2).
+  the last measured run (Agent-executor harness) was 83 calls - a full PASS with 16 driven
+  stations and 9 clean interference checks; 105 = 83 + 25% rounded.

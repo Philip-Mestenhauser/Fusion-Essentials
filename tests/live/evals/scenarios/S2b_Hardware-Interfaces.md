@@ -1,12 +1,13 @@
 ---
 id: S2b_Hardware-Interfaces
 tier: pipeline
-fixture: P2a-Gimbal (the S2a artifact - the eight primary bodies, contact-free) OPENED as the
-  active document by the orchestrator from the Pipeline-v1 tree BY URN, active hub PINNED first.
-  The agent builds the pivot interfaces and saves AS A NEW document (P2-Gimbal); P2a-Gimbal's
-  cloud version must remain untouched. Missing fixture = ask the user - never create a project.
+fixture: P2a-Gimbal (the S2a artifact - the primary bodies, ENGAGED at their support interfaces
+  and clearance-verified where parts move) OPENED as the active document by the orchestrator from
+  the Pipeline-v1 tree BY URN, active hub PINNED first. The agent builds the pivot interfaces and
+  saves AS A NEW document (P2-Gimbal); P2a-Gimbal's cloud version must remain untouched. Missing
+  fixture = ask the user - never create a project.
 budget:
-  max_tool_calls: 122
+  max_tool_calls: 110
   max_tokens: 173000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
@@ -16,11 +17,13 @@ expected_refusals: none
 # S2b - Hardware II: the pivot interfaces
 
 Goal-shaped, second half of the hardware stage (split so one blind run fits the harness's
-task-time cap). The parts exist and are contact-free; now build what joins them: physical pivot
-pins ALONG the skeleton's axes, threading BOTH parts of each interface through real bores with
-real clearance. Grades pin-to-skeleton collinearity, through-bore proof, clearance honesty, and
-the final ZERO-interference clearance state S3 inherits (pins ride in clearance bores, so nothing
-touches). The orchestrator hands the block below VERBATIM.
+task-time cap). The parts exist, engaged at their supports and clear where they move; now build
+what joins the moving parts: physical pivot pins ALONG the skeleton's axes, threading BOTH parts
+of each interface through real bores with real clearance - and built PARAMETRIC, because the
+regeneration stage will scale the whole design. Grades pin-to-skeleton collinearity, through-bore
+proof, clearance honesty, pin parametricity at the sketch level, and the final interference state
+S3 inherits (zero overlap; contact only at the inherited support engagements). The orchestrator
+hands the block below VERBATIM.
 
 ## AGENT PROMPT (verbatim)
 
@@ -33,7 +36,8 @@ already loaded). No local files, no shell.
 The active design is already staged: the saved document "P2a-Gimbal" - the gyroscope's eight
 primary bodies (frame with pedestal sub-component, carrier, two coplanar rings, rotor, rotor
 shaft, crank), built on a shared skeleton (one center point, three mutually perpendicular pivot
-construction lines) and verified CONTACT-FREE. Work IN the active design; do not create, open,
+construction lines), ENGAGED at its support interfaces (carrier on pedestal, crank on frame) and
+verified clear of overlap everywhere. Work IN the active design; do not create, open,
 or switch documents. The final save must write AS A NEW document and leave the P2a-Gimbal cloud
 artifact at the version you found it. If the save-target project does not exist, STOP and
 report BLOCKED.
@@ -52,6 +56,9 @@ GOAL - build the PIVOT INTERFACES that let the next stage joint the mechanism:
   thin to bore - and keep any added material clear of every OTHER body.
 - Where the ROTOR SHAFT meets the INNER RING, build the bearing seat the same way: the shaft
   ends ride in through bores (or open seats) with clearance - the shaft must be able to spin.
+- BUILD PARAMETRIC: the pins, bores, and seats you add must be driven by the design's shared
+  parameters (their sketch dimensions carry expressions), so the whole design still scales as
+  one - a later stage bumps the driving diameter and everything must follow.
 - Do NOT create joints - the next stage assembles the motion. Parts stay at their positions.
 
 Finally save AS A NEW document: P2-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}
@@ -69,11 +76,15 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
   measured extent) - and report pin radius vs bore radius at each interface (bore strictly
   larger).
 - the shaft bearing seats exist with clearance (report shaft radius vs seat radius).
-- FINAL CLEARANCE - the defining check of this stage: every pin and shaft end rides in a bore or
-  seat STRICTLY LARGER than it, so with real clearance NOTHING touches - a fresh interference check
-  reports ZERO interfering pairs. Any overlapping pair is a defect you fix before saving; a
-  pin-in-bore or shaft-in-seat contact means the clearance is missing, so open that bore/seat until
-  it clears (report the checker's actual output).
+- PARAMETRIC PINS: a fresh sketch read of the pin/bore/seat geometry you added shows its driving
+  dimensions carrying EXPRESSION text referencing shared parameters, not baked numbers (report at
+  least one expression per added interface).
+- FINAL INTERFERENCE STATE - the defining check of this stage: a fresh interference check reports
+  ZERO overlapping pairs, and with coincident faces included the only contacts it names are the
+  inherited support engagements (carrier-on-pedestal, crank-on-frame). Every pin and shaft end
+  rides in a bore or seat STRICTLY LARGER than it - a pin-in-bore or shaft-in-seat contact means
+  the clearance is missing, so open that bore/seat until it clears (report the checker's actual
+  output).
 - RETENTION DISCLOSURE - name it, do not assume: for EACH pin and shaft interface, name the
   geometric feature that stops the pin/shaft from sliding axially out of its bore/seat, or state
   plainly that NONE exists. A pin floating in a clearance bore has no axial capture - say so.
@@ -112,13 +123,19 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   literal radii and zero dimensions beside a sibling's driving "d56 = RotorRadius"). Grade rebuilt
   sketches by their DIMENSIONS (sketch_get dimensions[] expressions), not their shapes; S2c is
   the downstream catch when this slips.
+- WHY THE PARAMETRIC-PINS POSTCONDITION: a run can build every pin from find_geometry-derived
+  LITERAL coordinates with every static read green - measured: bit-identical pin bboxes across
+  a +12.5% driver bump, 4 interference pairs at scale, caught only one stage later. The
+  sketch-expression read fails that defect AT THE SOURCE; S2c remains the regeneration proof,
+  not the first line of defense.
 - WHY THE SPLIT: an unsplit blind S2 measures ~100+ min wall-clock, over the harness's ~60-min
   task cap (rule: split the task, never dodge the cap). S2a+S2b each fit with margin.
-- WHY ZERO-INTERFERENCE (not "only pins touch"): the bores carry real clearance, so the pins do
-  NOT touch them - the correct final state is ZERO interfering pairs, and that is exactly what S3's
-  rest-pose interference postcondition assumes. Grading it HERE means an S3 FAIL can no longer be
-  caused upstream by the hardware stage. An interference report that names a pin-in-bore contact is
-  a missing-clearance defect, not an expected contact.
+- WHY ZERO-OVERLAP + ENGAGEMENTS-ONLY CONTACT: the bores carry real clearance, so the pins do
+  NOT touch them; the support engagements inherited from S2a (carrier-on-pedestal,
+  crank-on-frame) DO touch, flush. The correct final state is ZERO overlapping pairs with the
+  coincident-face listing naming exactly the engagements - which is what S3's rest-pose
+  postcondition assumes. A pin-in-bore contact is a missing-clearance defect; a missing support
+  contact is a regression of the S2a engagement contract.
 - WHY THE RETENTION DISCLOSURE: the gimbal falls apart as hardware - pins float in clearance bores
   with nothing capturing them axially - and without this clause a run certifies to three decimals
   anyway. Forcing the executor to NAME the retaining feature (or say none exists) puts the
@@ -131,6 +148,6 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
 - Handoff: P2-Gimbal is the artifact S3's fixture consumes (its fixture wording names the S2b
   artifact).
 - Staging: doc_open the S2a artifact BY URN (force_api_open), confirm active; run the block.
-- Budget: measured run + 25% (170 calls / 138.3k output
-  tokens / 28.1 min, including two self-caught recovery cycles; the runner-audited call count
-  sets the size, not the executor self-count).
+- Budget: the last measured run (Agent-executor harness) was 70 calls; the parametric-pins and
+  engagement-contact reads add a handful, so 110 is a provisional pin - recalibrate at the
+  first measured run_eval run of the current wording.

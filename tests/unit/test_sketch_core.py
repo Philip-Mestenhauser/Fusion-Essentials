@@ -1275,6 +1275,39 @@ class TestCreateSketchPlaneRef:
         assert "find_geometry" in prop["description"]       # plus the handle form the kind adds
 
 
+class TestCreateFrameParity:
+    """sketch_create and sketch_get publish the SAME frame block from the one helper, so a caller
+    places geometry against the numbers it later verifies against."""
+
+    @staticmethod
+    def _framed(z_cm=1.5):
+        s = FakeSketch()
+        s.origin = SimpleNamespace(x=0.0, y=0.0, z=z_cm)
+        s.xDirection = SimpleNamespace(x=1.0, y=0.0, z=0.0)
+        s.yDirection = SimpleNamespace(x=0.0, y=0.0, z=-1.0)
+        return s
+
+    def test_created_sketch_publishes_origin_axes_and_normal(self, monkeypatch):
+        # origin 1.5 cm up world Z reads 15 mm; the normal is x cross y = (1,0,0) x (0,0,-1).
+        _install_draw(monkeypatch, self._framed())
+        out = _payload(sk.create_sketch_handler(plane="xz"))
+        assert out["frame"] == {"origin_mm": [0.0, 0.0, 15.0],
+                                "x_world": [1.0, 0.0, 0.0],
+                                "y_world": [0.0, 0.0, -1.0],
+                                "normal": [0.0, 1.0, 0.0]}
+
+    def test_frame_comes_from_the_shared_helper(self):
+        # one definition, imported - a second local copy is how create and read start disagreeing.
+        detail = load_tool("_sketch_detail")
+        assert sk.sketch_world_frame is detail.sketch_world_frame
+
+    def test_a_sketch_with_no_readable_plane_reports_frame_null(self, monkeypatch):
+        _install_draw(monkeypatch, FakeSketch())      # no origin/xDirection/yDirection
+        out = _payload(sk.create_sketch_handler(plane="xy"))
+        assert out["frame"] is None
+        assert out["created"] is True                 # the create still succeeded
+
+
 class TestCreateFrameNote:
     def test_note_states_the_xz_origin_plane_axis_mapping(self, monkeypatch):
         # the create result teaches the origin-plane local-axis -> world mapping so an agent
@@ -1373,35 +1406,3 @@ class TestDraw3dLine:
         assert res["isError"] is True and "could not be marked construction" in res["message"]
 
 
-# ── _sketch_world_frame: the on-face/xz frame mapping ──
-# A sketch's (0,0) is NOT the face centre and its axes need not align with world. The create result
-# reports where sketch (0,0) lands and where +X/+Y point, so geometry can be placed by computed coords.
-
-class TestSketchWorldFrame:
-    def _sk(self, origin, xdir, ydir):
-        P = lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)
-        return SimpleNamespace(origin=P(*origin), xDirection=P(*xdir), yDirection=P(*ydir))
-
-    def test_origin_reported_in_mm(self):
-        # origin is cm in the API -> reported x10 as mm
-        f = sk._sketch_world_frame(self._sk((-3.2, 0.8, 9.2), (1, 0, 0), (0, 1, 0)))
-        assert f["origin_mm"] == [-32.0, 8.0, 92.0]
-
-    def test_axes_reported_as_world_unit_vectors(self):
-        f = sk._sketch_world_frame(self._sk((0, 0, 0), (1, 0, 0), (0, 0, 1)))
-        assert f["x_world"] == [1, 0, 0]
-        assert f["y_world"] == [0, 0, 1]
-
-    def test_xz_plane_y_maps_to_negative_world_z(self):
-        # the key gotcha: on XZ, sketch +Y -> world -Z
-        f = sk._sketch_world_frame(self._sk((0, 0, 0), (1, 0, 0), (0, 0, -1)))
-        assert f["y_world"] == [0, 0, -1]
-
-    def test_unreadable_frame_is_none(self):
-        assert sk._sketch_world_frame(SimpleNamespace(origin=None, xDirection=None, yDirection=None)) is None
-
-    def test_partial_frame_is_none(self):
-        # missing any of origin/x/y -> None (don't report a half-frame the caller would misread)
-        s = SimpleNamespace(origin=SimpleNamespace(x=0, y=0, z=0), xDirection=None,
-                            yDirection=SimpleNamespace(x=0, y=1, z=0))
-        assert sk._sketch_world_frame(s) is None

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 183  |  **description breadcrumbs:** 675  |  **note/error breadcrumbs:** 400
+**Tools:** 184  |  **description breadcrumbs:** 678  |  **note/error breadcrumbs:** 406
   |  **guidance smells flagged:** 6
 ## Blindspots to engineer
 
@@ -14,11 +14,11 @@ close orphans, factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
-  `cam_inspect_toolpaths`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
+**Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
+  `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`, `view_screenshot_multi`
 
-**Edit (34)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
+**Edit (33)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_create_machine`, `cam_delete`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_draft`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_fill`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **53x** across 40 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -38,9 +38,9 @@ close orphans, factor duplicated guards into shared helpers.
 - `design_delete_feature`  <- 38  (desc 20, note 18)
 - `data_get`  <- 33  (desc 19, note 14)
 - `design_get`  <- 33  (desc 13, note 20)
-- `sketch_create`  <- 32  (desc 19, note 13)
+- `sketch_create`  <- 31  (desc 18, note 13)
 - `cam_get`  <- 30  (desc 20, note 10)
-- `sketch_get`  <- 28  (desc 14, note 14)
+- `sketch_get`  <- 29  (desc 14, note 15)
 - `doc_open`  <- 24  (desc 7, note 17)
 - `model_extrude`  <- 22  (desc 21, note 1)
 - `assembly_get`  <- 19  (desc 12, note 7)
@@ -192,9 +192,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide both 'operation_a' and 'operation_b' (operation names).
 
 ### `cam_create_machine`
-- Machine created, re-resolved through the query cam_edit_setup assigns from, and re-read from the cam_get(include=['machines']) catalog. Assign it: cam_edit_setup(setup=..., machine='
-- '). It persists in the
-- machine library - this server has no tool that removes a machine.
+- Machine created and re-resolved through the query cam_edit_setup assigns from - the same read the cam_get(include=['machines']) catalog is built on. Assign it: cam_edit_setup(setup=..., machine='
+- '). It persists in the local machine library - this server has no tool that removes a machine.
 - Provide 'name' - the new machine's name. It becomes Machine.description, the label cam_edit_setup(machine=...) resolves an assignment by.
 - This Fusion version's MachineTemplate has no '
 - machine library reaches '
@@ -211,7 +210,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The stored machine is still there.
 - ) but that name resolves to '
 - ' - an assignment would pick a different machine. The stored machine is still there.
-- ) but the machine catalog does not list that name - the create did not land where an assignment reads. The stored machine is still there.
 - ' in the Local machine library failed:
 
 ### `cam_create_operation`
@@ -922,6 +920,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - export options could not be created:
 - Could not create output directory '
 
+### `drawing_get`
+- The drawing family's READ. export_index is 1-based - the address drawing_export's sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size sheet reads sheet_size nul...
+- Unknown include value(s):
+- . This read offers: views.
+- The active document is not a 2D drawing. Activate the drawing document first (doc_activate), then read it.
+
 ### `drawing_insert_image`
 - Image placed on the sheet.
 - The document's modified flag could not be read, so nothing here confirms the insert took.
@@ -960,6 +964,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not resolve target '
 - '. Use an occurrence/component name, a body name (bare, or '<occurrence-or-component>:<body>' when several components hold that name), or '' for the whole design (see assembly_get / design_get(incl...
 - Narrow with kind / radius / nearest_to when a part has many similar faces. A match on a body that is not visible carries hidden:true (visible bodies' records omit it).
+A planar face's 'frame' is th...
 
 ### `joint_at_geometry`
 - Verify with assembly_get (is_healthy + positions).
@@ -1459,6 +1464,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - fit). Diameter set from the standard clearance table (the API tags the fastener but doesn't auto-size on this version).
 - Clearance hole drilled + TAGGED for
 - Provide 'diameter' (e.g. '8 mm') or a 'fastener' (e.g. 'M6 Socket Head Cap Screw') to size the hole.
+- points_space='world' applies to placement='sketch_points' (got '
+- ', which positions the hole off 'edge'/offsets instead).
 - A counterbore hole needs 'cbore_diameter' and 'cbore_depth'.
 - A countersink hole needs 'csink_diameter' and 'csink_angle' (e.g. '90 deg').
 - 'modeled' (a real helical thread) only applies to a tapped hole; pass 'tap' too.
@@ -1946,7 +1953,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' for 'target_sketch'. Available:
 
 ### `sketch_create`
-- Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world - ...
+- Draw on it with sketch_add_geometry (target this sketch by name). 'frame' maps sketch coords to world: sketch (0,0) sits at frame.origin_mm, +X points along frame.x_world, +Y along frame.y_world, a...
 - No active design. Create or open a document first (see doc_new).
 - Sketch creation returned nothing on
 - Failed to create sketch on
@@ -2126,8 +2133,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `surface_offset`
 - Faces offset into a new surface (isSolid=false).
+- Faces copied as a COINCIDENT surface (distance=0; isSolid=false) - the zero-offset copy-face idiom.
 - '. Use mm, cm, or in.
-- Provide a non-zero 'distance' to offset - distance=0 would create a surface exactly coincident with the source face.
 - '. Offset supports: new, new_component.
 - No active design. Create or open a document first (see doc_new).
 - Offset reported success but created no faces - nothing was offset. The feature remains in the timeline; remove it with design_delete_feature.

@@ -3729,6 +3729,7 @@ EXCLUDED = {
     "sys_request_selection": "waits on a human pick (user-present tier)",
     "drawing_update": "user-present tier (drawing docs)",
     "drawing_export": "user-present tier (drawing docs)",
+    "drawing_get": "user-present tier (drawing docs); read-only - drawing_verify.py drives it",
     "drawing_add_sketch": "user-present tier (drawing docs)",
     "drawing_dimension": "user-present tier (drawing docs)",
     "drawing_edit_sheet": "user-present tier (drawing docs)",

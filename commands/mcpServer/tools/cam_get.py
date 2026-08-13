@@ -378,19 +378,20 @@ def _normalize_include(include):
 TOOL_DESCRIPTION = (
     "Read the active document's CAM (Manufacture) state by zoom level. Default (no 'include'): "
     "per setup, op_states (valid/out_of_date/suppressed/error/warning tally), "
-    "invalidation_reasons (why ops are stale), and machine_out_of_date. 'include' deepens; scope "
+    "invalidation_reasons (why ops are stale), machine_out_of_date, and wcs (its origin/orientation "
+    "mode plus any geometry the WCS is bound to). 'include' deepens; scope "
     "before you deepen: 'operations' (per-op state; 'setup' filters; cam_compare_operations diffs "
-    "two by name) -> 'parameters' or 'tool' with 'operation'=<name> for one op's machining settings "
-    "(grouped by section) or its tool + presets -> 'preset'=<name> for that preset's feeds/speeds "
+    "two) -> 'parameters' or 'tool' with 'operation'=<name> for one op's machining settings "
+    "(grouped by section) or its tool + presets -> 'preset'=<name> for its feeds/speeds "
     "expressions. Document-level slices: 'references' (X-ref source docs), 'nc_programs', 'time' "
     "(cycle estimate), 'tools' (the tool sheet ops use), 'library' (a tool library's catalog to add "
-    "from - 'scope'/'library'/'tool_type' filter it; add/remove/edit stay on cam_edit_tools), "
+    "from - 'scope'/'library'/'tool_type' filter it; edits stay on cam_edit_tools), "
     "'library_types' (the add_tools[].from_type "
     "vocabulary), 'machines' (the machine catalog cam_edit_setup assigns), "
-    "'templates' (the toolpath template library; apply/save stay on cam_apply_template / "
-    "cam_save_template), 'inspection' (recorded probing results per measure, tolerance tally + worst "
-    "point; 'measure'=<index> lists its out-of-tolerance points). Works without switching to "
-    "Manufacture, but operation validity is only trustworthy once Manufacture has been entered."
+    "'templates' (the toolpath template library; apply/save: cam_apply_template / "
+    "cam_save_template), 'inspection' (probing results per measure, tolerance tally + worst "
+    "point; 'measure'=<index> lists its out-of-tolerance points). Readable from any workspace; "
+    "operation validity is trustworthy only after Manufacture has been entered."
 )
 
 tool = (

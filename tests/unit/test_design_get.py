@@ -42,9 +42,11 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(dg, "_fingerprint", lambda d: {"bodies": 2, "sketches": 3})
     monkeypatch.setattr(dg, "_slice_tree", lambda d, max_depth, component: (
         {"root": "Root", "max_depth": max_depth, "children": []}, None))
-    monkeypatch.setattr(dg, "_slice_timeline", lambda d, include_suppressed, group: (
-        {"count": 4, "timeline": []}, None))
+    monkeypatch.setattr(dg, "_slice_timeline", lambda d, include_suppressed, group, with_params=False: (
+        {"count": 4, "timeline": [], "with_params": with_params}, None))
     monkeypatch.setattr(dg, "_slice_configurations", lambda d: ({"table_name": "Configs"}, None))
+    monkeypatch.setattr(dg, "_slice_attributes", lambda d, group, key: (
+        {"group": group, "key": key, "attributes": []}, None))
     monkeypatch.setattr(dg, "_slice_materials", lambda d, library, name_filter, max_results: (
         {"kind": "materials", "library": library, "name_filter": name_filter,
          "max_results": max_results, "document": {"count": 1}, "libraries": []}, None))
@@ -115,10 +117,28 @@ class TestIncludeSlices:
         ("configurations", "configurations"),
         ("materials", "materials"),
         ("appearances", "appearances"),
+        ("attributes", "attributes"),
     ])
     def test_include_adds_the_slice(self, stub_slices, slice_name, key):
         out = _payload(dg.handler(include=[slice_name]))
         assert key in out
+
+    def test_timeline_params_flag_reaches_the_timeline_slice(self, stub_slices):
+        # the flag is off unless asked for - the extra allParameters pass is opt-in cost.
+        assert _payload(dg.handler(include=["timeline"]))["timeline"]["with_params"] is False
+        out = _payload(dg.handler(include=["timeline"], timeline_params=True))
+        assert out["timeline"]["with_params"] is True
+
+    def test_attribute_scope_reaches_the_attributes_slice(self, stub_slices):
+        out = _payload(dg.handler(include=["attributes"], attribute_group="shop",
+                                  attribute_key="op"))
+        assert out["attributes"]["group"] == "shop" and out["attributes"]["key"] == "op"
+
+    def test_attributes_slice_error_fails_the_read(self, monkeypatch, stub_slices):
+        monkeypatch.setattr(dg, "_slice_attributes",
+                            lambda d, g, k: (None, dg.error("needs attribute_group")))
+        res = dg.handler(include=["attributes"])
+        assert res["isError"] and "attribute_group" in error_message(res)
 
     def test_include_mode_adds_full_capability_map(self, stub_slices):
         out = _payload(dg.handler(include=["mode"]))
@@ -150,6 +170,12 @@ class TestCatalogSlices:
         note = _payload(dg.handler())["note"]
         assert "materials" in note and "appearances" in note
         assert "library" in note and "name_filter" in note   # un-named flags are invisible
+
+    def test_default_note_advertises_the_attributes_slice_and_timeline_params(self, stub_slices):
+        # both are invisible to a caller unless the default names them AND their scope flags.
+        note = _payload(dg.handler())["note"]
+        assert "attributes" in note and "attribute_group" in note
+        assert "timeline_params" in note
 
     def test_slice_error_fails_the_read(self, monkeypatch, stub_slices):
         monkeypatch.setattr(dg, "_slice_materials",
@@ -336,6 +362,142 @@ class TestTimelineSlice:
             def timeline(self): raise RuntimeError("direct design")
         out, err = dg._slice_timeline(_NoTL(), include_suppressed=True, group="")
         assert out is None and err["isError"] is True
+
+
+class TestTimelineParams:
+    """`timeline_params` - a timeline row carries type+name only, so a fillet's radius is unreadable
+    from it. The opt-in adds each row's own MODEL parameters, grouped from ONE pass over
+    design.allParameters by each parameter's .createdBy owner."""
+
+    def _entity(self, name, type_name="FilletFeature", token=None):
+        ent = type(type_name, (), {})()
+        ent.name = name
+        if token is not None:
+            ent.entityToken = token
+        return ent
+
+    def _model_param(self, name, role, expression, value, created_by):
+        return SimpleNamespace(name=name, role=role, expression=expression, value=value,
+                               createdBy=created_by)
+
+    def _user_param(self, name="Width", expression="20 mm", value=2.0):
+        """A UserParameter: it carries NO createdBy, so the read raises AttributeError. That missing
+        attribute IS the guard the grouping pass relies on - no type test."""
+        return SimpleNamespace(name=name, expression=expression, value=value)
+
+    def _row(self, entity, index=0, name=None):
+        return SimpleNamespace(index=index, name=name or getattr(entity, "name", "Row"),
+                               isGroup=False, isSuppressed=False, isRolledBack=False,
+                               parentGroup=None, healthState=0, errorOrWarningMessage=None,
+                               entity=entity)
+
+    def _design(self, rows, params):
+        tl = SimpleNamespace(markerPosition=0, timelineGroups=[], count=len(rows),
+                             item=lambda i, _r=list(rows): _r[i])
+        return SimpleNamespace(timeline=tl, allParameters=_NamedCollection(list(params)))
+
+    def test_fillet_row_carries_its_radius_parameter(self):
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        design = self._design([self._row(fillet)],
+                              [self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
+        out, err = dg._slice_timeline(design, True, "", True)
+        assert err is None
+        assert out["timeline"][0]["params"] == [
+            {"name": "d7", "role": "radius", "expression": "3 mm", "value": 0.3}]
+
+    def test_a_user_parameter_does_not_sink_the_pass(self):
+        # the UserParameter comes FIRST: an unguarded .createdBy read would raise before the
+        # fillet's own parameter is ever seen, and the row would lose its radius.
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        design = self._design([self._row(fillet)],
+                              [self._user_param(),
+                               self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
+        out, err = dg._slice_timeline(design, True, "", True)
+        assert err is None
+        params = out["timeline"][0]["params"]
+        assert [p["name"] for p in params] == ["d7"]      # the user parameter belongs to no feature
+
+    def test_off_by_default_and_does_not_walk_the_parameters(self):
+        class _Counting:
+            def __init__(self, items):
+                self._items = list(items)
+                self.reads = 0
+
+            @property
+            def count(self):
+                self.reads += 1
+                return len(self._items)
+
+            def item(self, i):
+                return self._items[i]
+
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        params = _Counting([self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
+        design = SimpleNamespace(
+            timeline=SimpleNamespace(markerPosition=0, timelineGroups=[], count=1,
+                                     item=lambda i, _r=[self._row(fillet)]: _r[i]),
+            allParameters=params)
+        out, err = dg._slice_timeline(design, True, "")
+        assert err is None and "params" not in out["timeline"][0]
+        assert "params_note" not in out
+        assert params.reads == 0            # the opt-in cost is not paid by the default call
+
+    def test_name_and_type_match_when_no_token_reads(self):
+        # neither side reads a token; the owner is still matched by name+type, which is the only
+        # identity left.
+        owner = self._entity("Extrude1", type_name="ExtrudeFeature")
+        row_entity = self._entity("Extrude1", type_name="ExtrudeFeature")
+        design = self._design([self._row(row_entity)],
+                              [self._model_param("d1", "Distance", "10 mm", 1.0, owner)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert [p["name"] for p in out["timeline"][0]["params"]] == ["d1"]
+
+    def test_two_owners_sharing_a_name_are_refused_not_mixed(self):
+        # two DIFFERENT features (distinct tokens) wear one name+type. The row's own token does not
+        # read, so only the name key is left - and answering it would publish the union of two
+        # features' parameters on one row.
+        a = self._entity("Fillet1", token="tok-a")
+        b = self._entity("Fillet1", token="tok-b")
+        row_entity = self._entity("Fillet1")           # no token
+        design = self._design([self._row(row_entity)],
+                              [self._model_param("d7", "radius", "3 mm", 0.3, a),
+                               self._model_param("d9", "radius", "5 mm", 0.5, b)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert "params" not in out["timeline"][0]
+
+    def test_params_capped_with_a_flag(self, monkeypatch):
+        monkeypatch.setattr(dg, "_PARAMS_PER_ROW", 1)
+        hole = self._entity("Hole1", type_name="HoleFeature", token="tok-hole")
+        design = self._design([self._row(hole)],
+                              [self._model_param("d1", "HoleDiameter", "6 mm", 0.6, hole),
+                               self._model_param("d2", "HoleDepth", "12 mm", 1.2, hole)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        row = out["timeline"][0]
+        assert len(row["params"]) == 1 and row["params_truncated"] is True
+
+    def test_unreadable_value_is_none_not_zero(self):
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        design = self._design([self._row(fillet)],
+                              [self._model_param("d7", "radius", "3 mm", "not-a-number", fillet)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert out["timeline"][0]["params"][0]["value"] is None
+
+    def test_payload_names_the_unit_the_values_are_in(self):
+        # value is the DATABASE-unit number (cm/radians) while expression carries the authored unit;
+        # publishing the raw number with no unit said anywhere is a 10x error waiting to happen.
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        design = self._design([self._row(fillet)],
+                              [self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert "internal units" in out["params_note"]
+
+    def test_a_row_owning_no_parameters_stays_terse(self):
+        fillet = self._entity("Fillet1", token="tok-fillet")
+        sketch = self._entity("Sketch1", type_name="Sketch", token="tok-sketch")
+        design = self._design([self._row(fillet), self._row(sketch, index=1)],
+                              [self._model_param("d7", "radius", "3 mm", 0.3, fillet)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert "params" in out["timeline"][0] and "params" not in out["timeline"][1]
 
 
 class TestTimelineRazor:
@@ -623,6 +785,97 @@ class TestSliceConfigurations:
         assert out["truncated"] is True and out["configuration_count"] == 1
 
 
+# ── the attributes slice (_slice_attributes) ───────────────────────────────────────────────────────
+#
+# design_edit_timeline can SET and DELETE an entity attribute; this is the read side. The group is
+# required - the slice must refuse rather than dump every attribute in the design.
+
+def _attr_design(attrs):
+    """A design whose findAttributes filters like the platform's: rows in the named group, narrowed
+    to one key only when a key was asked for (an empty key matches every key). It hands back a plain
+    list - an AttributeVector answers len()/[i], never .count/.item(i). `calls` records what the
+    slice actually searched for."""
+    calls = []
+
+    def find(group, key):
+        calls.append((group, key))
+        return [a for a in attrs if a._group == group and (not key or a.name == key)]
+
+    return SimpleNamespace(findAttributes=find, calls=calls)
+
+
+def _attr(group, key, value, parent=None):
+    a = SimpleNamespace(name=key, value=value, parent=parent)
+    a._group = group
+    return a
+
+
+def _attr_parent(type_name, name=None):
+    ent = type(type_name, (), {})()
+    if name is not None:
+        ent.name = name
+    return ent
+
+
+class TestSliceAttributes:
+    def test_group_filter_returns_only_that_group(self):
+        design = _attr_design([_attr("shop", "op", "mill"), _attr("other", "op", "turn")])
+        out, err = dg._slice_attributes(design, "shop", "")
+        assert err is None
+        assert out["count"] == 1 and [r["value"] for r in out["attributes"]] == ["mill"]
+        assert out["attributes"][0]["group"] == "shop"
+
+    def test_empty_key_matches_every_key_in_the_group(self):
+        design = _attr_design([_attr("shop", "op", "mill"), _attr("shop", "rev", "B")])
+        out, err = dg._slice_attributes(design, "shop", "")
+        assert err is None
+        assert {r["key"] for r in out["attributes"]} == {"op", "rev"}
+        assert design.calls == [("shop", "")]      # the empty key crosses to findAttributes as-is
+        assert out["key"] is None
+
+    def test_key_narrows_to_one(self):
+        design = _attr_design([_attr("shop", "op", "mill"), _attr("shop", "rev", "B")])
+        out, _ = dg._slice_attributes(design, "shop", "rev")
+        assert [r["key"] for r in out["attributes"]] == ["rev"]
+        assert out["key"] == "rev"
+
+    def test_missing_group_is_refused_naming_what_it_needs(self):
+        design = _attr_design([_attr("shop", "op", "mill")])
+        out, err = dg._slice_attributes(design, "  ", "op")
+        assert out is None
+        assert "attribute_group" in error_message(err)
+        assert design.calls == []                  # refused BEFORE any design-wide search ran
+
+    def test_row_names_the_entity_the_attribute_is_attached_to(self):
+        design = _attr_design([
+            _attr("shop", "op", "mill", parent=_attr_parent("ExtrudeFeature", "Extrude3"))])
+        out, _ = dg._slice_attributes(design, "shop", "")
+        assert out["attributes"][0]["entity"] == {"type": "ExtrudeFeature", "name": "Extrude3"}
+
+    def test_nameless_entity_still_reports_its_type(self):
+        design = _attr_design([_attr("shop", "op", "mill", parent=_attr_parent("BRepFace"))])
+        out, _ = dg._slice_attributes(design, "shop", "")
+        assert out["attributes"][0]["entity"] == {"type": "BRepFace"}      # no invented name
+
+    def test_no_matches_is_an_empty_read_not_an_error(self):
+        design = _attr_design([_attr("other", "op", "mill")])
+        out, err = dg._slice_attributes(design, "shop", "")
+        assert err is None and out["count"] == 0 and out["attributes"] == []
+
+    def test_cap_truncates_and_reports_the_true_total(self, monkeypatch):
+        monkeypatch.setattr(dg, "_ATTR_MAX_ROWS", 1)
+        design = _attr_design([_attr("shop", "a", "1"), _attr("shop", "b", "2")])
+        out, _ = dg._slice_attributes(design, "shop", "")
+        assert out["truncated"] is True and out["returned"] == 1 and out["count"] == 2
+
+    def test_unreadable_search_is_an_error_not_an_empty_read(self):
+        class _Raises:
+            def findAttributes(self, group, key):
+                raise RuntimeError("attribute search unavailable")
+        out, err = dg._slice_attributes(_Raises(), "shop", "")
+        assert out is None and "shop" in error_message(err)
+
+
 # ── router error propagation + _unwrap ─────────────────────────────────────────────────────────────
 
 class TestRouterErrorPropagation:
@@ -633,7 +886,7 @@ class TestRouterErrorPropagation:
 
     def test_timeline_slice_error_fails_the_read(self, monkeypatch, stub_slices):
         monkeypatch.setattr(dg, "_slice_timeline",
-                            lambda d, s, g: (None, dg.error("direct-modeling design")))
+                            lambda d, s, g, p=False: (None, dg.error("direct-modeling design")))
         res = dg.handler(include=["timeline"])
         assert res["isError"] and "direct-modeling" in error_message(res)
 

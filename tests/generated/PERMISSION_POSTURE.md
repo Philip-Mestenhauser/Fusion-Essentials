@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 183  |  read: 27  |  write: 139  |  destructive: 16  |  script-hatch: 1
+**Tools:** 184  |  read: 28  |  write: 139  |  destructive: 16  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -21,7 +21,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (27)
+### read - safe to auto-allow (28)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
@@ -33,6 +33,7 @@ Every tool declares a write= kind (read / write / destructive); the MCP readOnly
 - `mcp__fusion-essentials__data_get_upload_status`
 - `mcp__fusion-essentials__design_get`
 - `mcp__fusion-essentials__doc_get`
+- `mcp__fusion-essentials__drawing_get`
 - `mcp__fusion-essentials__find_geometry`
 - `mcp__fusion-essentials__mesh_get`
 - `mcp__fusion-essentials__model_compute_holder`
@@ -234,6 +235,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",
       "mcp__fusion-essentials__doc_get",
+      "mcp__fusion-essentials__drawing_get",
       "mcp__fusion-essentials__find_geometry",
       "mcp__fusion-essentials__mesh_get",
       "mcp__fusion-essentials__model_compute_holder",
@@ -434,6 +436,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__data_get_upload_status",
       "mcp__fusion-essentials__design_get",
       "mcp__fusion-essentials__doc_get",
+      "mcp__fusion-essentials__drawing_get",
       "mcp__fusion-essentials__find_geometry",
       "mcp__fusion-essentials__mesh_get",
       "mcp__fusion-essentials__model_compute_holder",

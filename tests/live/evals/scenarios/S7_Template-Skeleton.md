@@ -9,8 +9,8 @@ fixture: the S6 artifact P6-Vise (verified BY URN) OPENED by the orchestrator as
   subfolders + legacy chains), so a by-name search x-refs and edits the wrong
   lineage. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 198
-  max_tokens: 78000
+  max_tool_calls: 135
+  max_tokens: 340000
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline - document opens/saves are async and CAN flap; grade recovery)
 expected_refusals: none
@@ -58,13 +58,16 @@ GOAL - the template skeleton a machining job drops into:
   between the jaws at the vise center. A rigid park of the stock to a body (no jaw-to-stock joint)
   is PARKING, not clamping, and is a FAIL. The vise is SELF-CENTERING: BOTH jaws move when the
   opening changes, so a grip that rigidly follows ONE moving jaw will not stay centered - keep the
-  stock centered as the jaws move. FEASIBILITY: read the vise's maximum jaw opening and its jaw-face
-  size, and size the stock so its clamped width is <= the max opening and the gripped flank is <=
-  the jaw face (roughly a 90-96 mm opening and a 50 mm jaw face on this vise); each jaw's grip face
-  must sit FLUSH on a stock flank.
+  stock centered as the jaws move. FEASIBILITY: measure the vise YOURSELF - read its jaw
+  geometry, grip-face size, and reachable opening fresh, and size the stock so its clamped width
+  fits the opening and the gripped flank fits the jaw face; each jaw's grip face must sit FLUSH
+  on a stock flank. Trust no assumed numbers; the reads are the truth.
 - In the model component: a PLACEHOLDER component with a simple solid that carries a MODEST CURVED
   FEATURE (a fillet, a rounded boss, or a curved top) AND ONE THROUGH HOLE - so the downstream CAM
-  layer has a real curve to finish and a real hole to drill, not a bare prism.
+  layer has a real curve to finish and a real hole to drill, not a bare prism. The placeholder is
+  the part this template MACHINES: it must sit INSIDE the stock's envelope with machining
+  allowance on every side, and its features (the hole included) must cut the placeholder ALONE -
+  a feature that reaches into the stock or fixture bodies ships a corrupted template.
 
 Finally save the document as P7-Template into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
@@ -105,6 +108,10 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   placeholder part NOT embedded in the vise or jaw bodies; the only expected contacts are the jaw
   grip faces on the stock flanks (report the checker's output; any placeholder-in-fixture overlap
   is a defect).
+- the placeholder is MACHINABLE IN THIS STOCK: fresh reads show the placeholder's bbox contained
+  in the stock body's bbox with allowance on every side (report both boxes), AND the stock and
+  fixture bodies are untouched by the placeholder's features - each body's fresh volume matches
+  its own feature arithmetic (report the volumes; a hole that also pierced the stock fails this).
 - doc_get -> saved as "P7-Template", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
@@ -160,5 +167,11 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   block. The pre-open removes the name-collision that x-ref'd/edited the wrong lineage - source
   IDENTITY is not a graded skill; the xref LIFECYCLE (insert/stale/update/current), self-centering
   origin, and the stock-gripping joints are. The runner auto-derives --max-turns from the budget.
-  Budget 183 = measured 146 + 25% (a run that discovers the bbox_center snapshot and works
-  the xref re-clamp lifecycle is doing legitimate work at that count).
+- WHY MEASURE-THE-VISE + MACHINABLE-IN-STOCK: prompt-asserted fixture numbers go stale against
+  the real artifact (measured: an asserted 90-96mm opening and 50mm jaw face against a real
+  84x32mm face with no modeled limit) - a prose-trusting agent mis-sizes the stock, so the
+  prompt forbids assumed numbers. And a template can ship its placeholder entirely above the
+  stock with its hole drilled through the stock (extent-all overreach), leaving S8 to repair it
+  mid-run - the machinable-in-stock postconditions fail both defects at the source.
+- Budget: the last measured run (Agent-executor harness) was 106 calls, PASS with three
+  disclosed repairs; 135 = 106 + 25% rounded.

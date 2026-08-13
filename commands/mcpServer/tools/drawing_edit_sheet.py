@@ -13,7 +13,7 @@ import adsk.drawing
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import error, measured, ok, safe
+from ._common import error, ok, safe
 from . import _drawing_common
 from ._drawing_common import SHEET_SIZE_MAP
 from . import _inputs
@@ -28,68 +28,11 @@ _SHEET_SIZE = _inputs.Choice("sheet_size", list(SHEET_SIZE_MAP),
                              description="Preset sheet size (set_size).")
 _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"],
                               description="Sheet orientation (set_orientation).")
-# orientation key -> SheetOrientationTypes member.
-_ORIENTATION_MEMBERS = {"landscape": "LandscapeSheetOrientationType",
-                        "portrait": "PortraitSheetOrientationType"}
-
-
-def _size_label(value):
-    """'a3' for the SheetSizes value a sheet reads back, or None for a value outside the preset
-    table - CustomSizeSheetSize among them.
-
-    A custom-sized sheet keeps its extents in width/height and nowhere else: Sheet.customSize
-    carries a full docstring but READING it raises AttributeError, and CustomSizeSheetSize cannot
-    be assigned to Sheet.sheetSize, so a custom sheet is a size this tool reports as null and has
-    no route to set."""
-    if value is None:
-        return None
-    for key, (_standard, member) in SHEET_SIZE_MAP.items():
-        if value == _drawing_common.enum_value("SheetSizes", member):
-            return key
-    return None
-
-
-def _orientation_label(value):
-    """'landscape'/'portrait' for the SheetOrientationTypes value a sheet reads back, or None."""
-    if value is None:
-        return None
-    for key, member in _ORIENTATION_MEMBERS.items():
-        if value == _drawing_common.enum_value("SheetOrientationTypes", member):
-            return key
-    return None
-
-
-def _sheet_listing(dwg):
-    """The drawing's sheets in order as [{export_index, name}]. export_index is 1-BASED - the
-    numbering drawing_export's sheet_range takes - and no drawing read tool exists to obtain it, so
-    every action that changes which sheets a drawing holds hands the list back."""
-    # A sheet's INDEX is its address (export_index is exactly what drawing_export's sheet_range
-    # takes), so this stays a positional walk: iter_collection drops an unreadable sheet, which
-    # would slide every later export_index down one and export the WRONG sheets.
-    sheets = safe(lambda: dwg.sheets)
-    return [{"export_index": i + 1, "name": safe(lambda i=i: sheets.item(i).name)}
-            for i in range(safe(lambda: sheets.count, 0) or 0)]
-
-
-def _sheet_facts(sheet):
-    """One sheet's readable state. width/height are read-only, derive from size + orientation, and
-    are MILLIMETRES on every drawing - width_height_unit carries that constant fact beside them, so
-    the numbers are never read against sheet_units (the drawing's DIMENSION display unit, which on
-    an inch drawing reads 'in' while these two still read mm). Sheet.tidyUp is deliberately NOT read
-    here: it is a property whose READ tidies the sheet."""
-    size = safe(lambda: sheet.sheetSize)
-    orientation = safe(lambda: sheet.orientation)
-    return {
-        "name": safe(lambda: sheet.name),
-        "sheet_size": _size_label(size),
-        "orientation": _orientation_label(orientation),
-        "width": measured(lambda: sheet.width, 1.0, 3),
-        "height": measured(lambda: sheet.height, 1.0, 3),
-        "width_height_unit": _drawing_common.SHEET_EXTENT_UNIT,
-        "views": safe(lambda: sheet.views.count, 0),
-        "sketches": safe(lambda: sheet.sketches.count, 0),
-        "custom_tables": safe(lambda: sheet.customTables.count, 0),
-    }
+# The shared decoders/records live in _drawing_common (drawing_get reads through the same ones,
+# so a write's read-back and the read tool can never disagree about a sheet's facts).
+_ORIENTATION_MEMBERS = _drawing_common.ORIENTATION_MEMBERS
+_sheet_listing = _drawing_common.sheet_listing
+_sheet_facts = _drawing_common.sheet_facts
 
 
 def _do_add(dwg, new_name):

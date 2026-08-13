@@ -242,11 +242,11 @@ tool = (
                            "missing; the directory is created if needed."})
     .add_input_property("sheet_range", {"type": "string",
             "description": "format=pdf only: sheets to export, e.g. '1-3' or '1-2,5'. Omit to "
-                           "export all sheets - prefer omitting it: on Fusion 2705.0.87 a "
-                           "single-sheet sheet_range export twice wedged the Fusion main thread "
-                           "(every later call timed out, and the session did not recover - it "
-                           "needed outside intervention), while the all-sheets export of the same "
-                           "drawing ran clean."})
+                           "export all sheets. Measured on Fusion 2705.0.87: a sheet_range export "
+                           "issued soon AFTER another export of the same drawing twice blocked "
+                           "the Fusion main thread for minutes (it self-recovers, but the file "
+                           "never lands), while a sheet_range export run FIRST completed clean - "
+                           "make the sheet_range export the first export, never a follow-up."})
     .add_input_property("line_weights", {"type": "boolean",
             "description": "format=pdf only: render line weights (default true)."})
     .add_input_property(*_DWG_VARIANT.as_property())

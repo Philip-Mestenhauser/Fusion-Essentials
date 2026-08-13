@@ -321,6 +321,20 @@ def _make_pp(**over):
     return pp
 
 
+_DEFAULT_PP = object()      # "build a default PhysicalProperties", distinct from an explicit None
+
+
+def _occ_row(path, mass=1.0, children=(), pp=_DEFAULT_PP):
+    """One occurrence as the per_body walk reads it: a full path, physical properties (pp=None for
+    an unmeasurable one), and its own child occurrences - the collection that says whether its mass
+    already aggregates anything."""
+    props = (SimpleNamespace(mass=mass, centerOfMass=SimpleNamespace(x=0.0, y=0.0, z=0.0))
+             if pp is _DEFAULT_PP else pp)
+    return SimpleNamespace(name=path.split("+")[-1], fullPathName=path,
+                           getPhysicalProperties=lambda acc: props,
+                           childOccurrences=_NamedCollection(list(children)))
+
+
 class TestFullProps:
     def test_mm_scaling_per_quantity(self):
         # k = cm-per-mm = 0.1: lengths x10, areas x100, volumes x1000, inertia x100; mass (kg) and
@@ -371,14 +385,130 @@ class TestPhysicalProperties:
 
     def test_per_body_breakdown_skips_unmeasurable_occurrences(self):
         opp = SimpleNamespace(mass=1.25, centerOfMass=SimpleNamespace(x=0.1, y=0.0, z=0.0))
-        o1 = SimpleNamespace(name="A:1", getPhysicalProperties=lambda acc: opp)
-        o2 = SimpleNamespace(name="B:1", getPhysicalProperties=lambda acc: None)  # surface-only: no pp
+        o1 = _occ_row("A:1", pp=opp)
+        o2 = _occ_row("B:1", pp=None)                      # surface-only: no physical properties
         e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
-                            occurrences=_NamedCollection([o1, o2]))
+                            allOccurrences=_NamedCollection([o1, o2]))
         out = _payload(mi._physical_properties(None, e, "whole design", "mm", "medium", True))
         assert out["per_occurrence_count"] == 1
+        # a LEAF row keeps the plain shape - no aggregates_children key to reason about
         assert out["per_occurrence"] == [{"occurrence": "A:1", "mass_kg": 1.25,
                                           "center_of_mass": [1.0, 0.0, 0.0]}]
+
+
+class TestPerOccurrenceReachesEveryDepth:
+    """per_body must name EVERY occurrence in the target's subtree. The direct-children collection
+    stops one level down, so a body owned by a nested sub-component gets no row of its own and is
+    silently folded into its parent's mass - a breakdown that is short by exactly the deep parts."""
+
+    def _design_with_grandchild(self):
+        grand = _occ_row("Frame:1+Motor:1", mass=0.5)
+        child = _occ_row("Frame:1", mass=2.0, children=[grand])
+        # The root exposes BOTH collections, as live: 'occurrences' is the direct children only,
+        # 'allOccurrences' the flattened subtree. Walking the former misses the grandchild.
+        return SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                               occurrences=_NamedCollection([child]),
+                               allOccurrences=_NamedCollection([child, grand]))
+
+    def _rows(self, entity, target="whole design"):
+        out = _payload(mi._physical_properties(None, entity, target, "mm", "medium", True))
+        return out, out["per_occurrence"]
+
+    def test_a_grandchild_occurrence_gets_its_own_row(self):
+        out, rows = self._rows(self._design_with_grandchild())
+        assert [r["occurrence"] for r in rows] == ["Frame:1", "Frame:1+Motor:1"]
+        assert out["per_occurrence_count"] == 2
+        assert rows[1]["mass_kg"] == 0.5
+
+    def test_rows_are_keyed_by_full_path_not_bare_name(self):
+        # two 'Motor:1' under different parents are different parts; the bare name collapses them
+        a = _occ_row("Left:1+Motor:1", mass=0.5)
+        b = _occ_row("Right:1+Motor:1", mass=0.5)
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            allOccurrences=_NamedCollection([a, b]))
+        _, rows = self._rows(e)
+        assert [r["occurrence"] for r in rows] == ["Left:1+Motor:1", "Right:1+Motor:1"]
+
+    def test_a_row_with_children_says_it_aggregates_them(self):
+        # the parent's mass ALREADY contains the grandchild's row, so summing the rows double-counts
+        _, rows = self._rows(self._design_with_grandchild())
+        assert rows[0]["aggregates_children"] is True
+        assert "aggregates_children" not in rows[1]
+
+    def test_an_unreadable_child_count_publishes_null_not_leaf(self):
+        # null says "unknown", which is the only honest answer; a missing key would claim leaf and
+        # invite the caller to sum a row that may already include others.
+        deaf = SimpleNamespace(name="Frame:1", fullPathName="Frame:1",
+                               getPhysicalProperties=lambda acc: SimpleNamespace(
+                                   mass=1.0, centerOfMass=SimpleNamespace(x=0.0, y=0.0, z=0.0)),
+                               childOccurrences=SimpleNamespace())     # no readable count
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            allOccurrences=_NamedCollection([deaf]))
+        _, rows = self._rows(e)
+        assert rows[0]["aggregates_children"] is None
+
+    def test_an_occurrence_target_walks_its_own_subtree(self):
+        # an Occurrence carries no flattened allOccurrences - only childOccurrences - so a
+        # sub-assembly target still breaks down to its deepest parts.
+        grand = _occ_row("Frame:1+Motor:1+Shaft:1", mass=0.25)
+        child = _occ_row("Frame:1+Motor:1", mass=0.5, children=[grand])
+        occ = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                              childOccurrences=_NamedCollection([child]))
+        _, rows = self._rows(occ, "occurrence 'Frame:1'")
+        assert [r["occurrence"] for r in rows] == ["Frame:1+Motor:1", "Frame:1+Motor:1+Shaft:1"]
+
+    def test_a_target_with_no_occurrences_reports_an_empty_breakdown(self):
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp())   # a lone body
+        out, rows = self._rows(e, "body 'Plate'")
+        assert rows == [] and out["per_occurrence_count"] == 0
+        assert out["per_occurrence_truncated"] is False
+
+    def test_the_row_list_is_capped_and_says_so(self, monkeypatch):
+        monkeypatch.setattr(mi, "_MAX_PER_OCCURRENCE_ROWS", 3)
+        many = [_occ_row(f"P{i}:1") for i in range(5)]
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            allOccurrences=_NamedCollection(many))
+        out, rows = self._rows(e)
+        assert len(rows) == 3 and out["per_occurrence_count"] == 3
+        assert out["per_occurrence_truncated"] is True
+        assert "per_occurrence_truncated" in out["note"]
+
+    def test_a_list_inside_the_cap_is_not_flagged_truncated(self, monkeypatch):
+        monkeypatch.setattr(mi, "_MAX_PER_OCCURRENCE_ROWS", 3)
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            allOccurrences=_NamedCollection([_occ_row(f"P{i}:1") for i in range(3)]))
+        out, rows = self._rows(e)
+        assert len(rows) == 3 and out["per_occurrence_truncated"] is False
+
+    def test_the_note_discloses_that_parent_rows_aggregate(self):
+        out, _ = self._rows(self._design_with_grandchild())
+        assert "aggregates_children" in out["note"] and "double-count" in out["note"]
+
+    def test_without_per_body_no_breakdown_and_no_extra_note(self):
+        out = _payload(mi._physical_properties(None, self._design_with_grandchild(),
+                                               "whole design", "mm", "medium", False))
+        assert "per_occurrence" not in out and "per_occurrence_truncated" not in out
+        assert "aggregates_children" not in out["note"]
+
+
+class TestSubtreeOccurrences:
+    def test_a_deep_occurrence_chain_is_walked_to_the_bottom(self):
+        deep = _occ_row("A:1+B:1+C:1")
+        mid = _occ_row("A:1+B:1", children=[deep])
+        top = _occ_row("A:1", children=[mid])
+        entity = SimpleNamespace(childOccurrences=_NamedCollection([top]))
+        assert [o.fullPathName for o in mi._subtree_occurrences(entity, 10)] == [
+            "A:1", "A:1+B:1", "A:1+B:1+C:1"]
+
+    def test_the_walk_stops_one_past_the_limit(self):
+        # one extra item is what lets the caller flag truncation without counting a total it
+        # never walked; an unbounded walk would enumerate a whole assembly to publish 200 rows.
+        chain = [_occ_row(f"A{i}:1") for i in range(10)]
+        entity = SimpleNamespace(childOccurrences=_NamedCollection(chain))
+        assert len(mi._subtree_occurrences(entity, 4)) == 5
+
+    def test_an_entity_with_neither_collection_walks_nothing(self):
+        assert mi._subtree_occurrences(SimpleNamespace(), 10) == []
 
 
 class TestRouterErrorPropagation:

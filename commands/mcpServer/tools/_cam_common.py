@@ -33,9 +33,12 @@ MAP_BLURB = ("get_cam (the shared CAM-product resolver every CAM tool calls) + w
              "(the ONE async-generation registration - it mints the handle cam_get_status reads and "
              "keeps the GenerateToolpathFuture referenced, which is what stops Fusion abandoning the "
              "background work; every launch path registers here) + machine_catalog / resolve_machine "
-             "/ machine_label / machine_ident / query_machines (the ONE machine-library catalog read "
-             "and the ONE by-name machine resolver - exact LABEL match first, ambiguity REFUSED - "
-             "that an assignment and a machine create both run through) + parse_parameters (the ONE "
+             "/ machine_label / machine_ident / machine_kinds / query_machines (the ONE "
+             "machine-library catalog read and the ONE by-name machine resolver - exact LABEL match "
+             "first, ambiguity REFUSED - that an assignment and a machine create both run through; "
+             "machine_kinds is the per-machine capabilities read, the expensive part of a catalog "
+             "row, for a caller that needs ONE machine's kinds without a 46s unfiltered walk) + "
+             "parse_parameters (the ONE "
              "{name: expression} / 'name=value, ...' parameter-request parser both CAM parameter "
              "editors validate their request through) + walk_library_folders / library_assets / "
              "library_children (the ONE CAM library folder-tree walk - tool, post and template "
@@ -296,7 +299,7 @@ def op_state_facts(op) -> dict:
     (cam_get's per-setup op_states via op_primary_state, cam_get_status's live_states via
     op_state_tally) classifies from the SAME facts instead of each re-reading hasError/operationState/
     isSuppressed/isGenerating/hasWarning independently. operationState: 0=valid, 1=out_of_date,
-    2=suppressed, 3=no_toolpath (see _OP_STATE_NAMES below in this module)."""
+    2=suppressed, 3=no_toolpath - op_primary_state is what buckets those into one state."""
     return {
         "name": safe(lambda: op.name),
         "has_error": bool(safe(lambda: op.hasError, False)),
@@ -485,6 +488,54 @@ def _model_names(collection) -> tuple:
         truncated = True
     return names, truncated
 
+# The setup's WCS lives in the setup's own CAMParameters, which is where cam_edit_setup binds it -
+# setup.parameters.itemByName reads both kinds back (live-verified, Fusion 2705): a mode parameter is
+# a ChoiceParameterValue whose .value.value is the mode string ('point', 'modelOrientation',
+# 'axesZX'), and a geometry binding is a CadObjectParameterValue whose .value.value is an ITERABLE of
+# the bound entities.
+_WCS_MODE_PARAMS = (("origin_mode", "wcs_origin_mode"),
+                    ("orientation_mode", "wcs_orientation_mode"))
+_WCS_ENTITY_PARAMS = (("origin_entities", "wcs_origin_point"),
+                      ("orientation_z_entities", "wcs_orientation_axisZ"))
+
+
+def _wcs_bound_entities(param) -> list:
+    """[{type, name?}] for ONE CadObjectParameterValue's bound entities. The entity kind is always
+    published (the leaf of objectType, so 'adsk::fusion::JointOrigin' and 'JointOrigin' both read
+    'JointOrigin'); a name is emitted only when it reads back non-empty, because not every bindable
+    entity carries a readable one (a BRepFace does not)."""
+    rows = []
+    for ent in safe(lambda: list(param.value.value), []) or []:
+        kind = safe(lambda ent=ent: ent.objectType) or ""
+        row = {"type": str(kind).split("::")[-1] or None}
+        name = safe(lambda ent=ent: ent.name)
+        if name:
+            row["name"] = name
+        rows.append(row)
+    return rows
+
+
+def setup_wcs(setup):
+    """ONE setup's WCS as BOUND state - {origin_mode, orientation_mode, origin_entities,
+    orientation_z_entities} - the read-back side of cam_edit_setup's 'wcs' binding. Terse: a mode
+    that does not read and an EMPTY entity list are omitted, so a box-point WCS carries modes only.
+    None when the setup exposes no readable parameters - nothing about its WCS can be claimed then."""
+    params = safe(lambda: setup.parameters)
+    if params is None:
+        return None
+    wcs = {}
+    for key, pname in _WCS_MODE_PARAMS:
+        mode = safe(lambda pname=pname: params.itemByName(pname).value.value)
+        if mode is not None:
+            wcs[key] = mode
+    for key, pname in _WCS_ENTITY_PARAMS:
+        p = safe(lambda pname=pname: params.itemByName(pname))
+        rows = _wcs_bound_entities(p) if p is not None else []
+        if rows:
+            wcs[key] = rows
+    return wcs or None
+
+
 def get_cam_setups_handler() -> dict:
     cam, err = get_cam()
     if err:
@@ -507,6 +558,8 @@ def get_cam_setups_handler() -> dict:
         "operation_type": _operation_type_name(safe(lambda: s.operationType)),
         "is_active": safe(lambda: s.isActive),
         "machine": machine_label(safe(lambda: s.machine)),
+            # The bound WCS - the only read-back of what cam_edit_setup's 'wcs' binding did.
+            "wcs": setup_wcs(s),
             "selected_models": models,
             "fixtures": fixtures,
             "stock_solids": stock,
@@ -666,8 +719,10 @@ def validity_basis():
 
 
 def _operations_summary(op_records) -> dict:
-    """Exception-first rollup of an operations list. states = the count
-    tally; exceptions = only ACTIVE ops that block (suppressed ops never block); readiness = a factual
+    """Exception-first rollup of an operations list. states = the count tally over each row's own
+    'state' - which _operation_summary derives through op_primary_state, so this tally and the
+    per-setup op_states rollup are the SAME classification and cannot contradict each other;
+    exceptions = only ACTIVE ops that block (suppressed ops never block); readiness = a factual
     next-action string, gated by validity_basis (no toolpath verdict unless Manufacture-verified)."""
     states = {}
     exceptions = []
@@ -732,9 +787,6 @@ def _operations_in(setup_obj) -> tuple:
     return ops, truncated
 
 
-_OP_STATE_NAMES = {0: "valid", 1: "out_of_date", 2: "suppressed", 3: "no_toolpath"}
-
-
 def _operation_summary(op) -> dict:
     tool_desc = None
     try:
@@ -744,15 +796,19 @@ def _operation_summary(op) -> dict:
     except Exception:
         tool_desc = None
 
-    state = safe(lambda: op.operationState)
-    has_warn = bool(safe(lambda: op.hasWarning, False))
-    has_err = bool(safe(lambda: op.hasError, False))
+    facts = op_state_facts(op)
+    state = facts["operation_state"]
+    has_warn = facts["has_warning"]
+    has_err = facts["has_error"]
     summary = {
         "name": safe(lambda: op.name),
         "tool": tool_desc,
         "strategy": safe(lambda: op.strategy),
-        # operationState is the authoritative roll-up; valid==generated & up to date.
-        "state": _OP_STATE_NAMES.get(state, state),
+        # ONE state vocabulary for every rollup: this row, the summary tally built from it, and the
+        # per-setup op_states all read op_primary_state off the same facts. operationState ALONE is
+        # not the roll-up - it reads 0 ('valid') on an op carrying hasError, so a state derived from
+        # it alone calls an errored op valid while op_states calls the same op errored.
+        "state": op_primary_state(facts),
         "has_toolpath": safe(lambda: op.hasToolpath),
         "toolpath_valid": safe(lambda: op.isToolpathValid),
         "is_generating": safe(lambda: op.isGenerating),
@@ -1363,6 +1419,16 @@ _MACHINE_KINDS = {"milling": "isMillingSupported", "turning": "isTurningSupporte
                   "cutting": "isCuttingSupported", "additive": "isAdditiveSupported"}
 
 
+def machine_kinds(m):
+    """ONE machine's 'kind' labels off its capabilities flags - the per-machine read behind the
+    catalog's kind column. Reading capabilities is the EXPENSIVE part of a machine row (measured
+    ~47ms/machine over the 982-machine bundled library, ~46s for one unfiltered walk), so a caller
+    that needs one machine's kinds calls this instead of walking the catalog."""
+    caps = safe(lambda: m.capabilities)
+    return [k for k, attr in sorted(_MACHINE_KINDS.items())
+            if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
+
+
 def machine_label(m):
     """Readable machine label: .description, else 'vendor model'. adsk.cam.Machine has no .name."""
     if not m:
@@ -1428,9 +1494,7 @@ def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int =
         except Exception:
             continue
         for m in matches:
-            caps = safe(lambda m=m: m.capabilities)
-            kinds = [k for k, attr in sorted(_MACHINE_KINDS.items())
-                     if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
+            kinds = machine_kinds(m)
             if mt and mt not in kinds:
                 continue
             total += 1

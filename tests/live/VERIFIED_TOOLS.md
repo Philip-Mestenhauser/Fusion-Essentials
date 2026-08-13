@@ -19,9 +19,9 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 524f26f6e90c4541a5a7c014663535766fe939b382814730d5bf61ffefd679b4 | Fusion 2705.0.87 | verified 2026-08-09
+Stamp: source 56fb14cb1138776588e566f8c43a811d37761f23c77b26c7041289d6da0056f0 | Fusion 2705.0.87 | verified 2026-08-13
 
-147 covered / 5 refusals-only / 31 skipped(reason) / 0 pending
+147 covered / 5 refusals-only / 32 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -115,6 +115,7 @@ Stamp: source 524f26f6e90c4541a5a7c014663535766fe939b382814730d5bf61ffefd679b4 |
 | drawing_dimension | skipped: user-present tier (drawing docs) |  |
 | drawing_edit_sheet | skipped: user-present tier (drawing docs) |  |
 | drawing_export | skipped: user-present tier (drawing docs) |  |
+| drawing_get | skipped: user-present tier (drawing docs); read-only - drawing_verify.py drives it |  |
 | drawing_insert_image | skipped: user-present tier (drawing docs) |  |
 | drawing_update | skipped: user-present tier (drawing docs) |  |
 | find_geometry | covered | acquire the face/edge/body handles the build consumes |

@@ -52,6 +52,35 @@ runner/grader stops matching the docs.
 - A FAIL honestly reported and precisely located is a good run; the eval exists to surface tool,
   wire, and capability gaps (the SURFACED line), not to flatter the surface.
 
+## Open-endedness rules (binding)
+
+- **Goals name OUTCOMES, never construction.** A prompt states what the product must BE and DO;
+  it never prescribes which sketches to draw, which features to use, where a profile lives, or a
+  radius chain. The executor's construction choices are the thing under test. The tell that a
+  scenario has gone prescriptive: geometry whose only consumer is a postcondition. A 12-run
+  campaign showed prescribed sketch features (pin circles, hub profiles, a shaft profile) that no
+  later stage consumed - the next stage redrew its own.
+- **Postconditions are FUNCTIONAL INVARIANTS**, few and strong: what must engage, what must
+  clear, what must propagate, what must read back - each naming the fresh read that proves it.
+  Arbitrary count floors ("at least 8 dimensions across 4 components") are a smell; prefer "every
+  driving dimension of skeleton-anchored geometry carries an expression, spot-verified".
+- **The ENGAGEMENT CONTRACT replaces blanket contact laws.** Parts ENGAGE where the mechanism
+  needs it (each engagement NAMED, proven by a contact/coincident-face read or a ~0
+  measure_between) and CLEAR where they move (proven by the interference check: zero overlapping
+  pairs). A blanket "nothing touches" law is forbidden - it manufactures floating products
+  (a carrier that never reaches its post) that pass every check. Penetration is always a defect;
+  contact is graded against the declared engagement list.
+- **PRODUCT-BAR GRADE.** For any physical deliverable the orchestrator judges the terminal
+  artifact as a product, with eyes (screenshots / orthographic views) against a calibrated bar,
+  and re-issues its own reads per postcondition CLASS it upholds - including at least one
+  sketch-level read when sketch geometry is graded; census reads alone are insufficient grading.
+  A saved artifact holding a physically impossible pose, a part buried in another, or an
+  operation that cannot compute is a product FAIL even when honestly disclosed in the report.
+- **QUARANTINE THE SAVE.** A scenario that deliberately forces an infeasibility disclosure must
+  not ship the broken state as the terminal cloud artifact: the executor discloses, then restores
+  a physically valid state before the save (the disclosure lives in the report). The saved
+  artifact is what a cloned repo's user opens - it must be a product.
+
 ## Volumetric audit clause (required for physical-deliverable scenarios)
 
 A scenario whose deliverable is solid geometry includes, in its verbatim prompt, the volumetric

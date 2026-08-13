@@ -220,6 +220,10 @@ _DENYLIST = {
     "aabb_gap": ("_geom", "def"),
     # The thread-table walk that turns a designation into a ThreadInfo, shared by the tapped hole
     # and the thread-an-existing-cylinder tools.
+    # The ONE sketch local -> world frame: sketch_create publishes it on the way in and sketch_get on
+    # the way out, so a second copy is how the numbers a caller PLACES against stop matching the ones
+    # it VERIFIES against.
+    "sketch_world_frame": ("_sketch_detail", "def"),
     "resolve_thread_info": ("_threads", "def"),
     "build_joint_geometry": ("_joints", "def"),
     "apply_motion": ("_joints", "def"),

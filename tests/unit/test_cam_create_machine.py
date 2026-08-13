@@ -1,18 +1,19 @@
 """Unit tests for ``cam_create_machine`` - a machine built from a template into the Local library.
 
 The adsk.cam API is mocked. What is pinned here is the tool's own contract: the name-collision
-refusal that runs BEFORE anything is created, the description/vendor/model write-and-read-back, the
-Local-library store, and the gate that re-resolves the new machine through the SAME query
-``cam_edit_setup`` assigns from - a create that cannot be found again is an error, not a false ok.
+refusal that runs BEFORE anything is created (through ``resolve_machine`` - the SAME filtered query
+an assignment uses, never an unfiltered catalog walk, which reads capabilities on every bundled
+machine and busts the handler cap), the description/vendor/model write-and-read-back, the
+Local-library store, and the gate that re-resolves the new machine through that same query - a
+create that cannot be found again is an error, not a false ok.
 
-The machine library fake serves BOTH this tool and the real ``_cam_common`` helpers it calls
-(``machine_catalog`` for the catalog, ``resolve_machine`` for the gate), so the integration seam is
-exercised rather than stubbed. Its ``createQuery`` matches vendor exactly and model by prefix - the
-shape ``resolve_machine`` is written against, whose widen path re-splits a label into (vendor, model)
-because a label does not match the model field. The tool writes the name to both fields and gates on
-a re-resolve, so what the query indexes never has to be assumed. ``importMachine`` hands the library
-its OWN copy with a distinct id, so a payload assembled from the pre-store object reports a machine
-the library has not got.
+The machine library fake serves BOTH this tool and the real ``_cam_common`` helpers it calls, so
+the integration seam is exercised rather than stubbed. Its ``createQuery`` matches vendor exactly
+and model by prefix - the shape ``resolve_machine`` is written against, whose widen path re-splits
+a label into (vendor, model) because a label does not match the model field. The tool writes the
+name to both fields and gates on a re-resolve, so what the query indexes never has to be assumed.
+``importMachine`` hands the library its OWN copy with a distinct id, so a payload assembled from
+the pre-store object reports a machine the library has not got.
 """
 
 import json
@@ -150,12 +151,14 @@ class TestRefusals:
         assert e.asked == [] and e.lib.imported == []
 
     def test_a_local_name_collision_is_refused_naming_the_existing_machine(self, env):
-        # Compared case-insensitively and EXACTLY: 'sweep3axis' collides with 'Sweep3Axis'.
-        e = env(local=[_Mach(description="Sweep3Axis", vendor="SweepCo", model="S3")])
+        # Compared case-insensitively and EXACTLY: 'sweep3axis' collides with 'Sweep3Axis' (a
+        # machine this tool itself created carries its name on the model field too, which is what
+        # makes it reachable by the assignment query the clash check runs).
+        e = env(local=[_Mach(description="Sweep3Axis", vendor="SweepCo", model="Sweep3Axis")])
         res = ccm.handler(name="sweep3axis")
         assert res["isError"] is True
         assert "Sweep3Axis" in res["message"] and "local" in res["message"]
-        assert "SweepCo" in res["message"] and "S3" in res["message"]
+        assert "SweepCo" in res["message"]
         assert e.asked == [] and e.lib.imported == []
 
     def test_a_name_matching_an_existing_MODEL_is_refused(self, env):
@@ -191,12 +194,16 @@ class TestRefusals:
         assert out["created"] is True and out["name"] == "Sweep3Axis"
         assert len(e.lib.imported) == 1
 
-    def test_a_capped_catalog_read_refuses_rather_than_risking_a_duplicate(self, env, monkeypatch):
-        # The collision check's evidence is the catalog read; a truncated one proves nothing.
+    def test_an_ambiguous_name_cannot_be_proven_free_and_is_refused(self, env, monkeypatch):
+        # resolve_machine refusing on AMBIGUITY (several machines answer to the name) is a clash,
+        # not freeness - the create must refuse rather than mint a third claimant.
         e = env()
-        monkeypatch.setattr(ccm, "machine_catalog", lambda *a, **k: ([], True, None))
-        res = ccm.handler(name="Sweep3Axis")
+        monkeypatch.setattr(ccm, "resolve_machine",
+                            lambda name: (None, None, "'Sweep' matches several machines - "
+                                          "Sweep3Axis, Sweep4Axis. Pick one."))
+        res = ccm.handler(name="Sweep")
         assert res["isError"] is True and "cannot be proven free" in res["message"]
+        assert "matches several" in res["message"]
         assert e.asked == [] and e.lib.imported == []
 
 
@@ -250,9 +257,12 @@ class TestStoreAndGate:
         assert "still there" in res["message"]
 
     def test_a_name_resolving_to_a_different_machine_is_an_error(self, env, monkeypatch):
+        # The PRE-check and the post-store gate share the resolver seam: the first answer must be
+        # "free" so the create proceeds, the second is the wrong machine the gate must catch.
         env()
-        monkeypatch.setattr(ccm, "resolve_machine",
-                            lambda name: (_Mach(description="Someone Else"), "Someone Else", None))
+        answers = [(None, None, "No machine matches 'Sweep3Axis'."),
+                   (_Mach(description="Someone Else"), "Someone Else", None)]
+        monkeypatch.setattr(ccm, "resolve_machine", lambda name: answers.pop(0))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True
         assert "resolves to 'Someone Else'" in res["message"]
@@ -275,23 +285,6 @@ class TestStoreAndGate:
         assert "cam_edit_setup(setup=..., machine='Sweep3Axis')" in out["note"]
         assert "persists in the local machine library" in out["note"]
         assert "no tool that removes a machine" in out["note"]
-
-    def test_a_machine_the_catalog_does_not_list_afterwards_is_an_error(self, env, monkeypatch):
-        # The catalog re-read is the payload's evidence for the cam_get listing; if the row is not
-        # there, the create did not land where an assignment reads.
-        env()
-        real = ccm._catalog_clash
-        seen = []
-
-        def _clash(name):
-            seen.append(name)
-            return real(name) if len(seen) == 1 else (None, None, None)
-
-        monkeypatch.setattr(ccm, "_catalog_clash", _clash)
-        res = ccm.handler(name="Sweep3Axis")
-        assert res["isError"] is True
-        assert "catalog does not list that name" in res["message"]
-        assert "still there" in res["message"]
 
     def test_each_wire_template_maps_to_its_own_member(self, env):
         for wire, member in ccm._TEMPLATES.items():

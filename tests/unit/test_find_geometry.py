@@ -31,7 +31,17 @@ class _CylGeo:
 
 
 class _PlaneGeo:
+    """A planar face's surface. With `origin`, it also carries the adsk.core.Plane frame
+    find_geometry casts to (origin + uDirection/vDirection/normal); without, those reads fail and
+    the record's 'frame' must degrade to null."""
     surfaceType = "PLANE"
+
+    def __init__(self, origin=None, u=None, v=None, normal=None):
+        if origin is not None:
+            self.origin = _Pt(*origin)
+            self.uDirection = _Pt(*u)
+            self.vDirection = _Pt(*v)
+            self.normal = _Pt(*normal)
 
 
 class _Eval:
@@ -161,6 +171,16 @@ def _enum_sentinels(monkeypatch):
     monkeypatch.setattr(ct, "Circle3DCurveType", "CIRCLE", raising=False)
     monkeypatch.setattr(ct, "Line3DCurveType", "LINE", raising=False)
     monkeypatch.setattr(ct, "Arc3DCurveType", "ARC", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _plane_cast(monkeypatch):
+    """adsk.core.Plane.cast(surface) hands back a PLANE surface and None for anything else. The
+    stock mock's cast returns a truthy child Mock, which would present a cylinder as a plane."""
+    import adsk.core
+    monkeypatch.setattr(adsk.core.Plane, "cast",
+                        lambda g: g if getattr(g, "surfaceType", None) == "PLANE" else None,
+                        raising=False)
 
 
 def _install(occs, root_bodies=(), all_occs=None, meshes=(), active=None):
@@ -512,6 +532,77 @@ class TestPerception:
         _install([FakeOcc("X:1", "X", [FakeBody(edges=[edge])])])
         out = _payload(fg.handler(target="X:1", kind="line_edge"))
         assert out["matches"][0]["direction"] == [0.6, 0.8, 0.0]
+
+
+# ── PLANAR-FACE FRAME: the face plane's own world coordinate system ─────────────────────────────
+# A world centroid alone cannot express a position ON a face: a caller computing where to put
+# something needs the face's own axes. Every planar match carries 'frame' (origin + x_world/y_world/
+# normal, from adsk.core.Plane), and an unreadable frame is null rather than a partial one.
+
+class TestPlanarFaceFrame:
+    def _face(self, token, centroid, origin, u, v, n):
+        return FakeFace(token, _PlaneGeo(origin=origin, u=u, v=v, normal=n), centroid)
+
+    def _frame_of(self, face, units="mm"):
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[face])])])
+        out = _payload(fg.handler(target="X:1", kind="planar_face", units=units))
+        return out["matches"][0]
+
+    def test_frame_reports_the_plane_origin_and_axes(self):
+        # a frame rotated 90 deg about Z: local +X runs along world +Y, local +Y along world -X.
+        # Scrambling any of the three vectors would place a computed point somewhere else entirely.
+        m = self._frame_of(self._face("TOP", (5, 5, 3), (1, 2, 3),
+                                      (0, 1, 0), (-1, 0, 0), (0, 0, 1)))
+        assert m["frame"] == {"origin": [10.0, 20.0, 30.0], "x_world": [0.0, 1.0, 0.0],
+                              "y_world": [-1.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0]}
+
+    def test_frame_origin_is_scaled_into_the_requested_units(self):
+        # cm -> in: the origin rides the same conversion as 'position', not raw API centimetres
+        m = self._frame_of(self._face("TOP", (0, 0, 0), (2.54, 5.08, 0),
+                                      (1, 0, 0), (0, 1, 0), (0, 0, 1)), units="in")
+        assert m["frame"]["origin"] == [1.0, 2.0, 0.0]
+
+    def test_frame_origin_is_not_the_centroid(self):
+        # 'position' is the face CENTROID, frame.origin the plane's PARAMETRIC origin - a caller
+        # measuring in the frame subtracts the origin, so collapsing the two silently offsets
+        # every local coordinate it computes.
+        m = self._frame_of(self._face("TOP", (5, 5, 3), (1, 2, 3),
+                                      (1, 0, 0), (0, 1, 0), (0, 0, 1)))
+        assert m["position"] == [50.0, 50.0, 30.0]
+        assert m["frame"]["origin"] == [10.0, 20.0, 30.0]
+
+    def test_frame_axes_are_unit_vectors(self):
+        # a non-unit axis would scale every local coordinate measured along it
+        m = self._frame_of(self._face("TOP", (0, 0, 0), (0, 0, 0),
+                                      (0, 3, 0), (-4, 0, 0), (0, 0, 2)))
+        assert m["frame"]["x_world"] == [0.0, 1.0, 0.0]
+        assert m["frame"]["y_world"] == [-1.0, 0.0, 0.0]
+        assert m["frame"]["normal"] == [0.0, 0.0, 1.0]
+
+    def test_frame_is_null_when_the_plane_cast_refuses(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Plane, "cast", lambda g: None, raising=False)
+        m = self._frame_of(self._face("TOP", (0, 0, 0), (1, 2, 3),
+                                      (1, 0, 0), (0, 1, 0), (0, 0, 1)))
+        assert m["frame"] is None                    # the key is present, the value honest
+
+    def test_frame_is_null_when_the_axes_cannot_be_read(self):
+        # a plane surface that answers no uDirection/vDirection - null, never a fabricated frame
+        m = self._frame_of(FakeFace("PL", _PlaneGeo(), (1, 0, 0)))
+        assert m["frame"] is None
+
+    def test_a_degenerate_axis_voids_the_whole_frame(self):
+        # a zero-length axis makes the frame unusable; three quarters of a coordinate system would
+        # look complete enough to compute a wrong point from
+        m = self._frame_of(self._face("TOP", (0, 0, 0), (1, 2, 3),
+                                      (0, 0, 0), (0, 1, 0), (0, 0, 1)))
+        assert m["frame"] is None
+
+    def test_a_cylinder_face_carries_no_frame_key(self):
+        # the frame is a PLANAR-face field; a curved face has no single in-plane coordinate system
+        _install([FakeOcc("X:1", "X", [FakeBody(faces=[_cyl("C", 0.8, (0, 0, 0))])])])
+        out = _payload(fg.handler(target="X:1", kind="cylinder_face"))
+        assert "frame" not in out["matches"][0]
 
 
 # ── BOUNDED READS: 'matches' is capped (CLAUDE.md "Bound it") ────────────────────────────────────

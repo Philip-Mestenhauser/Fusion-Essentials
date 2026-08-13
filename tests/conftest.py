@@ -858,7 +858,47 @@ class FakeCAMFolder:
 
 
 class FakeSetup(FakeCAMFolder):
-    """A CAM Setup: the same container protocol + measured allOperations flatten as FakeCAMFolder."""
+    """A CAM Setup: the same container protocol + measured allOperations flatten as FakeCAMFolder,
+    plus Setup.parameters - the collection the WCS binding is written to and read back from
+    (build one with wcs_params below; None models a setup whose parameters do not read)."""
+
+    def __init__(self, name, ops=(), folders=(), patterns=(), parameters=None):
+        super().__init__(name, ops=ops, folders=folders, patterns=patterns)
+        self.parameters = parameters
+
+
+# Setup.parameters as the WCS read-back sees it. Named without a Fake prefix because CAMParameter
+# has no live SHAPES dump to sweep against (test_fake_shapes_exist), like the _Insp* trio below.
+
+class _SetupParam:
+    """A CAMParameter: .name plus .value, whose OWN .value is the payload - the mode string on a
+    ChoiceParameterValue, the iterable of bound entities on a CadObjectParameterValue."""
+
+    def __init__(self, name, value):
+        self.name = name
+        self.value = types.SimpleNamespace(value=value)
+
+
+def wcs_params(origin_mode=None, orientation_mode=None, origin=None, z_axis=None):
+    """A Setup.parameters collection holding the WCS parameters. A mode is its string; `origin` /
+    `z_axis` are lists of (object_type, name) entity specs - None omits that parameter entirely,
+    [] models a present-but-unbound one, and name=None models an entity with no readable name."""
+    def _entity(spec):
+        object_type, name = spec
+        ent = types.SimpleNamespace(objectType=object_type)
+        if name is not None:
+            ent.name = name
+        return ent
+
+    params = []
+    for pname, mode in (("wcs_origin_mode", origin_mode),
+                        ("wcs_orientation_mode", orientation_mode)):
+        if mode is not None:
+            params.append(_SetupParam(pname, mode))
+    for pname, specs in (("wcs_origin_point", origin), ("wcs_orientation_axisZ", z_axis)):
+        if specs is not None:
+            params.append(_SetupParam(pname, [_entity(s) for s in specs]))
+    return _NamedCollection(params)
 
 
 def make_cam(*setups):

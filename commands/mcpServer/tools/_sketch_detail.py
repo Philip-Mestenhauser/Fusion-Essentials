@@ -2,23 +2,32 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Detail engine behind sketch_get: X-rays ONE sketch - entities, construction geometry,
-constraints, dimensions. Not a separately-registered tool; sketch_get delegates here when called
-with a 'sketch_name'. Entity ids ('<type>:<index>') match the references sketch_constrain /
-model_extrude / sketch_add_geometry use. Read-only.
+constraints, dimensions - and owns the sketch's world FRAME, the map from its local 2D coords to
+world that sketch_create publishes on the way in and sketch_get on the way out. Not a
+separately-registered tool; sketch_get delegates here when called with a 'sketch_name'. Entity ids
+('<type>:<index>') match the references sketch_constrain / model_extrude / sketch_add_geometry use.
+Read-only.
 """
+
+import types
 
 import adsk.core
 import adsk.fusion
 
 from ._common import ok, error, safe, resolve_sketch, all_sketch_names
 from . import _common
+from . import _geom
 from . import _inputs
 
 app = adsk.core.Application.get()
 
 # One-line "what to reuse from here" for the generated CLAUDE.md helper map (see tests/gen_manifest.py).
 MAP_BLURB = ("the ONE-sketch X-ray behind sketch_get(sketch_name=...): entities, construction "
-             "geometry, constraints, dimensions and profiles + curve_id (the '<type>:<index>' entity "
+             "geometry, constraints, dimensions and profiles + sketch_world_frame (the ONE local -> "
+             "world map for a sketch plane: where sketch (0,0) lands in mm, the unit +X/+Y world "
+             "directions and the normal derived from them - sketch_create publishes it on the way in "
+             "and sketch_get on the way out, so a caller places and VERIFIES against the same "
+             "numbers) + curve_id (the '<type>:<index>' entity "
              "id every sketch reference is written in, which _common.resolve_entity_ref reads back) "
              "+ unquote_text / font_read_back (the SketchText readers: textParameter.expression "
              "holds the string QUOTED - .text/.height are retired - and fontName reads as a "
@@ -43,6 +52,48 @@ def font_read_back(obj):
     against it is the right check. An empty string is no name at all, so it reads as None."""
     value = safe(lambda: obj.fontName)
     return value if isinstance(value, str) and value else None
+
+
+def _plane_normal(x_world, y_world):
+    """The unit world normal of the plane two in-plane axis vectors span, each a [x, y, z] list: the
+    cross product x cross y, normalized through the shared _geom.unit_vector (which answers None for
+    a zero-length result, i.e. two parallel axes that span no plane). Derived from the two vectors
+    the payload PUBLISHES, so the normal always agrees with them instead of coming from a second
+    read."""
+    cross = types.SimpleNamespace(
+        x=x_world[1] * y_world[2] - x_world[2] * y_world[1],
+        y=x_world[2] * y_world[0] - x_world[0] * y_world[2],
+        z=x_world[0] * y_world[1] - x_world[1] * y_world[0])
+    return _geom.unit_vector(cross)
+
+
+def sketch_world_frame(sketch) -> dict:
+    """Map a sketch's local 2D coords to world: where sketch (0,0) lands, where +X/+Y point, and the
+    plane's normal. None when the plane cannot be read.
+
+    On a face (or on xz/yz) the sketch origin is NOT the face centre and the in-plane axes need not
+    align with world - reporting this lets the caller place geometry by computed coords, and read a
+    sketch's plane position/normal back, rather than by trial and error. x_world/y_world/normal are
+    unit world directions; origin_mm is in mm."""
+    def _vec(g):
+        return [round(safe(lambda: g.x, 0.0) or 0.0, 6),
+                round(safe(lambda: g.y, 0.0) or 0.0, 6),
+                round(safe(lambda: g.z, 0.0) or 0.0, 6)]
+
+    op = safe(lambda: sketch.origin)            # world Point3D of sketch (0,0)
+    xd = safe(lambda: sketch.xDirection)        # world Vector3D of sketch +X
+    yd = safe(lambda: sketch.yDirection)        # world Vector3D of sketch +Y
+    if op is None or xd is None or yd is None:
+        return None
+    x_world, y_world = _vec(xd), _vec(yd)
+    return {
+        "origin_mm": [round((safe(lambda: op.x, 0.0) or 0.0) * 10, 4),
+                      round((safe(lambda: op.y, 0.0) or 0.0) * 10, 4),
+                      round((safe(lambda: op.z, 0.0) or 0.0) * 10, 4)],
+        "x_world": x_world,
+        "y_world": y_world,
+        "normal": _plane_normal(x_world, y_world),
+    }
 
 
 # local aliases (this module's own record builders read them under the short names)
@@ -456,6 +507,11 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
         "dimension_count": dim_count,
         "profile_count": safe(lambda: sketch.profiles.count, 0),
         "units": unit,
+        # Where this sketch sits in WORLD - the verification side of the same frame sketch_create
+        # publishes. Every x/y below is sketch-LOCAL, so without it a caller cannot check a plane's
+        # position, its normal, or whether two sketches are coplanar. safe(): a plane read that
+        # raises reports frame null rather than sinking the whole read.
+        "frame": safe(lambda: sketch_world_frame(sketch)),
         # The actionable layer: pass a profile's 'handle' as a ProfileRef to extrude/revolve/loft
         # instead of guessing a profile_index.
         "profiles": _profiles(sketch, f),
@@ -463,12 +519,16 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
 
     if not include_entities:
         out["note"] = ("Overview only, lengths in 'units' (area=units^2). 'profiles[].handle' -> "
-                       "ProfileRef for extrude/revolve/loft. For the full entity/constraint/dimension "
-                       "X-ray, call again with include_entities=true.")
+                       "ProfileRef for extrude/revolve/loft. Entity coordinates are sketch-LOCAL; "
+                       "use 'frame' to map to world (on the XZ plane local +Y is world -Z; in a nested or offset component the frame reads component-LOCAL). For the "
+                       "full entity/constraint/dimension X-ray, call again with "
+                       "include_entities=true.")
         return ok(out)
 
     entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch, f)
-    note = ("Full X-ray, lengths in 'units'. Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
+    note = ("Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; use 'frame' to map "
+                 "to world (on the XZ plane local +Y is world -Z; in a nested or offset component the frame reads component-LOCAL). "
+                 "Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
                  "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
                  "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "
                  "is the sketch ORIGIN (anchor origin-pinned constraints to it). is_fully_constrained=false "

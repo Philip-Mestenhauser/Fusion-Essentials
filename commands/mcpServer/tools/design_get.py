@@ -3,8 +3,8 @@
 
 """RICH READ: design_get - the active design's structure by zoom level (see CLAUDE.md "Reads are
 RICH"). Default: a cheap orientation slice (design type, feature count, timeline health, content
-fingerprint). include=['tree'|'timeline'|'mode'|'configurations'|'materials'|'appearances'] pulls one
-deeper slice at a time via a thin router over _slice_*() helpers. Read-only.
+fingerprint). include=['tree'|'timeline'|'mode'|'configurations'|'materials'|'appearances'|
+'attributes'] pulls one deeper slice at a time via a thin router over _slice_*() helpers. Read-only.
 """
 
 import json
@@ -25,7 +25,7 @@ from . import _materials
 app = adsk.core.Application.get()
 
 # The deeper slices an agent can opt into (the default returns NONE of these in full - only summaries).
-_SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances")
+_SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances", "attributes")
 
 
 # ── slice helpers - each builds one slice's payload, independently testable ─────────────────────────
@@ -229,9 +229,79 @@ def _object_summary(obj):
     return out
 
 
-def _slice_timeline(design, include_suppressed, group):
+# ── the model parameters a timeline feature owns (include=['timeline'], timeline_params=true) ──────
+#
+# A timeline row carries type+name only, so a fillet's radius is unreadable from it. The honest route
+# to that number is the feature's own ModelParameters: each carries .createdBy (the Feature / Joint /
+# JointOrigin that made it) and .role (its slot on that owner - 'OffsetZ', 'alignAngle', ...). This is
+# ONE pass over design.allParameters grouped by owner, not a per-feature probe.
+_PARAMS_PER_ROW = 16
+
+
+def _owner_keys(entity):
+    """The keys ONE owner is indexed and looked up under: its entityToken when that reads (exact),
+    plus name+type as the fallback for a side whose token does not read. [] when neither reads."""
+    keys = []
+    tok = safe(lambda: entity.entityToken)
+    if isinstance(tok, str) and tok:
+        keys.append(("token", tok))
+    name = safe(lambda: entity.name)
+    if isinstance(name, str) and name:
+        keys.append(("name", name, type(entity).__name__))
+    return keys
+
+
+def _model_parameters_by_owner(design):
+    """{owner key -> {rows, tokens}} from ONE pass over design.allParameters.
+
+    A ModelParameter exposes .createdBy and .role; a UserParameter has NO createdBy and the read
+    raises - safe() turns that into None and the parameter is skipped, so the guard is the missing
+    attribute itself, not a type test. Each owner is indexed under every key it can be matched by;
+    the tokens collected under a key are what tells a name+type collision (two owners) apart from
+    one owner, so a colliding key can be refused instead of mixing two features' parameters."""
+    index = {}
+    for p in _common.iter_collection(safe(lambda: design.allParameters)):
+        owner = safe(lambda p=p: p.createdBy)
+        if owner is None:
+            continue
+        keys = _owner_keys(owner)
+        if not keys:
+            continue
+        row = {"name": safe(lambda p=p: p.name),
+               "role": safe(lambda p=p: p.role),
+               "expression": safe(lambda p=p: p.expression),
+               "value": _common.measured(lambda p=p: p.value)}
+        token = keys[0][1] if keys[0][0] == "token" else None
+        for key in keys:
+            entry = index.setdefault(key, {"rows": [], "tokens": set()})
+            entry["rows"].append(row)
+            entry["tokens"].add(token)
+    return index
+
+
+def _params_for(index, entity):
+    """(rows, truncated) - the model parameters `entity` owns, capped; (None, False) when it owns
+    none. A name+type key that collected two DIFFERENT owner tokens is skipped, not answered with
+    the union of two features' parameters."""
+    for key in _owner_keys(entity):
+        entry = index.get(key)
+        if not entry:
+            continue
+        if len([t for t in entry["tokens"] if t]) > 1:
+            continue
+        rows = entry["rows"]
+        return rows[:_PARAMS_PER_ROW], len(rows) > _PARAMS_PER_ROW
+    return None, False
+
+
+_PARAMS_NOTE = ("Each params[].value is in Fusion internal units (cm / radians) - params[].expression "
+                "carries the authored unit. Full records: param_get(include_model_parameters=true).")
+
+
+def _slice_timeline(design, include_suppressed, group, with_params=False):
     """The ordered parametric timeline, with healthy-row noise dropped (a normal row is
-    {index,name,type}; a suppressed/errored row keeps its flags and stands out)."""
+    {index,name,type}; a suppressed/errored row keeps its flags and stands out). with_params adds
+    each row's own model parameters (the readable form of a feature's radius/distance/angle)."""
     try:
         timeline = design.timeline
     except Exception as e:
@@ -239,6 +309,8 @@ def _slice_timeline(design, include_suppressed, group):
     want_group = (group or "").strip()
     items, truncated = [], False
     states, exceptions = {}, []                 # exception-first rollup over the timeline
+    param_index = _model_parameters_by_owner(design) if with_params else None
+    any_params = False
     try:
         total = timeline.count      # a timeline that cannot be counted is a refusal, not an empty read
         for obj in _common.iter_collection(timeline):
@@ -255,7 +327,16 @@ def _slice_timeline(design, include_suppressed, group):
                 continue
             if want_group and (summ["parent_group"] or "") != want_group:
                 continue
-            items.append(terse(summ, _TIMELINE_NOISE))
+            row = terse(summ, _TIMELINE_NOISE)
+            if param_index is not None:
+                entity = safe(lambda obj=obj: obj.entity)
+                prows, ptrunc = _params_for(param_index, entity) if entity is not None else (None, False)
+                if prows:
+                    row["params"] = prows
+                    if ptrunc:
+                        row["params_truncated"] = True
+                    any_params = True
+            items.append(row)
     except Exception as e:
         return None, error(f"Could not read the timeline: {e}")
     groups = {}
@@ -272,6 +353,8 @@ def _slice_timeline(design, include_suppressed, group):
                "groups": groups, "timeline": items}
     if truncated:
         payload["truncated"] = True
+    if any_params:
+        payload["params_note"] = _PARAMS_NOTE
     return payload, None
 
 
@@ -319,6 +402,59 @@ def _slice_configurations(design):
            "active_configuration": safe(lambda: active_row.name) if active_row else None,
            "configuration_count": len(rows), "configurations": rows, "columns": columns}
     if truncated:
+        out["truncated"] = True
+    return out, None
+
+
+# ── entity attributes (the tags design_edit_timeline's set_attribute writes) ───────────────────────
+_ATTR_MAX_ROWS = 500
+
+
+def _attribute_rows(design, group, key):
+    """(rows, error_text) - every attribute in the design under `group` (and `key` when given),
+    as {group, key, value, entity}. Design.findAttributes hands back an AttributeVector - len()/[i],
+    never .count/.item(i) - so this walks it by index rather than through iter_collection. An
+    Attribute exposes .name (the key), .value, and .parent (the entity it is attached to)."""
+    found = safe(lambda: design.findAttributes(group, key))
+    if found is None:
+        return None, (f"Searching attributes for group '{group}' failed - Design.findAttributes "
+                      "raised or returned nothing.")
+    total = _common.counted(lambda: len(found))
+    if total is None:
+        return None, f"The attribute search for group '{group}' returned a result that has no length."
+    rows = []
+    for i in range(min(total, _ATTR_MAX_ROWS)):
+        attr = safe(lambda i=i: found[i])
+        if attr is None:
+            continue
+        parent = safe(lambda: attr.parent)
+        entity = {"type": type(parent).__name__ if parent is not None else None}
+        parent_name = safe(lambda: parent.name) if parent is not None else None
+        if parent_name is not None:
+            entity["name"] = parent_name
+        # 'group' is the QUERIED group, not a read off the attribute: every row in the vector
+        # matched it, so echoing the query says the same thing without a second property read.
+        rows.append({"group": group, "key": safe(lambda: attr.name),
+                     "value": safe(lambda: attr.value), "entity": entity})
+    return {"total": total, "rows": rows}, None
+
+
+def _slice_attributes(design, group, key):
+    """The design's entity attributes under ONE group. The group is REQUIRED - without it this would
+    dump every attribute in the design (Fusion itself stores internal ones), which is the flood a
+    scoped read exists to avoid."""
+    g = (group or "").strip()
+    if not g:
+        return None, error("include=['attributes'] needs 'attribute_group' - the group to read (the "
+                           "same group design_edit_timeline(action='set_attribute') wrote with). "
+                           "Leave 'attribute_key' empty to get every key in that group.")
+    k = (key or "").strip()
+    result, err = _attribute_rows(design, g, k)
+    if err:
+        return None, error(err)
+    out = {"group": g, "key": k or None, "count": result["total"],
+           "returned": len(result["rows"]), "attributes": result["rows"]}
+    if result["total"] > len(result["rows"]):
         out["truncated"] = True
     return out, None
 
@@ -391,8 +527,9 @@ def _has_cam(design):
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
 def handler(include=None, max_depth: int = 3, component: str = "",
-            include_suppressed: bool = True, group: str = "",
-            library: str = "", name_filter: str = "", max_results: int = 0) -> dict:
+            include_suppressed: bool = True, group: str = "", timeline_params: bool = False,
+            library: str = "", name_filter: str = "", max_results: int = 0,
+            attribute_group: str = "", attribute_key: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
@@ -445,7 +582,8 @@ def handler(include=None, max_depth: int = 3, component: str = "",
         if terr:
             return terr
     if "timeline" in inc:
-        out["timeline"], tlerr = _slice_timeline(design, include_suppressed, group)
+        out["timeline"], tlerr = _slice_timeline(design, include_suppressed, group,
+                                                 bool(timeline_params))
         if tlerr:
             return tlerr
     if "configurations" in inc:
@@ -464,6 +602,10 @@ def handler(include=None, max_depth: int = 3, component: str = "",
         out["appearances"], apperr = _slice_appearances(design, library, name_filter, max_results)
         if apperr:
             return apperr
+    if "attributes" in inc:
+        out["attributes"], atterr = _slice_attributes(design, attribute_group, attribute_key)
+        if atterr:
+            return atterr
 
     # advertise the slices NOT yet pulled (load-bearing: an un-named flag is invisible to the agent).
     remaining = [s for s in _SLICES if s not in inc]
@@ -471,9 +613,12 @@ def handler(include=None, max_depth: int = 3, component: str = "",
         out["note"] = ("Orientation slice. Pull deeper with include=" + str(remaining) +
                        " (e.g. include=['tree'] for the full component tree, ['timeline'] for the "
                        "feature list, ['mode'] for the capability map, ['configurations'] for configs, "
-                       "['materials'] or ['appearances'] for the assignable catalog). "
+                       "['materials'] or ['appearances'] for the assignable catalog, ['attributes'] "
+                       "for entity attributes in one group). "
                        "'max_depth'/'component' scope the tree; 'group'/'include_suppressed' the "
-                       "timeline; 'library'/'name_filter'/'max_results' the catalog.")
+                       "timeline and 'timeline_params' adds each feature's own parameters (a "
+                       "fillet's radius); 'library'/'name_filter'/'max_results' the catalog; "
+                       "'attribute_group' (required) / 'attribute_key' the attributes.")
     return ok(out)
 
 
@@ -493,9 +638,13 @@ TOOL_DESCRIPTION = (
     "as is_out_of_date on tree nodes; the whole-document verdict is workspace_orient.is_healthy). "
     "'include' pulls deeper: 'tree' (full component/occurrence tree; "
     "'max_depth'/'component' scope it), 'timeline' (the feature list; 'group'/'include_suppressed' "
-    "scope it), 'mode' (full capability map), 'configurations' (the config table), 'materials' / "
+    "scope it, and 'timeline_params' adds each row's own model parameters with their roles - a "
+    "fillet's radius, an extrude's distance), 'mode' (full capability map), "
+    "'configurations' (the config table), 'materials' / "
     "'appearances' (the catalog to assign FROM: the document's entries plus a count-only census of "
-    "each loaded library; 'library' lists one, 'name_filter'/'max_results' page it). The default is "
+    "each loaded library; 'library' lists one, 'name_filter'/'max_results' page it), 'attributes' "
+    "(entity attributes and what each is attached to; 'attribute_group' required, empty "
+    "'attribute_key' = every key in it). The default is "
     "safe to call blind and names its deeper slices."
 )
 
@@ -503,8 +652,8 @@ tool = (
     Tool.create_simple(name="design_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": ["array", "string"],
             "description": "Deeper slices to include: any of tree | timeline | mode | configurations "
-                           "| materials | appearances (a list or comma-string). Omit for the "
-                           "orientation slice."})
+                           "| materials | appearances | attributes (a list or comma-string). Omit "
+                           "for the orientation slice."})
     .add_input_property("max_depth", {"type": "integer",
             "description": "Tree depth when include=tree (default 3, max 8)."})
     .add_input_property("component", {"type": "string",
@@ -513,6 +662,9 @@ tool = (
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",
             "description": "Only this timeline group when include=timeline."})
+    .add_input_property("timeline_params", {"type": "boolean",
+            "description": "Add each timeline row's own model parameters (name/role/expression/"
+                           "value). Default false."})
     .add_input_property("library", {"type": "string",
             "description": "One material library's entries, by exact name from the census the "
                            "catalog slices return when this is omitted."})
@@ -520,6 +672,10 @@ tool = (
             "description": "Catalog entries whose name contains this text."})
     .add_input_property("max_results", {"type": "integer",
             "description": "Catalog rows per page (default 50, cap 200); the true total comes too."})
+    .add_input_property("attribute_group", {"type": "string",
+            "description": "Attribute group to read; required by include=attributes."})
+    .add_input_property("attribute_key", {"type": "string",
+            "description": "One key within that group; empty means every key in it."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)
