@@ -12,7 +12,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
-from ._cam_common import get_cam, resolve_cam_node, walk_cam_tree, operations_under
+from ._cam_common import get_cam, resolve_cam_node, walk_cam_tree, operations_under, find_setup
 
 app = adsk.core.Application.get()
 
@@ -30,6 +30,32 @@ def _set_bulb(o, on):
     o.isLightBulbOn = bool(on)
     now = safe(lambda: o.isLightBulbOn)
     return now is None or bool(now) == bool(on)
+
+
+def _activate_owning_setup(cam, setup_name):
+    """Make the shown toolpath's OWN setup active. Returns (activated_name_or_None, warning_or_None);
+    already-active is (None, None).
+
+    MEASURED live: the Manufacture workspace renders only the ACTIVE setup's models. Showing an
+    operation from another setup therefore draws its toolpath beside a DIFFERENT setup's part - and
+    'fit' then frames that part, leaving the isolated toolpath off screen.
+    """
+    if not setup_name:
+        return None, None
+    s, _names, serr = find_setup(cam, setup_name)
+    if not s:
+        return None, f"Could not resolve this operation's setup '{setup_name}': {serr}"
+    if safe(lambda: s.isActive) is True:
+        return None, None
+    try:
+        s.activate()
+    except Exception as e:
+        return None, (f"Setup '{setup_name}' could not be activated ({e}) - the viewport still "
+                      "shows the ACTIVE setup's models, not this operation's part.")
+    if safe(lambda: s.isActive) is not True:
+        return None, (f"activate() ran but setup '{setup_name}' still reads isActive=false - the "
+                      "viewport still shows another setup's models, not this operation's part.")
+    return setup_name, None
 
 
 def _fit_operation():
@@ -96,10 +122,18 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
                     shown.append(safe(lambda o=o: o.name))
                 else:
                     failed.append(safe(lambda o=o: o.name))
+        activated, setup_warning = _activate_owning_setup(cam, fnode.setup)
         app.activeViewport.refresh()
         out = {"action": "show_folder", "folder": matched, "shown": shown,
         "shown_count": len(shown),
         "note": "Only this folder's generated toolpaths are shown."}
+        if activated:
+            out["setup_activated"] = activated
+            out["note"] += (f" Activated setup '{activated}' so the viewport renders THIS folder's "
+                            "part - only the active setup's models are displayed.")
+        if setup_warning:
+            out["setup_activation_warning"] = setup_warning
+            out["note"] += " " + setup_warning
         if failed:
             out["toggle_failures"] = failed
             out["note"] = (f"{len(failed)} operation(s) still read isLightBulbOn=false after the "
@@ -138,14 +172,28 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     if not took:
         return error(f"isLightBulbOn did not take for '{name}' - it still reads hidden.")
 
+    # BEFORE the fit: the displayed model is the active setup's, so the operation's own setup has to
+    # be active or the fit frames another setup's part.
+    activated, setup_warning = _activate_owning_setup(cam, onode.setup)
+
     fitted = False
     if fit:
         _fit_operation()   # raises on an API refusal, so reaching the payload means it applied
         fitted = True
     app.activeViewport.refresh()
-    return ok({"action": action, "operation": name, "fit": fitted,
-        "note": "Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
-        "view_screenshot."})
+    note = ("Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
+            "view_screenshot.")
+    out = {"action": action, "operation": name, "fit": fitted, "setup": onode.setup}
+    if activated:
+        out["setup_activated"] = activated
+        note += (f" Activated setup '{activated}' (the operation's own): the viewport renders only "
+                 "the ACTIVE setup's models, so the toolpath would otherwise sit beside another "
+                 "setup's part.")
+    if setup_warning:
+        out["setup_activation_warning"] = setup_warning
+        note += " " + setup_warning
+    out["note"] = note
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (
@@ -154,8 +202,10 @@ TOOL_DESCRIPTION = (
     "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
     "+ state). 'fit' fits the camera to the scene after showing (show/isolate). Toolpaths render "
     "only in the Manufacture workspace; pair with view_screenshot. Toggles "
-    "Operation.isLightBulbOn - does not touch simulation/in-process-stock commands (those are "
-    "unsafe to drive from here)."
+    "Operation.isLightBulbOn, and show/isolate/show_folder also ACTIVATE the operation's own "
+    "setup (the viewport renders only the active setup's models - the payload reports "
+    "setup_activated) - a later CAM call lands in that setup unless it names its own. Does not "
+    "touch simulation/in-process-stock commands (those are unsafe to drive from here)."
 )
 
 tool = (

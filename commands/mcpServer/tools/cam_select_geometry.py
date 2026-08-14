@@ -362,6 +362,18 @@ def _filter_by_diameter(faces, min_d, max_d, factor):
     return kept, non_cyl, out_range
 
 
+def _retained(applied, msg):
+    """The error text for a failure that lands AFTER the height writes. The heights are set while the
+    operation is still settled (see the ordering comment in the handler) and this call does not undo
+    them, so a later refusal has to NAME what it left on the operation instead of reading as a
+    no-op."""
+    if not applied:
+        return msg
+    return (f"{msg} The height setting(s) {', '.join(applied)} were applied BEFORE this failure and "
+            "REMAIN on the operation - this call did not undo them; set them back if the selection "
+            "is not going to be applied.")
+
+
 def _set_height(op, which, mode, offset):
     """Set a top/bottom height via _mode and/or _offset (never the resolved _value). Returns an error
     string, or None on success. Validates each param exists before mutating it."""
@@ -430,6 +442,20 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 
     result = {"operation": safe(lambda: op.name), "selection": selection}
 
+    # ── every refusal that can be decided WITHOUT touching the operation runs here ──
+    # The diameter filter reads the passed faces' geometry only, so it can refuse a filtered-to-zero
+    # selection while the operation is still exactly as found. It has to run before the height block
+    # below, which MUTATES: heights written first and then refused here would be retained by an
+    # isError the caller reads as "nothing happened".
+    faces = entities
+    diam_note = None
+    if selection == _HOLES and (min_diameter is not None or max_diameter is not None):
+        faces, non_cyl, out_range = _filter_by_diameter(entities, min_diameter, max_diameter, factor)
+        diam_note = (f"diameter filter [{min_diameter},{max_diameter}]{units_key} kept {len(faces)} "
+                     f"(dropped {out_range} out-of-range, {non_cyl} non-cylinder).")
+        if not faces:
+            return error("No cylinder faces left after the diameter filter. " + diam_note)
+
     # ── heights FIRST (before the selection) ──
     # A height _mode's valid enum is CONTEXT-DEPENDENT and applying a selection can transiently
     # invalidate a value that was valid in the op's settled state (found live: setting
@@ -441,7 +467,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             continue
         herr = _set_height(op, which, mode, offset)
         if herr:
-            return error(herr)
+            return error(_retained(applied, herr))
         if mode is not None:
             applied.append(f"{which}Height_mode={mode}")
         if offset is not None:
@@ -451,26 +477,19 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 
     # ── apply the selection ──
     extra = {}
-    diam_note = None
     if selection == _HOLES:
-        faces = entities
-        if min_diameter is not None or max_diameter is not None:
-            faces, non_cyl, out_range = _filter_by_diameter(entities, min_diameter, max_diameter, factor)
-            diam_note = (f"diameter filter [{min_diameter},{max_diameter}]{units} kept {len(faces)} "
-                         f"(dropped {out_range} out-of-range, {non_cyl} non-cylinder).")
-            if not faces:
-                return error("No cylinder faces left after the diameter filter. " + diam_note)
         count, aerr = _apply_holes(op, faces)
         record = None if aerr else {"selections": count}
     else:
         record, aerr = _apply_curve(op, selection, entities, knobs, factor, units_key, extra)
     if aerr:
-        return error(aerr)
+        return error(_retained(applied, aerr))
     if not record.get("selections"):
-        return error("Selection applied but the operation reports 0 selections - the geometry was "
+        return error(_retained(applied,
+                     "Selection applied but the operation reports 0 selections - the geometry was "
                      "rejected. Check the geometry matches the strategy (edges for chain, the pocket "
                      "floor face for pocket, bodies for silhouette/pocket_recognition, whole sketches "
-                     "for sketch, cylinder faces for holes).")
+                     "for sketch, cylinder faces for holes)."))
     result.update(record)
     result.update(extra)
     if diam_note:

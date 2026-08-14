@@ -795,6 +795,64 @@ class TestEdit:
         assert out["verified_in_memory_only"] is False
         assert "persisted" in out["note"] and "library url" in out["note"]
 
+    def test_an_expression_that_does_not_evaluate_errors_and_rolls_back(self, monkeypatch):
+        # A tool parameter STORES an unresolvable expression verbatim and reads it back, so the
+        # existing echo check cannot see it - only .error can (measured live: tool_diameter set to
+        # 'NoSuchParamXyz * 2' returned edited:1 while Fusion held 0.0 with a parameter error).
+        tool = _Tool("EM")
+        tool.parameters._d["tool_diameter"] = _BrokenParam("tool_diameter", "8.")
+        tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="edit", scope="document", tool=0,
+                         parameters={"tool_diameter": "NoSuchParamXyz * 2"})
+        assert res["isError"] is True
+        assert "did not evaluate" in res["message"] and "NoSuchParamXyz * 2" in res["message"]
+        assert "Failed to evaluate expression." in res["message"]
+        assert tool.parameters.itemByName("tool_diameter").expression == "8."   # rolled back
+        assert tgt.updated == [] and tgt.persisted == 0                         # never committed
+
+    def test_one_bad_expression_rolls_the_GOOD_ones_back_too(self, monkeypatch):
+        # partial application is the trap: the good parameter landed before the bad one was judged,
+        # so the refusal has to restore every parameter this call touched.
+        tool = _Tool("EM", tool_numberOfFlutes="3")
+        tool.parameters._d["tool_diameter"] = _BrokenParam("tool_diameter", "8.")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="edit", scope="document", tool=0,
+                         parameters={"tool_numberOfFlutes": "4", "tool_diameter": "Nope * 2"})
+        assert res["isError"] is True and "Rolled back all 2 parameter(s)" in res["message"]
+        assert tool.parameters.itemByName("tool_numberOfFlutes").expression == "3"
+        assert tool.parameters.itemByName("tool_diameter").expression == "8."
+
+    def test_a_rollback_that_will_not_read_back_is_named_not_assumed(self, monkeypatch):
+        class _Sticky(_BrokenParam):
+            @property
+            def expression(self):
+                return self._expr
+            @expression.setter
+            def expression(self, v):
+                self._expr = "NoSuchParamXyz * 2"      # refuses to go back to its prior expression
+
+        tool = _Tool("EM")
+        tool.parameters._d["tool_diameter"] = _Sticky("tool_diameter", "8.")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        res = ct.handler(action="edit", scope="document", tool=0,
+                         parameters={"tool_diameter": "NoSuchParamXyz * 2"})
+        assert res["isError"] is True
+        assert "ROLLBACK INCOMPLETE" in res["message"] and "tool_diameter" in res["message"]
+
+    def test_a_parameter_warning_alone_never_blocks_the_edit(self, monkeypatch):
+        # .warning fires on VALID expressions too, so it is carried on the row, never a refusal.
+        class _Warned(_Param):
+            error = ""
+            warning = "stock is less than the model width"
+
+        tool = _Tool("EM")
+        tool.parameters._d["tool_diameter"] = _Warned("tool_diameter", "8.")
+        _install(monkeypatch, _Target(tools=[tool], is_document=True))
+        out = _payload(ct.handler(action="edit", scope="document", tool=0,
+                                  parameters={"tool_diameter": "10 mm"}))
+        assert out["edited"] == 1
+        assert out["changed"][0]["warning"] == "stock is less than the model width"
+
     def test_edit_with_an_unreadable_refetch_names_the_weaker_basis(self, monkeypatch):
         # A library that cannot be re-read proves nothing about storage - the edit still stands on
         # the in-memory tool, and the payload says exactly that instead of claiming persistence.

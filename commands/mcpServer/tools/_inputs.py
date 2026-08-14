@@ -256,25 +256,76 @@ def _resolve_token_entity(des, s):
     ('<token>|@<kind>:<x>,<y>,<z>'), see make_handle(). entityTokens are short-lived (the same entity
     yields different tokens across queries; an old one can fail with no model edit). So if the token
     fails, we re-find the entity by its kind+position locator instead of forcing the caller to re-query.
-    """
+
+    SEVERAL entities can answer ONE token - findEntityByToken returns a vector, and live-measured:
+    splitting a face made the pre-split token resolve to BOTH survivors (a straight split yields
+    different centroids; a CONCENTRIC split yields two survivors at the SAME centroid). Taking the
+    first silently acts on geometry the caller never picked. The handle's own position locator
+    decides between them when it names exactly one; otherwise the handle is REFUSED, with the
+    reason (naming how many it resolved to) left in _LAST_REFIND_REFUSAL for the resolver's
+    error."""
     global _LAST_REFIND_REFUSAL
     _LAST_REFIND_REFUSAL = None
     if not isinstance(s, str) or not s:
         return None
     token, locator = _split_handle(s)
     found = _common.safe(lambda: des.findEntityByToken(token))
-    if found and len(found):
-        return found[0]
+    hits = list(found) if found else []
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        picked, reason = _pick_by_locator(hits, locator) if locator else (None, None)
+        if picked is not None:
+            return picked
+        _LAST_REFIND_REFUSAL = _ambiguous_token_refusal(hits, locator, reason)
+        return None
     # token dead -> re-find by the locator (kind + world position), if the handle carries one.
     if locator:
         return _refind_by_locator(des, locator)
     return None
 
 
-# Why the last locator recovery was REFUSED (set by _refind_by_locator, cleared per resolve) -
-# an error-detail channel so the resolver's message can say "the model changed" instead of the
-# generic staleness text. Never drives behavior, only sharpens the error.
+def _entity_context_label(ent):
+    """What tells one candidate of an ambiguous token from the others: the assembly path it is placed
+    in (a proxy), else its owning body/component - plus its type. Read-only and fully guarded."""
+    kind = type(ent).__name__
+    where = (_common.safe(lambda: ent.assemblyContext.fullPathName)
+             or _common.safe(lambda: ent.body.parentComponent.name)
+             or _common.safe(lambda: ent.parentComponent.name))
+    return f"{kind} in '{where}'" if where else kind
+
+
+def _ambiguous_token_refusal(hits, locator, locator_reason=None):
+    """The reason text for a token that resolved to SEVERAL entities and could not be narrowed to one
+    - it names the COUNT (the fact a caller acts on) and each candidate, and says why the locator did
+    not settle it. Bounded to a few candidates: this rides in an error string."""
+    cands = "; ".join(_entity_context_label(e) for e in hits[:4])
+    more = f" (+{len(hits) - 4} more)" if len(hits) > 4 else ""
+    why = (locator_reason if locator_reason else
+           ("this handle's position locator matched none of them" if locator else
+            "this bare token carries no position locator to tell them apart"))
+    return (f"the token resolved to {len(hits)} entities - {cands}{more} - and {why}. A split face "
+            "resolves this way, so acting on any of them would be a guess")
+
+
+# Why the last handle resolution was REFUSED (set by _resolve_token_entity / _refind_by_locator,
+# cleared per resolve) - an error-detail channel so the resolver's message can say "the model
+# changed" or "that token names several entities" instead of the generic staleness text. Never
+# drives behavior, only sharpens the error.
 _LAST_REFIND_REFUSAL = None
+
+
+def _handle_refusal_suffix():
+    """The clause a NAME-fallback miss appends when the same value was also refused as a HANDLE.
+
+    A kind that falls through to name lookups (TargetRef, _resolve_occurrence) ends in "that named
+    nothing" - which is a lie for a handle whose token resolved to several entities or died: the
+    caller re-issues names instead of re-running find_geometry. Empty when no handle refusal is
+    pending, so a plain misspelling reads exactly as before."""
+    if not _LAST_REFIND_REFUSAL:
+        return ""
+    return (f" It was also tried as a handle: {_LAST_REFIND_REFUSAL} - re-run find_geometry for a "
+            "fresh handle.")
 
 
 # ── composite, self-healing geometry handle ──────────────────────────────────
@@ -412,35 +463,70 @@ def _refind_profile(des, kind, want_pt):
     return best
 
 
+# How far (cm) a candidate may sit from a locator's recorded point and still BE that geometry: 1
+# micron, far below any modelling tolerance. The ONE gate both locator paths judge on - the
+# design-wide staleness re-find and the pick between the several entities one token can resolve to -
+# so a match can never mean two different distances.
+_LOCATOR_TOL_CM = 1e-4
+
+
+def _pick_by_locator(entities, locator):
+    """(the ONE entity `locator` names out of `entities`, refusal reason) - the shared locator match.
+
+    Three gates keep it honest (a delete-rebuild can put DIFFERENT geometry at the recorded
+    position, and binding it silently measures the wrong entity - live-proven): the candidate must
+    sit essentially AT the recorded point (_LOCATOR_TOL_CM); it must be the ONLY one there - a
+    concentric face split puts BOTH survivors at the identical centroid (measured live, and the
+    hit order is not stable across runs), so a tie is refused naming the count, never
+    first-matched; and when the handle carries the minting body's revisionId, the candidate's body
+    must still match it. (None, None) means nothing sits at that point; (None, reason) means the
+    candidates were gated out."""
+    lx, ly, lz = locator[1], locator[2], locator[3]
+    want_rev = locator[4] if len(locator) > 4 else None
+    best, best_d = None, None
+    within_tol = 0
+    for ent in entities:
+        p = _entity_point_cm(ent)
+        if p is None:
+            continue
+        d = ((p[0] - lx) ** 2 + (p[1] - ly) ** 2 + (p[2] - lz) ** 2) ** 0.5
+        if d <= _LOCATOR_TOL_CM:
+            within_tol += 1
+        if best_d is None or d < best_d:
+            best, best_d = ent, d
+    if best is None or best_d is None or best_d > _LOCATOR_TOL_CM:
+        return None, None
+    if within_tol > 1:
+        return None, (f"{within_tol} of them sit at the recorded position (co-located candidates - "
+                      "a concentric split puts both survivors at one centroid), so the locator "
+                      "cannot name exactly one")
+    if want_rev:
+        got_rev = _common.safe(lambda: best.body.revisionId)
+        if got_rev != want_rev:
+            # Position alone cannot tell a rebuilt/different entity from the original (a rotated
+            # rebuild lands its record point EXACTLY on the original's, live-verified); a changed
+            # body revision means the pick would be a guess - refuse it.
+            return None, ("the model CHANGED since this handle was minted (the geometry at the "
+                          "recorded position belongs to a different/rebuilt body), so locator "
+                          "recovery would bind the wrong entity")
+    return best, None
+
+
 def _refind_by_locator(des, locator):
     """Re-find the entity matching a locator by scanning the design's BRep geometry for the nearest
     face/edge/vertex of that kind to the recorded point. Returns the entity or None. This is the
     staleness recovery: the token died, but the geometry is unchanged, so its kind+position still
-    pins it. Two gates keep the recovery honest (a delete-rebuild can put DIFFERENT geometry at the
-    recorded position, and recovering it silently measures the wrong entity - live-proven): the
-    candidate must sit essentially AT the recorded point, and when the handle carries the minting
-    body's revisionId, the candidate's body must still match it. A gated refusal leaves its reason
-    in _LAST_REFIND_REFUSAL for the resolver's error. Profile locators route to _refind_profile
-    (sketch profiles are not BRep and their tokens can be dead on arrival)."""
+    pins it. The candidate set is gathered here; the match and its gates are _pick_by_locator's, and
+    a gated refusal leaves its reason in _LAST_REFIND_REFUSAL for the resolver's error. Profile
+    locators route to _refind_profile (sketch profiles are not BRep and their tokens can be dead on
+    arrival)."""
+    global _LAST_REFIND_REFUSAL
     kind, lx, ly, lz = locator[0], locator[1], locator[2], locator[3]
-    want_rev = locator[4] if len(locator) > 4 else None
     if kind.startswith("profile"):
         return _refind_profile(des, kind, (lx, ly, lz))
     root = _common.safe(lambda: des.rootComponent)
     if not root:
         return None
-    want_pt = (lx, ly, lz)
-    best, best_d = None, None
-
-    def consider(ent):
-        nonlocal best, best_d
-        p = _entity_point_cm(ent)
-        if p is None:
-            return
-        d = ((p[0] - lx) ** 2 + (p[1] - ly) ** 2 + (p[2] - lz) ** 2) ** 0.5
-        if best_d is None or d < best_d:
-            best, best_d = ent, d
-
     want_faces = kind.endswith("face") or kind == "face"
     want_edges = kind.endswith("edge") or kind == "edge"
     want_verts = kind == "vertex"
@@ -453,37 +539,26 @@ def _refind_by_locator(des, locator):
         coll = _common.safe(lambda o=o: o.bRepBodies)
         n = _common.safe(lambda: coll.count, 0) if coll else 0
         bodies += [coll.item(i) for i in range(n)]
+    candidates = []
     for b in bodies:
         if b is None:
             continue
         if want_faces:
             fs = _common.safe(lambda b=b: b.faces)
             for i in range(_common.safe(lambda: fs.count, 0) if fs else 0):
-                consider(fs.item(i))
+                candidates.append(fs.item(i))
         if want_edges:
             es = _common.safe(lambda b=b: b.edges)
             for i in range(_common.safe(lambda: es.count, 0) if es else 0):
-                consider(es.item(i))
+                candidates.append(es.item(i))
         if want_verts:
             vs = _common.safe(lambda b=b: b.vertices)
             for i in range(_common.safe(lambda: vs.count, 0) if vs else 0):
-                consider(vs.item(i))
-    # Accept only a close match (1 micron in cm) so we never silently bind the wrong entity.
-    if best is not None and best_d is not None and best_d <= 1e-4:
-        if want_rev:
-            got_rev = _common.safe(lambda: best.body.revisionId)
-            if got_rev != want_rev:
-                # Position alone cannot tell a rebuilt/different entity from the original (a
-                # rotated rebuild lands its record point EXACTLY on the original's, live-verified);
-                # a changed body revision means the recovery would be a guess - refuse it.
-                global _LAST_REFIND_REFUSAL
-                _LAST_REFIND_REFUSAL = (
-                    "the model CHANGED since this handle was minted (the geometry at the "
-                    "recorded position belongs to a different/rebuilt body), so locator "
-                    "recovery would bind the wrong entity")
-                return None
-        return best
-    return None
+                candidates.append(vs.item(i))
+    best, reason = _pick_by_locator(candidates, locator)
+    if reason:
+        _LAST_REFIND_REFUSAL = reason
+    return best
 
 
 def _isinstance(b, type_or_tuple) -> bool:
@@ -850,7 +925,8 @@ def _resolve_any_body(name, raw):
     return None, (f"'{name}': {BODY_MISS} '{s}'. Pass a body handle from "
                   "find_geometry, a body name (bare, or '<occurrence-or-component>:<body>'), or a "
                   "single-body component/occurrence name "
-                  "(see design_get(include=['tree']) / model_extrude output).")
+                  "(see design_get(include=['tree']) / model_extrude output)."
+                  + _handle_refusal_suffix())
 
 
 class BodyRef(InputKind):
@@ -1979,6 +2055,15 @@ def _occurrence_candidates(occs, cap=8):
     return "; ".join(out)
 
 
+# The stem of _resolve_occurrence's MISS refusal (no occurrence of that name/path exists). A caller
+# whose target vocabulary is WIDER than an occurrence (mesh_export takes a body/component name too)
+# matches on this to tell a plain miss - keep trying the other vocabularies - from a REFUSAL it must
+# pass through: a name/path SEVERAL instances answer to, which is the whole point of the resolver.
+# The mirror of BODY_MISS, and the reason a caller need not string-match "ambiguous" (only one of
+# the three refusals carries that word).
+OCCURRENCE_MISS = "no occurrence matching"
+
+
 def _resolve_occurrence(name, raw, candidates=None):
     """Resolve `raw` to a single live Occurrence. Returns (occurrence, error).
 
@@ -2048,8 +2133,9 @@ def _resolve_occurrence(name, raw, candidates=None):
                       f"({cands}). Pass the exact fullPathName, or a 'handle' "
                       "(design_get(include=['tree']) emits both).")
     sample = ", ".join(p for p in paths[:12] if p)
-    return None, (f"'{name}': no occurrence matching '{want}'. Available (sample): {sample or '(none)'}. "
-                  "Use design_get(include=['tree']) for the full list (each row carries its handle).")
+    return None, (f"'{name}': {OCCURRENCE_MISS} '{want}'. Available (sample): {sample or '(none)'}. "
+                  "Use design_get(include=['tree']) for the full list (each row carries its handle)."
+                  + _handle_refusal_suffix())
 
 
 class OccurrenceRef(InputKind):
@@ -2340,7 +2426,8 @@ class TargetRef(InputKind):
         # unreachable suggestion).
         empty_hint = ", or '' (whole design)" if "design" in self.allow else ""
         return None, (f"'{self.name}': '{s}' did not resolve to a body handle, an occurrence/component/"
-                      f"body name{empty_hint}. See design_get(include=['tree']) / find_geometry.")
+                      f"body name{empty_hint}. See design_get(include=['tree']) / find_geometry."
+                      + _handle_refusal_suffix())
 
 
 class TargetRefList(InputKind):

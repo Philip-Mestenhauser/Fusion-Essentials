@@ -214,6 +214,67 @@ ROWS = [
 """,
     },
     {
+        "id": "joint-limit-out-of-range-ignored",
+        "claim": ("Assigning a rotationValue/slideValue STRICTLY beyond an enabled joint limit is "
+                  "IGNORED - the value stays where it was, Fusion never clamps; assigning exactly "
+                  "AT an enabled bound lands on it"),
+        "encoded_in": ("commands/mcpServer/tools/joint_drive.py _limit_refusal (refuse before "
+                       "assigning); test_joint_drive.py refusal tests"),
+        "body": """
+    root = des.rootComponent
+    tr = adsk.core.Matrix3D.create()
+    occs = []
+    for nm in ("LimA", "LimB", "LimC"):
+        occ = root.occurrences.addNewComponent(tr)
+        c = occ.component
+        c.name = nm
+        sk = c.sketches.add(c.xYConstructionPlane)
+        sk.sketchCurves.sketchCircles.addByCenterRadius(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), 0.5)
+        c.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(0.5),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        occs.append(occ)
+    geo = adsk.fusion.JointGeometry.createByPoint(
+        occs[1].component.originConstructionPoint.createForAssemblyContext(occs[1]))
+    ji = root.asBuiltJoints.createInput(occs[0], occs[1], geo)
+    ji.setAsRevoluteJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+    rj = root.asBuiltJoints.add(ji)
+    rl = rj.jointMotion.rotationLimits
+    rl.isMinimumValueEnabled = True
+    rl.minimumValue = -0.17453293
+    rl.isMaximumValueEnabled = True
+    rl.maximumValue = 0.17453293
+    rj.jointMotion.rotationValue = 0.08726646
+    parked = rj.jointMotion.rotationValue
+    rj.jointMotion.rotationValue = 0.78539816
+    beyond = rj.jointMotion.rotationValue
+    rj.jointMotion.rotationValue = 0.17453293
+    at_bound = rj.jointMotion.rotationValue
+    geo2 = adsk.fusion.JointGeometry.createByPoint(
+        occs[2].component.originConstructionPoint.createForAssemblyContext(occs[2]))
+    si = root.asBuiltJoints.createInput(occs[0], occs[2], geo2)
+    si.setAsSliderJointMotion(adsk.fusion.JointDirections.ZAxisJointDirection)
+    sj = root.asBuiltJoints.add(si)
+    sl = sj.jointMotion.slideLimits
+    sl.isMinimumValueEnabled = True
+    sl.minimumValue = -1.0
+    sl.isMaximumValueEnabled = True
+    sl.maximumValue = 1.0
+    sj.jointMotion.slideValue = 4.5
+    s_beyond = sj.jointMotion.slideValue
+    ok_rot = (abs(parked - 0.08726646) < 1e-5 and abs(beyond - parked) < 1e-6
+              and abs(at_bound - 0.17453293) < 1e-5)
+    ok_sld = abs(s_beyond) < 1e-6
+    print("FACT behavior.joint_limit_out_of_range_ignored "
+          + ("true" if (ok_rot and ok_sld) else "false"))
+    emit(ok_rot and ok_sld,
+         "joint-limit-out-of-range-ignored: parked=" + str(parked) + " beyond=" + str(beyond)
+         + " at_bound=" + str(at_bound) + " slide_beyond=" + str(s_beyond)
+         + " (expect 0.08727 / unchanged / 0.17453 / 0)")
+""",
+    },
+    {
         "id": "design-cast",
         "claim": "Design.cast passes the active design through; a non-design casts to None",
         "encoded_in": "tests/conftest.py install() cast_design + install_mock_adsk Design.cast",

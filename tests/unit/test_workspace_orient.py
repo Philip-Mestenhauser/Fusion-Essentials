@@ -642,6 +642,41 @@ class TestBbox:
         _install(active_product=des, doc=FakeDoc(design=des))
         assert _payload(wo.handler())["design"]["overall_bbox"] is None
 
+    def test_a_failed_conversion_reports_null_not_raw_centimetres(self):
+        # The payload labels these numbers with the design's display unit. Falling back to the
+        # UNCONVERTED cm value publishes 5 as "50 mm" - a wrong measurement wearing the right label.
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bbox=((0, 0, 0), (5, 5, 5)))
+        des = FakeDesign(root, timeline=[FakeTL(0)], units="mm")
+
+        def _boom(value, from_u, to_u):
+            raise RuntimeError("units manager unavailable")
+        des.unitsManager.convert = _boom
+        _install(active_product=des, doc=FakeDoc(design=des))
+        bb = _payload(wo.handler())["design"]["overall_bbox"]
+        assert bb["units"] == "mm"
+        assert bb["size"] == {"x": None, "y": None, "z": None}
+        assert bb["center"] == {"x": None, "y": None, "z": None}
+        assert bb["unreadable_values"] is True
+        assert "null" in bb["note"]
+
+    def test_an_unreadable_coordinate_reports_null_not_zero(self):
+        # An unreadable max.z defaulted to 0.0 published a Z size of "0 mm" - a design that is flat,
+        # which is an ANSWER, not a missing read. Only that axis goes null; x/y still report.
+        class _NoZ:
+            x = 5.0
+            y = 5.0
+            @property
+            def z(self):
+                raise RuntimeError("unreadable")
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1, bbox=((0, 0, 0), (5, 5, 5)))
+        root.boundingBox.maxPoint = _NoZ()
+        des = FakeDesign(root, timeline=[FakeTL(0)], units="mm")
+        _install(active_product=des, doc=FakeDoc(design=des))
+        bb = _payload(wo.handler())["design"]["overall_bbox"]
+        assert bb["size"] == {"x": 50.0, "y": 50.0, "z": None}
+        assert bb["center"]["z"] is None and bb["center"]["x"] == 25.0
+        assert bb["unreadable_values"] is True
+
 
 class TestViewState:
     def test_orthographic_camera(self):
@@ -659,6 +694,24 @@ class TestViewState:
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=FakeDoc(design=des), camera=_FakeCamera(camera_type=1))
         assert _payload(wo.handler())["view"]["projection"] == "perspective"
+
+    def test_an_unreadable_eye_component_reports_a_null_point_not_a_zero_axis(self):
+        # (10, 0.0, 0) with the 0.0 standing in for an unreadable Y is a DIFFERENT world position
+        # from the one the camera holds - null says the point is unknown, which is the truth.
+        class _BadPt:
+            x = 10.0
+            z = 4.0
+            @property
+            def y(self):
+                raise RuntimeError("unreadable")
+        root = FakeRoot(top_occs=[FakeOcc("A:1")])
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        camera = _FakeCamera(camera_type=0, eye=(10, 0, 0), target=(1, 2, 3))
+        camera.eye = _BadPt()
+        _install(active_product=des, doc=FakeDoc(design=des), camera=camera)
+        v = _payload(wo.handler())["view"]
+        assert v["eye"] is None
+        assert v["target"] == {"x": 1.0, "y": 2.0, "z": 3.0}     # the readable point still reports
 
 
 class TestSelectionEcho:
@@ -717,3 +770,23 @@ class TestRelationHealthInFirstCall:
         _install(active_product=des, doc=FakeDoc(design=des))
         h = _payload(wo.handler())["health"]
         assert h["is_healthy"] is True and h["broken_relations"] == []
+
+    def test_a_broken_relation_alone_contradicts_neither_the_verdict_nor_the_pointers(self):
+        # is_healthy counts broken_relations, so the verdict sentence and the pointers must too:
+        # otherwise the one fault in the design reads "No compute errors ..." beside is_healthy
+        # false, with nothing naming the tool that repairs it.
+        des = self._design_with_constraint(health=2)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert out["health"]["is_healthy"] is False
+        assert "No compute errors" not in out["note"]
+        assert "1 assembly relation(s) failed to compute" in out["note"]
+        assert "Constraint 1" in out["pointers"]["fix_relations"]
+        assert out["pointers"]["fix_relations"].startswith("assembly_get(")
+
+    def test_a_healthy_design_keeps_the_clean_verdict_and_no_relation_pointer(self):
+        des = self._design_with_constraint(health=0)
+        _install(active_product=des, doc=FakeDoc(design=des))
+        out = _payload(wo.handler())
+        assert "No compute errors" in out["note"]
+        assert "fix_relations" not in out["pointers"]

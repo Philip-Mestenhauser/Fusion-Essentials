@@ -275,6 +275,13 @@ def _drill_op(name="Drill1", **kw):
     return _Op(name, {"holeFaces": _Param(_HoleParamValue())}, **kw)
 
 
+def _drill_op_with_heights(name="Drill1", **kw):
+    # a real drill op carries the height group too - the fake needs it to show what a refusal left
+    return _Op(name, {"holeFaces": _Param(_HoleParamValue()),
+                      "topHeight_mode": _Param(None), "topHeight_offset": _Param(None),
+                      "bottomHeight_mode": _Param(None), "bottomHeight_offset": _Param(None)}, **kw)
+
+
 def _bore_op(name="Bore1", **kw):
     # bore/circular use 'circularFaces' (no 'holeFaces') — same object-list shape
     return _Op(name, {"circularFaces": _Param(_HoleParamValue())}, **kw)
@@ -788,6 +795,19 @@ class TestHoles:
                          min_diameter=5.5, max_diameter=6.5, generate=False)
         assert res["isError"] is True and "diameter filter" in res["message"].lower()
 
+    def test_filtered_to_zero_leaves_the_heights_UNTOUCHED(self, monkeypatch):
+        # The filter reads the passed faces only, so it decides before anything is written: a call
+        # refused here must leave the operation exactly as found. (Measured live: heights written
+        # first were RETAINED by this refusal - 0 mm -> 7 mm on a Drill op that returned isError.)
+        op = _drill_op_with_heights()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(0.5), _Face(0.5)])    # both Ø10, filter for Ø6 -> none
+        res = cg.handler(operation="Drill1", selection="holes", handles=["a", "b"],
+                         min_diameter=5.5, max_diameter=6.5, top_offset="7 mm", generate=False)
+        assert res["isError"] is True and "diameter filter" in res["message"].lower()
+        assert op.parameters.itemByName("topHeight_offset").expression is None
+        assert op.parameters.itemByName("topHeight_mode").expression is None
+
     def test_holes_on_nonhole_op_errors(self, monkeypatch):
         op = _curve_op()                # neither holeFaces nor circularFaces
         cam = _CAM([_Setup([op])])
@@ -854,6 +874,41 @@ class TestHeights:
         cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
                    bottom_mode="from contour", generate=False)
         assert order.index("height") < order.index("selection")
+
+    def test_a_failure_after_the_height_write_names_what_it_left_behind(self, monkeypatch):
+        # Heights are set while the op is settled and this call never undoes them, so a refusal that
+        # can only be decided AFTER that write has to say the heights REMAIN - an isError the caller
+        # reads as "nothing happened" is the false part.
+        op = _curve_op()
+        pv = op.parameters.itemByName("contours").value
+        pv.applyCurveSelections = lambda cs: setattr(pv, "_cs", _CurveSelections())   # -> 0 selections
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         top_offset="7 mm", generate=False)
+        assert res["isError"] is True and "0 selection" in res["message"]
+        assert "topHeight_offset=7 mm" in res["message"] and "REMAIN" in res["message"]
+
+    def test_a_clean_refusal_before_any_height_write_says_nothing_about_heights(self, monkeypatch):
+        # the disclosure is conditional: no height was requested, so no retained-mutation sentence
+        op = _curve_op()
+        pv = op.parameters.itemByName("contours").value
+        pv.applyCurveSelections = lambda cs: setattr(pv, "_cs", _CurveSelections())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"], generate=False)
+        assert res["isError"] is True and "REMAIN" not in res["message"]
+
+    def test_a_half_applied_height_group_names_the_half_that_landed(self, monkeypatch):
+        # top lands, bottom's param is absent -> the error names the top write it kept
+        op = _curve_op()
+        del op.parameters._d["bottomHeight_offset"]
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         top_offset="7 mm", bottom_offset="-10 mm", generate=False)
+        assert res["isError"] is True and "bottomHeight_offset" in res["message"]
+        assert "topHeight_offset=7 mm" in res["message"] and "REMAIN" in res["message"]
 
     def test_missing_height_param_errors(self, monkeypatch):
         op = _curve_op()

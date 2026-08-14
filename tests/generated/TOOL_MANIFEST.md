@@ -176,7 +176,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `joint_create` | Create a Joint between two inputs |
 | ✎ | `joint_create_as_built` | Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins needed and neither part moves (unlike joint_create) |
 | ✎ | `joint_create_origin` | Create a Joint Origin (a reusable coordinate frame anchor) |
-| ✎ | `joint_drive` | Drive a joint to a value - the API's Drive Joints command |
+| ✎ | `joint_drive` | Drive a joint to a value - the API's Drive Joints command - moving the mechanism along that joint's DOF |
 | ✎ | `joint_edit` | Edit an existing joint in place |
 | ✎ | `joint_motion_link` | Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives the other proportionally - a gear pair, belt/chain drive, or coupl... |
 

@@ -1,7 +1,10 @@
 """Unit tests for ``_export.py`` - the export-to-disk substrate shared by design_export/mesh_export:
-filename sanitizing, the component-by-name resolver, the file-landed verifier, the bounded
-doEvents-pumping wait, and the one-file-per-top-level-occurrence split orchestration.
+filename sanitizing, the component-by-name resolver, the file-landed verifier (and the pre-write
+snapshot that makes it THIS call's proof), the bounded doEvents-pumping wait, and the
+one-file-per-top-level-occurrence split orchestration.
 """
+
+import os
 
 import adsk
 import pytest
@@ -94,6 +97,96 @@ class TestVerifyWritten:
         assert size == 0
         assert "no file was written" in err.lower()
         assert "size_bytes=0" in err
+
+
+class TestSnapshot:
+    def test_an_absent_target_is_the_zero_baseline(self, tmp_path):
+        assert ex.snapshot(str(tmp_path / "nothing.step")) == (False, 0, 0)
+
+    def test_an_existing_target_carries_its_size_and_mtime(self, tmp_path):
+        p = tmp_path / "there.step"
+        p.write_text("data")
+        exists, size, mtime = ex.snapshot(str(p))
+        assert exists is True
+        assert size == 4
+        assert mtime == p.stat().st_mtime_ns
+
+    def test_a_stat_that_raises_after_isfile_reads_as_existing_but_unmeasured(self, monkeypatch, tmp_path):
+        # the race/permission gap between isfile and stat: the baseline must say the file EXISTS
+        # (so a later identical state is not mistaken for a fresh write) with zeroed metrics, not
+        # crash and not claim absence.
+        p = tmp_path / "flaky.step"
+        p.write_text("data")
+        # *args/**kwargs: ex.os IS the stdlib module, so this patch is process-wide for the
+        # test's duration - pytest's own machinery calls os.stat with keyword arguments.
+        monkeypatch.setattr(ex.os, "stat",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("locked")))
+        assert ex.snapshot(str(p)) == (True, 0, 0)
+
+
+class TestVerifyWrittenProvesThisCall:
+    """A file EXISTING is not proof this export wrote it - a stale file from an earlier export sits
+    at the same path and passes an existence-only check."""
+
+    def test_an_untouched_pre_existing_file_is_refused(self, tmp_path):
+        p = tmp_path / "stale.step"
+        p.write_text("an export from an earlier call")
+        before = ex.snapshot(str(p))
+        size, err = ex.verify_written(str(p), before)      # nothing wrote in between
+        assert size == 0
+        assert "already there before this call" in err
+        assert str(p) in err
+
+    def test_a_rewrite_that_changes_the_size_passes(self, tmp_path):
+        p = tmp_path / "again.step"
+        p.write_text("old")
+        before = ex.snapshot(str(p))
+        p.write_text("a substantially longer export")
+        size, err = ex.verify_written(str(p), before)
+        assert err is None
+        assert size == p.stat().st_size
+
+    def test_a_same_size_rewrite_passes_on_the_timestamp(self, tmp_path):
+        # identical byte count, later modification time - the export DID write, so it must not be
+        # refused as stale
+        p = tmp_path / "same.step"
+        p.write_text("1234")
+        before = ex.snapshot(str(p))
+        later = before[2] + 1_000_000_000
+        os.utime(str(p), ns=(later, later))
+        size, err = ex.verify_written(str(p), before)
+        assert err is None and size == 4
+
+    def test_a_first_time_write_needs_no_change(self, tmp_path):
+        p = tmp_path / "new.step"
+        before = ex.snapshot(str(p))
+        assert before == (False, 0, 0)
+        p.write_text("fresh")
+        size, err = ex.verify_written(str(p), before)
+        assert err is None and size == 5
+
+    def test_without_a_baseline_the_weaker_existence_check_still_applies(self, tmp_path):
+        # a caller with no pre-write state (a redundant re-stat) keeps the exists-and-non-empty gate
+        p = tmp_path / "stale2.step"
+        p.write_text("old")
+        assert ex.verify_written(str(p))[1] is None
+
+
+class TestFailureDetail:
+    def test_names_each_occurrence_and_its_reason(self):
+        line = ex.failure_detail([{"occurrence": "A:1", "error": "STL export returned false"},
+                                  {"occurrence": "B:1", "error": "disk full"}])
+        assert "A:1: STL export returned false" in line
+        assert "B:1: disk full" in line
+
+    def test_a_long_list_is_bounded_with_a_remainder_count(self):
+        errs = [{"occurrence": f"P{i}:1", "error": "nope"} for i in range(9)]
+        line = ex.failure_detail(errs, limit=3)
+        assert line.count("nope") == 3
+        assert "(+6 more)" in line
+
+    def test_an_unnamed_occurrence_is_still_reported(self):
+        assert "(unnamed occurrence)" in ex.failure_detail([{"occurrence": None, "error": "boom"}])
 
 
 # ── pump_until ────────────────────────────────────────────────────────────────

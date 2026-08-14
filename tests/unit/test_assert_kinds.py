@@ -178,6 +178,17 @@ class TestVersionAdvanced:
                                    [kernel.VersionAdvanced()])())
         assert out["saved"] is True
 
+    def test_an_unreadable_modified_flag_is_disclosed_not_silently_passed(self, monkeypatch):
+        # the gate could not run; the payload must SAY so rather than look like a confirmed save
+        class _Doc:
+            @property
+            def isModified(self):
+                raise RuntimeError("the document is gone")
+
+        monkeypatch.setattr(kernel, "app", types.SimpleNamespace(activeDocument=_Doc()))
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}), [kernel.VersionAdvanced()])())
+        assert out["version_confirmed"] is False
+
 
 class TestReferencesFresh:
     def _app(self, flags):
@@ -199,6 +210,18 @@ class TestReferencesFresh:
         monkeypatch.setattr(kernel, "app", self._app([False, False]))
         out = _payload(kernel.wrap(lambda **kw: _ok({"updated": True}), [kernel.ReferencesFresh()])())
         assert out["stale_references_after"] == 0
+
+    def test_an_unreadable_reference_walk_is_disclosed_not_silently_passed(self, monkeypatch):
+        class _Doc:
+            @property
+            def documentReferences(self):
+                raise RuntimeError("references unavailable")
+
+        monkeypatch.setattr(kernel, "app", types.SimpleNamespace(activeDocument=_Doc()))
+        monkeypatch.setattr(kernel, "_REFERENCE_SETTLE_S", 0.0)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"updated": True}), [kernel.ReferencesFresh()])())
+        assert out["references_confirmed"] is False
+        assert "stale_references_after" not in out
 
 
 class TestDeliverablesExist:
@@ -237,6 +260,23 @@ class TestDeliverablesExist:
                           [kernel.DeliverablesExist()])()
         assert res["isError"] is True
         assert "files[0]" in res["message"]
+
+    def test_an_empty_files_list_bites_as_no_deliverable(self):
+        # a split export whose every write failed reaches the gate with files: [] - an empty list
+        # names NO deliverable, so it must fail on the same footing as a missing key, never pass a
+        # walk over nothing.
+        res = kernel.wrap(lambda **kw: _ok({"exported": False, "files": []}),
+                          [kernel.DeliverablesExist()])()
+        assert res["isError"] is True
+        assert "names no deliverable" in res["message"]
+        assert "EMPTY" in res["message"]
+
+    def test_an_empty_list_still_defers_to_a_single_claimed_file(self, tmp_path):
+        p = tmp_path / "one.nc"
+        p.write_text("G0 X0")
+        out = _payload(kernel.wrap(lambda **kw: _ok({"files": [], "file_path": str(p)}),
+                                   [kernel.DeliverablesExist()])())
+        assert out["deliverables_verified"] == 1
 
 
 class _FakeTimelineItem:
@@ -288,6 +328,25 @@ class TestFeatureHealthy:
         assert "Fillet1" in res["message"]
         assert "radius too large" in res["message"]
 
+    def test_a_count_that_raises_at_VERIFY_is_disclosed_not_failed_closed(self, monkeypatch):
+        # capture counts the timeline, then the verify re-count raises (a mid-recompute read):
+        # the count-is-None disposition must disclose feature_health_confirmed: False - without
+        # it the numeric comparison against the baseline raises and fails a possibly-fine edit
+        # closed.
+        class _CountsOnceTimeline:
+            def __init__(self):
+                self.reads = 0
+            @property
+            def count(self):
+                self.reads += 1
+                if self.reads > 1:
+                    raise RuntimeError("timeline mid-recompute")
+                return 3
+        p = self._wire(monkeypatch, _CountsOnceTimeline())
+        out = _payload(kernel.wrap(lambda **kw: _ok({"edited": True}), [p])())
+        assert out["feature_health_confirmed"] is False
+        assert "features_verified" not in out
+
     def test_compute_warning_is_evidence_not_failure(self, monkeypatch):
         tl = _FakeTimeline()
         p = self._wire(monkeypatch, tl)
@@ -316,11 +375,60 @@ class TestFeatureHealthy:
         p = self._wire(monkeypatch, tl)
         out = _payload(kernel.wrap(lambda **kw: _ok({"done": True}), [p])())
         assert "features_verified" not in out   # nothing added -> nothing gated
+        assert "feature_health_confirmed" not in out   # ...and the gate DID run
 
-    def test_no_timeline_design_skips_silently(self, monkeypatch):
+    def test_no_timeline_design_is_disclosed_not_silent(self, monkeypatch):
+        # a DIRECT design has no timeline to walk, so the health gate cannot run - the payload says
+        # so instead of reading like a clean compute
         p = self._wire(monkeypatch, None)
         out = _payload(kernel.wrap(lambda **kw: _ok({"done": True}), [p])())
+        assert out["feature_health_confirmed"] is False
         assert "features_verified" not in out
+
+    def test_an_unreadable_timeline_count_is_disclosed(self, monkeypatch):
+        class _PoisonCount(_FakeTimeline):
+            @property
+            def count(self):
+                raise RuntimeError("timeline unavailable inside a base-feature scope")
+
+        p = self._wire(monkeypatch, _PoisonCount())
+        out = _payload(kernel.wrap(lambda **kw: _ok({"done": True}), [p])())
+        assert out["feature_health_confirmed"] is False
+
+
+class TestSketchCurvesChanged:
+    """The entity-set fingerprint gate: an edit that changed nothing bites, and a sketch that cannot
+    be read on one side of the call is DISCLOSED rather than passed as a confirmed change."""
+
+    def _wire(self, monkeypatch, fingerprints):
+        p = kernel.SketchCurvesChanged()
+        seq = iter(fingerprints)
+        monkeypatch.setattr(p, "_fingerprint", lambda kwargs: next(seq))
+        return p
+
+    def _handler(self, **payload):
+        def handler(sketch_name=""):
+            return _ok(payload or {"moved": True})
+        return handler
+
+    def test_an_unchanged_entity_set_bites(self, monkeypatch):
+        marks = {"marks": {("curve", "TOK1"): (4.0, None)}, "curves": 1}
+        p = self._wire(monkeypatch, [dict(marks), dict(marks)])
+        res = kernel.wrap(self._handler(), [p])(sketch_name="Sketch1")
+        assert res["isError"] is True
+        assert "unchanged" in res["message"]
+
+    def test_a_changed_entity_set_confirms_with_the_curve_count(self, monkeypatch):
+        p = self._wire(monkeypatch, [{"marks": {("curve", "TOK1"): (4.0, None)}, "curves": 1},
+                                     {"marks": {("curve", "TOK1"): (9.0, None)}, "curves": 1}])
+        out = _payload(kernel.wrap(self._handler(), [p])(sketch_name="Sketch1"))
+        assert out["curve_count_after"] == 1
+
+    def test_an_unreadable_sketch_is_disclosed_not_silently_passed(self, monkeypatch):
+        p = self._wire(monkeypatch, [None, None])
+        out = _payload(kernel.wrap(self._handler(), [p])(sketch_name="Sketch1"))
+        assert out["sketch_curves_confirmed"] is False
+        assert "curve_count_after" not in out
 
 
 # ── ChildGeometryMoved: a joint's reposition must reach the NESTED body geometry ────────────────
@@ -455,6 +563,32 @@ class TestChildGeometryMoved:
         res = kernel.wrap(handler, [p])()
         assert res["isError"] is True
         assert "did not propagate" in res["message"].lower()
+
+    def test_an_unreadable_occurrence_walk_is_disclosed_not_silently_passed(self, monkeypatch):
+        # no part was sampled before the mutation, so nothing was gated - the flag reports that the
+        # CHECK did not run rather than leaving the payload looking verified
+        p = kernel.ChildGeometryMoved()
+        monkeypatch.setattr(p, "_top_occurrences", lambda: None)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"created": True}), [p])())
+        assert out["child_geometry_move_verified"] is False
+
+    def test_a_part_that_cannot_be_re_read_is_named_not_skipped(self, monkeypatch):
+        # one part propagates cleanly, the other's geometry can no longer be sampled after the
+        # mutation: reporting a clean verified pass would claim coverage the walk never had
+        gbody = _body(_pt(0, 0, 0))
+        good = _occ("Good:1", _pt(0, 0, 0), bodies=[gbody])
+        gone = _occ("Gone:1", _pt(0, 0, 0), bodies=[_body(_pt(0, 0, 0))])
+        p = self._wire(monkeypatch, [good, gone])
+
+        def handler(**kw):
+            good.transform.translation = _pt(5, 0, 0)
+            gbody.boundingBox.minPoint = _pt(5, 0, 0)
+            gone.bRepBodies = _coll([])          # its geometry is no longer reachable
+            return _ok({"created": True})
+
+        out = _payload(kernel.wrap(handler, [p])())
+        assert out["child_geometry_move_verified"] is False
+        assert out["child_geometry_unverified"] == ["Gone:1"]
 
     def test_occurrence_without_bodies_is_skipped(self, monkeypatch):
         empty = _occ("Empty:1", _pt(0, 0, 0))   # no bodies anywhere - nothing to gate

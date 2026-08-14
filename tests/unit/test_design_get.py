@@ -40,8 +40,8 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(dg, "_slice_health", lambda d: (
         {"healthy": True, "error_count": 0, "warning_count": 0, "errors": [], "warnings": []}, None))
     monkeypatch.setattr(dg, "_fingerprint", lambda d: {"bodies": 2, "sketches": 3})
-    monkeypatch.setattr(dg, "_slice_tree", lambda d, max_depth, component: (
-        {"root": "Root", "max_depth": max_depth, "children": []}, None))
+    monkeypatch.setattr(dg, "_slice_tree", lambda d, max_depth, component, with_bodies=False: (
+        {"root": "Root", "max_depth": max_depth, "children": [], "with_bodies": with_bodies}, None))
     monkeypatch.setattr(dg, "_slice_timeline", lambda d, include_suppressed, group, with_params=False: (
         {"count": 4, "timeline": [], "with_params": with_params}, None))
     monkeypatch.setattr(dg, "_slice_configurations", lambda d: ({"table_name": "Configs"}, None))
@@ -129,6 +129,12 @@ class TestIncludeSlices:
         out = _payload(dg.handler(include=["timeline"], timeline_params=True))
         assert out["timeline"]["with_params"] is True
 
+    def test_tree_bodies_flag_reaches_the_tree_slice(self, stub_slices):
+        # same opt-in shape as timeline_params: off by default, passed through when asked for.
+        assert _payload(dg.handler(include=["tree"]))["tree"]["with_bodies"] is False
+        out = _payload(dg.handler(include=["tree"], tree_bodies=True))
+        assert out["tree"]["with_bodies"] is True
+
     def test_attribute_scope_reaches_the_attributes_slice(self, stub_slices):
         out = _payload(dg.handler(include=["attributes"], attribute_group="shop",
                                   attribute_key="op"))
@@ -198,12 +204,13 @@ class TestCatalogSlices:
 class TestFingerprint:
     """The content fingerprint (`_fingerprint`) - the 'what IS this model' counts in the default slice."""
 
-    def _design(self, bodies=0, sketches=0, comps=0, joints=0, asbuilt=0, params=0):
+    def _design(self, bodies=0, sketches=0, occs=0, defs=0, joints=0, asbuilt=0, params=0):
         from types import SimpleNamespace
         c = lambda n: SimpleNamespace(count=n)
         root = SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
-                               allOccurrences=c(comps), joints=c(joints), asBuiltJoints=c(asbuilt))
-        return SimpleNamespace(rootComponent=root, userParameters=c(params))
+                               allOccurrences=c(occs), joints=c(joints), asBuiltJoints=c(asbuilt))
+        return SimpleNamespace(rootComponent=root, userParameters=c(params),
+                               allComponents=c(defs))
 
     def test_counts_both_joint_collections(self):
         # joints and asBuiltJoints are separate collections; the count must include both.
@@ -222,8 +229,14 @@ class TestFingerprint:
         assert fp["parameters"] == 40
 
     def test_zero_counts_omitted(self):
-        fp = dg._fingerprint(self._design(bodies=1))
+        fp = dg._fingerprint(self._design(bodies=1, defs=1))     # root is the only definition
         assert fp == {"bodies": 1}                 # no joints/sketches/components/parameters when zero
+
+    def test_components_counts_definitions_not_instances(self):
+        # a component instanced 5 times is ONE definition: 'components' counts definitions, and
+        # 'occurrences' carries the instance count honestly beside it.
+        fp = dg._fingerprint(self._design(defs=3, occs=5))       # root + 2 definitions, 5 instances
+        assert fp["components"] == 2 and fp["occurrences"] == 5
 
     def test_bodies_and_sketches_are_design_wide_not_root_only(self):
         # bodies/sketches must be summed across every component (via the shared
@@ -465,6 +478,57 @@ class TestTimelineParams:
         out, _ = dg._slice_timeline(design, True, "", True)
         assert "params" not in out["timeline"][0]
 
+    def _fresh_proxy_param(self, name, role, expression, value, owner_name,
+                           type_name="FilletFeature", token=None, tl_index=None):
+        """A ModelParameter whose createdBy mints a NEW proxy object per read - the measured
+        live behavior (proxy identity is never stable) - around a shared owner identity."""
+        class _P:
+            def __init__(self):
+                self.name, self.role = name, role
+                self.expression, self.value = expression, value
+            @property
+            def createdBy(self):
+                ent = type(type_name, (), {})()
+                ent.name = owner_name
+                if token is not None:
+                    ent.entityToken = token
+                if tl_index is not None:
+                    ent.timelineObject = SimpleNamespace(index=tl_index)
+                return ent
+        return _P()
+
+    def test_two_TOKENLESS_owners_sharing_a_name_are_also_refused(self):
+        # neither owner carries a token and .createdBy mints a FRESH proxy per read (measured):
+        # owner identity comes from the timeline index, and two different indices must refuse
+        # the shared name rather than union two features' parameters.
+        design = self._design(
+            [self._row(self._entity("Fillet1"))],
+            [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1", tl_index=4),
+             self._fresh_proxy_param("d9", "radius", "5 mm", 0.5, "Fillet1", tl_index=9)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert "params" not in out["timeline"][0]
+
+    def test_one_tokenless_owner_with_two_params_still_answers(self):
+        # the same feature read twice mints two DISTINCT proxy objects - the shared timeline
+        # index is what keeps its two parameters on one row instead of tripping the guard.
+        design = self._design(
+            [self._row(self._entity("Fillet1"))],
+            [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1", tl_index=4),
+             self._fresh_proxy_param("d8", "depth", "2 mm", 0.2, "Fillet1", tl_index=4)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert [p["name"] for p in out["timeline"][0]["params"]] == ["d7", "d8"]
+
+    def test_tokenless_owners_with_no_timeline_index_refuse_a_multi_param_name(self):
+        # no token AND no timeline index leaves no readable owner identity: the per-parameter
+        # sentinel refuses the shared name - an absent answer is the safe direction, a union of
+        # possibly-two features' parameters is not.
+        design = self._design(
+            [self._row(self._entity("Fillet1"))],
+            [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1"),
+             self._fresh_proxy_param("d9", "radius", "5 mm", 0.5, "Fillet1")])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert "params" not in out["timeline"][0]
+
     def test_params_capped_with_a_flag(self, monkeypatch):
         monkeypatch.setattr(dg, "_PARAMS_PER_ROW", 1)
         hole = self._entity("Hole1", type_name="HoleFeature", token="tok-hole")
@@ -636,6 +700,12 @@ class TestRootBodies:
 # The router tests above stub _slice_tree; these pin the slice's OWN behavior: the depth clamp, the
 # node cap with its truncated flag, per-node counts, reference metadata, and the component scope.
 
+def _tbody(name, token=None, solid=True, visible=True):
+    """A body a tree node can publish a record for: name + entityToken handle + solid/visible flags."""
+    return SimpleNamespace(name=name, entityToken=token or f"btok-{name}",
+                           isSolid=solid, isVisible=visible)
+
+
 def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=None):
     """A tree-walkable occurrence: named collections (count + iterable) for bodies/children, plus the
     entityToken the row publishes as its handle."""
@@ -643,14 +713,14 @@ def _tocc(name, comp=None, kids=(), bodies=0, is_ref=False, docref=None, token=N
         name=name, fullPathName=name, entityToken=token or f"tok-{name}",
         component=SimpleNamespace(name=comp or name.split(":")[0]),
         isReferencedComponent=is_ref,
-        bRepBodies=_NamedCollection([SimpleNamespace(name=f"B{i+1}") for i in range(bodies)]),
+        bRepBodies=_NamedCollection([_tbody(f"B{i+1}") for i in range(bodies)]),
         childOccurrences=_NamedCollection(kids),
         documentReference=docref,
     )
 
 
 def _tree_design(occs=(), root_bodies=0, root_name="RootComp"):
-    bodies = [SimpleNamespace(name=f"RootBody{i+1}") for i in range(root_bodies)]
+    bodies = [_tbody(f"RootBody{i+1}") for i in range(root_bodies)]
     root = SimpleNamespace(name=root_name, occurrences=_NamedCollection(occs),
                            allOccurrences=list(occs), bRepBodies=_NamedCollection(bodies))
     return SimpleNamespace(rootComponent=root)
@@ -714,6 +784,64 @@ class TestSliceTree:
         assert out["root_bodies"] == ["RootBody1"]
         assert "model_create_component" in out["root_bodies_note"]
 
+    def test_default_walk_carries_no_body_records(self):
+        # body records are opt-in cost: without tree_bodies a node carries body_count only.
+        design = _tree_design([_tocc("Bracket:1", bodies=2)])
+        out, _ = dg._slice_tree(design, 3, "")
+        assert "bodies" not in out["children"][0]
+
+    def test_tree_bodies_adds_name_handle_and_honest_flags(self):
+        # the record that makes a body TARGETABLE without replaying old feature receipts:
+        # name + entityToken handle + solid/visible.
+        design = _tree_design([_tocc("Bracket:1", bodies=2)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        rows = out["children"][0]["bodies"]
+        assert rows[0] == {"name": "B1", "handle": "btok-B1", "is_solid": True, "visible": True}
+        assert [r["name"] for r in rows] == ["B1", "B2"]
+
+    def test_tree_bodies_reaches_nested_children(self):
+        design = _tree_design([_tocc("Bracket:1", kids=[_tocc("Pin:1", bodies=1)])])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        kid = out["children"][0]["children"][0]
+        assert kid["bodies"][0]["name"] == "B1"
+
+    def test_tree_bodies_reaches_a_component_scoped_walk(self, monkeypatch):
+        design = _tree_design([_tocc("Bracket:1", comp="Bracket", bodies=1)])
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_tree(design, 3, "Bracket", with_bodies=True)
+        assert err is None and out["tree"]["bodies"][0]["handle"] == "btok-B1"
+
+    def test_body_rows_capped_with_flag(self, monkeypatch):
+        monkeypatch.setattr(dg, "_TREE_BODY_CAP", 1)
+        design = _tree_design([_tocc("Bracket:1", bodies=3)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        node = out["children"][0]
+        assert len(node["bodies"]) == 1 and node["bodies_truncated"] is True
+
+    def test_body_rows_exactly_at_the_cap_are_not_flagged(self, monkeypatch):
+        # the boundary: exactly cap-many bodies is a COMPLETE list - a >= guard would flag a
+        # complete list as truncated, claiming bodies were dropped when none were.
+        monkeypatch.setattr(dg, "_TREE_BODY_CAP", 2)
+        design = _tree_design([_tocc("Bracket:1", bodies=2)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        node = out["children"][0]
+        assert len(node["bodies"]) == 2 and "bodies_truncated" not in node
+
+    def test_unreadable_body_flags_read_None_not_False(self):
+        # read_flag honesty: a body whose isSolid/isVisible cannot be read publishes None - a
+        # coerced False would claim "surface body, hidden" about a body nothing was read from.
+        bare = SimpleNamespace(name="Mystery", entityToken="btok-M")   # no isSolid / isVisible
+        rows, truncated = dg._body_rows(_NamedCollection([bare]))
+        assert truncated is False
+        assert rows[0]["is_solid"] is None and rows[0]["visible"] is None
+
+    def test_tree_bodies_upgrades_root_bodies_to_records(self):
+        design = _tree_design([_tocc("Gear:1")], root_bodies=1)
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        row = out["root_bodies"][0]
+        assert row["name"] == "RootBody1" and row["handle"]
+        assert "model_create_component" in out["root_bodies_note"]
+
     def test_component_scope_roots_the_tree_there(self):
         kid = _tocc("Pin:1")
         design = _tree_design([_tocc("Bracket:1", comp="Bracket", kids=[kid]),
@@ -723,6 +851,16 @@ class TestSliceTree:
         assert out["root"] == "Bracket" and out["tree"]["name"] == "Bracket:1"
         assert [k["name"] for k in out["tree"]["children"]] == ["Pin:1"]
         assert "children" not in out                       # scoped: one rooted tree, not the root list
+
+    def test_component_scoped_tree_reports_truncation_from_the_walk(self, monkeypatch):
+        # the truncated flag must be read AFTER the scoped walk runs - a dict literal that reads
+        # the counter before walking pins the pre-walk False and a capped tree reads complete.
+        monkeypatch.setattr(dg, "_TREE_MAX_NODES", 2)
+        kids = [_tocc(f"Pin:{i}") for i in range(1, 5)]
+        design = _tree_design([_tocc("Bracket:1", comp="Bracket", kids=kids)])
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_tree(design, 3, "Bracket")
+        assert err is None and out["truncated"] is True
 
     def test_component_scope_miss_errors_naming_it(self, monkeypatch):
         root = _wire_tree(monkeypatch, [_Occ("Gear:1", "Gear")])
@@ -880,7 +1018,8 @@ class TestSliceAttributes:
 
 class TestRouterErrorPropagation:
     def test_tree_slice_error_fails_the_read(self, monkeypatch, stub_slices):
-        monkeypatch.setattr(dg, "_slice_tree", lambda d, md, c: (None, dg.error("no tree here")))
+        monkeypatch.setattr(dg, "_slice_tree",
+                            lambda d, md, c, wb=False: (None, dg.error("no tree here")))
         res = dg.handler(include=["tree"])
         assert res["isError"] and "no tree here" in error_message(res)
 

@@ -113,17 +113,41 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         return ok({"action": "list", "count": len(items), "sections": items})
 
     if action == "clear":
+        # The pre-count is what "all removed" is judged against; an unreadable one leaves nothing to
+        # walk and nothing to claim, so it refuses rather than reporting an empty sweep as success.
+        before = _common.counted(lambda: sections.count)
+        if before is None:
+            return error("Could not read how many section analyses exist - nothing was removed. "
+                         "Retry, or delete them from the browser's Analysis folder.")
         removed = []
+        refused = []
         # delete from the end (deleting shifts indices) - the walk MUTATES the collection it reads,
         # so it stays positional: iter_collection is a forward generator over a shrinking collection.
-        for i in range(safe(lambda: sections.count, 0) - 1, -1, -1):
+        for i in range(before - 1, -1, -1):
             s = sections.item(i)
-            nm = safe(lambda s=s: s.name)
+            nm = safe(lambda s=s: s.name) or f"#{i}"
             if safe(lambda s=s: s.deleteMe(), False):
                 removed.append(nm)
+            else:
+                refused.append(nm)
         app.activeViewport.refresh()
-        return ok({"action": "clear", "removed_count": len(removed), "removed": removed,
-        "note": "All section analyses removed - the model is no longer cut."})
+        after = _common.counted(lambda: sections.count)
+        if refused:
+            return error(f"deleteMe() refused {len(refused)} of {before} section analysis(es) "
+                         f"({', '.join(refused[:5])}) - the model is STILL cut by those. "
+                         f"{len(removed)} were removed. Delete the rest from the browser's "
+                         "Analysis folder.")
+        if after:
+            return error(f"Removed {len(removed)} of {before} section analysis(es) but "
+                         f"sectionAnalyses still reads {after} - the model may still be cut.")
+        out = {"action": "clear", "removed_count": len(removed), "removed": removed,
+               "sections_before": before, "sections_after": after,
+               "note": "All section analyses removed - the model is no longer cut."}
+        if after is None:
+            out["note"] = (f"Removed {len(removed)} of {before} section analysis(es), but the "
+                           "remaining count could not be read back - view_section(list) confirms "
+                           "whether the model is still cut.")
+        return ok(out)
 
     # --- cut ---
     root = design.rootComponent

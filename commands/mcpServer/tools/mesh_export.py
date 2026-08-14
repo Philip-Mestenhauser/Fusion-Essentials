@@ -66,13 +66,17 @@ _SAVE_QUALITY = _inputs.Choice("quality", options=list(_QUALITIES), default="nor
 # ── mesh_export target resolution (broad: body handle/name, component/occurrence, whole design) ──
 
 def _resolve_export_target(design, target):
-    """Resolve 'target' -> (geometry, description, redirected_from_mesh) for export. Empty -> root
-    component (whole design).
+    """Resolve 'target' -> (geometry, description, redirected_from_mesh, error) for export. Empty ->
+    root component (whole design).
 
     Broad on purpose (export geometry may be a BRepBody, MeshBody, Occurrence, or Component): a
     handle resolves to a specific body (BRep or mesh) via the shared BodyRef machinery; a name resolves
-    a component, then an occurrence, then a body. Returns (None, None, None) if a given name matches
-    nothing.
+    a component, then an occurrence, then a body. The occurrence lookup goes through the shared
+    ambiguity-refusing resolver (_inputs._resolve_occurrence), as design_export's does: an occurrence
+    NAME is not unique (two sub-assemblies each hold a 'Bolt:1'), so a name several instances answer
+    to is REFUSED with its candidates rather than exporting whichever the walk reached first.
+    Returns (None, None, None, None) if a given name matches nothing, or (None, None, None, err) when
+    it was ambiguous.
 
     MESH-TARGET REDIRECT (live-confirmed): ExportManager.execute() on a bare MeshBody geometry
     returns True but writes NO FILE (a mesh-in -> file is a no-op - the API only tessellates a BRep to
@@ -83,7 +87,7 @@ def _resolve_export_target(design, target):
     root = safe(lambda: design.rootComponent)
     name = (target or "").strip() if isinstance(target, str) else ""
     if not name:
-        return root, "whole design (root component)", False
+        return root, "whole design (root component)", False, None
 
     # A handle (or a name) that resolves to a real body - BRep OR mesh - via the shared resolver.
     body, berr = _EXPORT_TARGET.resolve(name)
@@ -95,23 +99,25 @@ def _resolve_export_target(design, target):
             comp = safe(lambda: body.parentComponent) or root
             comp_name = safe(lambda: comp.name) or "its component"
             return comp, (f"component '{comp_name}' (redirected from mesh '{mesh_name}', which cannot "
-                          f"be export-written on its own)"), True
-        return body, f"body '{safe(lambda: body.name) or name}'", False
+                          f"be export-written on its own)"), True, None
+        return body, f"body '{safe(lambda: body.name) or name}'", False, None
 
     # Component by name (export the whole component).
     comp = safe(lambda: _export.component_by_name(design, name))
     if comp:
-        return comp, f"component '{name}'", False
+        return comp, f"component '{name}'", False, None
 
-    # Occurrence by name / full path.
-    occ = safe(lambda: root.occurrences.itemByName(name))
-    if occ:
-        return occ, f"occurrence '{name}'", False
-    for o in (safe(lambda: root.allOccurrences) or []):
-        if (safe(lambda o=o: o.fullPathName) or "") == name or (safe(lambda o=o: o.name) or "") == name:
-            return o, f"occurrence '{name}'", False
+    # Occurrence by handle / fullPathName / name - the shared resolver, which refuses a name several
+    # instances answer to (naming each candidate's handle) instead of exporting the first hit.
+    occ, occ_err = _inputs._resolve_occurrence("target", name)
+    if occ is not None:
+        return occ, f"occurrence '{safe(lambda: occ.name) or name}'", False, None
+    if occ_err and _inputs.OCCURRENCE_MISS not in occ_err:
+        # Not a miss but a REFUSAL (the name/path names several instances) - pass it through with its
+        # candidates rather than reporting the target as absent.
+        return None, None, None, occ_err
 
-    return None, None, None
+    return None, None, None, None
 
 
 def _apply_refinement(opts, refine_key):
@@ -128,11 +134,13 @@ def _apply_refinement(opts, refine_key):
 
 
 def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
-    """Create options, apply refinement, execute, and VERIFY a non-empty file landed (execute() can
-    return True while writing nothing). Returns (size_or_None, applied_refinement, error_str)."""
+    """Create options, apply refinement, execute, and VERIFY a non-empty file THIS call wrote landed
+    (execute() can return True while writing nothing, and a stale file from an earlier export can sit
+    at the same path). Returns (size_or_None, applied_refinement, error_str)."""
     factory = safe(lambda: getattr(em, factory_name))
     if factory is None:
         return None, None, f"this build's ExportManager has no {factory_name}"
+    before = _export.snapshot(path)      # the baseline that makes the landed check THIS call's proof
     try:
         opts = factory(geom, path)
     except Exception as e:
@@ -144,7 +152,7 @@ def _write_mesh_file(em, factory_name, fmt, geom, path, ref):
         return None, applied, f"{fmt.upper()} export failed: {e}"
     if not did:
         return None, applied, f"{fmt.upper()} export returned false"
-    size, verr = _export.verify_written(path)
+    size, verr = _export.verify_written(path, before)
     if verr:
         return None, applied, f"{fmt.upper()} {verr}"
     return size, applied, None
@@ -194,29 +202,44 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
             return size, eerr
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
+        if not files:
+            # ZERO deliverables is a FAILED export, not a success carrying exported:false - every
+            # write failed, so there is nothing on disk to report. The per-occurrence reasons travel
+            # in the error text, which is all a failed result can carry.
+            return error(f"{fmt.upper()} split export wrote NO files - all "
+                         f"{len(errors)} occurrence(s) failed: "
+                         + _export.failure_detail(errors))
+        note = (f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files - each "
+                "top-level occurrence is one printable file.")
         out = {
-            "exported": len(files) > 0,
+            "exported": True,
             "format": fmt,
             "split_by_component": True,
             "directory": out_dir,
             "file_count": len(files),
             "files": files,
-            "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} mesh files - each "
-            "top-level occurrence is one printable file.",
         }
         if errors:
+            # PARTIAL success: some occurrences produced no file. Disclosed as its own flag plus the
+            # per-occurrence reasons, so a caller reading file_count alone cannot miss the shortfall.
+            out["partial"] = True
             out["failed"] = errors
+            note = (f"PARTIAL: {len(files)} of {len(files) + len(errors)} top-level occurrence(s) "
+                    f"exported to separate {fmt.upper()} mesh files; {len(errors)} produced NO file "
+                    "- see 'failed'.")
+        out["note"] = note
         return ok(out)
 
     # ---- single-target export ----
     if not path.lower().endswith(ext):
         path = path + ext
 
-    geom, desc, redirected_from_mesh = _resolve_export_target(design, target)
+    geom, desc, redirected_from_mesh, terr = _resolve_export_target(design, target)
     if geom is None:
-        return error(f"Export target '{target}' not found. Pass a body HANDLE from find_geometry "
-    "(precise), a body/mesh/component/occurrence NAME, or omit 'target' to export the "
-    "whole design.")
+        return error(terr or
+                     (f"Export target '{target}' not found. Pass a body HANDLE from find_geometry "
+                      "(precise), a body/mesh/component/occurrence NAME, or omit 'target' to export "
+                      "the whole design."))
 
     # make sure the destination directory exists
     out_dir = os.path.dirname(path)
@@ -234,6 +257,10 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
         return error(f"This build's ExportManager has no {factory_name} - {fmt.upper()} export "
     "is unavailable here.")
 
+    # The pre-write state of the target, so the landed check below proves THIS export produced the
+    # file rather than finding an earlier one still sitting there.
+    before = _export.snapshot(path)
+
     # All three mesh factories take (geometry, filename). Mutation (execute) is NOT wrapped in safe.
     try:
         opts = factory(geom, path)
@@ -247,10 +274,11 @@ def export_handler(format: str = "3mf", file_path: str = "", target: str = "",
     if not did:
         return error(f"{fmt.upper()} export returned false - nothing was written.")
 
-    # VERIFY the file is actually on disk and non-empty - execute returning truthy is NOT proof a
-    # file was written (a MeshBody target makes execute return True while writing nothing).
-    # file_exists + size>0 is the SOURCE OF TRUTH for success; never report exported:true otherwise.
-    size, verr = _export.verify_written(path)
+    # VERIFY the file is actually on disk, non-empty, and CHANGED by this call - execute returning
+    # truthy is NOT proof a file was written (a MeshBody target makes execute return True while
+    # writing nothing), and neither is a stale file left at the path by an earlier export. That
+    # comparison is the SOURCE OF TRUTH for success; never report exported:true otherwise.
+    size, verr = _export.verify_written(path, before)
     if verr:
         if redirected_from_mesh:
             return error(

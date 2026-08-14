@@ -5,10 +5,11 @@ other non-dict body -> one clean -32600 error object, never a raise); and the to
 an unknown tool name is a JSON-RPC protocol error, but an unknown/missing argument, an out-of-enum
 argument value, or a handler exception comes back as a normal result with isError=true (per the MCP
 spec, a tool EXECUTION failure is not a protocol-level failure) so the calling agent can read it
-and self-correct.
+and self-correct. Also covers the HTTP handler's Origin guard (the DNS-rebinding defense).
 """
 
 import asyncio
+import types
 
 import pytest
 
@@ -534,3 +535,46 @@ class TestTaskManager:
 
     def test_post_refuses_a_non_callable(self, task_manager):
         assert task_manager.post("cmd", "not-callable", {}) is None
+
+
+# ── MCPHandler._origin_ok: the DNS-rebinding guard ──────────────────────────
+#
+# The server binds loopback, but any page in the victim's browser can POST to
+# http://127.0.0.1:27182. The Origin header is the only thing separating a local browser client
+# from a hostile page, so the check must compare the PARSED scheme+hostname: a substring test
+# admits http://localhost.evil.com, which resolves to the attacker's server.
+
+def _origin_allowed(mcp_server_module, origin):
+    """Run the real _origin_ok against a header map holding `origin` (None = header absent)."""
+    probe = types.SimpleNamespace(headers={} if origin is None else {'Origin': origin})
+    return mcp_server_module.MCPHandler._origin_ok(probe)
+
+
+class TestOriginGuard:
+    @pytest.mark.parametrize("origin", [
+        "http://localhost.evil.com",        # loopback label as a SUBDOMAIN of an attacker domain
+        "http://127.0.0.1.evil.com",
+        "http://localhost.evil.com:27182",  # our own port on someone else's host
+        "https://evil.com",
+        "http://evil.localhost.com",
+        "http://127.0.0.1@evil.com",        # loopback in the userinfo, not the host
+        "not-a-url",                        # unparseable -> refused, never allowed
+        "http://localhost:notaport",        # malformed port
+        "http://[::1",                      # malformed IPv6 literal
+        "null",                             # a sandboxed (attacker-controlled) iframe sends this
+        "file://localhost/etc/passwd",      # loopback host but not an http(s) scheme
+    ])
+    def test_hostile_origin_is_refused(self, mcp_server_module, origin):
+        assert _origin_allowed(mcp_server_module, origin) is False
+
+    @pytest.mark.parametrize("origin", [
+        None,                               # no header at all: local CLI clients and our probes
+        "http://localhost",
+        "http://localhost:3000",
+        "http://127.0.0.1:8080",
+        "https://localhost",
+        "http://[::1]:5000",                # urlsplit().hostname strips the brackets -> '::1'
+        "HTTP://LOCALHOST:27182",           # scheme and host are case-insensitive
+    ])
+    def test_loopback_origin_is_allowed(self, mcp_server_module, origin):
+        assert _origin_allowed(mcp_server_module, origin) is True

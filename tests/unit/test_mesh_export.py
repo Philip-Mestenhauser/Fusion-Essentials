@@ -401,6 +401,19 @@ class TestExportTarget:
         assert res["isError"] is True
         assert "no file" in res["message"].lower() or "wrote no file" in res["message"].lower()
 
+    def test_a_stale_file_at_the_path_is_not_this_exports_deliverable(self, tmp_path):
+        # execute() lies (True, writes nothing) while a file of the same name from an EARLIER export
+        # sits at the path: existence alone would pass it, so the gate compares against the state
+        # captured before the write.
+        _wire_adsk()
+        des = _install(FakeDesign(FakeComp("Root", bodies=[BRepBody("Body1")])))
+        target = tmp_path / "p.3mf"
+        target.write_text("a 3MF written by an earlier call")
+        des.exportManager.execute = lambda opts: True
+        res = mx.export_handler(format="3mf", file_path=str(target))
+        assert res["isError"] is True
+        assert "already there before this call" in res["message"]
+
     def test_brep_target_that_writes_a_file_still_succeeds(self, tmp_path):
         # the verification must NOT regress the happy path: a BRep/component target that DOES write a
         # file still reports exported:true.
@@ -458,6 +471,34 @@ class TestExportTarget:
                                          file_path=str(tmp_path / "p.obj")))
         assert des.exportManager.calls[-1].geom is occ
         assert "occurrence" in out["target"].lower()
+
+    def test_a_name_two_instances_share_is_refused_with_their_paths(self, tmp_path):
+        # Occurrence names are NOT unique - instancing a sub-assembly replicates its children's names
+        # verbatim, so two 'Bolt:1' live under different parents. Exporting the first hit would write
+        # a file of geometry the caller never named, so the name is refused with the paths that do
+        # resolve, and NOTHING is exported.
+        _wire_adsk()
+        a = FakeOcc("Bolt:1", full_path="SubA:1+Bolt:1")
+        b = FakeOcc("Bolt:1", full_path="SubB:1+Bolt:1")
+        comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[a, b])
+        des = _install(FakeDesign(comp))
+        res = mx.export_handler(format="obj", target="Bolt:1", file_path=str(tmp_path / "p.obj"))
+        assert res["isError"] is True
+        assert "2 occurrences" in res["message"]
+        assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
+        assert des.exportManager.executed is None          # no file was written for either
+
+    def test_the_full_path_still_picks_one_of_the_shared_names(self, tmp_path):
+        # The refusal's own remedy has to work: the fullPathName resolves the instance it names.
+        _wire_adsk()
+        a = FakeOcc("Bolt:1", full_path="SubA:1+Bolt:1")
+        b = FakeOcc("Bolt:1", full_path="SubB:1+Bolt:1")
+        comp = FakeComp("Root", bodies=[BRepBody("Body1")], occurrences=[a, b])
+        des = _install(FakeDesign(comp))
+        out = _payload(mx.export_handler(format="obj", target="SubB:1+Bolt:1",
+                                         file_path=str(tmp_path / "p.obj")))
+        assert des.exportManager.calls[-1].geom is b       # the named instance, not the first hit
+        assert out["exported"] is True
 
     def test_missing_named_target_errors(self, tmp_path):
         _wire_adsk()
@@ -569,17 +610,22 @@ class TestExportSplitByComponent:
         assert out["files"][0]["occurrence"] == "Good:1"
         assert "failed" in out
         assert out["failed"][0]["occurrence"] == "Bad:1"
+        # a shortfall is disclosed as its own flag AND in the note - file_count alone would read
+        # like a complete export of a one-part design
+        assert out["partial"] is True
+        assert "PARTIAL" in out["note"] and "1 of 2" in out["note"]
 
-    def test_split_all_fail_reports_not_exported(self, tmp_path):
-        # every occurrence fails -> exported False, no files, all in 'failed'
+    def test_split_that_lands_nothing_is_an_error_carrying_the_reasons(self, tmp_path):
+        # every occurrence fails -> ZERO deliverables, which is a FAILED export, not an ok payload
+        # carrying exported:false. The per-occurrence reasons ride in the error text.
         _wire_adsk()
         des = _install(FakeDesign(FakeComp("Root", occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])))
         des.exportManager.execute = lambda opts: (_ for _ in ()).throw(RuntimeError("nope"))
-        out = _payload(mx.export_handler(format="stl", file_path=str(tmp_path),
-                                         split_by_component=True))
-        assert out["exported"] is False
-        assert out["file_count"] == 0
-        assert len(out["failed"]) == 2
+        res = mx.export_handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        assert res["isError"] is True
+        assert "wrote NO files" in res["message"]
+        assert "A:1" in res["message"] and "B:1" in res["message"]
+        assert "nope" in res["message"]
 
 
 # â”€â”€ save_as_mesh: tessellate + add a mesh body + route through run_in_base_feature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

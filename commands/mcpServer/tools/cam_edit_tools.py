@@ -880,6 +880,7 @@ def _do_edit(target, tool_index, parameters):
         return error(f"Tool has no parameter(s): {', '.join(missing)}. (Read the tool's parameters first.)")
     changed = []
     warnings = []
+    eval_failures = []
     for name, expr in parameters.items():
         p = resolved[name]
         before = safe(lambda p=p: p.expression)
@@ -893,7 +894,35 @@ def _do_edit(target, tool_index, parameters):
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}': {e}. "
                          f"(Applied: {', '.join(c['name'] for c in changed) or 'none'}.)")
-        changed.append({"name": name, "before": before, "after": safe(lambda p=p: p.expression)})
+        # A tool parameter STORES an expression it cannot evaluate: .expression echoes the string
+        # back verbatim, so the re-read below proves nothing on its own - .error is what reveals it
+        # (measured: 'NoSuchParamXyz * 2' read back verbatim with .error 'Failed to evaluate
+        # expression.', and the library later held 0.0). The read is valid on the in-memory tool,
+        # BEFORE the persist below (measured live).
+        eval_err, eval_warn = expression_error(p)
+        rec = {"name": name, "before": before, "after": safe(lambda p=p: p.expression)}
+        if eval_warn:
+            rec["warning"] = eval_warn
+        changed.append(rec)
+        if eval_err:
+            eval_failures.append((name, str(expr), eval_err))
+    # An expression the platform stored but could not EVALUATE is a swallowed no-op it reports as
+    # success. Restore every parameter this call touched and return before the persist below, so the
+    # library keeps what it held; a restore that will not read back is named rather than assumed.
+    if eval_failures:
+        unrestored = []
+        for rec in changed:
+            p = resolved[rec["name"]]
+            safe(lambda p=p, rec=rec: setattr(p, "expression", rec["before"]))
+            if safe(lambda p=p: p.expression) != rec["before"]:
+                unrestored.append(rec["name"])
+        detail = "; ".join(f"'{n}' = '{e}' ({why})" for n, e, why in eval_failures)
+        left = (f" ROLLBACK INCOMPLETE - {', '.join(unrestored)} did NOT read back its prior "
+                "expression; re-read the tool.") if unrestored else ""
+        return error(f"Tool {tool_index}: expression did not evaluate - {detail}. Rolled back all "
+                     f"{len(changed)} parameter(s) and did not commit, so the library keeps what it "
+                     f"held.{left} (A tool expression must reference parameters this tool carries "
+                     "and resolve to a value - check names and units.)")
     # persist
     if target.is_document:
         target.update_tool(tool)

@@ -354,12 +354,12 @@ class TestFileLandedGate:
         real = de._export.verify_written
         state = {"calls": 0}
 
-        def late(path):
+        def late(path, before=None):
             state["calls"] += 1
             if state["calls"] == 3:
                 with open(path, "w") as f:
                     f.write("LATE")
-            return real(path)
+            return real(path, before)
 
         monkeypatch.setattr(de._export, "verify_written", late)
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "late.dwg")))
@@ -372,9 +372,9 @@ class TestFileLandedGate:
         real = de._export.verify_written
         state = {"calls": 0}
 
-        def counted(path):
+        def counted(path, before=None):
             state["calls"] += 1
-            return real(path)
+            return real(path, before)
 
         monkeypatch.setattr(de._export, "verify_written", counted)
         res = _run(format="dwg", file_path=str(tmp_path / "never.dwg"))
@@ -383,6 +383,18 @@ class TestFileLandedGate:
         assert "no file was written" in res["message"].lower()
         # The premise of the wait: the write had not finished when the call returned.
         assert "of the export call returning" in res["message"]
+
+    def test_a_stale_pre_existing_file_is_not_this_exports_landing(self, install, tmp_path):
+        # A non-empty file of the right name from an EARLIER export reports a stable size on the
+        # first two samples, so the settle gate alone would report it as this call's deliverable.
+        # The wait carries the pre-export snapshot, so an unchanged file never settles.
+        em, _ = install()
+        em.write_file = False              # execute() lies: returns true, writes nothing
+        path = tmp_path / "stale.pdf"
+        path.write_text("a PDF from an earlier export")
+        res = _run(format="pdf", file_path=str(path))
+        assert res["isError"] is True
+        assert "already there before this call" in res["message"]
 
     def test_a_pre_existing_zero_byte_file_is_not_a_landing(self, install, tmp_path):
         em, _ = install()
@@ -399,7 +411,7 @@ class TestFileLandedGate:
         em, _ = install()
         sizes = [10, 20]
         monkeypatch.setattr(de._export, "verify_written",
-                            lambda path: (sizes.pop(0) if sizes else 20, None))
+                            lambda path, before=None: (sizes.pop(0) if sizes else 20, None))
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "grow.dwg")))
         assert out["size_bytes"] == 20            # the settled size, not the first non-zero one
 
@@ -407,7 +419,7 @@ class TestFileLandedGate:
         em, _ = install()
         state = {"size": 0}
 
-        def growing(path):
+        def growing(path, before=None):
             state["size"] += 10       # never two equal samples in a row
             return state["size"], None
 

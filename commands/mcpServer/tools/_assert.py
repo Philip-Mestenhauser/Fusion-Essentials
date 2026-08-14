@@ -8,7 +8,14 @@ runs capture -> handler -> verify and converts an ok() whose declared effect did
 error - the platform can return success while changing nothing. Severities: "hard" (reason ->
 isError; and a capture/verify that RAISES fails CLOSED - the honest "mutation may have succeeded,
 verification could not run" error, never a possible no-op passed as ok) and "soft" (payload marked
-unconfirmed, for effects that legitimately lag the call). Evidence a verify reads is folded into
+unconfirmed, for effects that legitimately lag the call). A verification read that is merely
+UNAVAILABLE (a safe() read answering None) is the third case: where failing closed would refuse a
+legitimate degraded path - a direct-modelling design with no timeline, a document whose flag will not
+read - the kind publishes an explicit could-not-verify marker instead. Each kind names its own
+marker key (feature_health_confirmed / sketch_curves_confirmed / child_geometry_move_verified /
+version_confirmed / references_confirmed); the kernel's soft-severity path writes '<name>_confirmed'
+from the kind's name. Silence is never an option: an evidence key is absent only when the gate
+actually RAN. Evidence a verify reads is folded into
 the payload via setdefault, so a declared RETURNS key can be SUPPLIED by its postcondition rather
 than computed twice. A Postcondition NEVER mutates: capture/verify are safe() reads. See
 tools/CLAUDE.md for the authoring rule.
@@ -75,6 +82,9 @@ class VersionAdvanced(Postcondition):
             return "", {}                    # clean-doc no-op: nothing was supposed to change
         still = safe(lambda: app.activeDocument.isModified)
         if still is None:
+            # The read that would confirm the save is unavailable. DISCLOSED, not failed closed: the
+            # save may well have taken, and the marker is what the caller acts on (re-read with
+            # doc_get). Never a silent pass - a payload without this key means the gate DID run.
             return "", {"version_confirmed": False}
         if still:
             return ("save reported success but the document is STILL modified - Fusion created no "
@@ -131,6 +141,9 @@ class ReferencesFresh(Postcondition):
         _settled, stale = _export.pump_until(probe, _REFERENCE_SETTLE_S,
                                              _REFERENCE_SETTLE_POLL_SLEEP)
         if stale is None:
+            # The per-reference walk would not read, so freshness is unknown - DISCLOSED with the
+            # marker rather than failed closed (a refresh whose read-back is unavailable is not
+            # evidence the refresh failed) and never a silent pass.
             return "", {"references_confirmed": False}
         if stale:
             return (f"refresh ran but {stale} reference(s) are STILL out of date - the references did "
@@ -141,7 +154,10 @@ class ReferencesFresh(Postcondition):
 class FileLanded(Postcondition):
     """After an export: a non-empty file exists at the payload's path key. execute()/postProcess()
     returning true is NOT proof a file was written (observed live) - the file on disk is. Supplies
-    size_bytes/file_exists as evidence so handlers don't re-stat."""
+    size_bytes/file_exists as evidence so handlers don't re-stat.
+
+    It proves the file EXISTS; proving THIS call wrote it needs the pre-write state, which only the
+    handler holds (_export.snapshot before the write, fed to _export.verify_written)."""
 
     name = "file_landed"
 
@@ -169,7 +185,11 @@ class DeliverablesExist(Postcondition):
     exist non-empty on disk. The handler's inline verification stays (it constructs the payload);
     this catches a claim that drifted from reality (a handler bug, a path typo between stat and
     payload, a file gone between). An ok payload claiming NEITHER key is itself a failure - an export
-    that reports success with no deliverable claim is exactly a false success."""
+    that reports success with no deliverable claim is exactly a false success - and an EMPTY list
+    claims none, so it fails on the same footing rather than passing a walk over nothing.
+
+    It proves the claimed files EXIST; proving THIS call wrote them is the handler's job, since only
+    the handler holds the pre-write state (_export.verify_written's `before`)."""
 
     name = "deliverables_exist"
 
@@ -182,7 +202,9 @@ class DeliverablesExist(Postcondition):
         from . import _export
         paths = []
         entries = payload.get(self.list_key)
-        if isinstance(entries, list):
+        # An EMPTY list is not "a list of deliverables to walk" - it names none, which is the false
+        # success this kind exists to catch, so it falls through to the refusal below.
+        if isinstance(entries, list) and entries:
             for i, it in enumerate(entries):
                 p = it.get(self.path_key) if isinstance(it, dict) else None
                 if not p:
@@ -192,8 +214,9 @@ class DeliverablesExist(Postcondition):
         elif payload.get(self.single_key):
             paths.append(payload[self.single_key])
         else:
-            return (f"the result claims success but names no deliverable ('{self.list_key}' or "
-                    f"'{self.single_key}') to verify on disk."), {}
+            state = "an EMPTY list" if isinstance(entries, list) else "absent"
+            return (f"the result claims success but names no deliverable to verify on disk "
+                    f"('{self.list_key}' is {state}, no '{self.single_key}')."), {}
         for p in paths:
             _size, verr = _export.verify_written(p)
             if verr:
@@ -228,10 +251,15 @@ class FeatureHealthy(Postcondition):
 
     def verify(self, kwargs, payload, before):
         tl = self._timeline()
-        if tl is None or before is None:
-            return "", {}                    # no timeline to walk (e.g. direct modeling)
-        count = safe(lambda: tl.count)
-        if count is None or count <= before:
+        count = safe(lambda: tl.count) if tl is not None else None
+        if tl is None or before is None or count is None:
+            # No timeline to walk, or it would not count. DISCLOSED with a marker rather than failed
+            # closed: a DIRECT-modelling design legitimately has no timeline, so failing closed here
+            # would turn every direct-mode feature edit into an error. The marker says the health
+            # gate did not run - a payload carrying neither it nor features_verified means the call
+            # added nothing to gate.
+            return "", {"feature_health_confirmed": False}
+        if count <= before:
             return "", {}                    # nothing new on the timeline - nothing to gate
         warnings = []
         for i in range(before, count):
@@ -353,7 +381,11 @@ class SketchCurvesChanged(Postcondition):
     def verify(self, kwargs, payload, before):
         after = self._fingerprint(kwargs)
         if before is None or after is None:
-            return "", {}                    # no sketch to read - nothing to gate
+            # The sketch would not read on one side of the call, so changed cannot be told from
+            # unchanged. DISCLOSED with a marker rather than failed closed: a legitimate edit can
+            # leave the named sketch unresolvable on one side (a sketch deleted by the call, a
+            # design that closed under it), and a payload without this key means the gate DID run.
+            return "", {"sketch_curves_confirmed": False}
         if after["marks"] == before["marks"]:
             return ("the edit reported success but the sketch's entities are unchanged - nothing was "
                     "added, removed, shortened, lengthened or moved."), {}
@@ -419,11 +451,15 @@ class ChildGeometryMoved(Postcondition):
                 safe(lambda: mn.z, 0.0) or 0.0)
 
     def _top_occurrences(self):
+        """The root's top-level occurrences - or None when the walk itself could not be read, which is
+        NOT the same fact as a design that holds none (nothing to gate)."""
         from ._common import design
         d = design()
         root = safe(lambda: d.rootComponent) if d else None
         occs = safe(lambda: root.occurrences) if root is not None else None
-        n = (safe(lambda: occs.count, 0) or 0) if occs is not None else 0
+        if occs is None:
+            return None
+        n = safe(lambda: occs.count, 0) or 0
         return [safe(lambda i=i: occs.item(i)) for i in range(n)]
 
     @staticmethod
@@ -431,8 +467,11 @@ class ChildGeometryMoved(Postcondition):
         return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
     def capture(self, kwargs):
+        occs = self._top_occurrences()
+        if occs is None:
+            return None                       # the walk failed - verify has no baseline to compare
         entries = []
-        for occ in self._top_occurrences():
+        for occ in occs:
             if occ is None:
                 continue
             tr = self._translation(occ)
@@ -443,14 +482,23 @@ class ChildGeometryMoved(Postcondition):
         return entries
 
     def verify(self, kwargs, payload, before):
+        if before is None:
+            # The occurrence walk was unreadable, so nothing was sampled before the mutation.
+            # DISCLOSED with a marker rather than failed closed: an unreadable READ of the assembly
+            # is not evidence the joint failed, and the flag says the propagation gate did not run.
+            return "", {"child_geometry_move_verified": False}
         if not before:
             return "", {}                     # no occurrence carried a body to gate
         tol = self._MOVE_TOL_CM
+        unverified = []
         for occ, tr0, pt0 in before:
             tr1 = self._translation(occ)
             pt1 = self._deep_body_point(occ)
             if tr1 is None or pt1 is None:
-                continue                       # cannot re-read this one - inconclusive, skip
+                # This part cannot be re-read, so the gate did not cover it - named in the payload
+                # below rather than skipped in silence.
+                unverified.append(safe(lambda occ=occ: occ.name) or "an unnamed occurrence")
+                continue
             parent_moved = self._dist(tr0, tr1)
             child_moved = self._dist(pt0, pt1)
             if parent_moved > tol and child_moved <= tol:
@@ -466,6 +514,12 @@ class ChildGeometryMoved(Postcondition):
                         "included), joint the WRAPPER, and recompute. Jointing the nested occurrence "
                         "directly does not work - joint_create repositions the top-most free "
                         "ancestor, stranding deeper geometry."), {}
+        if unverified:
+            # The flag reports whether the CHECK ran, not whether a part moved: an occurrence that
+            # could not be re-read leaves this call's propagation only partly gated, so the flag goes
+            # False and the payload names exactly which parts were never checked.
+            return "", {"child_geometry_move_verified": False,
+                        "child_geometry_unverified": unverified}
         return "", {"child_geometry_move_verified": True}
 
 

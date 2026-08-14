@@ -43,27 +43,36 @@ def _native_body_owners(occurrences):
     return owners
 
 
+# How many candidate instance paths a pair row publishes per side; a row whose full list exceeds
+# this carries a *_candidates_truncated flag, and the label's "or N more" count is the true total.
+_CANDIDATE_CAP = 8
+
+
 def _owning_occurrence_name(body, owners):
     """The INSTANCE that owns this body, for an actionable report - the key OccurrenceRef and
-    assembly_move consume. Falls back to the COMPONENT name (shared by every instance) only when the
-    body maps to no occurrence, and says so when it maps to several."""
+    assembly_move consume. Returns (label, candidates): candidates is None when the instance is
+    exact, and the FULL path list when one native body serves several instances - the platform
+    cannot say WHICH instance collided (see _native_body_owners), so every suspect is named
+    instead of one being silently picked (the handler caps what a row publishes). Falls back to
+    the COMPONENT name (shared by every instance) only when the body maps to no occurrence."""
     tok = safe(lambda: body.entityToken)
     paths = owners.get(tok) if tok else None
     if paths:
         if len(paths) == 1:
-            return paths[0]
-        return f"{paths[0]} (or {len(paths) - 1} more instance(s) of the same component)"
+            return paths[0], None
+        return (f"{paths[0]} (or {len(paths) - 1} more instance(s) of the same component)",
+                list(paths))
     occ = safe(lambda: body.assemblyContext)
     if occ is not None:
         nm = safe(lambda: occ.fullPathName) or safe(lambda: occ.name)
         if nm:
-            return nm
+            return nm, None
     pc = safe(lambda: body.parentComponent)
     if pc is not None:
         nm = safe(lambda: pc.name)
         if nm:
-            return nm
-    return safe(lambda: body.name) or "(unknown)"
+            return nm, None
+    return safe(lambda: body.name) or "(unknown)", None
 
 
 def handler(include_coincident_faces: bool = False) -> dict:
@@ -112,29 +121,49 @@ def handler(include_coincident_faces: bool = False) -> dict:
     items = []
     # Aggregate overlap volume per occurrence pair (a pair can produce several interference bodies).
     pair_vol = {}
+    candidates_by_label = {}
     for r in _common.iter_collection(results):
-        one = _owning_occurrence_name(safe(lambda r=r: r.entityOne), owners)
-        two = _owning_occurrence_name(safe(lambda r=r: r.entityTwo), owners)
+        one, one_cands = _owning_occurrence_name(safe(lambda r=r: r.entityOne), owners)
+        two, two_cands = _owning_occurrence_name(safe(lambda r=r: r.entityTwo), owners)
+        if one_cands:
+            candidates_by_label[one] = one_cands
+        if two_cands:
+            candidates_by_label[two] = two_cands
         vol = safe(lambda r=r: r.interferenceBody.volume) if safe(lambda r=r: r.interferenceBody) else None
         key = tuple(sorted([one, two]))
         pair_vol.setdefault(key, 0.0)
         if vol:
             pair_vol[key] += float(vol)
     for (one, two), vol in sorted(pair_vol.items(), key=lambda kv: -kv[1]):
-        items.append({"occurrence_one": one, "occurrence_two": two,
-        "overlap_volume_cm3": round(vol, 4)})
+        row = {"occurrence_one": one, "occurrence_two": two,
+               "overlap_volume_cm3": round(vol, 4)}
+        for side, label in (("occurrence_one", one), ("occurrence_two", two)):
+            cands = candidates_by_label.get(label)
+            if cands:
+                row[f"{side}_candidates"] = cands[:_CANDIDATE_CAP]
+                if len(cands) > _CANDIDATE_CAP:
+                    row[f"{side}_candidates_truncated"] = True
+        items.append(row)
 
     clear = len(items) == 0
+    note = ("No interference - every part fits." if clear else
+            f"{len(items)} interfering pair(s) - parts overlap in space. Each lists the two "
+            "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
+            "self-pair means two bodies of the same occurrence overlap.)")
+    if candidates_by_label:
+        note += (" A side with '*_candidates' shares ONE native body across those instances - "
+                 "analyzeInterference returns native bodies, so the exact instance cannot be read "
+                 "off the result; the candidate paths are listed (capped: a *_candidates_truncated "
+                 "flag marks an incomplete list, and the side's label carries the true instance "
+                 "count). Discriminate by position (assembly_get occurrence origins) or move one "
+                 "instance and re-check.")
     return ok({
         "relation": "interference_free",
         "passed": clear,
         "measured": {"interference_count": len(items), "occurrences_checked": n_occ,
                      "root_bodies_checked": n_root_bodies, "interferences": items},
         "tolerance_used": {"coincident_faces_included": bool(include_coincident_faces)},
-    "note": ("No interference - every part fits." if clear else
-                 f"{len(items)} interfering pair(s) - parts overlap in space. Each lists the two "
-                 "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
-                 "self-pair means two bodies of the same occurrence overlap.)"),
+        "note": note,
     })
 
 
@@ -143,7 +172,9 @@ TOOL_DESCRIPTION = (
     "interfering pair by occurrence name with its overlap volume (cm^3), in measured.interferences. "
     "Complements assembly_get, which checks joint wiring rather than physical overlap. Coincident/flush "
     "faces are excluded by default (set include_coincident_faces=true to include intended mates). "
-    "passed=true when nothing interferes.\n"
+    "passed=true when nothing interferes. A side belonging to a multi-instance component lists the "
+    "candidate instance paths, capped with a truncated flag (the platform returns native bodies, so "
+    "the exact instance is not readable off the result).\n"
     + _outputs.produces_block(RETURNS)
 )
 

@@ -79,6 +79,7 @@ def handler(views=None, width: int = 600, height: int = 500, transparent_backgro
 
     content = []
     saved_camera = vp.camera   # restore once at the end
+    camera_warning = None
     captured = []
     try:
         for name in names:
@@ -101,13 +102,20 @@ def handler(views=None, width: int = 600, height: int = 500, transparent_backgro
     finally:
         try:
             vp.camera = saved_camera
-        except Exception:
-            pass
+        except Exception as e:
+            # This tool is write="read": a camera it cannot put back leaves the viewport moved by
+            # a read, so the failure is reported rather than swallowed.
+            camera_warning = (f"The camera could NOT be put back where it was before these shots: "
+                              f"{e}. The viewport is left at the last captured view - "
+                              "view_set(orient) re-aims it.")
 
     if not captured:
-        return error("No views were captured.")
+        return error("No views were captured."
+                     + (" " + camera_warning if camera_warning else ""))
     summary = (f"Captured {len(captured)} view(s): {', '.join(captured)}. "
                "Each image is labelled with its view above it.")
+    if camera_warning:
+        summary += " " + camera_warning
     if dropped:
         summary += (f" Dropped {len(dropped)} view(s) over the {_MAX_VIEWS}-view cap: "
                     f"{', '.join(dropped)} - request them in a second call.")

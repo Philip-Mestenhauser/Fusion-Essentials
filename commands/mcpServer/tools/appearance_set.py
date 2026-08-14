@@ -193,6 +193,15 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
     desc = (f"{kind} '{safe(lambda: entity.fullPathName) or safe(lambda: entity.name)}'"
             if safe(lambda: entity.name) else kind)
 
+    # EVERY precondition the target has to clear runs BEFORE the appearance is minted: creating it
+    # first leaves an ORPHAN appearance asset in the design each time a refusal below fires (measured:
+    # an empty component's refusal took the design's appearance count 0 -> 1).
+    bodies = None
+    if kind == "component":
+        bodies = safe(lambda: entity.bRepBodies)
+        if (safe(lambda: bodies.count, 0) or 0) == 0:
+            return error(f"{desc} has no bodies to color.")
+
     appr_name = (name or "").strip() or f"AgentColor_{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
     appr, appr_reused, aerr = _make_colored_appearance(design, rgb, opacity, appr_name)
     if aerr:
@@ -206,12 +215,9 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
     # actually applied, so a later re-read of the object cannot drift the comparison.
     appr_id, appr_landed_name = safe(lambda: appr.id), safe(lambda: appr.name)
     if kind == "component":
-        # a Component has no single .appearance; apply to each of its bodies. A failure on one body
-        # must not hide that other bodies already got colored - collect per-body, don't abort the loop.
-        bodies = safe(lambda: entity.bRepBodies)
-        bn = safe(lambda: bodies.count, 0) or 0
-        if bn == 0:
-            return error(f"{desc} has no bodies to color.")
+        # a Component has no single .appearance; apply to each of its bodies (the collection was
+        # resolved and counted above, before anything was created). A failure on one body must not
+        # hide that other bodies already got colored - collect per-body, don't abort the loop.
         for b in _common.iter_collection(bodies):
             name = safe(lambda b=b: b.name)
             try:
@@ -256,6 +262,13 @@ def handler(target: str = "", color: str = "", opacity: int = 255, name: str = "
 
     note = ("Appearance override applied. Set a new color anytime; to revert, the override is on "
             "the body/occurrence (.appearance). Pair with view_screenshot to see it.")
+    if kind in ("body", "component"):
+        # LIVE-CONFIRMED: a body-level write reaches the NATIVE body even through an
+        # instance-exact proxy handle, so the color shows on EVERY instance of that component. It
+        # is not a per-instance act, and the payload has to say so before the caller assumes it was.
+        note = ("This write landed on the BODY, which is the component's NATIVE body - the color "
+                "shows on EVERY instance of that component, not just one. To color one instance, "
+                "target the OCCURRENCE (its fullPathName). " + note)
     if failed:
         note = (f"Appearance applied to {len(applied_to)} of {len(applied_to) + len(failed)} bodies; "
                 f"{len(failed)} failed - see 'failed'. " + note)

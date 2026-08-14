@@ -115,18 +115,23 @@ def _resolve_target(design, target):
         return comp, f"component '{name}'", None
 
     # Occurrence by name / fullPathName - the shared resolver refuses an ambiguous name (several
-    # instances) with its candidate list instead of grabbing the first.
+    # instances) with its candidate list instead of grabbing the first. Only a PLAIN miss falls
+    # through to the body vocabulary: string-matching "ambiguous" here would drop the shared-path
+    # and shared-exact-name refusals, losing their candidate lists (only one of the three refusal
+    # texts carries that word - the OCCURRENCE_MISS stem is the discriminator).
     occ, occ_err = _inputs._resolve_occurrence("target", name)
     if occ is not None:
         return occ, f"occurrence '{safe(lambda: occ.name) or name}'", None
-    if occ_err and "ambiguous" in occ_err.lower():
+    if occ_err and _inputs.OCCURRENCE_MISS not in occ_err:
         return None, None, occ_err
 
-    # Body by name (root + any occurrence) - likewise ambiguity-refusing.
+    # Body by name (root + any occurrence) - likewise ambiguity-refusing, with the same
+    # stem-not-substring discrimination (BODY_MISS marks the one plain-miss text; every other
+    # refusal - ambiguity, an empty scope, a multi-body component - passes through intact).
     body, body_err = _inputs._resolve_any_body("target", name)
     if body is not None:
         return body, f"body '{safe(lambda: body.name) or name}'", None
-    if body_err and "ambiguous" in body_err.lower():
+    if body_err and _inputs.BODY_MISS not in body_err:
         return None, None, body_err
 
     return None, None, None
@@ -205,6 +210,7 @@ def _write_dxf(design, sk, path, want_construction, want_points, want_projected)
     if factory is None:
         return None, ("This build's ExportManager has no createDXFSketchExportOptions - DXF export "
                       "is unavailable here.")
+    before = _export.snapshot(path)   # so the landed check proves THIS write, not an earlier file
     try:
         opts = factory(path, sk)
     except Exception as e:
@@ -221,7 +227,7 @@ def _write_dxf(design, sk, path, want_construction, want_points, want_projected)
         return None, f"DXF export failed: {e}"
     if not did:
         return None, "DXF export returned false - nothing was written."
-    size, verr = _export.verify_written(path)
+    size, verr = _export.verify_written(path, before)
     if verr:
         return None, f"DXF export reported success but {verr}."
     return size, None
@@ -413,12 +419,13 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         applied_seen, refused_union = [], []
 
         def _write_one(occ, fpath):
+            before = _export.snapshot(fpath)     # the baseline this file's landed check is proven on
             okk, eerr, knobs = _export_one(em, factory_name, geom_first, occ, fpath, configure)
             if not okk:
                 return None, eerr
-            # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT
-            # proof a file was written.
-            size, verr = _export.verify_written(fpath)
+            # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute()
+            # returning truthy is NOT proof, and neither is a stale file at the same path.
+            size, verr = _export.verify_written(fpath, before)
             if verr:
                 return None, f"{fmt.upper()} export reported success but {verr}"
             file_applied, file_refused = knobs
@@ -430,8 +437,14 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             return size, None
 
         files, errors = _export.split_by_occurrence(occs, out_dir, ext, _write_one)
+        if not files:
+            # ZERO deliverables is a FAILED export, not a success carrying exported:false - nothing
+            # landed on disk, so the per-occurrence reasons travel in the error text instead.
+            return error(f"{fmt.upper()} split export wrote NO files - all "
+                         f"{len(errors)} occurrence(s) failed: "
+                         + _export.failure_detail(errors))
         out = {
-            "exported": len(files) > 0,
+            "exported": True,
             "format": fmt,
             "split_by_component": True,
             "directory": out_dir,
@@ -440,6 +453,14 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} files. Each "
             "top-level occurrence is one file - ready to print/assemble individually.",
         }
+        if errors:
+            # PARTIAL success: the shortfall is its own flag plus the per-occurrence reasons, so a
+            # caller reading file_count alone cannot miss the occurrences that produced no file.
+            out["partial"] = True
+            out["failed"] = errors
+            out["note"] = (f"PARTIAL: {len(files)} of {len(files) + len(errors)} top-level "
+                           f"occurrence(s) exported to separate {fmt.upper()} files; "
+                           f"{len(errors)} produced NO file - see 'failed'.")
         if applied_seen and applied_seen[0]:
             out["options_applied"] = applied_seen[0]
             if len(applied_seen) > 1:
@@ -452,8 +473,6 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             out["options_refused"] = refused_union
             out["note"] += (" The files landed, but Fusion did not take these options on at least "
                             "one of them: " + ", ".join(refused_union) + ".")
-        if errors:
-            out["failed"] = errors
         return ok(out)
 
     # ---- single-target export ----
@@ -474,13 +493,15 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         except Exception as e:
             return error(f"Could not create output directory '{out_dir}': {e}")
 
+    before = _export.snapshot(path)   # the pre-write state the landed check is proven against
     okk, eerr, applied_opts = _export_one(em, factory_name, geom_first, geom, path, configure)
     if not okk:
         return error(f"{fmt.upper()} export failed: {eerr}")
 
-    # VERIFY the file is actually on disk and non-empty - execute() returning truthy is NOT proof a
-    # file was written. file_exists + size>0 is the SOURCE OF TRUTH for success.
-    size, verr = _export.verify_written(path)
+    # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute() returning
+    # truthy is NOT proof a file was written, and a stale file from an earlier export at the same
+    # path is not this export's deliverable. That comparison is the SOURCE OF TRUTH for success.
+    size, verr = _export.verify_written(path, before)
     if verr:
         return error(
             f"{fmt.upper()} export reported success but {verr}. execute() returned true but produced "

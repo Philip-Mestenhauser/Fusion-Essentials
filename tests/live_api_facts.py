@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2705.0.87"
-VERIFIED_ON = "2026-08-13"
+FUSION_VERSION = "2705.0.108"
+VERIFIED_ON = "2026-08-14"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -482,6 +482,7 @@ BEHAVIOR = {
     "find_entity_token_empty_on_miss": True,
     "internal_length_unit_is_cm": True,
     "item_by_name_none_on_miss": True,
+    "joint_limit_out_of_range_ignored": True,
     "machining_time_args_inert": True,
     "mesh_repair_density_default": 128.0,
     "mesh_repair_feature_has_parameters": False,

@@ -220,6 +220,117 @@ class TestSelfHealingHandle:
         assert "find_geometry" in err
 
 
+# ── ONE token, SEVERAL entities: the pick is the locator's, or the handle is refused ─────────────
+#
+# findEntityByToken answers with a VECTOR. Measured live: splitting a face made the pre-split token
+# resolve to BOTH survivors (equal halves at different centroids), and one native token resolves to a
+# proxy per occurrence. Those candidates sit in different places, so returning the first silently
+# acts on geometry the caller never picked.
+
+class _SplitFace(FakePlanarFace):
+    """A planar face at a known centroid - a survivor of a split, or one instance's proxy. `context`
+    is the assembly path an ambiguity refusal names each candidate by."""
+
+    def __init__(self, centroid, context=None):
+        super().__init__()
+        self.centroid = _Pt(*centroid)
+        if context is not None:
+            self.assemblyContext = types.SimpleNamespace(fullPathName=context)
+
+
+@pytest.fixture
+def token_env(monkeypatch):
+    """A design whose findEntityByToken answers a token from a map - a LIST value models the several
+    entities one token can resolve to."""
+    def build(tokens):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "BRepFace", _SplitFace, raising=False)
+        design = make_design(tokens=tokens)
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        monkeypatch.setattr(inp._common, "target_component", lambda _d=None: design.rootComponent)
+        return design
+    return build
+
+
+class TestTokenResolvingToSeveralEntities:
+    def test_the_locator_picks_the_member_it_names_not_the_first(self, token_env):
+        left, right = _SplitFace((2.5, 0.0, 0.0)), _SplitFace((7.5, 0.0, 0.0))
+        token_env({"TOK": [left, right]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:7.5,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert err is None
+        assert val is right and val is not left      # the locator's member, never found[0]
+
+    def test_a_locator_matching_none_of_them_is_refused_naming_the_count(self, token_env):
+        # The live case: the composite handle holds the PRE-split centroid, which matches neither
+        # survivor - so the handle is stale/ambiguous and must be refused, not silently first-matched.
+        left, right = _SplitFace((2.5, 0.0, 0.0)), _SplitFace((7.5, 0.0, 0.0))
+        token_env({"TOK": [left, right]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:5.0,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert val is None
+        assert "2 entities" in err                   # names HOW MANY it resolved to
+        assert "find_geometry" in err                # and points at the way out
+
+    def test_a_bare_token_resolving_to_several_is_refused_saying_it_has_no_locator(self, token_env):
+        token_env({"TOK": [_SplitFace((2.5, 0.0, 0.0)), _SplitFace((7.5, 0.0, 0.0))]})
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("TOK")
+        assert val is None
+        assert "2 entities" in err and "no position locator" in err
+
+    def test_the_refusal_names_each_candidate_by_its_assembly_path(self, token_env):
+        # What tells the candidates of one token apart is WHERE each is placed, so the refusal
+        # prints each assembly context rather than a bare count.
+        token_env({"TOK": [_SplitFace((0.0, 0.0, 0.0), context="Arm:1"),
+                           _SplitFace((9.0, 0.0, 0.0), context="Arm:2")]})
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("TOK")
+        assert val is None and "Arm:1" in err and "Arm:2" in err
+
+    def test_a_candidate_exactly_at_the_locator_tolerance_is_still_the_match(self, token_env):
+        # EXACT boundary of the 1-micron gate: at the tolerance the candidate IS that geometry.
+        far, edge = _SplitFace((9.0, 0.0, 0.0)), _SplitFace((inp._LOCATOR_TOL_CM, 0.0, 0.0))
+        token_env({"TOK": [far, edge]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:0.0,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert err is None and val is edge
+
+    def test_a_candidate_just_past_the_tolerance_is_refused(self, token_env):
+        far = _SplitFace((9.0, 0.0, 0.0))
+        beyond = _SplitFace((inp._LOCATOR_TOL_CM * 1.01, 0.0, 0.0))
+        token_env({"TOK": [far, beyond]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:0.0,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert val is None and "2 entities" in err
+
+    def test_two_CO_LOCATED_candidates_are_refused_never_first_matched(self, token_env):
+        # measured live: a CONCENTRIC face split puts BOTH survivors at the identical centroid,
+        # and the hit order is not stable across runs - so a distance tie inside the tolerance
+        # must refuse naming the count; "nearest" between equals is a coin flip on someone's
+        # geometry.
+        a, b = _SplitFace((5.0, 0.0, 0.0)), _SplitFace((5.0, 0.0, 0.0))
+        token_env({"TOK": [a, b]})
+        handle = f"TOK{inp._HANDLE_SEP}planar_face:5.0,0.0,0.0"
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve(handle)
+        assert val is None
+        assert "2 entities" in err and "co-located" in err
+
+    def test_one_entity_still_resolves_with_no_locator_involved(self, token_env):
+        # The ordinary case must be untouched: a token naming exactly one entity resolves as before.
+        only = _SplitFace((3.0, 0.0, 0.0))
+        token_env({"TOK": [only]})
+        val, err = inp.GeometryHandle("on_face", require="planar_face").resolve("TOK")
+        assert err is None and val is only
+
+    def test_a_name_fallback_kind_reports_the_handle_refusal_instead_of_a_miss(self, token_env):
+        # TargetRef falls through to name lookups when the handle does not resolve; its miss would
+        # otherwise tell the caller the string named nothing, sending it back to names when the real
+        # answer is that the HANDLE names several entities.
+        token_env({"TOK": [_SplitFace((0.0, 0.0, 0.0)), _SplitFace((9.0, 0.0, 0.0))]})
+        val, err = inp.TargetRef("target").resolve("TOK")
+        assert val is None
+        assert "2 entities" in err and "find_geometry" in err
+
+
 # ── GeometryHandleList: the 'these specific edges/bodies' shape ─────────────
 
 class TestGeometryHandleList:

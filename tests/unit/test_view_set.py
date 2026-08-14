@@ -304,6 +304,80 @@ class TestVisibility:
         assert res["isError"] is True and "Provide 'target'" in res["message"]
 
 
+class _StubbornOcc(FakeOcc):
+    """An occurrence that ACCEPTS a bulb/isolation write and keeps its old value - the platform
+    swallowing a visibility change, which no read-back would catch."""
+
+    def __init__(self, name, full_path=None, swallow=("isLightBulbOn", "isIsolated"), **kw):
+        super().__init__(name, full_path=full_path, **kw)
+        object.__setattr__(self, "_swallow", tuple(swallow))
+
+    def __setattr__(self, key, value):
+        if key in getattr(self, "_swallow", ()):
+            return
+        object.__setattr__(self, key, value)
+
+
+class TestVisibilityReadBack:
+    """Every occurrence write is read BACK: a swallowed hide/isolate/show is an error, and a
+    mid-list failure names the targets it already changed."""
+
+    def test_a_hide_the_platform_swallows_is_an_error(self, monkeypatch):
+        occ = _StubbornOcc("Bracket", bulb=True)
+        _install(monkeypatch, [occ])
+        res = iv.handler(action="hide", target="Bracket")
+        assert res["isError"] is True
+        assert "isLightBulbOn reads back True" in res["message"]
+        assert "did not take" in res["message"]
+
+    def test_an_isolate_the_platform_swallows_is_an_error(self, monkeypatch):
+        occ = _StubbornOcc("Bracket", isolated=False)
+        _install(monkeypatch, [occ])
+        res = iv.handler(action="isolate", target="Bracket")
+        assert res["isError"] is True
+        assert "isIsolated reads back False" in res["message"]
+
+    def test_a_show_whose_ancestor_bulb_will_not_light_is_an_error(self, monkeypatch):
+        # The leaf lights but the parent stays dark, so the target is STILL invisible - reporting
+        # 'Visibility changed' there is the false ok.
+        parent = _StubbornOcc("Assembly", bulb=False)
+        child = FakeOcc("Screw", full_path="Assembly+Screw", parent=parent, bulb=False)
+        _install(monkeypatch, [parent, child])
+        res = iv.handler(action="show", target="Screw")
+        assert res["isError"] is True
+        assert "Assembly" in res["message"] and "stays hidden" in res["message"]
+
+    def test_a_mid_list_failure_names_what_was_already_hidden(self, monkeypatch):
+        # Without this the caller gets a bare error and cannot tell that 'A' is now hidden.
+        a = FakeOcc("A", full_path="A", bulb=True)
+        b = _StubbornOcc("B", full_path="B", bulb=True)
+        _install(monkeypatch, [a, b])
+        res = iv.handler(action="hide", target=["A", "B"])
+        assert res["isError"] is True
+        assert "Already changed before this failure: A." in res["message"]
+        assert a.isLightBulbOn is False              # and it really is hidden
+
+    def test_a_first_target_failure_names_nothing_extra(self, monkeypatch):
+        b = _StubbornOcc("B", full_path="B", bulb=True)
+        _install(monkeypatch, [b])
+        res = iv.handler(action="hide", target=["B"])
+        assert res["isError"] is True and "Already changed" not in res["message"]
+
+    def test_a_clear_isolation_the_platform_swallows_is_disclosed(self, monkeypatch):
+        stuck = _StubbornOcc("A", full_path="A", isolated=True, swallow=("isIsolated",))
+        good = FakeOcc("B", full_path="B", isolated=True)
+        _install(monkeypatch, [stuck, good])
+        out = _payload(iv.handler(action="clear_isolation"))
+        assert out["cleared_count"] == 1             # only the one that actually cleared
+        assert out["stuck"] == ["A"]
+        assert "still read isIsolated true" in out["note"]
+
+    def test_a_fully_clean_clear_isolation_claims_nothing_stuck(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("A", full_path="A", isolated=True)])
+        out = _payload(iv.handler(action="clear_isolation"))
+        assert out["cleared_count"] == 1 and "stuck" not in out
+
+
 class TestBodyVisibility:
     """hide/show reach single BODIES (root-level bodies / one body of a multi-body component) -
     the granularity occurrence bulbs cannot address. The bulb write is READ BACK per body."""
@@ -754,6 +828,38 @@ class TestNamedViews:
         _payload(iv.handler(action="apply_view", view_name="Home"))
         assert nv.applied is True
 
+    def test_apply_returning_false_is_an_error_not_a_moved_camera(self, monkeypatch):
+        # NamedView.apply() RETURNS a bool ("true if the operation was successful") - discarding it
+        # reported a camera move the platform declined to make.
+        nv = FakeNamedView("Side")
+        nv.apply = lambda: False
+        _install(monkeypatch, [], named_views=FakeNamedViews([nv]))
+        res = iv.handler(action="apply_view", view_name="Side")
+        assert res["isError"] is True
+        assert "returned false" in res["message"] and "Side" in res["message"]
+
+    def test_an_apply_that_raises_is_reported_not_swallowed(self, monkeypatch):
+        nv = FakeNamedView("Side")
+
+        def boom():
+            raise RuntimeError("camera is busy")
+        nv.apply = boom
+        _install(monkeypatch, [], named_views=FakeNamedViews([nv]))
+        res = iv.handler(action="apply_view", view_name="Side")
+        assert res["isError"] is True and "camera is busy" in res["message"]
+
+    def test_save_over_a_view_that_refuses_deletion_is_refused(self, monkeypatch):
+        # deleteMe() answers a bool. Swallowing a false and adding anyway leaves TWO views sharing
+        # one name, which no later apply_view can tell apart.
+        stubborn = FakeNamedView("Side")
+        stubborn.deleteMe = lambda: False
+        nvs = FakeNamedViews([stubborn])
+        _install(monkeypatch, [], named_views=nvs)
+        res = iv.handler(action="save_view", view_name="Side")
+        assert res["isError"] is True
+        assert "refused to remove it" in res["message"]
+        assert nvs.count == 1                     # no duplicate was added
+
     def test_apply_unknown_view_lists_available(self, monkeypatch):
         _install(monkeypatch, [], named_views=FakeNamedViews([FakeNamedView("Home")]))
         res = iv.handler(action="apply_view", view_name="Nope")
@@ -907,6 +1013,86 @@ class TestSnapshotRestore:
         _install(monkeypatch, occs)
         out = _payload(iv.handler(action="clear_isolation"))
         assert out["cleared_count"] == 1 and "truncated" not in out
+
+    def test_a_bulb_that_will_not_go_back_keeps_the_snapshot_and_is_not_counted(self, monkeypatch):
+        # The snapshot is the ONLY copy of the pre-explore state. Counting attempts as restored and
+        # then POPPING it made a wholly failed restore unrecoverable while reporting success.
+        good = FakeOcc("A", full_path="A", bulb=True)
+        stuck = _StubbornOcc("B", full_path="B", bulb=True, swallow=("isLightBulbOn",))
+        _install(monkeypatch, [good, stuck], doc_name="StuckRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+        object.__setattr__(stuck, "isLightBulbOn", False)     # hidden after the snapshot
+        good.isLightBulbOn = False
+        out = _payload(iv.handler(action="restore"))
+        assert out["restored_occurrences"] == 1               # only the one that read back
+        assert out["failed_restores"] == ["B"] and out["failed_restore_count"] == 1
+        assert out["snapshot_kept"] is True
+        assert "StuckRestore" in iv._SNAPSHOTS                # retryable, not consumed
+        assert "PARTIAL RESTORE" in out["note"]
+
+    def test_a_clean_restore_still_consumes_the_snapshot(self, monkeypatch):
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install(monkeypatch, [a], doc_name="CleanRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+        a.isLightBulbOn = False
+        out = _payload(iv.handler(action="restore"))
+        assert out["snapshot_kept"] is False and "failed_restores" not in out
+        assert out["visual_style_restored"] is True and out["camera_restored"] is True
+        assert "CleanRestore" not in iv._SNAPSHOTS
+
+    def test_a_camera_the_viewport_refuses_is_reported_and_keeps_the_snapshot(self, monkeypatch):
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install(monkeypatch, [a], doc_name="CamRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+
+        class _RefusingViewport:
+            """A viewport that hands back a camera but will not take one - the restore the
+            platform declines after the explore already moved the view."""
+            visualStyle = 0
+
+            def __init__(self):
+                self._cam = FakeCamera()
+
+            @property
+            def camera(self):
+                return self._cam
+
+            @camera.setter
+            def camera(self, value):
+                raise RuntimeError("viewport busy")
+
+            def refresh(self):
+                pass
+        monkeypatch.setattr(iv.app, "activeViewport", _RefusingViewport())
+        out = _payload(iv.handler(action="restore"))
+        assert out["camera_restored"] is False
+        assert "camera" in out["failed_restores"]
+        assert "viewport busy" in out["note"]
+        assert "CamRestore" in iv._SNAPSHOTS
+
+    def test_a_visual_style_that_does_not_land_is_reported(self, monkeypatch):
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install(monkeypatch, [a], doc_name="StyleRestore")
+        iv._SNAPSHOTS.clear()
+        iv.app.activeViewport.visualStyle = 1
+        _payload(iv.handler(action="snapshot"))
+
+        class _StuckStyle(FakeViewport):
+            def __setattr__(self, key, value):
+                if key == "visualStyle" and getattr(self, "_armed", False):
+                    return
+                object.__setattr__(self, key, value)
+        vp = _StuckStyle()
+        vp.visualStyle = 7                       # the style the viewport insists on keeping
+        object.__setattr__(vp, "_armed", True)
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        out = _payload(iv.handler(action="restore"))
+        assert out["visual_style_restored"] is False
+        assert "visualStyle" in out["failed_restores"]
+        assert "StyleRestore" in iv._SNAPSHOTS
 
     def test_same_named_documents_do_not_collide(self, monkeypatch):
         # _SNAPSHOTS is keyed by document id, not name: two open documents that happen to share a

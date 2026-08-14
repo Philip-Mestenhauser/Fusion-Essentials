@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 184  |  **description breadcrumbs:** 678  |  **note/error breadcrumbs:** 406
+**Tools:** 184  |  **description breadcrumbs:** 678  |  **note/error breadcrumbs:** 409
   |  **guidance smells flagged:** 6
 ## Blindspots to engineer
 
@@ -55,6 +55,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `appearance_set`
 - Appearance override applied. Set a new color anytime; to revert, the override is on the body/occurrence (.appearance). Pair with view_screenshot to see it.
+- This write landed on the BODY, which is the component's NATIVE body - the color shows on EVERY instance of that component, not just one. To color one instance, target the OCCURRENCE (its fullPathNa...
 - Appearance applied to
 - failed - see 'failed'.
 - body(ies) of this occurrence do NOT carry the new appearance (
@@ -143,13 +144,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not set isGroundToParent on '
 
 ### `assembly_inspect_interference`
+- No interference - every part fits.
+- interfering pair(s) - parts overlap in space. Each lists the two occurrences and their total overlap volume; fix positioning/sizing/joints. (A self-pair means two bodies of the same occurrence over...
 - No active design to analyze.
 - Cannot check interference: this design exposes
 - comparable solid entit
 - occurrence(s) at any depth,
 - root-level solid body(ies)), and interference needs at least two. No verdict was formed - this is NOT a pass.
-- No interference - every part fits.
-- interfering pair(s) - parts overlap in space. Each lists the two occurrences and their total overlap volume; fix positioning/sizing/joints. (A self-pair means two bodies of the same occurrence over...
 - Interference analysis failed:
 
 ### `assembly_move`
@@ -376,6 +377,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Failed to set name on NC program '
 
 ### `cam_show_toolpath`
+- Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
 - operation(s) still read isLightBulbOn=true after the hide.
 - Only this folder's generated toolpaths are shown.
 - operation(s) still read isLightBulbOn=false after the show - see toggle_failures.
@@ -383,7 +385,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Use cam_show_toolpath(list) to see every operation.
 - isLightBulbOn did not take for '
 - ' - it still reads hidden.
-- Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
 - Provide 'folder' - the folder or setup name to show.
 - Use cam_show_toolpath(list) or cam_get(include=['operations']).
 - ' - it still reads shown.
@@ -590,10 +591,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
 - files. Each top-level occurrence is one file - ready to print/assemble individually.
+- top-level occurrence(s) exported to separate
+- produced NO file - see 'failed'.
 - ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
 - export reported success but
 - . execute() returned true but produced nothing - treating this as a failure, not a false success. Check the target geometry and the output path are valid.
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
+- split export wrote NO files - all
+- occurrence(s) failed:
 - Could not create output directory '
 
 ### `design_get`
@@ -1057,7 +1062,15 @@ A planar face's 'frame' is th...
 - ', which was already driven this session, and the pair is in an XREF/referenced context where driving BOTH members has killed the Fusion process. The link ALREADY moved '
 - ) - read it back with assembly_get; do not re-drive it. Rebuilding '
 - ' (delete+recreate, a new token) clears this refusal.
+- . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
+- Refused: the command lies beyond the enabled joint limits of '
+- . A parent-locked member freezes the whole chain
+- - check per-occurrence ground_to_parent with assembly_get.
+- : ground_to_parent is SET on
+- - release it with assembly_ground(ground_to_parent=false) and re-drive.
+- ' DID NOT TAKE - value_now reads
 - Could not drive joint '
+- DID NOT TAKE. The mechanism has moved (and any motion-linked partner with it) - read the pose back with assembly_get.
 - . PARTIALLY applied first (
 - ) - the joint (and any motion-linked partner) has moved; read the pose back with assembly_get.
 
@@ -1128,11 +1141,13 @@ A planar face's 'frame' is th...
 
 ### `mesh_export`
 - Exported a MESH file to local disk (the design was not modified). To round-trip it into the cloud, upload it with data_upload_file; to re-import it as a mesh body, use mesh_insert.
+- component(s) to separate
+- mesh files - each top-level occurrence is one printable file.
 - Target was a MESH body, which ExportManager cannot write to a file on its own (it returns success but writes nothing). Exported its owning component instead - the file contains that component's mes...
 - Provide 'file_path' - the local output path (a file, or a DIRECTORY when split_by_component=true). The format extension is appended if missing.
 - No active design to export. Open or create a document first (see doc_new).
-- component(s) to separate
-- mesh files - each top-level occurrence is one printable file.
+- top-level occurrence(s) exported to separate
+- produced NO file - see 'failed'.
 - ' not found. Pass a body HANDLE from find_geometry (precise), a body/mesh/component/occurrence NAME, or omit 'target' to export the whole design.
 - This design exposes no exportManager - cannot export.
 - This build's ExportManager has no
@@ -1141,6 +1156,8 @@ A planar face's 'frame' is th...
 - export reported success but
 - . execute() returned True but produced nothing - treating this as a FAILURE, not a false success. Check the target geometry and the output path are valid.
 - No top-level occurrences to split - the design has no component instances. Export without split_by_component to write the whole design as one file.
+- split export wrote NO files - all
+- occurrence(s) failed:
 - export wrote no file for this MESH target. Exporting an existing MESH body to a file via ExportManager writes nothing (a Fusion limitation - execute() returns True but no file lands), and the redir...
 - ) produced no file either (the component may hold no exportable mesh geometry). To get the mesh on disk, convert it first (mesh_to_brep) and export the resulting solid, or place it in a component t...
 - Could not create output directory '
@@ -2276,12 +2293,19 @@ A planar face's 'frame' is th...
 
 ### `view_section`
 - No active design. Open a document with design geometry first.
+- All section analyses removed - the model is no longer cut.
+- section analysis(es), but the remaining count could not be read back - view_section(list) confirms whether the model is still cut.
 - '. Use mm, cm, or in.
 - Section creation returned nothing (
 - Use view_screenshot to study the interior; flip=true cuts the other half; view_section(clear) removes the cut.
 - and the camera is aimed at the cut face.
 - ; the camera was left where it was (auto_view=false).
-- All section analyses removed - the model is no longer cut.
+- Could not read how many section analyses exist - nothing was removed. Retry, or delete them from the browser's Analysis folder.
+- section analysis(es) (
+- ) - the model is STILL cut by those.
+- were removed. Delete the rest from the browser's Analysis folder.
+- section analysis(es) but sectionAnalyses still reads
+- - the model may still be cut.
 - Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or a planar-face handle from find_geometry) or 'through' (an occurrence).
 - Failed to create section (
 
@@ -2292,10 +2316,15 @@ A planar face's 'frame' is th...
 ### `view_switch_workspace`
 - Provide 'workspace' - an id, visible name, or alias (e.g. 'design', 'manufacture').
 - Workspace not found: '
+- activate() returned true, but neither Workspace.isActive nor the UI's active workspace could be read back - the switch is UNVERIFIED. view_list_workspaces reports which workspace is active.
 - Could not enumerate workspaces:
 - ' failed (it may not be valid to switch to right now, e.g. no document open).
+- activate() returned true for '
+- ', its isActive flag would not read, and the UI reports '
+- ' as the active workspace - the switch did not take.
 - Failed to switch to '
 - Workspace was already active.
+- ' but it still reads isActive=false - the workspace did not become active.
 
 ### `workspace_orient`
 - Document is UNSAVED - no URN/project yet; save before addressing it by id.

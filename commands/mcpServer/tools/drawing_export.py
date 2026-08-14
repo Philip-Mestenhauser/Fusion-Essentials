@@ -115,20 +115,23 @@ def _apply_options(fmt, opts, rng, line_weights, variant, splines):
     return fields, ""
 
 
-def _wait_for_file(path):
-    """Poll until a non-empty file at `path` reports the SAME size on two consecutive samples,
-    bounded by _LAND_DEADLINE_S. Returns (size_bytes, error_or_None).
+def _wait_for_file(path, before=None):
+    """Poll until a non-empty file at `path` that THIS call wrote reports the SAME size on two
+    consecutive samples, bounded by _LAND_DEADLINE_S. Returns (size_bytes, error_or_None).
 
     Measured: execute() returns true while the file is still absent, and the file appears about 3s
     later - inside the same call - once the main thread is pumped. The two-equal-samples gate costs
     one extra pump when the first non-zero size is already final (measured: it is), and refuses to
-    report a size that is still climbing when it is not. The bounded pump loop is
-    _export.pump_until; the size-went-stable signal is this tool's own."""
+    report a size that is still climbing when it is not. `before` is the path's snapshot() taken
+    before the export, and it belongs INSIDE the loop: a stale file from an earlier export reports a
+    stable size on its first two samples, so a wait without it settles on that file rather than on
+    this export's write. The bounded pump loop is _export.pump_until; the size-went-stable signal is
+    this tool's own."""
     prev = None
 
     def probe():
         nonlocal prev
-        size, verr = _export.verify_written(path)
+        size, verr = _export.verify_written(path, before)
         stable = not verr and size == prev
         prev = None if verr else size
         return stable, (size, verr)
@@ -196,6 +199,9 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
     if aerr:
         return error(f"{fmt.upper()} export refused: {aerr}")
 
+    # The pre-export state of the target: an unchanged file at this path when the wait ends is a
+    # file this export did not write, not a landing.
+    before = _export.snapshot(path)
     try:
         did = em.execute(opts)
     except Exception as ex:
@@ -204,7 +210,7 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
         return error(f"{fmt.upper()} export returned false - Fusion wrote nothing. Treating this "
                      "as a failure.")
 
-    size, werr = _wait_for_file(path)
+    size, werr = _wait_for_file(path, before)
     if werr:
         return error(f"{fmt.upper()} export reported success but {werr} within "
                      f"{_LAND_DEADLINE_S:.0f}s of the export call returning. Treating this as a "

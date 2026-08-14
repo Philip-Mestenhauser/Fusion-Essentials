@@ -130,6 +130,21 @@ def _restore_message(restore_fit_to):
             "restores them.")
 
 
+def _restore_camera(vp, saved_camera):
+    """Put the user's camera back. Returns the sentence naming the failure, or None.
+
+    EVERY exit that may have moved the camera runs this: a read tool that leaves the viewport
+    somewhere else has changed the document's state, and a swallowed restore never says so."""
+    if saved_camera is None:
+        return None
+    try:
+        vp.camera = saved_camera
+    except Exception as e:
+        return (f"The camera could NOT be put back where it was before this shot: {e}. The "
+                "viewport is left at the capture camera - view_set(orient) re-aims it.")
+    return None
+
+
 def _active_component_note(design):
     """If a NON-root component is activated, Fusion renders everything outside it as dimmed/translucent
     'ghosts'. Return a one-line warning naming the activated occurrence so the agent reads the
@@ -205,9 +220,19 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change
     # the user's view as a side effect).
+    zoom_warning = None
+    camera_snapshot_warning = None
     if view != "current" or want_fit or (zoom and zoom != 1.0):
+        # Captured OUTSIDE the try: a failure inside can already have moved the camera, and the
+        # failure exit below can only put it back if the snapshot was taken first. When the
+        # snapshot itself will not read, the move still happens - so the payload must SAY the
+        # viewport was left at the capture view instead of quietly not restoring it.
+        saved_camera = safe(lambda: vp.camera)
+        if saved_camera is None:
+            camera_snapshot_warning = (
+                "The camera could not be captured before this shot, so the viewport is LEFT at "
+                "the capture view (no restore was possible) - view_set(orient) re-aims it.")
         try:
-            saved_camera = vp.camera          # snapshot of the user's current view
             if view != "current":
                 # Every named view resolves in the shared table (_VIEWS is built from it); the shared
                 # apply sets exact world-axis vectors (guaranteed square), forces ortho for the 6
@@ -222,15 +247,19 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
                 try:
                     cam.viewExtents = cam.viewExtents * z   # smaller extents = zoomed in
                     vp.camera = cam
-                except Exception:
-                    pass
+                except Exception as e:
+                    # A dropped zoom is a request the image does not honour - say so rather than
+                    # returning a fitted shot as if the zoom had applied.
+                    zoom_warning = (f"zoom={z} could NOT be applied ({e}) - the image is at the "
+                                    "fitted extents.")
         except Exception as e:
-            # The orient failed AFTER fit_to already hid the other occurrences, so this exit owes
-            # the same restore disclosure the capture exits give - a bulb the restore could not
-            # put back is named here or nowhere.
+            # The orient failed AFTER the camera may already have moved and AFTER fit_to hid the
+            # other occurrences, so this exit owes both restores: the camera goes back here or
+            # nowhere, and a bulb the restore could not put back is named here or nowhere.
+            cam_msg = _restore_camera(vp, saved_camera)
             stuck_msg = _restore_message(restore_fit_to)
-            return error(f"Failed to set view '{view}': {e}"
-                         + (" " + stuck_msg if stuck_msg else ""))
+            return error(" ".join(m for m in (f"Failed to set view '{view}': {e}",
+                                              cam_msg, stuck_msg) if m))
 
     try:
         b64, cerr = _view_common.capture_png_b64(
@@ -262,18 +291,15 @@ def handler(view: str = "current", width: int = 800, height: int = 600,
     except Exception as e:
         result = error(f"Screenshot error: {e}")
 
-    # Restore the user's original camera if we changed it.
-    if saved_camera is not None:
-        try:
-            vp.camera = saved_camera
-        except Exception:
-            pass
-    # Restore visibility if fit_to isolated something.
+    # Restore the user's original camera if we changed it, and the visibility fit_to isolated -
+    # each failure is NAMED, never swallowed.
+    cam_msg = _restore_camera(vp, saved_camera)
     stuck_msg = _restore_message(restore_fit_to)
-    if stuck_msg:
+    extra = " ".join(m for m in (zoom_warning, camera_snapshot_warning, cam_msg, stuck_msg) if m)
+    if extra:
         if result.get("isError"):
-            return error(result.get("message", "") + " " + stuck_msg)
-        result["content"].insert(0, {"type": "text", "text": stuck_msg})
+            return error(result.get("message", "") + " " + extra)
+        result["content"].insert(0, {"type": "text", "text": extra})
     return result
 
 

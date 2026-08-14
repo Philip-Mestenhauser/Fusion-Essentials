@@ -278,6 +278,17 @@ class TestTargetResolution:
         assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
         assert em.executed is None                        # nothing was exported
 
+    def test_an_EXACT_shared_name_refusal_keeps_its_candidate_list(self, tmp_path, monkeypatch):
+        # the shared-EXACT-name refusal carries no "ambiguous" wording - only the OCCURRENCE_MISS
+        # stem tells a plain miss from a refusal - so its candidate list must reach the caller
+        # instead of degrading to a generic not-found.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Bolt:1", "Sub-A:1+Bolt:1"),
+                                                      FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")])
+        res = dx.handler(format="step", target="Bolt:1", file_path=str(tmp_path / "p.step"))
+        assert res["isError"] is True
+        assert "Sub-A:1+Bolt:1" in res["message"] and "Sub-B:1+Bolt:1" in res["message"]
+        assert em.executed is None                        # nothing was exported
+
 
 # ── path handling ────────────────────────────────────────────────────────────
 
@@ -726,28 +737,39 @@ class TestSplitByComponent:
         assert [f["occurrence"] for f in out["files"]] == ["Good:1"]
         assert "failed" in out
         assert out["failed"][0]["occurrence"] == "Bad:1"
+        # the shortfall is flagged AND worded - file_count alone reads like a complete export
+        assert out["partial"] is True
+        assert "PARTIAL" in out["note"] and "1 of 2" in out["note"]
 
-    def test_all_fail_exported_false(self, tmp_path, monkeypatch):
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("A:1")])
+    def test_a_split_that_lands_nothing_is_an_error_carrying_the_reasons(self, tmp_path,
+                                                                        monkeypatch):
+        # ZERO deliverables is a FAILED export, not an ok payload carrying exported:false - and the
+        # refusal names every occurrence that failed, the only place those reasons can travel.
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("A:1"), FakeOcc("B:1")])
         em.execute = lambda opts: False
-        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
-        assert out["exported"] is False and out["file_count"] == 0
+        res = dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True)
+        assert res["isError"] is True
+        assert "wrote NO files" in res["message"]
+        assert "A:1" in res["message"] and "B:1" in res["message"]
+        assert "nothing was written" in res["message"]
 
     def test_execute_true_but_no_file_written_is_a_split_failure(self, tmp_path, monkeypatch):
         # execute() lying (True, but nothing landed on disk) must land the occurrence in 'failed',
         # not 'files' - the split path is gated on file existence the same as the single-target path.
-        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Ghost:1")])
+        _, em, _ = _install(monkeypatch, occurrences=[FakeOcc("Good:1"), FakeOcc("Ghost:1")])
+        real_exec = em.execute
 
         def lying_execute(opts):
-            em.executed = opts
-            return True   # lies: writes nothing
+            if "Ghost" in opts["path"]:
+                em.executed = opts
+                return True   # lies: writes nothing
+            return real_exec(opts)
 
         em.execute = lying_execute
         out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
-        assert out["exported"] is False
-        assert out["file_count"] == 0
-        assert out["files"] == []
-        assert "failed" in out
+        assert out["file_count"] == 1
+        assert [f["occurrence"] for f in out["files"]] == ["Good:1"]
+        assert out["partial"] is True
         assert out["failed"][0]["occurrence"] == "Ghost:1"
         assert "no file was written" in out["failed"][0]["error"].lower()
 
@@ -840,6 +862,18 @@ class TestFileExistenceGate:
         res = dx.handler(format="step", file_path=target)
         assert res["isError"] is True
         assert "no file was written" in res["message"].lower()
+
+    def test_a_stale_file_from_an_earlier_export_is_not_a_landing(self, tmp_path, monkeypatch):
+        # the strongest form of the lie: execute() returns true, writes nothing, and a file of the
+        # right name is ALREADY there - an existence-only check reports that old file as this
+        # export's deliverable.
+        _, em, _ = _install(monkeypatch)
+        target = tmp_path / "p.step"
+        target.write_text("ISO-10303-21; an export from an earlier call")
+        em.execute = lambda opts: True
+        res = dx.handler(format="step", file_path=str(target))
+        assert res["isError"] is True
+        assert "already there before this call" in res["message"]
 
 
 # ── _resolve_target ordering ──────────────────────────────────────────────────

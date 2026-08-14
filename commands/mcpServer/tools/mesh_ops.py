@@ -19,6 +19,7 @@ from ._common import error, ok, safe
 from ._cam_common import clamp_rows
 from . import _common
 from ._common import target_component as _target_component
+from . import _export          # component_by_name - the one design-wide by-name component walk
 from . import _inputs
 from .design_mode import run_in_base_feature
 
@@ -193,18 +194,17 @@ def mesh_get_handler(target: str = "", max_results: int = 50, units: str = "mm")
             if c is not None and c not in comps:
                 comps.append(c)
     else:
-        # resolve a named component/occurrence
-        found = None
-        root = safe(lambda: design.rootComponent)
-        for c in ([root] + list(safe(lambda: design.allComponents) or [])) if root else []:
-            if c is not None and safe(lambda c=c: c.name) == name:
-                found = c
-                break
+        # A named COMPONENT (the one design-wide by-name component walk), else an OCCURRENCE through
+        # the shared ambiguity-refusing resolver: an occurrence name is not unique (two sub-assemblies
+        # each hold a 'Bolt:1'), so a name several instances answer to is REFUSED with its candidates
+        # rather than listing whichever component the walk reached first.
+        found = _export.component_by_name(design, name)
         if found is None:
-            for o in (safe(lambda: root.allOccurrences) or []) if root else []:
-                if safe(lambda o=o: o.name) == name:
-                    found = safe(lambda o=o: o.component)
-                    break
+            occ, occ_err = _inputs._resolve_occurrence("target", name)
+            if occ is not None:
+                found = safe(lambda: occ.component)
+            elif occ_err and _inputs.OCCURRENCE_MISS not in occ_err:
+                return error(occ_err)          # a REFUSAL (several instances), not a plain miss
         if found is None:
             return error(f"No component/occurrence named '{name}'. List the tree with design_get(include=['tree']), "
     "or pass target='' to scan the whole design.")
@@ -318,12 +318,7 @@ def mesh_insert_handler(file_path: str = "", target_component: str = "",
     comp = _target_component(design)
     tc = (target_component or "").strip() if isinstance(target_component, str) else ""
     if tc:
-        root = safe(lambda: design.rootComponent)
-        picked = None
-        for c in ([root] + list(safe(lambda: design.allComponents) or [])) if root else []:
-            if c is not None and safe(lambda c=c: c.name) == tc:
-                picked = c
-                break
+        picked = _export.component_by_name(design, tc)   # the one design-wide by-name component walk
         if picked is None:
             return error(f"No component named '{tc}' to import into. Omit target_component to use the "
     "active component, or list components with design_get(include=['tree']).")

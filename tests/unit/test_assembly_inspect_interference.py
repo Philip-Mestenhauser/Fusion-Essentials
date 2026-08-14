@@ -117,23 +117,35 @@ def _install(monkeypatch, occurrences, results, reject_coincident=False):
 class TestOwningOccurrence:
     def test_names_the_INSTANCE_via_the_analysis_set(self):
         # The point of the report: which INSTANCE interferes. analyzeInterference returns a native
-        # body, so the path comes from the occurrence map, not off the body.
+        # body, so the path comes from the occurrence map, not off the body. An exact instance
+        # carries no candidate list.
         b = FakeBody("Body1", comp_name="Wheel")
         owners = {b.entityToken: ["Rig:1+Wheel:2"]}
-        assert ai._owning_occurrence_name(b, owners) == "Rig:1+Wheel:2"
+        assert ai._owning_occurrence_name(b, owners) == ("Rig:1+Wheel:2", None)
 
-    def test_says_so_when_one_native_body_serves_several_instances(self):
-        # A component instanced twice maps its native body to both - a genuine ambiguity, reported
-        # rather than silently collapsed to one path.
+    def test_names_every_candidate_when_one_native_body_serves_several_instances(self):
+        # A component instanced twice maps its native body to both - a genuine ambiguity: the label
+        # says so AND the full candidate path list rides along, so the caller can discriminate
+        # instead of guessing from "or N more".
         b = FakeBody("Body1", comp_name="Wheel")
         owners = {b.entityToken: ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]}
-        out = ai._owning_occurrence_name(b, owners)
-        assert "Rig:1+Wheel:1" in out and "1 more instance" in out
+        label, cands = ai._owning_occurrence_name(b, owners)
+        assert "Rig:1+Wheel:1" in label and "1 more instance" in label
+        assert cands == ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]
+
+    def test_helper_returns_the_full_list_and_a_true_count_label(self):
+        # the helper never drops a suspect - the ROW caps what it publishes; the label's "or N
+        # more" is the true total either way.
+        b = FakeBody("Body1", comp_name="Wheel")
+        paths = [f"Wheel:{i}" for i in range(1, 5)]
+        label, cands = ai._owning_occurrence_name(b, {b.entityToken: paths})
+        assert cands == paths                          # full, uncapped
+        assert "3 more instance" in label              # the true total
 
     def test_falls_back_to_component_then_body_name_when_unmapped(self):
         # A root-level body belongs to no occurrence: the component name is all there is.
-        assert ai._owning_occurrence_name(FakeBody("B", comp_name="Crank"), {}) == "Crank"
-        assert ai._owning_occurrence_name(FakeBody("LooseBody"), {}) == "LooseBody"
+        assert ai._owning_occurrence_name(FakeBody("B", comp_name="Crank"), {}) == ("Crank", None)
+        assert ai._owning_occurrence_name(FakeBody("LooseBody"), {}) == ("LooseBody", None)
 
 
 class TestInterferenceHandler:
@@ -213,7 +225,79 @@ class TestInterferenceHandler:
         # parentComponent present but its name is falsy -> use assemblyContext, then body name.
         b = FakeBody("BodyZ", comp_name="", occ_name="Crank:1")
         b.parentComponent = FakeComp("")         # present object, empty name
-        assert ai._owning_occurrence_name(b, {}) == "Crank:1"
+        assert ai._owning_occurrence_name(b, {}) == ("Crank:1", None)
+
+    def test_multi_instance_pair_carries_candidates_and_the_note_explains(self, monkeypatch):
+        # A multi-instance component collides with a single-instance one: the row must list every
+        # suspect path on the ambiguous side, and the note must say the platform (native bodies
+        # off analyzeInterference) is why the exact instance is not named.
+        shared = FakeBody("Body1")                          # ONE native body...
+        o1 = FakeOcc("Wheel:1", bodies=[shared])
+        o2 = FakeOcc("Wheel:2", bodies=[shared])            # ...serving two instances
+        fork_body = FakeBody("Body1", token="TOK::fork-native")   # same NAME, distinct native body
+        fork = FakeOcc("Fork:1", bodies=[fork_body])
+        _install(monkeypatch, [o1, o2, fork], [FakeResult(shared, fork_body, 2.5)])
+        out = _payload(ai.handler())
+        row = out["measured"]["interferences"][0]
+        sides = {row["occurrence_one"]: row.get("occurrence_one_candidates"),
+                 row["occurrence_two"]: row.get("occurrence_two_candidates")}
+        ambiguous = [c for c in sides.values() if c]
+        assert ambiguous == [["Wheel:1", "Wheel:2"]]        # the ambiguous side lists both suspects
+        assert "Fork:1" in sides and sides["Fork:1"] is None   # the exact side carries no list
+        assert "candidates" in out["note"] and "native bodies" in out["note"]
+
+    def test_both_sides_ambiguous_each_lists_its_own_candidates(self, monkeypatch):
+        # a rail instanced twice collides with a rod instanced twice - BOTH sides of the pair
+        # carry their own candidate lists.
+        rail_body, rod_body = FakeBody("Body1", token="TOK::rail"), FakeBody("Body1", token="TOK::rod")
+        occs = [FakeOcc("Rail:1", bodies=[rail_body]), FakeOcc("Rail:2", bodies=[rail_body]),
+                FakeOcc("Rod:1", bodies=[rod_body]), FakeOcc("Rod:2", bodies=[rod_body])]
+        _install(monkeypatch, occs, [FakeResult(rail_body, rod_body, 0.5)])
+        row = _payload(ai.handler())["measured"]["interferences"][0]
+        cands = {row["occurrence_one_candidates"][0], row["occurrence_two_candidates"][0]}
+        assert cands == {"Rail:1", "Rod:1"}
+        assert row["occurrence_one_candidates"] in (["Rail:1", "Rail:2"], ["Rod:1", "Rod:2"])
+        assert row["occurrence_two_candidates"] in (["Rail:1", "Rail:2"], ["Rod:1", "Rod:2"])
+
+    def test_exact_pair_carries_no_candidates_and_a_plain_note(self, monkeypatch):
+        wheel, fork = FakeBody("B1"), FakeBody("B2")
+        _install(monkeypatch, [FakeOcc("Wheel:1", bodies=[wheel]), FakeOcc("Fork:1", bodies=[fork])],
+                 [FakeResult(wheel, fork, 1.0)])
+        out = _payload(ai.handler())
+        row = out["measured"]["interferences"][0]
+        assert "occurrence_one_candidates" not in row and "occurrence_two_candidates" not in row
+        assert "candidates" not in out["note"]
+
+    def test_candidates_over_the_cap_are_flagged_truncated_on_the_row(self, monkeypatch):
+        # the machine-readable incompleteness signal: a capped list must never read as the full
+        # suspect set - the row carries a truncated flag, not just a count buried in prose.
+        monkeypatch.setattr(ai, "_CANDIDATE_CAP", 2)
+        shared = FakeBody("Body1")
+        occs = [FakeOcc(f"Wheel:{i}", bodies=[shared]) for i in range(1, 5)]
+        lone = FakeBody("B2", token="TOK::lone")
+        occs.append(FakeOcc("Fork:1", bodies=[lone]))
+        _install(monkeypatch, occs, [FakeResult(shared, lone, 1.0)])
+        row = _payload(ai.handler())["measured"]["interferences"][0]
+        side = "occurrence_one" if "occurrence_one_candidates" in row else "occurrence_two"
+        assert row[f"{side}_candidates"] == ["Wheel:1", "Wheel:2"]      # capped at 2
+        assert row[f"{side}_candidates_truncated"] is True
+        other = "occurrence_two" if side == "occurrence_one" else "occurrence_one"
+        assert f"{other}_candidates_truncated" not in row               # exact side unflagged
+
+    def test_candidates_exactly_at_the_cap_carry_no_truncated_flag(self, monkeypatch):
+        # the boundary: exactly cap-many candidates is a COMPLETE list - flagging it truncated
+        # would claim suspects were dropped when none were (a >= guard tells that lie).
+        monkeypatch.setattr(ai, "_CANDIDATE_CAP", 2)
+        shared = FakeBody("Body1")
+        occs = [FakeOcc("Wheel:1", bodies=[shared]), FakeOcc("Wheel:2", bodies=[shared]),
+                FakeOcc("Fork:1", bodies=[FakeBody("B2", token="TOK::lone")])]
+        _install(monkeypatch, occs, [FakeResult(shared, FakeBody("B2", token="TOK::lone"), 1.0)])
+        row = _payload(ai.handler())["measured"]["interferences"][0]
+        side = "occurrence_one" if "occurrence_one_candidates" in row else "occurrence_two"
+        assert row[f"{side}_candidates"] == ["Wheel:1", "Wheel:2"]      # complete, at the cap
+        assert f"{side}_candidates_truncated" not in row
+        assert "occurrence_one_candidates_truncated" not in row
+        assert "occurrence_two_candidates_truncated" not in row
 
     def test_self_pair_note_when_same_occurrence_overlaps(self, monkeypatch):
         # both bodies map to the same occurrence -> a self-pair (one entry, sorted key collapses).

@@ -47,19 +47,29 @@ class FakeSectionInput:
 
 
 class FakeSection:
-    def __init__(self, name):
+    def __init__(self, name, delete_ok=True):
         self.name = name
         self.isLightBulbOn = True
         self._deleted = False
+        self._delete_ok = delete_ok
+        self._owner = None          # set when it joins a FakeSectionAnalyses
 
     def deleteMe(self):
+        # Mirror Fusion: a successful delete takes the analysis OUT of the collection; a refused
+        # one returns false and leaves the model cut.
+        if not self._delete_ok:
+            return False
         self._deleted = True
+        if self._owner is not None and self in self._owner._items:
+            self._owner._items.remove(self)
         return True
 
 
 class FakeSectionAnalyses:
     def __init__(self, existing=()):
         self._items = list(existing)
+        for s in self._items:
+            s._owner = self
         self.last_input = None
         self.add_calls = 0
 
@@ -77,6 +87,7 @@ class FakeSectionAnalyses:
     def add(self, inp):
         self.add_calls += 1
         sec = FakeSection(f"Section{self.add_calls}")
+        sec._owner = self
         self._items.append(sec)
         return sec
 
@@ -352,6 +363,47 @@ class TestListClear:
         out = _payload(sv.handler(action="clear"))
         assert out["removed_count"] == 2
         assert s1._deleted and s2._deleted
+        # the claim "all removed" is gated on the count read BACK, not on the delete calls made
+        assert out["sections_before"] == 2 and out["sections_after"] == 0
+        assert "no longer cut" in out["note"]
+
+    def test_a_refused_delete_is_an_error_not_a_partial_success(self):
+        # deleteMe() returning FALSE leaves the model cut. Counting only the successful deletes and
+        # then asserting "All section analyses removed" is the false-ok this gate exists to stop.
+        s1 = FakeSection("Section1")
+        s2 = FakeSection("Stubborn", delete_ok=False)
+        _install(existing_sections=[s1, s2])
+        res = sv.handler(action="clear")
+        assert res["isError"] is True
+        assert "Stubborn" in res["message"]
+        assert "STILL cut" in res["message"]
+        assert s1._deleted is True and s2._deleted is False   # the one that could go, went
+
+    def test_a_surviving_section_after_every_delete_returned_true_is_an_error(self):
+        # Every deleteMe() answers true but the collection does not shrink - the platform reported a
+        # success it did not perform, so the count read back is what decides.
+        s1 = FakeSection("Section1")
+        s1._owner = None                       # deleteMe() returns True but never leaves the list
+        secs = _install(existing_sections=[])
+        secs._items.append(s1)
+        res = sv.handler(action="clear")
+        assert res["isError"] is True
+        assert "still reads 1" in res["message"]
+
+    def test_an_unreadable_section_count_refuses_instead_of_claiming_an_empty_sweep(self):
+        secs = _install(existing_sections=[])
+
+        class _Unreadable:
+            @property
+            def count(self):
+                raise RuntimeError("nope")
+            def item(self, i):
+                raise AssertionError("must not be walked")
+        sv.app.activeProduct.analyses.sectionAnalyses = _Unreadable()
+        res = sv.handler(action="clear")
+        assert res["isError"] is True
+        assert "how many section analyses exist" in res["message"]
+        assert secs is not None
 
     def test_clear_removes_every_section_from_a_collection_that_shrinks_as_it_deletes(self):
         # deleteMe() takes the section OUT of sectionAnalyses, so the indices shift under the walk.

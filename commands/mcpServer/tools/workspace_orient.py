@@ -132,21 +132,40 @@ def _overall_bbox(root, design):
         return None
     units = safe(lambda: design.unitsManager.defaultLengthUnits) or "cm"
     # internal API length is cm; convert to display units via the units manager (robust to any unit).
+    # A FAILED conversion returns None, never the raw centimetre number - publishing that under the
+    # requested unit's label is a wrong measurement, not a fallback. Same for a coordinate that will
+    # not read: null, never a fabricated 0.
     def conv(v_cm):
-        out = safe(lambda: design.unitsManager.convert(v_cm, "cm", units))
-        return out if out is not None else v_cm
-    xmn, ymn, zmn = safe(lambda: mn.x, 0.0), safe(lambda: mn.y, 0.0), safe(lambda: mn.z, 0.0)
-    xmx, ymx, zmx = safe(lambda: mx.x, 0.0), safe(lambda: mx.y, 0.0), safe(lambda: mx.z, 0.0)
-    return {
+        if v_cm is None:
+            return None
+        return _common.measured(lambda: design.unitsManager.convert(v_cm, "cm", units), places=4)
+    xmn, ymn, zmn = (_common.measured(lambda: mn.x), _common.measured(lambda: mn.y),
+                     _common.measured(lambda: mn.z))
+    xmx, ymx, zmx = (_common.measured(lambda: mx.x), _common.measured(lambda: mx.y),
+                     _common.measured(lambda: mx.z))
+
+    def span(lo, hi):
+        return None if (lo is None or hi is None) else conv(hi - lo)
+
+    def mid(lo, hi):
+        return None if (lo is None or hi is None) else conv((hi + lo) / 2)
+
+    size = {"x": span(xmn, xmx), "y": span(ymn, ymx), "z": span(zmn, zmx)}
+    center = {"x": mid(xmn, xmx), "y": mid(ymn, ymx), "z": mid(zmn, zmx)}
+    out = {
         "units": units,
-        "size": {"x": round(conv(xmx - xmn), 4), "y": round(conv(ymx - ymn), 4),
-                 "z": round(conv(zmx - zmn), 4)},
-        "center": {"x": round(conv((xmx + xmn) / 2), 4), "y": round(conv((ymx + ymn) / 2), 4),
-                   "z": round(conv((zmx + zmn) / 2), 4)},
+        "size": size,
+        "center": center,
         # Component.boundingBox SWEEPS sketch + construction geometry (an orphaned datum inflates
         # it); model_inspect's bbox is solids-only - the two legitimately disagree.
         "scope": "all geometry incl. sketches/construction - solids-only extents: model_inspect",
     }
+    if any(v is None for v in list(size.values()) + list(center.values())):
+        out["unreadable_values"] = True
+        out["note"] = (f"A null size/center component could not be read or converted to '{units}' - "
+                       "it is reported as null rather than a fabricated 0 or an unconverted "
+                       "centimetre value.")
+    return out
 
 
 def _view_state():
@@ -161,10 +180,13 @@ def _view_state():
     projection = {0: "orthographic", 1: "perspective", 2: "perspective"}.get(ct, ct)
 
     def pt(p):
+        # A component that will not read is null, not 0.0 - and a point carrying one fabricated
+        # zero is a WRONG world position, so the whole point reads null instead.
         if p is None:
             return None
-        return {"x": round(safe(lambda: p.x, 0.0), 3), "y": round(safe(lambda: p.y, 0.0), 3),
-                "z": round(safe(lambda: p.z, 0.0), 3)}
+        xyz = {axis: _common.measured(getter, places=3) for axis, getter in
+               (("x", lambda: p.x), ("y", lambda: p.y), ("z", lambda: p.z))}
+        return None if any(v is None for v in xyz.values()) else xyz
     return {
         "projection": projection,
         "eye": pt(safe(lambda: cam.eye)),
@@ -461,6 +483,12 @@ def handler() -> dict:
         if rolled_back:
             parts.append(f"a rolled-back marker ({marker_pos}/{marker_count} - features after it are reverted)")
         pointers["fix_health"] = "design_recompute() then re-orient - " + ", ".join(parts) + "."
+    if broken_relations:
+        # A failed relation counts against is_healthy, so it gets its own pointer at the tool that
+        # repairs one - design_recompute (the fix_health remedy) does not mend a relation.
+        pointers["fix_relations"] = (
+            f"assembly_get() - {len(broken_relations)} assembly relation(s) failed to compute "
+            f"({', '.join(broken_relations[:5])}); assembly_edit_relations repairs or removes one.")
     if out_of_date:
         pointers["fix_references"] = (
             f"doc_update_xref() - {len(out_of_date)} external reference(s) are OUT OF DATE "
@@ -476,12 +504,16 @@ def handler() -> dict:
     # verdict. is_healthy is a conservative OR; on a deliberately-configured doc (a fixture/CAM template
     # with parked joints or pinned references) these conditions can be by design, so let the agent
     # judge whether it's a problem here.
-    if errors or broken_joints or out_of_date or rolled_back:
+    # The gate matches is_healthy exactly, broken_relations included - a design whose only fault is
+    # a failed assembly constraint must not read "No compute errors ..." beside is_healthy false.
+    if errors or broken_joints or broken_relations or out_of_date or rolled_back:
         bits = []
         if errors:
             bits.append(f"{errors} timeline error(s)")
         if broken_joints:
             bits.append(f"{len(broken_joints)} joint(s) failed to compute")
+        if broken_relations:
+            bits.append(f"{len(broken_relations)} assembly relation(s) failed to compute")
         if out_of_date:
             bits.append(f"{len(out_of_date)} out-of-date reference(s)")
         if rolled_back:

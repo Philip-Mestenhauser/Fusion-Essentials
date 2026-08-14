@@ -25,6 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from ....lib import fusion360utils as futil
 from ..mcp_primitives.item import Item
@@ -386,6 +387,13 @@ class SimpleMCPServer:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+# The only origins a browser may present. Matched against the PARSED hostname of the Origin
+# header, so a host that merely contains a loopback label (localhost.evil.com) is not a member.
+# '::1' is what urlsplit().hostname yields for http://[::1]:port - it strips the brackets.
+_ALLOWED_ORIGIN_SCHEMES = frozenset({'http', 'https'})
+_ALLOWED_ORIGIN_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
 class MCPHandler(BaseHTTPRequestHandler):
     """HTTP request handler bridging HTTP <-> the MCP JSON-RPC server."""
 
@@ -398,12 +406,23 @@ class MCPHandler(BaseHTTPRequestHandler):
 
         Per the spec security note, validate Origin. Local CLI clients (and our own
         probes) typically send no Origin header, which we allow; browsers send one,
-        which must be a loopback origin.
+        which must PARSE to a loopback origin.
         """
         origin = self.headers.get('Origin')
         if not origin:
             return True
-        return ('127.0.0.1' in origin) or ('localhost' in origin) or origin == 'null'
+        try:
+            parts = urlsplit(origin)
+            hostname, _port = parts.hostname, parts.port   # .port raises on a bad port
+        except ValueError:
+            return False        # unparseable Origin (bad IPv6 literal / port) - refuse, never allow
+        # Compare the parsed scheme + host, never the raw string: substring containment would
+        # admit http://localhost.evil.com and http://127.0.0.1.evil.com, which resolve to an
+        # attacker's server and are exactly the DNS-rebinding case this guard exists for.
+        # Origin: null is REFUSED - it is what a sandboxed (attacker-controlled) iframe sends, so
+        # allowing it reopens the hole. A local client that legitimately sends null can send no
+        # Origin header at all instead, which is allowed above.
+        return parts.scheme in _ALLOWED_ORIGIN_SCHEMES and hostname in _ALLOWED_ORIGIN_HOSTS
 
     def do_POST(self):
         # MCP endpoint on /mcp (well-known) and "/" (convenience).

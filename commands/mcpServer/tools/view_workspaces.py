@@ -13,7 +13,8 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error
+from ._common import ok, error, safe
+from . import _common
 
 app = adsk.core.Application.get()
 
@@ -105,14 +106,42 @@ def switch_workspace_handler(workspace: str = "") -> dict:
                       f"Available: {', '.join(available) or '(none)'}")
 
     try:
-        if match.isActive:
+        # An UNREADABLE isActive is not "already active" and not a reason to refuse the switch -
+        # only a confirmed True short-circuits; None falls through to the activate + read-back.
+        if _common.read_flag(lambda: match.isActive) is True:
             return ok({"switched": False, "active_workspace": match.name,
         "note": "Workspace was already active."})
         did = match.activate()
         if not did:
             return error(f"Activation of '{match.name}' failed (it may not be valid "
     "to switch to right now, e.g. no document open).")
-        return ok({"switched": True, "active_workspace": match.name})
+        # activate() returning true is not proof the workspace changed - re-read the workspace's
+        # own isActive, falling back to the UI's active workspace id when that flag will not read.
+        # The refusal is worded from WHICHEVER read produced the verdict: claiming
+        # "isActive=false" for a verdict the UI fallback made would name a read that never
+        # happened.
+        flag = _common.read_flag(lambda: match.isActive)
+        now = flag
+        if now is None:
+            active_id = safe(lambda: ui.activeWorkspace.id)
+            if active_id is not None:
+                now = active_id == safe(lambda: match.id)
+        if now is False:
+            if flag is False:
+                return error(f"activate() returned true for '{match.name}' but it still reads "
+                             "isActive=false - the workspace did not become active.")
+            active_name = safe(lambda: ui.activeWorkspace.name) or safe(
+                lambda: ui.activeWorkspace.id) or "another workspace"
+            return error(f"activate() returned true for '{match.name}', its isActive flag would "
+                         f"not read, and the UI reports '{active_name}' as the active workspace - "
+                         "the switch did not take.")
+        out = {"switched": True, "active_workspace": match.name,
+               "activation_verified": now is True}
+        if now is None:
+            out["note"] = ("activate() returned true, but neither Workspace.isActive nor the UI's "
+                           "active workspace could be read back - the switch is UNVERIFIED. "
+                           "view_list_workspaces reports which workspace is active.")
+        return ok(out)
     except Exception as e:
         return error(f"Failed to switch to '{match.name}': {e}")
 

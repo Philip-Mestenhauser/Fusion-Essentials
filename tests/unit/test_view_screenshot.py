@@ -303,6 +303,95 @@ class TestFitToRestoreDisclosure:
         assert "restores them" in gs.TOOL_DESCRIPTION
 
 
+class TestCameraRestore:
+    """The camera this tool moves to take its picture is the USER's. Every exit puts it back, and a
+    restore (or a zoom) the viewport refuses is NAMED, never swallowed."""
+
+    class _Viewport:
+        """A viewport whose camera assignment can be made to raise, modelling a platform that
+        refuses the restore after accepting the move."""
+
+        class _StuckExtents:
+            """A camera whose viewExtents will not be written - the zoom the platform drops."""
+            @property
+            def viewExtents(self):
+                return 1.0
+
+            @viewExtents.setter
+            def viewExtents(self, value):
+                raise RuntimeError("extents locked")
+
+        def __init__(self, refuse_assign=False, zoom_raises=False):
+            self._refuse = refuse_assign
+            self._camera = (self._StuckExtents() if zoom_raises
+                            else SimpleNamespace(viewExtents=1.0))
+            self.assigned = []
+
+        @property
+        def camera(self):
+            return self._camera
+
+        @camera.setter
+        def camera(self, value):
+            if self._refuse:
+                raise RuntimeError("viewport busy")
+            self.assigned.append(value)
+            self._camera = value
+
+        def fit(self):
+            pass
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        monkeypatch.setattr(gs._view_common, "capture_png_b64",
+                            lambda *a, **k: ("B64DATA", None))
+        return monkeypatch
+
+    def test_a_failed_orient_puts_the_camera_back(self, rig):
+        # apply_named_view moves the camera and THEN fails; returning without restoring leaves the
+        # user's viewport somewhere they never asked for, with no way back.
+        vp = self._Viewport()
+        original = vp.camera
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+
+        def move_then_fail(viewport, name):
+            viewport.camera = SimpleNamespace(viewExtents=99.0)   # the camera HAS moved
+            raise RuntimeError("camera is busy")
+        rig.setattr(gs._view_common, "apply_named_view", move_then_fail)
+        result = gs.handler(view="top")
+        assert result["isError"] is True and "Failed to set view 'top'" in result["message"]
+        assert vp.camera is original                              # put back on the failure exit
+
+    def test_a_camera_restore_the_viewport_refuses_is_named_on_the_shot(self, rig):
+        vp = self._Viewport(refuse_assign=True)
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        result = gs.handler(view="top")
+        assert result["isError"] is False                         # the picture WAS taken
+        text = result["content"][0]["text"]
+        assert "could NOT be put back" in text and "viewport busy" in text
+        assert "view_set(orient)" in text
+
+    def test_a_clean_restore_says_nothing_extra(self, rig):
+        vp = self._Viewport()
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        result = gs.handler(view="top")
+        assert [c["type"] for c in result["content"]] == ["image"]
+
+    def test_a_zoom_the_camera_refuses_is_disclosed_not_silently_dropped(self, rig):
+        # The caller asked for zoom=0.5; a swallowed failure returns the FITTED frame as if the
+        # zoom had applied, and the image is read as the requested framing.
+        vp = self._Viewport(zoom_raises=True)
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        result = gs.handler(view="top", zoom=0.5)
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "zoom=0.5 could NOT be applied" in text and "extents locked" in text
+
+
 class TestFilePathWrite:
     """'file_path' writes the captured PNG to local disk - the raster file drawing_insert_image
     needs. The inline image is returned either way; a file that does not land is a failure, since

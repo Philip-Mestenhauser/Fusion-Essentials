@@ -176,13 +176,27 @@ class TestRevoluteDrive:
         out = _payload(jd.handler(joint_name="Pivot", angle_deg=45))
         assert abs(out["value_now"]["angle_deg"] - 45.0) < 1e-4
 
-    def test_over_limit_warns(self, monkeypatch):
+    def test_an_over_limit_command_is_REFUSED_before_assignment(self, monkeypatch):
+        # measured live: Fusion IGNORES a beyond-limit drive (the value stays put; it never
+        # clamps) - so the command is refused before anything is assigned.
         m = RevoluteJointMotion()
         m.rotationLimits = FakeLimits(max_on=True, maxv=math.radians(30))   # max 30 deg
         j = FakeJoint("Pivot", m)
         _install(monkeypatch, j)
-        out = _payload(jd.handler(joint_name="Pivot", angle_deg=60))        # exceeds 30
-        assert "limit_warnings" in out and "maximum" in out["limit_warnings"][0]
+        res = jd.handler(joint_name="Pivot", angle_deg=60)                  # exceeds 30
+        assert res["isError"] is True
+        assert "above the enabled maximum" in res["message"] and "30.0 deg" in res["message"]
+        assert j.jointMotion.rotationValue == 0.0                           # nothing was assigned
+
+    def test_a_command_exactly_at_the_bound_is_driven(self, monkeypatch):
+        # measured live: a command exactly AT an enabled bound lands on it - only STRICTLY
+        # beyond is refused.
+        m = RevoluteJointMotion()
+        m.rotationLimits = FakeLimits(max_on=True, maxv=math.radians(30))
+        j = FakeJoint("Pivot", m)
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Pivot", angle_deg=30))
+        assert abs(out["value_now"]["angle_deg"] - 30.0) < 1e-3
 
 
 # ── slider drive: mm -> cm ──────────────────────────────────────────────────
@@ -207,13 +221,17 @@ class TestSliderDrive:
         jd.handler(joint_name="Rail", distance=1, units="in")
         assert abs(j.jointMotion.slideValue - 2.54) < 1e-9      # 1 in -> 2.54 cm
 
-    def test_below_min_warns(self, monkeypatch):
+    def test_a_below_minimum_command_is_REFUSED_before_assignment(self, monkeypatch):
+        # measured live for rotation; the slide path shares the refusal (Fusion ignores an
+        # out-of-range drive - nothing would move).
         m = SliderJointMotion()
         m.slideLimits = FakeLimits(min_on=True, minv=0.0)        # min 0 cm
         j = FakeJoint("Rail", m)
         _install(monkeypatch, j)
-        out = _payload(jd.handler(joint_name="Rail", distance=-20, units="mm"))   # -2 cm < 0
-        assert "limit_warnings" in out and "minimum" in out["limit_warnings"][0]
+        res = jd.handler(joint_name="Rail", distance=-20, units="mm")      # -2 cm < 0
+        assert res["isError"] is True
+        assert "below the enabled minimum" in res["message"] and "mm" in res["message"]
+        assert j.jointMotion.slideValue == 0.0                   # nothing was assigned
 
 
 # ── cylindrical drive: both angle + distance ────────────────────────────────
@@ -487,34 +505,187 @@ def _frozen_revolute():
 
 
 class TestDriveTookGate:
-    def test_silently_ignored_drive_warns_and_names_the_locked_member(self, monkeypatch):
+    def test_silently_ignored_drive_is_an_ERROR_naming_the_locked_member(self, monkeypatch):
+        # a detected no-take is a FAILED drive: isError, never a success wearing a warning.
         j = FakeJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
         rotor = types.SimpleNamespace(name="Rotor:1", isGroundToParent=True)
         design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: rotor)
-        out = _payload(jd.handler(joint_name="J", angle_deg=25))
-        assert out["drive_took"] is False
-        assert "DID NOT TAKE" in out["note"] and "Rotor:1" in out["note"]
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "DID NOT TAKE" in res["message"] and "Rotor:1" in res["message"]
 
     def test_gate_falls_back_to_pointer_when_no_member_is_locked(self, monkeypatch):
         j = FakeJoint("J", _frozen_revolute())
         design = _install(monkeypatch, j)
         free = types.SimpleNamespace(name="Rotor:1", isGroundToParent=False)
         design.rootComponent.occurrences = types.SimpleNamespace(count=1, item=lambda i: free)
-        out = _payload(jd.handler(joint_name="J", angle_deg=25))
-        assert out["drive_took"] is False
-        assert "ground_to_parent" in out["note"]
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert res["isError"] is True
+        assert "ground_to_parent" in res["message"]
 
-    def test_limit_warning_suppresses_the_gate(self, monkeypatch):
-        # A clamped drive is already explained by limit_warnings; the gate stays quiet there.
+    def test_a_within_limits_no_take_is_still_an_ERROR(self, monkeypatch):
+        # enabled limits must not excuse the verify gate: a command INSIDE the limits that the
+        # chain silently ignores is a no-take like any other.
         j = FakeJoint("J", _frozen_revolute())
-        j.jointMotion.rotationLimits = FakeLimits(max_on=True, maxv=math.radians(10))
+        j.jointMotion.rotationLimits = FakeLimits(min_on=True, minv=math.radians(-50),
+                                                  max_on=True, maxv=math.radians(50))
         _install(monkeypatch, j)
-        out = _payload(jd.handler(joint_name="J", angle_deg=45))
-        assert "limit_warnings" in out and "drive_took" not in out
+        res = jd.handler(joint_name="J", angle_deg=45)                     # inside +/-50
+        assert res["isError"] is True and "DID NOT TAKE" in res["message"]
+
+    def test_a_cylindrical_partial_drive_names_what_landed(self, monkeypatch):
+        # rotation lands, slide is silently ignored: the receipt must say the mechanism MOVED
+        # and which value landed - a blanket frozen-chain diagnosis contradicts the observed
+        # rotation.
+        class CylindricalJointMotion:               # the NAME is what current_joint_type keys on
+            def __init__(self):
+                self.rotationValue = 0.0
+                self.rotationLimits = FakeLimits()
+                self.slideLimits = FakeLimits()
+            @property
+            def slideValue(self):
+                return 0.0
+            @slideValue.setter
+            def slideValue(self, v):
+                pass                                # accepted, lands nowhere
+        j = FakeJoint("Cyl", CylindricalJointMotion())
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Cyl", angle_deg=30, distance=50, units="mm")
+        assert res["isError"] is True
+        assert "PARTIAL" in res["message"] and "angle landed at 30.0 deg" in res["message"]
+        assert "slide 0.0 mm vs commanded 50.0 mm" in res["message"]
+        assert "parent-locked" not in res["message"]
 
     def test_a_drive_that_took_is_not_flagged(self, monkeypatch):
         j = FakeJoint("J", RevoluteJointMotion())
         _install(monkeypatch, j)
         out = _payload(jd.handler(joint_name="J", angle_deg=25))
         assert "drive_took" not in out and abs(out["value_now"]["angle_deg"] - 25.0) < 1e-4
+
+
+# ── equivalent-pose semantics: revolute values accumulate across full turns ──
+# A joint sitting at 720 deg commanded to 0 deg is ALREADY at the commanded physical pose - the
+# stored value just kept its full-turn count. That is an equivalent pose, never a failed drive.
+
+def _frozen_revolute_at(deg):
+    """A revolute whose stored value is pinned at `deg` - the setter lands nowhere, the way the
+    platform behaves when the commanded value equals the current pose modulo 360 (nothing moves,
+    the accumulated value stays)."""
+    class RevoluteJointMotion:                      # the NAME is what current_joint_type keys on
+        def __init__(self):
+            self.rotationLimits = FakeLimits()
+        @property
+        def rotationValue(self):
+            return math.radians(deg)
+        @rotationValue.setter
+        def rotationValue(self, v):
+            pass
+    return RevoluteJointMotion()
+
+
+class TestEquivalentPose:
+    def test_zero_command_at_720_is_equivalent_not_failed(self, monkeypatch):
+        j = FakeJoint("Crank", _frozen_revolute_at(720))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=0))
+        assert out["equivalent_pose"] is True
+        assert "drive_took" not in out                       # NOT a failed drive
+        assert "DID NOT TAKE" not in out["note"]             # no grounded-chain blame either
+        assert "modulo 360" in out["note"]
+        assert out["value_now"]["angle_deg"] == 720.0        # accumulated, reported honestly
+        assert out["value_now"]["angle_deg_normalized"] == 0.0
+
+    def test_full_turn_command_at_zero_is_equivalent(self, monkeypatch):
+        # the wrap-around direction: at 0 deg, commanding 360 deg is the same pose (d == 360).
+        j = FakeJoint("Crank", _frozen_revolute_at(0))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=360))
+        assert out["equivalent_pose"] is True and "drive_took" not in out
+
+    def test_float_drift_just_under_a_full_turn_is_equivalent(self, monkeypatch):
+        # 719.9995 deg commanded to 0: the raw difference is 359.9995, so only the 360-d half of
+        # min(d, 360-d) recognizes the equivalence - a plain d <= tol test would call this pose a
+        # failed drive, on exactly the value float drift produces.
+        j = FakeJoint("Crank", _frozen_revolute_at(719.9995))
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=0))
+        assert out["equivalent_pose"] is True
+        assert "drive_took" not in out and "DID NOT TAKE" not in out["note"]
+
+    def test_genuine_no_take_is_still_flagged(self, monkeypatch):
+        # 25 deg commanded against a chain frozen at 0 is NOT equivalent - the failure diagnosis
+        # must survive the modulo test, and a no-take is an ERROR.
+        j = FakeJoint("Crank", _frozen_revolute_at(0))
+        _install(monkeypatch, j)
+        res = jd.handler(joint_name="Crank", angle_deg=25)
+        assert res["isError"] is True and "DID NOT TAKE" in res["message"]
+
+    def test_accumulated_readback_carries_normalized_twin(self, monkeypatch):
+        # a drive that TOOK to 450 deg reads back both forms: 450 accumulated, 90 normalized.
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=450))
+        assert out["value_now"]["angle_deg"] == 450.0
+        assert out["value_now"]["angle_deg_normalized"] == 90.0
+        assert "equivalent_pose" not in out                  # it moved; nothing to explain
+
+    def test_negative_angle_normalizes_into_0_360(self, monkeypatch):
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=-30))
+        assert out["value_now"]["angle_deg"] == -30.0
+        assert out["value_now"]["angle_deg_normalized"] == 330.0
+
+    def test_in_range_readback_has_no_normalized_twin(self, monkeypatch):
+        # 25 deg IS its own normalized form - the twin would be noise.
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=25))
+        assert "angle_deg_normalized" not in out["value_now"]
+
+    def test_delta_accumulating_drive_reports_a_move_not_an_equivalent_pose(self, monkeypatch):
+        # measured live: commanding 90 at stored 2160 MOVES the mechanism (+90) and reads back
+        # 2250 - the value changed, so the receipt must report a move with accumulation, never
+        # "the pose already matches" (which claims nothing moved).
+        class RevoluteJointMotion:                  # the NAME is what current_joint_type keys on
+            def __init__(self):
+                self.rotationLimits = FakeLimits()
+                self._val = math.radians(2160)
+            @property
+            def rotationValue(self):
+                return self._val
+            @rotationValue.setter
+            def rotationValue(self, v):
+                self._val += (v - self._val) % (2 * math.pi)   # move BY the normalized delta
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=90))
+        assert "equivalent_pose" not in out and "drive_took" not in out
+        assert out["value_now"]["angle_deg"] == 2250.0
+        assert out["value_now"]["angle_deg_normalized"] == 90.0
+        assert "moved the mechanism" in out["note"]
+
+    def test_unreadable_before_value_keeps_the_claim_hedged(self, monkeypatch):
+        # the pre-drive read failing means moved-vs-not is unknowable: the receipt says the pose
+        # is equivalent AND that whether the mechanism moved is not known - never the confident
+        # "nothing needed to move".
+        class RevoluteJointMotion:
+            def __init__(self):
+                self.rotationLimits = FakeLimits()
+                self._reads = 0
+            @property
+            def rotationValue(self):
+                self._reads += 1
+                if self._reads == 1:
+                    raise RuntimeError("transient read failure")
+                return math.radians(720)
+            @rotationValue.setter
+            def rotationValue(self, v):
+                pass
+        j = FakeJoint("Crank", RevoluteJointMotion())
+        _install(monkeypatch, j)
+        out = _payload(jd.handler(joint_name="Crank", angle_deg=0))
+        assert out["equivalent_pose"] is True
+        assert "not known from this receipt" in out["note"]
+        assert "nothing needed to move" not in out["note"]

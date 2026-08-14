@@ -127,17 +127,23 @@ def _show_with_ancestors(occ):
     """Turn on this occurrence's light bulb AND every ancestor occurrence's bulb.
 
     A nested occurrence is only visible if its whole assemblyContext chain is lit; showing the
-    leaf alone does nothing if a parent is hidden. Returns the names of every occurrence turned on.
+    leaf alone does nothing if a parent is hidden. Every bulb is READ BACK: returns
+    (names whose bulb reads on, names whose bulb did NOT) - a swallowed write up the chain leaves
+    the target invisible, which is not a state to report as shown.
     """
-    lit = []
+    lit, stuck = [], []
     cur = occ
     guard = 0
     while cur and guard < 64:
+        nm = safe(lambda cur=cur: cur.name)
         safe(lambda cur=cur: setattr(cur, "isLightBulbOn", True))
-        lit.append(safe(lambda cur=cur: cur.name))
+        if _common.read_flag(lambda cur=cur: cur.isLightBulbOn) is True:
+            lit.append(nm)
+        else:
+            stuck.append(nm or "?")
         cur = safe(lambda cur=cur: cur.assemblyContext)  # parent occurrence; None at root
         guard += 1
-    return lit
+    return lit, stuck
 
 
 # ---------------------------------------------------------------------------
@@ -329,23 +335,48 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     return ok({"action": "orient", "applied": applied, "note": note})
 
 
+def _partial_suffix(done):
+    """The sentence a mid-list failure appends naming what ALREADY changed. A multi-target
+    hide/show/isolate that fails on target 3 has already mutated targets 1-2, and a bare error
+    naming none of them leaves the caller unable to put them back."""
+    names = [n for n in done if n]
+    if not names:
+        return ""
+    return (f" Already changed before this failure: {', '.join(names[:10])}"
+            + (f" (+{len(names) - 10} more)" if len(names) > 10 else "") + ".")
+
+
 def _do_visibility(design, action, target):
     if action == "clear_isolation":
         cleared = 0
+        stuck = []
         occs, truncated = _capped_occurrences(design)
         for o in occs:
             if safe(lambda o=o: o.isIsolated):
+                nm = safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name) or "?"
                 try:
                     o.isIsolated = False
-                    cleared += 1
                 except Exception:
-                    pass
+                    stuck.append(nm)
+                    continue
+                # Read it back: a write the platform swallows would otherwise be counted as cleared.
+                if _common.read_flag(lambda o=o: o.isIsolated) is False:
+                    cleared += 1
+                else:
+                    stuck.append(nm)
         out = {"action": action, "cleared_count": cleared}
+        note = ""
         if truncated:
             out["truncated"] = True
             out["occurrence_cap"] = _MAX_OCC
-            out["note"] = (f"PARTIAL: only the first {_MAX_OCC} occurrences were checked - an "
-                           "isolation past the cap is still set.")
+            note = (f"PARTIAL: only the first {_MAX_OCC} occurrences were checked - an "
+                    "isolation past the cap is still set.")
+        if stuck:
+            out["stuck"] = stuck[:20]
+            note += (f" WARNING: {len(stuck)} occurrence(s) still read isIsolated true after the "
+                     "clear - see 'stuck'.")
+        if note:
+            out["note"] = note.strip()
         return ok(out)
     if not target:
         return error(f"Provide 'target' for {action}.")
@@ -370,18 +401,32 @@ def _do_visibility(design, action, target):
     for ent, kind in pairs:
         nm = safe(lambda ent=ent: ent.name)
         if kind == "occurrence":
+            # Every occurrence write is READ BACK, like the body branch below: the platform accepts
+            # a bulb/isolation assignment and can leave the state where it was.
             try:
                 if action == "isolate":
                     ent.isIsolated = True
+                    got = _common.read_flag(lambda ent=ent: ent.isIsolated)
+                    if got is not True:
+                        return error(f"Set isolate on '{nm}' but isIsolated reads back {got} - the "
+                                     "change did not take." + _partial_suffix(affected))
                 elif action == "show":
                     # An occurrence stays hidden if any ANCESTOR occurrence's bulb is off - so turning
                     # on a nested child alone does nothing visible. Light up the whole ancestor chain.
-                    lit = _show_with_ancestors(ent)
+                    lit, stuck = _show_with_ancestors(ent)
+                    if stuck:
+                        return error(f"Failed to show '{nm}': the light bulb does not read back on "
+                                     f"for {', '.join(stuck[:5])}, so it stays hidden."
+                                     + _partial_suffix(affected))
                     ancestors_lit.extend(a for a in lit if a != nm)
                 elif action == "hide":
                     ent.isLightBulbOn = False
+                    got = _common.read_flag(lambda ent=ent: ent.isLightBulbOn)
+                    if got is not False:
+                        return error(f"Set hide on '{nm}' but isLightBulbOn reads back {got} - the "
+                                     "change did not take." + _partial_suffix(affected))
             except Exception as e:
-                return error(f"Failed to {action} '{nm}': {e}")
+                return error(f"Failed to {action} '{nm}': {e}" + _partial_suffix(affected))
         else:
             # A BODY's browser bulb. isLightBulbOn is the body's OWN bulb; isVisible is the effective
             # state (ancestor bulbs roll up into it) - gate the claim on the bulb read-back, report both.
@@ -389,17 +434,22 @@ def _do_visibility(design, action, target):
             try:
                 ent.isLightBulbOn = want
             except Exception as e:
-                return error(f"Failed to {action} body '{nm}': {e}")
+                return error(f"Failed to {action} body '{nm}': {e}" + _partial_suffix(affected))
             if want:
                 # A shown body stays invisible while an ancestor occurrence is dark - light the chain,
                 # the same teaching 'show' applies to a nested occurrence.
                 occ = safe(lambda ent=ent: ent.assemblyContext)
                 if occ is not None:
-                    ancestors_lit.extend(a for a in _show_with_ancestors(occ))
+                    lit, stuck = _show_with_ancestors(occ)
+                    if stuck:
+                        return error(f"Set show on body '{nm}' but the ancestor bulb does not read "
+                                     f"back on for {', '.join(stuck[:5])}, so the body stays "
+                                     "hidden." + _partial_suffix(affected))
+                    ancestors_lit.extend(lit)
             got = safe(lambda ent=ent: ent.isLightBulbOn)
             if got is not want:
                 return error(f"Set {action} on body '{nm}' but isLightBulbOn reads back {got} - "
-                             "the change did not take.")
+                             "the change did not take." + _partial_suffix(affected))
             body_states.append({"body": nm, "light_bulb_on": bool(got),
                                 "visible": bool(safe(lambda ent=ent: ent.isVisible, want))})
         affected.append(nm)
@@ -511,6 +561,7 @@ def _do_restore(design):
         if fp is not None:
             by_path[fp] = o
     # clear any current isolation
+    failed = []                  # every write whose read-back did NOT confirm the snapshot value
     for o in by_path.values():
         if safe(lambda o=o: o.isIsolated):
             safe(lambda o=o: setattr(o, "isIsolated", False))
@@ -519,10 +570,18 @@ def _do_restore(design):
         if not o:
             missing += 1
             continue
+        # Read every bulb/isolation back: counting ATTEMPTS as restored reports a state that was
+        # never reinstated, and the snapshot below is popped on that count.
         safe(lambda o=o, bulb=bulb: setattr(o, "isLightBulbOn", bulb))
+        ok_bulb = _common.read_flag(lambda o=o: o.isLightBulbOn) is bool(bulb)
+        ok_iso = True
         if isolated:
             safe(lambda o=o: setattr(o, "isIsolated", True))
-        restored_occ += 1
+            ok_iso = _common.read_flag(lambda o=o: o.isIsolated) is True
+        if ok_bulb and ok_iso:
+            restored_occ += 1
+        else:
+            failed.append(fp)
     # restore the display-folder bulbs a 'display' toggle may have moved (token-keyed; a bulb whose
     # snapshot read was None is left alone - unreadable then proves nothing about the wanted state)
     folders = snap.get("folders") or {}
@@ -532,16 +591,34 @@ def _do_restore(design):
             if not saved:
                 continue
             for attr, val in saved.items():
-                if val is not None:
-                    safe(lambda comp=comp, attr=attr, val=val: setattr(comp, attr, val))
-    # restore visual style + camera
+                if val is None:
+                    continue
+                safe(lambda comp=comp, attr=attr, val=val: setattr(comp, attr, val))
+                if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not val:
+                    failed.append(f"{safe(lambda comp=comp: comp.name) or '?'}:{attr}")
+    # restore visual style + camera - both read back / raised-checked, never silently swallowed
     safe(lambda: setattr(vp, "visualStyle", snap["visualStyle"]))
-    safe(lambda: setattr(vp, "camera", snap["camera"]))
+    style_now = safe(lambda: int(vp.visualStyle))
+    style_restored = style_now == snap["visualStyle"]
+    if not style_restored:
+        failed.append("visualStyle")
+    camera_error = None
+    try:
+        vp.camera = snap["camera"]
+    except Exception as e:
+        camera_error = str(e)
+        failed.append("camera")
     vp.refresh()
-    _SNAPSHOTS.pop(key, None)
     truncated = bool(snap.get("truncated")) or walk_truncated
+    # The snapshot is the ONLY copy of the pre-explore state: pop it just when everything it holds
+    # went back, so a partly-failed restore can be retried instead of being unrecoverable.
+    if not failed:
+        _SNAPSHOTS.pop(key, None)
     out = {"action": "restore", "restored_occurrences": restored_occ,
            "missing_occurrences": missing,
+           "visual_style_restored": style_restored,
+           "camera_restored": camera_error is None,
+           "snapshot_kept": bool(failed),
            "note": "Camera, visual style, and visibility restored to the pre-snapshot state."}
     if truncated:
         out["truncated"] = True
@@ -549,6 +626,13 @@ def _do_restore(design):
         out["note"] = (f"PARTIAL: this assembly is past the {_MAX_OCC}-occurrence cap, so "
                        f"{restored_occ} occurrence(s) were restored and the rest keep whatever "
                        "visibility they carry now. Camera and visual style are restored in full.")
+    if failed:
+        out["failed_restores"] = failed[:20]
+        out["failed_restore_count"] = len(failed)
+        out["note"] = (f"PARTIAL RESTORE: {len(failed)} saved state(s) did not read back as "
+                       f"restored ({', '.join(str(f) for f in failed[:5])})"
+                       + (f"; the camera assignment failed: {camera_error}" if camera_error else "")
+                       + ". The snapshot was KEPT so view_set(restore) can be retried.")
     return ok(out)
 
 
@@ -573,13 +657,20 @@ def _do_save_view(design, view_name):
     if nvs is None:
         return error("This design does not expose Named Views.")
     vp = app.activeViewport
-    # overwrite an existing same-named view (itemByName THROWS when absent - guard it)
+    # Overwrite an existing same-named view. itemByName THROWS when absent, so the guard wraps the
+    # LOOKUP only: a deleteMe() that returns false has to be reported, or the add below leaves two
+    # views answering to one name and no later apply_view can tell them apart. (design.namedViews
+    # enumerates only the USER views on this build - a 'Home' saved here is a new user view, not the
+    # built-in - so the refusal covers any declined delete, not one named class.)
     try:
         ex = nvs.itemByName(name)
-        if ex:
-            ex.deleteMe()
     except Exception:
-        pass
+        ex = None
+    if ex:
+        if safe(lambda: ex.deleteMe(), False) is not True:
+            return error(f"A named view '{name}' already exists and deleteMe() refused to remove "
+                         "it - saving now would leave two views sharing that name. Choose another "
+                         "'view_name'.")
     nv = safe(lambda: nvs.add(vp.camera, name))
     if not nv:
         return error(f"Failed to save named view '{name}'.")
@@ -604,7 +695,14 @@ def _do_apply_view(design, view_name):
     if not nv:
         names = [safe(lambda v=v: v.name) for v in _common.iter_collection(nvs)]
         return error(f"No named view '{name}'. Saved views: {', '.join(n for n in names if n) or '(none)'}.")
-    safe(lambda: nv.apply())
+    # NamedView.apply() RETURNS a bool ("true if the operation was successful", per the installed
+    # binding doc) - swallowing it reported a camera move that never happened.
+    try:
+        did = nv.apply()
+    except Exception as e:
+        return error(f"Applying named view '{name}' failed: {e}")
+    if did is False:
+        return error(f"apply() returned false for named view '{name}' - the camera was not moved.")
     app.activeViewport.refresh()
     return ok({"action": "apply_view", "view_name": safe(lambda: nv.name),
         "note": "Camera moved to the named view (camera only - does not change any active "

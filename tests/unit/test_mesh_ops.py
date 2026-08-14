@@ -256,7 +256,9 @@ class FakeDesign:
 
     @property
     def allComponents(self):
-        return self._all
+        # A COUNTED collection (count/item), the live shape every design-wide component walk reads -
+        # a bare list makes `.count` a method and the walk cannot run at all.
+        return _Coll(self._all)
 
     @property
     def allOccurrences(self):
@@ -349,6 +351,41 @@ class TestMeshGet:
         assert out["count"] == 1
         assert out["meshes"][0]["name"] == "SubScan"
         assert out["scope"] == "SubPart"
+
+    def test_named_occurrence_scopes_to_its_component(self):
+        # target=<occurrence name> lists that INSTANCE's component - the vocabulary a tree read emits.
+        _wire_adsk()
+        sub = FakeComp("SubPart", meshes=[MeshBody("SubScan", tri=20)])
+        root = FakeComp("Root", meshes=[MeshBody("RootScan", tri=10)])
+
+        class _Occ:
+            def __init__(self, name, path, comp):
+                self.name, self.fullPathName, self.component = name, path, comp
+
+        root.allOccurrences = [_Occ("SubPart:1", "SubPart:1", sub)]
+        _install(FakeDesign(root, all_comps=[root, sub]))
+        out = _payload(mo.mesh_get_handler(target="SubPart:1"))
+        assert out["count"] == 1 and out["meshes"][0]["name"] == "SubScan"
+
+    def test_an_occurrence_name_two_instances_share_is_refused(self):
+        # Occurrence names are NOT unique (two sub-assemblies each hold a 'Bolt:1'), so listing the
+        # meshes of whichever instance the walk reached first would answer about the wrong part.
+        _wire_adsk()
+        one = FakeComp("BoltA", meshes=[MeshBody("ScanA")])
+        two = FakeComp("BoltB", meshes=[MeshBody("ScanB")])
+        root = FakeComp("Root", meshes=[])
+
+        class _Occ:
+            def __init__(self, name, path, comp):
+                self.name, self.fullPathName, self.component = name, path, comp
+
+        root.allOccurrences = [_Occ("Bolt:1", "SubA:1+Bolt:1", one),
+                               _Occ("Bolt:1", "SubB:1+Bolt:1", two)]
+        _install(FakeDesign(root, all_comps=[root, one, two]))
+        res = mo.mesh_get_handler(target="Bolt:1")
+        assert res["isError"] is True
+        assert "2 occurrences" in res["message"]
+        assert "SubA:1+Bolt:1" in res["message"] and "SubB:1+Bolt:1" in res["message"]
 
     def test_unknown_component_name_errors(self):
         _wire_adsk()

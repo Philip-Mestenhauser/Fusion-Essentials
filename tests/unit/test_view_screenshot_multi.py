@@ -257,6 +257,27 @@ class TestCameraRestore:
             cv.handler(views=["front"])
         assert rig.vp.camera_assignments and rig.vp.camera_assignments[-1] is rig.vp._cam
 
+    def test_a_camera_restore_the_viewport_refuses_is_named_on_the_summary(self, rig,
+                                                                           monkeypatch):
+        # write="read": a camera this tool cannot put back leaves the viewport moved BY A READ.
+        # Swallowing that in the finally reported a clean multi-shot over a changed document.
+        # The per-view orients still land; only putting the ORIGINAL camera back is refused, which
+        # is the state that leaves the viewport moved after the call returns.
+        def refuse_the_restore(self, value):
+            if value is self._cam:
+                raise RuntimeError("viewport busy")
+            self.camera_assignments.append(value)
+        monkeypatch.setattr(type(rig.vp), "camera",
+                            property(lambda s: s._cam, refuse_the_restore))
+        result = cv.handler(views=["front", "top"])
+        assert result["isError"] is False                 # the images were still captured
+        summary = _texts(result)[0]
+        assert "could NOT be put back" in summary and "viewport busy" in summary
+
+    def test_a_clean_camera_restore_adds_nothing_to_the_summary(self, rig):
+        result = cv.handler(views=["front"])
+        assert "could NOT be put back" not in _texts(result)[0]
+
 
 @pytest.fixture
 def rig_real_orient(monkeypatch):

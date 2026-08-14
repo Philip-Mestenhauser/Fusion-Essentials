@@ -88,13 +88,98 @@ def _payload(result):
 
 
 def _simple_world():
-    """One setup, three ops; op2 has no toolpath."""
+    """One setup, three ops; op2 has no toolpath. The setup is already ACTIVE, so the display-scope
+    activation is a no-op and the payloads carry no setup_activated key."""
     op1 = FakeOp("Rough Top", shown=False)
     op2 = FakeOp("Drill", has_toolpath=False, shown=False)
     op3 = FakeOp("Finish", shown=True)
-    setup = FakeSetup("Op1", [op1, op2, op3])
+    setup = FakeSetup("Op1", [op1, op2, op3], is_active=True)
     _install([setup])
     return op1, op2, op3
+
+
+class _StuckOnOp(FakeOp):
+    """An operation whose bulb is STUCK ON - the setter lands nowhere, the getter always reads
+    True. The shape a hide must report instead of claiming the toolpath is hidden."""
+    @property
+    def isLightBulbOn(self):
+        return True
+
+    @isLightBulbOn.setter
+    def isLightBulbOn(self, v):
+        pass
+
+
+class _StuckOffOp(FakeOp):
+    """The mirror: stuck OFF - a show that reads back hidden must error, not claim shown."""
+    @property
+    def isLightBulbOn(self):
+        return False
+
+    @isLightBulbOn.setter
+    def isLightBulbOn(self, v):
+        pass
+
+
+class TestBulbReadBack:
+    def test_hide_of_a_stuck_bulb_is_an_error(self):
+        stuck = _StuckOnOp("Stuck")
+        _install([FakeSetup("S1", [stuck], is_active=True)])
+        res = st.handler(action="hide", operation="Stuck")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_show_of_a_stuck_off_bulb_is_an_error(self):
+        stuck = _StuckOffOp("Stuck")
+        _install([FakeSetup("S1", [stuck], is_active=True)])
+        res = st.handler(action="show", operation="Stuck")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_hide_all_counts_and_notes_stuck_bulbs(self):
+        good = FakeOp("Good", shown=True)
+        stuck = _StuckOnOp("Stuck")
+        _install([FakeSetup("S1", [good, stuck], is_active=True)])
+        out = _payload(st.handler(action="hide_all"))
+        assert out["hidden_count"] == 1 and out["toggle_failures"] == 1
+        assert "isLightBulbOn" in out["note"]
+
+    def test_show_folder_names_the_op_whose_bulb_did_not_take(self):
+        good = FakeOp("Good", shown=False)
+        stuck = _StuckOffOp("Stuck")
+        _install([FakeSetup("S1", [good, stuck], is_active=True)])
+        out = _payload(st.handler(action="show_folder", folder="S1"))
+        assert out["shown"] == ["Good"]
+        assert out["toggle_failures"] == ["Stuck"]
+        assert "still read isLightBulbOn=false" in out["note"]
+
+    def test_show_folder_surfaces_a_setup_activation_warning(self):
+        op = FakeOp("Face1", shown=False)
+        lying = FakeSetup("S1", [op], is_active=False, activate_lies=True)
+        _install([lying])
+        out = _payload(st.handler(action="show_folder", folder="S1"))
+        assert "setup_activated" not in out
+        assert "isActive=false" in out["setup_activation_warning"]
+        assert "isActive=false" in out["note"]
+
+
+class TestActivateOwningSetup:
+    def test_no_setup_name_is_a_silent_noop(self):
+        assert st._activate_owning_setup(object(), "") == (None, None)
+
+    def test_an_unresolvable_setup_warns_naming_it(self, monkeypatch):
+        monkeypatch.setattr(st, "find_setup",
+                            lambda cam, n: (None, [], "no setup named 'Ghost'"))
+        activated, warn = st._activate_owning_setup(object(), "Ghost")
+        assert activated is None and "Ghost" in warn
+
+    def test_an_activate_that_raises_warns_instead_of_crashing(self, monkeypatch):
+        class _S:
+            isActive = False
+            def activate(self):
+                raise RuntimeError("workspace refused the switch")
+        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S(), [], None))
+        activated, warn = st._activate_owning_setup(object(), "SetupA")
+        assert activated is None
+        assert "could not be activated" in warn and "workspace refused" in warn
 
 
 # ── action validation / cam presence ───────────────────────────────────────
@@ -180,6 +265,68 @@ class TestIsolate:
         assert out["operation_count"] == 2
         assert [(r["setup"], r["op"]) for r in out["operations"]] == \
             [("Setup1", "Drill1"), ("Setup2", "Drill1")]
+
+
+class TestSetupDisplayScope:
+    """The Manufacture workspace renders only the ACTIVE setup's models (live-measured). Showing an
+    operation from another setup therefore drew its toolpath beside a DIFFERENT setup's part, and
+    'fit' framed that part with the isolated toolpath off screen."""
+
+    def _two_setups(self, active="SetupB"):
+        a1 = FakeOp("FaceA")
+        b1 = FakeOp("FaceB")
+        sa = FakeSetup("SetupA", [a1], is_active=(active == "SetupA"))
+        sb = FakeSetup("SetupB", [b1], is_active=(active == "SetupB"))
+        _install([sa, sb])
+        return sa, sb, a1, b1
+
+    def test_isolate_activates_the_operations_own_setup(self):
+        sa, sb, _a1, _b1 = self._two_setups(active="SetupB")
+        out = _payload(st.handler(action="isolate", operation="FaceA", fit=True))
+        assert sa.isActive is True and sa._activate_calls == 1
+        assert out["setup_activated"] == "SetupA"
+        assert out["setup"] == "SetupA"
+        assert "only the ACTIVE setup's models" in out["note"]
+
+    def test_an_already_active_setup_is_not_re_activated_or_announced(self):
+        sa, _sb, _a1, _b1 = self._two_setups(active="SetupA")
+        out = _payload(st.handler(action="isolate", operation="FaceA"))
+        assert sa._activate_calls == 0
+        assert "setup_activated" not in out and "setup_activation_warning" not in out
+
+    def test_show_activates_the_setup_too(self):
+        sa, _sb, _a1, _b1 = self._two_setups(active="SetupB")
+        out = _payload(st.handler(action="show", operation="FaceA"))
+        assert sa.isActive is True and out["setup_activated"] == "SetupA"
+
+    def test_an_activation_that_does_not_take_is_disclosed_not_claimed(self):
+        a1 = FakeOp("FaceA")
+        sa = FakeSetup("SetupA", [a1], activate_lies=True)
+        sb = FakeSetup("SetupB", [FakeOp("FaceB")], is_active=True)
+        _install([sa, sb])
+        out = _payload(st.handler(action="isolate", operation="FaceA", fit=True))
+        assert "setup_activated" not in out                 # never claimed
+        assert "still reads isActive=false" in out["setup_activation_warning"]
+        assert "another setup's models" in out["note"]
+
+    def test_show_folder_activates_the_folders_own_setup(self):
+        a1 = FakeOp("A1")
+        sa = FakeSetup("SetupA", [a1])
+        sb = FakeSetup("SetupB", [FakeOp("B1")], is_active=True)
+        _install([sa, sb])
+        out = _payload(st.handler(action="show_folder", folder="SetupA"))
+        assert sa.isActive is True and out["setup_activated"] == "SetupA"
+
+    def test_a_pathless_op_returns_before_touching_the_active_setup(self):
+        # Nothing to display and nothing to frame - the warning path must not change the active
+        # setup as a side effect of a call that shows no toolpath.
+        drill = FakeOp("Drill", has_toolpath=False)
+        sa = FakeSetup("SetupA", [drill])
+        sb = FakeSetup("SetupB", [FakeOp("B1")], is_active=True)
+        _install([sa, sb])
+        out = _payload(st.handler(action="show", operation="Drill"))
+        assert out["has_toolpath"] is False
+        assert sa._activate_calls == 0 and sb.isActive is True
 
 
 # ── show / hide ─────────────────────────────────────────────────────────────

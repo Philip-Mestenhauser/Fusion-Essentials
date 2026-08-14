@@ -398,10 +398,13 @@ class TestSketchCurvesChangedPostcondition:
         reason, evidence = kind.verify({"sketch_name": "Plate"}, {}, before)
         assert reason == "" and evidence == {"curve_count_after": 2}
 
-    def test_a_missing_sketch_leaves_the_verdict_open(self, mod, sketch):
+    def test_a_missing_sketch_leaves_the_verdict_open_but_says_so(self, mod, sketch):
+        # a sketch that cannot be read on one side of the call is not a no-op verdict - the call is
+        # not failed, but the payload carries the marker instead of passing in silence
         kind = load_tool("_assert").SketchCurvesChanged()
         reason, evidence = kind.verify({"sketch_name": "Gone"}, {}, None)
-        assert reason == "" and evidence == {}
+        assert reason == ""
+        assert evidence == {"sketch_curves_confirmed": False}
 
 
 class TestExtendIsJudgedByLength:

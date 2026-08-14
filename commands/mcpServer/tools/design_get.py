@@ -60,6 +60,23 @@ def _slice_health(design):
 _TREE_DEFAULT_DEPTH = 3
 _TREE_MAX_DEPTH = 8
 _TREE_MAX_NODES = 2000
+_TREE_BODY_CAP = 25          # per-node body records when tree_bodies=true
+
+
+def _body_rows(bodies):
+    """Per-body records for one tree node, capped at _TREE_BODY_CAP: name + entityToken handle (the
+    exact identity BodyRef/TargetRef consumers accept - the counterpart of the node's occurrence
+    handle) + solid/visible flags via read_flag (None = unreadable, never a coerced False). Returns
+    (rows, truncated)."""
+    items = list(islice(_common.iter_collection(bodies), _TREE_BODY_CAP + 1))
+    truncated = len(items) > _TREE_BODY_CAP
+    rows = [{
+        "name": safe(lambda b=b: b.name),
+        "handle": safe(lambda b=b: b.entityToken),
+        "is_solid": _common.read_flag(lambda b=b: b.isSolid),
+        "visible": _common.read_flag(lambda b=b: b.isVisible),
+    } for b in items[:_TREE_BODY_CAP]]
+    return rows, truncated
 
 
 def _find_occurrence_by_name(root, want):
@@ -93,7 +110,7 @@ def _find_occurrence_by_name(root, want):
     return None, None
 
 
-def _walk_occurrence(occ, depth, max_depth, counter):
+def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
     counter["n"] += 1
     if counter["n"] >= _TREE_MAX_NODES:
         counter["truncated"] = True
@@ -110,6 +127,12 @@ def _walk_occurrence(occ, depth, max_depth, counter):
         "body_count": safe(lambda: occ.bRepBodies.count, 0),
         "child_count": safe(lambda: occ.childOccurrences.count, 0),
     }
+    if with_bodies and node["body_count"]:
+        rows, truncated = _body_rows(safe(lambda: occ.bRepBodies, None))
+        if rows:
+            node["bodies"] = rows
+            if truncated:
+                node["bodies_truncated"] = True
     if node["is_reference"]:
         try:
             dr = occ.documentReference
@@ -130,7 +153,7 @@ def _walk_occurrence(occ, depth, max_depth, counter):
                 if counter["n"] >= _TREE_MAX_NODES:
                     counter["truncated"] = True
                     break
-                kids.append(_walk_occurrence(child, depth + 1, max_depth, counter))
+                kids.append(_walk_occurrence(child, depth + 1, max_depth, counter, with_bodies))
         except Exception:
             pass
         if kids:
@@ -140,8 +163,10 @@ def _walk_occurrence(occ, depth, max_depth, counter):
     return node
 
 
-def _slice_tree(design, max_depth, component):
-    """The component/occurrence tree, bounded by max_depth + node cap (truncated flag)."""
+def _slice_tree(design, max_depth, component, with_bodies=False):
+    """The component/occurrence tree, bounded by max_depth + node cap (truncated flag). with_bodies
+    adds each node's per-body records (name/handle/solid/visible, capped) - the read that makes a
+    body targetable without replaying old feature receipts."""
     try:
         depth = max(1, min(int(max_depth), _TREE_MAX_DEPTH))
     except Exception:
@@ -156,15 +181,18 @@ def _slice_tree(design, max_depth, component):
             return None, error(amb)
         if not start:
             return None, error(f"Component/occurrence not found: '{component}'.")
+        # Walk FIRST, read the truncated flag AFTER: a dict literal evaluates its values in
+        # order, so reading counter["truncated"] before the walk would pin the pre-walk False.
+        scoped_tree = _walk_occurrence(start, 0, depth, counter, with_bodies)
         return {"root": component, "max_depth": depth, "truncated": counter["truncated"],
-                "tree": _walk_occurrence(start, 0, depth, counter)}, None
+                "tree": scoped_tree}, None
     children = []
     try:
         for occ in root.occurrences:
             if counter["n"] >= _TREE_MAX_NODES:
                 counter["truncated"] = True
                 break
-            children.append(_walk_occurrence(occ, 0, depth, counter))
+            children.append(_walk_occurrence(occ, 0, depth, counter, with_bodies))
     except Exception as e:
         return None, error(f"Could not read root occurrences: {e}")
     out = {"root": safe(lambda: root.name), "max_depth": depth, "node_count": counter["n"],
@@ -172,9 +200,17 @@ def _slice_tree(design, max_depth, component):
     # Bodies that live directly in the ROOT component (not in any occurrence). The occurrence walk above
     # never sees these, so without this an agent reading the tree can't tell they exist - and a root body
     # is NOT a jointable occurrence (promote it to a component to joint it).
-    root_bodies = _root_body_names(root)
-    if root_bodies:
-        out["root_bodies"] = root_bodies
+    if with_bodies:
+        root_rows, root_tr = _body_rows(safe(lambda: root.bRepBodies, None))
+        if root_rows:
+            out["root_bodies"] = root_rows
+            if root_tr:
+                out["root_bodies_truncated"] = True
+    else:
+        root_bodies = _root_body_names(root)
+        if root_bodies:
+            out["root_bodies"] = root_bodies
+    if out.get("root_bodies"):
         out["root_bodies_note"] = ("Bodies directly in the root component (not occurrences). A root body "
                                    "can't be jointed - model_create_component then move it in to joint it.")
     return out, None
@@ -271,7 +307,20 @@ def _model_parameters_by_owner(design):
                "role": safe(lambda p=p: p.role),
                "expression": safe(lambda p=p: p.expression),
                "value": _common.measured(lambda p=p: p.value)}
-        token = keys[0][1] if keys[0][0] == "token" else None
+        # A tokenless owner still needs a DISTINCT identity in the collision guard: two different
+        # tokenless features wearing one name+type must not collapse and answer a row with the
+        # UNION of two features' parameters. id(owner) is NOT that identity (measured live:
+        # .createdBy mints a fresh proxy per read, and two proxies of DIFFERENT owners reused one
+        # address in a single pass). The owner's timeline index is stable per feature; when even
+        # that does not read, a per-PARAMETER sentinel refuses the collision - which may also
+        # drop a multi-parameter tokenless feature's rows, the safe direction (an absent answer,
+        # never two features' parameters merged as one).
+        if keys[0][0] == "token":
+            token = keys[0][1]
+        else:
+            tl_index = safe(lambda: owner.timelineObject.index)
+            # dNN model-parameter names are design-unique, so the sentinel is per-parameter.
+            token = f"tl:{tl_index}" if tl_index is not None else f"anon:{safe(lambda p=p: p.name)}"
         for key in keys:
             entry = index.setdefault(key, {"rows": [], "tokens": set()})
             entry["rows"].append(row)
@@ -287,7 +336,7 @@ def _params_for(index, entity):
         entry = index.get(key)
         if not entry:
             continue
-        if len([t for t in entry["tokens"] if t]) > 1:
+        if len(entry["tokens"]) > 1:
             continue
         rows = entry["rows"]
         return rows[:_PARAMS_PER_ROW], len(rows) > _PARAMS_PER_ROW
@@ -489,7 +538,11 @@ def _fingerprint(design):
     fp = {
         "bodies": body_total,
         "sketches": sketch_total,
-        "components": safe(lambda: root.allOccurrences.count, 0),   # 0 = single-component design
+        # components = distinct component DEFINITIONS beyond the root (0 = single-component
+        # design); occurrences = placed instances. The two differ in any multi-instance assembly,
+        # and labeling the instance count "components" misstates the design's shape.
+        "components": max(0, safe(lambda: design.allComponents.count, 0) - 1),
+        "occurrences": safe(lambda: root.allOccurrences.count, 0),
         # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
         "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
         # userParameters = the ones an agent can drive; modelParameters includes internal ones it can't.
@@ -526,7 +579,7 @@ def _has_cam(design):
 
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
-def handler(include=None, max_depth: int = 3, component: str = "",
+def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: bool = False,
             include_suppressed: bool = True, group: str = "", timeline_params: bool = False,
             library: str = "", name_filter: str = "", max_results: int = 0,
             attribute_group: str = "", attribute_key: str = "") -> dict:
@@ -578,7 +631,7 @@ def handler(include=None, max_depth: int = 3, component: str = "",
     if "mode" in inc:
         out["mode_detail"] = mode_full          # the full capability can{} map
     if "tree" in inc:
-        out["tree"], terr = _slice_tree(design, max_depth, component)
+        out["tree"], terr = _slice_tree(design, max_depth, component, bool(tree_bodies))
         if terr:
             return terr
     if "timeline" in inc:
@@ -615,7 +668,8 @@ def handler(include=None, max_depth: int = 3, component: str = "",
                        "feature list, ['mode'] for the capability map, ['configurations'] for configs, "
                        "['materials'] or ['appearances'] for the assignable catalog, ['attributes'] "
                        "for entity attributes in one group). "
-                       "'max_depth'/'component' scope the tree; 'group'/'include_suppressed' the "
+                       "'max_depth'/'component' scope the tree and 'tree_bodies' adds each node's "
+                       "body records (name/handle/solid/visible); 'group'/'include_suppressed' the "
                        "timeline and 'timeline_params' adds each feature's own parameters (a "
                        "fillet's radius); 'library'/'name_filter'/'max_results' the catalog; "
                        "'attribute_group' (required) / 'attribute_key' the attributes.")
@@ -637,7 +691,9 @@ TOOL_DESCRIPTION = (
     "summary, and timeline_healthy (timeline errors/warnings ONLY - NOT stale references, which appear "
     "as is_out_of_date on tree nodes; the whole-document verdict is workspace_orient.is_healthy). "
     "'include' pulls deeper: 'tree' (full component/occurrence tree; "
-    "'max_depth'/'component' scope it), 'timeline' (the feature list; 'group'/'include_suppressed' "
+    "'max_depth'/'component' scope it, 'tree_bodies' adds each node's body records - name, a handle "
+    "any body-taking tool accepts, solid/visible - and upgrades root_bodies from names to the same "
+    "records), 'timeline' (the feature list; 'group'/'include_suppressed' "
     "scope it, and 'timeline_params' adds each row's own model parameters with their roles - a "
     "fillet's radius, an extrude's distance), 'mode' (full capability map), "
     "'configurations' (the config table), 'materials' / "
@@ -658,6 +714,10 @@ tool = (
             "description": "Tree depth when include=tree (default 3, max 8)."})
     .add_input_property("component", {"type": "string",
             "description": "Start the tree at this component/occurrence name (include=tree)."})
+    .add_input_property("tree_bodies", {"type": "boolean",
+            "description": "Add each tree node's body records (name, handle, is_solid, visible; "
+                           "capped per node) when include=tree; root_bodies also upgrades from "
+                           "bare names to the same records. Default false."})
     .add_input_property("include_suppressed", {"type": "boolean",
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",

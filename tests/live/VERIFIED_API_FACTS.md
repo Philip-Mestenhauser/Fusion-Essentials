@@ -6,7 +6,7 @@ leaning on it) does not match the platform: update the fake and its consumers, t
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2705.0.87 | verified 2026-08-13
+Stamp: Fusion 2705.0.108 | verified 2026-08-14
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|
@@ -14,6 +14,7 @@ Stamp: Fusion 2705.0.87 | verified 2026-08-13
 | PASS | units-cm | Lengths cross the API in cm - a 10 mm sketch square extruded 1.0 unit has bbox extent 1.0 | tests/conftest.py bbox fixture; every test asserting a scale() factor |
 | PASS | point3d-vectorto | Point3D.vectorTo(other) == other - self | tests/conftest.py FakePoint.vectorTo |
 | PASS | vector3d-normalize-zero | Vector3D.normalize() returns True even for a (near-)zero vector and leaves the components untouched - the return value is not a zero guard | tests/conftest.py FakeVector3D.normalize; commands/mcpServer/tools/sys_selection.py _unit |
+| PASS | joint-limit-out-of-range-ignored | Assigning a rotationValue/slideValue STRICTLY beyond an enabled joint limit is IGNORED - the value stays where it was, Fusion never clamps; assigning exactly AT an enabled bound lands on it | commands/mcpServer/tools/joint_drive.py _limit_refusal (refuse before assigning); test_joint_drive.py refusal tests |
 | PASS | design-cast | Design.cast passes the active design through; a non-design casts to None | tests/conftest.py install() cast_design + install_mock_adsk Design.cast |
 | PASS | cam-operation-cast | adsk.cam.Operation.cast(non-operation) returns None (tools filter on it) | tests/conftest.py install_mock_adsk cam.Operation.cast |
 | PASS | find-entity-token-shape | findEntityByToken returns a SWIG BaseVector - list-like (len/index/iterate) but NOT a Python list | tests/conftest.py MakeDesign.findEntityByToken |

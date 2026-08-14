@@ -93,9 +93,12 @@ def _current_value_text(jm, jtype):
     return ", ".join(parts) or "unknown"
 
 
-def _limit_violation(limits, value, what):
-    """If 'limits' has an enabled min/max that 'value' exceeds, return a warning string, else None.
-    value/limits are in the API's native unit (rad for angle, cm for slide)."""
+def _limit_refusal(limits, value, fmt):
+    """The refusal when 'value' (native units: rad / cm) lies STRICTLY beyond an enabled limit.
+    Fusion IGNORES an out-of-range drive rather than clamping (measured live on 2705.0.108: at
+    5 deg with limits +/-10 deg, commanding 45 leaves the value at 5; commanding a bound exactly
+    lands on it), so the only honest receipt is a refusal BEFORE the assignment. fmt renders a
+    native value in display units for the message. None when the value is in range."""
     if limits is None:
         return None
     lo_on = bool(safe(lambda: limits.isMinimumValueEnabled, False))
@@ -103,9 +106,9 @@ def _limit_violation(limits, value, what):
     lo = safe(lambda: limits.minimumValue)
     hi = safe(lambda: limits.maximumValue)
     if lo_on and lo is not None and value < lo - 1e-9:
-        return f"{what} {round(value, 4)} is below the joint's minimum limit {round(lo, 4)}"
+        return f"{fmt(value)} is below the enabled minimum {fmt(lo)}"
     if hi_on and hi is not None and value > hi + 1e-9:
-        return f"{what} {round(value, 4)} is above the joint's maximum limit {round(hi, 4)}"
+        return f"{fmt(value)} is above the enabled maximum {fmt(hi)}"
     return None
 
 
@@ -163,20 +166,40 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             f"Rebuilding '{partner}' (delete+recreate, a new token) clears this refusal.")
 
     applied = {}
-    warnings = []
+    # Out-of-range commands are REFUSED before ANY assignment: Fusion IGNORES a beyond-limit
+    # drive (see _limit_refusal's measured fact) - assigning would produce a receipt about a
+    # value that never changed - and checking BOTH values first means a cylindrical drive can
+    # never half-apply on a limit refusal.
+    refusals = []
+    rad = cm = None
+    if angle_deg is not None:
+        rad = math.radians(float(angle_deg))
+        r = _limit_refusal(safe(lambda: jm.rotationLimits), rad,
+                           lambda v: f"{round(math.degrees(v), 4)} deg")
+        if r:
+            refusals.append("angle " + r)
+    if distance is not None:
+        cm = float(distance) * k
+        r = _limit_refusal(safe(lambda: jm.slideLimits), cm,
+                           lambda v: f"{round(v * 10.0, 4)} mm")
+        if r:
+            refusals.append("slide " + r)
+    if refusals:
+        return error(
+            f"Refused: the command lies beyond the enabled joint limits of '{resolved_name}' - "
+            + "; ".join(refusals) + ". Fusion IGNORES an out-of-range drive (the value stays "
+            "where it was), so nothing would move. Command a value inside the limits (a command "
+            "exactly AT a bound lands on it), or widen them with joint_edit.")
+    # The PRE-drive angle, for the equivalence gate below: a pose-equivalent command can either
+    # no-op (value unchanged) or move the mechanism BY the delta while landing pose-equivalent
+    # (measured live: commanding 90 at stored 2160 moved the mechanism and read back 2250) - only
+    # the before-value tells the two receipts apart.
+    rv_before = safe(lambda: jm.rotationValue) if jtype in _DRIVES_ANGLE else None
     try:
-        if angle_deg is not None:
-            rad = math.radians(float(angle_deg))
-            w = _limit_violation(safe(lambda: jm.rotationLimits), rad, "angle")
-            if w:
-                warnings.append(w)
+        if rad is not None:
             jm.rotationValue = rad
             applied["angle_deg"] = round(float(angle_deg), 6)
-        if distance is not None:
-            cm = float(distance) * k
-            w = _limit_violation(safe(lambda: jm.slideLimits), cm, "slide")
-            if w:
-                warnings.append(w)
+        if cm is not None:
             jm.slideValue = cm
             applied["distance"] = round(float(distance), 6)
     except Exception as e:
@@ -195,7 +218,15 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     if jtype in _DRIVES_ANGLE:
         rv = safe(lambda: jm.rotationValue)
         if rv is not None:
-            read_back["angle_deg"] = round(math.degrees(rv), 4)
+            acc = round(math.degrees(rv), 4)
+            read_back["angle_deg"] = acc
+            # A revolute's value ACCUMULATES across full turns rather than normalizing (measured
+            # live: a crank whose stored value read 2160 deg, commanded 90, moved and read back
+            # 2250), so a multi-turn history leaves an angle no view of the mechanism can
+            # distinguish from its mod-360 form. Publish both.
+            norm = round(acc % 360.0, 4)
+            if abs(acc - norm) > 1e-9:
+                read_back["angle_deg_normalized"] = norm
     if jtype in _DRIVES_SLIDE:
         sv = safe(lambda: jm.slideValue)
         if sv is not None:
@@ -217,37 +248,84 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                 "the frame Z - so it cannot persist a drive). Pair with assembly_get to confirm the "
                 "kinematics and view_screenshot to see it.",
     }
-    if warnings:
-        result["limit_warnings"] = warnings
-        result["note"] += (" NOTE: the commanded value exceeds an ENABLED joint limit - Fusion may have "
-                           "clamped it (see value_now vs applied).")
-    # value_now vs applied gate: a drive the mechanism silently ignored reads back its pre-drive
+    # value_now verify gate: a drive the mechanism silently ignored reads back its pre-drive
     # value (measured: driven:true with value_now 0.0 vs applied 25 while an auto-grounded first
     # component froze the whole chain - isFirstComponentGroundToParent sets that lock without any
-    # user action). A limit warning already explains a clamp, so this fires only unexplained
-    # mismatches.
-    if not warnings:
-        mismatched = []
-        if ("angle_deg" in applied and "angle_deg" in read_back
-                and abs(read_back["angle_deg"] - applied["angle_deg"]) > 1e-3):
-            mismatched.append(f"angle {read_back['angle_deg']} deg vs applied {applied['angle_deg']}")
-        if ("distance" in applied and "distance_mm" in read_back
-                and abs(read_back["distance_mm"] - float(applied["distance"]) * k * 10.0) > 1e-3):
-            mismatched.append(f"slide {read_back['distance_mm']} mm vs applied "
-                              f"{round(float(applied['distance']) * k * 10.0, 4)} mm")
-        if mismatched:
-            result["drive_took"] = False
-            locked = [safe(lambda o=o: o.name) for o in
-                      _common.iter_collection(safe(lambda: design.rootComponent.occurrences))
-                      if safe(lambda o=o: o.isGroundToParent)]
-            locked = [n for n in locked if n]
-            result["note"] += (
-                " WARNING: the drive DID NOT TAKE - value_now reads " + "; ".join(mismatched) +
-                " with no enabled limit to explain it. A parent-locked member freezes the whole "
-                "chain" + (f": ground_to_parent is SET on {', '.join(locked)} - release it with "
-                           "assembly_ground(ground_to_parent=false) and re-drive."
-                           if locked else " - check per-occurrence ground_to_parent with "
-                           "assembly_get."))
+    # user action). Limits cannot explain a mismatch here: an out-of-range command was already
+    # refused before the assignment.
+    mismatched = []
+    angle_landed = slide_landed = None      # per-value outcome, for the PARTIAL diagnosis below
+    if "angle_deg" in applied and "angle_deg" in read_back:
+        angle_landed = True
+        if abs(read_back["angle_deg"] - applied["angle_deg"]) > 1e-3:
+            # 720 and 0 are the SAME physical pose: a command the read-back matches modulo 360 is
+            # an equivalent pose, not a failed drive - the accumulated stored value just kept its
+            # full-turn count. Only a mismatch that survives the mod-360 test is a genuine no-take.
+            d = abs(read_back["angle_deg"] - applied["angle_deg"]) % 360.0
+            if min(d, 360.0 - d) <= 1e-3:
+                before_deg = round(math.degrees(rv_before), 4) if rv_before is not None else None
+                acc_txt = (f"value_now reads {read_back['angle_deg']} deg accumulated"
+                           + (f" (= {read_back['angle_deg_normalized']} deg normalized)"
+                              if "angle_deg_normalized" in read_back else ""))
+                if before_deg is not None and abs(read_back["angle_deg"] - before_deg) > 1e-3:
+                    # The value CHANGED: the drive moved the mechanism and landed pose-equivalent
+                    # to the command (the stored value accumulated the delta). A real move, not a
+                    # no-op - say so instead of claiming the pose was already there.
+                    result["note"] += (
+                        f" NOTE: the drive moved the mechanism to the commanded pose; {acc_txt} - "
+                        "revolute values accumulate full turns rather than storing the bare "
+                        "command.")
+                elif before_deg is None:
+                    result["equivalent_pose"] = True
+                    result["note"] += (
+                        f" NOTE: {acc_txt}, pose-equivalent to the command (modulo 360 deg); the "
+                        "pre-drive value was unreadable, so whether the mechanism moved is not "
+                        "known from this receipt.")
+                else:
+                    result["equivalent_pose"] = True
+                    result["note"] += (
+                        f" NOTE: the commanded angle equals the current pose modulo 360 deg - "
+                        f"{acc_txt}, so the physical pose already matches the command and nothing "
+                        "needed to move; revolute values keep their full-turn count.")
+            else:
+                angle_landed = False
+                mismatched.append(
+                    f"angle {read_back['angle_deg']} deg vs commanded {applied['angle_deg']}")
+    if "distance" in applied and "distance_mm" in read_back:
+        slide_landed = True
+        exp_mm = round(float(applied["distance"]) * k * 10.0, 4)
+        if abs(read_back["distance_mm"] - exp_mm) > 1e-3:
+            slide_landed = False
+            mismatched.append(
+                f"slide {read_back['distance_mm']} mm vs commanded {exp_mm} mm")
+    if mismatched:
+        # A detected no-take is a FAILED drive - isError, never ok (a success whose effect
+        # did not land is the cardinal sin). The guard still registers the attempt: the
+        # assignment was accepted, so fail toward refusal for the xref pair crash guard.
+        _driven_this_session.add(_reg_key(doc_id, joint))
+        landed_bits = []
+        if angle_landed:
+            landed_bits.append(f"angle landed at {read_back['angle_deg']} deg")
+        if slide_landed:
+            landed_bits.append(f"slide landed at {read_back['distance_mm']} mm")
+        if landed_bits:
+            # One value landed: the mechanism HAS moved - a partial drive, not a frozen chain,
+            # so no lock diagnosis (the observed facts contradict it).
+            return error(
+                f"PARTIAL drive of '{resolved_name}': " + ", ".join(landed_bits) + "; "
+                + "; ".join(mismatched) + " DID NOT TAKE. The mechanism has moved (and any "
+                "motion-linked partner with it) - read the pose back with assembly_get.")
+        locked = [safe(lambda o=o: o.name) for o in
+                  _common.iter_collection(safe(lambda: design.rootComponent.occurrences))
+                  if safe(lambda o=o: o.isGroundToParent)]
+        locked = [n for n in locked if n]
+        return error(
+            f"Drive of '{resolved_name}' DID NOT TAKE - value_now reads "
+            + "; ".join(mismatched) +
+            ". A parent-locked member freezes the whole chain"
+            + (f": ground_to_parent is SET on {', '.join(locked)} - release it with "
+               "assembly_ground(ground_to_parent=false) and re-drive."
+               if locked else " - check per-occurrence ground_to_parent with assembly_get."))
     if partner:
         result["motion_link_partner"] = partner
         result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' - the link "
@@ -262,20 +340,20 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 
 
 TOOL_DESCRIPTION = (
-    "Drive a joint to a value - the API's Drive Joints command. Set a revolute, slider, or cylindrical "
-    "joint to a commanded angle and/or distance and the mechanism moves along that joint's DOF. "
-    "'joint_name' is the joint (from assembly_get). 'angle_deg' = rotation in degrees (revolute or "
-    "cylindrical); 'distance' = slide in 'units' (slider or cylindrical); give one, or both for a "
-    "cylindrical. Respects the joint's enabled limits (warns and reports the clamped value). Only "
-    "revolute, slider, and cylindrical are drivable (rigid has no value; pose a ball joint with "
-    "assembly_move). A drive is TRANSIENT: it arms a pending snapshot; a recompute resets it unless "
-    "captured. Call assembly_capture_position (action='capture') to write the pose into the timeline - "
-    "it then survives a recompute. Re-driving after a capture arms a NEW pending snapshot; capture "
-    "again to persist it. The 'offset' param moves a DIFFERENT axis (frame Z) and cannot persist a "
-    "drive. Motion-linked pairs: drive one member and read the partner back (the link moves it). In an "
-    "xref/referenced assembly, driving the other member is refused for the session - it has killed the "
-    "Fusion process; a plain in-document assembly allows it with a warning. Rebuilding the partner "
-    "clears the refusal."
+    "Drive a joint to a value - the API's Drive Joints command - moving the mechanism along that "
+    "joint's DOF. Give 'angle_deg' (revolute/cylindrical) and/or 'distance' in 'units' "
+    "(slider/cylindrical); rigid has no value, and a ball joint is posed with assembly_move. "
+    "An out-of-range command is REFUSED before anything moves - Fusion IGNORES a beyond-limit "
+    "drive rather than clamping (a command exactly AT a bound lands). A revolute's value "
+    "ACCUMULATES across full turns: value_now adds angle_deg_normalized ([0,360)) when it differs, "
+    "and a command equal to the current angle modulo 360 reports equivalent_pose=true - the same "
+    "physical pose, not a failed drive. A drive is TRANSIENT: it arms a pending snapshot; a "
+    "recompute resets it unless captured - assembly_capture_position (action='capture') writes the "
+    "pose into the timeline. Re-driving after a capture arms a NEW pending snapshot. The 'offset' "
+    "param moves a DIFFERENT axis (frame Z) and cannot persist a drive. Motion-linked pairs: drive "
+    "one member and read the partner back (the link moves it). In an xref/referenced assembly, "
+    "driving the other member is refused for the session - it has killed the Fusion process; a "
+    "plain in-document assembly allows it with a warning. Rebuilding the partner clears the refusal."
 )
 
 tool = (

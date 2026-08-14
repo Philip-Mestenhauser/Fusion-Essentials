@@ -33,7 +33,7 @@ _TOOL_WEIGHTS = {
     "assembly_edit_contacts": 2233,   # over P40: nine actions over one object - the set lifecycle (create with the >=2-distinct rule, set_members, rename, suppress, delete) plus the two design-level analysis flags whose truth table decides whether any set acts at all, and the enable-first fact the platform enforces by raising; peer: assembly_edit_relations
     "assembly_get": 2707,   # + the all_occurrences slice with its cap, and the joint rows' value_now/frame teaching (the frame's z_axis is the direction a joint offset drives along - the read that retires per-build probe cycles)
     "assembly_ground": 1166,
-    "assembly_inspect_interference": 893,
+    "assembly_inspect_interference": 1097,   # + candidate instance paths on multi-instance pairs, capped with a truncated flag: analyzeInterference returns NATIVE bodies (assemblyContext None), so the exact instance is unreadable - naming the suspect paths is the honest form of "which rail hit which rod"
     "assembly_move": 2434,
     "assembly_rigid_group": 816,
     "cam_activate_setup": 614,
@@ -57,7 +57,7 @@ _TOOL_WEIGHTS = {
     "cam_save_template": 1362,
     "cam_select_geometry": 3688,   # + the sketch and pocket_recognition selection kinds, per-kind input routing with refusals, loop/side/pocket-filter knobs read back, and the outputGeometry rung-3 read
     "cam_set_nc_comment": 1235,
-    "cam_show_toolpath": 1328,
+    "cam_show_toolpath": 1552,   # + the setup-activation disclosure: show/isolate/show_folder activate the operation's own setup (Manufacture renders only the active setup's models) - state a later CAM call consumes, so the caller must be told the tool changes it
     "data_create_folder": 1108,
     "data_create_project": 694,
     "data_delete_file": 1201,
@@ -77,7 +77,7 @@ _TOOL_WEIGHTS = {
     "design_delete_occurrence": 1176,   # the target is named as a handle (the exact identity) with the path/name as the convenience form, on both surfaces
     "design_export": 4155,   # 3MF/OBJ/USD/f3d/SMT formats, STL binary+units, DXF options, invisible flags
     "design_set_name": 1324,   # under the fleet P40 - add and go
-    "design_get": 2701,   # + the attributes slice (group/key scope, required-group refusal) and timeline_params - a feature's own model parameters with their roles, the only readable route to a fillet's radius; in-family peers: cam_get, assembly_get
+    "design_get": 3101,   # + the attributes slice (group/key scope, required-group refusal), timeline_params - a feature's own model parameters with their roles, the only readable route to a fillet's radius - and tree_bodies: per-node body records (name/handle/solid/visible), the read that makes a body targetable without replaying old feature receipts; in-family peers: cam_get, assembly_get
     "design_recompute": 571,
     "design_remove_feature": 1302,   # under the fleet P40 at pin time - add and go
     "design_set_mode": 969,
@@ -108,7 +108,7 @@ _TOOL_WEIGHTS = {
     "joint_create": 3480,
     "joint_create_as_built": 2095,  # non-rigid motion: geometry anchor + joint_type/axis/slide_axis inputs, per-DOF pose pointers; the name input (applied post-create, read back) + the no-offset/angle-parameter fact routing parametric drives to joint_create
     "joint_create_origin": 3972,   # +462: the 'component' input (which component's collection receives the origin - the only route to a joint origin that can serve as a SUB-component's side of a joint) and the space fact it brings: those offsets run from that component's origin, so world x,y,z is refused unless it sits at the world origin unrotated - neither is recoverable from the result
-    "joint_drive": 2067,
+    "joint_drive": 2081,   # accumulated/normalized angle + equivalent_pose semantics, and the measured limit contract (Fusion IGNORES a beyond-limit drive - never clamps - so out-of-range commands are refused upfront); the schema-restating input walkthrough stays out of the description
     "joint_edit": 3356,
     "joint_motion_link": 1032,
     "mesh_combine": 1642,

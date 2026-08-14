@@ -296,6 +296,23 @@ def _resolve_err(msg):
 # ── apply to a body / occurrence / component ───────────────────────────────────
 
 class TestApply:
+    def test_a_body_write_discloses_that_it_shows_on_every_instance(self):
+        # LIVE-CONFIRMED: a body-level write lands on the component's NATIVE body, so the color
+        # shows on every instance. A caller reading "applied" as per-instance is reading it wrong,
+        # so the note has to name the fan-out and point at the occurrence route.
+        body = FakeBody("Body1")
+        _install(FakeRoot(bodies=[body]))
+        out = _payload(ap.handler(target="Body1", color="#1E8E3E"))
+        assert "EVERY instance" in out["note"] and "OCCURRENCE" in out["note"]
+
+    def test_an_occurrence_write_does_not_carry_the_native_body_disclosure(self):
+        # the occurrence route IS the per-instance one - it must not be told it fans out
+        occ = FakeOcc("Part:1", bodies=[FakeBody("Body1")])
+        _install(FakeRoot(occurrences=[occ]))
+        _resolve_to(occ, "occurrence")
+        out = _payload(ap.handler(target="Part:1", color="#1E8E3E"))
+        assert "EVERY instance" not in out["note"]
+
     def test_color_a_body_by_name(self):
         body = FakeBody("Body1")
         root = FakeRoot(bodies=[body])
@@ -521,6 +538,19 @@ class TestGuards:
         _resolve_to(comp, "component")
         res = ap.handler(target="Empty", color="#000000")
         assert res["isError"] is True and "no bodies" in res["message"].lower()
+
+    def test_a_refused_target_mints_NO_appearance(self):
+        # The appearance is a persistent design asset. Creating it before the target is validated
+        # leaves an orphan behind on every refusal (measured live: an empty root took the design's
+        # appearance count 0 -> 1 on a call that returned isError).
+        comp = FakeComponent("Empty", bodies=[])
+        # a base IS available, so nothing but the ordering keeps the copy from being made
+        design, apps = _install(FakeRoot())
+        _resolve_to(comp, "component")
+        res = ap.handler(target="Empty", color="#CC2200")
+        assert res["isError"] is True
+        assert apps.copied == [] and apps.count == 1        # only the pre-existing "Base"
+        assert apps.itemByName("AgentColor_CC2200") is None
 
     def test_no_editable_color_property_errors(self):
         # the COPIED appearance exposes no ColorProperty -> honest failure, not a silent no-op

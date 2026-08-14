@@ -560,9 +560,13 @@ _SOLIDS = [
                               "edge_position": "middle", "diameter": "3 mm",
                               "extent": "blind", "depth": "3 mm"},
      lambda p: p.get("placement") == "on_edge", None),
-    # on_edge at the edge's START vertex, on a STRAIGHT edge the earlier acts left alone
+    # on_edge at the edge's START vertex - RE-ACQUIRED first: the middle-hole above SPLITS the
+    # pad edge (measured: a handle captured before that hole resolves to 2 sub-edges and is
+    # refused as stale), so every act re-acquires its own edge.
+    ("find_geometry", {"target": "FeatureCameo", "kind": "line_edge", "nearest_to": [220, 0, 20],
+                       "max_results": 1}, "ok", _fg("fc_edge2")),
     ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
-                              "placement": "on_edge", "edge": _ctx_get(c, "fc_edge", "pad edge"),
+                              "placement": "on_edge", "edge": _ctx_get(c, "fc_edge2", "pad edge"),
                               "edge_position": "start", "diameter": "3 mm",
                               "extent": "blind", "depth": "3 mm"}, "ok", None),
     # plane_offsets measures from STRAIGHT edges - a circular one is refused by name
@@ -573,9 +577,15 @@ _SOLIDS = [
                               "offset_edge_one": _ctx_get(c, "fc_rim2", "a round rim"),
                               "offset_one": "5 mm", "diameter": "3 mm", "extent": "blind",
                               "depth": "3 mm"}, "refused", None),
+    # re-acquired again: the start-vertex hole above can notch this edge the same way. The query
+    # aims at the LONG remaining stretch of the pad's bottom boundary (x~232) - the notch cuts
+    # mint short edges near the hole sites that are NOT parallel to the hole plane, and Fusion
+    # refuses a non-parallel reference edge (measured).
+    ("find_geometry", {"target": "FeatureCameo", "kind": "line_edge", "nearest_to": [232, 0, 20],
+                       "max_results": 1}, "ok", _fg("fc_edge3")),
     ("model_hole", lambda c: {"face": _ctx_get(c, "fc_top", "cameo top face"),
                               "placement": "plane_offsets", "point": [215, 15, 20],
-                              "offset_edge_one": _ctx_get(c, "fc_edge", "pad edge"),
+                              "offset_edge_one": _ctx_get(c, "fc_edge3", "pad edge"),
                               "offset_one": "6 mm", "diameter": "3 mm", "extent": "blind",
                               "depth": "3 mm"},
      lambda p: p.get("placement") == "plane_offsets", None),
@@ -944,8 +954,12 @@ _MOTION = [
     ("assembly_edit_contacts", {"action": "delete", "name": "NoSuchContactSet"}, "refused", None),
     ("assembly_edit_contacts", lambda c: {"action": "delete", "name": _ctx_get(c, "contact_set", "contact set name")},
      lambda p: p.get("deleted") is True, None),
-    # DRIVE EVERY AXIS ON CAMERA: yaw, both ring pivots, then the crank -> rotor at 2:1.
-    ("joint_drive", {"joint_name": "Yaw", "angle_deg": 30}, "ok", None),
+    # DRIVE THE AXES ON CAMERA: yaw proves the no-take gate; both ring pivots and the crank ->
+    # rotor 2:1 drive for real. Yaw CANNOT move in this scene - Carrier:1 rides the rigid group
+    # with Frame:1 and the chain closes through Pedestal:1, so the solver holds it at 0 (measured:
+    # it stays 0 even with Frame:1's parent lock released) - so its drive must REFUSE as a
+    # no-take.
+    ("joint_drive", {"joint_name": "Yaw", "angle_deg": 30}, "refused", None),
     ("joint_drive", {"joint_name": "PivotOuter", "angle_deg": 20}, "ok", None),
     ("joint_drive", {"joint_name": "PivotInner", "angle_deg": 25}, "ok", None),
     ("joint_drive", {"joint_name": "CrankAxis", "angle_deg": 30}, "ok", None),

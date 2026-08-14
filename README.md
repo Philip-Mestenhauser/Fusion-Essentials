@@ -23,9 +23,12 @@ how-to-drive-Fusion-well doctrine, demonstrated workflows, and security notes:
 generated from the live registry: [TOOL_MANIFEST.md](tests/generated/TOOL_MANIFEST.md).
 
 Permissions are first-class: every tool declares whether it reads, writes, or is destructive, and
-that machine-checked fact decides what an agent may run unattended. The repo ships a conservative
-default (`.claude/settings.json` auto-approves exactly the read-only tools; every write still
-prompts), plus a generated posture map with ready-to-paste presets:
+that machine-checked fact decides what an agent may run unattended. Claude Code's shared default
+(`.claude/settings.json`) is conservative. Codex's project default (`.codex/config.toml`) mirrors the
+existing local modeling convention: reads and local modeling writes run unattended, cloud/document
+and destructive writes prompt, and `sys_execute_script` is unavailable. Codex also loads the same
+root and nested `CLAUDE.md` files, so both clients receive the same operating conventions. The repo
+also ships a generated posture map with ready-to-paste presets:
 [PERMISSION_POSTURE.md](tests/generated/PERMISSION_POSTURE.md). A lint holds the shipped default
 equal to the registry's read set, and the arbitrary-code hatch (`sys_execute_script`) is never
 auto-approved in any preset.

@@ -860,11 +860,24 @@ class FakeCAMFolder:
 class FakeSetup(FakeCAMFolder):
     """A CAM Setup: the same container protocol + measured allOperations flatten as FakeCAMFolder,
     plus Setup.parameters - the collection the WCS binding is written to and read back from
-    (build one with wcs_params below; None models a setup whose parameters do not read)."""
+    (build one with wcs_params below; None models a setup whose parameters do not read) - and the
+    activate()/isActive pair. activate() returns a bool AND flips isActive, as the live one does;
+    'activate_lies' models it returning true while the setup never becomes active."""
 
-    def __init__(self, name, ops=(), folders=(), patterns=(), parameters=None):
+    def __init__(self, name, ops=(), folders=(), patterns=(), parameters=None, is_active=False,
+                 activate_ok=True, activate_lies=False):
         super().__init__(name, ops=ops, folders=folders, patterns=patterns)
         self.parameters = parameters
+        self.isActive = is_active
+        self._activate_ok = activate_ok
+        self._activate_lies = activate_lies
+        self._activate_calls = 0     # bookkeeping, private: the live Setup has no such member
+
+    def activate(self):
+        self._activate_calls += 1
+        if self._activate_ok and not self._activate_lies:
+            self.isActive = True
+        return self._activate_ok
 
 
 # Setup.parameters as the WCS read-back sees it. Named without a Fake prefix because CAMParameter
@@ -1111,8 +1124,12 @@ class MakeDesign:
 
     def findEntityByToken(self, token):
         # Live returns a SWIG BaseVector, not a list - len/bool/index/iterate behave list-like
-        # (live-verified), so never assert isinstance(result, list).
+        # (live-verified), so never assert isinstance(result, list). A token can answer with SEVERAL
+        # entities (measured: splitting a face makes the pre-split token resolve to BOTH
+        # survivors), so a tokens entry may be a LIST and is handed back as-is.
         e = self._tokens.get(token)
+        if isinstance(e, (list, tuple)):
+            return list(e)
         return [e] if e is not None else []
 
 
